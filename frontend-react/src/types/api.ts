@@ -2832,6 +2832,11 @@ export interface AssemblyDraftCommitResponse {
   draft_id: number;
 }
 
+export interface AssemblyDraftMergeRequest {
+  /** IDs of drafts to merge (≥2 distinct values). */
+  draft_ids: number[];
+}
+
 // Cold-start table — сегмент SKU «новинки + без продаж за 14д с остатком»
 export interface ColdStartMainWarehouse {
   district_key: string;

@@ -9,7 +9,7 @@ WB target warehouses) before committing it as N AssemblyRequests.
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PackageTypeStr = Literal["BOX", "MONOPALLET", "SUPERSAFE"]
 
@@ -116,3 +116,32 @@ class AssemblyDraftUnitEdit(AssemblyDraftUnitRef):
     """Замена наполнения заявки-юнита (ручная правка черновика)."""
 
     items: list[HandedUnitItem] = Field(default_factory=list)
+
+
+class AssemblyDraftMergeRequest(BaseModel):
+    """Request body for POST /assembly/drafts/merge.
+
+    Merges N drafts into one: rows with matching (nm_id, package_type) are
+    summed element-wise; source_warehouse_ids and target_warehouse_names are
+    unioned. cold_start_shares is dropped (user re-runs auto-balance).
+    """
+
+    draft_ids: list[int] = Field(
+        ...,
+        min_length=2,
+        description="IDs of drafts to merge (≥2 distinct values required)",
+    )
+
+    @field_validator("draft_ids")
+    @classmethod
+    def dedup_and_validate(cls, v: list[int]) -> list[int]:
+        """Dedup while preserving order; ensure ≥2 distinct ids remain."""
+        seen: set[int] = set()
+        result: list[int] = []
+        for x in v:
+            if x not in seen:
+                seen.add(x)
+                result.append(x)
+        if len(result) < 2:
+            raise ValueError("draft_ids must contain at least 2 distinct IDs")
+        return result

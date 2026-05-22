@@ -183,6 +183,120 @@ async def delete_draft(
     await db.commit()
 
 
+async def merge_drafts(
+    db: AsyncSession,
+    project_id: int,
+    draft_ids: list[int],
+) -> AssemblyDraft:
+    """Объединить N черновиков в один.
+
+    Survivor: черновик с наибольшим числом строк (tie-break — наименьший id).
+    Строки с совпадающим (nm_id, package_type) суммируются поэлементно (src, tgt).
+    source_warehouse_ids и target_warehouse_names объединяются (union).
+    cold_start_shares сбрасывается (суммировать доли бессмысленно).
+    Остальные черновики → soft_delete. Атомарно.
+
+    404 если хоть один id не найден или принадлежит другому проекту.
+    400 если у любого черновика есть handed_units (сначала верните в черновик).
+    """
+    # 1. Fetch all drafts scoped to project
+    result = await db.execute(
+        select(AssemblyDraft).where(
+            AssemblyDraft.project_id == project_id,
+            AssemblyDraft.id.in_(draft_ids),
+            AssemblyDraft.is_deleted == False,  # noqa: E712
+        )
+    )
+    drafts = list(result.scalars().all())
+
+    found_ids = {d.id for d in drafts}
+    missing = [i for i in draft_ids if i not in found_ids]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Черновики не найдены: {missing}")
+
+    # 2. Block if any draft has handed_units (must revert first)
+    for d in drafts:
+        dist = AssemblyDraftDistribution.model_validate(d.distribution or {})
+        if dist.handed_units:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Черновик #{d.id} содержит переданные на ФФ юниты — " "сначала верните их в черновик"),
+            )
+
+    # 3. Choose survivor: most rows; tie-break — lowest id
+    def _row_count(d: AssemblyDraft) -> tuple[int, int]:
+        rows = (d.distribution or {}).get("rows", []) if isinstance(d.distribution, dict) else []
+        return (len(rows), -d.id)
+
+    survivor = max(drafts, key=_row_count)
+    others = [d for d in drafts if d.id != survivor.id]
+
+    # 4. Merge all distributions into survivor
+    merged = AssemblyDraftDistribution.model_validate(survivor.distribution or {})
+
+    # Rows keyed by (nm_id, package_type). Preserve survivor's insertion order.
+    rows_by_key: dict[tuple[int, str], AssemblyDraftRow] = {(r.nm_id, r.package_type or "BOX"): r for r in merged.rows}
+
+    src_ids: list[int] = list(merged.source_warehouse_ids)
+    src_ids_set: set[int] = set(src_ids)
+    tgt_names: list[str] = list(merged.target_warehouse_names)
+    tgt_names_set: set[str] = set(tgt_names)
+
+    for other in others:
+        other_dist = AssemblyDraftDistribution.model_validate(other.distribution or {})
+
+        # Union source_warehouse_ids: survivor order first, new entries appended
+        for wid in other_dist.source_warehouse_ids:
+            if wid not in src_ids_set:
+                src_ids.append(wid)
+                src_ids_set.add(wid)
+
+        # Union target_warehouse_names: same
+        for name in other_dist.target_warehouse_names:
+            if name not in tgt_names_set:
+                tgt_names.append(name)
+                tgt_names_set.add(name)
+
+        # Merge rows
+        for row in other_dist.rows:
+            key = (row.nm_id, row.package_type or "BOX")
+            existing = rows_by_key.get(key)
+            if existing is None:
+                # New SKU+pkg: deep-copy and append (avoids sharing mutable dicts)
+                rows_by_key[key] = row.model_copy(deep=True)
+            else:
+                # Same (nm_id, pkg): sum src/tgt element-wise
+                for wh, qty in row.src.items():
+                    existing.src[wh] = existing.src.get(wh, 0) + qty
+                for wb, qty in row.tgt.items():
+                    existing.tgt[wb] = existing.tgt.get(wb, 0) + qty
+                # Fill blank barcode / vendor_code if survivor's row was empty
+                if not existing.barcode and row.barcode:
+                    existing.barcode = row.barcode
+                if not existing.vendor_code and row.vendor_code:
+                    existing.vendor_code = row.vendor_code
+
+    merged.rows = list(rows_by_key.values())
+    merged.source_warehouse_ids = src_ids
+    merged.target_warehouse_names = tgt_names
+    # Summing cold-start shares is meaningless; user re-runs auto-balance if needed
+    merged.cold_start_shares = None
+
+    # 5. Persist atomically: write survivor, soft-delete others
+    try:
+        survivor.distribution = merged.model_dump(mode="json")
+        for other in others:
+            other.soft_delete()
+        await db.commit()
+        await db.refresh(survivor)
+    except Exception as e:
+        await db.rollback()
+        logger.exception("merge_drafts failed for ids=%s", draft_ids)
+        raise HTTPException(status_code=500, detail=f"Ошибка объединения черновиков: {e}") from None
+
+    return survivor
+
+
 # ─── Commit (draft -> N AssemblyRequests) ───────────────────────────────────
 
 

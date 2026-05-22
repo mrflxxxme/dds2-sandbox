@@ -18,6 +18,7 @@ from backend.project_context import get_current_project
 from backend.schemas.assembly_draft import (
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
+    AssemblyDraftMergeRequest,
     AssemblyDraftRead,
     AssemblyDraftUnitEdit,
     AssemblyDraftUnitRef,
@@ -72,6 +73,23 @@ async def update_draft(
 ) -> AssemblyDraftRead:
     """Update mutable fields of a draft."""
     draft = await assembly_draft_service.update_draft(db, project.id, draft_id, payload)
+    return await assembly_draft_service.to_read_model(db, project.id, draft)
+
+
+@router.post("/merge", response_model=AssemblyDraftRead, dependencies=[Depends(rate_limit_write)])
+async def merge_drafts(
+    payload: AssemblyDraftMergeRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftRead:
+    """Объединить N черновиков в один.
+
+    Строки с совпадающим (nm_id, package_type) суммируются поэлементно;
+    source/target склады объединяются; cold_start_shares сбрасывается.
+    Черновики с handed_units → 400. Несуществующие id → 404.
+    Возвращает объединённый черновик (survivor).
+    """
+    draft = await assembly_draft_service.merge_drafts(db, project.id, payload.draft_ids)
     return await assembly_draft_service.to_read_model(db, project.id, draft)
 
 

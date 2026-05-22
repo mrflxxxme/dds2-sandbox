@@ -8,6 +8,7 @@ Covers:
 4. Commit balance validation: src sum != tgt sum -> 400
 5. Commit atomic: failure during create -> rollback (draft remains, no requests)
 6. Commit marks draft as soft-deleted on success
+7. Merge: sum / union / project isolation / guards / schema validation
 """
 
 from datetime import datetime
@@ -16,14 +17,17 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select, text
 
 from backend.models.assembly import AssemblyDraft, AssemblyRequest
 from backend.schemas.assembly_draft import (
     AssemblyDraftCreate,
     AssemblyDraftDistribution,
+    AssemblyDraftMergeRequest,
     AssemblyDraftRow,
     AssemblyDraftUpdate,
+    HandedUnit,
     HandedUnitItem,
 )
 from backend.services import assembly_draft_service, assembly_service
@@ -1120,3 +1124,364 @@ async def test_commit_unit_links_draft_and_list_filter(db_session):
     # list по чужому draft_id — пусто
     items2, total2 = await assembly_service.list_assembly_requests(db_session, PROJECT_ID, draft_id=draft.id + 999_999)
     assert items2 == [] and total2 == 0
+
+
+# ─── Tests: Merge ────────────────────────────────────────────────────────────
+
+
+def test_merge_request_schema_validates():
+    """AssemblyDraftMergeRequest enforces ≥2 distinct ids at schema level."""
+    # Valid
+    req = AssemblyDraftMergeRequest(draft_ids=[1, 2, 3])
+    assert req.draft_ids == [1, 2, 3]
+
+    # Single id → 422 via min_length
+    with pytest.raises(ValidationError):
+        AssemblyDraftMergeRequest(draft_ids=[1])
+
+    # Duplicates deduplicated → only 1 unique → ValueError → ValidationError
+    with pytest.raises(ValidationError):
+        AssemblyDraftMergeRequest(draft_ids=[5, 5])
+
+    # Duplicates with ≥2 unique: dedup preserves order, keeps all distinct
+    req2 = AssemblyDraftMergeRequest(draft_ids=[3, 1, 3, 2])
+    assert req2.draft_ids == [3, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_sums_overlapping_rows(db_session):
+    """Строки с совпадающим (nm_id, package_type) суммируются поэлементно."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    d1 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [
+                AssemblyDraftRow(nm_id=1, barcode="MRG-A", src={str(wh_a): 100}, tgt={"Электросталь": 100}),
+            ],
+        ),
+    )
+    d2 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [
+                AssemblyDraftRow(nm_id=1, barcode="MRG-A", src={str(wh_a): 50}, tgt={"Электросталь": 50}),
+            ],
+        ),
+    )
+
+    # Both 1 row → tie → survivor = d1 (lower id)
+    merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d1.id, d2.id])
+
+    assert merged.id == d1.id
+    dist = AssemblyDraftDistribution.model_validate(merged.distribution)
+    assert len(dist.rows) == 1
+    row = dist.rows[0]
+    assert row.nm_id == 1
+    assert row.src[str(wh_a)] == 150  # 100 + 50
+    assert row.tgt["Электросталь"] == 150
+
+    # d2 soft-deleted, d1 still alive
+    await db_session.refresh(d2)
+    assert d2.is_deleted is True
+    await db_session.refresh(merged)
+    assert merged.is_deleted is False
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_unions_distinct_rows(db_session):
+    """Строки с разными nm_id просто объединяются (не суммируются)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    d1 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [
+                AssemblyDraftRow(nm_id=10, barcode="MRG-B1", src={str(wh_a): 20}, tgt={"Электросталь": 20}),
+            ],
+        ),
+    )
+    d2 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Казань"],
+            [
+                AssemblyDraftRow(nm_id=20, barcode="MRG-B2", src={str(wh_a): 30}, tgt={"Казань": 30}),
+            ],
+        ),
+    )
+
+    merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d1.id, d2.id])
+
+    dist = AssemblyDraftDistribution.model_validate(merged.distribution)
+    assert len(dist.rows) == 2
+    nm_ids = {r.nm_id for r in dist.rows}
+    assert nm_ids == {10, 20}
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_preserves_package_type_split(db_session):
+    """Одинаковый nm_id с разным package_type → отдельные строки, не суммируются."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    d1 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [
+                AssemblyDraftRow(
+                    nm_id=5, barcode="MRG-C", package_type="BOX", src={str(wh_a): 10}, tgt={"Электросталь": 10}
+                ),
+            ],
+        ),
+    )
+    d2 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [
+                AssemblyDraftRow(
+                    nm_id=5, barcode="MRG-C", package_type="MONOPALLET", src={str(wh_a): 10}, tgt={"Электросталь": 10}
+                ),
+            ],
+        ),
+    )
+
+    merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d1.id, d2.id])
+
+    dist = AssemblyDraftDistribution.model_validate(merged.distribution)
+    assert len(dist.rows) == 2
+    pkgs = {r.package_type for r in dist.rows}
+    assert pkgs == {"BOX", "MONOPALLET"}
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_unions_source_and_target(db_session):
+    """source_warehouse_ids и target_warehouse_names объединяются (union)."""
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+
+    d1 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [
+                AssemblyDraftRow(nm_id=7, barcode="MRG-D", src={str(wh_a): 5}, tgt={"Электросталь": 5}),
+            ],
+        ),
+    )
+    d2 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_b],
+            ["Казань"],
+            [
+                AssemblyDraftRow(nm_id=8, barcode="MRG-E", src={str(wh_b): 5}, tgt={"Казань": 5}),
+            ],
+        ),
+    )
+
+    merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d1.id, d2.id])
+
+    dist = AssemblyDraftDistribution.model_validate(merged.distribution)
+    assert set(dist.source_warehouse_ids) == {wh_a, wh_b}
+    assert set(dist.target_warehouse_names) == {"Электросталь", "Казань"}
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_drops_cold_start_shares(db_session):
+    """cold_start_shares сбрасывается до None при слиянии."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    # Создаём черновик с cold_start_shares
+    d1 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        AssemblyDraftCreate(
+            name="Cold Start Draft",
+            distribution=AssemblyDraftDistribution(
+                source_warehouse_ids=[wh_a],
+                target_warehouse_names=["Электросталь", "Казань"],
+                rows=[AssemblyDraftRow(nm_id=9, barcode="MRG-F", src={str(wh_a): 10}, tgt={"Электросталь": 10})],
+                cold_start_shares={"Электросталь": 0.7, "Казань": 0.3},
+            ),
+        ),
+    )
+    d2 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Казань"],
+            [
+                AssemblyDraftRow(nm_id=11, barcode="MRG-G", src={str(wh_a): 5}, tgt={"Казань": 5}),
+            ],
+        ),
+    )
+
+    merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d1.id, d2.id])
+
+    dist = AssemblyDraftDistribution.model_validate(merged.distribution)
+    assert dist.cold_start_shares is None
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_survivor_has_most_rows(db_session):
+    """Survivor = черновик с наибольшим числом строк (tie-break: наименьший id)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    d1 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [
+                AssemblyDraftRow(nm_id=41, barcode="MRG-H1", src={str(wh_a): 1}, tgt={"Электросталь": 1}),
+            ],
+        ),
+    )
+    d2 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Казань"],
+            [
+                AssemblyDraftRow(nm_id=42, barcode="MRG-H2", src={str(wh_a): 1}, tgt={"Казань": 1}),
+                AssemblyDraftRow(nm_id=43, barcode="MRG-H3", src={str(wh_a): 1}, tgt={"Казань": 1}),
+                AssemblyDraftRow(nm_id=44, barcode="MRG-H4", src={str(wh_a): 1}, tgt={"Казань": 1}),
+            ],
+        ),
+    )
+
+    merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d1.id, d2.id])
+
+    # d2 has more rows → survivor
+    assert merged.id == d2.id
+    dist = AssemblyDraftDistribution.model_validate(merged.distribution)
+    assert len(dist.rows) == 4  # 3 from d2 + 1 from d1
+
+    await db_session.refresh(d1)
+    assert d1.is_deleted is True
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_blocks_handed_units(db_session):
+    """Слияние черновика с handed_units → 400."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    # Черновик с handed_units в distribution
+    d_handed = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        AssemblyDraftCreate(
+            name="Handed Draft",
+            distribution=AssemblyDraftDistribution(
+                source_warehouse_ids=[wh_a],
+                target_warehouse_names=["Электросталь"],
+                rows=[],
+                handed_units=[
+                    HandedUnit(
+                        source_ff_id=wh_a,
+                        target_wb_name="Электросталь",
+                        package_type="BOX",
+                        is_newcomer=False,
+                        status="handed",
+                        items=[HandedUnitItem(nm_id=1, barcode="X", vendor_code="", qty=10)],
+                    )
+                ],
+            ),
+        ),
+    )
+    d_normal = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Казань"],
+            [
+                AssemblyDraftRow(nm_id=50, barcode="MRG-I", src={str(wh_a): 5}, tgt={"Казань": 5}),
+            ],
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d_handed.id, d_normal.id])
+    assert exc.value.status_code == 400
+    assert "handed" in exc.value.detail.lower() or "юниты" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_404_if_draft_missing(db_session):
+    """Хоть один несуществующий id → 404."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    d1 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [
+                AssemblyDraftRow(nm_id=60, barcode="MRG-J", src={str(wh_a): 1}, tgt={"Электросталь": 1}),
+            ],
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d1.id, 999_999_999])
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_project_isolation(db_session):
+    """Нельзя объединить черновик из другого проекта — 404."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    d_p1 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [
+                AssemblyDraftRow(nm_id=70, barcode="MRG-K", src={str(wh_a): 1}, tgt={"Электросталь": 1}),
+            ],
+        ),
+    )
+
+    # Черновик в OTHER_PROJECT_ID
+    d_other = AssemblyDraft(
+        project_id=OTHER_PROJECT_ID,
+        name="Other Draft",
+        distribution=AssemblyDraftDistribution(
+            source_warehouse_ids=[],
+            target_warehouse_names=["Казань"],
+            rows=[],
+        ).model_dump(),
+        comment=None,
+    )
+    db_session.add(d_other)
+    await db_session.commit()
+    await db_session.refresh(d_other)
+
+    with pytest.raises(HTTPException) as exc:
+        await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d_p1.id, d_other.id])
+    assert exc.value.status_code == 404

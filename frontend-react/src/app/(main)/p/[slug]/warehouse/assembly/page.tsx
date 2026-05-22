@@ -7,6 +7,7 @@ import { formatDate, formatNumber } from '@/lib/utils';
 import { Toast } from '@/components';
 import { usePermissions } from '@/lib/hooks/usePermissions';
 import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, Warehouse } from '@/types/api';
+import { consolidatingLanes, findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -296,6 +297,9 @@ export default function AssemblyListPage() {
 
     // Drafts
     const [drafts, setDrafts] = useState<AssemblyDraft[]>([]);
+    const [selectedDraftIds, setSelectedDraftIds] = useState<Set<number>>(new Set());
+    const [merging, setMerging] = useState(false);
+    const [showMergeConfirm, setShowMergeConfirm] = useState(false);
 
     // Highlight just-created request ids (from query string)
     const justCreatedIds = useMemo(() => {
@@ -363,6 +367,33 @@ export default function AssemblyListPage() {
     // Warehouse options (FULFILLMENT only)
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [brandOptions, setBrandOptions] = useState<string[]>([]);
+
+    const warehouseNameById = useCallback(
+        (id: number) => warehouses.find(w => w.id === id)?.name ?? `Склад ${id}`,
+        [warehouses],
+    );
+
+    // Дубли направлений: пары (ff→wb), которые встречаются в ≥2 открытых черновиках
+    const duplicateLanes = useMemo(
+        () => drafts.length >= 2 ? findDuplicateLanes(drafts, warehouseNameById) : [],
+        [drafts, warehouseNameById],
+    );
+
+    const handleMergeDrafts = useCallback(async (ids: number[]) => {
+        setMerging(true);
+        try {
+            const merged = await api.mergeAssemblyDrafts(ids);
+            setShowMergeConfirm(false);
+            setSelectedDraftIds(new Set());
+            const qs = new URLSearchParams({ draft: String(merged.id), pkg: 'BOX', type: 'all' });
+            router.push(`/p/${slug}/warehouse/assembly/distribute/preview?${qs.toString()}`);
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка объединения черновиков', type: 'error' });
+            setShowMergeConfirm(false);
+        } finally {
+            setMerging(false);
+        }
+    }, [router, slug]);
 
     useEffect(() => {
         api.getWarehouses()
@@ -535,6 +566,70 @@ export default function AssemblyListPage() {
                 <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} duration={toast.type === 'error' ? 4000 : 2500} />
             )}
 
+            {/* Merge confirm modal */}
+            {showMergeConfirm && (
+                <div style={{
+                    position: 'fixed', inset: 0, zIndex: 1000,
+                    background: 'rgba(0,0,0,0.5)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    padding: 16,
+                }}>
+                    <div className="glass-card" style={{ maxWidth: 480, width: '100%' }}>
+                        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 16 }}>
+                            Объединить {selectedDraftIds.size} черновика в один?
+                        </div>
+                        {(() => {
+                            const lanes = consolidatingLanes(selectedDraftIds, duplicateLanes);
+                            return lanes.length > 0 ? (
+                                <div style={{ marginBottom: 16 }}>
+                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                                        Следующие маршруты будут объединены в одну отправку:
+                                    </div>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                        {lanes.map(lane => (
+                                            <div key={`${lane.ffId}-${lane.wbName}`} style={{
+                                                display: 'flex', alignItems: 'center', gap: 8,
+                                                padding: '8px 12px',
+                                                background: 'var(--color-bg)',
+                                                borderRadius: 8,
+                                                fontSize: 13,
+                                            }}>
+                                                <span style={{ fontWeight: 600 }}>{lane.ffName}</span>
+                                                <span style={{ color: 'var(--color-text-muted)' }}>→</span>
+                                                <span style={{ fontWeight: 600 }}>{lane.wbName}</span>
+                                                <span style={{ marginLeft: 'auto', color: 'var(--color-text-muted)', fontSize: 12 }}>
+                                                    ~{formatNumber(lane.pieces)} шт.
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            ) : (
+                                <div style={{ marginBottom: 16, fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                    Черновики будут объединены. Разные маршруты останутся отдельными заявками при передаче на ФФ.
+                                </div>
+                            );
+                        })()}
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => setShowMergeConfirm(false)}
+                                disabled={merging}
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => handleMergeDrafts([...selectedDraftIds])}
+                                disabled={merging}
+                            >
+                                {merging ? 'Объединяю…' : 'Объединить и открыть →'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Header */}
             <div className="page-header">
                 <div>
@@ -548,46 +643,94 @@ export default function AssemblyListPage() {
                 )}
             </div>
 
+            {/* Duplicate-lane warning banner */}
+            {duplicateLanes.length > 0 && (
+                <div className="glass-card" style={{ padding: '12px 16px', marginBottom: 12, borderLeft: '3px solid var(--color-warning)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                        <span>⚠️</span>
+                        <span style={{ fontWeight: 600, color: 'var(--color-text)' }}>Обнаружены дублирующиеся маршруты</span>
+                    </div>
+                    <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {duplicateLanes.map(lane => (
+                            <span key={`${lane.ffId}-${lane.wbName}`} className="badge badge-warning" style={{ fontSize: 11 }}>
+                                {lane.ffName} → {lane.wbName} · {formatNumber(lane.pieces)} шт. · #{lane.draftIds.join(', #')}
+                            </span>
+                        ))}
+                    </div>
+                    <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        Выберите черновики ниже и объедините — они будут переданы на ФФ одной отправкой.
+                    </div>
+                </div>
+            )}
+
             {/* Drafts */}
             {drafts.length > 0 && (
                 <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--color-text)' }}>
-                        Незавершённые черновики ({drafts.length})
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>
+                            Незавершённые черновики ({drafts.length})
+                        </div>
+                        {selectedDraftIds.size >= 2 && (
+                            <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => setShowMergeConfirm(true)}
+                                disabled={merging}
+                            >
+                                Объединить {selectedDraftIds.size} черновика →
+                            </button>
+                        )}
                     </div>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        {drafts.map(draft => (
-                            <div
-                                key={draft.id}
-                                style={{
-                                    display: 'flex', alignItems: 'center', gap: 8,
-                                    padding: '8px 12px',
-                                    border: '1px solid var(--color-border)',
-                                    borderRadius: 12,
-                                    background: 'var(--color-bg)',
-                                    fontSize: 12,
-                                }}
-                            >
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                                    <span style={{ fontWeight: 600 }}>{draft.name || `Черновик #${draft.id}`}</span>
-                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                        {draft.distribution.rows.length} поз. · обновлён {formatDate(draft.updated_at)}
-                                    </span>
+                        {drafts.map(draft => {
+                            const isSelected = selectedDraftIds.has(draft.id);
+                            return (
+                                <div
+                                    key={draft.id}
+                                    style={{
+                                        display: 'flex', alignItems: 'center', gap: 8,
+                                        padding: '8px 12px',
+                                        border: `1px solid ${isSelected ? 'var(--color-accent)' : 'var(--color-border)'}`,
+                                        borderRadius: 12,
+                                        background: isSelected ? 'color-mix(in srgb, var(--color-accent) 8%, var(--color-bg))' : 'var(--color-bg)',
+                                        fontSize: 12,
+                                        transition: 'border-color 0.2s, background 0.2s',
+                                    }}
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={isSelected}
+                                        onChange={e => {
+                                            const checked = e.target.checked;
+                                            setSelectedDraftIds(prev => {
+                                                const next = new Set(prev);
+                                                if (checked) next.add(draft.id); else next.delete(draft.id);
+                                                return next;
+                                            });
+                                        }}
+                                        style={{ accentColor: 'var(--color-accent)', cursor: 'pointer' }}
+                                    />
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                        <span style={{ fontWeight: 600 }}>{draft.name || `Черновик #${draft.id}`}</span>
+                                        <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                            {draft.distribution.rows.length} поз. · обновлён {formatDate(draft.updated_at)}
+                                        </span>
+                                    </div>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draft.id}`)}
+                                    >
+                                        Открыть
+                                    </button>
+                                    <button
+                                        className="btn btn-danger btn-sm"
+                                        onClick={() => handleDeleteDraft(draft.id)}
+                                        title="Удалить черновик"
+                                    >
+                                        ×
+                                    </button>
                                 </div>
-                                <button
-                                    className="btn btn-secondary btn-sm"
-                                    onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draft.id}`)}
-                                >
-                                    Открыть
-                                </button>
-                                <button
-                                    className="btn btn-danger btn-sm"
-                                    onClick={() => handleDeleteDraft(draft.id)}
-                                    title="Удалить черновик"
-                                >
-                                    ×
-                                </button>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </div>
             )}

@@ -448,6 +448,11 @@ export function addWarehouseMethods(api: ApiClient) {
         deleteDraftUnit(id: number, unit: AssemblyDraftUnitRef) {
             return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/delete`, unit);
         },
+        /** Объединить N черновиков в один: суммирует (nm_id, pkg)-строки, union складов.
+         *  Возвращает survivor (черновик с наибольшим числом строк). */
+        mergeAssemblyDrafts(draftIds: number[]) {
+            return api.request<AssemblyDraft>('POST', '/api/v1/assembly/drafts/merge', { draft_ids: draftIds });
+        },
 
         // ─── Box-multiplicity (кратность коробки) ────────────────────────
         getBoxMultiplicity() {
