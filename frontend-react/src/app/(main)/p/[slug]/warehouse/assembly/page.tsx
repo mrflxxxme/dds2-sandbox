@@ -7,7 +7,7 @@ import { formatDate, formatNumber } from '@/lib/utils';
 import { Toast } from '@/components';
 import { usePermissions } from '@/lib/hooks/usePermissions';
 import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, Warehouse } from '@/types/api';
-import { consolidatingLanes, findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
+import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -298,8 +298,6 @@ export default function AssemblyListPage() {
     // Drafts
     const [drafts, setDrafts] = useState<AssemblyDraft[]>([]);
     const [selectedDraftIds, setSelectedDraftIds] = useState<Set<number>>(new Set());
-    const [merging, setMerging] = useState(false);
-    const [showMergeConfirm, setShowMergeConfirm] = useState(false);
 
     // Highlight just-created request ids (from query string)
     const justCreatedIds = useMemo(() => {
@@ -378,22 +376,6 @@ export default function AssemblyListPage() {
         () => drafts.length >= 2 ? findDuplicateLanes(drafts, warehouseNameById) : [],
         [drafts, warehouseNameById],
     );
-
-    const handleMergeDrafts = useCallback(async (ids: number[]) => {
-        setMerging(true);
-        try {
-            const merged = await api.mergeAssemblyDrafts(ids);
-            setShowMergeConfirm(false);
-            setSelectedDraftIds(new Set());
-            const qs = new URLSearchParams({ draft: String(merged.id), pkg: 'BOX', type: 'all' });
-            router.push(`/p/${slug}/warehouse/assembly/distribute/preview?${qs.toString()}`);
-        } catch (e: unknown) {
-            setToast({ message: e instanceof Error ? e.message : 'Ошибка объединения черновиков', type: 'error' });
-            setShowMergeConfirm(false);
-        } finally {
-            setMerging(false);
-        }
-    }, [router, slug]);
 
     useEffect(() => {
         api.getWarehouses()
@@ -566,122 +548,6 @@ export default function AssemblyListPage() {
                 <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} duration={toast.type === 'error' ? 4000 : 2500} />
             )}
 
-            {/* Merge confirm modal */}
-            {showMergeConfirm && (
-                <div style={{
-                    position: 'fixed', inset: 0, zIndex: 1000,
-                    background: 'rgba(0,0,0,0.5)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    padding: 16,
-                }}>
-                    <div className="glass-card" style={{ maxWidth: 520, width: '100%' }}>
-                        {/* Modal header */}
-                        <div style={{ marginBottom: 16 }}>
-                            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 8 }}>
-                                Объединить {selectedDraftIds.size} черновика в один?
-                            </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                                {drafts
-                                    .filter(d => selectedDraftIds.has(d.id))
-                                    .map(d => (
-                                        <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
-                                            <span style={{ color: 'var(--color-accent)', fontWeight: 600, fontSize: 11 }}>#{d.id}</span>
-                                            <span style={{ color: 'var(--color-text)' }}>{d.name || `Черновик #${d.id}`}</span>
-                                            <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-                                                · {d.distribution.rows.length} поз.
-                                            </span>
-                                        </div>
-                                    ))}
-                            </div>
-                        </div>
-
-                        {(() => {
-                            const lanes = consolidatingLanes(selectedDraftIds, duplicateLanes);
-                            const selectedIds = [...selectedDraftIds];
-                            const totalPieces = lanes.reduce((s, l) => s + l.pieces, 0);
-                            return lanes.length > 0 ? (
-                                <>
-                                    {/* Summary chips */}
-                                    <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-                                        <span className="badge badge-info">
-                                            {lanes.length} {lanes.length === 1 ? 'маршрут' : lanes.length < 5 ? 'маршрута' : 'маршрутов'} объединится
-                                        </span>
-                                        <span className="badge badge-secondary">
-                                            ~{formatNumber(totalPieces)} шт. итого
-                                        </span>
-                                    </div>
-
-                                    {/* Lane list */}
-                                    <div style={{
-                                        maxHeight: 280,
-                                        overflowY: 'auto',
-                                        display: 'flex',
-                                        flexDirection: 'column',
-                                        gap: 6,
-                                        marginBottom: 12,
-                                        paddingRight: 2,
-                                    }}>
-                                        {lanes.map(lane => (
-                                            <div key={`${lane.ffId}-${lane.wbName}`} style={{
-                                                padding: '10px 12px',
-                                                background: 'var(--color-bg)',
-                                                borderRadius: 10,
-                                                fontSize: 13,
-                                            }}>
-                                                {/* Route + total */}
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
-                                                    <span style={{ fontWeight: 600 }}>{lane.ffName}</span>
-                                                    <span style={{ color: 'var(--color-text-muted)' }}>→</span>
-                                                    <span style={{ fontWeight: 600 }}>{lane.wbName}</span>
-                                                    <span style={{ marginLeft: 'auto', fontWeight: 600 }}>
-                                                        ~{formatNumber(lane.pieces)} шт.
-                                                    </span>
-                                                </div>
-                                                {/* Per-draft breakdown */}
-                                                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                                                    {selectedIds
-                                                        .filter(id => lane.piecesPerDraft[id] != null)
-                                                        .map(id => (
-                                                            <span key={id} style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                                                #{id}: ~{formatNumber(lane.piecesPerDraft[id])} шт.
-                                                            </span>
-                                                        ))}
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-
-                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 16 }}>
-                                        Несовпадающие маршруты останутся отдельными заявками при передаче на ФФ.
-                                    </div>
-                                </>
-                            ) : (
-                                <div style={{ marginBottom: 16, fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                    Черновики будут объединены. Все маршруты останутся отдельными заявками при передаче на ФФ.
-                                </div>
-                            );
-                        })()}
-
-                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                            <button
-                                className="btn btn-secondary btn-sm"
-                                onClick={() => setShowMergeConfirm(false)}
-                                disabled={merging}
-                            >
-                                Отмена
-                            </button>
-                            <button
-                                className="btn btn-primary btn-sm"
-                                onClick={() => handleMergeDrafts([...selectedDraftIds])}
-                                disabled={merging}
-                            >
-                                {merging ? 'Объединяю…' : 'Объединить и открыть →'}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
             {/* Header */}
             <div className="page-header">
                 <div>
@@ -725,8 +591,10 @@ export default function AssemblyListPage() {
                         {selectedDraftIds.size >= 2 && (
                             <button
                                 className="btn btn-primary btn-sm"
-                                onClick={() => setShowMergeConfirm(true)}
-                                disabled={merging}
+                                onClick={() => {
+                                    const qs = new URLSearchParams({ drafts: [...selectedDraftIds].join(',') });
+                                    router.push(`/p/${slug}/warehouse/assembly/merge?${qs.toString()}`);
+                                }}
                             >
                                 Объединить {selectedDraftIds.size} черновика →
                             </button>
