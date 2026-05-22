@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AvailableItem } from '@/types/api';
-import { matchesPasteParams, normalizeBox, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
+import { buildPriceOverwrites, matchesPasteParams, normalizeBox, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
 
 const foi = (over: Partial<AvailableItem>): AvailableItem => ({
     id: 1,
@@ -216,5 +216,86 @@ describe('splitRowAcrossFois — the core paste-mode bug fix', () => {
         const withOverrides = splitRowAcrossFois(fois, params, true);
         expect(withOverrides[0].box_size_override).toBeUndefined();
         expect(withOverrides[0].pcs_per_box_override).toBeUndefined();
+    });
+});
+
+describe('buildPriceOverwrites — multi-source price overwrite (sc20.3)', () => {
+    it('reprices EVERY FOI a multi-source barcode splits onto, not just the representative', () => {
+        // Real prod scenario (project 4, V-0010, barcode 2049989649860):
+        // FO 76 FOI (price 43, remaining 6) + FO 20 FOI (price 55.08, remaining 150).
+        // User pastes qty=156 at price=43 and opts into "overwrite order prices".
+        // Old behavior: only allItemMap[barcode] (one FOI) was repriced → FO 20 stayed 55.08.
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            '2049989649860': [
+                foi({ id: 1512, barcode: '2049989649860', remaining_qty: 6, price_cny: '43.00', box_size: '', pcs_per_box: 0 }),
+                foi({ id: 490, barcode: '2049989649860', remaining_qty: 150, price_cny: '55.08', box_size: '', pcs_per_box: 0 }),
+            ],
+        };
+        const updates = buildPriceOverwrites(
+            [{ barcode: '2049989649860', qty: 156, priceRaw: '43', boxRaw: '', pcsPerBox: 0 }],
+            foisByBarcode,
+        );
+        // FOI 1512 already 43 → skipped (no-op). FOI 490 (55.08) → repriced to 43.
+        expect(updates).toEqual([{ factory_order_item_id: 490, new_price_cny: '43' }]);
+    });
+
+    it('reprices all siblings when none match the paste price', () => {
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            BC: [
+                foi({ id: 1, barcode: 'BC', remaining_qty: 10, price_cny: '50.00', box_size: '', pcs_per_box: 0 }),
+                foi({ id: 2, barcode: 'BC', remaining_qty: 10, price_cny: '60.00', box_size: '', pcs_per_box: 0 }),
+            ],
+        };
+        const updates = buildPriceOverwrites(
+            [{ barcode: 'BC', qty: 20, priceRaw: '43', boxRaw: '', pcsPerBox: 0 }],
+            foisByBarcode,
+        );
+        expect(updates).toEqual([
+            { factory_order_item_id: 1, new_price_cny: '43' },
+            { factory_order_item_id: 2, new_price_cny: '43' },
+        ]);
+    });
+
+    it('does not reprice FOIs the qty never reaches', () => {
+        // qty fits in the first (matching) FOI → second sibling is never booked,
+        // so its price must be left untouched.
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            BC: [
+                foi({ id: 1, barcode: 'BC', remaining_qty: 100, price_cny: '43.00', box_size: '', pcs_per_box: 0 }),
+                foi({ id: 2, barcode: 'BC', remaining_qty: 100, price_cny: '55.08', box_size: '', pcs_per_box: 0 }),
+            ],
+        };
+        const updates = buildPriceOverwrites(
+            [{ barcode: 'BC', qty: 24, priceRaw: '43', boxRaw: '', pcsPerBox: 0 }],
+            foisByBarcode,
+        );
+        expect(updates).toEqual([]);
+    });
+
+    it('shares consumed across paste rows so reprices match the booked split', () => {
+        // Two paste rows of the same barcode; first exhausts FOI #1's matching pool,
+        // second spills onto FOI #2 — which must then be repriced.
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            BC: [
+                foi({ id: 1, barcode: 'BC', remaining_qty: 6, price_cny: '43.00', box_size: '', pcs_per_box: 0 }),
+                foi({ id: 2, barcode: 'BC', remaining_qty: 150, price_cny: '55.08', box_size: '', pcs_per_box: 0 }),
+            ],
+        };
+        const updates = buildPriceOverwrites(
+            [
+                { barcode: 'BC', qty: 6, priceRaw: '43', boxRaw: '', pcsPerBox: 0 },
+                { barcode: 'BC', qty: 100, priceRaw: '43', boxRaw: '', pcsPerBox: 0 },
+            ],
+            foisByBarcode,
+        );
+        expect(updates).toEqual([{ factory_order_item_id: 2, new_price_cny: '43' }]);
+    });
+
+    it('skips rows with no price or zero qty', () => {
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            BC: [foi({ id: 1, barcode: 'BC', remaining_qty: 100, price_cny: '55.08' })],
+        };
+        expect(buildPriceOverwrites([{ barcode: 'BC', qty: 24, priceRaw: '', boxRaw: '', pcsPerBox: 0 }], foisByBarcode)).toEqual([]);
+        expect(buildPriceOverwrites([{ barcode: 'BC', qty: 0, priceRaw: '43', boxRaw: '', pcsPerBox: 0 }], foisByBarcode)).toEqual([]);
     });
 });

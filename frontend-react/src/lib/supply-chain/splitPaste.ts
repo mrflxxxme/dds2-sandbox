@@ -80,3 +80,55 @@ export const splitRowAcrossFois = (
     }
     return out;
 };
+
+export interface PriceOverwriteRow {
+    barcode: string;
+    qty: number;
+    priceRaw: string;
+    boxRaw: string;
+    pcsPerBox: number;
+}
+
+export interface PriceOverwrite {
+    factory_order_item_id: number;
+    new_price_cny: string;
+}
+
+/**
+ * Compute factory-order price overwrites for a paste batch ("overwrite order
+ * prices" path).
+ *
+ * A barcode can map to multiple FOIs across factory orders, and the paste qty
+ * is split (matching-first, then FIFO) onto several of them. The price must be
+ * overwritten on EVERY FOI that receives qty whose current price differs — not
+ * just the representative FOI. Mirrors performAdd's split (same withOverrides
+ * mode + shared `consumed`) so the booked FOIs and the repriced FOIs are
+ * exactly the same set. (sc20.3: single-FOI map missed siblings — V-0010.)
+ */
+export const buildPriceOverwrites = (
+    rows: PriceOverwriteRow[],
+    foisByBarcode: Record<string, AvailableItem[]>,
+): PriceOverwrite[] => {
+    const consumed: Record<number, number> = {};
+    const updates: PriceOverwrite[] = [];
+    for (const r of rows) {
+        const price = parseFloat(r.priceRaw) || 0;
+        if (price <= 0 || r.qty <= 0) continue;
+        const fois = foisByBarcode[r.barcode] || [];
+        const foiById = new Map(fois.map(f => [f.id, f]));
+        const split = splitRowAcrossFois(
+            fois,
+            { qty: r.qty, price, boxRaw: r.boxRaw, pcsPerBox: r.pcsPerBox },
+            true,
+            consumed,
+        );
+        for (const s of split) {
+            const foi = foiById.get(s.factory_order_item_id);
+            const oldPrice = parseFloat(foi?.price_cny || '0') || 0;
+            if (Math.abs(price - oldPrice) > 0.0001) {
+                updates.push({ factory_order_item_id: s.factory_order_item_id, new_price_cny: r.priceRaw });
+            }
+        }
+    }
+    return updates;
+};
