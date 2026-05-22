@@ -776,6 +776,22 @@ function DistributeMatrix({
     const [dragSourceWb, setDragSourceWb] = useState<string | null>(null);
     const [dragOverWb, setDragOverWb] = useState<string | null>(null);
 
+    // Sum of tgt quantities across ALL rows (both tabs) — used to show a
+    // secondary "other-type" count in the column header so the user can
+    // find cross-type drop targets (e.g. BOX columns while on MONO tab).
+    const tgtSumAllPkgs = useMemo(() => {
+        const m: Record<string, number> = {};
+        for (const r of allRows) {
+            for (const [wb, qty] of Object.entries(r.tgt)) {
+                m[wb] = (m[wb] || 0) + (qty || 0);
+            }
+        }
+        return m;
+    }, [allRows]);
+
+    // Icon for the "other" package type: if visible rows are MONO → other is BOX, vice versa.
+    const otherPkgLabel = rows.some(r => r.package_type === 'MONOPALLET') ? '📦' : '📐';
+
     const thStyle: React.CSSProperties = {
         textAlign: 'right', fontSize: 11, fontWeight: 600,
         padding: '10px 8px', whiteSpace: 'nowrap',
@@ -835,6 +851,7 @@ function DistributeMatrix({
                         const isDragging = dragSourceWb === whName;
                         const isOver = dragOverWb === whName && dragSourceWb !== null && dragSourceWb !== whName;
                         const total = tgtSumPerWb[whName] || 0;
+                        const otherTotal = (tgtSumAllPkgs[whName] || 0) - total;
                         return (
                             <th
                                 key={`hdr-tgt-${whName}`}
@@ -898,10 +915,21 @@ function DistributeMatrix({
                                     setDragSourceWb(null);
                                     setDragOverWb(null);
                                 }}
-                                title={`Перетащи на другой WB-склад чтобы объединить колонки\n${whName}\nК отгрузке: ${formatNumber(total, 0)}`}
+                                title={[
+                                    `Перетащи на другой WB-склад чтобы объединить колонки`,
+                                    whName,
+                                    `К отгрузке: ${formatNumber(total, 0)}`,
+                                    otherTotal > 0
+                                        ? `${otherPkgLabel} другой тип: ${formatNumber(otherTotal, 0)} шт. (перетащи сюда для смены типа)`
+                                        : null,
+                                ].filter(Boolean).join('\n')}
                                 style={{
                                     ...thStyle,
-                                    background: isOver ? 'rgba(34,197,94,0.18)' : 'rgba(245,158,11,0.04)',
+                                    background: isOver
+                                        ? 'rgba(34,197,94,0.18)'
+                                        : total === 0 && otherTotal > 0
+                                            ? 'rgba(245,158,11,0.06)'
+                                            : 'rgba(245,158,11,0.04)',
                                     opacity: isDragging ? 0.4 : 1,
                                     cursor: 'grab',
                                     transition: 'background 0.12s',
@@ -912,6 +940,11 @@ function DistributeMatrix({
                                 <div style={{ fontSize: 13, fontWeight: 700, color: total > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', marginTop: 2 }}>
                                     {total > 0 ? formatNumber(total, 0) : '—'}
                                 </div>
+                                {total === 0 && otherTotal > 0 && (
+                                    <div style={{ fontSize: 10, color: 'var(--color-text-muted)', opacity: 0.7, marginTop: 1 }}>
+                                        {otherPkgLabel} {formatNumber(otherTotal, 0)}
+                                    </div>
+                                )}
                             </th>
                         );
                     })}
