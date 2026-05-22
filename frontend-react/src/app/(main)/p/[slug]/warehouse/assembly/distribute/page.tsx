@@ -889,12 +889,14 @@ function DistributeMatrix({
                                         );
                                         const srcOnlyMono = srcPkgs.size === 1 && srcPkgs.has('MONOPALLET');
                                         const srcOnlyBox  = srcPkgs.size > 0 && !srcPkgs.has('MONOPALLET');
-                                        const tgtHasMono  = tgtPkgs.has('MONOPALLET');
-                                        const tgtHasBox   = !tgtPkgs.has('MONOPALLET') && tgtPkgs.size > 0;
+                                        // "only" = exactly one package type, not mixed
+                                        const tgtOnlyMono = tgtPkgs.size === 1 && tgtPkgs.has('MONOPALLET');
+                                        const tgtOnlyBox  = tgtPkgs.size > 0 && tgtPkgs.has('BOX') && !tgtPkgs.has('MONOPALLET');
 
-                                        // Cross-type: source is unambiguously one type, target is unambiguously the other
-                                        const crossToBox  = srcOnlyMono && tgtHasBox && !tgtHasMono;
-                                        const crossToMono = srcOnlyBox  && tgtHasMono && !tgtHasBox;
+                                        // Cross-type: both sides are unambiguously different single types.
+                                        // Mixed targets (MONO+BOX) intentionally skip conversion.
+                                        const crossToBox  = srcOnlyMono && tgtOnlyBox;
+                                        const crossToMono = srcOnlyBox  && tgtOnlyMono;
 
                                         if (crossToBox || crossToMono) {
                                             const srcLabel  = srcOnlyMono ? 'Моно' : 'Короб';
