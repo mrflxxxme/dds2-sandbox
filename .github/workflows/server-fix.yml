@@ -14,6 +14,8 @@ on:
           - show-env
           - writeoff-hamza-dry-run
           - writeoff-hamza-commit
+          - fix-v0010-prices-dry-run
+          - fix-v0010-prices-commit
 
 jobs:
   fix:
@@ -89,6 +91,18 @@ jobs:
                 echo "=== COMMIT: writeoff stock at warehouse Хамза ==="
                 docker compose -f docker-compose.app.yml exec -T -e PYTHONPATH=/app backend \
                   python scripts/writeoff_hamza.py --project-slug default --commit
+                ;;
+
+              fix-v0010-prices-dry-run)
+                echo "=== DRY-RUN: fix V-0010 prices (ФЗ-20 + resync) ==="
+                docker compose -f docker-compose.app.yml exec -T -e PYTHONPATH=/app backend \
+                  python scripts/fix_v0010_prices.py
+                ;;
+
+              fix-v0010-prices-commit)
+                echo "=== COMMIT: fix V-0010 prices (ФЗ-20 + resync) ==="
+                docker compose -f docker-compose.app.yml exec -T -e PYTHONPATH=/app -e APPLY=1 backend \
+                  python scripts/fix_v0010_prices.py
                 ;;
             esac
 

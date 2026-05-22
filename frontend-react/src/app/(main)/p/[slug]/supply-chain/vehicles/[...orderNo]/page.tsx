@@ -915,17 +915,42 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
     };
 
     const handleExport = () => {
+        // «Мест» combine same-barcode source rows before rounding up, then show
+        // once per barcode — so the column sums to the supplier's box count and
+        // partial boxes aren't double-counted across splits.
+        const boxesByBarcode = new Map<string, number>();
+        for (const item of items) {
+            if (item.mix_group_id || (item.box_detail && item.box_detail.length > 0)) continue;
+            const ppb = item.pcs_per_box || 0;
+            if (ppb > 0 && item.barcode) {
+                const key = `${item.barcode}|${ppb}`;
+                boxesByBarcode.set(key, (boxesByBarcode.get(key) || 0) + item.qty);
+            }
+        }
+        const boxesSeen = new Set<string>();
         const rows = items.map(item => {
             const ppb = item.pcs_per_box || 0;
             const boxes = ppb > 0 ? Math.ceil(item.qty / ppb) : 0;
             const dims = parseBoxDims(item.box_size);
             const vol = dims && ppb > 0 ? (dims.l * dims.w * dims.h) / 1e6 * boxes : 0;
+            let boxesCell: number | string = '';
+            if (item.mix_group_id) {
+                boxesCell = t('detail_col_mix');
+            } else if (item.box_detail && item.box_detail.length > 0) {
+                boxesCell = item.box_detail.length;
+            } else if (ppb > 0 && item.barcode) {
+                const key = `${item.barcode}|${ppb}`;
+                if (!boxesSeen.has(key)) {
+                    boxesSeen.add(key);
+                    boxesCell = Math.ceil((boxesByBarcode.get(key) || 0) / ppb);
+                }
+            }
             return {
                 [t('col_barcode')]: item.barcode,
                 [t('col_article')]: item.article_seller || '',
                 [t('col_category')]: item.subject || '',
                 [t('col_qty')]: item.qty,
-                [t('col_boxes')]: item.mix_group_id ? t('detail_col_mix') : (boxes || ''),
+                [t('col_boxes')]: boxesCell,
                 [`${t('col_weight_1pc')} kg`]: item.weight_kg || '',
                 [`${t('col_weight')} kg`]: item.weight_kg ? Number(((item.weight_kg || 0) * item.qty).toFixed(1)) : '',
                 [t('col_box_spec')]: item.box_size || '',

@@ -102,10 +102,19 @@ export function formatDateTime(d: string | null | undefined): string {
     return new Date(d).toLocaleString('ru-RU');
 }
 
-/** Calculate total boxes with mix group deduplication */
-export function calcTotalBoxesWithMix(items: { qty: number; pcs_per_box?: number | null | undefined; mix_group_id?: string | null | undefined; mix_pcs_per_box?: number | null | undefined; box_detail?: number[] | null | undefined }[]): number {
+/**
+ * Calculate total boxes with mix group deduplication.
+ *
+ * Same barcode split across multiple source rows (one per factory order) must
+ * be combined BEFORE rounding up to whole boxes — otherwise each row's partial
+ * box is counted separately and inflates the total (e.g. 14+30 @22/box = 2
+ * boxes combined, not ceil(14/22)+ceil(30/22)=3). Only combines rows with the
+ * same barcode AND the same pcs_per_box.
+ */
+export function calcTotalBoxesWithMix(items: { barcode?: string | null | undefined; qty: number; pcs_per_box?: number | null | undefined; mix_group_id?: string | null | undefined; mix_pcs_per_box?: number | null | undefined; box_detail?: number[] | null | undefined }[]): number {
     let total = 0;
     const mixBoxes = new Map<string, number>(); // mix_group_id → max boxes in group
+    const qtyByBarcode = new Map<string, { qty: number; ppb: number }>(); // barcode|ppb → combined qty
     for (const item of items) {
         if (item.mix_group_id) {
             const ppb = item.mix_pcs_per_box || item.pcs_per_box || 0;
@@ -118,9 +127,18 @@ export function calcTotalBoxesWithMix(items: { qty: number; pcs_per_box?: number
             total += item.box_detail.length;
         } else {
             const ppb = item.pcs_per_box || 0;
-            if (ppb > 0) total += Math.ceil(item.qty / ppb);
+            if (ppb <= 0) continue;
+            if (item.barcode) {
+                const key = `${item.barcode}|${ppb}`;
+                const cur = qtyByBarcode.get(key) || { qty: 0, ppb };
+                cur.qty += item.qty;
+                qtyByBarcode.set(key, cur);
+            } else {
+                total += Math.ceil(item.qty / ppb);
+            }
         }
     }
+    for (const { qty, ppb } of qtyByBarcode.values()) total += Math.ceil(qty / ppb);
     for (const boxes of mixBoxes.values()) total += boxes;
     return total;
 }

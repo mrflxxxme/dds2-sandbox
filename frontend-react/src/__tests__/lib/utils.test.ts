@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { formatNumber, formatDate, formatDateTime, exportToExcel } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
 
 let captured: { columns: any[]; rows: any[] } | null = null;
 
@@ -157,5 +157,57 @@ describe('exportToExcel', () => {
 
         expect(captured).not.toBeNull();
         expect(captured!.rows[0]).toEqual({ id: 1, nested: '' });
+    });
+});
+
+describe('calcTotalBoxesWithMix', () => {
+    it('combines same-barcode source rows before rounding up (V-0012 bug)', () => {
+        // 14 + 30 @ 22/box = 44 -> 2 boxes combined, not ceil(14/22)+ceil(30/22)=3.
+        const boxes = calcTotalBoxesWithMix([
+            { barcode: 'BC1', qty: 14, pcs_per_box: 22 },
+            { barcode: 'BC1', qty: 30, pcs_per_box: 22 },
+        ]);
+        expect(boxes).toBe(2);
+    });
+
+    it('rounds up per barcode, not per row, across many barcodes', () => {
+        const boxes = calcTotalBoxesWithMix([
+            { barcode: 'A', qty: 14, pcs_per_box: 22 }, // +30 -> 44 -> 2
+            { barcode: 'A', qty: 30, pcs_per_box: 22 },
+            { barcode: 'B', qty: 24, pcs_per_box: 20 }, // +16 -> 40 -> 2
+            { barcode: 'B', qty: 16, pcs_per_box: 20 },
+        ]);
+        expect(boxes).toBe(4); // not 3+... per-row would be ceil(14/22)+ceil(30/22)+ceil(24/20)+ceil(16/20)=1+2+2+1=6
+    });
+
+    it('does NOT combine when pcs_per_box differs for same barcode', () => {
+        const boxes = calcTotalBoxesWithMix([
+            { barcode: 'A', qty: 10, pcs_per_box: 22 }, // -> 1
+            { barcode: 'A', qty: 10, pcs_per_box: 10 }, // -> 1
+        ]);
+        expect(boxes).toBe(2);
+    });
+
+    it('single source: plain ceil', () => {
+        expect(calcTotalBoxesWithMix([{ barcode: 'A', qty: 45, pcs_per_box: 22 }])).toBe(3);
+    });
+
+    it('mix groups deduped by max boxes, independent of barcode combine', () => {
+        const boxes = calcTotalBoxesWithMix([
+            { barcode: 'M1', qty: 22, pcs_per_box: 22, mix_group_id: 'g1', mix_pcs_per_box: 22 },
+            { barcode: 'M2', qty: 11, pcs_per_box: 22, mix_group_id: 'g1', mix_pcs_per_box: 22 },
+            { barcode: 'C', qty: 14, pcs_per_box: 22 },
+            { barcode: 'C', qty: 30, pcs_per_box: 22 },
+        ]);
+        // mix g1 -> max(ceil(22/22), ceil(11/22)) = 1; barcode C -> 2; total 3
+        expect(boxes).toBe(3);
+    });
+
+    it('falls back to per-row when barcode is missing', () => {
+        const boxes = calcTotalBoxesWithMix([
+            { qty: 14, pcs_per_box: 22 },
+            { qty: 30, pcs_per_box: 22 },
+        ]);
+        expect(boxes).toBe(3); // no barcode -> cannot combine -> 1 + 2
     });
 });
