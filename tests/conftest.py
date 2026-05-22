@@ -33,6 +33,13 @@ def pytest_sessionfinish(session, exitstatus):
 
     if os.environ.get("PYTEST_NO_CLEANUP"):
         return
+    # Под xdist pytest_sessionfinish вызывается на КАЖДОМ воркере при его
+    # завершении. Если один воркер финиширует раньше — он удалит все не-KEEP
+    # проекты, пока другой воркер ещё гоняет тесты → FK-гонка (напр.
+    # wb_goods_returns.project_id violates fkey). Чистим ТОЛЬКО на контроллере
+    # (workerinput есть только у xdist-воркеров) — один раз, после всех воркеров.
+    if hasattr(session.config, "workerinput"):
+        return
     sync_url = os.environ.get("DATABASE_URL_SYNC")
     if not sync_url:
         return
