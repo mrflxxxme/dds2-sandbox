@@ -27,6 +27,8 @@ paths:
 ## Архитектура
 - Cumulative consumption: `consumed: dict[id, qty]` как mutable state при sequential distribute
 - Composite priority chain: per-scope → SKU-level → derived-from-fact → derived-from-plan
+- Box-multiple распределение: кратность задаёт ФОРМУ (целые короба по потребности). Обычные SKU дослают хвост < короба россыпью (`distributeByBoxMultiple(..., looseTail=true)` + источник boxMode Pass 2) — иначе фрагментированный SKU молча выпадает. Новинки cold-start — СТРОГО (`looseTail=false`): хвост остаётся на ФФ (по требованию пользователя)
+- Carve потока из сбалансированной матрицы: вычитать qty из `src` И `tgt` поровну → строка остаётся `Σsrc==Σtgt`
 - Force-pull mutable external fields: `_try_force_enrich_*` с try/except, не кэшировать
 - Idempotent seed: `SELECT ... GROUP BY project_id` → INSERT только для новых
 - TanStack sort + pagination: ≤5k строк → без пагинации; >5k → server-side sort

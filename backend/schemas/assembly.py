@@ -132,6 +132,7 @@ class AssemblyRequestResponse(BaseModel):
     carrier_name: str | None = None
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
+    source_draft_id: int | None = None  # черновик-источник (поток распределения сборки)
     package_type: PackageTypeStr = "BOX"
     effective_wb_warehouse: str | None = None  # FBO warehouse_name or manual, whichever is set
     brands: str | None = None  # comma-separated unique brands from items

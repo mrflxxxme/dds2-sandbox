@@ -1,23 +1,27 @@
 /**
- * Распределение qty по WB-складам ТОЛЬКО целыми коробками `ppb` (pcs-per-box).
+ * Распределение qty по WB-складам целыми коробками `ppb` (pcs-per-box), с опцией
+ * досыла хвоста россыпью.
  *
  * Правила:
- *  1. **Только целые коробки.** Сначала минимум 1 коробка каждому складу с
+ *  1. **Короба — по потребности.** Сначала минимум 1 коробка каждому складу с
  *     need>0 (приоритет «первой коробки» — у склада с большей потребностью), затем
  *     остаток коробок раздаётся жадно складу с максимальной незакрытой потребностью.
- *  2. **Остаток < короба остаётся на источнике.** Хвост, не собравшийся в целую
- *     коробку, в WB НЕ уходит — кратность важнее, чем «отгрузить всё до штуки».
- *     Он остаётся на ФФ и уедет в следующую поставку.
- *  3. Суммарно раздаётся целое число коробок:
- *     `⌊min(totalCanSend, Σ need) / ppb⌋ × ppb` — сверх потребности не отгружаем.
+ *  2. **Хвост < короба** (`looseTail`):
+ *     - `true` (дефолт, обычные SKU) — досылается россыпью по убыванию незакрытой
+ *       потребности (cap на need — без overshoot); ничего не оседает на ФФ.
+ *     - `false` (строгий режим, новинки cold-start) — хвост НЕ уходит, остаётся
+ *       на ФФ до накопления целого короба. Только целые коробки `ppb`.
+ *  3. Суммарно отгружается `min(totalCanSend, Σ need)` (looseTail) либо округлённое
+ *     вниз до короба (строгий) — сверх потребности не шлём.
  *
  * Возвращает `Record<warehouseName, qty>`. Пустой объект если ppb≤0,
- * totalCanSend≤0, нет складов с need>0 или доступного меньше одной коробки.
+ * totalCanSend≤0, нет складов с need>0 (или в строгом режиме — меньше короба).
  */
 export function distributeByBoxMultiple(
     needs: ReadonlyArray<{ name: string; need: number }>,
     totalCanSend: number,
     ppb: number,
+    looseTail = true,
 ): Record<string, number> {
     if (ppb <= 0 || totalCanSend <= 0) return {};
     const sorted = [...needs]
@@ -27,9 +31,9 @@ export function distributeByBoxMultiple(
 
     const totalNeed = sorted.reduce((s, w) => s + w.need, 0);
     const tgt: Record<string, number> = {};
-    // Только целые коробки: бюджет округляем вниз до кратного ppb, остаток < короба
-    // остаётся на ФФ (в WB россыпью не уходит). Сверх потребности не отгружаем.
-    let remaining = Math.floor(Math.min(totalCanSend, totalNeed) / ppb) * ppb;
+    // Бюджет — вся доступная потребность (короба + хвост). Сверх потребности не шлём.
+    const budget = Math.min(totalCanSend, totalNeed);
+    let remaining = Math.floor(budget / ppb) * ppb; // целые коробки
 
     // Pass 1: минимум по 1 коробке, приоритет — самым нуждающимся.
     for (const wh of sorted) {
@@ -52,6 +56,26 @@ export function distributeByBoxMultiple(
         if (!bestName) break;
         tgt[bestName] = (tgt[bestName] || 0) + ppb;
         remaining -= ppb;
+    }
+
+    // Pass 3 (только looseTail): хвост (budget − короба) — россыпью по убыванию
+    // незакрытой потребности, cap на need (budget ≤ Σneed → влезает без overshoot).
+    // Строгий режим (новинки) хвост НЕ досылает — он остаётся на ФФ.
+    if (looseTail) {
+        let loose = budget - sorted.reduce((s, wh) => s + (tgt[wh.name] || 0), 0);
+        if (loose > 0) {
+            const byUnmet = [...sorted].sort(
+                (a, b) => (b.need - (tgt[b.name] || 0)) - (a.need - (tgt[a.name] || 0)),
+            );
+            for (const wh of byUnmet) {
+                if (loose <= 0) break;
+                const unmet = wh.need - (tgt[wh.name] || 0);
+                if (unmet <= 0) continue;
+                const give = Math.min(loose, unmet);
+                tgt[wh.name] = (tgt[wh.name] || 0) + give;
+                loose -= give;
+            }
+        }
     }
 
     return tgt;

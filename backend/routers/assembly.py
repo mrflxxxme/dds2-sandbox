@@ -34,6 +34,7 @@ router = APIRouter(prefix="/warehouse/assembly", tags=["Assembly"])
 @router.get("", response_model=AssemblyListResponse)
 async def list_assembly_requests(
     warehouse_id: int | None = Query(None),
+    draft_id: int | None = Query(None),
     status: str | None = Query(None),
     search: str | None = Query(None),
     date_from: date | None = Query(None),
@@ -49,6 +50,7 @@ async def list_assembly_requests(
         db,
         project.id,
         warehouse_id=warehouse_id,
+        draft_id=draft_id,
         status=status,
         search=search,
         date_from=date_from,

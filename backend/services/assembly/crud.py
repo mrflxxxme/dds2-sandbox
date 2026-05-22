@@ -353,6 +353,7 @@ async def _build_response(
         "shipped_at": request.shipped_at,
         "comment": request.comment,
         "wb_warehouse_name_manual": request.wb_warehouse_name_manual,
+        "source_draft_id": request.source_draft_id,
         "effective_wb_warehouse": (
             (request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else None)
             or request.wb_warehouse_name_manual
@@ -421,6 +422,7 @@ async def list_assembly_requests(
     project_id: int,
     *,
     warehouse_id: int | None = None,
+    draft_id: int | None = None,
     status: str | None = None,
     search: str | None = None,
     date_from: date | None = None,
@@ -439,6 +441,8 @@ async def list_assembly_requests(
 
     if warehouse_id is not None:
         base = base.where(AssemblyRequest.warehouse_id == warehouse_id)
+    if draft_id is not None:
+        base = base.where(AssemblyRequest.source_draft_id == draft_id)
     if status is not None:
         statuses = [s.strip() for s in status.split(",")]
         if len(statuses) == 1:

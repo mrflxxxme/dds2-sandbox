@@ -2,10 +2,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { exportToExcel, formatNumber } from '@/lib/utils';
+import { exportToExcel, formatDate, formatNumber } from '@/lib/utils';
 import { Toast } from '@/components';
 import KpiCard from '@/components/KpiCard';
-import type { AssemblyDraft, AssemblyDraftUnitRef, PackageType, Warehouse } from '@/types/api';
+import type { AssemblyDraft, AssemblyDraftUnitRef, AssemblyRequest, AssemblyStatus, PackageType, Warehouse } from '@/types/api';
 import {
     buildFfUnits,
     excelSheetName,
@@ -19,6 +19,18 @@ type TypeScope = 'all' | 'regular' | 'newcomer';
 const STATUS_BADGE: Record<string, { label: string; bg: string; color: string }> = {
     draft: { label: 'Черновик', bg: 'rgba(142,142,147,0.16)', color: '#6e6e73' },
     handed: { label: 'Передан на ФФ', bg: 'rgba(245,158,11,0.18)', color: '#a16207' },
+};
+
+// Статусы созданной заявки на сборку (для блока «История»). Зеркало STATUS_MAP
+// со страницы warehouse/assembly.
+const ASM_STATUS: Record<AssemblyStatus, { label: string; className: string }> = {
+    PENDING:          { label: 'В сборке',      className: 'badge-info' },
+    IN_PROGRESS:      { label: 'В сборке',      className: 'badge-info' },
+    READY:            { label: 'Готово',        className: 'badge-success' },
+    VEHICLE_ASSIGNED: { label: 'Машина',        className: 'badge-info' },
+    SHIPPED:          { label: 'Отгружена',     className: 'badge-success' },
+    DELIVERED:        { label: 'Принята WB',    className: 'badge-success' },
+    CANCELLED:        { label: 'Отменена',      className: 'badge-secondary' },
 };
 
 const unitRef = (u: DraftUnit): AssemblyDraftUnitRef => ({
@@ -49,21 +61,31 @@ export default function AssemblyFfPage() {
     const [draft, setDraft] = useState<AssemblyDraft | null>(null);
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
+    const [history, setHistory] = useState<AssemblyRequest[]>([]);
 
     const load = useCallback(async () => {
         if (!draftId) { setError('Не указан ID черновика'); setLoading(false); return; }
         setLoading(true);
         setError(null);
         try {
-            const [d, whs] = await Promise.all([api.getAssemblyDraft(draftId), api.getWarehouses()]);
+            const [d, whs, hist] = await Promise.all([
+                api.getAssemblyDraft(draftId),
+                api.getWarehouses(),
+                // История: заявки на сборку, созданные из ЭТОГО черновика (раздела) и
+                // склада-источника (свежие сверху). source_draft_id проставляется на commit.
+                ffId != null
+                    ? api.getAssemblyRequests({ draft_id: draftId, warehouse_id: ffId, limit: 200 })
+                    : api.getAssemblyRequests({ draft_id: draftId, limit: 200 }),
+            ]);
             setDraft(d);
             setWarehouses(whs);
+            setHistory([...hist.items].sort((a, b) => b.created_at.localeCompare(a.created_at)));
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         } finally {
             setLoading(false);
         }
-    }, [draftId]);
+    }, [draftId, ffId]);
     useEffect(() => { load(); }, [load]);
 
     useEffect(() => {
@@ -307,6 +329,53 @@ export default function AssemblyFfPage() {
                     })}
                 </div>
             )}
+
+            {/* История: юниты ЭТОГО раздела (черновика), по которым создана заявка на сборку (ASM). */}
+            <div style={{ marginTop: 28 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                        🗂 История — в сборке
+                        <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-muted)' }}>{history.length}</span>
+                    </h2>
+                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => router.push(`/p/${slug}/warehouse/assembly`)}>
+                        Вся история →
+                    </button>
+                </div>
+                {history.length === 0 ? (
+                    <div className="glass-card" style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>
+                        Пока нет заявок на сборку из этого раздела. Жми «В сборку» у переданного юнита — он появится здесь.
+                    </div>
+                ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {history.map(asm => {
+                            const st = ASM_STATUS[asm.status] ?? { label: asm.status, className: 'badge-secondary' };
+                            const qty = asm.items.reduce((s, it) => s + it.quantity, 0);
+                            const target = asm.effective_wb_warehouse || asm.wb_warehouse_name_manual || asm.wb_warehouse_name || '—';
+                            const openAsm = () => router.push(`/p/${slug}/warehouse/assembly/${asm.id}`);
+                            return (
+                                <div key={asm.id} className="glass-card" style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', cursor: 'pointer' }} onClick={openAsm}>
+                                    <div style={{ flex: 1, minWidth: 220 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                            <span style={{ fontWeight: 700, fontSize: 15 }}>{asm.number}</span>
+                                            <span style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>→ {target}</span>
+                                            {asm.package_type && (
+                                                <span style={{ padding: '1px 6px', borderRadius: 6, background: 'rgba(59,130,246,0.14)', color: '#1d4ed8', fontSize: 9, fontWeight: 700 }}>
+                                                    {PKG_LABEL_RU[asm.package_type] || asm.package_type}
+                                                </span>
+                                            )}
+                                            <span className={`badge ${st.className}`} style={{ fontSize: 11 }}>{st.label}</span>
+                                        </div>
+                                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>
+                                            Σ {formatNumber(qty, 0)} шт · {asm.items.length} SKU · {formatDate(asm.created_at)}
+                                        </div>
+                                    </div>
+                                    <button className="btn btn-secondary btn-sm" onClick={openAsm}>Открыть →</button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
         </div>
     );
 }

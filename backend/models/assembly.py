@@ -128,6 +128,11 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     # Manual WB warehouse name (used when no FBO supply is linked)
     wb_warehouse_name_manual: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
+    # Draft this request was created from (assembly-distribute flow). NULL for
+    # requests created via other paths (FBO/manual). Drives the per-draft
+    # «История — в сборке» list on the source-FF page.
+    source_draft_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("assembly_drafts.id"), nullable=True)
+
     # WB acceptance package type — defines the transport unit for this request.
     # Set when the request is built (default BOX; switched to MONOPALLET when
     # WB acceptance/options says canBox=false but canMonopallet=true).
@@ -154,6 +159,7 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_assembly_requests_warehouse_id", "warehouse_id"),
         Index("ix_assembly_requests_status", "status"),
         Index("ix_assembly_requests_counterparty_id", "counterparty_id"),
+        Index("ix_assembly_requests_source_draft_id", "source_draft_id"),
         # Partial unique: allow new request for same FBO after cancel
         Index(
             "ix_assembly_requests_fbo_unique",

@@ -660,7 +660,10 @@ export function WarehouseNeedView() {
                 continue;
             }
             // closed-доля не уезжает (нельзя) → остаётся свободным остатком на ФФ.
-            const alloc = distributeByBoxMultiple(needs, targetTotal, boxPpb);
+            // Новинки cold-start — СТРОГАЯ кратность (looseTail=false): хвост < короба
+            // остаётся на ФФ, не уходит россыпью. Правило «любой хвост в заявку» —
+            // только для обычных SKU (см. handleCreateAssembly).
+            const alloc = distributeByBoxMultiple(needs, targetTotal, boxPpb, false);
             m.set(row.nm_id, { alloc, total: sumVals(alloc) });
         }
         return m;
@@ -1626,9 +1629,8 @@ export function WarehouseNeedView() {
                     const pkgSrc: Record<string, number> = {};
                     if (boxMode) {
                         let need = pkgQty;
-                        // Только целые коробки K, собираемые ЦЕЛИКОМ с одного ФФ.
-                        // Россыпь-добора с других складов НЕТ: короб с двух ФФ не собрать.
-                        // Остаток < короба на каждом ФФ просто не уезжает (ждёт на ФФ).
+                        // Pass 1: целые коробки K, собираемые ЦЕЛИКОМ с одного ФФ
+                        // (короб с двух ФФ физически не собрать) — приоритет крупным ФФ.
                         for (const w of ffOrder) {
                             if (need < ppb) break;
                             const boxes = Math.floor((ffPool[w.id] || 0) / ppb);
@@ -1640,10 +1642,24 @@ export function WarehouseNeedView() {
                             ffPool[w.id] -= take;
                             need -= take;
                         }
+                        // Pass 2: хвост < короба досылаем россыпью из остатка FF-пула —
+                        // не оставляем на ФФ (правило «любой хвост в заявку»). ТОЛЬКО для
+                        // обычных SKU; новинки cold-start — строгая кратность (хвост на ФФ).
+                        if (!newcomer) {
+                            for (const w of ffOrder) {
+                                if (need <= 0) break;
+                                const avail = ffPool[w.id] || 0;
+                                if (avail <= 0) continue;
+                                const take = Math.min(need, avail);
+                                pkgSrc[String(w.id)] = (pkgSrc[String(w.id)] || 0) + take;
+                                ffPool[w.id] -= take;
+                                need -= take;
+                            }
+                        }
                         const sourced = pkgQty - need;
-                        if (sourced <= 0) continue;            // ни одного целого короба с одного ФФ
+                        if (sourced <= 0) continue;            // FF-пул пуст — нечего слать
                         if (sourced < pkgQty) {
-                            pkgTgt = trimTgt(pkgTgt, sourced); // целых коробов меньше потребности — режем tgt
+                            pkgTgt = trimTgt(pkgTgt, sourced); // FF меньше потребности — режем tgt
                             pkgQty = sourced;
                         }
                     } else {

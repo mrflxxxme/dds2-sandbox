@@ -395,6 +395,7 @@ async def commit_draft(
                 pallet_weight_kg=pallet_weight,
                 comment=req_comment,
                 package_type=package_type,
+                source_draft_id=draft_id,
             )
             db.add(assembly_req)
             await db.flush()
@@ -491,6 +492,7 @@ async def _create_one_request(
     nom_map: dict[str, Nomenclature],
     distribution: AssemblyDraftDistribution,
     base_comment: str | None,
+    source_draft_id: int,
 ) -> AssemblyRequest:
     """Создать один AssemblyRequest (IN_PROGRESS) из набора баркод→qty."""
     number = await _next_number(db, project_id, "ASM", AssemblyRequest)
@@ -524,6 +526,7 @@ async def _create_one_request(
         pallet_weight_kg=distribution.pallet_weight_kg or 0.0,
         comment=comment,
         package_type=package_type,
+        source_draft_id=source_draft_id,
     )
     db.add(req)
     await db.flush()
@@ -731,6 +734,7 @@ async def commit_unit(
             nom_map=nom_map,
             distribution=distribution,
             base_comment=draft.comment,
+            source_draft_id=draft_id,
         )
         created_ids.append(req.id)
         del units[idx]

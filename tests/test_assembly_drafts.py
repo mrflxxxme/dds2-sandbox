@@ -26,7 +26,7 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftUpdate,
     HandedUnitItem,
 )
-from backend.services import assembly_draft_service
+from backend.services import assembly_draft_service, assembly_service
 
 # PROJECT_ID / OTHER_PROJECT_ID are assigned per-test by the `setup_test_data`
 # fixture from conftest's sequence-allocated `project` / `other_project`. Never
@@ -1061,3 +1061,62 @@ async def test_delete_unit_handed_blocked(db_session, setup_newcomer_nomenclatur
     with pytest.raises(HTTPException) as exc:
         await assembly_draft_service.delete_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
     assert exc.value.status_code == 400
+
+
+# ─── Tests: source_draft_id linkage («История — в сборке» per draft) ──────────
+
+
+@pytest.mark.asyncio
+async def test_commit_draft_sets_source_draft_id(db_session):
+    """commit_draft проставляет source_draft_id = draft.id на все созданные заявки."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111,
+            barcode=TEST_BARCODE_1,
+            src={str(wh_a): 10},
+            tgt={"Электросталь": 6, "Казань": 4},
+        )
+    ]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh_a], ["Электросталь", "Казань"], rows)
+    )
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids)))
+    requests = list(res.scalars().all())
+    assert requests and all(r.source_draft_id == draft.id for r in requests)
+
+
+@pytest.mark.asyncio
+async def test_commit_unit_links_draft_and_list_filter(db_session):
+    """commit_unit проставляет source_draft_id; list?draft_id= возвращает только заявки этого черновика."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111,
+            barcode=TEST_BARCODE_1,
+            src={str(wh_a): 5},
+            tgt={"Электросталь": 5},
+            package_type="BOX",
+        )
+    ]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh_a], ["Электросталь"], rows)
+    )
+    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
+    resp = await assembly_draft_service.commit_unit(
+        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False
+    )
+    req_id = resp.created_request_ids[0]
+
+    res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == req_id))
+    assert res.scalar_one().source_draft_id == draft.id
+
+    # list по своему draft_id — только эта заявка
+    items, total = await assembly_service.list_assembly_requests(db_session, PROJECT_ID, draft_id=draft.id)
+    assert [r.id for r in items] == [req_id]
+    assert total == 1
+
+    # list по чужому draft_id — пусто
+    items2, total2 = await assembly_service.list_assembly_requests(db_session, PROJECT_ID, draft_id=draft.id + 999_999)
+    assert items2 == [] and total2 == 0
