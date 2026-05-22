@@ -36,16 +36,25 @@ export default function AssemblyMergePage() {
     const [merging, setMerging] = useState(false);
 
     useEffect(() => {
-        if (draftIds.length < 2) {
+        // Guard: searchParams might not be hydrated on the very first render in dev.
+        // Do NOT redirect until we're sure draftIds is empty (non-empty raw string).
+        const raw = searchParams.get('drafts') ?? '';
+        if (raw && draftIds.length < 2) {
             router.replace(`/p/${slug}/warehouse/assembly`);
             return;
         }
+        if (draftIds.length < 2) return; // wait for hydration
+
+        const controller = new AbortController();
+        setError('');
         setLoading(true);
+
         Promise.all([
             api.listAssemblyDrafts(),
             api.getWarehouses(),
         ])
             .then(([allDrafts, whs]) => {
+                if (controller.signal.aborted) return;
                 const selected = allDrafts.filter(d => draftIds.includes(d.id));
                 if (selected.length < 2) {
                     setError('Не удалось найти указанные черновики. Возможно, они были удалены.');
@@ -54,8 +63,15 @@ export default function AssemblyMergePage() {
                 setDrafts(selected);
                 setWarehouses(whs.filter(w => w.warehouse_type === 'FULFILLMENT'));
             })
-            .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Ошибка загрузки'))
-            .finally(() => setLoading(false));
+            .catch((e: unknown) => {
+                if (controller.signal.aborted) return;
+                setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            })
+            .finally(() => {
+                if (!controller.signal.aborted) setLoading(false);
+            });
+
+        return () => controller.abort();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [draftIds.join(','), slug]);
 
