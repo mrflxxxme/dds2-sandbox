@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import { Toast } from '@/components';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, Warehouse } from '@/types/api';
+import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, Warehouse } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -298,6 +298,8 @@ export default function AssemblyListPage() {
     // Drafts
     const [drafts, setDrafts] = useState<AssemblyDraft[]>([]);
     const [selectedDraftIds, setSelectedDraftIds] = useState<Set<number>>(new Set());
+    const [createdGroups, setCreatedGroups] = useState<CreatedAssemblyGroup[]>([]);
+    const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set());
 
     // Highlight just-created request ids (from query string)
     const justCreatedIds = useMemo(() => {
@@ -321,6 +323,11 @@ export default function AssemblyListPage() {
             setDrafts(list);
         } catch {
             setDrafts([]);
+        }
+        try {
+            setCreatedGroups(await api.getCreatedAssemblyGroups());
+        } catch {
+            setCreatedGroups([]);
         }
     }, []);
 
@@ -637,9 +644,17 @@ export default function AssemblyListPage() {
                                     </div>
                                     <button
                                         className="btn btn-secondary btn-sm"
-                                        onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draft.id}`)}
+                                        onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute/preview?draft=${draft.id}&pkg=BOX&type=all`)}
+                                        title="Открыть предпросмотр заявок — там кнопка «Создать»"
                                     >
-                                        Открыть
+                                        Открыть →
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draft.id}`)}
+                                        title="Изменить распределение (редактировать черновик)"
+                                    >
+                                        ✏️
                                     </button>
                                     <button
                                         className="btn btn-danger btn-sm"
@@ -648,6 +663,55 @@ export default function AssemblyListPage() {
                                     >
                                         ×
                                     </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {createdGroups.length > 0 && (
+                <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)', marginBottom: 4 }}>
+                        Созданные партии — предпросмотр ({createdGroups.length})
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                        Заявки, созданные из черновика и ещё в сборке. Только просмотр — правьте через карточку заявки.
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {createdGroups.map(g => {
+                            const open = expandedGroups.has(g.draft_id);
+                            return (
+                                <div key={g.draft_id} style={{ border: '1px solid var(--color-border)', borderRadius: 12, background: 'var(--color-bg)' }}>
+                                    <button
+                                        onClick={() => setExpandedGroups(prev => {
+                                            const n = new Set(prev);
+                                            if (n.has(g.draft_id)) n.delete(g.draft_id); else n.add(g.draft_id);
+                                            return n;
+                                        })}
+                                        style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '10px 14px', background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+                                    >
+                                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{open ? '▾' : '▸'}</span>
+                                        <span style={{ fontWeight: 600, fontSize: 13 }}>{g.draft_name || `Черновик #${g.draft_id}`}</span>
+                                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                            {g.request_count} заявок · {formatNumber(g.total_qty)} шт · {g.total_sku} SKU
+                                        </span>
+                                    </button>
+                                    {open && (
+                                        <div style={{ borderTop: '1px solid var(--color-border)', padding: '6px 14px 10px' }}>
+                                            {g.requests.map(r => (
+                                                <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', borderBottom: '1px solid var(--color-border)', fontSize: 13 }}>
+                                                    <span style={{ flex: 1, minWidth: 0 }}>
+                                                        <span style={{ fontWeight: 600 }}>{r.ff_name} → {r.wb_name || '—'}</span>
+                                                        <span style={{ color: 'var(--color-text-muted)', marginLeft: 8, fontSize: 12 }}>
+                                                            {r.package_type === 'MONOPALLET' ? 'Моно' : r.package_type === 'SUPERSAFE' ? 'Сейф' : 'Короб'} · {formatNumber(r.qty)} шт · {r.sku} SKU · {r.number}
+                                                        </span>
+                                                    </span>
+                                                    <button className="btn btn-secondary btn-sm" onClick={() => router.push(`/p/${slug}/warehouse/assembly/${r.id}`)}>Открыть →</button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
                                 </div>
                             );
                         })}

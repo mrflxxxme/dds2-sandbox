@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003
 """
 Assembly Request service — CRUD operations and helpers.
 
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models.assembly import (
+    AssemblyDraft,
     AssemblyRequest,
     AssemblyRequestItem,
     AssemblyStatus,
@@ -502,6 +504,102 @@ async def list_assembly_requests(
     items = list(result.scalars().all())
 
     return items, total
+
+
+async def get_created_groups(db: AsyncSession, project_id: int) -> list[dict]:
+    """Группы созданных заявок по source_draft_id («Предпросмотр созданных»).
+
+    Берём только IN_PROGRESS-заявки, созданные из распределения (source_draft_id
+    задан), ещё не ушедшие в работу/отгрузку — это то, что можно ревьюить и (в
+    будущем) мёрджить. Имя черновика берём из assembly_drafts (включая
+    soft-deleted — после полного коммита черновик удаляется). Кап — 50 групп.
+    """
+    # 1. Свежие source_draft_id с активными созданными заявками (кап групп).
+    did_q = (
+        select(AssemblyRequest.source_draft_id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+            AssemblyRequest.source_draft_id.isnot(None),
+            AssemblyRequest.status == AssemblyStatus.IN_PROGRESS,
+        )
+        .group_by(AssemblyRequest.source_draft_id)
+        .order_by(func.max(AssemblyRequest.created_at).desc())
+        .limit(50)
+    )
+    draft_ids = [row[0] for row in (await db.execute(did_q)).all()]
+    if not draft_ids:
+        return []
+
+    # 2. Заявки этих групп с позициями и складом-источником.
+    result = await db.execute(
+        select(AssemblyRequest)
+        .options(
+            selectinload(AssemblyRequest.items),
+            selectinload(AssemblyRequest.warehouse),
+        )
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+            AssemblyRequest.source_draft_id.in_(draft_ids),
+            AssemblyRequest.status == AssemblyStatus.IN_PROGRESS,
+        )
+        .order_by(AssemblyRequest.created_at.desc())
+    )
+    requests = list(result.scalars().all())
+
+    # 3. Имена черновиков (вкл. soft-deleted — фильтр project_id обязателен).
+    name_rows = await db.execute(
+        select(AssemblyDraft.id, AssemblyDraft.name).where(
+            AssemblyDraft.project_id == project_id,
+            AssemblyDraft.id.in_(draft_ids),
+        )
+    )
+    draft_names = {row[0]: row[1] for row in name_rows.all()}
+
+    # 4. Группировка в Python.
+    groups: dict[int, dict] = {}
+    for r in requests:
+        did = r.source_draft_id
+        g = groups.get(did)
+        if g is None:
+            g = {"draft_id": did, "draft_name": draft_names.get(did), "requests": [], "total_qty": 0, "_nm": set()}
+            groups[did] = g
+        qty = sum(it.quantity for it in r.items)
+        nms = {it.nomenclature_id for it in r.items}
+        g["requests"].append(
+            {
+                "id": r.id,
+                "number": r.number,
+                "ff_id": r.warehouse_id,
+                "ff_name": r.warehouse.name if r.warehouse else f"Склад {r.warehouse_id}",
+                "wb_name": r.wb_warehouse_name_manual,
+                "package_type": r.package_type,
+                "status": r.status,
+                "qty": qty,
+                "sku": len(nms),
+            }
+        )
+        g["total_qty"] += qty
+        g["_nm"].update(nms)
+
+    # 5. Порядок групп — как в did_q (свежие сверху).
+    out: list[dict] = []
+    for did in draft_ids:
+        g = groups.get(did)
+        if g is None:
+            continue
+        out.append(
+            {
+                "draft_id": g["draft_id"],
+                "draft_name": g["draft_name"],
+                "request_count": len(g["requests"]),
+                "total_qty": g["total_qty"],
+                "total_sku": len(g["_nm"]),
+                "requests": g["requests"],
+            }
+        )
+    return out
 
 
 async def get_assembly_request(

@@ -14,6 +14,7 @@ import type {
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
+    CreatedAssemblyGroup,
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBatchListResponse,
     BoxMultiplicityBatchRevertResponse,
@@ -329,6 +330,10 @@ export function addWarehouseMethods(api: ApiClient) {
         createAssemblyRequest(data: AssemblyRequestCreate) {
             return api.request<AssemblyRequest>('POST', '/api/v1/warehouse/assembly', data);
         },
+        /** Группы созданных заявок по черновику (IN_PROGRESS) — «Предпросмотр созданных». */
+        getCreatedAssemblyGroups() {
+            return api.request<CreatedAssemblyGroup[]>('GET', '/api/v1/warehouse/assembly/created-groups');
+        },
         getAssemblyRequest(id: number) {
             return api.request<AssemblyRequest>('GET', `/api/v1/warehouse/assembly/${id}`);
         },
@@ -447,6 +452,11 @@ export function addWarehouseMethods(api: ApiClient) {
         /** Удалить заявку-юнит целиком (товар остаётся на ФФ). */
         deleteDraftUnit(id: number, unit: AssemblyDraftUnitRef) {
             return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/delete`, unit);
+        },
+        /** «Сменить склад WB» — перенести заявку-юнит этого ФФ на другой WB-склад
+         *  (сливается с черновиком-получателем по баркоду). */
+        moveDraftUnit(id: number, unit: AssemblyDraftUnitRef, newTargetWbName: string) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/move`, { ...unit, new_target_wb_name: newTargetWbName });
         },
         /** Объединить N черновиков в один: суммирует (nm_id, pkg)-строки, union складов.
          *  Возвращает survivor (черновик с наибольшим числом строк). */

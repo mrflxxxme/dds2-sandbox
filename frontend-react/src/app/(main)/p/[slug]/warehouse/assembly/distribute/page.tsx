@@ -562,14 +562,14 @@ export default function AssemblyDistributePage() {
                         onClick={handleGoToPreview}
                         disabled={saving || uniqueAssemblyCount === 0}
                         title={
-                            `Предпросмотр и создание заявок: ${uniqueAssemblyCount}`
+                            `Открыть предпросмотр. Заявки (${uniqueAssemblyCount}) создаются на следующем шаге кнопкой «Создать».`
                             + `\nОбычные: ${commitBreakdown.regular} · 🆕 Новинки: ${commitBreakdown.newcomer} (раздельные заявки)`
                             + `\nГруппировка по складам-источникам + выгрузка в Excel.`
                         }
                     >
                         {saving
                             ? 'Сохранение...'
-                            : `✓ Создать: ${typeTab === 'all' ? '' : typeTab === 'newcomer' ? '🆕 Новинки · ' : 'Обычные · '}${pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'} (${uniqueAssemblyCount})`}
+                            : `Предпросмотр: ${typeTab === 'all' ? '' : typeTab === 'newcomer' ? '🆕 Новинки · ' : 'Обычные · '}${pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'} (${uniqueAssemblyCount}) →`}
                     </button>
                 </div>
             </div>

@@ -21,6 +21,7 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftMergeRequest,
     AssemblyDraftRead,
     AssemblyDraftUnitEdit,
+    AssemblyDraftUnitMove,
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
 )
@@ -221,6 +222,31 @@ async def set_unit_items(
         edit.package_type,
         edit.is_newcomer,
         edit.items,
+    )
+
+
+@router.post(
+    "/{draft_id}/units/move",
+    response_model=AssemblyDraftRead,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def move_unit(
+    draft_id: int,
+    move: AssemblyDraftUnitMove,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftRead:
+    """«Сменить склад WB»: перенести заявку-юнит этого ФФ на другой WB-склад
+    (поток ff→wb); на складе-получателе сливается с существующим черновиком."""
+    return await assembly_draft_service.move_unit(
+        db,
+        project.id,
+        draft_id,
+        move.source_ff_id,
+        move.target_wb_name,
+        move.package_type,
+        move.is_newcomer,
+        move.new_target_wb_name,
     )
 
 

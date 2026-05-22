@@ -146,6 +146,32 @@ class AssemblyListResponse(BaseModel):
     total: int
 
 
+class CreatedRequestBrief(BaseModel):
+    """Короткая карточка созданной заявки внутри группы-предпросмотра."""
+
+    id: int
+    number: str
+    ff_id: int
+    ff_name: str
+    wb_name: str | None
+    package_type: str
+    status: str
+    qty: int
+    sku: int
+
+
+class CreatedGroupResponse(BaseModel):
+    """Группа созданных заявок одного черновика («Предпросмотр созданных»).
+    Группировка по source_draft_id; только активные (IN_PROGRESS) заявки."""
+
+    draft_id: int
+    draft_name: str | None
+    request_count: int
+    total_qty: int
+    total_sku: int
+    requests: list[CreatedRequestBrief]
+
+
 class RefreshFromFboResponse(BaseModel):
     added: int
     removed: int

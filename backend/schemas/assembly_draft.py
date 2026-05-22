@@ -124,6 +124,12 @@ class AssemblyDraftUnitEdit(AssemblyDraftUnitRef):
     items: list[HandedUnitItem] = Field(default_factory=list)
 
 
+class AssemblyDraftUnitMove(AssemblyDraftUnitRef):
+    """Перенос заявки-юнита на другой WB-склад (только для этого ФФ)."""
+
+    new_target_wb_name: str
+
+
 class AssemblyDraftMergeRequest(BaseModel):
     """Request body for POST /assembly/drafts/merge.
 

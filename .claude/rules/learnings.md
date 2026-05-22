@@ -15,6 +15,9 @@ paths:
 - `URLSearchParams` для query, НИКОГДА template literals — `H&M` ломает `&`
 - `\b` regex НЕ матчит кириллицу — использовать `includes()` для русских маркеров
 - DOMPurify (`sanitizeAIHtml()`) для HTML из AI, не regex-allowlist
+- React StrictMode (dev) монтирует `useEffect` дважды: catch/finally первого (abort-нутого) запроса перезаписывает загруженные данные ложной ошибкой → `AbortController` + `if (controller.signal.aborted) return` в then/catch/finally
+- `useSearchParams` пуст на первом рендере до гидратации — не редиректь, пока сырая строка пуста (`const raw = sp.get('x') ?? ''; if (raw && cond) router.replace(...)`)
+- Convert по множеству: проверяй строгую однотипность цели (`onlyBox`/`onlyMono`), не отрицание присутствия (`!hasBox`) — иначе СМЕШАННАЯ цель ложно триггерит конвертацию
 
 ## Python/DB паттерны
 - `_UNSET = object()` для partial PATCH — различает «не передано» vs «null=clear»
@@ -23,6 +26,7 @@ paths:
 - `CREATE INDEX CONCURRENTLY` + `AUTOCOMMIT` для partial index в Alembic
 - Denormalized FK на child → синхронизировать при update parent.fk (state-guard)
 - Override поле → пересчитать ВСЕ derived (`effective = override ?? source`)
+- Explicit `null` в JSONB-поле ≠ отсутствующий ключ: Pydantic `default_factory` И `dict.get(k, default)` дают дефолт ТОЛЬКО при отсутствии ключа, не при null. Nullable JSONB-list → `@field_validator(mode="before")` коерсит null→[]; сырой dict → `.get(k) or []`, не `.get(k, [])`
 
 ## Архитектура
 - Cumulative consumption: `consumed: dict[id, qty]` как mutable state при sequential distribute

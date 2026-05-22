@@ -54,6 +54,13 @@ export default function AssemblyPreviewPage() {
         else router.push(`/p/${slug}/warehouse/assembly`);
     }, [draftId, router, slug]);
 
+    // «← Назад» — туда, откуда пришли (список / распределение), не насильно в редактор.
+    // Fallback на список заявок, если истории нет (прямой заход / refresh).
+    const goBack = useCallback(() => {
+        if (typeof window !== 'undefined' && window.history.length > 1) router.back();
+        else router.push(`/p/${slug}/warehouse/assembly`);
+    }, [router, slug]);
+
     const openFf = useCallback((ffId: number) => {
         const qs = new URLSearchParams({ draft: String(draftId ?? ''), ff: String(ffId), pkg: pkgTab, type: typeScope });
         router.push(`/p/${slug}/warehouse/assembly/distribute/ff?${qs.toString()}`);
@@ -345,7 +352,7 @@ export default function AssemblyPreviewPage() {
             {/* Header */}
             <div className="page-header" style={{ marginBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1 }}>
-                    <button className="btn btn-secondary btn-sm" onClick={backToDistribute}>← Назад</button>
+                    <button className="btn btn-secondary btn-sm" onClick={goBack}>← Назад</button>
                     <div>
                         <h1 className="page-title" style={{ margin: 0 }}>Предпросмотр заявок</h1>
                         <p className="page-subtitle" style={{ margin: 0 }}>Срез: <strong>{scopeLabel}</strong></p>

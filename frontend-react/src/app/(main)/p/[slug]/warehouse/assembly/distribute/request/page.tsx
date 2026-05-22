@@ -7,6 +7,7 @@ import { Toast } from '@/components';
 import KpiCard from '@/components/KpiCard';
 import type { AssemblyDraft, AssemblyDraftUnitRef, HandedUnitItem, PackageType, Warehouse } from '@/types/api';
 import {
+    buildFfUnits,
     findDraftUnit,
     excelSheetName,
     PKG_LABEL_RU,
@@ -55,6 +56,7 @@ export default function AssemblyRequestUnitPage() {
     const [editMode, setEditMode] = useState(false);
     const [editItems, setEditItems] = useState<EditItem[]>([]);
     const [addQuery, setAddQuery] = useState('');
+    const [moveOpen, setMoveOpen] = useState(false);
 
     useEffect(() => {
         if (!draftId) { setError('Не указан ID черновика'); setLoading(false); return; }
@@ -121,6 +123,12 @@ export default function AssemblyRequestUnitPage() {
         );
     }, [draft, ffId, wbName, pkg, isNewcomer, newcomerNmIds]);
 
+    // Доступные WB-склады черновика для переноса (кроме текущего).
+    const availableWbTargets = useMemo(
+        () => (draft?.distribution.target_warehouse_names ?? []).filter(n => n && n !== wbName),
+        [draft, wbName],
+    );
+
     const items = useMemo(
         () => (unit ? [...unit.items].sort((a, b) => b.qty - a.qty || a.vendor.localeCompare(b.vendor)) : []),
         [unit],
@@ -129,6 +137,20 @@ export default function AssemblyRequestUnitPage() {
     const kOf = useCallback((nmId: number) => nmPpb.get(nmId) || 0, [nmPpb]);
     // Коробок = ⌈шт / K⌉: неполный короб тоже считается коробом (товар всё равно кладётся в короб).
     const boxesOf = useCallback((nmId: number, qty: number) => { const k = kOf(nmId); return k > 0 ? Math.ceil(qty / k) : 0; }, [kOf]);
+
+    // Существующая загрузка этого ФФ по каждому WB-складу (текущий срез pkg×новизна) —
+    // подсказка в дропдауне «Сменить склад WB»: куда вольётся перенос.
+    const wbTargetStats = useMemo(() => {
+        const m = new Map<string, { qty: number; boxes: number; sku: number }>();
+        if (!draft || ffId == null) return m;
+        const units = buildFfUnits(draft.distribution.rows ?? [], draft.distribution.handed_units ?? [], newcomerNmIds, ffId);
+        for (const u of units) {
+            if (u.pkg !== pkg || u.isNewcomer !== isNewcomer) continue;
+            const boxes = u.items.reduce((s, it) => s + boxesOf(it.nmId, it.qty), 0);
+            m.set(u.wbName, { qty: u.qty, boxes, sku: u.items.length });
+        }
+        return m;
+    }, [draft, ffId, newcomerNmIds, pkg, isNewcomer, boxesOf]);
 
     // ─── Остаток ФФ для проверки правок ──────────────────────────────────
     const stockByNm = useMemo(() => {
@@ -315,6 +337,27 @@ export default function AssemblyRequestUnitPage() {
         }
     }, [draftId, unitRef, router, slug, backToFf]);
 
+    const handleMoveToWb = useCallback(async (newWb: string) => {
+        if (!draftId) return;
+        if (!window.confirm(`Перенести заявку «${ffName} → ${wbName}» на склад «${newWb}»? Поедет только товар этого ФФ; если на «${newWb}» уже есть заявка с этого ФФ — позиции сольются.`)) return;
+        setMoveOpen(false);
+        setBusy(true);
+        try {
+            const d = await api.moveDraftUnit(draftId, unitRef, newWb);
+            setDraft(d);
+            setToast({ message: `Перенесено на «${newWb}»`, type: 'success' });
+            const qs = new URLSearchParams({
+                draft: String(draftId), ff: String(ffId ?? ''), wb: newWb,
+                pkg, new: isNewcomer ? '1' : '0', type: typeScope,
+            });
+            router.replace(`/p/${slug}/warehouse/assembly/distribute/request?${qs.toString()}`);
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка переноса', type: 'error' });
+        } finally {
+            setBusy(false);
+        }
+    }, [draftId, unitRef, ffName, wbName, ffId, pkg, isNewcomer, typeScope, router, slug]);
+
     if (loading) {
         return <div className="animate-in"><div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка…</div></div>;
     }
@@ -374,6 +417,38 @@ export default function AssemblyRequestUnitPage() {
                     ) : (
                         <>
                             <button className="btn btn-secondary" onClick={exportUnit}>📥 Excel</button>
+                            {editable && availableWbTargets.length > 0 && (
+                                <div style={{ position: 'relative' }}>
+                                    <button className="btn btn-secondary" onClick={() => setMoveOpen(o => !o)} disabled={busy} title="Перенести заявку этого ФФ на другой WB-склад">🔀 Сменить склад WB</button>
+                                    {moveOpen && (
+                                        <>
+                                            <div onClick={() => setMoveOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 19 }} />
+                                            <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 12, boxShadow: 'var(--shadow-glass)', zIndex: 20, minWidth: 340, maxHeight: 420, overflowY: 'auto', padding: 8 }}>
+                                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', padding: '4px 8px 10px' }}>Перенести «{unit.wbName}» на склад:</div>
+                                                {availableWbTargets.map(wb => {
+                                                    const st = wbTargetStats.get(wb);
+                                                    return (
+                                                        <button
+                                                            key={wb}
+                                                            className="btn btn-secondary"
+                                                            style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3, width: '100%', textAlign: 'left', marginBottom: 6, padding: '8px 12px', height: 'auto' }}
+                                                            onClick={() => handleMoveToWb(wb)}
+                                                            disabled={busy}
+                                                        >
+                                                            <span style={{ fontWeight: 600, fontSize: 14 }}>→ {wb}</span>
+                                                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 400 }}>
+                                                                {st
+                                                                    ? `📦 ${formatNumber(st.boxes, 0)} кор · 🏷️ ${formatNumber(st.sku, 0)} SKU · ${formatNumber(st.qty, 0)} шт`
+                                                                    : 'пусто — новая линия'}
+                                                            </span>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            )}
                             {editable && <button className="btn btn-secondary" onClick={enterEdit} disabled={busy}>✏️ Редактировать</button>}
                             {unit.frozen && unit.status === 'draft' && (
                                 <button className="btn btn-secondary" onClick={handleRevert} disabled={busy} title="Вернуть в авто-распределение (правки сбросятся)">↩ В авто</button>

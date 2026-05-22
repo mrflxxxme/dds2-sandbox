@@ -1508,6 +1508,28 @@ export interface AssemblyListResponse {
   total: number;
 }
 
+export interface CreatedRequestBrief {
+  id: number;
+  number: string;
+  ff_id: number;
+  ff_name: string;
+  wb_name: string | null;
+  package_type: PackageType;
+  status: AssemblyStatus;
+  qty: number;
+  sku: number;
+}
+
+/** Группа созданных заявок одного черновика («Предпросмотр созданных»). */
+export interface CreatedAssemblyGroup {
+  draft_id: number;
+  draft_name: string | null;
+  request_count: number;
+  total_qty: number;
+  total_sku: number;
+  requests: CreatedRequestBrief[];
+}
+
 export interface AssemblyHistoryEntry {
     id: number;
     old_status: string | null;
