@@ -12,6 +12,9 @@
 ## Исправленные (последние)
 Свежие крупные постмортемы; старое — в git-истории.
 
+### Overwrite-цены наполнения машины обновлял только 1 источник из N (2026-05-22)
+Наполнение машины (paste-режим, vehicles page) → модалка mismatch → «переписать цены ФЗ» обновляла цену только у ОДНОГО FOI на баркод. `handleOverwriteOrderPrices` резолвил баркод через `allItemMap[barcode].id` — представитель (FIFO по order_number), хотя qty сплитится по ВСЕМ FOIs (`foisByBarcode`). Баркод из 2+ ФЗ → второй источник сохранял старую цену. Прод: V-0010, 8 баркодов (напр. 2049989649860: ФЗ-76 «Дивандеки»→43 ✅, ФЗ-20 «тиамо»→55.08 ❌). Фикс: pure `buildPriceOverwrites` (`splitPaste.ts`) повторяет split (`withOverrides=true`, общий `consumed`) → переписывает цену у КАЖДОГО забронированного FOI, отличного по цене. Файлы: `lib/supply-chain/splitPaste.ts`, `vehicles/[...orderNo]/page.tsx`. Тест: `splitPaste.test.ts` (describe buildPriceOverwrites). ⚠️ Уже разъехавшиеся данные фикс НЕ чинит (FOIs assigned, remaining=0 → не попадают в available-items): чинить правкой цен ФЗ-20 + price-resync машины.
+
 ### SUPERSAFE выпадал из «Короб»-коммита (2026-05-22)
 Вкладка «Короб» на distribute = `package_type !== 'MONOPALLET'` (включает SUPERSAFE), но `commit_draft` слал `package_type=BOX`, а `_is_selected` сравнивал строго (`SUPERSAFE != BOX`) → SUPERSAFE-строки не коммитились, молча оставались в черновике (черновик не закрывался). Фикс: `_pkg_selected` в `commit_draft` трактует срез как вкладку — `BOX` = всё кроме MONOPALLET (BOX + SUPERSAFE), `MONOPALLET` = только моно; каждая заявка сохраняет реальный `package_type`. Файл: `services/assembly_draft_service.py`. Тест: `test_commit_box_tab_includes_supersafe_excludes_mono`.
 

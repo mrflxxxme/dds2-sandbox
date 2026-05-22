@@ -22,7 +22,7 @@ import type {
 } from '@/types/api';
 import { FactoryQtyExceededError } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
-import { splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
+import { buildPriceOverwrites, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
 import { LanguageProvider, useT, LanguageToggle } from '../../i18n';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -2049,18 +2049,21 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
         setSubmitting(true);
         setError('');
         try {
-            // Price mismatches → overwrite factory order prices (existing semantic).
-            const priceMismatchRows = mismatchRows.filter(r => {
-                const item = allItemMap[r.barcode.trim()];
-                const p = parseFloat(r.price);
-                const op = parseFloat(item?.price_cny || '0') || 0;
-                return Math.abs(p - op) > 0.0001;
-            });
-            if (priceMismatchRows.length > 0) {
-                const priceUpdates = priceMismatchRows.map(r => ({
-                    factory_order_item_id: allItemMap[r.barcode.trim()].id,
-                    new_price_cny: r.price,
-                }));
+            // Price mismatches → overwrite factory order prices. A barcode can
+            // map to multiple FOIs across factory orders and the paste qty is
+            // split onto several of them — reprice EVERY booked FOI, not just the
+            // representative one (mirrors performAdd's split). sc20.3 / V-0010.
+            const priceUpdates = buildPriceOverwrites(
+                validRows.map(r => ({
+                    barcode: r.barcode.trim(),
+                    qty: parseInt(r.qty) || 0,
+                    priceRaw: r.price,
+                    boxRaw: r.box_size || '',
+                    pcsPerBox: parseInt(r.pcs_per_box) || 0,
+                })),
+                foisByBarcode,
+            );
+            if (priceUpdates.length > 0) {
                 await api.bulkUpdateFactoryItemPrices(priceUpdates);
             }
             // Box/ppb mismatches → per-vehicle override on CostOrderItem.
