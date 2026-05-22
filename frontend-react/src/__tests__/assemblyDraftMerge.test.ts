@@ -41,6 +41,7 @@ describe('findDuplicateLanes', () => {
         expect(result[0].draftIds).toEqual(expect.arrayContaining([1, 2]));
         expect(result[0].pieces).toBe(160); // 100 + 60
         expect(result[0].ffName).toBe('Склад-10');
+        expect(result[0].piecesPerDraft).toEqual({ 1: 100, 2: 60 });
     });
 
     it('returns nothing when lanes are disjoint', () => {
@@ -83,14 +84,15 @@ describe('findDuplicateLanes', () => {
         expect(result).toHaveLength(1);
         expect(result[0].draftIds).toHaveLength(3);
         expect(result[0].pieces).toBe(180);
+        expect(result[0].piecesPerDraft).toEqual({ 1: 100, 2: 50, 3: 30 });
     });
 });
 
 describe('consolidatingLanes', () => {
     it('returns lanes where ≥2 selected drafts share the lane', () => {
-        const lanes = [
-            { ffId: 10, ffName: 'Склад-10', wbName: 'Электросталь', draftIds: [1, 2], pieces: 150 },
-            { ffId: 10, ffName: 'Склад-10', wbName: 'Казань', draftIds: [1, 3], pieces: 60 },
+        const lanes: import('@/lib/utils/assemblyDraftMerge').DuplicateLane[] = [
+            { ffId: 10, ffName: 'Склад-10', wbName: 'Электросталь', draftIds: [1, 2], pieces: 150, piecesPerDraft: { 1: 90, 2: 60 } },
+            { ffId: 10, ffName: 'Склад-10', wbName: 'Казань', draftIds: [1, 3], pieces: 60, piecesPerDraft: { 1: 40, 3: 20 } },
         ];
         // Selected: 1 and 2 → first lane consolidates, second doesn't (3 not selected)
         const result = consolidatingLanes(new Set([1, 2]), lanes);
@@ -99,8 +101,8 @@ describe('consolidatingLanes', () => {
     });
 
     it('returns empty when selection has no overlap with duplicate lanes', () => {
-        const lanes = [
-            { ffId: 10, ffName: 'Склад-10', wbName: 'Электросталь', draftIds: [1, 2], pieces: 100 },
+        const lanes: import('@/lib/utils/assemblyDraftMerge').DuplicateLane[] = [
+            { ffId: 10, ffName: 'Склад-10', wbName: 'Электросталь', draftIds: [1, 2], pieces: 100, piecesPerDraft: { 1: 60, 2: 40 } },
         ];
         expect(consolidatingLanes(new Set([3, 4]), lanes)).toHaveLength(0);
     });

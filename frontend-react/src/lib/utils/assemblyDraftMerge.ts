@@ -22,6 +22,8 @@ export interface DuplicateLane {
   draftIds: number[];
   /** Best-effort piece count (Σ tgt[wb] over involved drafts). */
   pieces: number;
+  /** Per-draft best-effort piece count: draftId → pieces. */
+  piecesPerDraft: Record<number, number>;
 }
 
 /**
@@ -79,7 +81,14 @@ export function findDuplicateLanes(
   for (const { ffId, wbName, draftIds, piecesPerDraft } of laneMap.values()) {
     if (draftIds.length < 2) continue;
     const pieces = [...piecesPerDraft.values()].reduce((a, b) => a + b, 0);
-    result.push({ ffId, ffName: nameById(ffId), wbName, draftIds, pieces });
+    result.push({
+      ffId,
+      ffName: nameById(ffId),
+      wbName,
+      draftIds,
+      pieces,
+      piecesPerDraft: Object.fromEntries(piecesPerDraft),
+    });
   }
 
   return result;

@@ -574,42 +574,94 @@ export default function AssemblyListPage() {
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     padding: 16,
                 }}>
-                    <div className="glass-card" style={{ maxWidth: 480, width: '100%' }}>
-                        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 16 }}>
-                            Объединить {selectedDraftIds.size} черновика в один?
+                    <div className="glass-card" style={{ maxWidth: 520, width: '100%' }}>
+                        {/* Modal header */}
+                        <div style={{ marginBottom: 16 }}>
+                            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 8 }}>
+                                Объединить {selectedDraftIds.size} черновика в один?
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                {drafts
+                                    .filter(d => selectedDraftIds.has(d.id))
+                                    .map(d => (
+                                        <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                                            <span style={{ color: 'var(--color-accent)', fontWeight: 600, fontSize: 11 }}>#{d.id}</span>
+                                            <span style={{ color: 'var(--color-text)' }}>{d.name || `Черновик #${d.id}`}</span>
+                                            <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+                                                · {d.distribution.rows.length} поз.
+                                            </span>
+                                        </div>
+                                    ))}
+                            </div>
                         </div>
+
                         {(() => {
                             const lanes = consolidatingLanes(selectedDraftIds, duplicateLanes);
+                            const selectedIds = [...selectedDraftIds];
+                            const totalPieces = lanes.reduce((s, l) => s + l.pieces, 0);
                             return lanes.length > 0 ? (
-                                <div style={{ marginBottom: 16 }}>
-                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-                                        Следующие маршруты будут объединены в одну отправку:
+                                <>
+                                    {/* Summary chips */}
+                                    <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+                                        <span className="badge badge-info">
+                                            {lanes.length} {lanes.length === 1 ? 'маршрут' : lanes.length < 5 ? 'маршрута' : 'маршрутов'} объединится
+                                        </span>
+                                        <span className="badge badge-secondary">
+                                            ~{formatNumber(totalPieces)} шт. итого
+                                        </span>
                                     </div>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+
+                                    {/* Lane list */}
+                                    <div style={{
+                                        maxHeight: 280,
+                                        overflowY: 'auto',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: 6,
+                                        marginBottom: 12,
+                                        paddingRight: 2,
+                                    }}>
                                         {lanes.map(lane => (
                                             <div key={`${lane.ffId}-${lane.wbName}`} style={{
-                                                display: 'flex', alignItems: 'center', gap: 8,
-                                                padding: '8px 12px',
+                                                padding: '10px 12px',
                                                 background: 'var(--color-bg)',
-                                                borderRadius: 8,
+                                                borderRadius: 10,
                                                 fontSize: 13,
                                             }}>
-                                                <span style={{ fontWeight: 600 }}>{lane.ffName}</span>
-                                                <span style={{ color: 'var(--color-text-muted)' }}>→</span>
-                                                <span style={{ fontWeight: 600 }}>{lane.wbName}</span>
-                                                <span style={{ marginLeft: 'auto', color: 'var(--color-text-muted)', fontSize: 12 }}>
-                                                    ~{formatNumber(lane.pieces)} шт.
-                                                </span>
+                                                {/* Route + total */}
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5 }}>
+                                                    <span style={{ fontWeight: 600 }}>{lane.ffName}</span>
+                                                    <span style={{ color: 'var(--color-text-muted)' }}>→</span>
+                                                    <span style={{ fontWeight: 600 }}>{lane.wbName}</span>
+                                                    <span style={{ marginLeft: 'auto', fontWeight: 600 }}>
+                                                        ~{formatNumber(lane.pieces)} шт.
+                                                    </span>
+                                                </div>
+                                                {/* Per-draft breakdown */}
+                                                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                                                    {selectedIds
+                                                        .filter(id => lane.piecesPerDraft[id] != null)
+                                                        .map(id => (
+                                                            <span key={id} style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                                                #{id}: ~{formatNumber(lane.piecesPerDraft[id])} шт.
+                                                            </span>
+                                                        ))}
+                                                </div>
                                             </div>
                                         ))}
                                     </div>
-                                </div>
+
+                                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 16 }}>
+                                        Несовпадающие маршруты останутся отдельными заявками при передаче на ФФ.
+                                    </div>
+                                </>
                             ) : (
                                 <div style={{ marginBottom: 16, fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                    Черновики будут объединены. Разные маршруты останутся отдельными заявками при передаче на ФФ.
+                                    Черновики будут объединены. Все маршруты останутся отдельными заявками при передаче на ФФ.
                                 </div>
                             );
                         })()}
+
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                             <button
                                 className="btn btn-secondary btn-sm"
