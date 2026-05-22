@@ -1,6 +1,6 @@
 /** Cost API methods */
 import { ApiClient } from './client';
-import type { CostOrder, CostOrderItem, Nomenclature, DutyRule, MessageResponse } from '@/types/api';
+import type { CostOrder, CostOrderItem, Nomenclature, DutyRule, MissingAreaBarcode, MessageResponse } from '@/types/api';
 
 export function addCostMethods(api: ApiClient) {
     return {
@@ -14,6 +14,7 @@ export function addCostMethods(api: ApiClient) {
         },
         getNomenclature() { return api.request<Nomenclature[]>('GET', '/api/v1/cost/nomenclature'); },
         getNomenclatureSubjects() { return api.request<string[]>('GET', '/api/v1/cost/nomenclature/subjects'); },
+        getMissingAreaBarcodes() { return api.request<MissingAreaBarcode[]>('GET', '/api/v1/cost/nomenclature/missing_area'); },
         syncNomenclature() { return api.request<{ ok: boolean; synced: number; status?: string; error_msg?: string; finished_at?: string }>('POST', '/api/v1/integrations/wb/sync_nomenclature'); },
         getDutyRules() { return api.request<DutyRule[]>('GET', '/api/v1/cost/duty_rules'); },
         addDutyRule(data: Partial<DutyRule>) { return api.request<DutyRule>('POST', '/api/v1/cost/duty_rules', data); },

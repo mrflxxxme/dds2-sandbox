@@ -4,7 +4,7 @@ import { api } from '@/lib/api';
 import { exportToExcel, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { Nomenclature } from '@/types/api';
+import type { Nomenclature, MissingAreaBarcode } from '@/types/api';
 
 interface AreaRow { barcode: string; area_m2: string }
 
@@ -13,6 +13,8 @@ const EMPTY_AREA_ROW = (): AreaRow => ({ barcode: '', area_m2: '' });
 export function DutyRules() {
     const [rules, setRules] = useState<any[]>([]);
     const [nomenclature, setNomenclature] = useState<Nomenclature[]>([]);
+    const [missingArea, setMissingArea] = useState<MissingAreaBarcode[]>([]);
+    const [missingDraft, setMissingDraft] = useState<Record<string, string>>({});
     const [categories, setCategories] = useState<string[]>([]);
     const [showForm, setShowForm] = useState(false);
     const [form, setForm] = useState({ subject: '', basis: 'INVOICE', rate: '0', util_collect_rub: '0', note: '' });
@@ -32,13 +34,19 @@ export function DutyRules() {
         } catch { }
     }, []);
 
+    const loadMissingArea = useCallback(async () => {
+        try {
+            setMissingArea(await api.getMissingAreaBarcodes());
+        } catch { }
+    }, []);
+
     const loadCategories = useCallback(async () => {
         try {
             setCategories(await api.getNomenclatureSubjects());
         } catch { }
     }, []);
 
-    useEffect(() => { loadRules(); loadNomenclature(); loadCategories(); loadVatRate(); }, [loadNomenclature, loadCategories]);
+    useEffect(() => { loadRules(); loadNomenclature(); loadMissingArea(); loadCategories(); loadVatRate(); }, [loadNomenclature, loadMissingArea, loadCategories]);
     useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(''), 5000); return () => clearTimeout(t); }, [msg]);
 
     const loadRules = async () => { try { setRules(await api.getDutyRules()); } catch { } };
@@ -126,8 +134,29 @@ export function DutyRules() {
             setMsg(parts.join(' | '));
             setAreaRows(Array.from({ length: 5 }, EMPTY_AREA_ROW));
             loadNomenclature();
+            loadMissingArea();
         } catch (e: any) { setMsg(`❌ ${e.message}`); }
         setAreaSaving(false);
+    };
+
+    // Fill area for a single barcode from the "missing area" list
+    const saveMissingArea = async (barcode: string) => {
+        const area = parseFloat((missingDraft[barcode] ?? '').replace(',', '.'));
+        if (isNaN(area) || area <= 0) { setMsg('❌ Введите корректную площадь'); return; }
+        try {
+            await api.bulkUpdateNomenclatureArea([{ barcode, area_m2: area }]);
+            setMsg('✅ Площадь сохранена');
+            setMissingDraft(prev => { const next = { ...prev }; delete next[barcode]; return next; });
+            loadNomenclature();
+            loadMissingArea();
+        } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    };
+
+    const loadMissingToGrid = () => {
+        const rows: AreaRow[] = missingArea.map(m => ({ barcode: m.barcode, area_m2: '' }));
+        rows.push(EMPTY_AREA_ROW());
+        setAreaRows(rows);
+        setMsg(`✏️ Загружено в форму: ${missingArea.length}. Заполните площади и сохраните.`);
     };
 
     // Inline edit / delete for existing area values
@@ -150,6 +179,7 @@ export function DutyRules() {
             await api.bulkUpdateNomenclatureArea([{ barcode, area_m2: 0 }]);
             setMsg('✅ Площадь удалена');
             loadNomenclature();
+            loadMissingArea();
         } catch (e: any) { setMsg(`❌ ${e.message}`); }
     };
     const loadAllToGrid = () => {
@@ -213,6 +243,33 @@ export function DutyRules() {
                 <div style={{ display: 'flex', gap: 4 }}>
                     <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => startEdit(row.barcode, row.area_m2)}>✎</button>
                     <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => deleteArea(row.barcode)}>✕</button>
+                </div>
+            ),
+        },
+    ];
+
+    const missingColumns: Column[] = [
+        { key: 'barcode', label: 'Баркод', render: (v: any) => <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{v}</span> },
+        { key: 'subject', label: 'Категория', render: (v: any) => <span style={{ fontSize: 13 }}>{v || '—'}</span> },
+        { key: 'article_seller', label: 'Артикул', render: (v: any) => <span style={{ fontSize: 13 }}>{v || '—'}</span> },
+        { key: 'total_qty', label: 'Кол-во, шт', render: (v: any) => <span style={{ fontFamily: 'monospace' }}>{formatNumber(v)}</span> },
+        {
+            key: 'vehicles', label: 'Машины', sortable: false,
+            render: (v: string[]) => <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{(v || []).join(', ') || '—'}</span>,
+        },
+        {
+            key: '_fill', label: 'Площадь м²', sortable: false,
+            render: (_v: any, row: any) => (
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                    <input
+                        className="form-input"
+                        value={missingDraft[row.barcode] ?? ''}
+                        onChange={e => setMissingDraft(prev => ({ ...prev, [row.barcode]: e.target.value }))}
+                        onKeyDown={e => { if (e.key === 'Enter') saveMissingArea(row.barcode); }}
+                        placeholder="0.00"
+                        style={{ width: 90, fontSize: 13, fontFamily: 'monospace', textAlign: 'right', padding: '4px 8px' }}
+                    />
+                    <button className="btn btn-success btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => saveMissingArea(row.barcode)}>✓</button>
                 </div>
             ),
         },
@@ -294,6 +351,31 @@ export function DutyRules() {
                         </div>
                     )}
                 </div>
+
+                {/* Barcodes in vehicles missing area (AREA-basis duty) */}
+                {missingArea.length > 0 && (
+                    <div style={{ marginBottom: 16, padding: 12, background: 'rgba(245,158,11,0.08)', borderRadius: 8, border: '1px solid rgba(245,158,11,0.2)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-warning)' }}>
+                                ⚠️ В машинах без площади (пошлина «За м²»): {missingArea.length}
+                            </div>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                                <button className="btn btn-secondary btn-sm" onClick={loadMissingToGrid}>✎ Заполнить в форме ниже</button>
+                                <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(missingArea.map(m => ({ barcode: m.barcode, subject: m.subject, article_seller: m.article_seller, total_qty: m.total_qty, vehicles: (m.vehicles || []).join(', ') })), 'barcodes_missing_area')}>📥 Excel</button>
+                            </div>
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                            Эти баркоды есть в машинах, но без площади (м²) — пошлина «За м²» не посчитается. Заполните площадь здесь или загрузите в форму ниже.
+                        </div>
+                        <TanStackDataTable
+                            columns={missingColumns}
+                            data={missingArea}
+                            emptyText=""
+                            enableSorting
+                            enablePagination={false}
+                        />
+                    </div>
+                )}
 
                 {/* Paste grid */}
                 <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginBottom: 16 }}>

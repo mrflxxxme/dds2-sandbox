@@ -4,12 +4,22 @@ Uses DB fixtures from conftest.py.
 """
 
 import io
+import uuid
+from decimal import Decimal
 
 import pandas as pd
 import pytest
 
-from backend.models import Nomenclature
+from backend.models import (
+    CostOrder,
+    CostOrderItem,
+    DutyBasis,
+    DutyRule,
+    Nomenclature,
+    VehicleStatus,
+)
 from backend.services.cost.nomenclature import (
+    get_missing_area_barcodes,
     get_nomenclature,
     get_nomenclature_subjects,
     upload_nomenclature,
@@ -205,3 +215,108 @@ class TestUploadNomenclature:
         items_b = await get_nomenclature(db_session, other_project.id)
         assert len(items_a) >= 1
         assert all(n.barcode != "4000000000001" for n in items_b)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# get_missing_area_barcodes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _vno() -> str:
+    return f"V-{uuid.uuid4().hex[:8]}"
+
+
+class TestGetMissingAreaBarcodes:
+    @pytest.mark.asyncio
+    async def test_empty_for_new_project(self, db_session, project):
+        assert await get_missing_area_barcodes(db_session, project.id) == []
+
+    @pytest.mark.asyncio
+    async def test_filters_to_area_basis_missing_in_vehicles(self, db_session, project):
+        """Only AREA-basis barcodes that are in a vehicle and have no area_m2."""
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.61")))
+        db_session.add(DutyRule(project_id=pid, subject="Шторы", basis=DutyBasis.WEIGHT, rate=Decimal("0.5")))
+        db_session.add_all(
+            [
+                Nomenclature(project_id=pid, barcode="BC-NEED", subject="Ковры", article_seller="A1"),
+                Nomenclature(project_id=pid, barcode="BC-HAS-AREA", subject="Ковры", area_m2=Decimal("2.0")),
+                Nomenclature(project_id=pid, barcode="BC-WEIGHT", subject="Шторы"),
+                Nomenclature(project_id=pid, barcode="BC-NO-RULE", subject="Вазы"),
+                Nomenclature(project_id=pid, barcode="BC-NOT-IN-VEHICLE", subject="Ковры"),
+            ]
+        )
+        vno = _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.FORMING))
+        for bc, qty in [("BC-NEED", 100), ("BC-HAS-AREA", 5), ("BC-WEIGHT", 7), ("BC-NO-RULE", 9)]:
+            db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode=bc, qty=qty))
+        await db_session.commit()
+
+        result = await get_missing_area_barcodes(db_session, pid)
+        assert [r["barcode"] for r in result] == ["BC-NEED"]
+        row = result[0]
+        assert row["subject"] == "Ковры"
+        assert row["article_seller"] == "A1"
+        assert row["total_qty"] == 100
+        assert row["vehicles"] == [vno]
+
+    @pytest.mark.asyncio
+    async def test_zero_area_treated_as_missing(self, db_session, project):
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.61")))
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-ZERO", subject="Ковры", area_m2=Decimal("0")))
+        vno = _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.CUSTOMS))
+        db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode="BC-ZERO", qty=12))
+        await db_session.commit()
+
+        result = await get_missing_area_barcodes(db_session, pid)
+        assert [r["barcode"] for r in result] == ["BC-ZERO"]
+
+    @pytest.mark.asyncio
+    async def test_aggregates_across_vehicles_including_delivered(self, db_session, project):
+        """Qty summed and vehicles collected across all statuses (incl. DELIVERED)."""
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.61")))
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-MULTI", subject="Ковры"))
+        v1, v2 = _vno(), _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=v1, status=VehicleStatus.FORMING))
+        db_session.add(CostOrder(project_id=pid, order_no=v2, status=VehicleStatus.DELIVERED))
+        db_session.add(CostOrderItem(project_id=pid, order_no=v1, barcode="BC-MULTI", qty=100))
+        db_session.add(CostOrderItem(project_id=pid, order_no=v2, barcode="BC-MULTI", qty=50))
+        await db_session.commit()
+
+        result = await get_missing_area_barcodes(db_session, pid)
+        row = next(r for r in result if r["barcode"] == "BC-MULTI")
+        assert row["total_qty"] == 150
+        assert row["vehicles"] == sorted([v1, v2])
+
+    @pytest.mark.asyncio
+    async def test_excludes_deleted_vehicle(self, db_session, project):
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.61")))
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-DEL", subject="Ковры"))
+        vno = _vno()
+        order = CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.FORMING)
+        order.soft_delete()
+        db_session.add(order)
+        db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode="BC-DEL", qty=10))
+        await db_session.commit()
+
+        result = await get_missing_area_barcodes(db_session, pid)
+        assert all(r["barcode"] != "BC-DEL" for r in result)
+
+    @pytest.mark.asyncio
+    async def test_project_isolation(self, db_session, project, other_project):
+        for p in (project, other_project):
+            db_session.add(DutyRule(project_id=p.id, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.61")))
+            db_session.add(Nomenclature(project_id=p.id, barcode=f"BC-{p.id}", subject="Ковры"))
+            vno = _vno()
+            db_session.add(CostOrder(project_id=p.id, order_no=vno, status=VehicleStatus.FORMING))
+            db_session.add(CostOrderItem(project_id=p.id, order_no=vno, barcode=f"BC-{p.id}", qty=10))
+        await db_session.commit()
+
+        res_a = await get_missing_area_barcodes(db_session, project.id)
+        res_b = await get_missing_area_barcodes(db_session, other_project.id)
+        assert [r["barcode"] for r in res_a] == [f"BC-{project.id}"]
+        assert [r["barcode"] for r in res_b] == [f"BC-{other_project.id}"]
