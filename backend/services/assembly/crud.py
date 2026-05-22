@@ -561,6 +561,8 @@ async def get_created_groups(db: AsyncSession, project_id: int) -> list[dict]:
     groups: dict[int, dict] = {}
     for r in requests:
         did = r.source_draft_id
+        if did is None:  # запрос фильтрует isnot(None), но mypy этого не знает
+            continue
         g = groups.get(did)
         if g is None:
             g = {"draft_id": did, "draft_name": draft_names.get(did), "requests": [], "total_qty": 0, "_nm": set()}

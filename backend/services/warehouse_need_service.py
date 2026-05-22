@@ -874,8 +874,8 @@ async def get_warehouse_need(
 
         # Apply bump per SKU per main warehouse
         for nm_id in all_nm_ids:
-            target = _bump_target_for_sku(sku_ppb_map.get(nm_id), min_stock_per_main_warehouse)
-            if target <= 0:
+            bump_target = _bump_target_for_sku(sku_ppb_map.get(nm_id), min_stock_per_main_warehouse)
+            if bump_target <= 0:
                 continue
             total_rf_stock_local = sum(
                 rf_stock_map.get(nm_id, {}).get(wh.id, 0)
@@ -908,8 +908,8 @@ async def get_warehouse_need(
                     + transit_target_map.get(nm_id, {}).get(wh_name, 0)
                     + art["need"]
                 )
-                if current_at_wh < target:
-                    bump = min(target - current_at_wh, remaining_budget)
+                if current_at_wh < bump_target:
+                    bump = min(bump_target - current_at_wh, remaining_budget)
                     if bump > 0:
                         art["need"] += bump
                         remaining_budget -= bump
