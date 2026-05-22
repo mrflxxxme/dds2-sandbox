@@ -25,6 +25,11 @@ concurrency:
   group: deploy-production
   cancel-in-progress: false
 
+# git pull на хосте — read-only, хватает per-run GITHUB_TOKEN (не протухает, не требует ротации).
+# Раньше тут был GH_PAT, который протух (~30 дней) и уронил деплой "could not read Password".
+permissions:
+  contents: read
+
 jobs:
   # Тесты здесь НЕ пере-прогоняются: PR dev→main уже прошёл Tests + Security
   # (required checks), а auto-merge гейтит merge на их зелёности. Сетка
@@ -91,7 +96,7 @@ jobs:
             echo "📥 Pulling main branch..."
             git stash --include-untracked 2>/dev/null || true
             git checkout main 2>/dev/null || true
-            git remote set-url origin https://${{ secrets.GH_PAT }}@github.com/vladbydaev37/dds2.git 2>/dev/null || true
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/vladbydaev37/dds2.git 2>/dev/null || true
             git pull origin main
 
             echo "📦 Pre-pulling base images (with retry)..."

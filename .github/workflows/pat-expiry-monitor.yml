@@ -1,0 +1,122 @@
+# Стережёт срок действия GH_PAT, чтобы токен больше не умирал молча.
+#
+# Предыстория: GH_PAT протух (~30 дней) и уронил `git pull` на деплой-хосте
+# с "could not read Password". cd-production + server-diagnose переведены на
+# GITHUB_TOKEN (не протухает), но auto-merge.yml / dependabot-auto-merge.yml
+# durable-токен нужен по-настоящему: мёрдж под GITHUB_TOKEN НЕ триггерит
+# push:[main] → авто-деплой не запустится. Этот джоб предупреждает заранее.
+#
+# Хочешь убрать рутину совсем — мигрируй auto-merge на GitHub App
+# (actions/create-github-app-token), тогда токен авто-обновляется и этот
+# монитор станет не нужен.
+name: PAT Expiry Monitor
+
+on:
+  schedule:
+    - cron: "0 9 * * *"   # ежедневно 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  check-pat-expiry:
+    name: Check GH_PAT expiry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check expiry and open issue if soon
+        env:
+          PAT_TO_CHECK: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WARN_DAYS: "10"
+        run: |
+          python3 << 'PYEOF'
+          import json, os, sys, urllib.request
+          from datetime import datetime, timezone
+
+          pat = os.environ["PAT_TO_CHECK"]
+          repo = os.environ["REPO"]
+          gh_token = os.environ["GITHUB_TOKEN"]
+          warn_days = int(os.environ.get("WARN_DAYS", "10"))
+
+          marker = "<!-- pat-expiry-monitor -->"
+          title = "[infra] GH_PAT скоро протухнет — обновить токен"
+
+          def open_issue_if_absent(body):
+              # Не плодим дубли: ищем открытую issue с маркером.
+              q = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/issues?state=open&per_page=100",
+                  headers={"Authorization": f"Bearer {gh_token}",
+                           "Accept": "application/vnd.github+json"},
+              )
+              for it in json.loads(urllib.request.urlopen(q).read()):
+                  if marker in (it.get("body") or ""):
+                      print(f"Открытая issue уже есть: #{it['number']} — не дублирую.")
+                      return
+              payload = json.dumps({"title": title, "body": body + "\n\n" + marker}).encode()
+              cr = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/issues",
+                  data=payload,
+                  headers={"Authorization": f"Bearer {gh_token}",
+                           "Accept": "application/vnd.github+json",
+                           "Content-Type": "application/json"},
+              )
+              r = json.loads(urllib.request.urlopen(cr).read())
+              print(f"Создана issue #{r['number']}: {r['html_url']}")
+
+          # Пробуем API под самим PAT — GitHub отдаёт срок в заголовке ответа.
+          # /rate_limit не тратит лимит и работает с любым валидным токеном.
+          req = urllib.request.Request(
+              "https://api.github.com/rate_limit",
+              headers={"Authorization": f"Bearer {pat}",
+                       "Accept": "application/vnd.github+json"},
+          )
+          try:
+              resp = urllib.request.urlopen(req)
+          except Exception as e:
+              # PAT уже невалиден (протух/отозван) — худший случай, кричим громко.
+              print(f"::error::GH_PAT не прошёл аутентификацию в GitHub API: {e}")
+              open_issue_if_absent(
+                  "**GH_PAT уже невалиден** — аутентификация в GitHub API не прошла. "
+                  "`auto-merge` и `dependabot-auto-merge` сейчас сломаны. "
+                  "Обнови `GH_PAT` в Settings → Secrets → Actions."
+              )
+              sys.exit(1)
+
+          raw = resp.headers.get("github-authentication-token-expiration")
+          if raw is None:
+              print("GH_PAT без срока действия (classic no-expiry) — мониторинг не нужен.")
+              sys.exit(0)
+
+          raw = raw.strip()
+          exp = None
+          for fmt in ("%Y-%m-%d %H:%M:%S %Z", "%Y-%m-%d %H:%M:%S UTC", "%Y-%m-%dT%H:%M:%SZ"):
+              try:
+                  exp = datetime.strptime(raw, fmt)
+                  break
+              except ValueError:
+                  continue
+          if exp is None:
+              print(f"::warning::Не смог распарсить дату срока '{raw}', пропускаю.")
+              sys.exit(0)
+          if exp.tzinfo is None:
+              exp = exp.replace(tzinfo=timezone.utc)
+
+          days_left = (exp - datetime.now(timezone.utc)).days
+          print(f"GH_PAT истекает {raw} → осталось {days_left} дн.")
+
+          if days_left <= warn_days:
+              open_issue_if_absent(
+                  f"`GH_PAT` истекает **{raw}** (осталось ~{days_left} дн.).\n\n"
+                  f"Используется в `auto-merge.yml` и `dependabot-auto-merge.yml`. "
+                  f"Обнови токен в Settings → Secrets → Actions → `GH_PAT`, иначе "
+                  f"авто-мёрдж dev→main и авто-деплой встанут.\n\n"
+                  f"Чтобы убрать эту рутину навсегда — мигрируй auto-merge на GitHub App "
+                  f"(`actions/create-github-app-token`)."
+              )
+              print(f"::warning::GH_PAT истекает через {days_left} дн.")
+          else:
+              print(f"OK — до истечения {days_left} дн. (порог {warn_days}).")
+          PYEOF
