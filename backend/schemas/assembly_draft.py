@@ -66,6 +66,12 @@ class AssemblyDraftDistribution(BaseModel):
     # Замороженные заявки-юниты, переданные на ФФ (вырезаны из rows).
     handed_units: list[HandedUnit] = Field(default_factory=list)
 
+    @field_validator("rows", "source_warehouse_ids", "target_warehouse_names", "handed_units", mode="before")
+    @classmethod
+    def coerce_null_to_empty_list(cls, v: object) -> object:
+        """Guard against explicit null in stored JSONB (null → [])."""
+        return v if v is not None else []
+
 
 class AssemblyDraftCreate(BaseModel):
     name: str = "Черновик сборки"

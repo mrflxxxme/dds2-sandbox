@@ -120,6 +120,7 @@ export default function AssemblyMergePage() {
 
     const handleMerge = async () => {
         setMerging(true);
+        setError('');
         try {
             const merged = await api.mergeAssemblyDrafts(draftIds);
             const qs = new URLSearchParams({ draft: String(merged.id), pkg: 'BOX', type: 'all' });
@@ -251,7 +252,7 @@ export default function AssemblyMergePage() {
                                 Маршруты, которые объединятся
                             </div>
                             <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                Вместо {mergingLanes.length * drafts.length} отдельных отправок — {mergingLanes.length} объединённых
+                                Вместо {mergingLanes.reduce((s, l) => s + l.draftIds.length, 0)} отдельных отправок — {mergingLanes.length} объединённых
                             </div>
                         </div>
                         <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>

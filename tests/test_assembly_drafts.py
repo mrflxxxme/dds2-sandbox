@@ -1485,3 +1485,35 @@ async def test_merge_drafts_project_isolation(db_session):
     with pytest.raises(HTTPException) as exc:
         await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d_p1.id, d_other.id])
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_survivor_rows_none(db_session):
+    """_row_count не падает когда distribution['rows'] == null (а не отсутствует)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    # Черновик с явным rows=None в JSON
+    d_null = AssemblyDraft(
+        project_id=PROJECT_ID,
+        name="Null-rows draft",
+        distribution={"source_warehouse_ids": [], "target_warehouse_names": [], "rows": None},
+        comment=None,
+    )
+    d_normal = AssemblyDraft(
+        project_id=PROJECT_ID,
+        name="Normal draft",
+        distribution=AssemblyDraftDistribution(
+            source_warehouse_ids=[wh_a],
+            target_warehouse_names=["Электросталь"],
+            rows=[AssemblyDraftRow(nm_id=99, barcode="NULL-R", src={str(wh_a): 5}, tgt={"Электросталь": 5})],
+        ).model_dump(mode="json"),
+        comment=None,
+    )
+    db_session.add_all([d_null, d_normal])
+    await db_session.commit()
+    await db_session.refresh(d_null)
+    await db_session.refresh(d_normal)
+
+    # Should not raise — d_normal wins as survivor (1 row > 0)
+    merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d_null.id, d_normal.id])
+    assert merged.id == d_normal.id

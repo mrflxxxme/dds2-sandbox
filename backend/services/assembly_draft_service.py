@@ -225,7 +225,7 @@ async def merge_drafts(
 
     # 3. Choose survivor: most rows; tie-break — lowest id
     def _row_count(d: AssemblyDraft) -> tuple[int, int]:
-        rows = (d.distribution or {}).get("rows", []) if isinstance(d.distribution, dict) else []
+        rows = (d.distribution or {}).get("rows") or [] if isinstance(d.distribution, dict) else []
         return (len(rows), -d.id)
 
     survivor = max(drafts, key=_row_count)
