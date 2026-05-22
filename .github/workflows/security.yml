@@ -42,7 +42,10 @@ jobs:
       - name: Audit backend dependencies
         # --ignore-vuln: pyasn1 CVE-2026-30922 — pinned by python-jose<0.5.0, no fix without replacing library
         # --ignore-vuln: pytest CVE-2025-71176 — dev/test dependency only, runtime risk = 0; tracked for upgrade to 9.0.3+
-        run: pip-audit --strict -r requirements-backend.txt --ignore-vuln CVE-2026-30922 --ignore-vuln CVE-2025-71176
+        # --ignore-vuln: starlette PYSEC-2026-161 (Host-header auth bypass) — fix=1.0.1 needs FastAPI on starlette 1.0,
+        #   blocked by prometheus-fastapi-instrumentator (no starlette-1.0 release yet). Practical risk low: JWT auth
+        #   (not path-reconstruction-based) + nginx validates Host. Tracked for upgrade when ecosystem supports starlette 1.0.
+        run: pip-audit --strict -r requirements-backend.txt --ignore-vuln CVE-2026-30922 --ignore-vuln CVE-2025-71176 --ignore-vuln PYSEC-2026-161
 
       - name: Audit worker/other dependencies (if exists)
         run: |
