@@ -132,6 +132,7 @@ class AssemblyRequestResponse(BaseModel):
     carrier_name: str | None = None
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
+    source_draft_id: int | None = None  # черновик-источник (поток распределения сборки)
     package_type: PackageTypeStr = "BOX"
     effective_wb_warehouse: str | None = None  # FBO warehouse_name or manual, whichever is set
     brands: str | None = None  # comma-separated unique brands from items
@@ -143,6 +144,32 @@ class AssemblyRequestResponse(BaseModel):
 class AssemblyListResponse(BaseModel):
     items: list[AssemblyRequestResponse]
     total: int
+
+
+class CreatedRequestBrief(BaseModel):
+    """Короткая карточка созданной заявки внутри группы-предпросмотра."""
+
+    id: int
+    number: str
+    ff_id: int
+    ff_name: str
+    wb_name: str | None
+    package_type: str
+    status: str
+    qty: int
+    sku: int
+
+
+class CreatedGroupResponse(BaseModel):
+    """Группа созданных заявок одного черновика («Предпросмотр созданных»).
+    Группировка по source_draft_id; только активные (IN_PROGRESS) заявки."""
+
+    draft_id: int
+    draft_name: str | None
+    request_count: int
+    total_qty: int
+    total_sku: int
+    requests: list[CreatedRequestBrief]
 
 
 class RefreshFromFboResponse(BaseModel):

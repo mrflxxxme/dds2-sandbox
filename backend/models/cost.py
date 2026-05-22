@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002, RUF003
 """
 Cost models: Nomenclature, DutyRule, CostOrder, CostOrderItem.
 """
@@ -72,6 +73,7 @@ class BoxQtyPerWarehouse(Base):
     barcode: Mapped[str] = mapped_column(String(50), nullable=False)
     warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
     box_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    box_size: Mapped[str | None] = mapped_column(String(50), nullable=True)
     use_box_multiplicity: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -88,13 +90,11 @@ class BoxQtyPerWarehouse(Base):
 
 
 class BoxQtyPerOrder(Base):
-    """Override кратности коробки для строки заказа на фабрику (factory_order_item).
+    """УСТАРЕЛО. Не используется ни одним сервисом/роутером.
 
-    Живёт ТОЛЬКО для box-multiplicity: правка не меняет сам
-    factory_order_items.pcs_per_box — домен supply-chain (объём, логистика)
-    не затрагивается. При резолюции «Из заказа» / effective_box_qty:
-      box_qty_per_order.box_qty       ← если задан
-      → factory_order_items.pcs_per_box (или mix_pcs_per_box)
+    Заказы фабрики больше не источник кратности — box-multiplicity резолвит
+    кратность per-ФФ из принятых машин (`BoxQtyPerWarehouse`). Таблица и модель
+    оставлены до отдельной миграции на удаление.
     """
 
     __tablename__ = "box_qty_per_order"
@@ -107,6 +107,37 @@ class BoxQtyPerOrder(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     __table_args__ = (UniqueConstraint("project_id", "factory_order_item_id", name="uq_box_qty_po_project_foi"),)
+
+
+class BoxMultiplicityChangeLog(Base):
+    """Журнал изменений кратности/размера коробки — для «Истории изменений» и отката.
+
+    Одна строка на одно изменение поля. `warehouse_id IS NULL` — изменение
+    SKU-уровня (`Nomenclature`), иначе per-ФФ (`BoxQtyPerWarehouse`).
+    `old_value`/`new_value` — строковое представление (`None` = очистка/«не задано»).
+    """
+
+    __tablename__ = "box_multiplicity_change_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    barcode: Mapped[str] = mapped_column(String(50), nullable=False)
+    warehouse_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=True)
+    # field: box_qty_override | box_qty | box_size | use_box_multiplicity
+    field: Mapped[str] = mapped_column(String(30), nullable=False)
+    old_value: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    new_value: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # change_source: manual | bulk | revert
+    change_source: Mapped[str] = mapped_column(String(20), nullable=False, default="manual", server_default="manual")
+    # UUID одной bulk-операции (apply из буфера) — позволяет откатить всю
+    # вставку одним кликом. NULL для manual/revert или старых записей.
+    batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_box_mult_change_log_project_bc", "project_id", "barcode"),
+        Index("ix_box_mult_change_log_batch", "batch_id", postgresql_where="batch_id IS NOT NULL"),
+    )
 
 
 class DutyRule(Base, SoftDeleteMixin):

@@ -66,6 +66,18 @@ DISTRICT_PREFERRED_WH_OVERRIDE: dict[str, str] = {
 }
 
 
+def _bump_target_for_sku(sku_ppb: int | None, min_stock_per_main_warehouse: int) -> int:
+    """Целевой минимум на главном складе ФО для bump-логики.
+
+    Если у SKU задана кратность коробки (`Nomenclature.box_qty_override`) и
+    `use_box_multiplicity=True` — шлём одну коробку (target=K). Иначе fallback
+    на флэт-параметр `min_stock_per_main_warehouse` (исторический «минимум N шт»).
+    """
+    if sku_ppb is not None and sku_ppb > 0:
+        return sku_ppb
+    return max(0, min_stock_per_main_warehouse)
+
+
 def _normalize_wb_warehouse(name: str | None) -> str:
     """Canonicalize warehouse name to the WAREHOUSE_COORDS form so backend's
     `data.warehouses[].name` matches acceptance-redistribute output on the
@@ -819,7 +831,26 @@ async def get_warehouse_need(
     # → алгоритм не предлагает» для дальних регионов (ДВФО, СФО), где WB
     # никогда не получит истории без bootstrap-загрузки.
     # Bump capped по ОСТАВШЕМУСЯ rf_avail (после Mode 1 cap).
-    if min_stock_per_main_warehouse > 0 and only_available:
+    #
+    # SKU-кратность коробки (Nomenclature.box_qty_override + use_box_multiplicity=True)
+    # переопределяет min_stock per SKU: целевой минимум = одна коробка вместо N шт.
+    # Bump-секция активируется если задан min_stock_per_main_warehouse > 0 ИЛИ есть
+    # хотя бы один SKU с эффективной кратностью.
+    sku_ppb_map: dict[int, int] = {}
+    if only_available and all_nm_ids:
+        ppb_result = await db.execute(
+            select(Nomenclature.article_wb, Nomenclature.box_qty_override).where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.article_wb.in_(all_nm_ids),
+                Nomenclature.box_qty_override.isnot(None),
+                Nomenclature.box_qty_override > 0,
+                Nomenclature.use_box_multiplicity == True,  # noqa: E712
+            )
+        )
+        for row in ppb_result:  # type: ignore[assignment]
+            sku_ppb_map[row.article_wb] = int(row.box_qty_override)
+
+    if (min_stock_per_main_warehouse > 0 or sku_ppb_map) and only_available:
         from collections import defaultdict
 
         from backend.services.warehouse_district import warehouse_to_district
@@ -843,6 +874,9 @@ async def get_warehouse_need(
 
         # Apply bump per SKU per main warehouse
         for nm_id in all_nm_ids:
+            bump_target = _bump_target_for_sku(sku_ppb_map.get(nm_id), min_stock_per_main_warehouse)
+            if bump_target <= 0:
+                continue
             total_rf_stock_local = sum(
                 rf_stock_map.get(nm_id, {}).get(wh.id, 0)
                 for wh in rf_warehouses  # type: ignore[attr-defined]
@@ -874,8 +908,8 @@ async def get_warehouse_need(
                     + transit_target_map.get(nm_id, {}).get(wh_name, 0)
                     + art["need"]
                 )
-                if current_at_wh < min_stock_per_main_warehouse:
-                    bump = min(min_stock_per_main_warehouse - current_at_wh, remaining_budget)
+                if current_at_wh < bump_target:
+                    bump = min(bump_target - current_at_wh, remaining_budget)
                     if bump > 0:
                         art["need"] += bump
                         remaining_budget -= bump

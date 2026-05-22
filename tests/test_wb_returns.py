@@ -68,35 +68,31 @@ async def ensure_returns_project(db_session):
     )
     await db_session.commit()
 
-    # Ensure both projects exist
-    result = await db_session.execute(
-        text("SELECT id FROM projects WHERE id = :pid"),
-        {"pid": TEST_PROJECT_ID},
-    )
-    if result.scalar() is None:
-        # Need a user for owner_id
+    # Ensure BOTH projects exist — идемпотентно КАЖДЫЙ тест (не гейтить по 991).
+    # Тесты изоляции вставляют данные и для 991, и для 992; при параллельном CI
+    # один из проектов мог отсутствовать → FK на wb_goods_returns.project_id.
+    result_u = await db_session.execute(text("SELECT id FROM users WHERE username = 'wb_returns_test_user'"))
+    user_id = result_u.scalar()
+    if user_id is None:
+        await db_session.execute(
+            text(
+                "INSERT INTO users (username, email, password_hash, is_active, created_at) "
+                "VALUES (:u, :e, :p, true, NOW())"
+            ),
+            {"u": "wb_returns_test_user", "e": "wbret_test@test.com", "p": "nohash"},
+        )
+        await db_session.commit()
         result_u = await db_session.execute(text("SELECT id FROM users WHERE username = 'wb_returns_test_user'"))
         user_id = result_u.scalar()
-        if user_id is None:
-            await db_session.execute(
-                text(
-                    "INSERT INTO users (username, email, password_hash, is_active, created_at) "
-                    "VALUES (:u, :e, :p, true, NOW())"
-                ),
-                {"u": "wb_returns_test_user", "e": "wbret_test@test.com", "p": "nohash"},
-            )
-            await db_session.commit()
-            result_u = await db_session.execute(text("SELECT id FROM users WHERE username = 'wb_returns_test_user'"))
-            user_id = result_u.scalar()
-        for pid, slug in [(TEST_PROJECT_ID, "wb-ret-test"), (OTHER_PROJECT_ID, "wb-ret-other")]:
-            await db_session.execute(
-                text(
-                    "INSERT INTO projects (id, name, slug, owner_id, created_at) "
-                    "VALUES (:id, :n, :s, :o, NOW()) ON CONFLICT (id) DO NOTHING"
-                ),
-                {"id": pid, "n": f"WB Ret {pid}", "s": slug, "o": user_id},
-            )
-        await db_session.commit()
+    for pid, slug in [(TEST_PROJECT_ID, "wb-ret-test"), (OTHER_PROJECT_ID, "wb-ret-other")]:
+        await db_session.execute(
+            text(
+                "INSERT INTO projects (id, name, slug, owner_id, created_at) "
+                "VALUES (:id, :n, :s, :o, NOW()) ON CONFLICT (id) DO NOTHING"
+            ),
+            {"id": pid, "n": f"WB Ret {pid}", "s": slug, "o": user_id},
+        )
+    await db_session.commit()
 
     yield
 

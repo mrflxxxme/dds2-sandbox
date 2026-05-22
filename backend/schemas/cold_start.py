@@ -108,6 +108,7 @@ class ColdStartTableRow(BaseModel):
     rf_qty: int
     rf_by_warehouse: dict[int, int] = {}  # warehouse_id → qty на ФФ-локации
     wb_qty: int
+    wb_by_warehouse: dict[str, int] = {}  # canonical wb_warehouse → текущий WB-сток
     in_assembly_total: int
     asm_by_warehouse: dict[str, int] = {}  # canonical wb_warehouse → qty в сборке на этот склад
     sales_14d: int

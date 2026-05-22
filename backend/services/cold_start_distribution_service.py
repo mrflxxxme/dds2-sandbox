@@ -22,7 +22,7 @@ Read-only: никаких записей в БД.
 import logging
 from collections import defaultdict
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,6 +46,7 @@ from backend.services.warehouse_district import (
     okrug_to_district,
 )
 from backend.services.warehouse_geo_data import ACCEPTANCE_TO_STOCK_NAME
+from backend.services.warehouse_speed import get_anchors_for_okrug
 
 if TYPE_CHECKING:
     pass
@@ -79,6 +80,68 @@ _DEFAULT_MAIN_WAREHOUSES: dict[str, str] = {
 }
 
 _SKIP_DISTRICTS_DEFAULT: frozenset[str] = frozenset({"abroad", "unknown"})
+
+# ДВ (Дальневосточный) снабжаем со склада максимум на эту долю заказов — дальше
+# товар физически не довезти. Излишек доли ДВ перекидываем на Урал (Екатеринбург —
+# ворота в Сибирь/ДВ: туда довозим, а WB дотягивает последнюю милю восточнее).
+FAR_EAST_MAX_SHARE: float = 0.06
+
+# Как делится излишек доли ДВ между складами-воришками (по speed-карте реально
+# обслуживают ДВ: WB развозит ДВ-заказы с них). Сумма долей = 1.0. Ключ ДВ-якоря
+# (Екатеринбург) — сколько остаётся на нём; остальное уводится на другие склады.
+FAR_EAST_EXCESS_ANCHOR: str = "Екатеринбург - Перспективная 14"
+FAR_EAST_EXCESS_ROUTING: dict[str, float] = {
+    FAR_EAST_EXCESS_ANCHOR: 0.40,  # Екатеринбург
+    "Электросталь": 0.35,
+    "Сарапул": 0.25,
+}
+
+
+def _cap_far_east_share(bench_share: dict[str, float]) -> dict[str, float]:
+    """ДВ-доля сверх FAR_EAST_MAX_SHARE перекидывается на Урал. Возвращает НОВЫЙ
+    dict (не мутирует вход — bench_share может быть общим FALLBACK_DISTRICT_SHARE).
+    Часть этой доли позже уходит на Электросталь на уровне складов — см.
+    `_route_far_east_excess` (ФО-доля не умеет целиться в конкретный склад)."""
+    fe = bench_share.get("far_east_siberia", 0.0)
+    if fe <= FAR_EAST_MAX_SHARE:
+        return bench_share
+    capped = dict(bench_share)
+    capped["far_east_siberia"] = FAR_EAST_MAX_SHARE
+    capped["ural"] = capped.get("ural", 0.0) + (fe - FAR_EAST_MAX_SHARE)
+    return capped
+
+
+def _route_far_east_excess(alloc: dict[str, int], excess_qty: int) -> None:
+    """Распределить излишек ДВ по складам-воришкам (FAR_EAST_EXCESS_ROUTING).
+    `_cap_far_east_share` кладёт весь излишек на Екатеринбург (anchor); здесь часть
+    уводим на остальных получателей (Электросталь/Сарапул). Мутирует alloc на месте;
+    total сохраняется (Екатеринбург теряет ровно столько, сколько получают другие)."""
+    anchor = FAR_EAST_EXCESS_ANCHOR  # Екатеринбург — на нём сейчас весь излишек
+    moves = {wh: round(share * excess_qty) for wh, share in FAR_EAST_EXCESS_ROUTING.items() if wh != anchor}
+    move_out = sum(moves.values())
+    if move_out <= 0 or alloc.get(anchor, 0) < move_out:
+        return
+    alloc[anchor] -= move_out
+    for wh, qty in moves.items():
+        if qty > 0:
+            alloc[wh] = alloc.get(wh, 0) + qty
+
+
+def _is_spec_warehouse(name: str) -> bool:
+    """Спец/сортировочные склады — не для FBO cold-start (зеркало фронтового
+    isSpecWarehouse). СЦ/СГТ/виртуальные/Питание/Горючее не должны быть anchor-
+    кандидатами: фронт их прячет, иначе была бы скрытая аллокация."""
+    if name.startswith("Виртуальный "):
+        return True
+    if name.startswith("СЦ "):
+        return True
+    if " СГТ" in name:
+        return True
+    if ": Питание" in name or ":Питание" in name:
+        return True
+    if ": Горючее" in name or ":Горючее" in name:
+        return True
+    return False
 
 
 # ─── Async DB-fetchers (parametrized SQL, project_id-фильтр везде) ─────────
@@ -522,6 +585,9 @@ async def compute_distribution(db: AsyncSession, project_id: int, req: Distribut
         bench_source = "wb_fallback"
         bench_total = 0
 
+    fe_excess_share = max(0.0, bench_share.get("far_east_siberia", 0.0) - FAR_EAST_MAX_SHARE)
+    bench_share = _cap_far_east_share(bench_share)
+
     # 4. Главный склад в каждом ФО (по трафику bench-источника)
     if bench_wh_traffic:
         main_wh = pick_main_warehouse_per_district(bench_wh_traffic, excluded)
@@ -531,6 +597,8 @@ async def compute_distribution(db: AsyncSession, project_id: int, req: Distribut
 
     # 6. Распределение и вычитание уже идущих сборок (active_asm уже загружены выше)
     allocation = distribute(total_qty, bench_share, req.min_pack, main_wh)
+    if fe_excess_share > 0:
+        _route_far_east_excess(allocation, round(fe_excess_share * total_qty))
 
     # 7. Сборка ответа в каноничном порядке ФО
     allocations: list[AllocationItem] = []
@@ -621,6 +689,13 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
                  0
                ) AS wb_qty,
                COALESCE(
+                 (SELECT jsonb_object_agg(wws.warehouse_name, wws.quantity)
+                  FROM wb_warehouse_stocks wws
+                  WHERE wws.nm_id = n.article_wb AND wws.project_id = :project_id
+                    AND wws.quantity > 0),
+                 '{}'::jsonb
+               ) AS wb_by_wh,
+               COALESCE(
                  (SELECT SUM(ari.quantity)
                   FROM assembly_request_items ari
                   JOIN assembly_requests ar ON ar.id = ari.assembly_request_id
@@ -670,6 +745,13 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
         rf_by_wh_raw = r["rf_by_wh"] or {}
         # jsonb приходит как dict[str,int]; на всякий случай приводим типы.
         rf_by_warehouse: dict[int, int] = {int(k): int(v) for k, v in rf_by_wh_raw.items()}
+        # WB-сток per-склад: канонизируем имена в то же пространство, что и
+        # anchor-склады распределения (иначе вычет «уже на WB» не сматчится).
+        wb_by_wh_raw = r["wb_by_wh"] or {}
+        wb_by_warehouse: dict[str, int] = {}
+        for wh_name, q in wb_by_wh_raw.items():
+            canon = _canonicalize_asm_warehouse(str(wh_name))
+            wb_by_warehouse[canon] = wb_by_warehouse.get(canon, 0) + int(q)
         out.append(
             {
                 "internal_id": int(r["internal_id"]),
@@ -681,6 +763,7 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
                 "rf_qty": rf,
                 "rf_by_warehouse": rf_by_warehouse,
                 "wb_qty": wb,
+                "wb_by_warehouse": wb_by_warehouse,
                 "asm_qty": asm,
                 "sales_14d": sales,
                 "revenue_30d": float(r["revenue_30d"] or 0),
@@ -730,14 +813,34 @@ async def compute_cold_start_table(
         bench_source = "wb_fallback"
         bench_total = 0
 
+    # ДВ-кап: излишек доли Дальневосточного ФО (со склада не довезти) → на Урал
+    # (часть позже уводится на Электросталь — см. _route_far_east_excess).
+    fe_excess_share = max(0.0, bench_share.get("far_east_siberia", 0.0) - FAR_EAST_MAX_SHARE)
+    bench_share = _cap_far_east_share(bench_share)
+
     if bench_wh_traffic:
         wh_per_district = pick_warehouses_per_district(bench_wh_traffic, excluded, top_n=3)
     else:
         wh_per_district = {d: [(wh, 1)] for d, wh in _DEFAULT_MAIN_WAREHOUSES.items() if wh not in excluded}
 
+    # Принцип /warehouse/speed: кандидаты per-ФО — speed-anchor склады (быстрые
+    # для своего ФО из speed-карты POSTAVLENO), вес = cities_count. Товар уходит
+    # на склад, с которого WB замкнёт первый (быстрый) приоритет города, а не на
+    # склад с наибольшим sales-трафиком. Имена канонизируем в stock-пространство
+    # (чтобы совпали с wb_by_warehouse при вычете). ФО без anchor — fallback на трафик.
+    for d in DISTRICT_ORDER:
+        if d in {"abroad", "unknown"}:
+            continue
+        anchors = [(_canonicalize_asm_warehouse(wh), cnt) for wh, cnt in get_anchors_for_okrug(d)]
+        speed_whs = [(wh, cnt) for wh, cnt in anchors if wh not in excluded and not _is_spec_warehouse(wh) and cnt > 0][
+            :3
+        ]
+        if speed_whs:
+            wh_per_district[d] = speed_whs
+
     # main_warehouses meta — все склады каждого ФО (top-3), РФ-округа (abroad/unknown скрыты)
     # share_pct = доля округа × доля склада в трафике округа
-    main_wh_meta = []
+    main_wh_meta: list[dict[str, Any]] = []
     for d in DISTRICT_ORDER:
         if d in {"abroad", "unknown"}:
             continue
@@ -756,6 +859,37 @@ async def compute_cold_start_table(
                     "share_pct": round(wh_share * 100, 2),
                 }
             )
+
+    # Заголовки %: отразить переброс излишка ДВ (зеркало _route_far_east_excess на
+    # уровне долей) — Екатеринбург отдаёт, Электросталь/Сарапул получают. Сарапул
+    # добавляем КОЛОНКОЙ (он не top-3 anchor — иначе его аллокация была бы скрыта,
+    # «Итого» > суммы видимых колонок).
+    if fe_excess_share > 0:
+        by_wh = {m["warehouse"]: m for m in main_wh_meta}
+        move_out_pct = round(fe_excess_share * (1 - FAR_EAST_EXCESS_ROUTING[FAR_EAST_EXCESS_ANCHOR]) * 100, 2)
+        anchor_meta = by_wh.get(FAR_EAST_EXCESS_ANCHOR)
+        if anchor_meta:
+            anchor_meta["share_pct"] = round(max(0.0, anchor_meta["share_pct"] - move_out_pct), 2)
+        for wh, share in FAR_EAST_EXCESS_ROUTING.items():
+            if wh == FAR_EAST_EXCESS_ANCHOR:
+                continue
+            add_pct = round(fe_excess_share * share * 100, 2)
+            if add_pct <= 0:
+                continue
+            if wh in by_wh:
+                by_wh[wh]["share_pct"] = round(by_wh[wh]["share_pct"] + add_pct, 2)
+            else:
+                d_wh = WAREHOUSE_TO_DISTRICT.get(wh, "far_east_siberia")
+                if d_wh in {"abroad", "unknown"}:
+                    d_wh = "far_east_siberia"
+                main_wh_meta.append(
+                    {
+                        "district_key": d_wh,
+                        "district_label": DISTRICT_LABELS.get(d_wh, d_wh),
+                        "warehouse": wh,
+                        "share_pct": add_pct,
+                    }
+                )
 
     # ФФ-склады проекта (id+name) — для разбивки rf_qty по локациям на UI.
     rf_warehouses = await fetch_rf_warehouses(db, project_id)
@@ -782,6 +916,7 @@ async def compute_cold_start_table(
                     rf_qty=sku["rf_qty"],
                     rf_by_warehouse=sku.get("rf_by_warehouse", {}),
                     wb_qty=sku["wb_qty"],
+                    wb_by_warehouse=sku.get("wb_by_warehouse", {}),
                     in_assembly_total=sku["asm_qty"],
                     asm_by_warehouse=active_asm,
                     sales_14d=sku["sales_14d"],
@@ -793,11 +928,40 @@ async def compute_cold_start_table(
             )
             continue
 
-        allocation = distribute_multi(total_qty, bench_share, min_pack, wh_per_district)
+        # Принцип speed + учёт уже имеющегося на WB:
+        #   network = свободный ФФ + (WB-сток + сборки) на target-складах ФО,
+        #   target[wh] = benchmark-доля network (speed-взвешенно по anchor),
+        #   ship[wh]   = max(0, target − WB[wh] − asm[wh]).
+        # Перетаренные склады → 0 (доля остаётся на ФФ), недотаренные —
+        # допоставляются до benchmark. asm учитывается один раз (был вычтен из
+        # total_qty и добавлен в network → сокращается).
+        wb_by_wh: dict[str, int] = sku.get("wb_by_warehouse", {})
+        target_whs = {wh for whs in wh_per_district.values() for wh, _ in whs}
+        existing_at_targets = sum(wb_by_wh.get(wh, 0) + active_asm.get(wh, 0) for wh in target_whs)
+        network_total = total_qty + existing_at_targets
+        targets = distribute_multi(network_total, bench_share, min_pack, wh_per_district)
+        if fe_excess_share > 0:
+            _route_far_east_excess(targets, round(fe_excess_share * network_total))
         final_alloc: dict[str, int] = {}
-        for wh, qty in allocation.items():
-            asm = active_asm.get(wh, 0)
-            final_alloc[wh] = max(0, qty - asm)
+        for wh, target in targets.items():
+            ship = target - wb_by_wh.get(wh, 0) - active_asm.get(wh, 0)
+            if ship > 0:
+                final_alloc[wh] = ship
+
+        # Σship может превысить свободный ФФ: min_pack-bump в distribute_multi
+        # раздувает отдельные target, а перетаренные склады дают ship=0 (их «минус»
+        # не компенсирует). Урезаем до total_qty (пропорционально + largest-remainder).
+        ship_total = sum(final_alloc.values())
+        if ship_total > total_qty:
+            scale = total_qty / ship_total
+            trimmed = {wh: int(q * scale) for wh, q in final_alloc.items()}
+            leftover = total_qty - sum(trimmed.values())
+            for wh in sorted(trimmed, key=lambda w: -final_alloc[w]):
+                if leftover <= 0:
+                    break
+                trimmed[wh] += 1
+                leftover -= 1
+            final_alloc = {wh: q for wh, q in trimmed.items() if q > 0}
 
         rows.append(
             ColdStartTableRow(

@@ -15,6 +15,9 @@ paths:
 - `URLSearchParams` для query, НИКОГДА template literals — `H&M` ломает `&`
 - `\b` regex НЕ матчит кириллицу — использовать `includes()` для русских маркеров
 - DOMPurify (`sanitizeAIHtml()`) для HTML из AI, не regex-allowlist
+- React StrictMode (dev) монтирует `useEffect` дважды: catch/finally первого (abort-нутого) запроса перезаписывает загруженные данные ложной ошибкой → `AbortController` + `if (controller.signal.aborted) return` в then/catch/finally
+- `useSearchParams` пуст на первом рендере до гидратации — не редиректь, пока сырая строка пуста (`const raw = sp.get('x') ?? ''; if (raw && cond) router.replace(...)`)
+- Convert по множеству: проверяй строгую однотипность цели (`onlyBox`/`onlyMono`), не отрицание присутствия (`!hasBox`) — иначе СМЕШАННАЯ цель ложно триггерит конвертацию
 
 ## Python/DB паттерны
 - `_UNSET = object()` для partial PATCH — различает «не передано» vs «null=clear»
@@ -23,10 +26,13 @@ paths:
 - `CREATE INDEX CONCURRENTLY` + `AUTOCOMMIT` для partial index в Alembic
 - Denormalized FK на child → синхронизировать при update parent.fk (state-guard)
 - Override поле → пересчитать ВСЕ derived (`effective = override ?? source`)
+- Explicit `null` в JSONB-поле ≠ отсутствующий ключ: Pydantic `default_factory` И `dict.get(k, default)` дают дефолт ТОЛЬКО при отсутствии ключа, не при null. Nullable JSONB-list → `@field_validator(mode="before")` коерсит null→[]; сырой dict → `.get(k) or []`, не `.get(k, [])`
 
 ## Архитектура
 - Cumulative consumption: `consumed: dict[id, qty]` как mutable state при sequential distribute
 - Composite priority chain: per-scope → SKU-level → derived-from-fact → derived-from-plan
+- Box-multiple распределение: кратность задаёт ФОРМУ (целые короба по потребности). Обычные SKU дослают хвост < короба россыпью (`distributeByBoxMultiple(..., looseTail=true)` + источник boxMode Pass 2) — иначе фрагментированный SKU молча выпадает. Новинки cold-start — СТРОГО (`looseTail=false`): хвост остаётся на ФФ (по требованию пользователя)
+- Carve потока из сбалансированной матрицы: вычитать qty из `src` И `tgt` поровну → строка остаётся `Σsrc==Σtgt`
 - Force-pull mutable external fields: `_try_force_enrich_*` с try/except, не кэшировать
 - Idempotent seed: `SELECT ... GROUP BY project_id` → INSERT только для новых
 - TanStack sort + pagination: ≤5k строк → без пагинации; >5k → server-side sort

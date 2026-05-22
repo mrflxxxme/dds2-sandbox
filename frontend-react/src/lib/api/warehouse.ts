@@ -6,15 +6,20 @@ import type {
     AssemblyDraft,
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
+    AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
+    HandedUnitItem,
     AssemblyHistoryEntry,
     AssemblyListResponse,
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
+    CreatedAssemblyGroup,
     BoxMultiplicityBulkRequest,
+    BoxMultiplicityBatchListResponse,
+    BoxMultiplicityBatchRevertResponse,
     BoxMultiplicityBulkResponse,
-    BoxMultiplicityOrderPatch,
+    BoxMultiplicityChangesResponse,
     BoxMultiplicityPatch,
     BoxMultiplicityPerWarehousePatch,
     BoxMultiplicityResponse,
@@ -309,7 +314,7 @@ export function addWarehouseMethods(api: ApiClient) {
 
         // ─── Assembly Requests ──────────────────────────────────────────
         getAssemblyRequests(params?: {
-            warehouse_id?: number; status?: string; search?: string;
+            warehouse_id?: number; draft_id?: number; status?: string; search?: string;
             date_from?: string; date_to?: string; brand?: string;
             limit?: number; offset?: number;
         }) {
@@ -324,6 +329,10 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         createAssemblyRequest(data: AssemblyRequestCreate) {
             return api.request<AssemblyRequest>('POST', '/api/v1/warehouse/assembly', data);
+        },
+        /** Группы созданных заявок по черновику (IN_PROGRESS) — «Предпросмотр созданных». */
+        getCreatedAssemblyGroups() {
+            return api.request<CreatedAssemblyGroup[]>('GET', '/api/v1/warehouse/assembly/created-groups');
         },
         getAssemblyRequest(id: number) {
             return api.request<AssemblyRequest>('GET', `/api/v1/warehouse/assembly/${id}`);
@@ -414,8 +423,45 @@ export function addWarehouseMethods(api: ApiClient) {
         deleteAssemblyDraft(id: number) {
             return api.request<void>('DELETE', `/api/v1/assembly/drafts/${id}`);
         },
-        commitAssemblyDraft(id: number) {
-            return api.request<AssemblyDraftCommitResponse>('POST', `/api/v1/assembly/drafts/${id}/commit`);
+        commitAssemblyDraft(id: number, packageType?: string, newcomerFilter?: string) {
+            const qs = new URLSearchParams();
+            if (packageType) qs.set('package_type', packageType);
+            if (newcomerFilter && newcomerFilter !== 'all') qs.set('newcomer_filter', newcomerFilter);
+            const q = qs.toString();
+            return api.request<AssemblyDraftCommitResponse>(
+                'POST',
+                `/api/v1/assembly/drafts/${id}/commit${q ? `?${q}` : ''}`,
+            );
+        },
+        /** «Передать на ФФ» — заморозить заявку-юнит (вырезать в handed_units). */
+        handOffDraftUnit(id: number, unit: AssemblyDraftUnitRef) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/hand-off`, unit);
+        },
+        /** «Вернуть в черновик» — вернуть позиции замороженного юнита в rows. */
+        revertDraftUnit(id: number, unit: AssemblyDraftUnitRef) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/revert`, unit);
+        },
+        /** «В сборку» — создать AssemblyRequest из замороженного юнита. */
+        commitDraftUnit(id: number, unit: AssemblyDraftUnitRef) {
+            return api.request<AssemblyDraftCommitResponse>('POST', `/api/v1/assembly/drafts/${id}/units/commit`, unit);
+        },
+        /** Заменить наполнение заявки-юнита (правка черновика → фиксация). */
+        setDraftUnitItems(id: number, unit: AssemblyDraftUnitRef, items: HandedUnitItem[]) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/items`, { ...unit, items });
+        },
+        /** Удалить заявку-юнит целиком (товар остаётся на ФФ). */
+        deleteDraftUnit(id: number, unit: AssemblyDraftUnitRef) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/delete`, unit);
+        },
+        /** «Сменить склад WB» — перенести заявку-юнит этого ФФ на другой WB-склад
+         *  (сливается с черновиком-получателем по баркоду). */
+        moveDraftUnit(id: number, unit: AssemblyDraftUnitRef, newTargetWbName: string) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${id}/units/move`, { ...unit, new_target_wb_name: newTargetWbName });
+        },
+        /** Объединить N черновиков в один: суммирует (nm_id, pkg)-строки, union складов.
+         *  Возвращает survivor (черновик с наибольшим числом строк). */
+        mergeAssemblyDrafts(draftIds: number[]) {
+            return api.request<AssemblyDraft>('POST', '/api/v1/assembly/drafts/merge', { draft_ids: draftIds });
         },
 
         // ─── Box-multiplicity (кратность коробки) ────────────────────────
@@ -446,7 +492,7 @@ export function addWarehouseMethods(api: ApiClient) {
                 { items } satisfies BoxMultiplicityBulkRequest,
             );
         },
-        /** Per-RF override: создаёт строку если её нет. URL-encode barcode на случай чужих символов. */
+        /** Per-ФФ override кратности/флага. Может вернуть 409 если ФФ машинно-заблокирован. */
         patchPerWarehouseBoxMultiplicity(
             barcode: string, warehouseId: number, patch: BoxMultiplicityPerWarehousePatch,
         ) {
@@ -456,19 +502,42 @@ export function addWarehouseMethods(api: ApiClient) {
                 patch,
             );
         },
-        /** Drill-down: вся история снабжения SKU — машины + заказы на фабрику. */
+        /** Drill-down: вся история снабжения SKU — машины + заказы на фабрику (read-only). */
         getBoxMultiplicitySources(barcode: string) {
             return api.request<BoxMultiplicitySourcesResponse>(
                 'GET',
                 `/api/v1/warehouse/box-multiplicity/sources/${encodeURIComponent(barcode)}`,
             );
         },
-        /** Override кратности у строки заказа на фабрику. boxQty=null — сброс. */
-        patchOrderBoxMultiplicity(factoryOrderItemId: number, boxQty: number | null) {
+        /** Drill-down: история изменений кратности/размера SKU (SKU- и per-ФФ-уровень). */
+        getBoxMultiplicityChanges(barcode: string) {
+            return api.request<BoxMultiplicityChangesResponse>(
+                'GET',
+                `/api/v1/warehouse/box-multiplicity/changes/${encodeURIComponent(barcode)}`,
+            );
+        },
+        /** Откат одного изменения. Возвращает обновлённую строку SKU; 409 если откат заблокирован машиной. */
+        revertBoxMultiplicityChange(changeId: number) {
             return api.request<BoxMultiplicityRow>(
-                'PATCH',
-                `/api/v1/warehouse/box-multiplicity/order/${factoryOrderItemId}`,
-                { box_qty: boxQty } satisfies BoxMultiplicityOrderPatch,
+                'POST',
+                `/api/v1/warehouse/box-multiplicity/changes/${changeId}/revert`,
+                {},
+            );
+        },
+        /** Список последних bulk-вставок проекта (для журнала истории). */
+        listBoxMultiplicityBatches(limit = 50) {
+            const params = new URLSearchParams({ limit: String(limit) });
+            return api.request<BoxMultiplicityBatchListResponse>(
+                'GET',
+                `/api/v1/warehouse/box-multiplicity/changes/batches?${params}`,
+            );
+        },
+        /** Откат всей bulk-операции (вставки) по batch_id. */
+        revertBoxMultiplicityBatch(batchId: string) {
+            return api.request<BoxMultiplicityBatchRevertResponse>(
+                'POST',
+                `/api/v1/warehouse/box-multiplicity/changes/batch/${encodeURIComponent(batchId)}/revert`,
+                {},
             );
         },
     };

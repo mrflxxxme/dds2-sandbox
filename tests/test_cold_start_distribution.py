@@ -11,7 +11,12 @@ import pytest
 from backend.schemas.cold_start import DistributeRequest
 from backend.services import cold_start_distribution_service as cs
 from backend.services.cold_start_distribution_service import (
+    _DEFAULT_MAIN_WAREHOUSES,
     FALLBACK_DISTRICT_SHARE,
+    FAR_EAST_MAX_SHARE,
+    _cap_far_east_share,
+    _is_spec_warehouse,
+    _route_far_east_excess,
     distribute,
     distribute_multi,
     pick_main_warehouse_per_district,
@@ -146,6 +151,55 @@ class TestDistribute:
         )
         # Сумма = 200 (abroad=5% пропускается, его доля идёт в крупнейший как leftover)
         assert sum(result.values()) == 200, f"Сумма ≠ 200: {result}"
+
+
+class TestFarEastCap:
+    """Кап доли ДВ → излишек на Урал."""
+
+    def test_excess_far_east_share_moves_to_ural(self) -> None:
+        capped = _cap_far_east_share({"far_east_siberia": 0.19, "ural": 0.09, "central": 0.30})
+        assert capped["far_east_siberia"] == FAR_EAST_MAX_SHARE
+        assert abs(capped["ural"] - (0.09 + 0.19 - FAR_EAST_MAX_SHARE)) < 1e-9
+        assert capped["central"] == 0.30  # прочие ФО не тронуты
+
+    def test_far_east_below_cap_unchanged(self) -> None:
+        src = {"far_east_siberia": 0.04, "ural": 0.09}
+        assert _cap_far_east_share(src) is src  # ≤ кап → без копии/изменений
+
+    def test_input_not_mutated(self) -> None:
+        src = {"far_east_siberia": 0.19, "ural": 0.09}
+        _cap_far_east_share(src)
+        assert src["far_east_siberia"] == 0.19  # вход не мутирован (важно для общего FALLBACK)
+
+    def test_route_excess_40_35_25(self) -> None:
+        ekb = _DEFAULT_MAIN_WAREHOUSES["ural"]  # Екатеринбург
+        alloc = {ekb: 100}
+        _route_far_east_excess(alloc, excess_qty=100)  # Екб 40 / Электр 35 / Сарапул 25
+        assert alloc[ekb] == 40
+        assert alloc["Электросталь"] == 35
+        assert alloc["Сарапул"] == 25
+        assert sum(alloc.values()) == 100  # total сохранён
+
+    def test_route_noop_if_anchor_insufficient(self) -> None:
+        ekb = _DEFAULT_MAIN_WAREHOUSES["ural"]
+        alloc = {ekb: 5}  # move_out=60 > 5 → не трогаем
+        _route_far_east_excess(alloc, excess_qty=100)
+        assert alloc == {ekb: 5}
+
+
+class TestSpecWarehouse:
+    """Спец/сортировочные склады исключаются из anchor-кандидатов."""
+
+    def test_spec_warehouses_detected(self) -> None:
+        assert _is_spec_warehouse("СЦ Барнаул")
+        assert _is_spec_warehouse("Виртуальный Челябинск")
+        assert _is_spec_warehouse("Ярославль СГТ")
+        assert _is_spec_warehouse("Коледино: Питание")
+
+    def test_normal_warehouses_kept(self) -> None:
+        assert not _is_spec_warehouse("Владивосток")
+        assert not _is_spec_warehouse("Электросталь")
+        assert not _is_spec_warehouse("Екатеринбург - Перспективная 14")
 
 
 class TestPickMainWarehouse:
@@ -357,12 +411,18 @@ class TestColdStartSubtractAssembly:
         async def fake_rf_wh(*_a: Any, **_kw: Any) -> list:
             return []
 
+        # speed-anchor для central → Электросталь (детерминированно, без зависимости
+        # от реальной wb_warehouse_speed.json).
+        def fake_anchors(d: str) -> tuple[tuple[str, int], ...]:
+            return (("Электросталь", 1),) if d == "central" else ()
+
         monkeypatch.setattr(cs, "get_excluded_warehouses", fake_excluded)
         monkeypatch.setattr(cs, "fetch_district_share", fake_district_share)
         monkeypatch.setattr(cs, "fetch_warehouse_traffic", fake_traffic)
         monkeypatch.setattr(cs, "fetch_cold_start_segment", fake_segment)
         monkeypatch.setattr(cs, "fetch_active_assemblies_for_sku", fake_active_asm)
         monkeypatch.setattr(cs, "fetch_rf_warehouses", fake_rf_wh)
+        monkeypatch.setattr(cs, "get_anchors_for_okrug", fake_anchors)
 
         resp = await cs.compute_cold_start_table(
             db=None,  # type: ignore[arg-type]
@@ -372,7 +432,7 @@ class TestColdStartSubtractAssembly:
             bench_from_project_id=None,
         )
         row = resp.rows[0]
-        # 100 - 40 = 60, central=1.0 → весь остаток в Электросталь
+        # 100 - 40 = 60, central=1.0, anchor=Электросталь → весь остаток туда
         assert row.total_allocated == 60
         assert row.allocations.get("Электросталь") == 60
 
@@ -453,6 +513,141 @@ class TestColdStartSubtractAssembly:
         req = DistributeRequest(nm_id=100, total_qty=50, window_days=14, min_pack=5)
         resp = await cs.compute_distribution(db=None, project_id=1, req=req)  # type: ignore[arg-type]
         assert resp.total_qty == 50, "Явно переданный total_qty не должен меняться"
+
+    @pytest.mark.asyncio
+    async def test_table_subtracts_existing_wb_stock_per_warehouse(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """WB-сток per-склад вычитается из benchmark-цели (принцип «не перетаривать»):
+        перетаренный склад получает меньше, недотаренный — допоставляется до доли."""
+
+        async def fake_excluded(*_a: Any, **_kw: Any) -> list[str]:
+            return []
+
+        async def fake_district_share(*_a: Any, **_kw: Any) -> tuple[dict[str, float], int]:
+            return ({"central": 1.0}, 1000)
+
+        async def fake_traffic(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"A": 1000}
+
+        async def fake_segment(*_a: Any, **_kw: Any) -> list[dict]:
+            return [
+                {
+                    "internal_id": 7,
+                    "nm_id": 555,
+                    "article_seller": "T",
+                    "subject": "X",
+                    "brand": "Y",
+                    "barcode": "",
+                    "rf_qty": 100,
+                    "rf_by_warehouse": {},
+                    "wb_qty": 80,
+                    "wb_by_warehouse": {"A": 80},
+                    "asm_qty": 0,
+                    "sales_14d": 0,
+                    "revenue_30d": 0.0,
+                    "is_newcomer": True,
+                }
+            ]
+
+        async def fake_active_asm(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {}
+
+        async def fake_rf_wh(*_a: Any, **_kw: Any) -> list:
+            return []
+
+        def fake_anchors(d: str) -> tuple[tuple[str, int], ...]:
+            return (("A", 1), ("B", 1)) if d == "central" else ()
+
+        monkeypatch.setattr(cs, "get_excluded_warehouses", fake_excluded)
+        monkeypatch.setattr(cs, "fetch_district_share", fake_district_share)
+        monkeypatch.setattr(cs, "fetch_warehouse_traffic", fake_traffic)
+        monkeypatch.setattr(cs, "fetch_cold_start_segment", fake_segment)
+        monkeypatch.setattr(cs, "fetch_active_assemblies_for_sku", fake_active_asm)
+        monkeypatch.setattr(cs, "fetch_rf_warehouses", fake_rf_wh)
+        monkeypatch.setattr(cs, "get_anchors_for_okrug", fake_anchors)
+
+        resp = await cs.compute_cold_start_table(
+            db=None,
+            project_id=1,
+            window_days=14,
+            min_pack=5,
+            bench_from_project_id=None,  # type: ignore[arg-type]
+        )
+        row = resp.rows[0]
+        # network = 100 (свободный ФФ) + 80 (WB на A) = 180; цель A=90, B=90.
+        # ship A = 90−80 = 10 (перетарен → меньше), ship B = 90 (недотарен → больше).
+        assert row.allocations.get("A") == 10
+        assert row.allocations.get("B") == 90
+        assert row.total_allocated == 100  # = весь свободный ФФ
+
+    @pytest.mark.asyncio
+    async def test_ship_total_capped_at_free_ff_when_overstocked(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Перетаренный склад раздувает network → Σship мог превысить свободный ФФ.
+        Должно быть урезано до total_qty (rf − в сборке)."""
+
+        async def fake_excluded(*_a: Any, **_kw: Any) -> list[str]:
+            return []
+
+        async def fake_district_share(*_a: Any, **_kw: Any) -> tuple[dict[str, float], int]:
+            return ({"central": 1.0}, 1000)
+
+        async def fake_traffic(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"A": 1000}
+
+        async def fake_segment(*_a: Any, **_kw: Any) -> list[dict]:
+            return [
+                {
+                    "internal_id": 8,
+                    "nm_id": 556,
+                    "article_seller": "T2",
+                    "subject": "X",
+                    "brand": "Y",
+                    "barcode": "",
+                    "rf_qty": 10,
+                    "rf_by_warehouse": {},
+                    "wb_qty": 80,
+                    "wb_by_warehouse": {"A": 80},
+                    "asm_qty": 0,
+                    "sales_14d": 0,
+                    "revenue_30d": 0.0,
+                    "is_newcomer": True,
+                }
+            ]
+
+        async def fake_active_asm(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {}
+
+        async def fake_rf_wh(*_a: Any, **_kw: Any) -> list:
+            return []
+
+        def fake_anchors(d: str) -> tuple[tuple[str, int], ...]:
+            return (("A", 1), ("B", 1)) if d == "central" else ()
+
+        monkeypatch.setattr(cs, "get_excluded_warehouses", fake_excluded)
+        monkeypatch.setattr(cs, "fetch_district_share", fake_district_share)
+        monkeypatch.setattr(cs, "fetch_warehouse_traffic", fake_traffic)
+        monkeypatch.setattr(cs, "fetch_cold_start_segment", fake_segment)
+        monkeypatch.setattr(cs, "fetch_active_assemblies_for_sku", fake_active_asm)
+        monkeypatch.setattr(cs, "fetch_rf_warehouses", fake_rf_wh)
+        monkeypatch.setattr(cs, "get_anchors_for_okrug", fake_anchors)
+
+        resp = await cs.compute_cold_start_table(
+            db=None,
+            project_id=1,
+            window_days=14,
+            min_pack=5,
+            bench_from_project_id=None,  # type: ignore[arg-type]
+        )
+        row = resp.rows[0]
+        # свободный ФФ = 10; A перетарен (WB=80) → 0; B недотарен, но Σ урезается до 10.
+        assert row.total_allocated == 10, f"Σship должно быть ≤ свободного ФФ, получено {row.total_allocated}"
+        assert row.allocations.get("A", 0) == 0
+        assert row.allocations.get("B") == 10
 
 
 @pytest.mark.unit

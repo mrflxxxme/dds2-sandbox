@@ -24,6 +24,7 @@ from backend.services.assembly import (  # noqa: F401
     deliver_request,
     get_assembly_history,
     get_assembly_request,
+    get_created_groups,
     get_logistics_analytics,
     list_assembly_requests,
     list_wb_warehouses,

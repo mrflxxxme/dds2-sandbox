@@ -242,7 +242,12 @@ async def list_cities() -> list[CitySpeedDTO]:
             okrug_key=c.okrug,
             okrug_label=DISTRICT_LABELS.get(c.okrug, c.okrug),
             priorities=[
-                CityPriorityRow(warehouse_name=w, hours=h) for w, h in zip(c.warehouses, c.hours, strict=False)
+                CityPriorityRow(
+                    warehouse_name=w,
+                    hours=h,
+                    own_okrug=warehouse_to_district(w),
+                )
+                for w, h in zip(c.warehouses, c.hours, strict=False)
             ],
         )
         for c in iter_all_cities()

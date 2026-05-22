@@ -12,6 +12,7 @@ See backend/DOMAIN_ASSEMBLY.md for context (assembly module).
 
 import logging
 from datetime import date, timedelta
+from typing import cast
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -29,7 +30,11 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftCreate,
     AssemblyDraftDistribution,
     AssemblyDraftRead,
+    AssemblyDraftRow,
     AssemblyDraftUpdate,
+    HandedUnit,
+    HandedUnitItem,
+    PackageTypeStr,
 )
 from backend.services.warehouse_stock_engine import _next_number
 
@@ -178,6 +183,120 @@ async def delete_draft(
     await db.commit()
 
 
+async def merge_drafts(
+    db: AsyncSession,
+    project_id: int,
+    draft_ids: list[int],
+) -> AssemblyDraft:
+    """Объединить N черновиков в один.
+
+    Survivor: черновик с наибольшим числом строк (tie-break — наименьший id).
+    Строки с совпадающим (nm_id, package_type) суммируются поэлементно (src, tgt).
+    source_warehouse_ids и target_warehouse_names объединяются (union).
+    cold_start_shares сбрасывается (суммировать доли бессмысленно).
+    Остальные черновики → soft_delete. Атомарно.
+
+    404 если хоть один id не найден или принадлежит другому проекту.
+    400 если у любого черновика есть handed_units (сначала верните в черновик).
+    """
+    # 1. Fetch all drafts scoped to project
+    result = await db.execute(
+        select(AssemblyDraft).where(
+            AssemblyDraft.project_id == project_id,
+            AssemblyDraft.id.in_(draft_ids),
+            AssemblyDraft.is_deleted == False,  # noqa: E712
+        )
+    )
+    drafts = list(result.scalars().all())
+
+    found_ids = {d.id for d in drafts}
+    missing = [i for i in draft_ids if i not in found_ids]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Черновики не найдены: {missing}")
+
+    # 2. Block if any draft has handed_units (must revert first)
+    for d in drafts:
+        dist = AssemblyDraftDistribution.model_validate(d.distribution or {})
+        if dist.handed_units:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Черновик #{d.id} содержит переданные на ФФ юниты — " "сначала верните их в черновик"),
+            )
+
+    # 3. Choose survivor: most rows; tie-break — lowest id
+    def _row_count(d: AssemblyDraft) -> tuple[int, int]:
+        rows = (d.distribution or {}).get("rows") or [] if isinstance(d.distribution, dict) else []
+        return (len(rows), -d.id)
+
+    survivor = max(drafts, key=_row_count)
+    others = [d for d in drafts if d.id != survivor.id]
+
+    # 4. Merge all distributions into survivor
+    merged = AssemblyDraftDistribution.model_validate(survivor.distribution or {})
+
+    # Rows keyed by (nm_id, package_type). Preserve survivor's insertion order.
+    rows_by_key: dict[tuple[int, str], AssemblyDraftRow] = {(r.nm_id, r.package_type or "BOX"): r for r in merged.rows}
+
+    src_ids: list[int] = list(merged.source_warehouse_ids)
+    src_ids_set: set[int] = set(src_ids)
+    tgt_names: list[str] = list(merged.target_warehouse_names)
+    tgt_names_set: set[str] = set(tgt_names)
+
+    for other in others:
+        other_dist = AssemblyDraftDistribution.model_validate(other.distribution or {})
+
+        # Union source_warehouse_ids: survivor order first, new entries appended
+        for wid in other_dist.source_warehouse_ids:
+            if wid not in src_ids_set:
+                src_ids.append(wid)
+                src_ids_set.add(wid)
+
+        # Union target_warehouse_names: same
+        for name in other_dist.target_warehouse_names:
+            if name not in tgt_names_set:
+                tgt_names.append(name)
+                tgt_names_set.add(name)
+
+        # Merge rows
+        for row in other_dist.rows:
+            key = (row.nm_id, row.package_type or "BOX")
+            existing = rows_by_key.get(key)
+            if existing is None:
+                # New SKU+pkg: deep-copy and append (avoids sharing mutable dicts)
+                rows_by_key[key] = row.model_copy(deep=True)
+            else:
+                # Same (nm_id, pkg): sum src/tgt element-wise
+                for wh, qty in row.src.items():
+                    existing.src[wh] = existing.src.get(wh, 0) + qty
+                for wb, qty in row.tgt.items():
+                    existing.tgt[wb] = existing.tgt.get(wb, 0) + qty
+                # Fill blank barcode / vendor_code if survivor's row was empty
+                if not existing.barcode and row.barcode:
+                    existing.barcode = row.barcode
+                if not existing.vendor_code and row.vendor_code:
+                    existing.vendor_code = row.vendor_code
+
+    merged.rows = list(rows_by_key.values())
+    merged.source_warehouse_ids = src_ids
+    merged.target_warehouse_names = tgt_names
+    # Summing cold-start shares is meaningless; user re-runs auto-balance if needed
+    merged.cold_start_shares = None
+
+    # 5. Persist atomically: write survivor, soft-delete others
+    try:
+        survivor.distribution = merged.model_dump(mode="json")
+        for other in others:
+            other.soft_delete()
+        await db.commit()
+        await db.refresh(survivor)
+    except Exception as e:
+        await db.rollback()
+        logger.exception("merge_drafts failed for ids=%s", draft_ids)
+        raise HTTPException(status_code=500, detail=f"Ошибка объединения черновиков: {e}") from None
+
+    return survivor
+
+
 # ─── Commit (draft -> N AssemblyRequests) ───────────────────────────────────
 
 
@@ -236,11 +355,19 @@ async def commit_draft(
     db: AsyncSession,
     project_id: int,
     draft_id: int,
+    package_type: str | None = None,
+    newcomer_filter: str | None = None,
 ) -> AssemblyDraftCommitResponse:
     """
     Validate the distribution, then create one AssemblyRequest per
     (source_ff_warehouse, target_wb_name) pair with non-zero qty.
-    On any failure rolls back. On success soft-deletes the draft.
+    On any failure rolls back.
+
+    Партиальный коммит по двум независимым осям (всё, что не выбрано,
+    остаётся в черновике для последующих сборок):
+    - `package_type` (BOX/MONOPALLET/...) — короб/моно раздельно;
+    - `newcomer_filter` (newcomer/regular/all) — новинки/обычные раздельно.
+    Без обоих фильтров коммитит весь черновик и soft-delete'ит его.
     """
     draft = await get_draft(db, project_id, draft_id)
     if draft is None:
@@ -254,8 +381,53 @@ async def commit_draft(
     if not distribution.rows:
         raise HTTPException(status_code=400, detail="Distribution has no rows")
 
+    # Партиальный коммит по двум осям: тип упаковки (короб/моно) и тип товара
+    # (новинки/обычные). newcomer-set считаем по ВСЕМ строкам ДО фильтрации —
+    # он нужен и для фильтра по новизне, и далее для группировки заявок.
+    norm_pkg = (package_type or "").strip().upper() or None
+    norm_nc = (newcomer_filter or "").strip().lower() or None
+    if norm_nc == "all":
+        norm_nc = None
+    if norm_nc not in (None, "newcomer", "regular"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid newcomer_filter: {newcomer_filter!r} (expected newcomer|regular|all)",
+        )
+
+    newcomer_nm_ids = await fetch_newcomer_nm_ids(db, project_id, {row.nm_id for row in distribution.rows})
+
+    def _pkg_selected(rpkg: str) -> bool:
+        # Срез упаковки = вкладка UI, а не точный тип:
+        # «Короб» (norm_pkg=BOX) включает BOX И SUPERSAFE (всё, кроме моно);
+        # «Моно» (MONOPALLET) — только моно. Иначе SUPERSAFE-строки молча
+        # оставались бы в черновике после «Короб»-коммита (он не закрывался).
+        if not norm_pkg:
+            return True
+        if norm_pkg == "MONOPALLET":
+            return rpkg == "MONOPALLET"
+        if norm_pkg == "BOX":
+            return rpkg != "MONOPALLET"
+        return rpkg == norm_pkg
+
+    def _is_selected(r: AssemblyDraftRow) -> bool:
+        if not _pkg_selected(r.package_type or "BOX"):
+            return False
+        if norm_nc == "newcomer" and r.nm_id not in newcomer_nm_ids:
+            return False
+        if norm_nc == "regular" and r.nm_id in newcomer_nm_ids:
+            return False
+        return True
+
+    commit_rows = [r for r in distribution.rows if _is_selected(r)]
+    leftover_rows = [r for r in distribution.rows if not _is_selected(r)]
+    if (norm_pkg or norm_nc) and not commit_rows:
+        raise HTTPException(
+            status_code=400,
+            detail="Нет строк выбранного типа (упаковка/новизна) для сборки",
+        )
+
     # 1. Validate balance per row (Σ src == Σ tgt > 0)
-    for row in distribution.rows:
+    for row in commit_rows:
         src_sum = sum(int(v or 0) for v in row.src.values())
         tgt_sum = sum(int(v or 0) for v in row.tgt.values())
         if src_sum <= 0 or tgt_sum <= 0:
@@ -269,16 +441,13 @@ async def commit_draft(
                 detail=f"Row {row.nm_id}: src sum != tgt sum ({src_sum} != {tgt_sum})",
             )
 
-    # 2. Detect newcomer SKUs — они группируются в отдельные AssemblyRequests,
-    # чтобы заявку «новинки» можно было обрабатывать отдельно от обычных.
-    all_nm_ids = {row.nm_id for row in distribution.rows}
-    newcomer_nm_ids = await fetch_newcomer_nm_ids(db, project_id, all_nm_ids)
-
+    # 2. newcomer_nm_ids уже посчитан выше (до фильтрации строк) — используем его
+    # для группировки: новинки идут отдельными AssemblyRequests от обычных.
     # 3. Group items per (source_ff_id, target_wb_name, package_type, is_newcomer) tuple.
     # One AssemblyRequest = one transport unit = one package_type, новинки отдельно.
     # pair_items[(src_id, wb_name, pkg, is_new)] -> {barcode: total_qty}
     pair_items: dict[tuple[int, str, str, bool], dict[str, int]] = {}
-    for row in distribution.rows:
+    for row in commit_rows:
         if not row.barcode:
             raise HTTPException(
                 status_code=400,
@@ -353,6 +522,7 @@ async def commit_draft(
                 pallet_weight_kg=pallet_weight,
                 comment=req_comment,
                 package_type=package_type,
+                source_draft_id=draft_id,
             )
             db.add(assembly_req)
             await db.flush()
@@ -373,8 +543,13 @@ async def commit_draft(
             await db.flush()
             created_ids.append(assembly_req.id)
 
-        # 7. Soft-delete draft on success
-        draft.soft_delete()
+        # 7. Если остались строки другого типа упаковки ИЛИ замороженные
+        # (передан на ФФ) юниты — оставляем черновик; иначе soft-delete.
+        if leftover_rows or distribution.handed_units:
+            distribution.rows = leftover_rows
+            draft.distribution = distribution.model_dump(mode="json")
+        else:
+            draft.soft_delete()
         await db.commit()
     except HTTPException:
         await db.rollback()
@@ -388,3 +563,520 @@ async def commit_draft(
         created_request_ids=created_ids,
         draft_id=draft_id,
     )
+
+
+# ─── Per-unit lifecycle (черновик → передан на ФФ → в сборке) ────────────────
+# «Заявка-юнит» = (source_ff × target_wb × package_type × newcomer). «Передать
+# на ФФ» вырезает юнит из rows в замороженный handed_units (правки распределения
+# его больше не трогают). «В сборку» создаёт из снимка AssemblyRequest.
+
+
+def _norm_pkg(package_type: str | None) -> PackageTypeStr:
+    p = (package_type or "BOX").strip().upper() or "BOX"
+    if p not in ("BOX", "MONOPALLET", "SUPERSAFE"):
+        raise HTTPException(status_code=400, detail=f"Invalid package_type: {package_type!r}")
+    return cast(PackageTypeStr, p)
+
+
+def _find_handed_index(units: list[HandedUnit], ff: int, wb: str, pkg: str, newcomer: bool) -> int | None:
+    for i, u in enumerate(units):
+        if (
+            u.source_ff_id == ff
+            and u.target_wb_name == wb
+            and (u.package_type or "BOX") == pkg
+            and u.is_newcomer == newcomer
+        ):
+            return i
+    return None
+
+
+async def _resolve_nomenclature(db: AsyncSession, project_id: int, barcodes: set[str]) -> dict[str, Nomenclature]:
+    """Резолв баркодов → Nomenclature одним запросом. 400, если что-то не найдено."""
+    if not barcodes:
+        return {}
+    result = await db.execute(
+        select(Nomenclature).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.barcode.in_(barcodes),
+        )
+    )
+    nom_map = {n.barcode: n for n in result.scalars().all()}
+    missing = [bc for bc in barcodes if bc not in nom_map]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Barcode not found: {missing[0]}")
+    return nom_map
+
+
+async def _create_one_request(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    source_ff_id: int,
+    target_wb_name: str,
+    package_type: str,
+    is_newcomer: bool,
+    barcodes: dict[str, int],
+    nom_map: dict[str, Nomenclature],
+    distribution: AssemblyDraftDistribution,
+    base_comment: str | None,
+    source_draft_id: int,
+) -> AssemblyRequest:
+    """Создать один AssemblyRequest (IN_PROGRESS) из набора баркод→qty."""
+    number = await _next_number(db, project_id, "ASM", AssemblyRequest)
+    if is_newcomer:
+        pieces = [NEWCOMER_COMMENT_PREFIX]
+        if base_comment:
+            pieces.append(base_comment)
+        comment: str | None = " | ".join(pieces)
+    else:
+        comment = base_comment
+
+    eta: date | None = None
+    if distribution.estimated_ready_date:
+        try:
+            eta = date.fromisoformat(distribution.estimated_ready_date)
+        except ValueError:
+            raise HTTPException(  # noqa: B904
+                status_code=400,
+                detail=f"Invalid estimated_ready_date: {distribution.estimated_ready_date}",
+            )
+
+    req = AssemblyRequest(
+        project_id=project_id,
+        warehouse_id=source_ff_id,
+        number=number,
+        status=AssemblyStatus.IN_PROGRESS,
+        wb_fbo_supply_id=None,
+        wb_warehouse_name_manual=target_wb_name,
+        estimated_ready_date=eta,
+        pallets_count=max(1, int(distribution.pallets_count or 1)),
+        pallet_weight_kg=distribution.pallet_weight_kg or 0.0,
+        comment=comment,
+        package_type=package_type,
+        source_draft_id=source_draft_id,
+    )
+    db.add(req)
+    await db.flush()
+    for bc, qty in barcodes.items():
+        if qty <= 0:
+            continue
+        db.add(
+            AssemblyRequestItem(
+                project_id=project_id,
+                assembly_request_id=req.id,
+                nomenclature_id=nom_map[bc].id,
+                barcode=bc,
+                quantity=qty,
+            )
+        )
+    await db.flush()
+    return req
+
+
+def _carve_unit_from_rows(
+    rows: list[AssemblyDraftRow],
+    source_ff_id: int,
+    target_wb_name: str,
+    norm_pkg: str,
+    newcomer: bool,
+    newcomer_set: set[int],
+) -> tuple[dict[str, HandedUnitItem], list[AssemblyDraftRow]]:
+    """Вырезать поток ff→wb из строк. Возвращает (позиции по баркоду, остаток строк).
+    Σsrc и Σtgt падают на одну величину → строки остаются сбалансированными."""
+    sid = str(source_ff_id)
+    carved: dict[str, HandedUnitItem] = {}
+    remaining: list[AssemblyDraftRow] = []
+    for row in rows:
+        is_new = row.nm_id in newcomer_set
+        if (row.package_type or "BOX") != norm_pkg or is_new != newcomer:
+            remaining.append(row)
+            continue
+        qty = _allocate_pairs(row.src, row.tgt).get((source_ff_id, target_wb_name), 0)
+        if qty <= 0:
+            remaining.append(row)
+            continue
+        if not row.barcode:
+            raise HTTPException(status_code=400, detail=f"Row {row.nm_id}: barcode is required")
+        item = carved.get(row.barcode)
+        if item:
+            item.qty += qty
+        else:
+            carved[row.barcode] = HandedUnitItem(
+                nm_id=row.nm_id,
+                barcode=row.barcode,
+                vendor_code=row.vendor_code,
+                qty=qty,
+            )
+        new_src = dict(row.src)
+        new_tgt = dict(row.tgt)
+        new_src[sid] = new_src.get(sid, 0) - qty
+        if new_src[sid] <= 0:
+            new_src.pop(sid, None)
+        new_tgt[target_wb_name] = new_tgt.get(target_wb_name, 0) - qty
+        if new_tgt[target_wb_name] <= 0:
+            new_tgt.pop(target_wb_name, None)
+        if new_src and new_tgt:
+            remaining.append(row.model_copy(update={"src": new_src, "tgt": new_tgt}))
+    return carved, remaining
+
+
+async def hand_off_unit(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    source_ff_id: int,
+    target_wb_name: str,
+    package_type: str,
+    newcomer: bool,
+) -> AssemblyDraftRead:
+    """«Передать на ФФ»: заморозить заявку-юнит со статусом handed. Если юнит уже
+    заморожен (ручной черновик после правки) — просто меняем статус на handed;
+    иначе вырезаем поток ff→wb из rows в новый снимок."""
+    draft = await get_draft(db, project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
+    norm_pkg = _norm_pkg(package_type)
+
+    units = list(distribution.handed_units)
+    idx = _find_handed_index(units, source_ff_id, target_wb_name, norm_pkg, newcomer)
+    if idx is not None:
+        units[idx].status = "handed"
+        distribution.handed_units = units
+    else:
+        newcomer_set = await fetch_newcomer_nm_ids(db, project_id, {r.nm_id for r in distribution.rows})
+        carved, remaining = _carve_unit_from_rows(
+            distribution.rows, source_ff_id, target_wb_name, norm_pkg, newcomer, newcomer_set
+        )
+        if not carved:
+            raise HTTPException(status_code=400, detail="В заявке нет позиций для передачи")
+        distribution.rows = remaining
+        distribution.handed_units = [
+            *units,
+            HandedUnit(
+                source_ff_id=source_ff_id,
+                target_wb_name=target_wb_name,
+                package_type=norm_pkg,
+                is_newcomer=newcomer,
+                status="handed",
+                items=list(carved.values()),
+            ),
+        ]
+    draft.distribution = distribution.model_dump(mode="json")
+    await db.commit()
+    await db.refresh(draft)
+    return await to_read_model(db, project_id, draft)
+
+
+async def revert_unit(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    source_ff_id: int,
+    target_wb_name: str,
+    package_type: str,
+    newcomer: bool,
+) -> AssemblyDraftRead:
+    """«Вернуть в черновик»: убрать handed-юнит и влить его позиции обратно в rows."""
+    draft = await get_draft(db, project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
+    norm_pkg = _norm_pkg(package_type)
+    units = list(distribution.handed_units)
+    idx = _find_handed_index(units, source_ff_id, target_wb_name, norm_pkg, newcomer)
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Переданная заявка не найдена")
+
+    unit = units.pop(idx)
+    sid = str(source_ff_id)
+    rows_by_key: dict[tuple[int, str], AssemblyDraftRow] = {
+        (r.nm_id, r.package_type or "BOX"): r for r in distribution.rows
+    }
+    for it in unit.items:
+        row = rows_by_key.get((it.nm_id, norm_pkg))
+        if row is None:
+            row = AssemblyDraftRow(
+                nm_id=it.nm_id,
+                barcode=it.barcode,
+                vendor_code=it.vendor_code,
+                src={},
+                tgt={},
+                package_type=norm_pkg,
+            )
+            distribution.rows.append(row)
+            rows_by_key[(it.nm_id, norm_pkg)] = row
+        row.src[sid] = row.src.get(sid, 0) + it.qty
+        row.tgt[target_wb_name] = row.tgt.get(target_wb_name, 0) + it.qty
+
+    distribution.handed_units = units
+    draft.distribution = distribution.model_dump(mode="json")
+    await db.commit()
+    await db.refresh(draft)
+    return await to_read_model(db, project_id, draft)
+
+
+async def commit_unit(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    source_ff_id: int,
+    target_wb_name: str,
+    package_type: str,
+    newcomer: bool,
+) -> AssemblyDraftCommitResponse:
+    """«В сборку»: создать AssemblyRequest из замороженного handed-юнита и убрать
+    его из черновика. Если черновик опустел (нет rows и handed_units) — soft-delete."""
+    draft = await get_draft(db, project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
+    norm_pkg = _norm_pkg(package_type)
+    units = list(distribution.handed_units)
+    idx = _find_handed_index(units, source_ff_id, target_wb_name, norm_pkg, newcomer)
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Переданная заявка не найдена")
+    if units[idx].status != "handed":
+        raise HTTPException(status_code=400, detail="Сначала передайте заявку на ФФ")
+
+    unit = units[idx]
+    barcodes: dict[str, int] = {}
+    for it in unit.items:
+        if it.qty > 0:
+            barcodes[it.barcode] = barcodes.get(it.barcode, 0) + it.qty
+    if not barcodes:
+        raise HTTPException(status_code=400, detail="В заявке нет позиций для сборки")
+    nom_map = await _resolve_nomenclature(db, project_id, set(barcodes))
+
+    created_ids: list[int] = []
+    try:
+        req = await _create_one_request(
+            db,
+            project_id,
+            source_ff_id=source_ff_id,
+            target_wb_name=target_wb_name,
+            package_type=norm_pkg,
+            is_newcomer=newcomer,
+            barcodes=barcodes,
+            nom_map=nom_map,
+            distribution=distribution,
+            base_comment=draft.comment,
+            source_draft_id=draft_id,
+        )
+        created_ids.append(req.id)
+        del units[idx]
+        distribution.handed_units = units
+        if distribution.rows or distribution.handed_units:
+            draft.distribution = distribution.model_dump(mode="json")
+        else:
+            draft.soft_delete()
+        await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.exception("commit_unit failed for draft_id=%s", draft_id)
+        raise HTTPException(status_code=400, detail=f"Failed to commit unit: {e}") from None
+
+    return AssemblyDraftCommitResponse(created_request_ids=created_ids, draft_id=draft_id)
+
+
+async def set_unit_items(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    source_ff_id: int,
+    target_wb_name: str,
+    package_type: str,
+    newcomer: bool,
+    items: list[HandedUnitItem],
+) -> AssemblyDraftRead:
+    """Заменить наполнение заявки-юнита (ручная правка черновика). Если юнит ещё
+    авто (в rows) — вырезаем его текущий поток из rows и фиксируем как ручной
+    черновик (status='draft') с НОВЫМ наполнением. Если уже заморожен —
+    заменяем items. Переданный на ФФ (handed) править нельзя.
+    Проверку остатка ФФ делает фронт; здесь — резолв баркодов и qty>0."""
+    draft = await get_draft(db, project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
+    norm_pkg = _norm_pkg(package_type)
+
+    clean: list[HandedUnitItem] = []
+    for it in items:
+        qty = int(it.qty or 0)
+        if qty <= 0:
+            continue
+        if not it.barcode:
+            raise HTTPException(status_code=400, detail=f"Позиция {it.nm_id}: не указан баркод")
+        clean.append(HandedUnitItem(nm_id=it.nm_id, barcode=it.barcode, vendor_code=it.vendor_code, qty=qty))
+    if not clean:
+        raise HTTPException(status_code=400, detail="Заявка не может быть пустой")
+    await _resolve_nomenclature(db, project_id, {it.barcode for it in clean})
+
+    units = list(distribution.handed_units)
+    idx = _find_handed_index(units, source_ff_id, target_wb_name, norm_pkg, newcomer)
+    if idx is not None:
+        if units[idx].status != "draft":
+            raise HTTPException(status_code=400, detail="Заявка передана на ФФ — правка запрещена")
+        units[idx].items = clean
+        distribution.handed_units = units
+    else:
+        newcomer_set = await fetch_newcomer_nm_ids(db, project_id, {r.nm_id for r in distribution.rows})
+        _carved, remaining = _carve_unit_from_rows(
+            distribution.rows, source_ff_id, target_wb_name, norm_pkg, newcomer, newcomer_set
+        )
+        distribution.rows = remaining
+        distribution.handed_units = [
+            *units,
+            HandedUnit(
+                source_ff_id=source_ff_id,
+                target_wb_name=target_wb_name,
+                package_type=norm_pkg,
+                is_newcomer=newcomer,
+                status="draft",
+                items=clean,
+            ),
+        ]
+    draft.distribution = distribution.model_dump(mode="json")
+    await db.commit()
+    await db.refresh(draft)
+    return await to_read_model(db, project_id, draft)
+
+
+async def move_unit(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    source_ff_id: int,
+    target_wb_name: str,
+    package_type: str,
+    newcomer: bool,
+    new_target_wb_name: str,
+) -> AssemblyDraftRead:
+    """«Сменить склад WB»: перенести заявку-юнит этого ФФ на другой WB-склад.
+    Двигается только поток ff→wb (для этого ФФ), баланс матрицы сохраняется.
+    Источник — авто (вырезаем поток из rows) или ручной черновик (берём снимок);
+    переданный на ФФ (handed) переносить нельзя. На складе-получателе: если уже
+    есть ручной черновик-юнит — позиции сливаются по баркоду, иначе поток
+    возвращается в rows как (ff → new_wb)."""
+    new_wb = (new_target_wb_name or "").strip()
+    if not new_wb:
+        raise HTTPException(status_code=400, detail="Не указан склад-получатель")
+    if new_wb == target_wb_name:
+        raise HTTPException(status_code=400, detail="Заявка уже на этом складе")
+
+    draft = await get_draft(db, project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
+    norm_pkg = _norm_pkg(package_type)
+    units = list(distribution.handed_units)
+
+    # 1. Извлечь позиции исходного юнита (ручной снимок или авто-поток из rows).
+    src_idx = _find_handed_index(units, source_ff_id, target_wb_name, norm_pkg, newcomer)
+    if src_idx is not None:
+        if units[src_idx].status != "draft":
+            raise HTTPException(status_code=400, detail="Заявка передана на ФФ — сначала верните в черновик")
+        moved = list(units.pop(src_idx).items)
+    else:
+        newcomer_set = await fetch_newcomer_nm_ids(db, project_id, {r.nm_id for r in distribution.rows})
+        carved, remaining = _carve_unit_from_rows(
+            distribution.rows, source_ff_id, target_wb_name, norm_pkg, newcomer, newcomer_set
+        )
+        if not carved:
+            raise HTTPException(status_code=404, detail="Заявка не найдена")
+        distribution.rows = remaining
+        moved = list(carved.values())
+
+    # 2. Влить в склад-получатель: merge в ручной черновик или вернуть в rows.
+    dest_idx = _find_handed_index(units, source_ff_id, new_wb, norm_pkg, newcomer)
+    if dest_idx is not None:
+        if units[dest_idx].status != "draft":
+            raise HTTPException(
+                status_code=400,
+                detail="На складе-получателе заявка уже передана на ФФ — сначала верните её в черновик",
+            )
+        by_bc = {it.barcode: it for it in units[dest_idx].items}
+        for it in moved:
+            existing = by_bc.get(it.barcode)
+            if existing:
+                existing.qty += it.qty
+            else:
+                new_it = HandedUnitItem(nm_id=it.nm_id, barcode=it.barcode, vendor_code=it.vendor_code, qty=it.qty)
+                units[dest_idx].items.append(new_it)
+                by_bc[it.barcode] = new_it
+        distribution.handed_units = units
+    else:
+        distribution.handed_units = units
+        sid = str(source_ff_id)
+        rows_by_key: dict[tuple[int, str], AssemblyDraftRow] = {
+            (r.nm_id, r.package_type or "BOX"): r for r in distribution.rows
+        }
+        for it in moved:
+            row = rows_by_key.get((it.nm_id, norm_pkg))
+            if row is None:
+                row = AssemblyDraftRow(
+                    nm_id=it.nm_id,
+                    barcode=it.barcode,
+                    vendor_code=it.vendor_code,
+                    src={},
+                    tgt={},
+                    package_type=norm_pkg,
+                )
+                distribution.rows.append(row)
+                rows_by_key[(it.nm_id, norm_pkg)] = row
+            row.src[sid] = row.src.get(sid, 0) + it.qty
+            row.tgt[new_wb] = row.tgt.get(new_wb, 0) + it.qty
+
+    if new_wb not in distribution.target_warehouse_names:
+        distribution.target_warehouse_names = [*distribution.target_warehouse_names, new_wb]
+
+    draft.distribution = distribution.model_dump(mode="json")
+    await db.commit()
+    await db.refresh(draft)
+    return await to_read_model(db, project_id, draft)
+
+
+async def delete_unit(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    source_ff_id: int,
+    target_wb_name: str,
+    package_type: str,
+    newcomer: bool,
+) -> AssemblyDraftRead:
+    """Удалить заявку-юнит из черновика целиком (товар остаётся на ФФ, не
+    отгружается). Заморожен (ручной черновик) → убираем снимок; авто → вырезаем
+    поток из rows и отбрасываем. Переданный на ФФ удалять нельзя (сначала
+    вернуть в черновик). Пустой черновик → soft-delete."""
+    draft = await get_draft(db, project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
+    norm_pkg = _norm_pkg(package_type)
+
+    units = list(distribution.handed_units)
+    idx = _find_handed_index(units, source_ff_id, target_wb_name, norm_pkg, newcomer)
+    if idx is not None:
+        if units[idx].status == "handed":
+            raise HTTPException(status_code=400, detail="Заявка передана на ФФ — сначала верните в черновик")
+        del units[idx]
+        distribution.handed_units = units
+    else:
+        newcomer_set = await fetch_newcomer_nm_ids(db, project_id, {r.nm_id for r in distribution.rows})
+        carved, remaining = _carve_unit_from_rows(
+            distribution.rows, source_ff_id, target_wb_name, norm_pkg, newcomer, newcomer_set
+        )
+        if not carved:
+            raise HTTPException(status_code=404, detail="Заявка не найдена")
+        distribution.rows = remaining
+
+    draft.distribution = distribution.model_dump(mode="json")
+    if not (distribution.rows or distribution.handed_units):
+        draft.soft_delete()
+    await db.commit()
+    await db.refresh(draft)
+    return await to_read_model(db, project_id, draft)

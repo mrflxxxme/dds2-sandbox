@@ -14,7 +14,9 @@ pytest_plugins = ["tests.conftest_api"]
 
 # Real (production-equivalent) projects we never delete in cleanup.
 # id=4 — Default seed; id=15 — main user project (вяткин).
-_KEEP_PROJECT_IDS = (4, 15)
+# 991/992 — изолированные проекты test_wb_returns: держим, чтобы cleanup не
+# удалял их между параллельными воркерами (иначе FK на wb_goods_returns.project_id).
+_KEEP_PROJECT_IDS = (4, 15, 991, 992)
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -32,6 +34,13 @@ def pytest_sessionfinish(session, exitstatus):
     import os
 
     if os.environ.get("PYTEST_NO_CLEANUP"):
+        return
+    # Под xdist pytest_sessionfinish вызывается на КАЖДОМ воркере при его
+    # завершении. Если один воркер финиширует раньше — он удалит все не-KEEP
+    # проекты, пока другой воркер ещё гоняет тесты → FK-гонка (напр.
+    # wb_goods_returns.project_id violates fkey). Чистим ТОЛЬКО на контроллере
+    # (workerinput есть только у xdist-воркеров) — один раз, после всех воркеров.
+    if hasattr(session.config, "workerinput"):
         return
     sync_url = os.environ.get("DATABASE_URL_SYNC")
     if not sync_url:

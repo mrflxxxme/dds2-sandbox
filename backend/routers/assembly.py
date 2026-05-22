@@ -18,6 +18,7 @@ from backend.schemas.assembly import (
     AssemblyRequestUpdate,
     AssignVehicle,
     AssignVehicleBulk,
+    CreatedGroupResponse,
     LogisticsAnalyticsResponse,
     RefreshFromFboResponse,
     ShipBulk,
@@ -34,6 +35,7 @@ router = APIRouter(prefix="/warehouse/assembly", tags=["Assembly"])
 @router.get("", response_model=AssemblyListResponse)
 async def list_assembly_requests(
     warehouse_id: int | None = Query(None),
+    draft_id: int | None = Query(None),
     status: str | None = Query(None),
     search: str | None = Query(None),
     date_from: date | None = Query(None),
@@ -49,6 +51,7 @@ async def list_assembly_requests(
         db,
         project.id,
         warehouse_id=warehouse_id,
+        draft_id=draft_id,
         status=status,
         search=search,
         date_from=date_from,
@@ -62,6 +65,19 @@ async def list_assembly_requests(
         resp = await assembly_service._build_response(db, req)
         response_items.append(AssemblyRequestResponse.model_validate(resp))
     return AssemblyListResponse(items=response_items, total=total)
+
+
+# --- Created groups (Предпросмотр созданных заявок) -------------------------
+
+
+@router.get("/created-groups", response_model=list[CreatedGroupResponse])
+async def get_created_groups(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Группы созданных заявок по черновику (source_draft_id), только активные
+    (IN_PROGRESS) — для секции «Созданные партии / Предпросмотр»."""
+    return await assembly_service.get_created_groups(db, project.id)
 
 
 # --- WB warehouses ----------------------------------------------------------

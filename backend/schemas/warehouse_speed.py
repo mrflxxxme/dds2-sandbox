@@ -103,10 +103,14 @@ class OkrugBasketStats(BaseModel):
 
 
 class CityPriorityRow(BaseModel):
-    """Один priority-слот в ответе /cities (склад + часы)."""
+    """Один priority-слот в ответе /cities (склад + часы + округ склада)."""
 
     warehouse_name: str
     hours: int = Field(..., ge=0)
+    own_okrug: str = Field(
+        default="unknown",
+        description="ФО самого склада (для отличия anchor/stealer относительно okrug города)",
+    )
 
 
 class CitySpeedDTO(BaseModel):

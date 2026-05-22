@@ -6,7 +6,8 @@ import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import { Toast } from '@/components';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, Warehouse } from '@/types/api';
+import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, Warehouse } from '@/types/api';
+import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -296,6 +297,9 @@ export default function AssemblyListPage() {
 
     // Drafts
     const [drafts, setDrafts] = useState<AssemblyDraft[]>([]);
+    const [selectedDraftIds, setSelectedDraftIds] = useState<Set<number>>(new Set());
+    const [createdGroups, setCreatedGroups] = useState<CreatedAssemblyGroup[]>([]);
+    const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set());
 
     // Highlight just-created request ids (from query string)
     const justCreatedIds = useMemo(() => {
@@ -319,6 +323,11 @@ export default function AssemblyListPage() {
             setDrafts(list);
         } catch {
             setDrafts([]);
+        }
+        try {
+            setCreatedGroups(await api.getCreatedAssemblyGroups());
+        } catch {
+            setCreatedGroups([]);
         }
     }, []);
 
@@ -363,6 +372,17 @@ export default function AssemblyListPage() {
     // Warehouse options (FULFILLMENT only)
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [brandOptions, setBrandOptions] = useState<string[]>([]);
+
+    const warehouseNameById = useCallback(
+        (id: number) => warehouses.find(w => w.id === id)?.name ?? `Склад ${id}`,
+        [warehouses],
+    );
+
+    // Дубли направлений: пары (ff→wb), которые встречаются в ≥2 открытых черновиках
+    const duplicateLanes = useMemo(
+        () => drafts.length >= 2 ? findDuplicateLanes(drafts, warehouseNameById) : [],
+        [drafts, warehouseNameById],
+    );
 
     useEffect(() => {
         api.getWarehouses()
@@ -548,46 +568,153 @@ export default function AssemblyListPage() {
                 )}
             </div>
 
+            {/* Duplicate-lane warning banner */}
+            {duplicateLanes.length > 0 && (
+                <div className="glass-card" style={{ padding: '12px 16px', marginBottom: 12, borderLeft: '3px solid var(--color-warning)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                        <span>⚠️</span>
+                        <span style={{ fontWeight: 600, color: 'var(--color-text)' }}>Обнаружены дублирующиеся маршруты</span>
+                    </div>
+                    <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {duplicateLanes.map(lane => (
+                            <span key={`${lane.ffId}-${lane.wbName}`} className="badge badge-warning" style={{ fontSize: 11 }}>
+                                {lane.ffName} → {lane.wbName} · {formatNumber(lane.pieces)} шт. · #{lane.draftIds.join(', #')}
+                            </span>
+                        ))}
+                    </div>
+                    <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        Выберите черновики ниже и объедините — они будут переданы на ФФ одной отправкой.
+                    </div>
+                </div>
+            )}
+
             {/* Drafts */}
             {drafts.length > 0 && (
                 <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--color-text)' }}>
-                        Незавершённые черновики ({drafts.length})
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        {drafts.map(draft => (
-                            <div
-                                key={draft.id}
-                                style={{
-                                    display: 'flex', alignItems: 'center', gap: 8,
-                                    padding: '8px 12px',
-                                    border: '1px solid var(--color-border)',
-                                    borderRadius: 12,
-                                    background: 'var(--color-bg)',
-                                    fontSize: 12,
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>
+                            Незавершённые черновики ({drafts.length})
+                        </div>
+                        {selectedDraftIds.size >= 2 && (
+                            <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => {
+                                    const qs = new URLSearchParams({ drafts: [...selectedDraftIds].join(',') });
+                                    router.push(`/p/${slug}/warehouse/assembly/merge?${qs.toString()}`);
                                 }}
                             >
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                                    <span style={{ fontWeight: 600 }}>{draft.name || `Черновик #${draft.id}`}</span>
-                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                        {draft.distribution.rows.length} поз. · обновлён {formatDate(draft.updated_at)}
-                                    </span>
+                                Объединить {selectedDraftIds.size} черновика →
+                            </button>
+                        )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {drafts.map(draft => {
+                            const isSelected = selectedDraftIds.has(draft.id);
+                            return (
+                                <div
+                                    key={draft.id}
+                                    style={{
+                                        display: 'flex', alignItems: 'center', gap: 8,
+                                        padding: '8px 12px',
+                                        border: `1px solid ${isSelected ? 'var(--color-accent)' : 'var(--color-border)'}`,
+                                        borderRadius: 12,
+                                        background: isSelected ? 'color-mix(in srgb, var(--color-accent) 8%, var(--color-bg))' : 'var(--color-bg)',
+                                        fontSize: 12,
+                                        transition: 'border-color 0.2s, background 0.2s',
+                                    }}
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={isSelected}
+                                        onChange={e => {
+                                            const checked = e.target.checked;
+                                            setSelectedDraftIds(prev => {
+                                                const next = new Set(prev);
+                                                if (checked) next.add(draft.id); else next.delete(draft.id);
+                                                return next;
+                                            });
+                                        }}
+                                        style={{ accentColor: 'var(--color-accent)', cursor: 'pointer' }}
+                                    />
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                        <span style={{ fontWeight: 600 }}>{draft.name || `Черновик #${draft.id}`}</span>
+                                        <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                            {draft.distribution.rows.length} поз. · обновлён {formatDate(draft.updated_at)}
+                                        </span>
+                                    </div>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute/preview?draft=${draft.id}&pkg=BOX&type=all`)}
+                                        title="Открыть предпросмотр заявок — там кнопка «Создать»"
+                                    >
+                                        Открыть →
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draft.id}`)}
+                                        title="Изменить распределение (редактировать черновик)"
+                                    >
+                                        ✏️
+                                    </button>
+                                    <button
+                                        className="btn btn-danger btn-sm"
+                                        onClick={() => handleDeleteDraft(draft.id)}
+                                        title="Удалить черновик"
+                                    >
+                                        ×
+                                    </button>
                                 </div>
-                                <button
-                                    className="btn btn-secondary btn-sm"
-                                    onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draft.id}`)}
-                                >
-                                    Открыть
-                                </button>
-                                <button
-                                    className="btn btn-danger btn-sm"
-                                    onClick={() => handleDeleteDraft(draft.id)}
-                                    title="Удалить черновик"
-                                >
-                                    ×
-                                </button>
-                            </div>
-                        ))}
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {createdGroups.length > 0 && (
+                <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)', marginBottom: 4 }}>
+                        Созданные партии — предпросмотр ({createdGroups.length})
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                        Заявки, созданные из черновика и ещё в сборке. Только просмотр — правьте через карточку заявки.
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {createdGroups.map(g => {
+                            const open = expandedGroups.has(g.draft_id);
+                            return (
+                                <div key={g.draft_id} style={{ border: '1px solid var(--color-border)', borderRadius: 12, background: 'var(--color-bg)' }}>
+                                    <button
+                                        onClick={() => setExpandedGroups(prev => {
+                                            const n = new Set(prev);
+                                            if (n.has(g.draft_id)) n.delete(g.draft_id); else n.add(g.draft_id);
+                                            return n;
+                                        })}
+                                        style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '10px 14px', background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+                                    >
+                                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{open ? '▾' : '▸'}</span>
+                                        <span style={{ fontWeight: 600, fontSize: 13 }}>{g.draft_name || `Черновик #${g.draft_id}`}</span>
+                                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                            {g.request_count} заявок · {formatNumber(g.total_qty)} шт · {g.total_sku} SKU
+                                        </span>
+                                    </button>
+                                    {open && (
+                                        <div style={{ borderTop: '1px solid var(--color-border)', padding: '6px 14px 10px' }}>
+                                            {g.requests.map(r => (
+                                                <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', borderBottom: '1px solid var(--color-border)', fontSize: 13 }}>
+                                                    <span style={{ flex: 1, minWidth: 0 }}>
+                                                        <span style={{ fontWeight: 600 }}>{r.ff_name} → {r.wb_name || '—'}</span>
+                                                        <span style={{ color: 'var(--color-text-muted)', marginLeft: 8, fontSize: 12 }}>
+                                                            {r.package_type === 'MONOPALLET' ? 'Моно' : r.package_type === 'SUPERSAFE' ? 'Сейф' : 'Короб'} · {formatNumber(r.qty)} шт · {r.sku} SKU · {r.number}
+                                                        </span>
+                                                    </span>
+                                                    <button className="btn btn-secondary btn-sm" onClick={() => router.push(`/p/${slug}/warehouse/assembly/${r.id}`)}>Открыть →</button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
                     </div>
                 </div>
             )}

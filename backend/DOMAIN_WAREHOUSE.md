@@ -26,9 +26,10 @@
 | `WbGoodsReturn` | Возвраты на ПВЗ, линк на `InboundReceipt` | SoftDelete + Timestamp, UNIQUE(project_id, srid) |
 
 ### Box multiplicity (models/cost.py)
-| `Nomenclature.box_qty_override: int\|None` | Глобальный SKU-override кратности коробки |
+| `Nomenclature.box_qty_override: int\|None` | SKU-уровневый ручной дефолт кратности коробки |
 | `Nomenclature.use_box_multiplicity: bool` | Per-SKU toggle: учитывать ли кратность при распределении |
-| `BoxQtyPerWarehouse` | Per-RF override (`project_id`, `barcode`, `warehouse_id`, `box_qty`, `use_box_multiplicity`) | UNIQUE `uq_box_qty_pw_project_bc_wh` |
+| `BoxQtyPerWarehouse` | Ручная per-ФФ кратность/размер (`project_id`, `barcode`, `warehouse_id`, `box_qty`, `box_size`, `use_box_multiplicity`) | UNIQUE `uq_box_qty_pw_project_bc_wh` |
+| `BoxMultiplicityChangeLog` | Журнал изменений кратности/размера (`project_id`, `barcode`, `warehouse_id` NULL=SKU-уровень, `field`, `old_value`, `new_value`, `change_source`, `created_at`) | для «Истории изменений» и отката |
 
 ### Enums
 - `WarehouseType` — EXTERNAL, FULFILLMENT
@@ -78,11 +79,20 @@
 - При создании сборки `package_type` пишется в `AssemblyRequest.package_type` — одна заявка = одна транспортная единица.
 
 ### Box Multiplicity (сборка по кратности коробок)
-WB не принимает коробку, где кол-во штук одного SKU не кратно `pcs_per_box`. Система знает кратность per-SKU (и опционально per-RF); распределение в `WarehouseNeedView` округляет до кратного, переливая остаток на соседа по федеральному округу.
-- **Priority chain:** `BoxQtyPerWarehouse.box_qty` > `Nomenclature.box_qty_override` > `CostOrderItem.pcs_per_box` (source-of-truth от поставщика).
-- `resolve_effective_ppb_for_assembly` — qty-weighted по vehicle: если в одну машину распределены строки из нескольких `CostOrderItem` с разными `pcs_per_box`, берётся qty-weighted average. Per-RF override (если задан) bypass-ит это. Если для RF выключен `use_box_multiplicity` — распределение без округления.
-- **Bulk paste:** пользователь копирует прямоугольный диапазон из Excel → frontend парсит (`boxMultiplicityPaste.ts`), auto-detect колонок (баркод / box_qty / use_flag по типу значений) → батч `POST /bulk`; backend `bulk_update_by_barcode` upsert-ит по `(project_id, barcode)`.
-- Acceptance redistribute учитывает эффективный `pcs_per_box` для каждого SKU+RF — после перелива qty остаётся кратным коробке.
+WB не принимает коробку, где кол-во штук одного SKU не кратно `pcs_per_box`. Кратность резолвится **пер пару (товар barcode, ФФ-склад)** — разные машины-поставки приняты на разные ФФ, поэтому per-ФФ кратность выходит сама собой. Распределение в `WarehouseNeedView` округляет до кратного, переливая остаток на соседа по федеральному округу.
+- **Priority chain (резолв пары `(barcode, warehouse_id)`, первое сработавшее побеждает):**
+  1. **machine** — последняя `ACCEPTED`-приёмка этого товара на этот ФФ (`inbound_receipts.status=ACCEPTED`, `cost_order_id` NOT NULL, item с `actual_qty>0`) → её машина (`cost_order`) → наполняемость строк `cost_order_items` с этим barcode. Несколько строк с разной кратностью → qty-weighted mode. Ячейка заблокирована (`editable=false`, `source="machine"`).
+  2. **manual** — `BoxQtyPerWarehouse.box_qty` (ручная per-ФФ кратность), если не NULL.
+  3. **default** — `Nomenclature.box_qty_override` (SKU-уровневый ручной дефолт).
+  4. **none** — ничего не задано (`box_qty=null`).
+- Машины **не** принятые (приёмка не `ACCEPTED` либо её нет) кратность не дают. Заказы фабрики **не** являются источником кратности — `factory`-строки остаются только в read-only drill-down.
+- **Редактируемость** — на уровне ячейки ФФ: `editable=false` только при `source="machine"`. SKU-уровневое `box_qty_override` редактируется всегда.
+- **Флаг `use_box_multiplicity` per-ФФ:** из строки `BoxQtyPerWarehouse` если она есть, иначе SKU-уровневый `Nomenclature.use_box_multiplicity`. Выключен → распределение для пары без округления.
+- **Размер коробки `box_size` per-ФФ:** при `source="machine"` берётся из машины; иначе — из `BoxQtyPerWarehouse.box_size` (ручной per-ФФ размер), если строка есть; иначе `null`. На машинном ФФ изменение `box_size` блокируется (`409`), как и `box_qty`.
+- `resolve_effective_ppb_for_assembly(db, project_id, barcode, warehouse_id)` → `(box_qty, use_flag)` по той же цепочке (переиспользует table-builder).
+- **Bulk paste:** пользователь копирует прямоугольный диапазон из Excel → frontend парсит (`boxMultiplicityPaste.ts`), auto-detect колонок → батч `POST /bulk`; `bulk_update_by_barcode` upsert-ит по `(project_id, barcode)` либо `(project_id, barcode, warehouse_id)`. Машинно-заблокированные для `box_qty`/`box_size` пары попадают в ответ `locked` и не апдейтятся (только их `use_box_multiplicity` всё ещё применяется).
+- **Журнал изменений + откат:** каждое реальное изменение поля (`box_qty_override` / `box_qty` / `box_size` / `use_box_multiplicity`) в `update_box_multiplicity`, `update_per_warehouse`, `bulk_update_by_barcode` пишет строку `BoxMultiplicityChangeLog` (`change_source`: `manual` / `bulk`). No-op (значение не поменялось) не логируется. `get_change_log(db, project_id, barcode)` → история свежие сверху (limit 200, JOIN `Warehouse` для `warehouse_name`). `revert_change(db, project_id, change_id)` применяет `old_value` обратно (`Nomenclature` для SKU-уровня, `BoxQtyPerWarehouse` для ФФ) и пишет новую запись `change_source="revert"`; откат `box_qty`/`box_size` для ставшего машинно-заблокированным ФФ не применяется (`409`).
+- Acceptance redistribute учитывает эффективный `pcs_per_box` для каждого SKU+ФФ — после перелива qty остаётся кратным коробке.
 
 ### Unified Stock (единые остатки)
 Объединённый вид: свои склады + WB + в пути. `get_unified_stock_summary(db, project_id, group_by, brand=None, include_forecast=False)`.
@@ -113,7 +123,7 @@ WB не принимает коробку, где кол-во штук одно�
 - Router: `routers/wb_returns.py` — возвраты на ПВЗ (все через `Depends(get_current_project)`, мутации с `rate_limit_write`). `GET /` с фильтром `tab=pvz|in_transit|history|all`; `GET /summary` — KPI по ui_state; `POST /sync` — ручной запуск (date_from/date_to или дефолт 7 дней).
 - Router: `routers/assembly.py` — заявки на сборку (см. `DOMAIN_ASSEMBLY.md`).
 - `GET /warehouse/stock/unified?group_by={mode}&brand={name}&include_forecast={bool}` — единые остатки.
-- `PATCH /warehouse/box-multiplicity/{nm_id}` — partial update (`box_qty_override` null = сбросить, и/или `use_box_multiplicity`); `PATCH .../per-warehouse/{barcode}/{warehouse_id}` — per-RF override; `POST .../bulk` — массовый paste из Excel.
+- `GET /warehouse/box-multiplicity` — таблица: SKU + per-ФФ резолв кратности. `PATCH .../{nm_id}` — SKU-уровень (`box_qty_override` null = сбросить, и/или `use_box_multiplicity`), разрешён всегда. `PATCH .../per-warehouse/{barcode}/{warehouse_id}` — ручная per-ФФ кратность/размер (`box_qty`, `box_size`, `use_box_multiplicity`); на машинном ФФ изменение `box_qty`/`box_size` → `409`, изменение только `use_box_multiplicity` разрешено. `POST .../bulk` — массовый paste из Excel (ответ содержит `locked`). `GET .../sources/{barcode}` — read-only история снабжения SKU. `GET .../changes/{barcode}` — журнал изменений кратности/размера (свежие сверху). `POST .../changes/{change_id}/revert` — откат изменения (`404` если запись не найдена, `409` если откат заблокирован машиной).
 - WB Marketplace API: `GET /api/v3/supplies`, `/api/v3/supplies/{id}/orders`, `/api/v3/supplies/{id}`. Base `https://marketplace-api.wildberries.ru`, авторизация `IntegrationKey service="wb"`.
 
 ## Зависимости
@@ -147,7 +157,7 @@ WB не принимает коробку, где кол-во штук одно�
 - `services/warehouse_stock_service.py` — WB остатки sync + `compute_need`.
 - `services/warehouse_need_service.py` — расчёт потребности в товарах.
 - `services/warehouse_acceptance_service.py` — WB Acceptance Check + redistribute закрытых складов.
-- `services/box_multiplicity_service.py` — box multiplicity (global + per-RF override, bulk paste, `resolve_effective_ppb_for_assembly`).
+- `services/box_multiplicity_service.py` — box multiplicity (machine-resolved per-ФФ кратность/размер + ручные per-ФФ/SKU дефолты, bulk paste, журнал изменений + откат `get_change_log`/`revert_change`, `resolve_effective_ppb_for_assembly`, `has_machine_box_qty`).
 - `services/warehouse_geo_data.py` — WB warehouse maps: координаты, federal districts, `ACCEPTANCE_TO_STOCK_NAME`, `WB_API_ID_TO_STOCK_NAME`.
 - `services/wb_returns_service.py` — sync + list + summary + `classify_ui_state` + `create_receipt_from_returns`.
 - `routers/warehouse.py`, `routers/wb_returns.py`, `routers/assembly.py`.

@@ -121,3 +121,61 @@ describe('parseBoxMultiplicityPaste', () => {
         expect(r.rows.length).toBe(2);
     });
 });
+
+describe('parseBoxMultiplicityPaste — header mode (расширенный шаблон выгрузки)', () => {
+    const whMap = new Map<string, number>([
+        ['ФФ-Тула', 10], ['фф-тула', 10],
+        ['ФФ-Казань', 20], ['фф-казань', 20],
+    ]);
+
+    it('распознаёт header + per-ФФ строки с box_size', () => {
+        const text = [
+            'Артикул\tBarcode\tnm_id\tСклад\tКратность по ФФ\tРазмер коробки',
+            'YY-1\t111\t1001\tФФ-Тула\t12\t30x40x20',
+            'YY-2\t222\t1002\tФФ-Казань\t8\t',
+        ].join('\n');
+        const r = parseBoxMultiplicityPaste(text, whMap);
+        expect(r.errors).toEqual([]);
+        expect(r.rows.length).toBe(2);
+        expect(r.rows[0]).toMatchObject({
+            barcode: '111', warehouse_id: 10, box_qty_override: 12, box_size: '30x40x20',
+        });
+        expect(r.rows[1]).toMatchObject({
+            barcode: '222', warehouse_id: 20, box_qty_override: 8,
+        });
+        expect(r.rows[1].box_size).toBeUndefined();  // пустой → не трогать
+    });
+
+    it('пустой склад в header-mode = SKU-level update (без warehouse_id)', () => {
+        const text = 'Barcode\tСклад\tКратность по ФФ\n111\t\t50';
+        const r = parseBoxMultiplicityPaste(text, whMap);
+        expect(r.rows[0]).toMatchObject({ barcode: '111', box_qty_override: 50 });
+        expect(r.rows[0].warehouse_id).toBeUndefined();
+    });
+
+    it('неизвестное имя склада → ошибка', () => {
+        const text = 'Barcode\tСклад\tКратность по ФФ\n111\tФФ-Несуществующий\t10';
+        const r = parseBoxMultiplicityPaste(text, whMap);
+        expect(r.rows.length).toBe(0);
+        expect(r.errors[0].reason).toMatch(/ФФ-склад не найден/);
+    });
+
+    it('clear box_size через «-»', () => {
+        const text = 'Barcode\tСклад\tКратность по ФФ\tРазмер коробки\n111\tФФ-Тула\t10\t-';
+        const r = parseBoxMultiplicityPaste(text, whMap);
+        expect(r.rows[0].box_size).toBeNull();
+    });
+
+    it('header без обязательной Barcode-колонки → одна ошибка', () => {
+        const text = 'Артикул\tСклад\tКратность по ФФ\nYY-1\tФФ-Тула\t10';
+        const r = parseBoxMultiplicityPaste(text, whMap);
+        expect(r.rows.length).toBe(0);
+        expect(r.errors[0].reason).toMatch(/Barcode/);
+    });
+
+    it('case-insensitive резолв имени склада', () => {
+        const text = 'Barcode\tСклад\tКратность по ФФ\n111\tфф-Тула\t10';
+        const r = parseBoxMultiplicityPaste(text, whMap);
+        expect(r.rows[0]?.warehouse_id).toBe(10);
+    });
+});
