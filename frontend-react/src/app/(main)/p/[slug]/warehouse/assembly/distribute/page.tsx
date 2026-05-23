@@ -1,5 +1,5 @@
 'use client';
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
@@ -309,24 +309,113 @@ export default function AssemblyDistributePage() {
     // ─── Cell editors ────────────────────────────────────────────────────
     // Матч по nm_id И типу упаковки: у SKU может быть две строки (короб + моно)
     // с одним nm_id — без проверки package_type правка задела бы обе.
+    // Ручной ввод снапим вниз до целых коробов, если кратность задана (как
+    // normQty на странице заявки). SKU без кратности — без снапа.
+    const snapToBox = useCallback((nmId: number, qty: number) => {
+        const q = Math.max(0, Math.trunc(qty || 0));
+        const k = nmPpb.get(nmId);
+        return k && k > 0 ? Math.floor(q / k) * k : q;
+    }, [nmPpb]);
+
+    // Потолок в штуках → вниз до целого числа коробов (неполный короб сверх
+    // остатка сдать нельзя). Без кратности — потолок как есть.
+    const boxCap = useCallback((nmId: number, maxUnits: number) => {
+        const k = nmPpb.get(nmId);
+        const m = Math.max(0, maxUnits);
+        return k && k > 0 ? Math.floor(m / k) * k : m;
+    }, [nmPpb]);
+
+    // Свободный остаток SKU на ФФ. null = данных нет (stockNeed не загрузился /
+    // SKU вне выборки) → кап НЕ применяем, чтобы не блокировать ввод вслепую.
+    // Map вместо .find — вызывается на каждую ячейку матрицы при ререндере.
+    const stockByNm = useMemo(() => {
+        const m = new Map<number, StockNeedArticle>();
+        for (const a of stockNeed?.articles ?? []) m.set(a.nm_id, a);
+        return m;
+    }, [stockNeed]);
+    const availAtFfOrNull = useCallback((nmId: number, ffId: number): number | null => {
+        const a = stockByNm.get(nmId);
+        if (!a) return null;
+        return a.rf_stocks[ffId]?.available ?? 0;
+    }, [stockByNm]);
+    // Сколько SKU можно отгрузить ЦЕЛЫМИ коробами суммарно по всем ФФ: per-FF
+    // floor по кратности (короб собирается на одном ФФ, остаток < короба не едет).
+    // null = нет данных. Это потолок для целей и авто-источника.
+    const boxShipTotalOrNull = useCallback((nmId: number): number | null => {
+        const a = stockByNm.get(nmId);
+        if (!a) return null;
+        const k = nmPpb.get(nmId) || 0;
+        return sourceWarehouseIds.reduce((s, ffId) => {
+            const av = a.rf_stocks[ffId]?.available ?? 0;
+            return s + (k > 0 ? Math.floor(av / k) * k : av);
+        }, 0);
+    }, [stockByNm, sourceWarehouseIds, nmPpb]);
+
+    // Источник: нельзя забрать с ФФ больше, чем там свободно (в целых коробах).
     const setRowSrc = useCallback((nmId: number, pkg: PackageType, ffId: number, qty: number) => {
+        const snapped = snapToBox(nmId, qty);
+        const avail = availAtFfOrNull(nmId, ffId);
+        const q = avail === null ? snapped : Math.min(snapped, boxCap(nmId, avail));
+        if (avail !== null && q < snapped) {
+            setToast({ message: `На «${warehouseNameById(ffId)}» свободно ${formatNumber(avail, 0)} шт — добавлено ${formatNumber(q, 0)}`, type: 'error' });
+        }
         setRows(prev => prev.map(r => {
             if (r.nm_id !== nmId || (r.package_type || 'BOX') !== pkg) return r;
             const next = { ...r.src };
-            if (qty > 0) next[String(ffId)] = qty;
+            if (q > 0) next[String(ffId)] = q;
             else delete next[String(ffId)];
             return { ...r, src: next };
         }));
-    }, []);
+    }, [snapToBox, availAtFfOrNull, boxCap, warehouseNameById]);
 
+    // Цель: ограничиваем суммой свободного остатка SKU и АВТО-набираем источник
+    // (с какого ФФ сборка) жадно по убыванию свободного остатка, чтобы строка
+    // осталась сбалансированной (Σ ист = Σ цель). Нет данных по остаткам —
+    // старое поведение (просто пишем цель, источник не трогаем).
     const setRowTgt = useCallback((nmId: number, pkg: PackageType, whName: string, qty: number) => {
+        const snapped = snapToBox(nmId, qty);
+        const total = boxShipTotalOrNull(nmId); // потолок целыми коробами по всем ФФ
+        const row = rows.find(r => r.nm_id === nmId && (r.package_type || 'BOX') === pkg);
+        const otherTgt = row ? Object.entries(row.tgt).reduce((s, [w, v]) => w === whName ? s : s + (v || 0), 0) : 0;
+        const q = total === null ? snapped : Math.min(snapped, boxCap(nmId, Math.max(0, total - otherTgt)));
+        if (total !== null && q < snapped) {
+            setToast({ message: `Целыми коробами доступно ${formatNumber(total, 0)} шт по SKU — на «${whName}» добавлено ${formatNumber(q, 0)}`, type: 'error' });
+        }
+        const k = nmPpb.get(nmId) || 0;
         setRows(prev => prev.map(r => {
             if (r.nm_id !== nmId || (r.package_type || 'BOX') !== pkg) return r;
-            const next = { ...r.tgt };
-            if (qty > 0) next[whName] = qty;
-            else delete next[whName];
-            return { ...r, tgt: next };
+            const nextTgt = { ...r.tgt };
+            if (q > 0) nextTgt[whName] = q;
+            else delete nextTgt[whName];
+            if (total === null) return { ...r, tgt: nextTgt };
+            // Авто-источник под Σ цели: жадно ЦЕЛЫМИ коробами по убыванию остатка ФФ
+            // (короб собирается на одном ФФ). Так Σ ист = Σ цель и всё кратно коробу.
+            const totalTgt = Object.values(nextTgt).reduce((s, v) => s + (v || 0), 0);
+            const cands = sourceWarehouseIds
+                .map(ffId => { const av = availableAtFf(nmId, ffId); return { ffId, ship: k > 0 ? Math.floor(av / k) * k : av }; })
+                .sort((a, b) => b.ship - a.ship);
+            const newSrc: Record<string, number> = {};
+            let remaining = totalTgt;
+            for (const c of cands) {
+                if (remaining <= 0) break;
+                const take = Math.min(remaining, c.ship);
+                if (take > 0) { newSrc[String(c.ffId)] = take; remaining -= take; }
+            }
+            return { ...r, tgt: nextTgt, src: newSrc };
         }));
+    }, [snapToBox, boxShipTotalOrNull, boxCap, rows, sourceWarehouseIds, availableAtFf, nmPpb]);
+
+    // «Обнулить позицию» — убрать все количества строки (товар остаётся на ФФ);
+    // строка остаётся в матрице для повторного ввода.
+    const clearRow = useCallback((nmId: number, pkg: PackageType) => {
+        setRows(prev => prev.map(r =>
+            r.nm_id === nmId && (r.package_type || 'BOX') === pkg ? { ...r, src: {}, tgt: {} } : r,
+        ));
+    }, []);
+
+    // «Удалить позицию» — убрать строку из распределения целиком.
+    const deleteRow = useCallback((nmId: number, pkg: PackageType) => {
+        setRows(prev => prev.filter(r => !(r.nm_id === nmId && (r.package_type || 'BOX') === pkg)));
     }, []);
 
     // ─── Merge two WB target columns (drag & drop) ────────────────────────
@@ -715,7 +804,6 @@ export default function AssemblyDistributePage() {
                     <DistributeMatrix
                         rows={visibleRows}
                         allRows={rows}
-                        groupByType={typeTab === 'all' && hasNewcomerRows}
                         nmPpb={nmPpb}
                         sourceWarehouseIds={sourceWarehouseIds}
                         targetWarehouseNames={targetWarehouseNames}
@@ -723,11 +811,14 @@ export default function AssemblyDistributePage() {
                         srcSumPerFf={srcSumPerFf}
                         tgtSumPerWb={tgtSumPerWb}
                         availableAtFf={availableAtFf}
+                        availAtFfOrNull={availAtFfOrNull}
                         initialNeedByNmId={initialNeedByNmId}
                         newcomerNmIds={newcomerNmIds}
                         onSrcChange={setRowSrc}
                         onTgtChange={setRowTgt}
                         onMergeWb={handleMergeWb}
+                        onClearRow={clearRow}
+                        onDeleteRow={deleteRow}
                     />
                 </div>
             )}
@@ -741,7 +832,6 @@ interface DistributeMatrixProps {
     rows: AssemblyDraftRow[];
     /** All rows across all package-type tabs — used for cross-type drag detection. */
     allRows: AssemblyDraftRow[];
-    groupByType: boolean;
     nmPpb: Map<number, number | null>;
     sourceWarehouseIds: number[];
     targetWarehouseNames: string[];
@@ -749,17 +839,19 @@ interface DistributeMatrixProps {
     srcSumPerFf: Record<number, number>;
     tgtSumPerWb: Record<string, number>;
     availableAtFf: (nmId: number, ffId: number) => number;
+    availAtFfOrNull: (nmId: number, ffId: number) => number | null;
     initialNeedByNmId: Record<number, number>;
     newcomerNmIds: Set<number>;
     onSrcChange: (nmId: number, pkg: PackageType, ffId: number, qty: number) => void;
     onTgtChange: (nmId: number, pkg: PackageType, whName: string, qty: number) => void;
     onMergeWb: (sourceWb: string, targetWb: string, convertPkg?: PackageType) => void;
+    onClearRow: (nmId: number, pkg: PackageType) => void;
+    onDeleteRow: (nmId: number, pkg: PackageType) => void;
 }
 
 function DistributeMatrix({
     rows,
     allRows,
-    groupByType,
     nmPpb,
     sourceWarehouseIds,
     targetWarehouseNames,
@@ -767,14 +859,19 @@ function DistributeMatrix({
     srcSumPerFf,
     tgtSumPerWb,
     availableAtFf,
+    availAtFfOrNull,
     initialNeedByNmId,
     newcomerNmIds,
     onSrcChange,
     onTgtChange,
     onMergeWb,
+    onClearRow,
+    onDeleteRow,
 }: DistributeMatrixProps) {
     const [dragSourceWb, setDragSourceWb] = useState<string | null>(null);
     const [dragOverWb, setDragOverWb] = useState<string | null>(null);
+    // Сколько строк рендерить (для скорости): по умолчанию 100, «показать ещё».
+    const [visibleLimit, setVisibleLimit] = useState(100);
 
     // Sum of tgt quantities across ALL rows (both tabs) — used to show a
     // secondary "other-type" count in the column header so the user can
@@ -788,6 +885,54 @@ function DistributeMatrix({
         }
         return m;
     }, [allRows]);
+
+    // Свободный остаток SKU по всем ФФ: raw (физический остаток) + ship (сколько
+    // уйдёт целыми коробами, per-FF floor). Для колонки «Свободно» и капа целей.
+    // null = данных нет. Считаем один раз на ререндер.
+    const freeByNm = useMemo(() => {
+        const m = new Map<number, { raw: number; ship: number } | null>();
+        for (const r of rows) {
+            if (m.has(r.nm_id)) continue;
+            const k = nmPpb.get(r.nm_id) || 0;
+            let raw = 0, ship = 0, has = false;
+            for (const ffId of sourceWarehouseIds) {
+                const a = availAtFfOrNull(r.nm_id, ffId);
+                if (a !== null) { has = true; raw += a; ship += k > 0 ? Math.floor(a / k) * k : a; }
+            }
+            m.set(r.nm_id, has ? { raw, ship } : null);
+        }
+        return m;
+    }, [rows, sourceWarehouseIds, availAtFfOrNull, nmPpb]);
+
+    // ─── Сортировка строк кликом по заголовку столбца ──────────────────────
+    // desc → asc → выкл (исходный порядок). WB-цели сортируются по клику; их же
+    // drag (merge) браузер различает по движению мыши — клик ≠ перетаскивание.
+    const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
+    const toggleSort = useCallback((key: string) => {
+        setSort(prev => {
+            if (!prev || prev.key !== key) return { key, dir: 'desc' };
+            return prev.dir === 'desc' ? { key, dir: 'asc' } : null;
+        });
+    }, []);
+    const sortValue = useCallback((row: AssemblyDraftRow, key: string): number | string => {
+        if (key === 'art') return (row.vendor_code || `nm:${row.nm_id}`).toLowerCase();
+        if (key === 'ship' || key === 'srcSum') return Object.values(row.src).reduce((s, v) => s + (v || 0), 0);
+        if (key === 'tgtSum') return Object.values(row.tgt).reduce((s, v) => s + (v || 0), 0);
+        if (key === 'free') { const f = freeByNm.get(row.nm_id); return f ? f.raw : -1; }
+        if (key.startsWith('src:')) return row.src[key.slice(4)] || 0;
+        if (key.startsWith('tgt:')) return row.tgt[key.slice(4)] || 0;
+        return 0;
+    }, [freeByNm]);
+    const sortRows = useCallback((list: AssemblyDraftRow[]): AssemblyDraftRow[] => {
+        if (!sort) return list;
+        const dir = sort.dir === 'asc' ? 1 : -1;
+        return [...list].sort((a, b) => {
+            const va = sortValue(a, sort.key), vb = sortValue(b, sort.key);
+            const cmp = typeof va === 'string' || typeof vb === 'string' ? String(va).localeCompare(String(vb)) : va - vb;
+            return cmp * dir;
+        });
+    }, [sort, sortValue]);
+    const sortArrow = (key: string) => (sort?.key === key ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '');
 
     // Icon for the "other" package type: if visible rows are MONO → other is BOX, vice versa.
     const otherPkgLabel = rows.some(r => r.package_type === 'MONOPALLET') ? '📦' : '📐';
@@ -808,10 +953,11 @@ function DistributeMatrix({
             <thead>
                 {/* Group headers */}
                 <tr>
-                    <th style={{ ...thStyle, textAlign: 'left', minWidth: 200, position: 'sticky', left: 0, zIndex: 3 }}>
-                        Артикул
+                    <th onClick={() => toggleSort('art')} style={{ ...thStyle, textAlign: 'left', minWidth: 200, position: 'sticky', left: 0, zIndex: 3, cursor: 'pointer', userSelect: 'none' }} title="Клик — сортировать по артикулу">
+                        Артикул{sortArrow('art')}
                     </th>
-                    <th style={{ ...thStyle, minWidth: 92 }} title="Отгружаем (Σ источников строки) / Потребность по SKU из «Потребности по складам». Оранжевым — отгрузка больше потребности (лишек).">Отгр. / Потреб.</th>
+                    <th onClick={() => toggleSort('ship')} style={{ ...thStyle, minWidth: 92, cursor: 'pointer', userSelect: 'none' }} title="Отгружаем (Σ источников строки) / Потребность по SKU. Клик — сортировать по отгрузке.">Отгр. / Потреб.{sortArrow('ship')}</th>
+                    <th onClick={() => toggleSort('free')} style={{ ...thStyle, minWidth: 76, cursor: 'pointer', userSelect: 'none' }} title="Остаток, ещё не разложенный: свободно на ФФ минус уже взято. Клик — сортировать.">Свободно{sortArrow('free')}</th>
                     <th
                         colSpan={sourceWarehouseIds.length + 1}
                         style={{ ...thStyle, textAlign: 'center', background: 'rgba(59,130,246,0.08)', letterSpacing: 1, fontWeight: 700 }}
@@ -830,19 +976,20 @@ function DistributeMatrix({
                 <tr>
                     <th style={{ ...thStyle, textAlign: 'left', position: 'sticky', left: 0, zIndex: 3 }} />
                     <th style={thStyle} />
+                    <th style={thStyle} />
                     {sourceWarehouseIds.map(ffId => {
                         const total = srcSumPerFf[ffId] || 0;
                         return (
-                            <th key={`hdr-src-${ffId}`} style={{ ...thStyle, background: 'rgba(59,130,246,0.04)' }}>
-                                <div>{warehouseNameById(ffId)}</div>
+                            <th key={`hdr-src-${ffId}`} onClick={() => toggleSort(`src:${ffId}`)} style={{ ...thStyle, background: 'rgba(59,130,246,0.04)', cursor: 'pointer', userSelect: 'none' }} title={`Клик — сортировать по «${warehouseNameById(ffId)}»`}>
+                                <div>{warehouseNameById(ffId)}{sortArrow(`src:${ffId}`)}</div>
                                 <div style={{ fontSize: 13, fontWeight: 700, color: total > 0 ? 'var(--color-accent)' : 'var(--color-text-muted)', marginTop: 2 }}>
                                     {total > 0 ? formatNumber(total, 0) : '—'}
                                 </div>
                             </th>
                         );
                     })}
-                    <th style={{ ...thStyle, background: 'rgba(59,130,246,0.08)' }}>
-                        <div>Σ ист</div>
+                    <th onClick={() => toggleSort('srcSum')} style={{ ...thStyle, background: 'rgba(59,130,246,0.08)', cursor: 'pointer', userSelect: 'none' }} title="Клик — сортировать по Σ источников">
+                        <div>Σ ист{sortArrow('srcSum')}</div>
                         <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-accent)', marginTop: 2 }}>
                             {formatNumber(Object.values(srcSumPerFf).reduce((s, v) => s + v, 0), 0)}
                         </div>
@@ -856,6 +1003,7 @@ function DistributeMatrix({
                             <th
                                 key={`hdr-tgt-${whName}`}
                                 draggable
+                                onClick={() => toggleSort(`tgt:${whName}`)}
                                 onDragStart={e => {
                                     e.dataTransfer.effectAllowed = 'move';
                                     e.dataTransfer.setData('text/plain', whName);
@@ -918,7 +1066,7 @@ function DistributeMatrix({
                                     setDragOverWb(null);
                                 }}
                                 title={[
-                                    `Перетащи на другой WB-склад чтобы объединить колонки`,
+                                    `Клик — сортировать по этому складу · перетащи на другой WB-склад чтобы объединить`,
                                     whName,
                                     `К отгрузке: ${formatNumber(total, 0)}`,
                                     otherTotal > 0
@@ -938,7 +1086,7 @@ function DistributeMatrix({
                                     border: isOver ? '2px dashed var(--color-success, #22c55e)' : undefined,
                                 }}
                             >
-                                <div>{whName.length > 14 ? whName.slice(0, 14) + '…' : whName}</div>
+                                <div>{whName.length > 14 ? whName.slice(0, 14) + '…' : whName}{sortArrow(`tgt:${whName}`)}</div>
                                 <div style={{ fontSize: 13, fontWeight: 700, color: total > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', marginTop: 2 }}>
                                     {total > 0 ? formatNumber(total, 0) : '—'}
                                 </div>
@@ -950,8 +1098,8 @@ function DistributeMatrix({
                             </th>
                         );
                     })}
-                    <th style={{ ...thStyle, background: 'rgba(245,158,11,0.08)' }}>
-                        <div>Σ цель</div>
+                    <th onClick={() => toggleSort('tgtSum')} style={{ ...thStyle, background: 'rgba(245,158,11,0.08)', cursor: 'pointer', userSelect: 'none' }} title="Клик — сортировать по Σ целей">
+                        <div>Σ цель{sortArrow('tgtSum')}</div>
                         <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-warning)', marginTop: 2 }}>
                             {formatNumber(Object.values(tgtSumPerWb).reduce((s, v) => s + v, 0), 0)}
                         </div>
@@ -1018,6 +1166,38 @@ function DistributeMatrix({
                                             }}>📦 кор</span>
                                     )}
                                     <span>{row.vendor_code || `nm:${row.nm_id}`}</span>
+                                    <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 2 }}>
+                                        <button
+                                            type="button"
+                                            title="Обнулить позицию: убрать все количества (товар останется на ФФ)"
+                                            onClick={() => onClearRow(row.nm_id, (row.package_type || 'BOX') as PackageType)}
+                                            disabled={srcSum === 0 && tgtSum === 0}
+                                            style={{
+                                                border: 'none', background: 'transparent',
+                                                cursor: srcSum === 0 && tgtSum === 0 ? 'default' : 'pointer',
+                                                fontSize: 12, lineHeight: 1, padding: '2px 4px', borderRadius: 6,
+                                                color: 'var(--color-text-muted)', opacity: srcSum === 0 && tgtSum === 0 ? 0.25 : 0.6,
+                                            }}
+                                        >
+                                            ⌫
+                                        </button>
+                                        <button
+                                            type="button"
+                                            title="Удалить позицию из распределения"
+                                            onClick={() => {
+                                                if (window.confirm(`Удалить позицию «${row.vendor_code || `nm:${row.nm_id}`}» из распределения?`)) {
+                                                    onDeleteRow(row.nm_id, (row.package_type || 'BOX') as PackageType);
+                                                }
+                                            }}
+                                            style={{
+                                                border: 'none', background: 'transparent', cursor: 'pointer',
+                                                fontSize: 12, lineHeight: 1, padding: '2px 4px', borderRadius: 6,
+                                                color: 'var(--color-danger)', opacity: 0.6,
+                                            }}
+                                        >
+                                            ✕
+                                        </button>
+                                    </span>
                                 </div>
                                 <div style={{ fontSize: 10, color: 'var(--color-text-muted)' }}>
                                     {row.barcode}
@@ -1052,6 +1232,22 @@ function DistributeMatrix({
                             >
                                 {srcSum}/{initialNeed > 0 ? initialNeed : '?'}
                             </td>
+                            <td style={{ ...tdStyle }} title="Сколько ещё можно разложить: свободно на ФФ минус уже взято в источники этой строки. Снизу — в целых коробах.">
+                                {(() => {
+                                    const free = freeByNm.get(row.nm_id);
+                                    if (!free) return <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
+                                    const k = nmPpb.get(row.nm_id) || 0;
+                                    // Остаток = свободно − уже взято в источники (srcSum). Убывает по мере раскладки.
+                                    const remRaw = Math.max(0, free.raw - srcSum);
+                                    const remBoxes = k > 0 ? Math.max(0, Math.floor((free.ship - srcSum) / k)) : 0;
+                                    return (
+                                        <>
+                                            <div style={{ fontWeight: 600, color: remRaw > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }} title={`Всего свободно: ${formatNumber(free.raw, 0)} шт`}>{formatNumber(remRaw, 0)}</div>
+                                            {k > 0 ? <div style={{ fontSize: 10, color: 'var(--color-text-muted)' }}>{formatNumber(remBoxes, 0)} кор</div> : null}
+                                        </>
+                                    );
+                                })()}
+                            </td>
 
                             {sourceWarehouseIds.map(ffId => {
                                 const qty = row.src[String(ffId)] || 0;
@@ -1070,6 +1266,8 @@ function DistributeMatrix({
                                             value={qty}
                                             onChange={(v) => onSrcChange(row.nm_id, (row.package_type || 'BOX') as PackageType, ffId, v)}
                                             invalid={!balanced && qty > 0}
+                                            box={nmPpb.get(row.nm_id) || 0}
+                                            max={availAtFfOrNull(row.nm_id, ffId) ?? undefined}
                                         />
                                         <div
                                             style={{
@@ -1097,6 +1295,8 @@ function DistributeMatrix({
 
                             {targetWarehouseNames.map(whName => {
                                 const qty = row.tgt[whName] || 0;
+                                const free = freeByNm.get(row.nm_id);
+                                const tgtMax = !free ? undefined : Math.max(0, free.ship - (tgtSum - qty));
                                 return (
                                     <td
                                         key={`tgt-${row.nm_id}-${whName}`}
@@ -1109,6 +1309,8 @@ function DistributeMatrix({
                                             value={qty}
                                             onChange={(v) => onTgtChange(row.nm_id, (row.package_type || 'BOX') as PackageType, whName, v)}
                                             invalid={!balanced && qty > 0}
+                                            box={nmPpb.get(row.nm_id) || 0}
+                                            max={tgtMax}
                                         />
                                     </td>
                                 );
@@ -1126,50 +1328,27 @@ function DistributeMatrix({
                         </tr>
                     );
                     };
-                    if (!groupByType) return rows.map(renderRow);
+                    const totalCols = 3 + sourceWarehouseIds.length + 1 + targetWarehouseNames.length + 1;
+                    // Рендерим строки частями (по умолчанию 100) — иначе 400+ строк × ~20
+                    // колонок тормозят перерисовку при каждой правке. Суммы в шапке и
+                    // в заголовках секций считаются по ВСЕМ строкам — режется только показ.
+                    const moreRow = (shown: number, total: number) => total > shown ? (
+                        <tr key="more-row">
+                            <td colSpan={totalCols} style={{ padding: '10px 12px', background: '#fafafe', borderTop: '1px solid var(--color-border)', borderBottom: '1px solid var(--color-border)' }}>
+                                <div style={{ position: 'sticky', left: 12, width: 'fit-content', display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+                                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Показано {formatNumber(shown, 0)} из {formatNumber(total, 0)}</span>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => setVisibleLimit(l => l + 100)}>Показать ещё 100</button>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => setVisibleLimit(total)}>Показать все</button>
+                                </div>
+                            </td>
+                        </tr>
+                    ) : null;
 
-                    // «Все»: группируем строки секциями обычные / новинки —
-                    // делает раздельность будущих заявок видимой глазами.
-                    const regular = rows.filter(r => !newcomerNmIds.has(r.nm_id));
-                    const newcomers = rows.filter(r => newcomerNmIds.has(r.nm_id));
-                    const totalCols = 2 + sourceWarehouseIds.length + 1 + targetWarehouseNames.length + 1;
-                    const renderSection = (label: string, list: AssemblyDraftRow[], isNew: boolean) => {
-                        if (list.length === 0) return null;
-                        const sSrc = list.reduce((s, r) => s + Object.values(r.src).reduce((a, b) => a + (b || 0), 0), 0);
-                        const sTgt = list.reduce((s, r) => s + Object.values(r.tgt).reduce((a, b) => a + (b || 0), 0), 0);
-                        return (
-                            <Fragment key={`sec-${isNew ? 'new' : 'reg'}`}>
-                                <tr>
-                                    <td colSpan={totalCols} style={{
-                                        padding: '8px 12px',
-                                        background: isNew ? 'rgba(168,85,247,0.08)' : 'rgba(59,130,246,0.06)',
-                                        borderTop: '2px solid var(--color-border)',
-                                        borderBottom: '1px solid var(--color-border)',
-                                    }}>
-                                        <div style={{
-                                            position: 'sticky', left: 12, width: 'fit-content',
-                                            display: 'flex', gap: 16, alignItems: 'center',
-                                            fontSize: 12, fontWeight: 700,
-                                        }}>
-                                            <span style={{ color: isNew ? '#7e22ce' : 'var(--color-text)' }}>
-                                                {label} · {list.length}
-                                            </span>
-                                            <span style={{ fontWeight: 600, color: 'var(--color-text-muted)' }}>
-                                                Σ ист {formatNumber(sSrc, 0)} · Σ цель {formatNumber(sTgt, 0)}
-                                            </span>
-                                        </div>
-                                    </td>
-                                </tr>
-                                {list.map(renderRow)}
-                            </Fragment>
-                        );
-                    };
-                    return (
-                        <>
-                            {renderSection('Обычные товары', regular, false)}
-                            {renderSection('🆕 Новинки', newcomers, true)}
-                        </>
-                    );
+                    // Единый список (без разделения на обычные/новинки) — чтобы
+                    // сортировка действовала на все строки сразу. Новинки помечены
+                    // 🆕 в строке; на commit они всё равно уйдут отдельными заявками.
+                    const sorted = sortRows(rows);
+                    return <>{sorted.slice(0, visibleLimit).map(renderRow)}{moreRow(Math.min(visibleLimit, sorted.length), sorted.length)}</>;
                 })()}
             </tbody>
         </table>
@@ -1182,12 +1361,19 @@ interface NumericCellProps {
     value: number;
     onChange: (v: number) => void;
     invalid?: boolean;
+    /** Кратность короба (K). >0 → у активной ячейки кнопки ±короб и подсказка «N кор». */
+    box?: number;
+    /** Потолок в штуках (свободный остаток ФФ). undefined → без ограничения. */
+    max?: number;
 }
 
-function NumericCell({ value, onChange, invalid }: NumericCellProps) {
+function NumericCell({ value, onChange, invalid, box, max }: NumericCellProps) {
     const [editing, setEditing] = useState(false);
     const [text, setText] = useState('');
     const inputRef = useRef<HTMLInputElement>(null);
+    const k = box && box > 0 ? box : 0;
+    // Потолок, выровненный вниз по коробу (если остаток задан).
+    const cap = max === undefined ? Infinity : (k > 0 ? Math.floor(Math.max(0, max) / k) * k : Math.max(0, max));
 
     useEffect(() => {
         if (editing && inputRef.current) {
@@ -1204,32 +1390,73 @@ function NumericCell({ value, onChange, invalid }: NumericCellProps) {
         }
     };
 
+    // Текущее значение из ввода (или value), для шага и подсказки.
+    const curVal = (() => { const n = parseInt(text, 10); return isNaN(n) ? value : Math.max(0, n); })();
+    // Шаг ±один короб: выровнять на сетку короба (вниз) и прибавить/убавить K.
+    // onMouseDown+preventDefault — чтобы инпут не терял фокус (иначе onBlur закроет ввод).
+    const stepBox = (dir: 1 | -1) => {
+        const step = k > 0 ? k : 1;
+        const base = k > 0 ? Math.floor(curVal / k) * k : curVal;
+        const next = Math.min(cap, Math.max(0, base + dir * step));
+        setText(String(next));
+        onChange(next);
+        inputRef.current?.focus();
+    };
+
+    const stepBtnStyle = {
+        width: 22, height: 24, padding: 0, flex: '0 0 auto',
+        border: '1px solid var(--color-border)', borderRadius: 6,
+        background: 'var(--color-bg-card)', cursor: 'pointer',
+        fontSize: 15, lineHeight: 1, color: 'var(--color-accent)',
+    } as const;
+
     if (editing) {
         return (
-            <input
-                ref={inputRef}
-                type="number"
-                min={0}
-                value={text}
-                onChange={e => setText(e.target.value)}
-                onBlur={commit}
-                onKeyDown={e => {
-                    if (e.key === 'Enter') inputRef.current?.blur();
-                    if (e.key === 'Escape') {
-                        setText(String(value || ''));
-                        setEditing(false);
-                    }
-                }}
-                style={{
-                    width: 70,
-                    padding: '3px 6px',
-                    borderRadius: 6,
-                    border: '2px solid var(--color-accent)',
-                    fontSize: 12,
-                    textAlign: 'right',
-                    outline: 'none',
-                }}
-            />
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                {k > 0 && (
+                    <button type="button" tabIndex={-1} title={`− короб (${formatNumber(k, 0)} шт)`}
+                        onMouseDown={e => { e.preventDefault(); stepBox(-1); }}
+                        style={stepBtnStyle}
+                    >−</button>
+                )}
+                <input
+                    ref={inputRef}
+                    type="number"
+                    min={0}
+                    step={k > 0 ? k : 1}
+                    value={text}
+                    onChange={e => setText(e.target.value)}
+                    onBlur={commit}
+                    onKeyDown={e => {
+                        if (e.key === 'Enter') inputRef.current?.blur();
+                        if (e.key === 'Escape') {
+                            setText(String(value || ''));
+                            setEditing(false);
+                        }
+                    }}
+                    style={{
+                        width: k > 0 ? 54 : 70,
+                        padding: '3px 6px',
+                        borderRadius: 6,
+                        border: '2px solid var(--color-accent)',
+                        fontSize: 12,
+                        textAlign: 'right',
+                        outline: 'none',
+                    }}
+                />
+                {k > 0 && (
+                    <button type="button" tabIndex={-1} disabled={curVal >= cap}
+                        title={curVal >= cap ? 'Достигнут свободный остаток ФФ' : `+ короб (${formatNumber(k, 0)} шт)`}
+                        onMouseDown={e => { e.preventDefault(); if (curVal < cap) stepBox(1); }}
+                        style={{ ...stepBtnStyle, opacity: curVal >= cap ? 0.4 : 1, cursor: curVal >= cap ? 'default' : 'pointer' }}
+                    >+</button>
+                )}
+                {k > 0 && (
+                    <span style={{ fontSize: 10, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }}>
+                        {formatNumber(Math.floor(curVal / k), 0)} кор{cap !== Infinity ? ` / макс ${formatNumber(Math.floor(cap / k), 0)}` : ''}
+                    </span>
+                )}
+            </div>
         );
     }
 
@@ -1248,7 +1475,7 @@ function NumericCell({ value, onChange, invalid }: NumericCellProps) {
                 fontWeight: value > 0 ? 600 : 400,
                 minHeight: 22,
             }}
-            title="Нажмите для редактирования"
+            title={k > 0 ? `${formatNumber(value, 0)} шт = ${formatNumber(Math.floor(value / k), 0)} кор · кратно ${formatNumber(k, 0)}` : 'Нажмите для редактирования'}
         >
             {value > 0 ? formatNumber(value, 0) : '—'}
         </div>

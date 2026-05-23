@@ -5,7 +5,7 @@ import { api } from '@/lib/api';
 import { exportToExcel, formatNumber } from '@/lib/utils';
 import { Toast } from '@/components';
 import KpiCard from '@/components/KpiCard';
-import type { AssemblyDraft, AssemblyDraftUnitRef, HandedUnitItem, PackageType, Warehouse } from '@/types/api';
+import type { AcceptanceCheckRequest, AcceptanceFlags, AssemblyDraft, AssemblyDraftUnitRef, HandedUnitItem, PackageType, Warehouse } from '@/types/api';
 import {
     buildFfUnits,
     findDraftUnit,
@@ -57,6 +57,11 @@ export default function AssemblyRequestUnitPage() {
     const [editItems, setEditItems] = useState<EditItem[]>([]);
     const [addQuery, setAddQuery] = useState('');
     const [moveOpen, setMoveOpen] = useState(false);
+    // Приёмка WB для «Сменить склад WB»: nm_id → {wb_name: флаги}. Грузим лениво
+    // при открытии дропдауна (live-вызов WB API, кэш 5 мин на backend).
+    const [moveAcc, setMoveAcc] = useState<Map<number, Record<string, AcceptanceFlags>>>(new Map());
+    const [accLoading, setAccLoading] = useState(false);
+    const [accError, setAccError] = useState<string | null>(null);
 
     useEffect(() => {
         if (!draftId) { setError('Не указан ID черновика'); setLoading(false); return; }
@@ -337,8 +342,62 @@ export default function AssemblyRequestUnitPage() {
         }
     }, [draftId, unitRef, router, slug, backToFf]);
 
+    // ─── Проверка приёмки WB для переноса ────────────────────────────────
+    // Флаг приёмки, соответствующий упаковке этого юнита.
+    const pkgFlag: 'can_box' | 'can_monopallet' | 'can_supersafe' =
+        pkg === 'MONOPALLET' ? 'can_monopallet' : pkg === 'SUPERSAFE' ? 'can_supersafe' : 'can_box';
+    const accReady = moveAcc.size > 0;
+
+    // Склад-получатель блокируется, если WB явно не принимает хотя бы один SKU
+    // юнита этой упаковкой. blocked — число таких SKU; known — есть ли данные.
+    const targetAcceptance = useCallback((wb: string): { ok: boolean; blocked: number; known: boolean } => {
+        if (!unit) return { ok: false, blocked: 0, known: false };
+        let blocked = 0;
+        let known = false;
+        // Блокируем только при ЯВНОМ отказе WB по этой упаковке (флаг есть и false).
+        // Нет данных по складу → benefit of the doubt (как isClosed в WarehouseNeedView).
+        for (const it of unit.items) {
+            const flags = moveAcc.get(it.nmId)?.[wb];
+            if (flags) { known = true; if (!flags[pkgFlag]) blocked++; }
+        }
+        return { ok: blocked === 0, blocked, known };
+    }, [unit, moveAcc, pkgFlag]);
+
+    const loadAcceptance = useCallback(async (force = false) => {
+        if (!unit || unit.items.length === 0) return;
+        setAccLoading(true);
+        setAccError(null);
+        try {
+            const body: AcceptanceCheckRequest = {
+                items: unit.items.map(it => ({ nm_id: it.nmId, barcode: it.barcode, distribution: { [wbName]: it.qty } })),
+            };
+            const resp = await api.checkWbAcceptance(body, force);
+            const m = new Map<number, Record<string, AcceptanceFlags>>();
+            for (const it of resp.items) m.set(it.nm_id, it.availability);
+            setMoveAcc(m);
+        } catch (e: unknown) {
+            setAccError(e instanceof Error ? e.message : 'Не удалось проверить приёмку WB');
+        } finally {
+            setAccLoading(false);
+        }
+    }, [unit, wbName]);
+
+    const openMove = useCallback(() => {
+        const willOpen = !moveOpen;
+        setMoveOpen(willOpen);
+        if (willOpen && moveAcc.size === 0 && !accLoading) loadAcceptance();
+    }, [moveOpen, moveAcc, accLoading, loadAcceptance]);
+
     const handleMoveToWb = useCallback(async (newWb: string) => {
         if (!draftId) return;
+        const acc = targetAcceptance(newWb);
+        if (!acc.ok) {
+            setToast({
+                message: `На «${newWb}» нельзя сдать ${acc.blocked} из ${unit?.items.length ?? 0} SKU упаковкой «${PKG_LABEL_RU[pkg] || pkg}» — перенос отменён`,
+                type: 'error',
+            });
+            return;
+        }
         if (!window.confirm(`Перенести заявку «${ffName} → ${wbName}» на склад «${newWb}»? Поедет только товар этого ФФ; если на «${newWb}» уже есть заявка с этого ФФ — позиции сольются.`)) return;
         setMoveOpen(false);
         setBusy(true);
@@ -356,7 +415,7 @@ export default function AssemblyRequestUnitPage() {
         } finally {
             setBusy(false);
         }
-    }, [draftId, unitRef, ffName, wbName, ffId, pkg, isNewcomer, typeScope, router, slug]);
+    }, [draftId, unitRef, ffName, wbName, ffId, pkg, isNewcomer, typeScope, router, slug, targetAcceptance, unit]);
 
     if (loading) {
         return <div className="animate-in"><div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка…</div></div>;
@@ -419,27 +478,43 @@ export default function AssemblyRequestUnitPage() {
                             <button className="btn btn-secondary" onClick={exportUnit}>📥 Excel</button>
                             {editable && availableWbTargets.length > 0 && (
                                 <div style={{ position: 'relative' }}>
-                                    <button className="btn btn-secondary" onClick={() => setMoveOpen(o => !o)} disabled={busy} title="Перенести заявку этого ФФ на другой WB-склад">🔀 Сменить склад WB</button>
+                                    <button className="btn btn-secondary" onClick={openMove} disabled={busy} title="Перенести заявку этого ФФ на другой WB-склад">🔀 Сменить склад WB</button>
                                     {moveOpen && (
                                         <>
                                             <div onClick={() => setMoveOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 19 }} />
                                             <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 12, boxShadow: 'var(--shadow-glass)', zIndex: 20, minWidth: 340, maxHeight: 420, overflowY: 'auto', padding: 8 }}>
-                                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', padding: '4px 8px 10px' }}>Перенести «{unit.wbName}» на склад:</div>
+                                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', padding: '4px 8px 10px' }}>
+                                                    Перенести «{unit.wbName}» на склад{accLoading ? ' · проверка приёмки WB…' : ''}:
+                                                </div>
+                                                {accError && (
+                                                    <div style={{ fontSize: 12, color: 'var(--color-danger)', padding: '0 8px 8px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                                        ⚠️ {accError}
+                                                        <button className="btn btn-secondary btn-sm" onClick={() => loadAcceptance(true)} disabled={accLoading}>🔄 Повторить</button>
+                                                    </div>
+                                                )}
                                                 {availableWbTargets.map(wb => {
                                                     const st = wbTargetStats.get(wb);
+                                                    const acc = targetAcceptance(wb);
+                                                    const blocked = accReady && !acc.ok;
+                                                    const disabled = busy || accLoading || !accReady || blocked;
                                                     return (
                                                         <button
                                                             key={wb}
                                                             className="btn btn-secondary"
-                                                            style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3, width: '100%', textAlign: 'left', marginBottom: 6, padding: '8px 12px', height: 'auto' }}
+                                                            style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 3, width: '100%', textAlign: 'left', marginBottom: 6, padding: '8px 12px', height: 'auto', opacity: blocked ? 0.6 : 1 }}
                                                             onClick={() => handleMoveToWb(wb)}
-                                                            disabled={busy}
+                                                            disabled={disabled}
+                                                            title={blocked ? `«${wb}» не принимает ${acc.blocked} из ${unit.items.length} SKU упаковкой «${PKG_LABEL_RU[pkg] || pkg}»` : undefined}
                                                         >
-                                                            <span style={{ fontWeight: 600, fontSize: 14 }}>→ {wb}</span>
-                                                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 400 }}>
-                                                                {st
-                                                                    ? `📦 ${formatNumber(st.boxes, 0)} кор · 🏷️ ${formatNumber(st.sku, 0)} SKU · ${formatNumber(st.qty, 0)} шт`
-                                                                    : 'пусто — новая линия'}
+                                                            <span style={{ fontWeight: 600, fontSize: 14 }}>
+                                                                {blocked ? '⛔' : acc.known ? '✅' : '→'} {wb}
+                                                            </span>
+                                                            <span style={{ fontSize: 12, color: blocked ? 'var(--color-danger)' : 'var(--color-text-muted)', fontWeight: 400 }}>
+                                                                {blocked
+                                                                    ? `не примут ${acc.blocked}/${unit.items.length} SKU (${PKG_LABEL_RU[pkg] || pkg})`
+                                                                    : st
+                                                                        ? `📦 ${formatNumber(st.boxes, 0)} кор · 🏷️ ${formatNumber(st.sku, 0)} SKU · ${formatNumber(st.qty, 0)} шт`
+                                                                        : 'пусто — новая линия'}
                                                             </span>
                                                         </button>
                                                     );
