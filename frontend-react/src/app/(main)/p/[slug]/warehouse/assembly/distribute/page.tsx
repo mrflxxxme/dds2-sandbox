@@ -33,6 +33,19 @@ interface StockNeedResponse {
 
 const AUTOSAVE_DEBOUNCE_MS = 5000;
 
+/** Схлопнуть дубли строк по nm_id+упаковка, оставляя первую. Старые черновики
+ *  могли содержать задвоенные SKU (баг прежней генерации) — это ломало
+ *  сортировку/редактирование и задваивало отгрузку при commit. */
+function dedupeRows(rows: AssemblyDraftRow[]): AssemblyDraftRow[] {
+    const seen = new Set<string>();
+    return rows.filter(r => {
+        const k = `${r.nm_id}-${r.package_type || 'BOX'}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+    });
+}
+
 export default function AssemblyDistributePage() {
     const params = useParams();
     const router = useRouter();
@@ -104,7 +117,7 @@ export default function AssemblyDistributePage() {
                 setPalletWeightKg(draftResp.distribution.pallet_weight_kg || 0);
                 setSourceWarehouseIds(draftResp.distribution.source_warehouse_ids || []);
                 setTargetWarehouseNames(draftResp.distribution.target_warehouse_names || []);
-                setRows(draftResp.distribution.rows || []);
+                setRows(dedupeRows(draftResp.distribution.rows || []));
                 setColdStartShares(draftResp.distribution.cold_start_shares || null);
                 setHandedUnits(draftResp.distribution.handed_units || []);
                 setNewcomerNmIds(new Set(draftResp.newcomer_nm_ids || []));
@@ -216,12 +229,6 @@ export default function AssemblyDistributePage() {
             }
         }
         return m;
-    }, [stockNeed]);
-
-    const wbNeedByNmIdAndWh = useCallback((nmId: number, whName: string): number => {
-        if (!stockNeed?.warehouses) return 0;
-        const wh = stockNeed.warehouses.find(w => w.name === whName);
-        return wh?.articles?.[nmId]?.need || 0;
     }, [stockNeed]);
 
     const availableAtFf = useCallback((nmId: number, ffId: number): number => {
@@ -439,81 +446,6 @@ export default function AssemblyDistributePage() {
         setTargetWarehouseNames(prev => prev.filter(n => n !== sourceWb));
     }, []);
 
-    // ─── Auto-balance ────────────────────────────────────────────────────
-    const handleAutoBalance = useCallback(() => {
-        const newRows: AssemblyDraftRow[] = rows.map(r => {
-            // Quote: src приоритетнее tgt. Если пользователь явно ввёл src qty
-            // (например уменьшил с 36 до 32), используем именно эту цифру —
-            // tgt пересчитается. Если src=0, fallback на tgt как «желаемое».
-            const srcSum = Object.values(r.src).reduce((s, v) => s + (v || 0), 0);
-            const tgtSum = Object.values(r.tgt).reduce((s, v) => s + (v || 0), 0);
-            const quote = srcSum > 0 ? srcSum : tgtSum;
-            if (quote <= 0) {
-                return { ...r, src: {}, tgt: {} };
-            }
-
-            // src: greedy by descending available_at_ff
-            const srcCandidates = sourceWarehouseIds
-                .map(ffId => ({ ffId, avail: availableAtFf(r.nm_id, ffId) }))
-                .sort((a, b) => b.avail - a.avail);
-
-            const newSrc: Record<string, number> = {};
-            let remainingSrc = quote;
-            for (const c of srcCandidates) {
-                if (remainingSrc <= 0) break;
-                const take = Math.min(remainingSrc, c.avail);
-                if (take > 0) {
-                    newSrc[String(c.ffId)] = take;
-                    remainingSrc -= take;
-                }
-            }
-
-            const newTgt: Record<string, number> = {};
-            const actualSent = quote - remainingSrc;
-
-            // Приоритет: cold_start_shares (для cold-start сборок без wbNeed),
-            // далее wbNeed pro-rata, далее fallback в первый склад.
-            const coldStartCandidates = coldStartShares
-                ? targetWarehouseNames
-                    .map(whName => ({ whName, share: coldStartShares[whName] || 0 }))
-                    .filter(x => x.share > 0)
-                : [];
-            const wbNeeds = targetWarehouseNames
-                .map(whName => ({ whName, need: wbNeedByNmIdAndWh(r.nm_id, whName) }))
-                .filter(x => x.need > 0);
-            const totalNeed = wbNeeds.reduce((s, x) => s + x.need, 0);
-
-            const proRata = (items: Array<{ whName: string; weight: number }>, total: number): void => {
-                const sumW = items.reduce((s, x) => s + x.weight, 0) || 1;
-                let allocated = 0;
-                for (let i = 0; i < items.length; i++) {
-                    const x = items[i];
-                    const isLast = i === items.length - 1;
-                    const portion = isLast
-                        ? total - allocated
-                        : Math.floor((x.weight / sumW) * total);
-                    if (portion > 0) {
-                        newTgt[x.whName] = portion;
-                        allocated += portion;
-                    }
-                }
-            };
-
-            if (actualSent > 0 && coldStartCandidates.length > 0) {
-                proRata(coldStartCandidates.map(x => ({ whName: x.whName, weight: x.share })), actualSent);
-            } else if (totalNeed > 0 && actualSent > 0) {
-                proRata(wbNeeds.map(x => ({ whName: x.whName, weight: x.need })), actualSent);
-            } else if (actualSent > 0 && targetWarehouseNames.length > 0) {
-                newTgt[targetWarehouseNames[0]] = actualSent;
-            }
-
-            return { ...r, src: newSrc, tgt: newTgt };
-        });
-        setRows(newRows);
-        const mode = coldStartShares ? 'по cold-start долям' : 'по wbNeed';
-        setToast({ message: `Распределено автоматически (${mode})`, type: 'success' });
-    }, [rows, sourceWarehouseIds, targetWarehouseNames, availableAtFf, wbNeedByNmIdAndWh, coldStartShares]);
-
     // ─── Commit ──────────────────────────────────────────────────────────
     // Должно совпадать с backend `commit_draft` группировкой:
     // (source_ff_id, target_wb_name, package_type, is_newcomer) → 1 AssemblyRequest.
@@ -659,65 +591,6 @@ export default function AssemblyDistributePage() {
                         {saving
                             ? 'Сохранение...'
                             : `Предпросмотр: ${typeTab === 'all' ? '' : typeTab === 'newcomer' ? '🆕 Новинки · ' : 'Обычные · '}${pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'} (${uniqueAssemblyCount}) →`}
-                    </button>
-                </div>
-            </div>
-
-            {/* Settings row */}
-            <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'end' }}>
-                <div className="form-group">
-                    <label className="form-label" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                        Дата готовности
-                    </label>
-                    <input
-                        type="date"
-                        className="form-input"
-                        value={estimatedReadyDate}
-                        onChange={e => setEstimatedReadyDate(e.target.value)}
-                    />
-                </div>
-                <div className="form-group">
-                    <label className="form-label" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                        Палеты (шт)
-                    </label>
-                    <input
-                        type="number"
-                        min={1}
-                        className="form-input"
-                        value={palletsCount}
-                        onChange={e => setPalletsCount(Math.max(1, Number(e.target.value) || 1))}
-                        style={{ width: 100 }}
-                    />
-                </div>
-                <div className="form-group">
-                    <label className="form-label" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                        Вес палеты (кг)
-                    </label>
-                    <input
-                        type="number"
-                        min={0}
-                        step={0.1}
-                        className="form-input"
-                        value={palletWeightKg}
-                        onChange={e => setPalletWeightKg(Math.max(0, Number(e.target.value) || 0))}
-                        style={{ width: 120 }}
-                    />
-                </div>
-                <div className="form-group" style={{ flex: 1, minWidth: 200 }}>
-                    <label className="form-label" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                        Комментарий
-                    </label>
-                    <input
-                        type="text"
-                        className="form-input"
-                        value={comment}
-                        onChange={e => setComment(e.target.value)}
-                        placeholder="Необязательно"
-                    />
-                </div>
-                <div>
-                    <button className="btn btn-secondary" onClick={handleAutoBalance}>
-                        ↺ Авто-баланс
                     </button>
                 </div>
             </div>
@@ -903,6 +776,16 @@ function DistributeMatrix({
         }
         return m;
     }, [rows, sourceWarehouseIds, availAtFfOrNull, nmPpb]);
+
+    // Стабильный ключ строки: один SKU (nm_id+упаковка) может встречаться в
+    // черновике несколько раз, поэтому ключ по nm_id+pkg коллизирует и React
+    // не переставляет строки при сортировке. Индекс в исходном массиве уникален
+    // и стабилен — sortRows сохраняет ссылки на объекты строк.
+    const rowIndex = useMemo(() => {
+        const m = new Map<AssemblyDraftRow, number>();
+        rows.forEach((r, i) => m.set(r, i));
+        return m;
+    }, [rows]);
 
     // ─── Сортировка строк кликом по заголовку столбца ──────────────────────
     // desc → asc → выкл (исходный порядок). WB-цели сортируются по клику; их же
@@ -1116,7 +999,7 @@ function DistributeMatrix({
                     const overflow = initialNeed > 0 && srcSum > initialNeed;
 
                     return (
-                        <tr key={`row-${row.nm_id}-${row.package_type || 'BOX'}`}>
+                        <tr key={`row-${rowIndex.get(row) ?? `${row.nm_id}-${row.package_type || 'BOX'}`}`}>
                             <td
                                 style={{
                                     ...tdStyle,

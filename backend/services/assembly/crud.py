@@ -424,6 +424,7 @@ async def list_assembly_requests(
     project_id: int,
     *,
     warehouse_id: int | None = None,
+    counterparty_id: int | None = None,
     draft_id: int | None = None,
     status: str | None = None,
     search: str | None = None,
@@ -443,6 +444,8 @@ async def list_assembly_requests(
 
     if warehouse_id is not None:
         base = base.where(AssemblyRequest.warehouse_id == warehouse_id)
+    if counterparty_id is not None:
+        base = base.where(AssemblyRequest.counterparty_id == counterparty_id)
     if draft_id is not None:
         base = base.where(AssemblyRequest.source_draft_id == draft_id)
     if status is not None:

@@ -184,6 +184,27 @@ async def test_list_other_project_empty(client, auth_headers):
     assert "КА Проект1" not in names
 
 
+@pytest.mark.asyncio
+async def test_list_counterparties_tolerates_malformed_inn(client, auth_headers, db_session):
+    """Regression: a stored row with malformed inn (e.g. '-') must not 500 the list.
+
+    The response model echoes DB data; INN/KPP format constraints belong on the
+    write models only. A bank-import row with inn='-' previously crashed the whole
+    list with a ValidationError (surfaced as 'Failed to fetch' — the 500 carried
+    no CORS header).
+    """
+    from backend.models.counterparty import Counterparty
+
+    headers, project_id = await _project_headers(client, auth_headers)
+
+    db_session.add(Counterparty(project_id=project_id, inn="-", name="КА битый ИНН", primary_type="OTHER"))
+    await db_session.commit()
+
+    resp = await client.get("/api/v1/counterparties", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert "-" in [item["inn"] for item in resp.json()["items"]]
+
+
 # ─── GET /counterparties/{id} ─────────────────────────────────────────────────
 
 

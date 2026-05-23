@@ -35,6 +35,7 @@ router = APIRouter(prefix="/warehouse/assembly", tags=["Assembly"])
 @router.get("", response_model=AssemblyListResponse)
 async def list_assembly_requests(
     warehouse_id: int | None = Query(None),
+    counterparty_id: int | None = Query(None, description="Filter by carrier counterparty"),
     draft_id: int | None = Query(None),
     status: str | None = Query(None),
     search: str | None = Query(None),
@@ -51,6 +52,7 @@ async def list_assembly_requests(
         db,
         project.id,
         warehouse_id=warehouse_id,
+        counterparty_id=counterparty_id,
         draft_id=draft_id,
         status=status,
         search=search,
