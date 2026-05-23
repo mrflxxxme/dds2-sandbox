@@ -77,14 +77,27 @@ jobs:
       - name: Free disk space and add swap (prevent OOM exit code 137)
         continue-on-error: true
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+          # Чистим крупные неиспользуемые SDK ПАРАЛЛЕЛЬНО — последовательный rm
+          # десятков тысяч файлов android SDK ел заметную часть шага.
+          for d in /usr/share/dotnet /usr/local/lib/android /opt/ghc; do
+            sudo rm -rf "$d" 2>/dev/null &
+          done
+          wait || true
           docker system prune -af 2>/dev/null || true
           sudo swapoff -a 2>/dev/null || true
           sudo rm -f /swapfile
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          # fallocate вместо dd: 8 ГБ выделяются мгновенно вместо записи нулей (~60-120с).
+          # На ext4 (раннеры ubuntu) swapon принимает fallocate-файл; фолбэк на dd,
+          # если по какой-то причине не примет.
+          if ! (sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile); then
+            echo "fallocate-swap не взлетел — фолбэк на dd"
+            sudo swapoff /swapfile 2>/dev/null || true
+            sudo rm -f /swapfile
+            sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          fi
           free -h
 
       - name: Create .env for docker-compose
