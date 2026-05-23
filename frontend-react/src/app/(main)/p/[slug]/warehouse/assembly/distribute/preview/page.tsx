@@ -1,5 +1,5 @@
 'use client';
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { exportToExcel, formatNumber } from '@/lib/utils';
@@ -23,6 +23,38 @@ import {
 
 type TypeScope = 'all' | 'regular' | 'newcomer';
 
+const toggleInSet = (s: Set<string>, value: string): Set<string> => {
+    const n = new Set(s);
+    if (n.has(value)) n.delete(value); else n.add(value);
+    return n;
+};
+
+/** Строка-фильтр в виде чипсов (WB-цель / предмет / бренд) с Σ qty на каждом. */
+function FilterChipRow({ label, options, selected, onToggle, titleFn }: {
+    label: string;
+    options: Array<{ value: string; qty: number }>;
+    selected: Set<string>;
+    onToggle: (value: string) => void;
+    titleFn: (value: string) => string;
+}) {
+    if (options.length <= 1) return null;
+    return (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{label}</span>
+            {options.map(({ value, qty }) => (
+                <button
+                    key={value}
+                    className={`btn btn-sm ${selected.has(value) ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => onToggle(value)}
+                    title={titleFn(value)}
+                >
+                    {value} <span style={{ opacity: 0.6 }}>· {formatNumber(qty, 0)}</span>
+                </button>
+            ))}
+        </div>
+    );
+}
+
 export default function AssemblyPreviewPage() {
     const params = useParams();
     const router = useRouter();
@@ -41,11 +73,17 @@ export default function AssemblyPreviewPage() {
     const [committing, setCommitting] = useState(false);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
     const [draft, setDraft] = useState<AssemblyDraft | null>(null);
+    const [name, setName] = useState('');
+    const [editingName, setEditingName] = useState(false);
+    const [savingName, setSavingName] = useState(false);
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
     const [query, setQuery] = useState('');
     const [selectedWbs, setSelectedWbs] = useState<Set<string>>(new Set());
+    const [selectedSubjects, setSelectedSubjects] = useState<Set<string>>(new Set());
+    const [selectedBrands, setSelectedBrands] = useState<Set<string>>(new Set());
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
+    const [nmMeta, setNmMeta] = useState<Map<number, { subject: string; brand: string }>>(new Map());
     const [viewMode, setViewMode] = useState<'cards' | 'table' | 'matrix'>('cards');
     const [matrixUnit, setMatrixUnit] = useState<'qty' | 'boxes'>('qty');
 
@@ -66,6 +104,31 @@ export default function AssemblyPreviewPage() {
         router.push(`/p/${slug}/warehouse/assembly/distribute/ff?${qs.toString()}`);
     }, [draftId, pkgTab, typeScope, router, slug]);
 
+    // Переименование черновика — сохраняем только name (distribution не трогаем).
+    // PUT возвращает обогащённый draft (newcomer_nm_ids), поэтому setDraft безопасен.
+    // Единый путь сохранения — onBlur (Enter/клик-мимо). Escape ставит skip, чтобы
+    // blur, который последует за размонтированием инпута, не сохранил отменённое.
+    const skipSaveRef = useRef(false);
+    const saveDraftName = useCallback(async () => {
+        setEditingName(false);
+        if (skipSaveRef.current) { skipSaveRef.current = false; setName(draft?.name ?? ''); return; }
+        if (!draftId || !draft) return;
+        const trimmed = name.trim();
+        if (trimmed === '' || trimmed === draft.name) { setName(draft.name); return; }
+        setSavingName(true);
+        try {
+            const updated = await api.updateAssemblyDraft(draftId, { name: trimmed });
+            setDraft(updated);
+            setName(updated.name);
+            setToast({ message: 'Название сохранено', type: 'success' });
+        } catch (e: unknown) {
+            setName(draft.name);
+            setToast({ message: e instanceof Error ? e.message : 'Не удалось переименовать', type: 'error' });
+        } finally {
+            setSavingName(false);
+        }
+    }, [draftId, draft, name]);
+
     // ─── Load draft + warehouses ─────────────────────────────────────────
     useEffect(() => {
         if (!draftId) { setError('Не указан ID черновика'); setLoading(false); return; }
@@ -77,6 +140,7 @@ export default function AssemblyPreviewPage() {
                 const [d, whs] = await Promise.all([api.getAssemblyDraft(draftId), api.getWarehouses()]);
                 if (cancelled) return;
                 setDraft(d);
+                setName(d.name);
                 setWarehouses(whs);
             } catch (e: unknown) {
                 if (!cancelled) setError(e instanceof Error ? e.message : 'Ошибка загрузки черновика');
@@ -95,6 +159,7 @@ export default function AssemblyPreviewPage() {
             .then(resp => {
                 if (cancelled) return;
                 const m = new Map<number, number | null>();
+                const meta = new Map<number, { subject: string; brand: string }>();
                 for (const r of resp.items) {
                     let ppb: number | null = null;
                     if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
@@ -109,8 +174,10 @@ export default function AssemblyPreviewPage() {
                         ppb = best > 0 ? best : null;
                     }
                     m.set(r.nm_id, ppb);
+                    meta.set(r.nm_id, { subject: r.subject || '', brand: r.brand || '' });
                 }
                 setNmPpb(m);
+                setNmMeta(meta);
             })
             .catch(() => { /* best-effort: без кратности покажем только штуки */ });
         return () => { cancelled = true; };
@@ -136,12 +203,20 @@ export default function AssemblyPreviewPage() {
 
     const allLines = useMemo(() => buildPreviewLines(committableRows, newcomerNmIds), [committableRows, newcomerNmIds]);
 
-    // WB-цели для фильтра (с Σ по всему срезу, по убыванию объёма).
-    const wbOptions = useMemo(() => {
+    // Опции фильтров (Σ qty по всему срезу, по убыванию объёма) — общий билдер.
+    // WB-цель / предмет / бренд считаются по allLines (как и WB-фильтр) и
+    // применяются независимыми AND-ами только к отображению/выгрузке.
+    const buildOptions = useCallback((keyOf: (l: PreviewLine) => string) => {
         const m = new Map<string, number>();
-        for (const l of allLines) m.set(l.wbName, (m.get(l.wbName) || 0) + l.qty);
-        return [...m.entries()].map(([wb, qty]) => ({ wb, qty })).sort((a, b) => b.qty - a.qty);
+        for (const l of allLines) {
+            const k = keyOf(l);
+            if (k) m.set(k, (m.get(k) || 0) + l.qty);
+        }
+        return [...m.entries()].map(([value, qty]) => ({ value, qty })).sort((a, b) => b.qty - a.qty);
     }, [allLines]);
+    const wbOptions = useMemo(() => buildOptions(l => l.wbName), [buildOptions]);
+    const subjectOptions = useMemo(() => buildOptions(l => nmMeta.get(l.nmId)?.subject || ''), [buildOptions, nmMeta]);
+    const brandOptions = useMemo(() => buildOptions(l => nmMeta.get(l.nmId)?.brand || ''), [buildOptions, nmMeta]);
 
     // Поиск (артикул/баркод) + фильтр по WB-цели — ТОЛЬКО отображение и
     // выгрузка. Сам commit создаёт весь срез (упаковка × тип товара).
@@ -149,10 +224,12 @@ export default function AssemblyPreviewPage() {
         const q = query.trim().toLowerCase();
         return allLines.filter(l => {
             if (selectedWbs.size > 0 && !selectedWbs.has(l.wbName)) return false;
+            if (selectedSubjects.size > 0 && !selectedSubjects.has(nmMeta.get(l.nmId)?.subject || '')) return false;
+            if (selectedBrands.size > 0 && !selectedBrands.has(nmMeta.get(l.nmId)?.brand || '')) return false;
             if (q && !(l.vendor.toLowerCase().includes(q) || l.barcode.toLowerCase().includes(q))) return false;
             return true;
         });
-    }, [allLines, query, selectedWbs]);
+    }, [allLines, query, selectedWbs, selectedSubjects, selectedBrands, nmMeta]);
     const ffGroups = useMemo(() => groupByFf(lines), [lines]);
 
     // Разбивка по ВСЕМУ срезу — это то, что реально создаст commit
@@ -164,7 +241,13 @@ export default function AssemblyPreviewPage() {
         return { regular: reg.size, newcomer: nw.size, total: reg.size + nw.size };
     }, [allLines]);
     const totalAssemblies = breakdown.total;
-    const isFiltered = query.trim() !== '' || selectedWbs.size > 0;
+    const isFiltered = query.trim() !== '' || selectedWbs.size > 0 || selectedSubjects.size > 0 || selectedBrands.size > 0;
+    const resetFilters = useCallback(() => {
+        setQuery('');
+        setSelectedWbs(new Set());
+        setSelectedSubjects(new Set());
+        setSelectedBrands(new Set());
+    }, []);
     // Сводка по всему срезу (allLines) — как в шапке.
     const distinctSku = useMemo(() => new Set(allLines.map(l => l.nmId)).size, [allLines]);
     const partialBoxes = useMemo(
@@ -353,8 +436,33 @@ export default function AssemblyPreviewPage() {
             <div className="page-header" style={{ marginBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1 }}>
                     <button className="btn btn-secondary btn-sm" onClick={goBack}>← Назад</button>
-                    <div>
-                        <h1 className="page-title" style={{ margin: 0 }}>Предпросмотр заявок</h1>
+                    <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <h1 className="page-title" style={{ margin: 0 }}>Предпросмотр заявок</h1>
+                            {editingName ? (
+                                <input
+                                    className="form-input"
+                                    autoFocus
+                                    value={name}
+                                    onChange={e => setName(e.target.value)}
+                                    onBlur={saveDraftName}
+                                    onKeyDown={e => {
+                                        if (e.key === 'Enter') e.currentTarget.blur();
+                                        if (e.key === 'Escape') { skipSaveRef.current = true; e.currentTarget.blur(); }
+                                    }}
+                                    style={{ maxWidth: 320, fontSize: 14 }}
+                                />
+                            ) : (
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={() => setEditingName(true)}
+                                    disabled={savingName}
+                                    title="Изменить название черновика"
+                                >
+                                    ✏️ {savingName ? 'Сохранение…' : (name || 'Без названия')}
+                                </button>
+                            )}
+                        </div>
                         <p className="page-subtitle" style={{ margin: 0 }}>Срез: <strong>{scopeLabel}</strong></p>
                     </div>
                 </div>
@@ -427,34 +535,33 @@ export default function AssemblyPreviewPage() {
                             <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                                 Показано: <strong>{reqCountOf(lines)}</strong> заявок · Σ <strong>{formatNumber(sumQty(lines), 0)}</strong> из {totalAssemblies}
                             </span>
-                            <button className="btn btn-secondary btn-sm" onClick={() => { setQuery(''); setSelectedWbs(new Set()); }}>
+                            <button className="btn btn-secondary btn-sm" onClick={resetFilters}>
                                 ✕ Сбросить
                             </button>
                         </>
                     )}
                 </div>
-                {wbOptions.length > 1 && (
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Склад-цель:</span>
-                        {wbOptions.map(({ wb, qty }) => {
-                            const active = selectedWbs.has(wb);
-                            return (
-                                <button
-                                    key={wb}
-                                    className={`btn btn-sm ${active ? 'btn-primary' : 'btn-secondary'}`}
-                                    onClick={() => setSelectedWbs(prev => {
-                                        const n = new Set(prev);
-                                        if (n.has(wb)) n.delete(wb); else n.add(wb);
-                                        return n;
-                                    })}
-                                    title={`Показать только заявки на «${wb}»`}
-                                >
-                                    {wb} <span style={{ opacity: 0.6 }}>· {formatNumber(qty, 0)}</span>
-                                </button>
-                            );
-                        })}
-                    </div>
-                )}
+                <FilterChipRow
+                    label="Склад-цель:"
+                    options={wbOptions}
+                    selected={selectedWbs}
+                    onToggle={v => setSelectedWbs(prev => toggleInSet(prev, v))}
+                    titleFn={v => `Показать только заявки на «${v}»`}
+                />
+                <FilterChipRow
+                    label="Предмет:"
+                    options={subjectOptions}
+                    selected={selectedSubjects}
+                    onToggle={v => setSelectedSubjects(prev => toggleInSet(prev, v))}
+                    titleFn={v => `Показать только предмет «${v}»`}
+                />
+                <FilterChipRow
+                    label="Бренд:"
+                    options={brandOptions}
+                    selected={selectedBrands}
+                    onToggle={v => setSelectedBrands(prev => toggleInSet(prev, v))}
+                    titleFn={v => `Показать только бренд «${v}»`}
+                />
             </div>
 
             {/* Body: группы по складам-источникам */}
@@ -463,7 +570,7 @@ export default function AssemblyPreviewPage() {
                     {isFiltered ? (
                         <>
                             Ничего не найдено по фильтру.
-                            <button className="btn btn-secondary btn-sm" style={{ marginLeft: 8 }} onClick={() => { setQuery(''); setSelectedWbs(new Set()); }}>✕ Сбросить</button>
+                            <button className="btn btn-secondary btn-sm" style={{ marginLeft: 8 }} onClick={resetFilters}>✕ Сбросить</button>
                         </>
                     ) : (
                         <>
