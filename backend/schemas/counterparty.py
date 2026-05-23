@@ -104,6 +104,14 @@ class CounterpartyStats(BaseModel):
 class CounterpartyListItem(CounterpartyBase):
     """Compact list item response."""
 
+    # Read models echo stored data — they must not re-apply input constraints.
+    # Legacy/imported rows can hold malformed inn/kpp (e.g. '-' from a bank
+    # statement); inheriting CounterpartyBase's min_length/pattern would 500 the
+    # whole list on a single bad row. Strict validation stays on the write
+    # models (CounterpartyCreate / CounterpartyUpdate).
+    inn: str | None = None
+    kpp: str | None = None
+
     id: int
     created_by_import: bool
     created_at: datetime | None = None

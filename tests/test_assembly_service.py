@@ -352,6 +352,31 @@ class TestListAssemblyRequests:
         found_ids = [r.id for r in items]
         assert req.id not in found_ids
 
+    async def test_list_filters_by_counterparty(self, db_session):
+        """GET list?counterparty_id -> only requests linked to that carrier.
+
+        Powers the «Доставки» tab on the carrier counterparty card.
+        """
+        from backend.models.counterparty import Counterparty
+
+        carrier = Counterparty(project_id=PROJECT_ID, name="ИП Перевозчик Тест", primary_type="CARRIER")
+        other = Counterparty(project_id=PROJECT_ID, name="ИП Другой Тест", primary_type="CARRIER")
+        db_session.add_all([carrier, other])
+        await db_session.flush()
+
+        req = await _create_test_request(db_session)
+        req.counterparty_id = carrier.id
+        await db_session.commit()
+
+        items, total = await list_assembly_requests(db_session, PROJECT_ID, counterparty_id=carrier.id)
+        assert total >= 1
+        assert all(r.counterparty_id == carrier.id for r in items)
+        assert req.id in [r.id for r in items]
+
+        # A different carrier sees nothing of this request.
+        other_items, _ = await list_assembly_requests(db_session, PROJECT_ID, counterparty_id=other.id)
+        assert req.id not in [r.id for r in other_items]
+
 
 @pytest.mark.asyncio
 class TestUpdateAssemblyRequest:

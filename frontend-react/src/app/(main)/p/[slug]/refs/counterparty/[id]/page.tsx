@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
@@ -11,6 +11,7 @@ import TabLayout from '@/components/TabLayout';
 import type {
     CounterpartyDetail, CounterpartyDocument, DocType,
     CounterpartyUpdate, CounterpartyTransactionItem, CounterpartyType,
+    AssemblyRequest,
 } from '@/types/api';
 
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -23,6 +24,16 @@ const DOC_TYPE_LABELS: Record<DocType, string> = {
     OTHER: 'Прочее',
 };
 
+const ASM_STATUS: Record<string, { label: string; cls: string }> = {
+    PENDING: { label: 'В сборке', cls: 'badge-info' },
+    IN_PROGRESS: { label: 'В сборке', cls: 'badge-info' },
+    READY: { label: 'Готово', cls: 'badge-success' },
+    VEHICLE_ASSIGNED: { label: 'Машина назначена', cls: 'badge-info' },
+    SHIPPED: { label: 'Отгружена', cls: 'badge-success' },
+    DELIVERED: { label: 'Принята WB', cls: 'badge-success' },
+    CANCELLED: { label: 'Отменена', cls: 'badge-secondary' },
+};
+
 export default function CounterpartyDetailPage() {
     const params = useParams();
     const slug = params.slug as string;
@@ -33,9 +44,20 @@ export default function CounterpartyDetailPage() {
     const [documents, setDocuments] = useState<CounterpartyDocument[]>([]);
     const [transactions, setTransactions] = useState<CounterpartyTransactionItem[]>([]);
     const [txTotal, setTxTotal] = useState(0);
+    const [deliveries, setDeliveries] = useState<AssemblyRequest[]>([]);
+    const [deliveriesLoading, setDeliveriesLoading] = useState(false);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [activeTab, setActiveTab] = useState(0);
+
+    // Carrier role shows the «Доставки» tab even with zero linked requests.
+    // We still fetch deliveries for every counterparty so the tab also appears
+    // when requests are linked but the category was never switched to CARRIER —
+    // assign_vehicle only bumps OTHER → CARRIER, never an already-typed CP.
+    const isCarrier = useMemo(
+        () => detail?.primary_type === 'CARRIER' || (detail?.secondary_types ?? []).includes('CARRIER'),
+        [detail],
+    );
 
     // Date range for stats
     const [dateFrom, setDateFrom] = useState(HALF_YEAR_AGO);
@@ -67,6 +89,20 @@ export default function CounterpartyDetailPage() {
     }, [id, dateFrom, dateTo]);
 
     useEffect(() => { loadDetail(); }, [loadDetail]);
+
+    const loadDeliveries = useCallback(async () => {
+        setDeliveriesLoading(true);
+        try {
+            const resp = await api.getAssemblyRequests({ counterparty_id: id, limit: 500 });
+            setDeliveries(resp.items);
+        } catch {
+            setDeliveries([]);
+        } finally {
+            setDeliveriesLoading(false);
+        }
+    }, [id]);
+
+    useEffect(() => { if (detail) loadDeliveries(); }, [detail, loadDeliveries]);
 
     const handleDelete = async () => {
         if (!confirm(`Удалить контрагента "${detail?.name}"?`)) return;
@@ -127,6 +163,7 @@ export default function CounterpartyDetailPage() {
     const tabs = [
         { label: 'Статистика', icon: '📊' },
         { label: `Документы (${detail.docs_count})`, icon: '📎' },
+        ...((isCarrier || deliveries.length > 0) ? [{ label: `Доставки (${deliveries.length})`, icon: '🚚' }] : []),
     ];
 
     return (
@@ -426,6 +463,87 @@ export default function CounterpartyDetailPage() {
                                         </div>
                                     </div>
                                 ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Доставки — заявки, где этот контрагент является перевозчиком */}
+                {activeTab === 2 && (
+                    <div>
+                        {deliveriesLoading ? (
+                            <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                                Загрузка...
+                            </div>
+                        ) : deliveries.length === 0 ? (
+                            <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                                Доставок по этому перевозчику нет
+                            </div>
+                        ) : (
+                            <div className="glass-card">
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
+                                        Заявки на доставку ({deliveries.length})
+                                    </h3>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => exportToExcel(
+                                            deliveries.map(d => ({
+                                                '№': d.number,
+                                                Статус: ASM_STATUS[d.status]?.label ?? d.status,
+                                                Забор: d.warehouse_name ?? '',
+                                                'Сдача WB': d.effective_wb_warehouse ?? '',
+                                                'Дата забора': d.pickup_date ? formatDate(d.pickup_date) : '',
+                                                'Дата сдачи': d.delivery_date ? formatDate(d.delivery_date) : '',
+                                                Палет: d.pallets_count,
+                                                'Вес, кг': Number(d.total_weight_kg ?? 0),
+                                                'Стоимость, ₽': Number(d.pickup_cost ?? 0),
+                                            })),
+                                            'carrier_deliveries',
+                                        )}
+                                    >
+                                        Excel
+                                    </button>
+                                </div>
+                                <div style={{ overflowX: 'auto' }}>
+                                    <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+                                        <thead>
+                                            <tr style={{ borderBottom: '1px solid var(--color-border)', textAlign: 'left' }}>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>№</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Статус</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Забор</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Сдача WB</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Дата забора</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Дата сдачи</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', textAlign: 'right' }}>Палет</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', textAlign: 'right' }}>Вес</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', textAlign: 'right' }}>Стоимость</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {deliveries.map(d => {
+                                                const st = ASM_STATUS[d.status] ?? { label: d.status, cls: 'badge-secondary' };
+                                                return (
+                                                    <tr
+                                                        key={d.id}
+                                                        style={{ borderBottom: '1px solid var(--color-border)', cursor: 'pointer' }}
+                                                        onClick={() => router.push(`/p/${slug}/warehouse/assembly/${d.id}`)}
+                                                    >
+                                                        <td style={{ padding: '8px 8px', fontWeight: 500 }}>{d.number}</td>
+                                                        <td style={{ padding: '8px 8px' }}><span className={`badge ${st.cls}`}>{st.label}</span></td>
+                                                        <td style={{ padding: '8px 8px', color: 'var(--color-text-muted)' }}>{d.warehouse_name ?? '—'}</td>
+                                                        <td style={{ padding: '8px 8px' }}>{d.effective_wb_warehouse ?? '—'}</td>
+                                                        <td style={{ padding: '8px 8px', whiteSpace: 'nowrap' }}>{d.pickup_date ? formatDate(d.pickup_date) : '—'}</td>
+                                                        <td style={{ padding: '8px 8px', whiteSpace: 'nowrap' }}>{d.delivery_date ? formatDate(d.delivery_date) : '—'}</td>
+                                                        <td style={{ padding: '8px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{d.pallets_count}</td>
+                                                        <td style={{ padding: '8px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{d.total_weight_kg ? `${formatNumber(d.total_weight_kg, 1)} кг` : '—'}</td>
+                                                        <td style={{ padding: '8px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: Number(d.pickup_cost) > 0 ? 'var(--color-danger)' : undefined }}>{d.pickup_cost ? `${formatNumber(d.pickup_cost)} ₽` : '—'}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         )}
                     </div>

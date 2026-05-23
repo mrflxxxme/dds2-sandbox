@@ -314,7 +314,7 @@ export function addWarehouseMethods(api: ApiClient) {
 
         // ─── Assembly Requests ──────────────────────────────────────────
         getAssemblyRequests(params?: {
-            warehouse_id?: number; draft_id?: number; status?: string; search?: string;
+            warehouse_id?: number; counterparty_id?: number; draft_id?: number; status?: string; search?: string;
             date_from?: string; date_to?: string; brand?: string;
             limit?: number; offset?: number;
         }) {
