@@ -46,6 +46,26 @@ NEWCOMER_DAYS = 14
 NEWCOMER_COMMENT_PREFIX = "🆕 Новинки"
 
 
+def _dedupe_rows(rows: list[AssemblyDraftRow]) -> list[AssemblyDraftRow]:
+    """Схлопнуть дубли строк по (nm_id, package_type), оставляя ПЕРВУЮ.
+
+    Старая генерация черновика (до перехода на Set уникальных nm_id) могла
+    обработать один SKU дважды → дублирующиеся строки. Дубль спурьёзный: первая
+    строка несёт полную аллокацию, повторная — остаток истощённого FF-пула.
+    Суммировать нельзя — commit_draft складывает qty по баркоду в корзину
+    (ФФ, WB, упаковка) и задвоил бы отгрузку. Поэтому keep-first.
+    """
+    seen: set[tuple[int, str]] = set()
+    out: list[AssemblyDraftRow] = []
+    for r in rows:
+        key = (r.nm_id, r.package_type or "BOX")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
 async def fetch_newcomer_nm_ids(
     db: AsyncSession,
     project_id: int,
@@ -135,6 +155,7 @@ async def create_draft(
     payload: AssemblyDraftCreate,
 ) -> AssemblyDraft:
     """Create a new draft from payload."""
+    payload.distribution.rows = _dedupe_rows(payload.distribution.rows)
     draft = AssemblyDraft(
         project_id=project_id,
         name=payload.name or "Черновик сборки",
@@ -161,6 +182,7 @@ async def update_draft(
     if payload.name is not None:
         draft.name = payload.name
     if payload.distribution is not None:
+        payload.distribution.rows = _dedupe_rows(payload.distribution.rows)
         draft.distribution = payload.distribution.model_dump()
     if payload.comment is not None:
         draft.comment = payload.comment
@@ -377,6 +399,10 @@ async def commit_draft(
         distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid distribution: {e}") from None
+
+    # Схлопываем дубли (nm_id, package_type): старые черновики с задвоенными
+    # строками иначе задвоят отгрузку (qty по баркоду суммируется в корзину).
+    distribution.rows = _dedupe_rows(distribution.rows)
 
     if not distribution.rows:
         raise HTTPException(status_code=400, detail="Distribution has no rows")

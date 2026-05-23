@@ -1703,3 +1703,63 @@ async def test_merge_drafts_survivor_rows_none(db_session):
     # Should not raise — d_normal wins as survivor (1 row > 0)
     merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d_null.id, d_normal.id])
     assert merged.id == d_normal.id
+
+
+# ─── Tests: duplicate-row dedupe ────────────────────────────────────────────
+
+
+def test_dedupe_rows_keeps_first_per_nm_pkg():
+    """_dedupe_rows схлопывает дубли (nm_id, package_type), оставляя первую строку."""
+    rows = [
+        AssemblyDraftRow(nm_id=1, barcode="b1", src={"10": 5}, tgt={"WB": 5}),
+        AssemblyDraftRow(nm_id=1, barcode="b1", src={"10": 2}, tgt={"WB": 2}),  # dup → drop
+        AssemblyDraftRow(nm_id=1, barcode="b1", src={"10": 3}, tgt={"WB": 3}, package_type="MONOPALLET"),
+        AssemblyDraftRow(nm_id=2, barcode="b2", src={"10": 1}, tgt={"WB": 1}),
+    ]
+    out = assembly_draft_service._dedupe_rows(rows)
+    assert {(r.nm_id, r.package_type or "BOX") for r in out} == {(1, "BOX"), (1, "MONOPALLET"), (2, "BOX")}
+    box1 = next(r for r in out if r.nm_id == 1 and (r.package_type or "BOX") == "BOX")
+    assert box1.src == {"10": 5}  # keep-first (не вторая строка с src 2)
+
+
+@pytest.mark.asyncio
+async def test_create_draft_dedupes_duplicate_rows(db_session):
+    """create_draft схлопывает дубли строк — в БД одна строка на (nm_id, package_type)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    row = AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_1, src={str(wh_a): 10}, tgt={"Казань": 10})
+    payload = _build_payload([wh_a], ["Казань"], [row, row.model_copy(deep=True)])
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+    dist = AssemblyDraftDistribution.model_validate(draft.distribution)
+    assert len(dist.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_commit_draft_dedupes_stale_duplicate_rows(db_session):
+    """commit не задваивает отгрузку для черновика с уже сохранёнными дублями.
+
+    Старые черновики (до фикса генерации) хранят задвоенные строки; commit
+    складывает qty по баркоду в корзину (ФФ, WB, упаковка) → без дедупа отгрузка
+    удвоилась бы. Дубль вписываем через ORM напрямую, минуя дедуп create/update.
+    """
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    row = AssemblyDraftRow(nm_id=333, barcode=TEST_BARCODE_1, src={str(wh_a): 10}, tgt={"Казань": 10})
+    payload = _build_payload([wh_a], ["Казань"], [row])
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    # Впишем дубль напрямую (как в битом черновике), минуя дедуп сервиса.
+    draft_obj = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    dist = AssemblyDraftDistribution.model_validate(draft_obj.distribution)
+    dist.rows = [row, row.model_copy(deep=True)]
+    draft_obj.distribution = dist.model_dump(mode="json")
+    await db_session.commit()
+
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert len(resp.created_request_ids) == 1
+
+    item_q = await db_session.execute(
+        text("SELECT barcode, quantity FROM assembly_request_items " "WHERE assembly_request_id = ANY(:ids)"),
+        {"ids": resp.created_request_ids},
+    )
+    items = item_q.all()
+    assert len(items) == 1
+    assert items[0].quantity == 10  # дубль схлопнут (НЕ 20)
