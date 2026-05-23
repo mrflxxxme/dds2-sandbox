@@ -290,6 +290,15 @@ export interface DutyRule {
   note?: string | null;
 }
 
+/** Баркод в машинах с пошлиной «За м²», но без заданной площади. */
+export interface MissingAreaBarcode {
+  barcode: string;
+  subject?: string | null;
+  article_seller?: string | null;
+  total_qty: number;
+  vehicles: string[];
+}
+
 export interface CostOrder {
   id: number;
   order_no: string;

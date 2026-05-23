@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002, RUF003
 """
 Router: /cost — nomenclature, duty rules, cost orders & items, cost calculation.
 Thin HTTP layer — all business logic is in services/cost_service.py.
@@ -49,6 +50,15 @@ async def get_nomenclature_subjects(
     db: AsyncSession = Depends(get_db),
 ) -> list[str]:
     return await cost_service.get_nomenclature_subjects(db, project.id)
+
+
+@router.get("/nomenclature/missing_area")
+async def get_missing_area_barcodes(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Баркоды в машинах с базисом «За м²» и без заданной площади (для дозаполнения)."""
+    return await cost_service.get_missing_area_barcodes(db, project.id)
 
 
 @router.put("/nomenclature/bulk_area", dependencies=[Depends(rate_limit_write)])

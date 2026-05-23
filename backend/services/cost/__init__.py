@@ -27,6 +27,7 @@ from backend.services.cost.items import (
     upload_order_items,
 )
 from backend.services.cost.nomenclature import (
+    get_missing_area_barcodes,
     get_nomenclature,
     get_nomenclature_subjects,
     upload_nomenclature,
@@ -51,6 +52,7 @@ __all__ = [
     # Nomenclature
     "get_nomenclature",
     "get_nomenclature_subjects",
+    "get_missing_area_barcodes",
     "upload_nomenclature",
     # Duty
     "get_duty_rules",
