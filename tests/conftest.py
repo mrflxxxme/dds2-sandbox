@@ -19,6 +19,47 @@ pytest_plugins = ["tests.conftest_api"]
 _KEEP_PROJECT_IDS = (4, 15, 991, 992)
 
 
+def pytest_sessionstart(session):
+    """Reserve the hardcoded test project ids (4/15/991/992) by advancing
+    projects_id_seq well past them.
+
+    test_wb_returns hardcodes project_id 991/992 (see its module docstring),
+    relying on the sequence already sitting above them — true on the long-lived
+    dev DB, but a FRESH CI DB starts the sequence at 1. There it climbs through
+    991/992 mid-run and hands those ids to another suite's auto-created project;
+    test_wb_returns' teardown then runs `DELETE FROM warehouses WHERE project_id
+    IN (991,992)` and trips an FK on that suite's warehouse children — flaky, the
+    child table varied run to run (stock_movements, stock_adjustments, …).
+    Bumping the sequence makes the "ids are reserved" assumption hold in CI too.
+
+    Idempotent (GREATEST never lowers it) — safe under xdist per-worker re-entry.
+    Sync psycopg2 + DATABASE_URL_SYNC: runs before the asyncio loop exists.
+    """
+    import os
+
+    if os.environ.get("PYTEST_NO_CLEANUP"):
+        return
+    sync_url = os.environ.get("DATABASE_URL_SYNC")
+    if not sync_url:
+        return
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(sync_url)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT setval('projects_id_seq', GREATEST("
+            "(SELECT last_value FROM projects_id_seq),"
+            "(SELECT COALESCE(MAX(id), 0) FROM projects),"
+            "1000000))"
+        )
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"\n[pytest_sessionstart] projects_id_seq bump skipped: {type(e).__name__}: {e}")
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Safety-net cleanup: drop test projects/users left by tests that don't teardown.
 

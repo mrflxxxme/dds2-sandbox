@@ -58,25 +58,6 @@ async def ensure_returns_project(db_session):
         text("DELETE FROM inbound_receipts WHERE project_id IN (:p1, :p2)"),
         {"p1": TEST_PROJECT_ID, "p2": OTHER_PROJECT_ID},
     )
-    # stock_movements / warehouse_stock тоже ссылаются на warehouses.id. Чистим их
-    # ДО самих складов — иначе остаточная строка (другой suite потрогал склад
-    # 991/992 раньше в общем прогоне, либо движение из чужого проекта на наш склад)
-    # роняет DELETE FROM warehouses на FK. Инцидент: Tests #1188 / commit 1f186da.
-    # Скоупим по warehouse_id-подзапросу, чтобы поймать и кросс-проектные строки.
-    await db_session.execute(
-        text(
-            "DELETE FROM stock_movements WHERE warehouse_id IN "
-            "(SELECT id FROM warehouses WHERE project_id IN (:p1, :p2))"
-        ),
-        {"p1": TEST_PROJECT_ID, "p2": OTHER_PROJECT_ID},
-    )
-    await db_session.execute(
-        text(
-            "DELETE FROM warehouse_stock WHERE warehouse_id IN "
-            "(SELECT id FROM warehouses WHERE project_id IN (:p1, :p2))"
-        ),
-        {"p1": TEST_PROJECT_ID, "p2": OTHER_PROJECT_ID},
-    )
     await db_session.execute(
         text("DELETE FROM warehouses WHERE project_id IN (:p1, :p2)"),
         {"p1": TEST_PROJECT_ID, "p2": OTHER_PROJECT_ID},
