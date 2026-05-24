@@ -300,10 +300,10 @@ async def merge_drafts(
         # Merge handed_units: carry into survivor (merge would otherwise drop them).
         # Same key → sum items by barcode; 'handed' beats 'draft' (part is at FF).
         for unit in other_dist.handed_units:
-            key = _handed_key(unit)
-            existing_unit = handed_by_key.get(key)
+            hkey = _handed_key(unit)
+            existing_unit = handed_by_key.get(hkey)
             if existing_unit is None:
-                handed_by_key[key] = unit.model_copy(deep=True)
+                handed_by_key[hkey] = unit.model_copy(deep=True)
             else:
                 items_by_bc = {it.barcode: it for it in existing_unit.items}
                 for it in unit.items:
