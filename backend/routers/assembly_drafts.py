@@ -87,7 +87,8 @@ async def merge_drafts(
 
     Строки с совпадающим (nm_id, package_type) суммируются поэлементно;
     source/target склады объединяются; cold_start_shares сбрасывается.
-    Черновики с handed_units → 400. Несуществующие id → 404.
+    handed_units переносятся в survivor (юниты одного ключа сливаются,
+    'handed' побеждает 'draft'). Несуществующие id → 404.
     Возвращает объединённый черновик (survivor).
     """
     draft = await assembly_draft_service.merge_drafts(db, project.id, payload.draft_ids)

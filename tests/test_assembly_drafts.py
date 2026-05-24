@@ -1569,35 +1569,28 @@ async def test_merge_drafts_survivor_has_most_rows(db_session):
     assert d1.is_deleted is True
 
 
-@pytest.mark.asyncio
-async def test_merge_drafts_blocks_handed_units(db_session):
-    """Слияние черновика с handed_units → 400."""
-    wh_a, _ = await _get_warehouse_ids(db_session)
-
-    # Черновик с handed_units в distribution
-    d_handed = await assembly_draft_service.create_draft(
-        db_session,
-        PROJECT_ID,
-        AssemblyDraftCreate(
-            name="Handed Draft",
-            distribution=AssemblyDraftDistribution(
-                source_warehouse_ids=[wh_a],
-                target_warehouse_names=["Электросталь"],
-                rows=[],
-                handed_units=[
-                    HandedUnit(
-                        source_ff_id=wh_a,
-                        target_wb_name="Электросталь",
-                        package_type="BOX",
-                        is_newcomer=False,
-                        status="handed",
-                        items=[HandedUnitItem(nm_id=1, barcode="X", vendor_code="", qty=10)],
-                    )
-                ],
-            ),
+def _draft_with_handed(
+    wh: int, name: str, rows: list[AssemblyDraftRow], units: list[HandedUnit]
+) -> AssemblyDraftCreate:
+    """Payload-хелпер: черновик с rows и handed_units."""
+    return AssemblyDraftCreate(
+        name=name,
+        distribution=AssemblyDraftDistribution(
+            source_warehouse_ids=[wh],
+            target_warehouse_names=[u.target_wb_name for u in units] or ["Электросталь"],
+            rows=rows,
+            handed_units=units,
         ),
     )
-    d_normal = await assembly_draft_service.create_draft(
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_carries_handed_units(db_session):
+    """handed_units не-survivor черновика переносятся в survivor, не теряются."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    # survivor (больше строк) без handed_units
+    d_survivor = await assembly_draft_service.create_draft(
         db_session,
         PROJECT_ID,
         _build_payload(
@@ -1605,14 +1598,112 @@ async def test_merge_drafts_blocks_handed_units(db_session):
             ["Казань"],
             [
                 AssemblyDraftRow(nm_id=50, barcode="MRG-I", src={str(wh_a): 5}, tgt={"Казань": 5}),
+                AssemblyDraftRow(nm_id=51, barcode="MRG-I2", src={str(wh_a): 7}, tgt={"Казань": 7}),
+            ],
+        ),
+    )
+    # не-survivor с handed-юнитом
+    d_handed = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _draft_with_handed(
+            wh_a,
+            "Handed Draft",
+            [],
+            [
+                HandedUnit(
+                    source_ff_id=wh_a,
+                    target_wb_name="Электросталь",
+                    package_type="BOX",
+                    is_newcomer=False,
+                    status="handed",
+                    items=[HandedUnitItem(nm_id=1, barcode="X", vendor_code="V", qty=10)],
+                )
             ],
         ),
     )
 
-    with pytest.raises(HTTPException) as exc:
-        await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d_handed.id, d_normal.id])
-    assert exc.value.status_code == 400
-    assert "handed" in exc.value.detail.lower() or "юниты" in exc.value.detail
+    merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d_survivor.id, d_handed.id])
+
+    assert merged.id == d_survivor.id  # survivor = больше строк
+    dist = AssemblyDraftDistribution.model_validate(merged.distribution)
+    assert len(dist.handed_units) == 1
+    u = dist.handed_units[0]
+    assert u.status == "handed"
+    assert u.target_wb_name == "Электросталь"
+    assert sum(it.qty for it in u.items) == 10
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_dedups_handed_units_same_key(db_session):
+    """Юниты с совпадающим (ff, wb, pkg, newcomer) сливаются, позиции суммируются по баркоду."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    def _unit(qty_x: int, qty_y: int) -> HandedUnit:
+        return HandedUnit(
+            source_ff_id=wh_a,
+            target_wb_name="Казань",
+            package_type="BOX",
+            is_newcomer=False,
+            status="handed",
+            items=[
+                HandedUnitItem(nm_id=1, barcode="X", vendor_code="V", qty=qty_x),
+                HandedUnitItem(nm_id=2, barcode="Y", vendor_code="V", qty=qty_y),
+            ],
+        )
+
+    d1 = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _draft_with_handed(wh_a, "H1", [], [_unit(10, 3)])
+    )
+    d2 = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _draft_with_handed(wh_a, "H2", [], [_unit(5, 0)])
+    )
+
+    merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d1.id, d2.id])
+
+    dist = AssemblyDraftDistribution.model_validate(merged.distribution)
+    assert len(dist.handed_units) == 1  # один ключ → один юнит
+    by_bc = {it.barcode: it.qty for it in dist.handed_units[0].items}
+    assert by_bc == {"X": 15, "Y": 3}  # X: 10+5, Y: 3+0
+
+
+@pytest.mark.asyncio
+async def test_merge_drafts_handed_status_wins_over_draft(db_session):
+    """При слиянии юнитов одного ключа статус 'handed' побеждает 'draft'."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+
+    def _unit(status: str) -> HandedUnit:
+        return HandedUnit(
+            source_ff_id=wh_a,
+            target_wb_name="Казань",
+            package_type="BOX",
+            is_newcomer=False,
+            status=status,
+            items=[HandedUnitItem(nm_id=1, barcode="X", vendor_code="V", qty=4)],
+        )
+
+    # survivor с замороженным draft-снимком (1 строка), other — handed того же ключа (0 строк)
+    d_survivor = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _draft_with_handed(
+            wh_a,
+            "S",
+            [AssemblyDraftRow(nm_id=99, barcode="R", src={str(wh_a): 1}, tgt={"Казань": 1})],
+            [_unit("draft")],
+        ),
+    )
+    d_other = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _draft_with_handed(wh_a, "O", [], [_unit("handed")])
+    )
+
+    merged = await assembly_draft_service.merge_drafts(db_session, PROJECT_ID, [d_survivor.id, d_other.id])
+
+    assert merged.id == d_survivor.id
+    dist = AssemblyDraftDistribution.model_validate(merged.distribution)
+    assert len(dist.handed_units) == 1
+    assert dist.handed_units[0].status == "handed"
+    assert sum(it.qty for it in dist.handed_units[0].items) == 8  # 4 + 4
 
 
 @pytest.mark.asyncio

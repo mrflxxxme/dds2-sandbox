@@ -214,12 +214,14 @@ async def merge_drafts(
 
     Survivor: черновик с наибольшим числом строк (tie-break — наименьший id).
     Строки с совпадающим (nm_id, package_type) суммируются поэлементно (src, tgt).
+    handed_units переносятся в survivor: юниты с совпадающим ключом
+    (source_ff_id, target_wb_name, package_type, is_newcomer) сливаются — позиции
+    суммируются по баркоду, статус 'handed' побеждает 'draft'.
     source_warehouse_ids и target_warehouse_names объединяются (union).
     cold_start_shares сбрасывается (суммировать доли бессмысленно).
     Остальные черновики → soft_delete. Атомарно.
 
     404 если хоть один id не найден или принадлежит другому проекту.
-    400 если у любого черновика есть handed_units (сначала верните в черновик).
     """
     # 1. Fetch all drafts scoped to project
     result = await db.execute(
@@ -236,16 +238,7 @@ async def merge_drafts(
     if missing:
         raise HTTPException(status_code=404, detail=f"Черновики не найдены: {missing}")
 
-    # 2. Block if any draft has handed_units (must revert first)
-    for d in drafts:
-        dist = AssemblyDraftDistribution.model_validate(d.distribution or {})
-        if dist.handed_units:
-            raise HTTPException(
-                status_code=400,
-                detail=(f"Черновик #{d.id} содержит переданные на ФФ юниты — " "сначала верните их в черновик"),
-            )
-
-    # 3. Choose survivor: most rows; tie-break — lowest id
+    # 2. Choose survivor: most rows; tie-break — lowest id
     def _row_count(d: AssemblyDraft) -> tuple[int, int]:
         rows = (d.distribution or {}).get("rows") or [] if isinstance(d.distribution, dict) else []
         return (len(rows), -d.id)
@@ -253,11 +246,17 @@ async def merge_drafts(
     survivor = max(drafts, key=_row_count)
     others = [d for d in drafts if d.id != survivor.id]
 
-    # 4. Merge all distributions into survivor
+    # 3. Merge all distributions into survivor
     merged = AssemblyDraftDistribution.model_validate(survivor.distribution or {})
 
     # Rows keyed by (nm_id, package_type). Preserve survivor's insertion order.
     rows_by_key: dict[tuple[int, str], AssemblyDraftRow] = {(r.nm_id, r.package_type or "BOX"): r for r in merged.rows}
+
+    # Handed units keyed by (ff, wb, pkg, newcomer). Preserve survivor's order.
+    def _handed_key(u: HandedUnit) -> tuple[int, str, str, bool]:
+        return (u.source_ff_id, u.target_wb_name, u.package_type or "BOX", u.is_newcomer)
+
+    handed_by_key: dict[tuple[int, str, str, bool], HandedUnit] = {_handed_key(u): u for u in merged.handed_units}
 
     src_ids: list[int] = list(merged.source_warehouse_ids)
     src_ids_set: set[int] = set(src_ids)
@@ -298,13 +297,34 @@ async def merge_drafts(
                 if not existing.vendor_code and row.vendor_code:
                     existing.vendor_code = row.vendor_code
 
+        # Merge handed_units: carry into survivor (merge would otherwise drop them).
+        # Same key → sum items by barcode; 'handed' beats 'draft' (part is at FF).
+        for unit in other_dist.handed_units:
+            key = _handed_key(unit)
+            existing_unit = handed_by_key.get(key)
+            if existing_unit is None:
+                handed_by_key[key] = unit.model_copy(deep=True)
+            else:
+                items_by_bc = {it.barcode: it for it in existing_unit.items}
+                for it in unit.items:
+                    dup = items_by_bc.get(it.barcode)
+                    if dup is not None:
+                        dup.qty += it.qty
+                    else:
+                        new_it = it.model_copy(deep=True)
+                        existing_unit.items.append(new_it)
+                        items_by_bc[it.barcode] = new_it
+                if unit.status == "handed":
+                    existing_unit.status = "handed"
+
     merged.rows = list(rows_by_key.values())
+    merged.handed_units = list(handed_by_key.values())
     merged.source_warehouse_ids = src_ids
     merged.target_warehouse_names = tgt_names
     # Summing cold-start shares is meaningless; user re-runs auto-balance if needed
     merged.cold_start_shares = None
 
-    # 5. Persist atomically: write survivor, soft-delete others
+    # 4. Persist atomically: write survivor, soft-delete others
     try:
         survivor.distribution = merged.model_dump(mode="json")
         for other in others:
