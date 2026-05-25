@@ -423,10 +423,9 @@ export function addWarehouseMethods(api: ApiClient) {
         deleteAssemblyDraft(id: number) {
             return api.request<void>('DELETE', `/api/v1/assembly/drafts/${id}`);
         },
-        commitAssemblyDraft(id: number, packageType?: string, newcomerFilter?: string) {
+        commitAssemblyDraft(id: number, packageType?: string) {
             const qs = new URLSearchParams();
             if (packageType) qs.set('package_type', packageType);
-            if (newcomerFilter && newcomerFilter !== 'all') qs.set('newcomer_filter', newcomerFilter);
             const q = qs.toString();
             return api.request<AssemblyDraftCommitResponse>(
                 'POST',

@@ -38,15 +38,16 @@ class HandedUnitItem(BaseModel):
 
 
 class HandedUnit(BaseModel):
-    """Заявка-юнит (source_ff × target_wb × упаковка × новизна), вырезанная из
-    черновика и переданная на ФФ. Снимок заморожен: правки распределения его не
-    трогают (его уже нет в rows). `в сборке` создаёт из него AssemblyRequest."""
+    """Заявка-юнит (source_ff × target_wb × упаковка), вырезанная из черновика и
+    переданная на ФФ. Снимок заморожен: правки распределения его не трогают (его
+    уже нет в rows). `в сборке` создаёт из него AssemblyRequest. Новинки и обычные
+    товары на один склад живут в ОДНОМ юните — признак новинки derived из
+    nomenclature на уровне товара, а не оси группировки."""
 
     source_ff_id: int
     target_wb_name: str
     package_type: PackageTypeStr = "BOX"
-    is_newcomer: bool = False
-    status: str = "handed"  # пока только "handed" (передан на ФФ)
+    status: str = "handed"  # "handed" (передан на ФФ) | "draft" (ручной черновик)
     items: list[HandedUnitItem] = Field(default_factory=list)
 
 
@@ -110,12 +111,12 @@ class AssemblyDraftCommitResponse(BaseModel):
 
 
 class AssemblyDraftUnitRef(BaseModel):
-    """Ссылка на заявку-юнит черновика (для hand-off / revert / commit)."""
+    """Ссылка на заявку-юнит черновика (для hand-off / revert / commit). Ключ —
+    (source_ff × target_wb × package_type); новинки и обычные не разделяются."""
 
     source_ff_id: int
     target_wb_name: str
     package_type: PackageTypeStr = "BOX"
-    is_newcomer: bool = False
 
 
 class AssemblyDraftUnitEdit(AssemblyDraftUnitRef):

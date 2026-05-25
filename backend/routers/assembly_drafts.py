@@ -116,20 +116,16 @@ async def commit_draft(
         default=None,
         description="Коммитить только этот тип упаковки (BOX/MONOPALLET); остальное остаётся в черновике",
     ),
-    newcomer_filter: str | None = Query(
-        default=None,
-        description="Коммитить только новинки/обычные (newcomer|regular|all); остальное остаётся в черновике",
-    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> AssemblyDraftCommitResponse:
     """Turn a draft into N AssemblyRequests (one per non-zero pair).
 
-    `package_type` (короб/моно) и `newcomer_filter` (новинки/обычные) —
-    независимые оси партиального коммита: всё не выбранное остаётся в
-    черновике для последующих сборок. Без фильтров коммитит весь черновик.
+    `package_type` (короб/моно) — партиальный коммит по упаковке: всё не выбранное
+    остаётся в черновике. Без фильтра коммитит весь черновик. Новинки и обычные
+    товары на один склад идут одной заявкой.
     """
-    return await assembly_draft_service.commit_draft(db, project.id, draft_id, package_type, newcomer_filter)
+    return await assembly_draft_service.commit_draft(db, project.id, draft_id, package_type)
 
 
 @router.post(
@@ -151,7 +147,6 @@ async def hand_off_unit(
         unit.source_ff_id,
         unit.target_wb_name,
         unit.package_type,
-        unit.is_newcomer,
     )
 
 
@@ -174,7 +169,6 @@ async def revert_unit(
         unit.source_ff_id,
         unit.target_wb_name,
         unit.package_type,
-        unit.is_newcomer,
     )
 
 
@@ -197,7 +191,6 @@ async def commit_unit(
         unit.source_ff_id,
         unit.target_wb_name,
         unit.package_type,
-        unit.is_newcomer,
     )
 
 
@@ -221,7 +214,6 @@ async def set_unit_items(
         edit.source_ff_id,
         edit.target_wb_name,
         edit.package_type,
-        edit.is_newcomer,
         edit.items,
     )
 
@@ -246,7 +238,6 @@ async def move_unit(
         move.source_ff_id,
         move.target_wb_name,
         move.package_type,
-        move.is_newcomer,
         move.new_target_wb_name,
     )
 
@@ -270,5 +261,4 @@ async def delete_unit(
         unit.source_ff_id,
         unit.target_wb_name,
         unit.package_type,
-        unit.is_newcomer,
     )

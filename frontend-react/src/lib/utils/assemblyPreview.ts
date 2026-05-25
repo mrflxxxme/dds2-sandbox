@@ -71,7 +71,8 @@ export function buildPreviewLines(rows: AssemblyDraftRow[], newcomerNmIds: Set<n
 }
 
 export const sumQty = (ls: PreviewLine[]) => ls.reduce((s, l) => s + l.qty, 0);
-export const reqCountOf = (ls: PreviewLine[]) => new Set(ls.map(l => `${l.wbName}::${l.pkg}::${l.isNew}`)).size;
+// Заявок = уникальные (склад × упаковка). Новинки и обычные на один склад — одна заявка.
+export const reqCountOf = (ls: PreviewLine[]) => new Set(ls.map(l => `${l.wbName}::${l.pkg}`)).size;
 export const skuCountOf = (ls: PreviewLine[]) => new Set(ls.map(l => l.nmId)).size;
 
 /** Группировка по складу-источнику (ФФ), отсортированных по убыванию объёма. */
@@ -129,13 +130,16 @@ export interface UnitItem {
     vendor: string;
     barcode: string;
     qty: number;
+    /** Товар-новинка (derived из newcomer_nm_ids) — для бейджа 🆕 в позициях. */
+    isNew: boolean;
 }
 
 export interface DraftUnit {
     ffId: number;
     wbName: string;
     pkg: PackageType;
-    isNewcomer: boolean;
+    /** В юните есть хотя бы один товар-новинка (для пометки 🆕 на карточке). */
+    hasNewcomer: boolean;
     status: UnitStatus;
     /** true = снимок в handed_units (вырезан из rows: ручной черновик или передан на ФФ). */
     frozen: boolean;
@@ -152,34 +156,66 @@ export function buildFfUnits(
     newcomerNmIds: Set<number>,
     ffId: number,
 ): DraftUnit[] {
+    const newUnit = (wbName: string, pkg: PackageType, status: UnitStatus, frozen: boolean): DraftUnit =>
+        ({ ffId, wbName, pkg, hasNewcomer: false, status, frozen, items: [], qty: 0 });
+    const addItem = (u: DraftUnit, it: UnitItem) => {
+        u.items.push(it);
+        u.qty += it.qty;
+        if (it.isNew) u.hasNewcomer = true;
+    };
+
+    // Авто-часть из rows, ключ wb::pkg (новинки + обычные вместе).
     const draftMap = new Map<string, DraftUnit>();
     for (const l of buildPreviewLines(rows, newcomerNmIds)) {
         if (l.ffId !== ffId) continue;
-        const key = `${l.wbName}::${l.pkg}::${l.isNew ? 1 : 0}`;
+        const key = `${l.wbName}::${l.pkg}`;
         let u = draftMap.get(key);
-        if (!u) {
-            u = { ffId, wbName: l.wbName, pkg: l.pkg, isNewcomer: l.isNew, status: 'draft', frozen: false, items: [], qty: 0 };
-            draftMap.set(key, u);
-        }
-        u.items.push({ nmId: l.nmId, vendor: l.vendor, barcode: l.barcode, qty: l.qty });
-        u.qty += l.qty;
+        if (!u) { u = newUnit(l.wbName, l.pkg, 'draft', false); draftMap.set(key, u); }
+        addItem(u, { nmId: l.nmId, vendor: l.vendor, barcode: l.barcode, qty: l.qty, isNew: l.isNew });
     }
-    const handedUnits: DraftUnit[] = handed
-        .filter(h => h.source_ff_id === ffId)
-        .map(h => ({
-            ffId,
-            wbName: h.target_wb_name,
-            pkg: h.package_type,
-            isNewcomer: h.is_newcomer,
-            status: (h.status === 'handed' ? 'handed' : 'draft') as UnitStatus,
-            frozen: true,
-            items: h.items.map(it => ({ nmId: it.nm_id, vendor: it.vendor_code, barcode: it.barcode, qty: it.qty })),
-            qty: h.items.reduce((s, it) => s + it.qty, 0),
-        }));
-    return [...handedUnits, ...[...draftMap.values()]].sort((a, b) => b.qty - a.qty);
+
+    // Замороженная часть из handed_units (тот же ключ). Несколько снимков на ключ
+    // (старые черновики, где новинки/обычные были раздельны) сливаются по баркоду;
+    // статус 'handed' побеждает 'draft'.
+    const handedMap = new Map<string, DraftUnit>();
+    for (const h of handed) {
+        if (h.source_ff_id !== ffId) continue;
+        const key = `${h.target_wb_name}::${h.package_type}`;
+        let u = handedMap.get(key);
+        if (!u) { u = newUnit(h.target_wb_name, h.package_type, 'draft', true); handedMap.set(key, u); }
+        if (h.status === 'handed') u.status = 'handed';
+        for (const it of h.items) {
+            addItem(u, { nmId: it.nm_id, vendor: it.vendor_code, barcode: it.barcode, qty: it.qty, isNew: newcomerNmIds.has(it.nm_id) });
+        }
+    }
+
+    // Одна карточка на (wb, pkg). Смешанный случай (часть в снимке + часть ещё в
+    // rows — старый черновик «в полёте») → показываем как ОДИН черновик: пока есть
+    // авто-часть, юнит не передан целиком; позиции объединяем по баркоду.
+    const out: DraftUnit[] = [];
+    const keys = new Set<string>([...handedMap.keys(), ...draftMap.keys()]);
+    for (const key of keys) {
+        const d = draftMap.get(key);
+        const h = handedMap.get(key);
+        if (d && h) {
+            const merged = newUnit(d.wbName, d.pkg, 'draft', false);
+            const byBc = new Map<string, UnitItem>();
+            for (const it of [...h.items, ...d.items]) {
+                const ex = byBc.get(it.barcode);
+                if (ex) { ex.qty += it.qty; ex.isNew = ex.isNew || it.isNew; }
+                else { const ni = { ...it }; byBc.set(it.barcode, ni); merged.items.push(ni); }
+            }
+            merged.qty = merged.items.reduce((s, it) => s + it.qty, 0);
+            merged.hasNewcomer = merged.items.some(it => it.isNew);
+            out.push(merged);
+        } else {
+            out.push((d ?? h) as DraftUnit);
+        }
+    }
+    return out.sort((a, b) => b.qty - a.qty);
 }
 
-/** Найти один юнит склада по (wb, упаковка, новизна). */
+/** Найти один юнит склада по (wb, упаковка). */
 export function findDraftUnit(
     rows: AssemblyDraftRow[],
     handed: HandedUnit[],
@@ -187,9 +223,8 @@ export function findDraftUnit(
     ffId: number,
     wbName: string,
     pkg: PackageType,
-    isNewcomer: boolean,
 ): DraftUnit | null {
     return buildFfUnits(rows, handed, newcomerNmIds, ffId).find(
-        u => u.wbName === wbName && u.pkg === pkg && u.isNewcomer === isNewcomer,
+        u => u.wbName === wbName && u.pkg === pkg,
     ) ?? null;
 }

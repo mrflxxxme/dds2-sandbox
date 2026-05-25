@@ -21,8 +21,6 @@ import {
     type PreviewLine,
 } from '@/lib/utils/assemblyPreview';
 
-type TypeScope = 'all' | 'regular' | 'newcomer';
-
 const toggleInSet = (s: Set<string>, value: string): Set<string> => {
     const n = new Set(s);
     if (n.has(value)) n.delete(value); else n.add(value);
@@ -63,10 +61,6 @@ export default function AssemblyPreviewPage() {
 
     const draftId = Number(searchParams.get('draft')) || null;
     const pkgTab: PackageType = searchParams.get('pkg') === 'MONOPALLET' ? 'MONOPALLET' : 'BOX';
-    const typeScope: TypeScope = (() => {
-        const t = searchParams.get('type');
-        return t === 'regular' || t === 'newcomer' ? t : 'all';
-    })();
 
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -100,9 +94,9 @@ export default function AssemblyPreviewPage() {
     }, [router, slug]);
 
     const openFf = useCallback((ffId: number) => {
-        const qs = new URLSearchParams({ draft: String(draftId ?? ''), ff: String(ffId), pkg: pkgTab, type: typeScope });
+        const qs = new URLSearchParams({ draft: String(draftId ?? ''), ff: String(ffId), pkg: pkgTab });
         router.push(`/p/${slug}/warehouse/assembly/distribute/ff?${qs.toString()}`);
-    }, [draftId, pkgTab, typeScope, router, slug]);
+    }, [draftId, pkgTab, router, slug]);
 
     // Переименование черновика — сохраняем только name (distribution не трогаем).
     // PUT возвращает обогащённый draft (newcomer_nm_ids), поэтому setDraft безопасен.
@@ -189,17 +183,11 @@ export default function AssemblyPreviewPage() {
     );
     const newcomerNmIds = useMemo(() => new Set(draft?.newcomer_nm_ids ?? []), [draft]);
 
-    // Срез, который коммитим: упаковка × тип товара (как на distribute-странице).
+    // Срез, который коммитим: упаковка (короб/моно). Новинки и обычные не разделяем.
     const committableRows = useMemo(() => {
         const rows = draft?.distribution.rows ?? [];
-        return rows.filter(r => {
-            const pkgOk = pkgTab === 'MONOPALLET' ? r.package_type === 'MONOPALLET' : r.package_type !== 'MONOPALLET';
-            if (!pkgOk) return false;
-            if (typeScope === 'all') return true;
-            const isNew = newcomerNmIds.has(r.nm_id);
-            return typeScope === 'newcomer' ? isNew : !isNew;
-        });
-    }, [draft, pkgTab, typeScope, newcomerNmIds]);
+        return rows.filter(r => (pkgTab === 'MONOPALLET' ? r.package_type === 'MONOPALLET' : r.package_type !== 'MONOPALLET'));
+    }, [draft, pkgTab]);
 
     const allLines = useMemo(() => buildPreviewLines(committableRows, newcomerNmIds), [committableRows, newcomerNmIds]);
 
@@ -232,13 +220,17 @@ export default function AssemblyPreviewPage() {
     }, [allLines, query, selectedWbs, selectedSubjects, selectedBrands, nmMeta]);
     const ffGroups = useMemo(() => groupByFf(lines), [lines]);
 
-    // Разбивка по ВСЕМУ срезу — это то, что реально создаст commit
-    // (обычные/новинки уйдут раздельными заявками).
+    // Сколько заявок создаст commit = уникальные (ФФ, WB, упаковка). Новинки и
+    // обычные на один склад — одна заявка; withNewcomer — сколько из них с 🆕.
     const breakdown = useMemo(() => {
-        const reg = new Set<string>();
-        const nw = new Set<string>();
-        for (const l of allLines) (l.isNew ? nw : reg).add(`${l.ffId}::${l.wbName}::${l.pkg}`);
-        return { regular: reg.size, newcomer: nw.size, total: reg.size + nw.size };
+        const groups = new Set<string>();
+        const withNewcomer = new Set<string>();
+        for (const l of allLines) {
+            const key = `${l.ffId}::${l.wbName}::${l.pkg}`;
+            groups.add(key);
+            if (l.isNew) withNewcomer.add(key);
+        }
+        return { total: groups.size, withNewcomer: withNewcomer.size };
     }, [allLines]);
     const totalAssemblies = breakdown.total;
     const isFiltered = query.trim() !== '' || selectedWbs.size > 0 || selectedSubjects.size > 0 || selectedBrands.size > 0;
@@ -267,7 +259,7 @@ export default function AssemblyPreviewPage() {
     }, [nmPpb]);
     const boxesSum = useCallback((ls: PreviewLine[]) => ls.reduce((s, l) => s + boxesOf(l), 0), [boxesOf]);
 
-    const scopeLabel = `${typeScope === 'all' ? 'Все типы' : typeScope === 'newcomer' ? '🆕 Новинки' : 'Обычные'} · ${pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'}`;
+    const scopeLabel = pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб';
 
     // ─── Excel export ────────────────────────────────────────────────────
     const today = new Date().toISOString().slice(0, 10);
@@ -377,8 +369,7 @@ export default function AssemblyPreviewPage() {
         if (!draftId) return;
         setCommitting(true);
         try {
-            const ncFilter = typeScope === 'all' ? undefined : typeScope;
-            const resp = await api.commitAssemblyDraft(draftId, pkgTab, ncFilter);
+            const resp = await api.commitAssemblyDraft(draftId, pkgTab);
             const ids = resp.created_request_ids || [];
             // Остался ли черновик (другой срез) — решаем, куда уйти.
             let leftoverRows = 0;
@@ -405,7 +396,7 @@ export default function AssemblyPreviewPage() {
             setToast({ message: e instanceof Error ? e.message : 'Ошибка создания сборок', type: 'error' });
             setCommitting(false);
         }
-    }, [draftId, pkgTab, typeScope, router, slug]);
+    }, [draftId, pkgTab, router, slug]);
 
     // ─── Render ──────────────────────────────────────────────────────────
     if (loading) {
@@ -491,7 +482,7 @@ export default function AssemblyPreviewPage() {
 
             {/* Сводка по срезу */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 12 }}>
-                <KpiCard label="Заявок" value={totalAssemblies} icon="📋" color="var(--color-accent)" sub={`Обычные ${breakdown.regular}${breakdown.newcomer > 0 ? ` · 🆕 ${breakdown.newcomer}` : ''}`} />
+                <KpiCard label="Заявок" value={totalAssemblies} icon="📋" color="var(--color-accent)" sub={breakdown.withNewcomer > 0 ? `🆕 с новинками: ${breakdown.withNewcomer}` : 'все обычные'} />
                 <KpiCard label="Штук" value={sumQty(allLines)} icon="🔢" color="var(--color-success)" />
                 <KpiCard label="Коробок" value={boxesSum(allLines)} icon="📦" color="var(--color-accent)" />
                 <KpiCard label="SKU" value={distinctSku} icon="🏷️" color="var(--color-warning)" sub="уникальных" />

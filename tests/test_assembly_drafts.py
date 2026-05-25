@@ -20,7 +20,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import select, text
 
-from backend.models.assembly import AssemblyDraft, AssemblyRequest
+from backend.models.assembly import AssemblyDraft, AssemblyRequest, AssemblyRequestItem
 from backend.schemas.assembly_draft import (
     AssemblyDraftCreate,
     AssemblyDraftDistribution,
@@ -615,8 +615,9 @@ async def setup_newcomer_nomenclature(db_session):
 
 
 @pytest.mark.asyncio
-async def test_commit_splits_newcomer_from_regular(db_session, setup_newcomer_nomenclature):
-    """Same (src, wb, pkg) but mixed newcomer/regular → 2 separate AssemblyRequests."""
+async def test_commit_merges_newcomer_and_regular(db_session, setup_newcomer_nomenclature):
+    """Same (src, wb, pkg) mixed newcomer/regular → ОДНА AssemblyRequest (новинки и
+    обычные едут вместе); comment получает префикс 🆕 (в заявке есть новинка)."""
     wh_a, _ = await _get_warehouse_ids(db_session)
     rows = [
         AssemblyDraftRow(
@@ -638,20 +639,28 @@ async def test_commit_splits_newcomer_from_regular(db_session, setup_newcomer_no
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
 
     resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
-    # Несмотря на одинаковые (src, wb, pkg) — две заявки: новинки отдельно.
-    assert len(resp.created_request_ids) == 2
+    # Один и тот же (src, wb, pkg) → ОДНА заявка (новинки + обычные вместе).
+    assert len(resp.created_request_ids) == 1
 
-    res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids)))
-    requests = list(res.scalars().all())
-    comments = {r.comment for r in requests}
-    # Одна заявка — новинки (comment начинается с маркера), вторая — обычная (auto-test).
-    assert any(c and c.startswith("🆕 Новинки") for c in comments)
-    assert "auto-test" in comments
+    req_id = resp.created_request_ids[0]
+    res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == req_id))
+    req = res.scalars().one()
+    # Содержит новинку → префикс 🆕 в комментарии (auto-test — базовый comment).
+    assert req.comment and req.comment.startswith("🆕 Новинки")
+    assert "auto-test" in req.comment
+
+    items_res = await db_session.execute(
+        select(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == req_id)
+    )
+    items = list(items_res.scalars().all())
+    assert {it.barcode for it in items} == {NEWCOMER_BARCODE, REGULAR_BARCODE}
+    assert sum(it.quantity for it in items) == 12  # 5 (новинка) + 7 (обычный)
 
 
 @pytest.mark.asyncio
-async def test_commit_splits_box_mono_newcomer_4_requests(db_session, setup_newcomer_nomenclature):
-    """Same (src, wb) — оба SKU имеют BOX+MONOPALLET split → 4 заявки (newcomer × {BOX, MONO} + regular × {BOX, MONO})."""
+async def test_commit_box_mono_2_requests(db_session, setup_newcomer_nomenclature):
+    """Same (src, wb), упаковки BOX+MONOPALLET, в каждой смесь новинка+обычный →
+    2 заявки (по одной на упаковку); обе помечены 🆕 (в каждой есть новинка)."""
     wh_a, _ = await _get_warehouse_ids(db_session)
     rows = [
         AssemblyDraftRow(
@@ -687,19 +696,14 @@ async def test_commit_splits_box_mono_newcomer_4_requests(db_session, setup_newc
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
 
     resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
-    assert len(resp.created_request_ids) == 4
+    # Группировка по (src, wb, pkg): BOX и MONOPALLET — 2 заявки (новинки и обычные слиты).
+    assert len(resp.created_request_ids) == 2
 
     res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids)))
     requests = list(res.scalars().all())
-    pkg_types = {r.package_type for r in requests}
-    assert pkg_types == {"BOX", "MONOPALLET"}
-    newcomer_reqs = [r for r in requests if r.comment and r.comment.startswith("🆕")]
-    regular_reqs = [r for r in requests if not r.comment or not r.comment.startswith("🆕")]
-    assert len(newcomer_reqs) == 2  # BOX + MONOPALLET для новинки
-    assert len(regular_reqs) == 2  # BOX + MONOPALLET для обычного
-    # Каждый тип package_type есть и у новинки, и у обычного
-    assert {r.package_type for r in newcomer_reqs} == {"BOX", "MONOPALLET"}
-    assert {r.package_type for r in regular_reqs} == {"BOX", "MONOPALLET"}
+    assert {r.package_type for r in requests} == {"BOX", "MONOPALLET"}
+    # В каждой упаковке есть новинка → обе заявки помечены 🆕.
+    assert all(r.comment and r.comment.startswith("🆕") for r in requests)
 
 
 @pytest.mark.asyncio
@@ -765,63 +769,43 @@ def _mixed_rows(wh_a: int) -> list[AssemblyDraftRow]:
 
 
 @pytest.mark.asyncio
-async def test_commit_newcomer_filter_only_newcomers(db_session, setup_newcomer_nomenclature):
-    """newcomer_filter='newcomer' коммитит только новинки; обычные остаются в черновике."""
+async def test_commit_mixed_merges_one_request_and_clears_draft(db_session, setup_newcomer_nomenclature):
+    """Смешанный склад (новинка + обычный, один src/wb/pkg) → ОДНА заявка с 🆕;
+    весь черновик закоммичен → soft-delete."""
     wh_a, _ = await _get_warehouse_ids(db_session)
     payload = _build_payload([wh_a], ["Электросталь"], _mixed_rows(wh_a))
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
 
-    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id, newcomer_filter="newcomer")
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
     assert len(resp.created_request_ids) == 1
     res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids)))
     req = res.scalars().one()
     assert req.comment and req.comment.startswith("🆕 Новинки")
-
-    # Обычный SKU остался в живом черновике (раздельная сборка).
-    leftover = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
-    assert leftover is not None
-    assert {r["nm_id"] for r in leftover.distribution["rows"]} == {REGULAR_NM_ID}
-
-
-@pytest.mark.asyncio
-async def test_commit_newcomer_filter_only_regular(db_session, setup_newcomer_nomenclature):
-    """newcomer_filter='regular' коммитит только обычные; новинки остаются в черновике."""
-    wh_a, _ = await _get_warehouse_ids(db_session)
-    payload = _build_payload([wh_a], ["Электросталь"], _mixed_rows(wh_a))
-    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
-
-    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id, newcomer_filter="regular")
-    assert len(resp.created_request_ids) == 1
-    res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids)))
-    req = res.scalars().one()
-    assert not (req.comment and req.comment.startswith("🆕"))
-
-    leftover = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
-    assert leftover is not None
-    assert {r["nm_id"] for r in leftover.distribution["rows"]} == {NEWCOMER_NM_ID}
-
-
-@pytest.mark.asyncio
-async def test_commit_newcomer_filter_all_commits_everything(db_session, setup_newcomer_nomenclature):
-    """newcomer_filter='all' эквивалентен отсутствию фильтра: коммитит всё, черновик удаляется."""
-    wh_a, _ = await _get_warehouse_ids(db_session)
-    payload = _build_payload([wh_a], ["Электросталь"], _mixed_rows(wh_a))
-    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
-
-    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id, newcomer_filter="all")
-    assert len(resp.created_request_ids) == 2  # новинка + обычный = раздельные заявки
+    # Черновик полностью закоммичен → удалён.
     assert await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id) is None
 
 
 @pytest.mark.asyncio
-async def test_commit_invalid_newcomer_filter_400(db_session, setup_newcomer_nomenclature):
-    """Некорректный newcomer_filter → 400, черновик не тронут."""
+async def test_commit_regular_only_no_newcomer_marker(db_session, setup_newcomer_nomenclature):
+    """Склад только из обычных товаров → заявка без префикса 🆕."""
     wh_a, _ = await _get_warehouse_ids(db_session)
-    payload = _build_payload([wh_a], ["Электросталь"], _mixed_rows(wh_a))
+    rows = [
+        AssemblyDraftRow(
+            nm_id=REGULAR_NM_ID,
+            barcode=REGULAR_BARCODE,
+            src={str(wh_a): 7},
+            tgt={"Электросталь": 7},
+            package_type="BOX",
+        ),
+    ]
+    payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
-    with pytest.raises(HTTPException) as exc:
-        await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id, newcomer_filter="bogus")
-    assert exc.value.status_code == 400
+
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert len(resp.created_request_ids) == 1
+    res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids)))
+    req = res.scalars().one()
+    assert not (req.comment and req.comment.startswith("🆕"))
 
 
 @pytest.mark.asyncio
@@ -870,9 +854,7 @@ async def test_hand_off_unit_carves_from_rows(db_session, setup_newcomer_nomencl
     payload = _build_payload([wh_a], ["Электросталь", "Казань"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
 
-    read = await assembly_draft_service.hand_off_unit(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False
-    )
+    read = await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     assert len(read.distribution.handed_units) == 1
     unit = read.distribution.handed_units[0]
     assert unit.source_ff_id == wh_a and unit.target_wb_name == "Электросталь"
@@ -882,6 +864,43 @@ async def test_hand_off_unit_carves_from_rows(db_session, setup_newcomer_nomencl
     rem = read.distribution.rows[0]
     assert sum(rem.src.values()) == 5
     assert rem.tgt == {"Казань": 5}
+
+
+@pytest.mark.asyncio
+async def test_hand_off_merges_rows_into_existing_snapshot(db_session, setup_newcomer_nomenclature):
+    """Edge (черновик «в полёте»): обычные уже переданы на ФФ (снимок), а новинки
+    ещё в rows на тот же (ff, wb, pkg). hand_off вырезает rows и сливает их в
+    снимок → один handed-юнит со всеми позициями, rows пустеют."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    handed = [
+        HandedUnit(
+            source_ff_id=wh_a,
+            target_wb_name="Электросталь",
+            package_type="BOX",
+            status="handed",
+            items=[HandedUnitItem(nm_id=REGULAR_NM_ID, barcode=REGULAR_BARCODE, vendor_code="", qty=7)],
+        )
+    ]
+    rows = [
+        AssemblyDraftRow(
+            nm_id=NEWCOMER_NM_ID,
+            barcode=NEWCOMER_BARCODE,
+            src={str(wh_a): 5},
+            tgt={"Электросталь": 5},
+            package_type="BOX",
+        )
+    ]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _draft_with_handed(wh_a, "Inflight", rows, handed)
+    )
+
+    read = await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+    assert len(read.distribution.handed_units) == 1
+    u = read.distribution.handed_units[0]
+    assert u.status == "handed"
+    by_bc = {it.barcode: it.qty for it in u.items}
+    assert by_bc == {REGULAR_BARCODE: 7, NEWCOMER_BARCODE: 5}
+    assert read.distribution.rows == []
 
 
 @pytest.mark.asyncio
@@ -900,10 +919,8 @@ async def test_revert_unit_merges_back(db_session, setup_newcomer_nomenclature):
     payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
 
-    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
-    read = await assembly_draft_service.revert_unit(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False
-    )
+    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+    read = await assembly_draft_service.revert_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     assert read.distribution.handed_units == []
     assert len(read.distribution.rows) == 1
     assert read.distribution.rows[0].src == {str(wh_a): 7}
@@ -926,10 +943,8 @@ async def test_commit_unit_creates_request_and_clears_draft(db_session, setup_ne
     payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
 
-    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
-    resp = await assembly_draft_service.commit_unit(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False
-    )
+    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+    resp = await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     assert len(resp.created_request_ids) == 1
     res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids)))
     req = res.scalars().one()
@@ -956,7 +971,7 @@ async def test_commit_unit_404_when_not_handed(db_session, setup_newcomer_nomenc
     payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
     with pytest.raises(HTTPException) as exc:
-        await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
+        await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     assert exc.value.status_code == 404
 
 
@@ -981,7 +996,7 @@ async def test_set_unit_items_freezes_auto_draft(db_session, setup_newcomer_nome
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
 
     read = await assembly_draft_service.set_unit_items(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False, [_item(10)]
+        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", [_item(10)]
     )
     assert len(read.distribution.handed_units) == 1
     u = read.distribution.handed_units[0]
@@ -1008,10 +1023,10 @@ async def test_set_unit_items_replaces_frozen(db_session, setup_newcomer_nomencl
     payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
     await assembly_draft_service.set_unit_items(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False, [_item(5)]
+        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", [_item(5)]
     )
     read = await assembly_draft_service.set_unit_items(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False, [_item(9)]
+        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", [_item(9)]
     )
     assert len(read.distribution.handed_units) == 1
     assert sum(it.qty for it in read.distribution.handed_units[0].items) == 9
@@ -1032,10 +1047,10 @@ async def test_set_unit_items_blocked_after_handoff(db_session, setup_newcomer_n
     ]
     payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
-    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
+    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     with pytest.raises(HTTPException) as exc:
         await assembly_draft_service.set_unit_items(
-            db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False, [_item(9)]
+            db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", [_item(9)]
         )
     assert exc.value.status_code == 400
 
@@ -1056,17 +1071,13 @@ async def test_edit_then_handoff_then_commit(db_session, setup_newcomer_nomencla
     payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
     await assembly_draft_service.set_unit_items(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False, [_item(9)]
+        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", [_item(9)]
     )
-    read = await assembly_draft_service.hand_off_unit(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False
-    )
+    read = await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     u = read.distribution.handed_units[0]
     assert u.status == "handed"
     assert sum(it.qty for it in u.items) == 9
-    resp = await assembly_draft_service.commit_unit(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False
-    )
+    resp = await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     assert len(resp.created_request_ids) == 1
 
 
@@ -1085,7 +1096,7 @@ async def test_delete_unit_auto_clears_empty_draft(db_session, setup_newcomer_no
     ]
     payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
-    await assembly_draft_service.delete_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
+    await assembly_draft_service.delete_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     assert await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id) is None
 
 
@@ -1104,9 +1115,9 @@ async def test_delete_unit_handed_blocked(db_session, setup_newcomer_nomenclatur
     ]
     payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
-    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
+    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     with pytest.raises(HTTPException) as exc:
-        await assembly_draft_service.delete_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
+        await assembly_draft_service.delete_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     assert exc.value.status_code == 400
 
 
@@ -1130,9 +1141,7 @@ async def test_move_unit_auto_relabels_to_new_wb(db_session, setup_newcomer_nome
     payload = _build_payload([wh_a], ["Электросталь", "Казань"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
 
-    read = await assembly_draft_service.move_unit(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False, "Тула"
-    )
+    read = await assembly_draft_service.move_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", "Тула")
     assert read.distribution.handed_units == []
     assert len(read.distribution.rows) == 1
     row = read.distribution.rows[0]
@@ -1158,12 +1167,10 @@ async def test_move_unit_merges_into_existing_draft_at_dest(db_session, setup_ne
     payload = _build_payload([wh_a], ["Электросталь", "Казань"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
     # Зафиксировать Казань как ручной черновик (5 шт), Электросталь остаётся авто.
-    await assembly_draft_service.set_unit_items(
-        db_session, PROJECT_ID, draft.id, wh_a, "Казань", "BOX", False, [_item(5)]
-    )
+    await assembly_draft_service.set_unit_items(db_session, PROJECT_ID, draft.id, wh_a, "Казань", "BOX", [_item(5)])
 
     read = await assembly_draft_service.move_unit(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False, "Казань"
+        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", "Казань"
     )
     assert read.distribution.rows == []
     assert len(read.distribution.handed_units) == 1
@@ -1190,7 +1197,7 @@ async def test_move_unit_same_wb_rejected(db_session, setup_newcomer_nomenclatur
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
     with pytest.raises(HTTPException) as exc:
         await assembly_draft_service.move_unit(
-            db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False, "Электросталь"
+            db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", "Электросталь"
         )
     assert exc.value.status_code == 400
 
@@ -1210,12 +1217,45 @@ async def test_move_unit_handed_source_blocked(db_session, setup_newcomer_nomenc
     ]
     payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
-    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
+    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     with pytest.raises(HTTPException) as exc:
-        await assembly_draft_service.move_unit(
-            db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False, "Казань"
-        )
+        await assembly_draft_service.move_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", "Казань")
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_move_unit_mixed_snapshot_and_rows(db_session, setup_newcomer_nomenclature):
+    """Legacy «в полёте»: ДРАФТ-снимок + остаточный авто-поток на тот же (ff,wb,pkg).
+    move переносит ВСЁ (снимок + rows) → на исходном складе ничего не остаётся."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    handed = [
+        HandedUnit(
+            source_ff_id=wh_a,
+            target_wb_name="Электросталь",
+            package_type="BOX",
+            status="draft",
+            items=[HandedUnitItem(nm_id=REGULAR_NM_ID, barcode=REGULAR_BARCODE, vendor_code="", qty=7)],
+        )
+    ]
+    rows = [
+        AssemblyDraftRow(
+            nm_id=NEWCOMER_NM_ID,
+            barcode=NEWCOMER_BARCODE,
+            src={str(wh_a): 5},
+            tgt={"Электросталь": 5},
+            package_type="BOX",
+        )
+    ]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _draft_with_handed(wh_a, "Mixed", rows, handed)
+    )
+
+    read = await assembly_draft_service.move_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", "Тула")
+    # На исходном складе не осталось ни снимка, ни авто-потока.
+    assert all(u.target_wb_name != "Электросталь" for u in read.distribution.handed_units)
+    assert all("Электросталь" not in r.tgt for r in read.distribution.rows)
+    # Всё (7 снимок + 5 rows) уехало на Тулу (нет снимка-получателя → вернулось в rows).
+    assert sum(r.tgt.get("Тула", 0) for r in read.distribution.rows) == 12
 
 
 # ─── Tests: source_draft_id linkage («История — в сборке» per draft) ──────────
@@ -1258,10 +1298,8 @@ async def test_commit_unit_links_draft_and_list_filter(db_session):
     draft = await assembly_draft_service.create_draft(
         db_session, PROJECT_ID, _build_payload([wh_a], ["Электросталь"], rows)
     )
-    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False)
-    resp = await assembly_draft_service.commit_unit(
-        db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX", False
-    )
+    await assembly_draft_service.hand_off_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+    resp = await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
     req_id = resp.created_request_ids[0]
 
     res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == req_id))
@@ -1615,7 +1653,6 @@ async def test_merge_drafts_carries_handed_units(db_session):
                     source_ff_id=wh_a,
                     target_wb_name="Электросталь",
                     package_type="BOX",
-                    is_newcomer=False,
                     status="handed",
                     items=[HandedUnitItem(nm_id=1, barcode="X", vendor_code="V", qty=10)],
                 )
@@ -1636,7 +1673,7 @@ async def test_merge_drafts_carries_handed_units(db_session):
 
 @pytest.mark.asyncio
 async def test_merge_drafts_dedups_handed_units_same_key(db_session):
-    """Юниты с совпадающим (ff, wb, pkg, newcomer) сливаются, позиции суммируются по баркоду."""
+    """Юниты с совпадающим (ff, wb, pkg) сливаются, позиции суммируются по баркоду."""
     wh_a, _ = await _get_warehouse_ids(db_session)
 
     def _unit(qty_x: int, qty_y: int) -> HandedUnit:
@@ -1644,7 +1681,6 @@ async def test_merge_drafts_dedups_handed_units_same_key(db_session):
             source_ff_id=wh_a,
             target_wb_name="Казань",
             package_type="BOX",
-            is_newcomer=False,
             status="handed",
             items=[
                 HandedUnitItem(nm_id=1, barcode="X", vendor_code="V", qty=qty_x),
@@ -1677,7 +1713,6 @@ async def test_merge_drafts_handed_status_wins_over_draft(db_session):
             source_ff_id=wh_a,
             target_wb_name="Казань",
             package_type="BOX",
-            is_newcomer=False,
             status=status,
             items=[HandedUnitItem(nm_id=1, barcode="X", vendor_code="V", qty=4)],
         )

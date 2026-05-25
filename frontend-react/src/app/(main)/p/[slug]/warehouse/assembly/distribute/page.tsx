@@ -74,7 +74,6 @@ export default function AssemblyDistributePage() {
     const [rows, setRows] = useState<AssemblyDraftRow[]>([]);
     const [pkgTab, setPkgTab] = useState<'BOX' | 'MONOPALLET'>('BOX');
     const [multFilter, setMultFilter] = useState<'none' | 'with' | 'without'>('none');
-    const [typeTab, setTypeTab] = useState<'all' | 'regular' | 'newcomer'>('all');
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
     const [coldStartShares, setColdStartShares] = useState<Record<string, number> | null>(null);
     // Замороженные заявки (передан на ФФ) — вырезаны из rows, на distribute не
@@ -241,30 +240,20 @@ export default function AssemblyDistributePage() {
     // ─── Вкладки Короб/Моно: строки активного типа упаковки ───────────────
     // Короб-вкладка показывает всё кроме моно (BOX + редкий SUPERSAFE), чтобы
     // ни одна строка не потерялась между двумя вкладками.
-    // ─── Две независимых оси фильтра: упаковка (короб/моно) × тип товара ───
+    // ─── Фильтр по упаковке (короб/моно) ──────────────────────────────────
     const pkgMatch = useCallback(
         (r: AssemblyDraftRow) => pkgTab === 'MONOPALLET'
             ? r.package_type === 'MONOPALLET'
             : r.package_type !== 'MONOPALLET',
         [pkgTab],
     );
-    const typeMatch = useCallback((r: AssemblyDraftRow) => {
-        if (typeTab === 'all') return true;
-        const isNew = newcomerNmIds.has(r.nm_id);
-        return typeTab === 'newcomer' ? isNew : !isNew;
-    }, [typeTab, newcomerNmIds]);
 
-    // Есть ли в черновике новинки — определяет показ сегмента «Тип товара».
-    const hasNewcomerRows = useMemo(
-        () => rows.some(r => newcomerNmIds.has(r.nm_id)), [rows, newcomerNmIds],
-    );
-
-    // committableRows — то, что реально уйдёт в commit (упаковка × тип товара).
+    // committableRows — то, что реально уйдёт в commit (срез по упаковке).
     // multFilter («Кратные / Без кратности») — только визуальный фильтр и на
-    // состав сборки НЕ влияет.
+    // состав сборки НЕ влияет. Новинки и обычные коммитятся вместе.
     const committableRows = useMemo(
-        () => rows.filter(r => pkgMatch(r) && typeMatch(r)),
-        [rows, pkgMatch, typeMatch],
+        () => rows.filter(r => pkgMatch(r)),
+        [rows, pkgMatch],
     );
     const visibleRows = useMemo(
         () => committableRows.filter(r => {
@@ -275,18 +264,9 @@ export default function AssemblyDistributePage() {
         [committableRows, multFilter, nmPpb],
     );
 
-    // Счётчики сегментов — каждый учитывает выбор по ВТОРОЙ оси.
-    const rowsForPkg = useMemo(() => rows.filter(pkgMatch), [rows, pkgMatch]);
-    const rowsForType = useMemo(() => rows.filter(typeMatch), [rows, typeMatch]);
-    const allTypeCount = rowsForPkg.length;
-    const regularCount = useMemo(
-        () => rowsForPkg.filter(r => !newcomerNmIds.has(r.nm_id)).length, [rowsForPkg, newcomerNmIds],
-    );
-    const newcomerCount = useMemo(
-        () => rowsForPkg.filter(r => newcomerNmIds.has(r.nm_id)).length, [rowsForPkg, newcomerNmIds],
-    );
-    const boxRowCount = useMemo(() => rowsForType.filter(r => r.package_type !== 'MONOPALLET').length, [rowsForType]);
-    const monoRowCount = useMemo(() => rowsForType.filter(r => r.package_type === 'MONOPALLET').length, [rowsForType]);
+    // Счётчики вкладок упаковки (по всем строкам) и кратности (по срезу упаковки).
+    const boxRowCount = useMemo(() => rows.filter(r => r.package_type !== 'MONOPALLET').length, [rows]);
+    const monoRowCount = useMemo(() => rows.filter(r => r.package_type === 'MONOPALLET').length, [rows]);
     const withKCount = useMemo(() => committableRows.filter(r => !!nmPpb.get(r.nm_id)).length, [committableRows, nmPpb]);
     const withoutKCount = useMemo(() => committableRows.filter(r => !nmPpb.get(r.nm_id)).length, [committableRows, nmPpb]);
     const newcomerRowsTotal = useMemo(() => rows.filter(r => newcomerNmIds.has(r.nm_id)).length, [rows, newcomerNmIds]);
@@ -448,14 +428,13 @@ export default function AssemblyDistributePage() {
 
     // ─── Commit ──────────────────────────────────────────────────────────
     // Должно совпадать с backend `commit_draft` группировкой:
-    // (source_ff_id, target_wb_name, package_type, is_newcomer) → 1 AssemblyRequest.
-    // Кол-во заявок, которые создаст commit текущего среза — совпадает с backend
-    // группировкой (ФФ, WB, упаковка, новинка?). Считаем по committableRows
-    // (НЕ visibleRows): multFilter на состав сборки не влияет. Разбивка
-    // обычные/новинки показывает, что они уйдут раздельными заявками.
+    // (source_ff_id, target_wb_name, package_type) → 1 AssemblyRequest. Новинки и
+    // обычные на один склад едут вместе. Считаем по committableRows (НЕ
+    // visibleRows): multFilter на состав сборки не влияет. withNewcomer — сколько
+    // заявок будут с товаром-новинкой (получат префикс 🆕).
     const commitBreakdown = useMemo(() => {
-        const reg = new Set<string>();
-        const nw = new Set<string>();
+        const groups = new Set<string>();
+        const withNewcomer = new Set<string>();
         for (const r of committableRows) {
             const pkg = r.package_type || 'BOX';
             const isNew = newcomerNmIds.has(r.nm_id);
@@ -463,11 +442,13 @@ export default function AssemblyDistributePage() {
                 if ((srcQty || 0) <= 0) continue;
                 for (const [wbName, tgtQty] of Object.entries(r.tgt)) {
                     if ((tgtQty || 0) <= 0) continue;
-                    (isNew ? nw : reg).add(`${ffId}::${wbName}::${pkg}`);
+                    const key = `${ffId}::${wbName}::${pkg}`;
+                    groups.add(key);
+                    if (isNew) withNewcomer.add(key);
                 }
             }
         }
-        return { regular: reg.size, newcomer: nw.size, total: reg.size + nw.size };
+        return { total: groups.size, withNewcomer: withNewcomer.size };
     }, [committableRows, newcomerNmIds]);
     const uniqueAssemblyCount = commitBreakdown.total;
 
@@ -477,9 +458,9 @@ export default function AssemblyDistributePage() {
         if (!draftId) return;
         const ok = await saveDraft(true);
         if (!ok) return;
-        const qs = new URLSearchParams({ draft: String(draftId), pkg: pkgTab, type: typeTab });
+        const qs = new URLSearchParams({ draft: String(draftId), pkg: pkgTab });
         router.push(`/p/${slug}/warehouse/assembly/distribute/preview?${qs.toString()}`);
-    }, [draftId, saveDraft, router, slug, pkgTab, typeTab]);
+    }, [draftId, saveDraft, router, slug, pkgTab]);
 
     // ─── Render ──────────────────────────────────────────────────────────
     if (loading) {
@@ -584,47 +565,21 @@ export default function AssemblyDistributePage() {
                         disabled={saving || uniqueAssemblyCount === 0}
                         title={
                             `Открыть предпросмотр. Заявки (${uniqueAssemblyCount}) создаются на следующем шаге кнопкой «Создать».`
-                            + `\nОбычные: ${commitBreakdown.regular} · 🆕 Новинки: ${commitBreakdown.newcomer} (раздельные заявки)`
+                            + (commitBreakdown.withNewcomer > 0 ? `\n🆕 с новинками: ${commitBreakdown.withNewcomer} (новинки и обычные едут вместе)` : '')
                             + `\nГруппировка по складам-источникам + выгрузка в Excel.`
                         }
                     >
                         {saving
                             ? 'Сохранение...'
-                            : `Предпросмотр: ${typeTab === 'all' ? '' : typeTab === 'newcomer' ? '🆕 Новинки · ' : 'Обычные · '}${pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'} (${uniqueAssemblyCount}) →`}
+                            : `Предпросмотр: ${pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'} (${uniqueAssemblyCount}) →`}
                     </button>
                 </div>
             </div>
 
-            {/* Вкладки: Тип товара (новинки/обычные) × Упаковка (короб/моно) —
-                каждое измерение уходит раздельными заявками при commit. */}
+            {/* Вкладки: Упаковка (короб/моно) — раздельные заявки при commit.
+                Новинки и обычные товары на один склад идут одной заявкой. */}
             {rows.length > 0 && (
                 <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-                    {hasNewcomerRows && (
-                        <>
-                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Тип:</span>
-                            <button
-                                className={`btn btn-sm ${typeTab === 'all' ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => setTypeTab('all')}
-                            >
-                                Все ({allTypeCount})
-                            </button>
-                            <button
-                                className={`btn btn-sm ${typeTab === 'regular' ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => setTypeTab('regular')}
-                            >
-                                Обычные ({regularCount})
-                            </button>
-                            <button
-                                className={`btn btn-sm ${typeTab === 'newcomer' ? 'btn-primary' : 'btn-secondary'}`}
-                                style={typeTab !== 'newcomer' ? { borderColor: '#a855f7', color: '#a855f7' } : {}}
-                                onClick={() => setTypeTab('newcomer')}
-                                title="Новинки (cold-start) — уйдут отдельными заявками от обычных"
-                            >
-                                🆕 Новинки ({newcomerCount})
-                            </button>
-                            <div style={{ width: 1, alignSelf: 'stretch', background: 'var(--color-border)', margin: '0 4px' }} />
-                        </>
-                    )}
                     <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Упак:</span>
                     <button
                         className={`btn btn-sm ${pkgTab === 'BOX' ? 'btn-primary' : 'btn-secondary'}`}
@@ -668,8 +623,7 @@ export default function AssemblyDistributePage() {
             ) : visibleRows.length === 0 ? (
                 <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                     Нет позиций в выбранном срезе
-                    {' «'}{typeTab === 'newcomer' ? '🆕 Новинки' : typeTab === 'regular' ? 'Обычные' : 'Все'}
-                    {' · '}{pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'}{'»'}
+                    {' «'}{pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб'}{'»'}
                     {multFilter !== 'none' && ` (${multFilter === 'with' ? 'кратные' : 'без кратности'})`}
                 </div>
             ) : (
