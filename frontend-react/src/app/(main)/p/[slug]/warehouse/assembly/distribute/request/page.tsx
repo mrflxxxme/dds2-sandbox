@@ -41,8 +41,6 @@ export default function AssemblyRequestUnitPage() {
     const wbName = searchParams.get('wb') || '';
     const pkgRaw = searchParams.get('pkg');
     const pkg: PackageType = pkgRaw === 'MONOPALLET' ? 'MONOPALLET' : pkgRaw === 'SUPERSAFE' ? 'SUPERSAFE' : 'BOX';
-    const isNewcomer = searchParams.get('new') === '1';
-    const typeScope = searchParams.get('type') || 'all';
 
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -124,9 +122,9 @@ export default function AssemblyRequestUnitPage() {
         return findDraftUnit(
             draft.distribution.rows ?? [],
             draft.distribution.handed_units ?? [],
-            newcomerNmIds, ffId, wbName, pkg, isNewcomer,
+            newcomerNmIds, ffId, wbName, pkg,
         );
-    }, [draft, ffId, wbName, pkg, isNewcomer, newcomerNmIds]);
+    }, [draft, ffId, wbName, pkg, newcomerNmIds]);
 
     // Доступные WB-склады черновика для переноса (кроме текущего).
     const availableWbTargets = useMemo(
@@ -150,12 +148,12 @@ export default function AssemblyRequestUnitPage() {
         if (!draft || ffId == null) return m;
         const units = buildFfUnits(draft.distribution.rows ?? [], draft.distribution.handed_units ?? [], newcomerNmIds, ffId);
         for (const u of units) {
-            if (u.pkg !== pkg || u.isNewcomer !== isNewcomer) continue;
+            if (u.pkg !== pkg) continue;
             const boxes = u.items.reduce((s, it) => s + boxesOf(it.nmId, it.qty), 0);
             m.set(u.wbName, { qty: u.qty, boxes, sku: u.items.length });
         }
         return m;
-    }, [draft, ffId, newcomerNmIds, pkg, isNewcomer, boxesOf]);
+    }, [draft, ffId, newcomerNmIds, pkg, boxesOf]);
 
     // ─── Остаток ФФ для проверки правок ──────────────────────────────────
     const stockByNm = useMemo(() => {
@@ -231,13 +229,13 @@ export default function AssemblyRequestUnitPage() {
     const looseUnits = partialItems.reduce((s, it) => s + (it.qty % kOf(it.nmId)), 0);
 
     const unitRef: AssemblyDraftUnitRef = useMemo(() => ({
-        source_ff_id: ffId ?? 0, target_wb_name: wbName, package_type: pkg, is_newcomer: isNewcomer,
-    }), [ffId, wbName, pkg, isNewcomer]);
+        source_ff_id: ffId ?? 0, target_wb_name: wbName, package_type: pkg,
+    }), [ffId, wbName, pkg]);
 
     const backToFf = useCallback(() => {
-        const qs = new URLSearchParams({ draft: String(draftId ?? ''), ff: String(ffId ?? ''), pkg, type: typeScope });
+        const qs = new URLSearchParams({ draft: String(draftId ?? ''), ff: String(ffId ?? ''), pkg });
         router.push(`/p/${slug}/warehouse/assembly/distribute/ff?${qs.toString()}`);
-    }, [draftId, ffId, pkg, typeScope, router, slug]);
+    }, [draftId, ffId, pkg, router, slug]);
 
     // ─── Edit handlers ───────────────────────────────────────────────────
     const enterEdit = useCallback(() => {
@@ -288,7 +286,7 @@ export default function AssemblyRequestUnitPage() {
             return {
                 vendor: it.vendor, barcode: it.barcode, wb: unit.wbName, qty: it.qty,
                 boxes: k > 0 ? Math.ceil(it.qty / k) : '', box_qty: k > 0 ? k : '',
-                pkg: PKG_LABEL_RU[unit.pkg] || unit.pkg, type: unit.isNewcomer ? 'Новинка' : 'Обычный',
+                pkg: PKG_LABEL_RU[unit.pkg] || unit.pkg, type: it.isNew ? 'Новинка' : 'Обычный',
             };
         });
         exportToExcel(data, `Заявка_${excelSheetName(ffName)}_${excelSheetName(unit.wbName)}_${new Date().toISOString().slice(0, 10)}`, PREVIEW_EXPORT_COLUMNS);
@@ -406,8 +404,7 @@ export default function AssemblyRequestUnitPage() {
             setDraft(d);
             setToast({ message: `Перенесено на «${newWb}»`, type: 'success' });
             const qs = new URLSearchParams({
-                draft: String(draftId), ff: String(ffId ?? ''), wb: newWb,
-                pkg, new: isNewcomer ? '1' : '0', type: typeScope,
+                draft: String(draftId), ff: String(ffId ?? ''), wb: newWb, pkg,
             });
             router.replace(`/p/${slug}/warehouse/assembly/distribute/request?${qs.toString()}`);
         } catch (e: unknown) {
@@ -415,7 +412,7 @@ export default function AssemblyRequestUnitPage() {
         } finally {
             setBusy(false);
         }
-    }, [draftId, unitRef, ffName, wbName, ffId, pkg, isNewcomer, typeScope, router, slug, targetAcceptance, unit]);
+    }, [draftId, unitRef, ffName, wbName, ffId, pkg, router, slug, targetAcceptance, unit]);
 
     if (loading) {
         return <div className="animate-in"><div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка…</div></div>;
@@ -454,7 +451,7 @@ export default function AssemblyRequestUnitPage() {
                             {unit.frozen && unit.status === 'draft' && (
                                 <span style={{ padding: '2px 8px', borderRadius: 24, background: 'rgba(14,165,233,0.16)', color: '#0369a1', fontWeight: 700, fontSize: 11 }}>ручной</span>
                             )}
-                            <span>{PKG_LABEL_RU[unit.pkg] || unit.pkg}{unit.isNewcomer ? ' · 🆕 Новинка' : ''}</span>
+                            <span>{PKG_LABEL_RU[unit.pkg] || unit.pkg}{unit.hasNewcomer ? ' · 🆕 есть новинки' : ''}</span>
                             <span>· Σ {formatNumber(unit.qty, 0)} шт · {formatNumber(totalBoxes, 0)} кор · {items.length} SKU</span>
                         </p>
                     </div>
@@ -548,7 +545,7 @@ export default function AssemblyRequestUnitPage() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
                 <KpiCard label="Коробок" value={Math.round(totalBoxes)} icon="📦" color="var(--color-accent)" sub={PKG_LABEL_RU[unit.pkg] || unit.pkg} />
                 <KpiCard label="Штук" value={unit.qty} icon="🔢" color="var(--color-success)" sub={`→ ${unit.wbName}`} />
-                <KpiCard label="Позиций (SKU)" value={items.length} icon="🏷️" color="var(--color-warning)" sub={unit.isNewcomer ? '🆕 новинка' : 'обычные'} />
+                <KpiCard label="Позиций (SKU)" value={items.length} icon="🏷️" color="var(--color-warning)" sub={unit.hasNewcomer ? '🆕 есть новинки' : 'обычные'} />
                 <KpiCard
                     label="Неполных коробов"
                     value={partialCount}
@@ -653,7 +650,10 @@ export default function AssemblyRequestUnitPage() {
                                 const rem = k > 0 ? it.qty % k : 0;
                                 return (
                                     <tr key={it.nmId} style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                        <td style={{ padding: '6px 12px', fontWeight: 500 }}>{it.vendor || `nm:${it.nmId}`}</td>
+                                        <td style={{ padding: '6px 12px', fontWeight: 500 }}>
+                                            {it.isNew && <span title="Новинка" style={{ marginRight: 4, color: '#a855f7', fontWeight: 700 }}>🆕</span>}
+                                            {it.vendor || `nm:${it.nmId}`}
+                                        </td>
                                         <td style={{ padding: '6px 12px', color: 'var(--color-text-muted)' }}>{it.barcode}</td>
                                         <td
                                             style={{ padding: '6px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}

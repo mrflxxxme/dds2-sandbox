@@ -2800,13 +2800,13 @@ export interface HandedUnitItem {
   qty: number;
 }
 
-/** Заявка-юнит, переданная на ФФ: вырезана из rows, заморожена снимком. */
+/** Заявка-юнит, переданная на ФФ: вырезана из rows, заморожена снимком.
+ *  Ключ — (ff × wb × pkg); новинки и обычные товары на один склад в одном юните. */
 export interface HandedUnit {
   source_ff_id: number;
   target_wb_name: string;
   package_type: PackageType;
-  is_newcomer: boolean;
-  status: string; // "handed"
+  status: string; // "handed" | "draft"
   items: HandedUnitItem[];
 }
 
@@ -2825,12 +2825,12 @@ export interface AssemblyDraftDistribution {
   handed_units?: HandedUnit[];
 }
 
-/** Ссылка на заявку-юнит черновика (hand-off / revert / commit). */
+/** Ссылка на заявку-юнит черновика (hand-off / revert / commit).
+ *  Ключ — (ff × wb × pkg); новинки и обычные не разделяются. */
 export interface AssemblyDraftUnitRef {
   source_ff_id: number;
   target_wb_name: string;
   package_type: PackageType;
-  is_newcomer: boolean;
 }
 
 export interface AssemblyDraft {

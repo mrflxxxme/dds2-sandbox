@@ -14,8 +14,6 @@ import {
     type DraftUnit,
 } from '@/lib/utils/assemblyPreview';
 
-type TypeScope = 'all' | 'regular' | 'newcomer';
-
 const STATUS_BADGE: Record<string, { label: string; bg: string; color: string }> = {
     draft: { label: 'Черновик', bg: 'rgba(142,142,147,0.16)', color: '#6e6e73' },
     handed: { label: 'Передан на ФФ', bg: 'rgba(245,158,11,0.18)', color: '#a16207' },
@@ -37,7 +35,6 @@ const unitRef = (u: DraftUnit): AssemblyDraftUnitRef => ({
     source_ff_id: u.ffId,
     target_wb_name: u.wbName,
     package_type: u.pkg,
-    is_newcomer: u.isNewcomer,
 });
 
 export default function AssemblyFfPage() {
@@ -49,10 +46,6 @@ export default function AssemblyFfPage() {
     const draftId = Number(searchParams.get('draft')) || null;
     const ffId = Number(searchParams.get('ff')) || null;
     const pkgTab: PackageType = searchParams.get('pkg') === 'MONOPALLET' ? 'MONOPALLET' : 'BOX';
-    const typeScope: TypeScope = (() => {
-        const t = searchParams.get('type');
-        return t === 'regular' || t === 'newcomer' ? t : 'all';
-    })();
 
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -119,16 +112,15 @@ export default function AssemblyFfPage() {
     );
     const newcomerNmIds = useMemo(() => new Set(draft?.newcomer_nm_ids ?? []), [draft]);
 
-    // Срез (упаковка × тип товара) — как на странице предпросмотра.
+    // Срез по упаковке (короб/моно). Новинки и обычные внутри склада не разделяем.
     const filtered = useMemo(() => {
         const allRows = draft?.distribution.rows ?? [];
         const allHanded = draft?.distribution.handed_units ?? [];
         const pkgOkRow = (p?: PackageType) => pkgTab === 'MONOPALLET' ? p === 'MONOPALLET' : p !== 'MONOPALLET';
-        const typeOk = (isNew: boolean) => typeScope === 'all' || (typeScope === 'newcomer' ? isNew : !isNew);
-        const rows = allRows.filter(r => pkgOkRow(r.package_type) && typeOk(newcomerNmIds.has(r.nm_id)));
-        const handed = allHanded.filter(h => pkgOkRow(h.package_type) && typeOk(h.is_newcomer));
+        const rows = allRows.filter(r => pkgOkRow(r.package_type));
+        const handed = allHanded.filter(h => pkgOkRow(h.package_type));
         return { rows, handed };
-    }, [draft, pkgTab, typeScope, newcomerNmIds]);
+    }, [draft, pkgTab]);
 
     const units = useMemo(
         () => ffId == null ? [] : buildFfUnits(filtered.rows, filtered.handed, newcomerNmIds, ffId),
@@ -144,17 +136,16 @@ export default function AssemblyFfPage() {
     const unitBoxes = useCallback((u: DraftUnit) => u.items.reduce((s, it) => s + boxesOf(it.nmId, it.qty), 0), [boxesOf]);
 
     const backToPreview = useCallback(() => {
-        const qs = new URLSearchParams({ draft: String(draftId ?? ''), pkg: pkgTab, type: typeScope });
+        const qs = new URLSearchParams({ draft: String(draftId ?? ''), pkg: pkgTab });
         router.push(`/p/${slug}/warehouse/assembly/distribute/preview?${qs.toString()}`);
-    }, [draftId, pkgTab, typeScope, router, slug]);
+    }, [draftId, pkgTab, router, slug]);
 
     const openUnit = useCallback((u: DraftUnit) => {
         const qs = new URLSearchParams({
-            draft: String(draftId ?? ''), ff: String(u.ffId), wb: u.wbName,
-            pkg: u.pkg, new: u.isNewcomer ? '1' : '0', type: typeScope,
+            draft: String(draftId ?? ''), ff: String(u.ffId), wb: u.wbName, pkg: u.pkg,
         });
         router.push(`/p/${slug}/warehouse/assembly/distribute/request?${qs.toString()}`);
-    }, [draftId, typeScope, router, slug]);
+    }, [draftId, router, slug]);
 
     const handleHandOff = useCallback(async (u: DraftUnit) => {
         if (!draftId) return;
@@ -222,7 +213,7 @@ export default function AssemblyFfPage() {
                 boxes: k && k > 0 ? Math.ceil(it.qty / k) : '',
                 box_qty: k && k > 0 ? k : '',
                 pkg: PKG_LABEL_RU[u.pkg] || u.pkg,
-                type: u.isNewcomer ? 'Новинка' : 'Обычный',
+                type: it.isNew ? 'Новинка' : 'Обычный',
             };
         })).sort((a, b) => a.wb.localeCompare(b.wb) || a.vendor.localeCompare(b.vendor));
         if (!data.length) return;
@@ -292,11 +283,11 @@ export default function AssemblyFfPage() {
                     {units.map(u => {
                         const badge = STATUS_BADGE[u.status];
                         return (
-                            <div key={`${u.wbName}-${u.pkg}-${u.isNewcomer ? 1 : 0}`} className="glass-card" style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                            <div key={`${u.wbName}-${u.pkg}`} className="glass-card" style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                                 <div style={{ flex: 1, minWidth: 220, cursor: 'pointer' }} onClick={() => openUnit(u)}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                         <span style={{ fontWeight: 700, fontSize: 15 }}>→ {u.wbName}</span>
-                                        {u.isNewcomer && <span style={{ padding: '1px 6px', borderRadius: 6, background: '#a855f7', color: '#fff', fontSize: 9, fontWeight: 700 }}>🆕</span>}
+                                        {u.hasNewcomer && <span title="В заявке есть товары-новинки" style={{ padding: '1px 6px', borderRadius: 6, background: '#a855f7', color: '#fff', fontSize: 9, fontWeight: 700 }}>🆕 новинки</span>}
                                         <span style={{ padding: '1px 6px', borderRadius: 6, background: 'rgba(59,130,246,0.14)', color: '#1d4ed8', fontSize: 9, fontWeight: 700 }}>
                                             {PKG_LABEL_RU[u.pkg] || u.pkg}
                                         </span>
