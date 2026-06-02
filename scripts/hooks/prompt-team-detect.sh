@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # UserPromptSubmit hook — slim версия (2026-05-19).
-# Только: pending docs reminder + /compact session counter.
+# Только: /compact session counter + [PUSH] reminder при фейле авто-пуша. (pending-docs убран → /learn)
 # Удалено: directive injection (PARALLELISM/MIGRATION/TRIVIAL), prewarm-spawn вызов,
 # git diff analysis. Lead-agent сам решает по содержимому запроса.
 # Возврат: `git show HEAD~1:scripts/hooks/prompt-team-detect.sh > scripts/hooks/prompt-team-detect.sh`
@@ -8,13 +8,10 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 
-# Pending docs
-DOCS_PENDING="$ROOT_DIR/.claude/.pending-docs.log"
-if [ -f "$DOCS_PENDING" ] && [ -s "$DOCS_PENDING" ]; then
-    docs_count=$(wc -l < "$DOCS_PENDING" | tr -d ' ')
-    if [ "${docs_count:-0}" -gt 0 ]; then
-        echo "[DOCS] $docs_count pending коммит(ов) без синка документации — запусти /docs" >&2
-    fi
+# Авто-пуш dev упал?
+PUSH_LOG="$ROOT_DIR/.claude/.last-push.log"
+if [ -f "$PUSH_LOG" ] && grep -q 'PUSH_FAILED' "$PUSH_LOG" 2>/dev/null; then
+    echo "[PUSH] последний авто-пуш dev УПАЛ — запушь вручную, детали в .claude/.last-push.log" >&2
 fi
 
 # /compact session counter
