@@ -5,13 +5,14 @@ Cost — Cost Order Items (get, upload Excel, recalculate).
 from decimal import Decimal
 
 import pandas as pd
-from sqlalchemy import delete, select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.etl.cost_parsers import detect_and_normalize_excel
 from backend.models import CostOrder, CostOrderItem, DutyBasis, DutyRule, Nomenclature
 from backend.models.supply_chain import FactoryOrderItem
 from backend.services.cost.helpers import DEFAULT_VAT_RATE, parse_box_volume_m3, safe_decimal
+from backend.utils.time import utcnow
 
 
 async def get_cost_order_items(db: AsyncSession, project_id: int, order_no: str):
@@ -67,8 +68,19 @@ async def upload_order_items(
     except ValueError as e:
         return None, None, str(e)
 
-    # Delete existing items
-    await db.execute(delete(CostOrderItem).where(CostOrderItem.order_no == order_no))
+    # Re-upload replaces all items: soft-delete the existing active rows (Iron rule 3).
+    # CostOrderItem has no unique constraint on (order_no, barcode), so re-inserting the
+    # same barcodes below cannot collide with the soft-deleted ones. All read-paths filter
+    # is_deleted == False, so the old rows become invisible while staying recoverable.
+    await db.execute(
+        update(CostOrderItem)
+        .where(
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.order_no == order_no,
+            CostOrderItem.is_deleted == False,
+        )
+        .values(is_deleted=True, deleted_at=utcnow())
+    )
 
     # Load nomenclature and duty rules
     nom_result = await db.execute(select(Nomenclature).where(Nomenclature.project_id == project_id))

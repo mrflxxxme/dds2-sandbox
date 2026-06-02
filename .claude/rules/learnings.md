@@ -27,6 +27,7 @@ paths:
 - Denormalized FK на child → синхронизировать при update parent.fk (state-guard)
 - Override поле → пересчитать ВСЕ derived (`effective = override ?? source`)
 - Explicit `null` в JSONB-поле ≠ отсутствующий ключ: Pydantic `default_factory` И `dict.get(k, default)` дают дефолт ТОЛЬКО при отсутствии ключа, не при null. Nullable JSONB-list → `@field_validator(mode="before")` коерсит null→[]; сырой dict → `.get(k) or []`, не `.get(k, [])`
+- `SoftDeleteMixin` + `UniqueConstraint` без `is_deleted` = мина: после `soft_delete()` строка остаётся и занимает уникальный слот → повторный INSERT того же бизнес-ключа падает `IntegrityError`/500. Re-create путь обязан искать ВКЛЮЧАЯ soft-deleted → `.restore()` + обновить поля, НЕ новый INSERT (см. `accept_invite` в `routers/projects.py`). Альтернатива на уровне схемы — partial unique index `WHERE is_deleted = false` (миграция). Все lookup'ы по такой модели фильтруют `is_deleted == False`, иначе мутации/проверки бьют по «мёртвой» строке. Сигнал несоблюдения: `mixins.restore()` почти нигде не зовётся
 
 ## Архитектура
 - Cumulative consumption: `consumed: dict[id, qty]` как mutable state при sequential distribute

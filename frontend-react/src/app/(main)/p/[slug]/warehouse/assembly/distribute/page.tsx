@@ -1065,9 +1065,9 @@ function DistributeMatrix({
                                     background: overflow ? 'rgba(255,159,10,0.12)' : undefined,
                                     color: overflow ? 'var(--color-warning)' : undefined,
                                 }}
-                                title={overflow ? `Лишек: ${srcSum - initialNeed}` : undefined}
+                                title={overflow ? `Лишек: ${formatNumber(srcSum - initialNeed, 0)}` : undefined}
                             >
-                                {srcSum}/{initialNeed > 0 ? initialNeed : '?'}
+                                {formatNumber(srcSum, 0)}/{initialNeed > 0 ? formatNumber(initialNeed, 0) : '?'}
                             </td>
                             <td style={{ ...tdStyle }} title="Сколько ещё можно разложить: свободно на ФФ минус уже взято в источники этой строки. Снизу — в целых коробах.">
                                 {(() => {
@@ -1127,7 +1127,7 @@ function DistributeMatrix({
                                     color: balanced ? 'var(--color-success)' : 'var(--color-danger)',
                                 }}
                             >
-                                {srcSum} {balanced ? '✓' : '!'}
+                                {formatNumber(srcSum, 0)} {balanced ? '✓' : '!'}
                             </td>
 
                             {targetWarehouseNames.map(whName => {
@@ -1160,7 +1160,7 @@ function DistributeMatrix({
                                     color: balanced ? 'var(--color-success)' : 'var(--color-danger)',
                                 }}
                             >
-                                {tgtSum} {balanced ? '✓' : '!'}
+                                {formatNumber(tgtSum, 0)} {balanced ? '✓' : '!'}
                             </td>
                         </tr>
                     );
