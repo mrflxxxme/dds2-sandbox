@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
+import { dropCommittedRows } from '@/lib/utils/assemblyDraftReconcile';
 import { Toast } from '@/components';
 import type {
     AssemblyDraft,
@@ -180,7 +181,23 @@ export default function AssemblyDistributePage() {
     // ─── Save draft (manual + autosave) ──────────────────────────────────
     const saveDraft = useCallback(async (silent = false): Promise<boolean> => {
         if (!draftId) return false;
-        const dist = buildDistribution();
+
+        // Re-shipment guard: a stale page (bfcache / browser-back / second tab) can
+        // still hold rows that a partial commit already turned into AssemblyRequests.
+        // Reconcile against the server draft and drop rows it no longer has, so an
+        // autosave can't resurrect committed lanes. Best-effort — on fetch failure we
+        // fall through and save local rows (no worse than before the guard).
+        let effectiveRows = rows;
+        try {
+            const server = await api.getAssemblyDraft(draftId);
+            const reconciled = dropCommittedRows(rows, server.distribution.rows || []);
+            if (reconciled.length !== rows.length) {
+                effectiveRows = reconciled;
+                setRows(reconciled);
+            }
+        } catch { /* keep local rows */ }
+
+        const dist: AssemblyDraftDistribution = { ...buildDistribution(), rows: effectiveRows };
         const json = JSON.stringify(dist);
         if (json === lastSavedJsonRef.current && !silent) return true;
 
@@ -200,7 +217,7 @@ export default function AssemblyDistributePage() {
         } finally {
             setSaving(false);
         }
-    }, [draftId, buildDistribution, name, comment]);
+    }, [draftId, buildDistribution, name, comment, rows]);
 
     // ─── Autosave: debounce 5s after any change ──────────────────────────
     useEffect(() => {
@@ -1065,9 +1082,9 @@ function DistributeMatrix({
                                     background: overflow ? 'rgba(255,159,10,0.12)' : undefined,
                                     color: overflow ? 'var(--color-warning)' : undefined,
                                 }}
-                                title={overflow ? `Лишек: ${srcSum - initialNeed}` : undefined}
+                                title={overflow ? `Лишек: ${formatNumber(srcSum - initialNeed, 0)}` : undefined}
                             >
-                                {srcSum}/{initialNeed > 0 ? initialNeed : '?'}
+                                {formatNumber(srcSum, 0)}/{initialNeed > 0 ? formatNumber(initialNeed, 0) : '?'}
                             </td>
                             <td style={{ ...tdStyle }} title="Сколько ещё можно разложить: свободно на ФФ минус уже взято в источники этой строки. Снизу — в целых коробах.">
                                 {(() => {
@@ -1127,7 +1144,7 @@ function DistributeMatrix({
                                     color: balanced ? 'var(--color-success)' : 'var(--color-danger)',
                                 }}
                             >
-                                {srcSum} {balanced ? '✓' : '!'}
+                                {formatNumber(srcSum, 0)} {balanced ? '✓' : '!'}
                             </td>
 
                             {targetWarehouseNames.map(whName => {
@@ -1160,7 +1177,7 @@ function DistributeMatrix({
                                     color: balanced ? 'var(--color-success)' : 'var(--color-danger)',
                                 }}
                             >
-                                {tgtSum} {balanced ? '✓' : '!'}
+                                {formatNumber(tgtSum, 0)} {balanced ? '✓' : '!'}
                             </td>
                         </tr>
                     );

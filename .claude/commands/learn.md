@@ -24,7 +24,7 @@ description: "Рефлексия после фичи/коммита DDS2: уро
 - Новый кэш-prefix → проверить `invalidate_project_reports()` в `backend/cache.py`.
 
 ## 4. Очисти логи
-`> .claude/.pending-learn.log` и `> .claude/.pending-docs.log`.
+`> .claude/.pending-learn.log`.
 
 ## Правила
 - Только дополняй существующие файлы (исключение — новые шаблоны). Не дублируй уроки — сперва прочитай текущие `learnings.md` / `feedback_*`.

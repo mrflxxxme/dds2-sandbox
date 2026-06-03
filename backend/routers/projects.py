@@ -308,6 +308,7 @@ async def update_member_role(
         select(ProjectMember).where(
             ProjectMember.project_id == project.id,
             ProjectMember.user_id == user.id,
+            ProjectMember.is_deleted == False,  # noqa: E712
         )
     )
     actor_member = actor_result.scalar_one_or_none()
@@ -319,6 +320,7 @@ async def update_member_role(
         select(ProjectMember).where(
             ProjectMember.project_id == project.id,
             ProjectMember.user_id == user_id,
+            ProjectMember.is_deleted == False,  # noqa: E712
         )
     )
     target_member = target_result.scalar_one_or_none()
@@ -385,6 +387,7 @@ async def update_telegram_username(
         select(ProjectMember).where(
             ProjectMember.project_id == project.id,
             ProjectMember.user_id == user.id,
+            ProjectMember.is_deleted == False,  # noqa: E712
         )
     )
     actor_member = actor_result.scalar_one_or_none()
@@ -396,6 +399,7 @@ async def update_telegram_username(
         select(ProjectMember).where(
             ProjectMember.project_id == project.id,
             ProjectMember.user_id == user_id,
+            ProjectMember.is_deleted == False,  # noqa: E712
         )
     )
     target_member = target_result.scalar_one_or_none()
@@ -589,24 +593,38 @@ async def accept_invite(
     if not invite:
         raise HTTPException(404, "Приглашение не найдено или уже использовано")
 
-    # Check if user is already a member
-    existing = await db.execute(
+    # Check if user is already a member — include soft-deleted rows, because the
+    # uq_project_member (project_id, user_id) constraint ignores is_deleted: a
+    # previously removed member still occupies the unique slot. A blind INSERT
+    # would raise IntegrityError → 500.
+    existing_result = await db.execute(
         select(ProjectMember).where(
             ProjectMember.project_id == invite.project_id,
             ProjectMember.user_id == user.id,
         )
     )
-    if existing.scalar_one_or_none():
+    existing = existing_result.scalar_one_or_none()
+
+    if existing is not None and not existing.is_deleted:
+        # Already an active member — idempotent, leave the invite pending.
         return {"message": "Вы уже участник этого проекта"}
 
-    # Add as member with role and pages from invite
-    member = ProjectMember(
-        project_id=invite.project_id,
-        user_id=user.id,
-        role=invite.role,
-        pages=invite.pages,
-    )
-    db.add(member)
+    if existing is not None:
+        # Previously removed (soft-deleted) member — restore the row and refresh
+        # role/pages from the invite instead of inserting a new row (which would
+        # violate uq_project_member). Falls through to the common tail below.
+        existing.restore()
+        existing.role = invite.role
+        existing.pages = invite.pages
+    else:
+        # Brand-new member.
+        member = ProjectMember(
+            project_id=invite.project_id,
+            user_id=user.id,
+            role=invite.role,
+            pages=invite.pages,
+        )
+        db.add(member)
 
     # Mark invite as accepted (both email and link invites)
     invite.status = "accepted"

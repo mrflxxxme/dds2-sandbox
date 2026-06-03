@@ -33,7 +33,7 @@ else
     echo "  ✗ $SCRIPTS_DIR/pre-push не найден"
 fi
 
-# post-commit (tracker для /learn + /docs + auto-push dev)
+# post-commit (tracker для /learn + auto-push dev)
 cat > "$HOOKS_DIR/post-commit" <<'EOF'
 #!/bin/bash
 # Post-commit: tracker для /learn + auto-push dev
@@ -44,24 +44,19 @@ if [ -x "$ROOT_DIR/scripts/hooks/post-commit-track.sh" ]; then
     bash "$ROOT_DIR/scripts/hooks/post-commit-track.sh" 2>/dev/null || true
 fi
 
-# 2) Track commit для последующего /docs (UserPromptSubmit hook напомнит)
-if [ -x "$ROOT_DIR/scripts/hooks/post-commit-docs-track.sh" ]; then
-    bash "$ROOT_DIR/scripts/hooks/post-commit-docs-track.sh" 2>/dev/null || true
-fi
-
-# 3) Auto-push dev branch
+# 2) Auto-push dev branch (результат → .claude/.last-push.log, без тихого глотания)
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 if [ "$BRANCH" = "dev" ]; then
-    git push origin dev 2>/dev/null &
+    ( git push origin dev > "$ROOT_DIR/.claude/.last-push.log" 2>&1 || echo "PUSH_FAILED" >> "$ROOT_DIR/.claude/.last-push.log" ) &
 fi
 EOF
 chmod +x "$HOOKS_DIR/post-commit"
-echo "  ✓ post-commit установлен (track для /learn + /docs + auto-push dev)"
+echo "  ✓ post-commit установлен (track для /learn + auto-push dev)"
 
 echo ""
 echo "✅ Git hooks установлены"
 echo "   pre-commit:  ruff, gitleaks, bandit, conventions"
 echo "   pre-push:    pytest(testmon) + vitest + conventions"
-echo "   post-commit: tracker pending → Stop/Prompt hook напомнит /learn, /docs"
+echo "   post-commit: tracker pending → Stop hook напомнит /learn"
 echo ""
 echo "   Пропустить: git push --no-verify (только экстренно)"

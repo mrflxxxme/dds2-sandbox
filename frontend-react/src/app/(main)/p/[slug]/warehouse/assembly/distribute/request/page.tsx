@@ -40,6 +40,13 @@ export default function AssemblyRequestUnitPage() {
     const ffId = Number(searchParams.get('ff')) || null;
     const wbName = searchParams.get('wb') || '';
     const pkgRaw = searchParams.get('pkg');
+    // Целевой WB при «Сменить склад WB»: выставляется синхронно в момент переноса,
+    // ДО того как router.replace(...wb=newWb) протолкнёт новый параметр в URL. На
+    // happy-path searchParams отстают на один рендер → без этого lookup юнита по
+    // старому wbName вернул бы null и мелькнул бы empty-state «Заявка не найдена».
+    const [pendingWb, setPendingWb] = useState<string | null>(null);
+    // Эффективный WB: предпочитаем pendingWb, пока URL не догнал перенос.
+    const effectiveWb = pendingWb ?? wbName;
     const pkg: PackageType = pkgRaw === 'MONOPALLET' ? 'MONOPALLET' : pkgRaw === 'SUPERSAFE' ? 'SUPERSAFE' : 'BOX';
 
     const [loading, setLoading] = useState(true);
@@ -122,14 +129,19 @@ export default function AssemblyRequestUnitPage() {
         return findDraftUnit(
             draft.distribution.rows ?? [],
             draft.distribution.handed_units ?? [],
-            newcomerNmIds, ffId, wbName, pkg,
+            newcomerNmIds, ffId, effectiveWb, pkg,
         );
-    }, [draft, ffId, wbName, pkg, newcomerNmIds]);
+    }, [draft, ffId, effectiveWb, pkg, newcomerNmIds]);
+
+    // Перенос завершён, URL догнал pendingWb → перестаём его предпочитать.
+    useEffect(() => {
+        if (pendingWb !== null && wbName === pendingWb) setPendingWb(null);
+    }, [pendingWb, wbName]);
 
     // Доступные WB-склады черновика для переноса (кроме текущего).
     const availableWbTargets = useMemo(
-        () => (draft?.distribution.target_warehouse_names ?? []).filter(n => n && n !== wbName),
-        [draft, wbName],
+        () => (draft?.distribution.target_warehouse_names ?? []).filter(n => n && n !== effectiveWb),
+        [draft, effectiveWb],
     );
 
     const items = useMemo(
@@ -229,8 +241,8 @@ export default function AssemblyRequestUnitPage() {
     const looseUnits = partialItems.reduce((s, it) => s + (it.qty % kOf(it.nmId)), 0);
 
     const unitRef: AssemblyDraftUnitRef = useMemo(() => ({
-        source_ff_id: ffId ?? 0, target_wb_name: wbName, package_type: pkg,
-    }), [ffId, wbName, pkg]);
+        source_ff_id: ffId ?? 0, target_wb_name: effectiveWb, package_type: pkg,
+    }), [ffId, effectiveWb, pkg]);
 
     const backToFf = useCallback(() => {
         const qs = new URLSearchParams({ draft: String(draftId ?? ''), ff: String(ffId ?? ''), pkg });
@@ -294,7 +306,7 @@ export default function AssemblyRequestUnitPage() {
 
     const handleDelete = useCallback(async () => {
         if (!draftId) return;
-        if (!window.confirm(`Удалить заявку «${ffName} → ${wbName}»? Товар останется на ФФ (не отгружается).`)) return;
+        if (!window.confirm(`Удалить заявку «${ffName} → ${effectiveWb}»? Товар останется на ФФ (не отгружается).`)) return;
         setBusy(true);
         try {
             const d = await api.deleteDraftUnit(draftId, unitRef);
@@ -308,7 +320,7 @@ export default function AssemblyRequestUnitPage() {
             setToast({ message: e instanceof Error ? e.message : 'Ошибка', type: 'error' });
             setBusy(false);
         }
-    }, [draftId, unitRef, ffName, wbName, router, slug, backToFf]);
+    }, [draftId, unitRef, ffName, effectiveWb, router, slug, backToFf]);
 
     const handleHandOff = useCallback(async () => {
         if (!draftId) return;
@@ -367,7 +379,7 @@ export default function AssemblyRequestUnitPage() {
         setAccError(null);
         try {
             const body: AcceptanceCheckRequest = {
-                items: unit.items.map(it => ({ nm_id: it.nmId, barcode: it.barcode, distribution: { [wbName]: it.qty } })),
+                items: unit.items.map(it => ({ nm_id: it.nmId, barcode: it.barcode, distribution: { [effectiveWb]: it.qty } })),
             };
             const resp = await api.checkWbAcceptance(body, force);
             const m = new Map<number, Record<string, AcceptanceFlags>>();
@@ -378,7 +390,7 @@ export default function AssemblyRequestUnitPage() {
         } finally {
             setAccLoading(false);
         }
-    }, [unit, wbName]);
+    }, [unit, effectiveWb]);
 
     const openMove = useCallback(() => {
         const willOpen = !moveOpen;
@@ -396,11 +408,15 @@ export default function AssemblyRequestUnitPage() {
             });
             return;
         }
-        if (!window.confirm(`Перенести заявку «${ffName} → ${wbName}» на склад «${newWb}»? Поедет только товар этого ФФ; если на «${newWb}» уже есть заявка с этого ФФ — позиции сольются.`)) return;
+        if (!window.confirm(`Перенести заявку «${ffName} → ${effectiveWb}» на склад «${newWb}»? Поедет только товар этого ФФ; если на «${newWb}» уже есть заявка с этого ФФ — позиции сольются.`)) return;
         setMoveOpen(false);
         setBusy(true);
         try {
             const d = await api.moveDraftUnit(draftId, unitRef, newWb);
+            // pendingWb выставляем СИНХРОННО вместе с setDraft: новые rows уже под
+            // newWb, а searchParams (router.replace ниже) догонят лишь через рендер.
+            // effectiveWb=newWb сразу → findDraftUnit находит юнит, empty-state не мелькает.
+            setPendingWb(newWb);
             setDraft(d);
             setToast({ message: `Перенесено на «${newWb}»`, type: 'success' });
             const qs = new URLSearchParams({
@@ -408,11 +424,14 @@ export default function AssemblyRequestUnitPage() {
             });
             router.replace(`/p/${slug}/warehouse/assembly/distribute/request?${qs.toString()}`);
         } catch (e: unknown) {
+            // Перенос не состоялся — сбрасываем pendingWb, иначе lookup поедет на WB,
+            // которого нет в (неизменённом) черновике.
+            setPendingWb(null);
             setToast({ message: e instanceof Error ? e.message : 'Ошибка переноса', type: 'error' });
         } finally {
             setBusy(false);
         }
-    }, [draftId, unitRef, ffName, wbName, ffId, pkg, router, slug, targetAcceptance, unit]);
+    }, [draftId, unitRef, ffName, effectiveWb, ffId, pkg, router, slug, targetAcceptance, unit]);
 
     if (loading) {
         return <div className="animate-in"><div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка…</div></div>;

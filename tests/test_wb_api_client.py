@@ -467,3 +467,43 @@ class TestParseWBSales:
     def test_empty_sales(self):
         """Empty input returns empty."""
         assert parse_wb_sales_to_payouts([]) == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# get_acceptance_options — chunking
+# Bug (2026-06): ~405 barcodes in one 5000-chunk timed out (TIMEOUT=30) → 3× retry
+# → 500 «Failed to fetch». Fix: chunk ≤150 so each response stays fast.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetAcceptanceOptionsChunking:
+    """get_acceptance_options must split large barcode sets into small chunks."""
+
+    @staticmethod
+    def _echo_post(url, headers=None, json=None):
+        # Echo one result entry per barcode in the chunk → merging is verifiable.
+        return _mock_response(200, json_data={"result": [{"barcode": it["barcode"]} for it in (json or [])]})
+
+    @pytest.mark.asyncio
+    async def test_chunks_405_into_calls_of_at_most_150(self):
+        """405 barcodes → 3 POSTs of ≤150 each, results merged."""
+        client = WBApiClient("test-key", project_id=1)
+        items = [{"quantity": 1, "barcode": f"BC{i}"} for i in range(405)]
+        with patch("httpx.AsyncClient.post", side_effect=self._echo_post) as mock_post:
+            fn = client.get_acceptance_options.__wrapped__
+            result = await fn(client, items)
+        sizes = [len(call.kwargs["json"]) for call in mock_post.call_args_list]
+        assert mock_post.call_count == 3
+        assert max(sizes) <= 150
+        assert sum(sizes) == 405
+        assert len(result["result"]) == 405  # all chunks merged
+
+    @pytest.mark.asyncio
+    async def test_small_set_single_call(self):
+        """≤150 barcodes → single POST."""
+        client = WBApiClient("test-key", project_id=1)
+        items = [{"quantity": 1, "barcode": f"BC{i}"} for i in range(120)]
+        with patch("httpx.AsyncClient.post", side_effect=self._echo_post) as mock_post:
+            fn = client.get_acceptance_options.__wrapped__
+            await fn(client, items)
+        assert mock_post.call_count == 1

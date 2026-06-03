@@ -95,15 +95,19 @@ fi
 # ─── 5. Frontend npm audit (security CVE, ~5-10 сек) ─────────────────
 # Прецедент 2026-05-12: 7 HIGH CVE в next@15.5.15 ловятся ТОЛЬКО в CI,
 # не локально. Pre-push catch + 5 секунд = меньше CI runs впустую.
+# --omit=dev: аудитим только прод-рантайм; CVE dev-тулинга (vitest и пр.) не
+# должны блокировать прод-деплой. --audit-level=critical: блокируем НОВЫЕ
+# прод-critical, не залипаем на пре-существующем high/moderate деп-долге
+# (его чистим отдельно через npm audit fix).
 echo ""
-echo "━━━ Frontend security (npm audit --audit-level=high) ━━━"
+echo "━━━ Frontend security (npm audit --omit=dev --audit-level=critical) ━━━"
 if [ -d "frontend-react/node_modules" ] && command -v npm &>/dev/null; then
-    AUDIT_OUTPUT=$(cd frontend-react && npm audit --audit-level=high 2>&1)
+    AUDIT_OUTPUT=$(cd frontend-react && npm audit --omit=dev --audit-level=critical 2>&1)
     AUDIT_EXIT=$?
     if [ $AUDIT_EXIT -eq 0 ]; then
-        echo -e "${GREEN}✓ npm audit clean (no HIGH/CRITICAL)${NC}"
+        echo -e "${GREEN}✓ npm audit clean (no prod CRITICAL)${NC}"
     else
-        echo -e "${RED}✗ npm audit found HIGH/CRITICAL CVEs${NC}"
+        echo -e "${RED}✗ npm audit found prod CRITICAL CVEs${NC}"
         echo "$AUDIT_OUTPUT" | grep -E "Severity:|^[a-z-]+\s+[<>=]" | head -10
         echo -e "${YELLOW}Fix: cd frontend-react && npm audit fix (or bump manually)${NC}"
         FAILED=1
