@@ -3,14 +3,16 @@
 Активные баги и постмортемы крупных инцидентов. Полная история фиксов — в `git log`; распространённые грабли-паттерны — в `.claude/rules/learnings.md`.
 
 ## Активные проблемы
-Открытые edge-cases переработки распределения «Потребность → сборка» (box-кратность, новинки). Не блокеры, но с риском данных.
-
-- 🔴 **Автосейв на distribute может вернуть закоммиченные строки** после частичного коммита → риск повторной отгрузки. Сверять автосейв с актуальным состоянием draft после commit.
-- 🟠 **Приёмка 405 SKU → timeout/500.** `get_acceptance_options` (`integrations/wb_api.py`, TIMEOUT=30, chunk 5000) на ~405 баркодов таймаутит 3× → 500 → фронт «Failed to fetch». Транзиентно (утром те же 405 проходили). Фикс: чанковать по ≤150 (WB-лимит 6 req/min позволяет).
 - 🟡 **Перф editMode на больших списках.** В режиме «Редактировать» рендерятся инпуты всех ячеек всех строк — на «Все (420)» лагает. Воркэраунд: фильтровать список. Кандидат на виртуализацию.
 
 ## Исправленные (последние)
 Свежие крупные постмортемы; старое — в git-истории.
+
+### Автосейв distribute возвращал закоммиченные строки → риск повторной отгрузки (2026-06-03)
+После частичного коммита `commit_draft` удаляет закоммиченные строки из черновика, но stale-страница distribute (bfcache / browser-back / вторая вкладка) держала их в React-state; debounce-автосейв PUT'ил их обратно → закоммиченные lane'ы «воскресали» → дубль-отгрузка. Фикс: `saveDraft` (и ручной, и автосейв) перед записью читает серверный draft и через `dropCommittedRows` выкидывает строки, которых на сервере уже нет (матчинг по `nm_id+package_type`; локальные правки выживших строк сохраняются). Best-effort: при ошибке GET пишем локальные строки (не хуже прежнего поведения). Файлы: `frontend-react/src/lib/utils/assemblyDraftReconcile.ts` (новый чистый хелпер), `assembly/distribute/page.tsx`. Тест: `assemblyDraftReconcile.test.ts` (8 кейсов: partial/full commit, SUPERSAFE под «Короб», дефолт BOX, сохранение правок).
+
+### Приёмка 405 SKU → timeout/500 (2026-06-03)
+`get_acceptance_options` слал все баркоды одним чанком (`chunk_size=5000`); WB считает опции по всем складам на каждый баркод, поэтому тело ~405 баркодов превышало `TIMEOUT=30s` → 3× retry → 500 «Failed to fetch». Фикс: `chunk_size` 5000 → 150 (≤150 на запрос; ~405 = 3 чанка, в пределах лимита 6 req/min). Файл: `backend/integrations/wb_api.py`. Тест: `test_wb_api_client.py::TestGetAcceptanceOptionsChunking` (405 → 3 чанка ≤150 + merge; ≤150 → 1 запрос). ⚠️ Для очень больших каталогов (>900 баркодов → >6 чанков/мин) возможен 429 — отрабатывает `@retry_with_backoff` (RateLimitError + backoff).
 
 ### Удалённого участника нельзя было повторно пригласить — вечная блокировка (2026-06-02)
 `ProjectMember(SoftDeleteMixin)` + `UniqueConstraint(project_id,user_id)` без `is_deleted`. `remove_member` делает soft_delete (строка остаётся, занимает уникальный слот). `accept_invite` проверял участника БЕЗ фильтра `is_deleted` и при наличии строки рано `return` «вы уже участник» → удалённый юзер получал «вы участник», но доступа нет, invite навсегда pending. Наивное добавление фильтра → INSERT падал бы `IntegrityError`/500 по uq_project_member. Фикс: искать участника ВКЛЮЧАЯ soft-deleted → активный=идемпотентный return; удалённый=`existing.restore()`+обновить role/pages+пометить invite accepted (без INSERT); иначе INSERT. Заодно `is_deleted==False` добавлен в target+actor lookup'ы `update_member_role`/`update_telegram_username` (раньше можно было править роль/telegram удалённого). Файл: `routers/projects.py`. Тесты: `test_api_auth.py` (re-invite restore, идемпотентность, 404 на удалённом). Паттерн-профилактика — в `learnings.md` (soft-delete+unique = мина). ⚠️ Defense-in-depth НЕ сделан: partial unique index `WHERE is_deleted=false` — отдельная миграция (та же мина у Nomenclature/Supplier/WarehouseStock и др. soft-delete-моделей с re-create путём).

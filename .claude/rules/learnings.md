@@ -18,6 +18,7 @@ paths:
 - React StrictMode (dev) монтирует `useEffect` дважды: catch/finally первого (abort-нутого) запроса перезаписывает загруженные данные ложной ошибкой → `AbortController` + `if (controller.signal.aborted) return` в then/catch/finally
 - `useSearchParams` пуст на первом рендере до гидратации — не редиректь, пока сырая строка пуста (`const raw = sp.get('x') ?? ''; if (raw && cond) router.replace(...)`)
 - Convert по множеству: проверяй строгую однотипность цели (`onlyBox`/`onlyMono`), не отрицание присутствия (`!hasBox`) — иначе СМЕШАННАЯ цель ложно триггерит конвертацию
+- Stale-страница (bfcache / browser-back / вторая вкладка) держит React-state; debounce-автосейв может PUT'нуть устаревшее поверх серверного состояния, изменившегося под ним (напр. после commit в другом месте) → перед записью сверять с сервером и выкидывать исчезнувшие сущности (паттерн `dropCommittedRows`)
 
 ## Python/DB паттерны
 - `_UNSET = object()` для partial PATCH — различает «не передано» vs «null=clear»

@@ -397,11 +397,13 @@ class WBApiClient:
         Returns: {"result": [{"barcode", "warehouses": [{warehouseID, canBox,
                   canMonopallet, canSupersafe, isBoxOnPallet}], "error"?}]}
 
-        Rate limit: 6 req/min — caller MUST batch + cache. We slice by 5000
-        entries per call for very large catalogs.
+        Rate limit: 6 req/min — caller MUST batch + cache. We slice into ≤150-barcode
+        chunks: WB computes options across every warehouse per barcode, so a single
+        large body (~405 barcodes) overruns TIMEOUT (30s) → 500. ~405 → 3 chunks,
+        well within the 6 req/min budget.
         """
         all_results: list[dict] = []
-        chunk_size = 5000
+        chunk_size = 150  # ≤150: larger bodies time out server-side (bug 2026-06)
         async with self._circuit:
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 for i in range(0, len(items), chunk_size):
