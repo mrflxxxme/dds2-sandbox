@@ -4,7 +4,7 @@
     "ENABLE_PROMPT_CACHING_1H": "1",
     "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-4-8"
   },
-  "effortLevel": "medium",
+  "effortLevel": "high",
   "permissions": {
     "allow": [
       "WebFetch(domain:code.claude.com)",
