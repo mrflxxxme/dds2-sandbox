@@ -8,6 +8,9 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     globals: true,
+    // vitest 4: spy на global.fetch протекает между тестами без явной очистки —
+    // чистим .mock.calls перед каждым тестом, чтобы calls[0] был вызовом ЭТОГО теста.
+    clearMocks: true,
     css: false,
     exclude: ['tests/e2e/**', 'node_modules/**'],
     coverage: {
