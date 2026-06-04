@@ -47,3 +47,23 @@ jobs:
             --head dev \
             --title "${LAST_COMMIT_MSG}" \
             --body "${PR_BODY}"
+
+      - name: Enable native auto-merge
+        # GH_PAT (не GITHUB_TOKEN): merge, выполненный GitHub'ом по auto-merge,
+        # должен триггерить cd-production. Push от GITHUB_TOKEN не запускает
+        # workflow — деплоя бы не было. auto-merge.yml остаётся fallback'ом и
+        # обновляет BEHIND-ветку (native сам её не апдейтит при strict_uptodate).
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          # Открытый dev → main PR (только что созданный или уже существовавший)
+          PR_NUMBER=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number // empty')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "Нет открытого dev → main PR — нечего авто-мёржить"
+            exit 0
+          fi
+          # --auto: GitHub смёржит сам, когда required-чеки зелёные И ветка up-to-date
+          echo "Включаю auto-merge на PR #${PR_NUMBER}..."
+          gh pr merge "$PR_NUMBER" --auto --merge \
+            || echo "⚠ auto-merge не включился (уже включён / недоступен) — auto-merge.yml fallback добьёт"
