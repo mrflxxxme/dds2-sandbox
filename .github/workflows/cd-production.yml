@@ -118,7 +118,20 @@ jobs:
             docker compose -f docker-compose.app.yml up -d --build --remove-orphans --force-recreate backend worker frontend-react nginx autoheal
 
             echo "🗄️ Running migrations on Data server..."
-            docker compose -f docker-compose.app.yml exec -T backend alembic upgrade head
+            # Вариант B (migration-fail recovery): при фейле миграции откатываем КОД на
+            # HEAD~1 (чтобы прод не отдавал 500 с новым кодом на сломанной схеме). БД
+            # автоматически НЕ трогаем — для финансовых данных restore решает человек
+            # (см. /rollback: схему авто не откатываем). Бэкап уже создан в Step 1.
+            if ! docker compose -f docker-compose.app.yml exec -T backend alembic upgrade head; then
+              MIGR_COUNT=$(git diff --name-only HEAD~1 HEAD -- migrations/versions/ 2>/dev/null | wc -l | tr -d ' ')
+              echo "❌ Миграция упала — откатываю КОД на HEAD~1, БД оставляю как есть..."
+              git checkout HEAD~1 -- .
+              docker compose -f docker-compose.app.yml up -d --build backend worker frontend-react
+              echo "🔄 Код откатан на HEAD~1. БД автоматически НЕ изменялась."
+              echo "::error::Migration failed. Код откатан на HEAD~1, БД НЕ тронута (${MIGR_COUNT} migration-файл(ов) в деплое). Restore вручную на Data-сервере: docker compose exec -T db-backup /scripts/restore.sh <последний pre-deploy-*.sql.gz из /opt/dds_data/backups>. Обратимая одиночная миграция: alembic downgrade -1."
+              exit 1
+            fi
+            echo "✅ Migrations applied"
 
             echo "🏥 Health check..."
             sleep 15
