@@ -1,6 +1,7 @@
 'use client';
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
+import { exportToExcel } from '@/lib/utils';
 import { usePermissions } from '@/lib/hooks/usePermissions';
 import { MultiLineChart } from './components/MultiLineChart';
 import { DayAnalysisTab } from './components/DayAnalysisTab';
@@ -190,6 +191,91 @@ export default function FunnelPage() {
         } catch { return iso; }
     };
 
+    // Excel-экспорт текущей сводки. Значения — сырые числа (Excel сам считает/сортирует);
+    // '' для пустых rate-полей (как «—» в таблице). Колонки повторяют активную вкладку.
+    const handleExportFunnel = () => {
+        const labels = { day: 'По дням', sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям', tag: 'По ярлыкам', imt: 'По склейкам', abc: 'ABC анализ' } as const;
+        const range = dateFrom && dateTo ? `_${dateFrom}_${dateTo}` : '';
+        const fname = `Воронка_${labels[groupBy]}${range}`;
+
+        // Метрики, общие для вкладок sku/brand/subject/tag/imt (порядок = как в таблице).
+        const metricCols = (r: FunnelGroupRow): Record<string, string | number> => ({
+            'Переходы': r.open_card ?? '',
+            'Корзины': r.add_to_cart ?? '',
+            'Заказы': r.orders_count ?? '',
+            'Сумма ₽': r.orders_sum_rub ?? '',
+            'Выручка ₽': r.revenue ?? '',
+            'Расходы рекл. ₽': r.adv_sum ?? '',
+            'Просмотры': r.adv_views ?? '',
+            'Клики': r.adv_clicks ?? '',
+            'CTR %': r.ctr ?? '',
+            'CPC': r.cpc ?? '',
+            'CPM': r.cpm ?? '',
+            'ДРР %': r.drr ?? '',
+            'СПП %': r.spp_rate || '',
+            'Выкуп %': r.buyout_percent || '',
+            'Налог ₽': r.tax ?? '',
+            'Расх. WB %': r.commission_rate || '',
+            'Комиссия ₽': r.commission || '',
+            'Прибыль ₽': r.profit ?? '',
+            'Маржа %': r.margin ?? '',
+            'Ср. цена ₽': r.avg_price ?? '',
+            'В корзину %': r.add_to_cart_pct ?? '',
+            'В заказ %': r.cart_to_order_pct ?? '',
+        });
+
+        let rows: Record<string, string | number>[] = [];
+        if (groupBy === 'sku') {
+            rows = skuData.map(r => ({ 'Бренд': r.brand || '', 'Артикул': r.vendor_code || '', 'WB ID': r.nm_id, 'Категория': r.subject || '', ...metricCols(r) }));
+        } else if (groupBy === 'brand' || groupBy === 'subject' || groupBy === 'tag' || groupBy === 'imt') {
+            const colName = groupBy === 'brand' ? 'Бренд' : groupBy === 'tag' ? 'Ярлык' : groupBy === 'imt' ? 'Склейка' : 'Категория';
+            rows = groupData
+                .filter(r => !(filterTag && groupBy === 'tag' && r.tag !== filterTag))
+                .filter(r => !(filterImt && groupBy === 'imt' && r.imt_group !== filterImt))
+                .map(r => {
+                    const label = groupBy === 'brand' ? (r.brand || '—') : groupBy === 'tag' ? (r.tag || '—') : groupBy === 'imt' ? (r.imt_group || '—') : (r.subject || '—');
+                    return { [colName]: label, ...metricCols(r) };
+                });
+        } else if (groupBy === 'abc') {
+            rows = abcData.map(r => ({
+                'ABC (выручка)': r.abc_revenue, 'ABC (прибыль)': r.abc_profit,
+                'Артикул': r.vendor_code || '', 'WB ID': r.nm_id, 'Категория': r.subject || '', 'Бренд': r.brand || '',
+                'Заказы': r.orders_count ?? '', 'Сумма ₽': r.orders_sum ?? '', 'Выручка ₽': r.revenue ?? '',
+                'Расходы рекл. ₽': r.adv_sum ?? '', 'Просмотры': r.adv_views ?? '', 'Клики': r.adv_clicks ?? '',
+                'ДРР %': r.drr ?? '', 'Прибыль ₽': r.profit ?? '', 'Маржа %': r.margin_pct ?? '',
+            }));
+        } else {
+            rows = data.map(r => ({
+                'Дата': r.date,
+                'Переходы': r.open_card ?? r.opens ?? '',
+                'Корзины': r.add_to_cart ?? '',
+                'Заказы': r.orders_count ?? r.orders ?? '',
+                'Сумма ₽': r.orders_sum_rub ?? r.orders_sum ?? '',
+                'Выручка ₽': r.revenue ?? r.buyout_sum ?? '',
+                'Расходы рекл. ₽': r.adv_sum ?? r.ad_sum ?? '',
+                'Просмотры': r.adv_views ?? r.ad_views ?? '',
+                'Клики': r.adv_clicks ?? r.ad_clicks ?? '',
+                'CTR %': r.ctr ?? '',
+                'CPC': r.cpc ?? '',
+                'CPM': r.cpm ?? '',
+                'ДРР %': r.drr ?? '',
+                'СПП %': r.spp_rate || '',
+                'Выкуп %': r.buyout_percent ?? r.buyout_pct ?? '',
+                'Налог ₽': r.tax ?? '',
+                'Расх. WB %': r.commission_rate || '',
+                'Комиссия ₽': r.commission || '',
+                'Прибыль ₽': r.profit ?? '',
+                'Маржа %': r.margin ?? '',
+                'Ср. цена ₽': r.avg_price ?? '',
+                'В корзину %': r.add_to_cart_pct ?? '',
+                'В заказ %': r.cart_to_order_pct ?? '',
+            }));
+        }
+
+        if (rows.length === 0) { alert('Нет данных для экспорта'); return; }
+        exportToExcel(rows, fname);
+    };
+
     return (
         <div>
             <h1 style={{ fontSize: 22, fontWeight: 600, marginBottom: 16 }}>📊 Воронка продаж</h1>
@@ -339,6 +425,8 @@ export default function FunnelPage() {
                         <h3 style={{ fontSize: 16, fontWeight: 600, color: '#111827', margin: 0 }}>
                             {groupBy === 'day' ? 'Сводка по дням' : groupBy === 'sku' ? 'Сводка по товарам' : groupBy === 'brand' ? 'Сводка по брендам' : groupBy === 'abc' ? 'ABC анализ' : 'Сводка по категориям'}
                         </h3>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <button onClick={handleExportFunnel} className="btn btn-secondary btn-sm" style={{ fontSize: 13, padding: '6px 14px', whiteSpace: 'nowrap' }}>📥 Excel</button>
                         <div style={{ display: 'flex', gap: 0, border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
                             {(['day', 'sku', 'brand', 'subject', 'tag', 'imt', 'abc'] as const).map((mode, idx) => {
                                 const labels = { day: 'По дням', sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям', tag: 'По ярлыкам', imt: 'По склейкам', abc: 'ABC анализ' };
@@ -355,6 +443,7 @@ export default function FunnelPage() {
                                     >{labels[mode]}</button>
                                 );
                             })}
+                        </div>
                         </div>
                     </div>
 
