@@ -915,52 +915,56 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
     };
 
     const handleExport = () => {
-        // «Мест» combine same-barcode source rows before rounding up, then show
-        // once per barcode — so the column sums to the supplier's box count and
-        // partial boxes aren't double-counted across splits.
-        const boxesByBarcode = new Map<string, number>();
+        // Для машины баркод из нескольких источников (ФЗ) — ОДНА позиция: короба и
+        // суммы считаются по суммарному qty, неполные коробки не округляются вверх
+        // на каждый источник. Поэтому строки-источники одного баркода схлопываются
+        // в одну (как сводная строка группы на экране) — иначе «Мест» приходилось
+        // оставлять пустым на дублях, и колонка выглядела незаполненной. Mix-позиции
+        // остаются отдельными строками.
+        const order: string[] = [];
+        const groups = new Map<string, VehicleItemSchema[]>();
         for (const item of items) {
-            if (item.mix_group_id || (item.box_detail && item.box_detail.length > 0)) continue;
-            const ppb = item.pcs_per_box || 0;
-            if (ppb > 0 && item.barcode) {
-                const key = `${item.barcode}|${ppb}`;
-                boxesByBarcode.set(key, (boxesByBarcode.get(key) || 0) + item.qty);
-            }
+            const key = item.mix_group_id ? `mix:${item.id}` : `bc:${item.barcode}`;
+            if (!groups.has(key)) { groups.set(key, []); order.push(key); }
+            groups.get(key)!.push(item);
         }
-        const boxesSeen = new Set<string>();
-        const rows = items.map(item => {
-            const ppb = item.pcs_per_box || 0;
-            const boxes = ppb > 0 ? Math.ceil(item.qty / ppb) : 0;
-            const dims = parseBoxDims(item.box_size);
-            const vol = dims && ppb > 0 ? (dims.l * dims.w * dims.h) / 1e6 * boxes : 0;
-            let boxesCell: number | string = '';
-            if (item.mix_group_id) {
-                boxesCell = t('detail_col_mix');
-            } else if (item.box_detail && item.box_detail.length > 0) {
-                boxesCell = item.box_detail.length;
-            } else if (ppb > 0 && item.barcode) {
-                const key = `${item.barcode}|${ppb}`;
-                if (!boxesSeen.has(key)) {
-                    boxesSeen.add(key);
-                    boxesCell = Math.ceil((boxesByBarcode.get(key) || 0) / ppb);
-                }
-            }
+        const rows = order.map(key => {
+            const group = groups.get(key)!;
+            const first = group[0];
+            const totalQty = group.reduce((s, it) => s + it.qty, 0);
+            const totalSumCny = group.reduce((s, it) => s + Number(it.price_cny) * it.qty, 0);
+            const totalWeight = group.reduce((s, it) => s + (it.weight_kg || 0) * it.qty, 0);
+            const totalVolume = group.reduce((s, it) => {
+                const d = parseBoxDims(it.box_size);
+                const p = it.pcs_per_box || 0;
+                return s + (d && p > 0 ? (d.l * d.w * d.h) / 1e6 * Math.ceil(it.qty / p) : 0);
+            }, 0);
+            const totalDelivery = group.reduce((s, it) => s + (it.delivery_rub || 0) * it.qty, 0);
+            const totalDuty = group.reduce((s, it) => s + (it.duty_rub || 0) * it.qty, 0);
+            const totalVat = group.reduce((s, it) => s + (it.vat_rub || 0) * it.qty, 0);
+            const totalRub = group.reduce((s, it) => s + (it.total_rub || 0) * it.qty, 0);
+            // Средняя цена за шт по группе (взвеш. по qty) — как в сводной строке.
+            const avgPrice = totalQty > 0 ? totalSumCny / totalQty : Number(first.price_cny) || 0;
+            // «Мест»: MIX — метка; иначе короба по суммарному qty (combine до округления).
+            const boxesCell: number | string = first.mix_group_id
+                ? t('detail_col_mix')
+                : (calcTotalBoxesWithMix(group) || '');
             return {
-                [t('col_barcode')]: item.barcode,
-                [t('col_article')]: item.article_seller || '',
-                [t('col_category')]: item.subject || '',
-                [t('col_qty')]: item.qty,
+                [t('col_barcode')]: first.barcode,
+                [t('col_article')]: first.article_seller || '',
+                [t('col_category')]: first.subject || '',
+                [t('col_qty')]: totalQty,
                 [t('col_boxes')]: boxesCell,
-                [`${t('col_weight_1pc')} kg`]: item.weight_kg || '',
-                [`${t('col_weight')} kg`]: item.weight_kg ? Number(((item.weight_kg || 0) * item.qty).toFixed(1)) : '',
-                [t('col_box_spec')]: item.box_size || '',
-                'V m³': vol > 0 ? Number(vol.toFixed(2)) : '',
-                [t('col_price_cny')]: Number(item.price_cny) || '',
-                [t('col_sum_cny')]: Number(item.price_cny) * item.qty || '',
-                [`${t('cost_delivery')} ₽`]: item.delivery_rub ? Number((item.delivery_rub * item.qty).toFixed(0)) : '',
-                [`${t('cost_duty')} ₽`]: item.duty_rub ? Number((item.duty_rub * item.qty).toFixed(0)) : '',
-                [`${t('cost_vat')} ₽`]: item.vat_rub ? Number((item.vat_rub * item.qty).toFixed(0)) : '',
-                [`${t('cost_total')} ₽`]: item.total_rub ? Number((item.total_rub * item.qty).toFixed(0)) : '',
+                [`${t('col_weight_1pc')} kg`]: first.weight_kg || '',
+                [`${t('col_weight')} kg`]: totalWeight > 0 ? Number(totalWeight.toFixed(1)) : '',
+                [t('col_box_spec')]: first.box_size || '',
+                'V m³': totalVolume > 0 ? Number(totalVolume.toFixed(2)) : '',
+                [t('col_price_cny')]: Number(avgPrice.toFixed(2)) || '',
+                [t('col_sum_cny')]: totalSumCny || '',
+                [`${t('cost_delivery')} ₽`]: totalDelivery ? Number(totalDelivery.toFixed(0)) : '',
+                [`${t('cost_duty')} ₽`]: totalDuty ? Number(totalDuty.toFixed(0)) : '',
+                [`${t('cost_vat')} ₽`]: totalVat ? Number(totalVat.toFixed(0)) : '',
+                [`${t('cost_total')} ₽`]: totalRub ? Number(totalRub.toFixed(0)) : '',
             };
         });
         exportToExcel(rows, `${t('vdetail_vehicle')}_${vehicleOrderNo}`);
@@ -1130,10 +1134,12 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                         const totalQty = groupItems.reduce((s, it) => s + it.qty, 0);
                         const allSameBox = groupItems.every(it => it.box_size === groupItems[0].box_size && it.pcs_per_box === groupItems[0].pcs_per_box);
                         const groupPpb = allSameBox ? (groupItems[0].pcs_per_box || 0) : 0;
-                        const groupBoxes = allSameBox && groupPpb > 0 ? Math.ceil(totalQty / groupPpb) : groupItems.reduce((s, it) => {
-                            const p = it.pcs_per_box || 0;
-                            return s + (p > 0 ? Math.ceil(it.qty / p) : 0);
-                        }, 0);
+                        // «Мест»: баркод из нескольких ФЗ — для машины единая позиция.
+                        // Короба считаем по СУММАРНОМУ qty (calcTotalBoxesWithMix
+                        // комбинирует источники одного баркода+ppb ДО округления), а не
+                        // округляя каждый источник отдельно — иначе неполные коробки
+                        // округляются вверх многократно. Совпадает с футером и Excel.
+                        const groupBoxes = calcTotalBoxesWithMix(groupItems);
                         const totalWeight = groupItems.reduce((s, it) => s + (it.weight_kg || 0) * it.qty, 0);
                         const totalVolume = groupItems.reduce((s, it) => {
                             const d = parseBoxDims(it.box_size);

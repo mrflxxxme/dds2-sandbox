@@ -170,6 +170,16 @@ describe('calcTotalBoxesWithMix', () => {
         expect(boxes).toBe(2);
     });
 
+    it('combines two sources of equal pcs_per_box into whole boxes (V-0022 bug)', () => {
+        // 30 + 26 @ 4/box = 56 -> 14 whole boxes combined, NOT ceil(30/4)+ceil(26/4)=8+7=15.
+        // Для машины баркод из 2 ФЗ — единая позиция, делится ровно по коробке.
+        const boxes = calcTotalBoxesWithMix([
+            { barcode: '20494046010912', qty: 30, pcs_per_box: 4 },
+            { barcode: '20494046010912', qty: 26, pcs_per_box: 4 },
+        ]);
+        expect(boxes).toBe(14);
+    });
+
     it('rounds up per barcode, not per row, across many barcodes', () => {
         const boxes = calcTotalBoxesWithMix([
             { barcode: 'A', qty: 14, pcs_per_box: 22 }, // +30 -> 44 -> 2
