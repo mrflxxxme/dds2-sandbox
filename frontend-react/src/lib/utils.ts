@@ -142,3 +142,40 @@ export function calcTotalBoxesWithMix(items: { barcode?: string | null | undefin
     for (const boxes of mixBoxes.values()) total += boxes;
     return total;
 }
+
+/**
+ * Combined box breakdown for ONE barcode split across several source rows (ФЗ).
+ *
+ * A barcode coming from N factory orders is a SINGLE position for the vehicle —
+ * boxes are packed by the COMBINED qty, not per source. Per-source rounding shows
+ * each source's tail as its own partial box (208@14 → [14×14, 12] и 2@14 → [2]),
+ * while the true packing is 210@14 → [14×15] (хвосты 12+2=14 сливаются). Mirrors
+ * calcTotalBoxesWithMix (combine by barcode|ppb before rounding) but returns the
+ * box ARRAY (parallel to autoBoxDetail in BoxDetailCell), so the breakdown matches
+ * the «Мест» number.
+ *
+ * Returns null when combining is unsafe — caller falls back to per-source display:
+ *   • mixed pcs_per_box across sources — different box sizes can't merge;
+ *   • any source carries an explicit box_detail (manual packing override) — that
+ *     source's layout is fixed and must not be silently absorbed;
+ *   • mix-group items — handled separately (max boxes per group).
+ */
+export function calcCombinedBoxDetail(
+    items: { qty: number; pcs_per_box?: number | null; box_detail?: number[] | null; mix_group_id?: string | null }[],
+): number[] | null {
+    if (items.length === 0) return null;
+    const ppb = items[0].pcs_per_box || 0;
+    if (ppb <= 0) return null;
+    for (const it of items) {
+        if (it.mix_group_id) return null;
+        if (it.box_detail && it.box_detail.length > 0) return null;
+        if ((it.pcs_per_box || 0) !== ppb) return null;
+    }
+    const totalQty = items.reduce((sum, it) => sum + it.qty, 0);
+    if (totalQty <= 0) return null;
+    const full = Math.floor(totalQty / ppb);
+    const remainder = totalQty % ppb;
+    const detail: number[] = Array(full).fill(ppb);
+    if (remainder > 0) detail.push(remainder);
+    return detail;
+}

@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxesWithMix, calcCombinedBoxDetail } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
 import TabLayout from '@/components/TabLayout';
 import BoxDetailCell, { BoxDetailExpandRow, BoxDropdown } from '@/components/BoxDetailCell';
@@ -814,6 +814,24 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
         }
         return rows;
     })();
+    // sc: баркод из 2+ источников (ФЗ) — короба пакуются по СУММАРНОМУ qty, не на
+    // каждый источник: иначе хвосты показываются как отдельные неполные коробки
+    // (208@14 → [14×14,12] и 2@14 → [2] вместо 210@14 → [14×15]). Совпадает с «Мест»
+    // (calcTotalBoxesWithMix). null → комбинировать нельзя (разный ppb / ручной
+    // box_detail-override) → fallback на per-source плашки.
+    const combinedBoxDetailByBarcode = new Map<string, number[] | null>();
+    {
+        const byBc = new Map<string, VehicleItemSchema[]>();
+        for (const it of filteredItems) {
+            if (it.mix_group_id) continue;
+            const list = byBc.get(it.barcode) || [];
+            list.push(it);
+            byBc.set(it.barcode, list);
+        }
+        for (const [bc, list] of byBc) {
+            combinedBoxDetailByBarcode.set(bc, list.length > 1 ? calcCombinedBoxDetail(list) : null);
+        }
+    }
     const toggleGroup = (barcode: string) => {
         setExpandedBarcodes(prev => {
             const next = new Set(prev);
@@ -1140,6 +1158,10 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                         // округляя каждый источник отдельно — иначе неполные коробки
                         // округляются вверх многократно. Совпадает с футером и Excel.
                         const groupBoxes = calcTotalBoxesWithMix(groupItems);
+                        // Сводная разбивка по коробкам для баркода из 2+ ФЗ (или null,
+                        // если комбинировать нельзя — тогда показываем число как раньше).
+                        const combinedDetail = combinedBoxDetailByBarcode.get(row.barcode) ?? null;
+                        const combinedPpb = groupItems[0].pcs_per_box || 0;
                         const totalWeight = groupItems.reduce((s, it) => s + (it.weight_kg || 0) * it.qty, 0);
                         const totalVolume = groupItems.reduce((s, it) => {
                             const d = parseBoxDims(it.box_size);
@@ -1161,7 +1183,8 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                             : t('vdetail_group_mixed');
                         const groupHasDrift = groupItems.some(it => it.qty_drift != null && it.qty_drift > 0);
                         return (
-                            <tr key={`group:${row.barcode}`} style={{ borderBottom: expanded ? 'none' : '1px solid var(--color-border)', background: groupSomeSelected || groupAllSelected ? 'rgba(0,113,227,0.04)' : 'rgba(0,113,227,0.015)' }}>
+                            <React.Fragment key={`group:${row.barcode}`}>
+                            <tr style={{ borderBottom: expanded ? 'none' : '1px solid var(--color-border)', background: groupSomeSelected || groupAllSelected ? 'rgba(0,113,227,0.04)' : 'rgba(0,113,227,0.015)' }}>
                                 {canDelete && (
                                     <td style={{ ...td, textAlign: 'center', width: 28 }}>
                                         <input
@@ -1206,7 +1229,19 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                                 <td style={{ ...td, fontSize: 12, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={groupItems[0].article_seller || ''}>{groupItems[0].article_seller || '—'}</td>
                                 <td style={{ ...td, fontSize: 12 }}>{groupItems[0].subject || '—'}</td>
                                 <td style={{ ...tdR, fontWeight: 600 }}>{formatNumber(totalQty, 0)}</td>
-                                <td style={tdR}>{groupBoxes > 0 ? groupBoxes : '—'}</td>
+                                <td style={tdR}>
+                                    {combinedDetail
+                                        ? (
+                                            <BoxDetailCell
+                                                qty={totalQty}
+                                                pcsPerBox={combinedPpb}
+                                                boxDetail={null}
+                                                expanded={expanded}
+                                                onToggle={() => toggleGroup(row.barcode)}
+                                            />
+                                        )
+                                        : (groupBoxes > 0 ? groupBoxes : '—')}
+                                </td>
                                 <td style={{ ...tdR, color: 'var(--color-text-muted)' }}>{weightPerPc ? formatNumber(weightPerPc, 2) : '—'}</td>
                                 <td style={tdR}>{totalWeight > 0 ? formatNumber(totalWeight, 1) : '—'}</td>
                                 <td style={{ ...td, fontSize: 11, color: 'var(--color-text-muted)' }}>{boxLabel}</td>
@@ -1229,10 +1264,24 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                                     </td>
                                 )}
                             </tr>
+                            {expanded && combinedDetail && (
+                                <tr>
+                                    <BoxDetailExpandRow
+                                        qty={totalQty}
+                                        pcsPerBox={combinedPpb}
+                                        boxDetail={null}
+                                        colSpan={baseCols + costCols}
+                                    />
+                                </tr>
+                            )}
+                            </React.Fragment>
                         );
                     }
                     const item = row.item;
                     const isChild = row.kind === 'group_child';
+                    // Строка-источник комбинируемого баркода: её хвост — доля источника,
+                    // не настоящая неполная коробка (сводная разбивка — на шапке группы).
+                    const childCombined = isChild ? (combinedBoxDetailByBarcode.get(item.barcode) ?? null) : null;
                     const ppb = item.pcs_per_box || 0;
                     const boxes = ppb > 0 ? Math.ceil(item.qty / ppb) : 0;
                     const notFull = ppb > 0 && item.qty % ppb !== 0;
@@ -1331,6 +1380,7 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                                         boxDetail={item.box_detail}
                                         expanded={expandedId === item.id}
                                         onToggle={ppb > 0 ? () => setExpandedId(expandedId === item.id ? null : item.id) : undefined}
+                                        suppressWarning={childCombined !== null}
                                     />
                                 )}
                             </td>

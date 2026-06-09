@@ -35,17 +35,26 @@ interface BoxDetailCellProps {
     boxDetail?: number[] | null;
     expanded?: boolean;
     onToggle?: () => void;
+    /**
+     * Suppress the "incomplete box" (⚠) flag. Used for per-source child rows of a
+     * barcode whose boxes are packed by the COMBINED qty — a source's partial tail
+     * is not a real incomplete box (it merges with sibling tails), so the warning
+     * would be misleading. The combined breakdown is shown on the group header.
+     */
+    suppressWarning?: boolean;
 }
 
 /** Clickable "Мест" cell — shows box count, click to expand. */
-export default function BoxDetailCell({ qty, pcsPerBox, boxDetail, expanded, onToggle }: BoxDetailCellProps) {
+export default function BoxDetailCell({ qty, pcsPerBox, boxDetail, expanded, onToggle, suppressWarning }: BoxDetailCellProps) {
     const ppb = pcsPerBox || 0;
     const boxes = boxDetail && boxDetail.length > 0
         ? boxDetail.length
         : (ppb > 0 ? Math.ceil(qty / ppb) : 0);
-    const notFull = boxDetail && boxDetail.length > 0
-        ? boxDetail.some(b => b !== ppb)
-        : (ppb > 0 && qty % ppb !== 0);
+    const notFull = suppressWarning
+        ? false
+        : (boxDetail && boxDetail.length > 0
+            ? boxDetail.some(b => b !== ppb)
+            : (ppb > 0 && qty % ppb !== 0));
 
     if (boxes <= 0) return <span>—</span>;
 
