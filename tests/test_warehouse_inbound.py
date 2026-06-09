@@ -247,6 +247,110 @@ class TestAcceptReceipt:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# accept_receipt — defect receipts (WB-возвраты с ПВЗ)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+async def _mark_defect(db_session: AsyncSession, receipt) -> None:
+    """Пометить приёмку как брак — как делает create_receipt_from_returns для возвратов ПВЗ.
+
+    Мутируем ORM-объект, а не сырой UPDATE: тест-сессия с expire_on_commit=False
+    иначе вернула бы из identity-map устаревший is_defect=False (в проде accept
+    идёт отдельным запросом/сессией и грузит приёмку заново).
+    """
+    receipt.is_defect = True
+    receipt.defect_reason = "Возврат WB с ПВЗ"
+    await db_session.commit()
+
+
+async def _read_stock(db_session: AsyncSession, project_id: int, warehouse_id: int, nom_id: int) -> tuple[int, int]:
+    """(quantity, defect_quantity) для строки остатка; (0, 0) если строки нет."""
+    row = (
+        await db_session.execute(
+            text(
+                "SELECT quantity, defect_quantity FROM warehouse_stock "
+                "WHERE project_id = :p AND warehouse_id = :w AND nomenclature_id = :n"
+            ),
+            {"p": project_id, "w": warehouse_id, "n": nom_id},
+        )
+    ).first()
+    return (0, 0) if row is None else (row[0], row[1])
+
+
+class TestAcceptDefectReceipt:
+    @pytest.mark.asyncio
+    async def test_accept_defect_receipt_books_into_defect_not_good(
+        self, db_session, project, warehouse, nomenclature_id
+    ):
+        """Возврат с ПВЗ (is_defect=True): Accept пополняет брак, а не годный сток."""
+        barcode, nom_id = nomenclature_id
+        receipt = await create_receipt(
+            db_session,
+            project.id,
+            warehouse.id,
+            {"items": [{"barcode": barcode, "expected_qty": 7, "actual_qty": 0}]},
+        )
+        await _mark_defect(db_session, receipt)
+
+        await accept_receipt(db_session, project.id, receipt.id)
+
+        quantity, defect_quantity = await _read_stock(db_session, project.id, warehouse.id, nom_id)
+        assert defect_quantity == 7, "возврат-брак должен попасть в defect_quantity"
+        assert quantity == 0, "годный сток не должен расти от приёмки брака"
+
+    @pytest.mark.asyncio
+    async def test_cancel_accepted_defect_receipt_rolls_back_defect(
+        self, db_session, project, warehouse, nomenclature_id
+    ):
+        """Отмена подтверждённой брак-приёмки откатывает именно defect_quantity (симметрия accept↔cancel)."""
+        barcode, nom_id = nomenclature_id
+        receipt = await create_receipt(
+            db_session,
+            project.id,
+            warehouse.id,
+            {"items": [{"barcode": barcode, "expected_qty": 7}]},
+        )
+        await _mark_defect(db_session, receipt)
+        await accept_receipt(db_session, project.id, receipt.id)
+
+        await cancel_receipt(db_session, project.id, receipt.id)
+
+        quantity, defect_quantity = await _read_stock(db_session, project.id, warehouse.id, nom_id)
+        assert defect_quantity == 0
+        assert quantity == 0
+
+    @pytest.mark.asyncio
+    async def test_accept_defect_receipt_is_idempotent(self, db_session, project, warehouse, nomenclature_id):
+        """Повторный Accept брак-приёмки (гонка double-submit) не задваивает defect_quantity."""
+        from tests.conftest_api import TestSessionLocal
+
+        barcode, nom_id = nomenclature_id
+        receipt = await create_receipt(
+            db_session,
+            project.id,
+            warehouse.id,
+            {"items": [{"barcode": barcode, "expected_qty": 7}]},
+        )
+        await _mark_defect(db_session, receipt)
+        await accept_receipt(db_session, project.id, receipt.id)
+
+        # Снова делаем приёмку "подтверждаемой" — снимок статуса до победившего accept.
+        await db_session.execute(
+            text("UPDATE inbound_receipts SET status = 'EXPECTED' WHERE id = :id"),
+            {"id": receipt.id},
+        )
+        await db_session.commit()
+
+        async with TestSessionLocal() as other:
+            with pytest.raises(ValueError):
+                await accept_receipt(other, project.id, receipt.id)
+
+        async with TestSessionLocal() as reader:
+            _, defect_quantity = await _read_stock(reader, project.id, warehouse.id, nom_id)
+            assert defect_quantity == 7
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # cancel_receipt
 # ═══════════════════════════════════════════════════════════════════════════════
 

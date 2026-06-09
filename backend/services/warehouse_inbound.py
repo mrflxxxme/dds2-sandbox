@@ -248,18 +248,21 @@ async def accept_receipt(
     if locked_status not in (InboundStatus.DRAFT, InboundStatus.EXPECTED):
         raise ValueError(f"Cannot accept receipt in status {locked_status}")
 
-    # Idempotency net: if INBOUND stock was already booked for this receipt
-    # (e.g. a retry that landed after a prior accept committed), do not book it
-    # again. cancel_receipt adds offsetting INBOUND_CANCEL rows and moves the
-    # receipt to CANCELLED, so it can never reach this point — only a genuine
+    # Idempotency net: if stock was already booked for this receipt (e.g. a
+    # retry that landed after a prior accept committed), do not book it again.
+    # Defect receipts (WB returns from PVZ) book via DEFECT_RECEIVE, regular
+    # receipts via INBOUND — guard on whichever type this receipt applies.
+    # cancel_receipt adds offsetting *_CANCEL rows and moves the receipt to
+    # CANCELLED, so it can never reach this point — only a genuine
     # re-application trips this guard.
+    apply_movement_type = MovementType.DEFECT_RECEIVE if receipt.is_defect else MovementType.INBOUND
     already_applied = await db.execute(
         select(StockMovement.id)
         .where(
             StockMovement.project_id == project_id,
             StockMovement.reference_type == "RECEIPT",
             StockMovement.reference_id == receipt_id,
-            StockMovement.movement_type == MovementType.INBOUND,
+            StockMovement.movement_type == apply_movement_type,
         )
         .limit(1)
     )
@@ -278,7 +281,9 @@ async def accept_receipt(
         if item.actual_qty <= 0 and item.expected_qty > 0:
             item.actual_qty = item.expected_qty
 
-    # Update stock for each item
+    # Update stock for each item. Defect receipts (WB returns from PVZ) book
+    # into defect_quantity via DEFECT_RECEIVE — mirror of cancel_receipt's
+    # is_defect branch; regular receipts add good stock via INBOUND.
     for item in receipt.items:
         if item.actual_qty <= 0:
             continue
@@ -288,8 +293,9 @@ async def accept_receipt(
             warehouse_id=receipt.warehouse_id,
             nomenclature_id=item.nomenclature_id,
             barcode=item.barcode,
-            delta=item.actual_qty,
-            movement_type=MovementType.INBOUND,
+            delta=0 if receipt.is_defect else item.actual_qty,
+            defect_delta=item.actual_qty if receipt.is_defect else 0,
+            movement_type=apply_movement_type,
             reference_type="RECEIPT",
             reference_id=receipt.id,
         )

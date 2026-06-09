@@ -55,8 +55,8 @@
 - **Перемещение:** DRAFT → IN_TRANSIT → COMPLETED. На source `qty -= delta` (TRANSFER_OUT), на target `qty += delta` (TRANSFER_IN); `in_transit` на target растёт при send, падает при complete.
 
 ### Accept / Cancel / Update приёмки
-- **Accept (DRAFT|EXPECTED → ACCEPTED):** если `actual_qty <= 0` и `expected_qty > 0` — автозаполнение `actual_qty = expected_qty`. Для каждого item с `actual_qty > 0` — `_update_stock(+actual_qty, INBOUND)`. `status = ACCEPTED`, `actual_date = today`.
-- **Cancel accepted (ACCEPTED → CANCELLED):** `_update_stock(-actual_qty, INBOUND_CANCEL)`.
+- **Accept (DRAFT|EXPECTED → ACCEPTED):** если `actual_qty <= 0` и `expected_qty > 0` — автозаполнение `actual_qty = expected_qty`. Для каждого item с `actual_qty > 0` — `_update_stock(+actual_qty, INBOUND)`. **Если `receipt.is_defect`** (возвраты WB с ПВЗ) — сток идёт в брак: `_update_stock(delta=0, defect_delta=+actual_qty, DEFECT_RECEIVE)` (симметрия с Cancel; idempotency-guard проверяет DEFECT_RECEIVE, а не INBOUND). `status = ACCEPTED`, `actual_date = today`.
+- **Cancel accepted (ACCEPTED → CANCELLED):** `_update_stock(-actual_qty, INBOUND_CANCEL)`; для `is_defect` — `defect_delta=-actual_qty`.
 - **Update accepted:** для каждого item `delta = new_actual_qty - old_actual_qty`; если `delta != 0` — `_update_stock(delta, INBOUND_EDIT)`.
 
 ### Брак (Defective Goods)
