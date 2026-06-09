@@ -19,6 +19,7 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
     SHIPPED:          { label: 'Отгружена',          className: 'badge-success' },
     DELIVERED:        { label: 'Принята WB',         className: 'badge-success' },
+    CLOSED:           { label: 'Закрыт',             className: 'badge-warning' },
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
 };
 
@@ -31,6 +32,7 @@ const STATUS_OPTIONS_FILTER: { value: string; label: string }[] = [
     { value: 'VEHICLE_ASSIGNED', label: 'Машина назначена' },
     { value: 'SHIPPED', label: 'Отгружена' },
     { value: 'DELIVERED', label: 'Принята WB' },
+    { value: 'CLOSED', label: 'Закрыт' },
     { value: 'CANCELLED', label: 'Отменена' },
 ];
 
@@ -43,6 +45,7 @@ const STATUS_COLORS: Record<string, string> = {
     VEHICLE_ASSIGNED: 'bg-sky-100 text-sky-700 border-sky-200',
     SHIPPED:          'bg-emerald-100/60 text-emerald-600 border-emerald-200',
     DELIVERED:        'bg-emerald-100 text-emerald-700 border-emerald-200',
+    CLOSED:           'bg-amber-100 text-amber-700 border-amber-200',
     CANCELLED:        'bg-slate-100 text-slate-500 border-slate-200',
 };
 

@@ -43,6 +43,7 @@ class AssemblyStatus(enum.StrEnum):
     VEHICLE_ASSIGNED = "VEHICLE_ASSIGNED"
     SHIPPED = "SHIPPED"
     DELIVERED = "DELIVERED"  # WB accepted the supply (auto from FBO sync)
+    CLOSED = "CLOSED"  # WB не принял поставку — товар возвращён на склад, логистика сохранена
     CANCELLED = "CANCELLED"
 
 
@@ -69,8 +70,15 @@ ASSEMBLY_TRANSITIONS: dict[AssemblyStatus, set[AssemblyStatus]] = {
     AssemblyStatus.IN_PROGRESS: {AssemblyStatus.READY, AssemblyStatus.CANCELLED},
     AssemblyStatus.READY: {AssemblyStatus.VEHICLE_ASSIGNED, AssemblyStatus.IN_PROGRESS, AssemblyStatus.CANCELLED},
     AssemblyStatus.VEHICLE_ASSIGNED: {AssemblyStatus.SHIPPED, AssemblyStatus.READY, AssemblyStatus.CANCELLED},
-    AssemblyStatus.SHIPPED: {AssemblyStatus.DELIVERED, AssemblyStatus.READY, AssemblyStatus.CANCELLED},
-    AssemblyStatus.DELIVERED: set(),  # final status
+    AssemblyStatus.SHIPPED: {
+        AssemblyStatus.DELIVERED,
+        AssemblyStatus.READY,
+        AssemblyStatus.CLOSED,
+        AssemblyStatus.CANCELLED,
+    },
+    # WB принял, но позже выяснилось, что часть/всё вернулось → закрытие возвратом.
+    AssemblyStatus.DELIVERED: {AssemblyStatus.CLOSED},
+    AssemblyStatus.CLOSED: set(),  # final status — товар возвращён, логистика сохранена
     AssemblyStatus.CANCELLED: set(),
 }
 

@@ -19,6 +19,7 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
     SHIPPED:          { label: 'Отгружена',          className: 'badge-success' },
     DELIVERED:        { label: 'Принята WB',         className: 'badge-success' },
+    CLOSED:           { label: 'Закрыт',             className: 'badge-warning' },
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
 };
 
@@ -48,6 +49,7 @@ export default function AssemblyDetailPage() {
     const [deliveryDate, setDeliveryDate] = useState('');
     const [showShipModal, setShowShipModal] = useState(false);
     const [showCancelModal, setShowCancelModal] = useState(false);
+    const [showReturnModal, setShowReturnModal] = useState(false);
 
     // Refresh from FBO result
     const [refreshResult, setRefreshResult] = useState<RefreshFromFboResponse | null>(null);
@@ -233,6 +235,19 @@ export default function AssemblyDetailPage() {
         setActionLoading(false);
     };
 
+    const handleReturn = async () => {
+        setActionLoading(true);
+        setError('');
+        try {
+            const updated = await api.returnAssembly(id);
+            setAssembly(updated);
+            setShowReturnModal(false);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setActionLoading(false);
+    };
+
     const handleRefreshFromFbo = async () => {
         setActionLoading(true);
         setError('');
@@ -247,7 +262,11 @@ export default function AssemblyDetailPage() {
         setActionLoading(false);
     };
 
-    const canEditFields = assembly && !['SHIPPED', 'DELIVERED', 'CANCELLED'].includes(assembly.status);
+    // Мета-поля (склад WB, плановая дата, палеты, вес, комментарий) редактируемы
+    // в любом не-CANCELLED статусе, включая SHIPPED/DELIVERED/CLOSED — backend это
+    // допускает (не двигает остатки). Структурные поля (позиции, склад-источник,
+    // FBO) остаются под canEditFbo / страницей редактирования.
+    const canEditFields = assembly && assembly.status !== 'CANCELLED';
     const canEditAlways = assembly && assembly.status !== 'CANCELLED';
     const canEditFbo = assembly && ['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED'].includes(assembly.status);
 
@@ -399,9 +418,22 @@ export default function AssemblyDetailPage() {
                 );
                 break;
             case 'SHIPPED':
-                // No primary actions for shipped
-                break;
             case 'DELIVERED':
+                buttons.push(
+                    <button key="return" className="btn btn-primary" onClick={() => setShowReturnModal(true)} disabled={actionLoading}>
+                        Вернуть на склад
+                    </button>,
+                    <Link key="edit" href={`/p/${slug}/warehouse/assembly/${assembly.id}/edit`}>
+                        <button className="btn btn-secondary">Редактировать</button>
+                    </Link>,
+                );
+                break;
+            case 'CLOSED':
+                buttons.push(
+                    <Link key="edit" href={`/p/${slug}/warehouse/assembly/${assembly.id}/edit`}>
+                        <button className="btn btn-secondary">Редактировать</button>
+                    </Link>,
+                );
                 break;
             case 'CANCELLED':
                 break;
@@ -882,6 +914,31 @@ export default function AssemblyDetailPage() {
                                 style={{ background: 'var(--color-danger)' }}
                             >
                                 {actionLoading ? 'Отмена...' : 'Да, отменить'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Return-to-warehouse confirmation modal */}
+            {showReturnModal && (
+                <div className="modal-overlay" onClick={() => setShowReturnModal(false)}>
+                    <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 460 }}>
+                        <h2 className="modal-title">Вернуть на склад</h2>
+                        <div style={{ marginBottom: 16, fontSize: 14 }}>
+                            <p>WB не принял поставку по заявке <strong>{assembly.number}</strong>, товар вернулся на склад <strong>{assembly.warehouse_name}</strong>.</p>
+                            <p>Будет создана приёмка-возврат на годный сток, а заявка перейдёт в статус <strong>«Закрыт»</strong>. Логистика (стоимость перевозки) сохранится в аналитике.</p>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                            <button className="btn btn-secondary" onClick={() => setShowReturnModal(false)}>
+                                Отмена
+                            </button>
+                            <button
+                                className="btn btn-primary"
+                                onClick={handleReturn}
+                                disabled={actionLoading}
+                            >
+                                {actionLoading ? 'Возврат...' : 'Вернуть на склад'}
                             </button>
                         </div>
                     </div>

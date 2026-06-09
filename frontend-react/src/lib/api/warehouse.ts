@@ -368,6 +368,9 @@ export function addWarehouseMethods(api: ApiClient) {
         cancelAssembly(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/cancel`);
         },
+        returnAssembly(id: number) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/return`);
+        },
         deleteAssembly(id: number) {
             return api.request<void>('DELETE', `/api/v1/warehouse/assembly/${id}`);
         },

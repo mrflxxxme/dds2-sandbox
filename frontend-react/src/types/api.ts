@@ -1456,7 +1456,7 @@ export interface FboAuditRevertResponse {
 
 // ─── Assembly Requests ────────────────────────────────────────────────────
 
-export type AssemblyStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';
+export type AssemblyStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'DELIVERED' | 'CLOSED' | 'CANCELLED';
 
 export type PackageType = 'BOX' | 'MONOPALLET' | 'SUPERSAFE';
 

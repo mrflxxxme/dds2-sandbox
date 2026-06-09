@@ -19,6 +19,7 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
     SHIPPED:          { label: 'Отгружена',          className: 'badge-success' },
     DELIVERED:        { label: 'Принята WB',         className: 'badge-success' },
+    CLOSED:           { label: 'Закрыт',             className: 'badge-warning' },
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
 };
 

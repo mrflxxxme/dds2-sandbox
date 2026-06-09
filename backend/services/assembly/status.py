@@ -1,4 +1,4 @@
-# ruff: noqa: RUF002
+# ruff: noqa: RUF002, RUF003
 """
 Assembly Request service — status transitions and audit.
 
@@ -20,6 +20,9 @@ from backend.models.assembly import (
 )
 from backend.models.counterparty import Counterparty
 from backend.models.warehouse import (
+    InboundReceipt,
+    InboundReceiptItem,
+    InboundStatus,
     MovementType,
     OutboundShipment,
     OutboundShipmentItem,
@@ -366,6 +369,120 @@ async def cancel_request(db: AsyncSession, project_id: int, request_id: int) -> 
     await db.refresh(req)
 
     await invalidate_cache("reports:balance")
+
+    return req
+
+
+async def return_to_warehouse(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+    changed_by: str = "user",
+    comment: str | None = None,
+) -> AssemblyRequest:
+    """
+    SHIPPED/DELIVERED -> CLOSED: WB не принял поставку, товар вернулся на склад-источник.
+
+    В отличие от cancel_request:
+      - заявка НЕ отменяется (статус CLOSED, не CANCELLED) → pickup_cost остаётся в
+        аналитике логистики (перевозка оплачена, история нужна);
+      - OutboundShipment НЕ soft-удаляется (история отгрузки сохранена);
+      - товар возвращается на склад-источник как ГОДНЫЙ сток через InboundReceipt(ACCEPTED).
+
+    Связанная FBO-поставка помечается return_processed_at / return_type=GOODS (если ещё
+    не обработана) — чтобы она не висела в «недоприёмке» и не было двойного возврата.
+    """
+    from .crud import get_assembly_request
+
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+
+    current = AssemblyStatus(req.status)
+    _check_transition(current, AssemblyStatus.CLOSED)
+
+    if not req.items:
+        raise ValueError("Нет позиций для возврата")
+
+    # 0. Блокируем связанную FBO-поставку и гардим двойной возврат. Защищает от:
+    #   - кросс-флоу: если возврат уже оформлен через «недоприёмку» (process_fbo_return
+    #     выставил return_processed_at) — повторный возврат тут задвоил бы остаток;
+    #   - гонки параллельных кликов «Вернуть» (row-lock сериализует транзакции).
+    fbo_supply = None
+    if req.wb_fbo_supply_id:
+        fbo_supply = (
+            await db.execute(
+                select(WbFboSupply)
+                .where(WbFboSupply.id == req.wb_fbo_supply_id, WbFboSupply.project_id == project_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if fbo_supply and fbo_supply.return_processed_at is not None:
+            raise ValueError("Возврат по связанной поставке уже обработан")
+
+    # 1. Приёмка-возврат на складе-источнике (годный сток).
+    receipt_number = await _next_number(db, project_id, "IN", InboundReceipt)
+    auto_comment = f"Возврат по заявке {req.number} (WB не принял поставку)"
+    receipt = InboundReceipt(
+        project_id=project_id,
+        warehouse_id=req.warehouse_id,
+        number=receipt_number,
+        status=InboundStatus.ACCEPTED,
+        planned_date=date.today(),
+        actual_date=date.today(),
+        comment=f"{auto_comment}. {comment}" if comment else auto_comment,
+    )
+    db.add(receipt)
+    await db.flush()
+
+    # 2. Позиции приёмки + возврат остатков (+qty, годный).
+    for item in req.items:
+        db.add(
+            InboundReceiptItem(
+                project_id=project_id,
+                receipt_id=receipt.id,
+                nomenclature_id=item.nomenclature_id,
+                barcode=item.barcode,
+                expected_qty=item.quantity,
+                actual_qty=item.quantity,
+            )
+        )
+        await _update_stock(
+            db,
+            project_id=project_id,
+            warehouse_id=req.warehouse_id,
+            nomenclature_id=item.nomenclature_id,
+            barcode=item.barcode,
+            delta=+item.quantity,
+            movement_type=MovementType.INBOUND,
+            reference_type="RECEIPT",
+            reference_id=receipt.id,
+            comment=f"Возврат по заявке {req.number}",
+        )
+
+    # 3. Помечаем связанную FBO-поставку обработанной возвратом (флаг гарантированно
+    #    был None — проверено под row-lock на шаге 0) — уходит из «недоприёмки».
+    if fbo_supply is not None:
+        fbo_supply.return_processed_at = utcnow()
+        fbo_supply.return_type = "GOODS"
+        fbo_supply.return_qty = sum(it.quantity for it in req.items)
+
+    # 4. Статус → CLOSED. Логистику (pickup_cost) и отгрузку НЕ трогаем.
+    req.status = AssemblyStatus.CLOSED
+    await _log_status_change(
+        db,
+        project_id,
+        req.id,
+        current,
+        AssemblyStatus.CLOSED,
+        changed_by=changed_by,
+        comment=comment or "Возврат на склад (WB не принял)",
+    )
+    await db.commit()
+    await db.refresh(req)
+
+    await invalidate_cache("reports:balance")
+    await invalidate_cache("reports:logistics_analytics")
 
     return req
 

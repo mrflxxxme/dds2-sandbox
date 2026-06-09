@@ -765,11 +765,13 @@ async def update_assembly_request(
     if req.status == AssemblyStatus.CANCELLED:
         raise ValueError(f"Cannot edit in status {req.status}")
 
-    # SHIPPED / DELIVERED — allow only cost, pallets and vehicle fields
-    _is_closed = req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED)
+    # SHIPPED / DELIVERED / CLOSED — «закрытые» статусы: структурные поля (склад,
+    # FBO-поставка, позиции) менять нельзя; мета (палеты, вес, даты, комментарий,
+    # склад WB, упаковка) и логистика — можно (товар уже отгружён/возвращён).
+    _is_closed = req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CLOSED)
 
-    # Update FBO supply link — not allowed in closed statuses
-    if payload.wb_fbo_supply_id is not None:
+    # Update FBO supply link — only on actual change, and not in closed statuses.
+    if payload.wb_fbo_supply_id is not None and payload.wb_fbo_supply_id != req.wb_fbo_supply_id:
         if _is_closed:
             raise ValueError("Cannot change FBO supply in status " + req.status)
         # Validate the FBO supply
@@ -822,20 +824,21 @@ async def update_assembly_request(
         req.warehouse_id = payload.warehouse_id
         warehouse_changed = True
 
-    # Update scalar fields — not allowed in closed statuses
-    if not _is_closed:
-        if payload.pallets_count is not None:
-            req.pallets_count = payload.pallets_count
-        if payload.pallet_weight_kg is not None:
-            req.pallet_weight_kg = payload.pallet_weight_kg
-        if payload.comment is not None:
-            req.comment = payload.comment
-        if payload.estimated_ready_date is not None:
-            req.estimated_ready_date = payload.estimated_ready_date
-        if payload.wb_warehouse_name_manual is not None:
-            req.wb_warehouse_name_manual = payload.wb_warehouse_name_manual
-        if payload.package_type is not None:
-            req.package_type = payload.package_type
+    # Meta-поля (палеты, вес, даты, комментарий, склад WB, упаковка) — редактируемы
+    # в любом не-CANCELLED статусе, включая SHIPPED/DELIVERED/CLOSED. Это не двигает
+    # остатки, лишь правит сопроводительные данные уже отгруженной/возвращённой заявки.
+    if payload.pallets_count is not None:
+        req.pallets_count = payload.pallets_count
+    if payload.pallet_weight_kg is not None:
+        req.pallet_weight_kg = payload.pallet_weight_kg
+    if payload.comment is not None:
+        req.comment = payload.comment
+    if payload.estimated_ready_date is not None:
+        req.estimated_ready_date = payload.estimated_ready_date
+    if payload.wb_warehouse_name_manual is not None:
+        req.wb_warehouse_name_manual = payload.wb_warehouse_name_manual
+    if payload.package_type is not None:
+        req.package_type = payload.package_type
 
     # Vehicle & cost fields — editable in any non-cancelled status (including SHIPPED/DELIVERED)
     if payload.pickup_cost is not None:
@@ -857,7 +860,12 @@ async def update_assembly_request(
     # READY/VEHICLE_ASSIGNED — позволяем подправить кол-во под факт WB (например,
     # WB принял меньше заявленного — редактируем позиции до отгрузки).
     if payload.items is not None:
-        if req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CANCELLED):
+        if req.status in (
+            AssemblyStatus.SHIPPED,
+            AssemblyStatus.DELIVERED,
+            AssemblyStatus.CLOSED,
+            AssemblyStatus.CANCELLED,
+        ):
             raise ValueError(f"Items cannot be edited in status {req.status}")
         # Delete existing items
         await db.execute(delete(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == req.id))

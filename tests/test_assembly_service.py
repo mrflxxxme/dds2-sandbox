@@ -25,7 +25,7 @@ import pytest_asyncio
 from sqlalchemy import select, text
 
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
-from backend.models.warehouse import OutboundShipment, WarehouseStock
+from backend.models.warehouse import InboundReceipt, OutboundShipment, WarehouseStock
 from backend.models.wb_fbo import WbFboSupply, WbSupplyStatus
 from backend.schemas.assembly import (
     AssemblyItemCreate,
@@ -38,13 +38,17 @@ from backend.services.assembly_service import (
     assign_vehicle_bulk,
     cancel_request,
     create_assembly_request,
+    deliver_request,
     get_assembly_request,
+    get_logistics_analytics,
     list_assembly_requests,
     mark_ready,
+    return_to_warehouse,
     ship_request,
     start_assembly,
     update_assembly_request,
 )
+from backend.utils.time import utcnow
 
 # PROJECT_ID / OTHER_PROJECT_ID are assigned per-test by the `setup_test_data`
 # fixture from conftest's sequence-allocated `project` / `other_project`. Never
@@ -821,6 +825,198 @@ class TestShipAndCancel:
         ship_result = await db_session.execute(select(OutboundShipment).where(OutboundShipment.id == shipment_id))
         shipment = ship_result.scalar_one()
         assert shipment.is_deleted is True
+
+
+async def _create_and_ship(db_session, *, pickup_cost: int = 15000) -> AssemblyRequest:
+    """Helper: create a test request and move it through the full lifecycle to SHIPPED."""
+    req = await _create_test_request(db_session)
+    await start_assembly(db_session, PROJECT_ID, req.id)
+    await mark_ready(db_session, PROJECT_ID, req.id)
+    await assign_vehicle(
+        db_session,
+        PROJECT_ID,
+        req.id,
+        AssignVehicle(
+            vehicle_info="Truck R",
+            vehicle_brand="MAN",
+            driver_phone="+79992222222",
+            pickup_date="2026-03-22",
+            pickup_time_slot="10:00-14:00",
+            pickup_cost=pickup_cost,
+            delivery_date="2026-03-24",
+        ),
+    )
+    return await ship_request(db_session, PROJECT_ID, req.id)
+
+
+@pytest.mark.asyncio
+class TestReturnToWarehouse:
+    """Возврат: WB не принял поставку → CLOSED, товар на склад, логистика сохранена."""
+
+    async def test_return_restores_stock_keeps_shipment_and_logistics(self, db_session):
+        req = await _create_and_ship(db_session, pickup_cost=15000)
+        wh_id = req.warehouse_id
+        shipment_id = req.outbound_shipment_id
+        assert shipment_id is not None
+
+        nom_result = await db_session.execute(
+            text("SELECT id FROM nomenclature WHERE project_id = :pid AND barcode = :bc"),
+            {"pid": PROJECT_ID, "bc": TEST_BARCODE_1},
+        )
+        nom_id = nom_result.scalar()
+        shipped_qty = (
+            await db_session.execute(
+                select(WarehouseStock.quantity).where(
+                    WarehouseStock.project_id == PROJECT_ID,
+                    WarehouseStock.warehouse_id == wh_id,
+                    WarehouseStock.nomenclature_id == nom_id,
+                )
+            )
+        ).scalar_one()
+
+        # Return to warehouse
+        req = await return_to_warehouse(db_session, PROJECT_ID, req.id)
+
+        assert req.status == AssemblyStatus.CLOSED
+        # Logistics preserved: shipment link and shipped_at NOT cleared
+        assert req.outbound_shipment_id == shipment_id
+        assert req.shipped_at is not None
+
+        # Stock restored (+5 back to source warehouse)
+        restored_qty = (
+            await db_session.execute(
+                select(WarehouseStock.quantity).where(
+                    WarehouseStock.project_id == PROJECT_ID,
+                    WarehouseStock.warehouse_id == wh_id,
+                    WarehouseStock.nomenclature_id == nom_id,
+                )
+            )
+        ).scalar_one()
+        assert restored_qty == shipped_qty + 5
+
+        # OutboundShipment NOT soft-deleted (unlike cancel)
+        shipment = (
+            await db_session.execute(select(OutboundShipment).where(OutboundShipment.id == shipment_id))
+        ).scalar_one()
+        assert shipment.is_deleted is False
+
+        # A return InboundReceipt (ACCEPTED) was created on the source warehouse
+        receipt = (
+            await db_session.execute(
+                select(InboundReceipt).where(
+                    InboundReceipt.project_id == PROJECT_ID,
+                    InboundReceipt.warehouse_id == wh_id,
+                    InboundReceipt.comment.like(f"%{req.number}%"),
+                )
+            )
+        ).scalar_one()
+        assert receipt.status == "ACCEPTED"
+        assert receipt.is_defect is False
+
+        # FBO supply flagged as return-processed (GOODS) so it leaves «недоприёмка»
+        fbo_id = await _get_fbo_supply_id(db_session)
+        fbo = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == fbo_id))).scalar_one()
+        assert fbo.return_processed_at is not None
+        assert fbo.return_type == "GOODS"
+        assert fbo.return_qty == 5
+
+        # Logistics analytics STILL counts the CLOSED request (перевозка оплачена)
+        analytics = await get_logistics_analytics(db_session, PROJECT_ID)
+        assert analytics["summary"]["total_shipments"] == 1
+        assert float(analytics["summary"]["total_cost"]) == 15000.0
+
+    async def test_return_blocked_from_in_progress(self, db_session):
+        req = await _create_test_request(db_session)
+        with pytest.raises(ValueError):
+            await return_to_warehouse(db_session, PROJECT_ID, req.id)
+
+    async def test_return_idempotent_second_call_blocked(self, db_session):
+        """Повторный возврат по уже CLOSED-заявке запрещён (CLOSED→CLOSED нет)."""
+        req = await _create_and_ship(db_session)
+        req = await return_to_warehouse(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.CLOSED
+        with pytest.raises(ValueError):
+            await return_to_warehouse(db_session, PROJECT_ID, req.id)
+
+    async def test_return_blocked_when_fbo_already_returned(self, db_session):
+        """Кросс-флоу: возврат уже оформлен через «недоприёмку» → no double-restock."""
+        req = await _create_and_ship(db_session)
+        wh_id = req.warehouse_id
+
+        # Симулируем, что process_fbo_return уже отработал по этой поставке.
+        fbo_id = await _get_fbo_supply_id(db_session)
+        fbo = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == fbo_id))).scalar_one()
+        fbo.return_processed_at = utcnow()
+        await db_session.commit()
+
+        nom_id = (
+            await db_session.execute(
+                text("SELECT id FROM nomenclature WHERE project_id = :pid AND barcode = :bc"),
+                {"pid": PROJECT_ID, "bc": TEST_BARCODE_1},
+            )
+        ).scalar()
+        qty_before = (
+            await db_session.execute(
+                select(WarehouseStock.quantity).where(
+                    WarehouseStock.project_id == PROJECT_ID,
+                    WarehouseStock.warehouse_id == wh_id,
+                    WarehouseStock.nomenclature_id == nom_id,
+                )
+            )
+        ).scalar_one()
+
+        with pytest.raises(ValueError):
+            await return_to_warehouse(db_session, PROJECT_ID, req.id)
+
+        # Сток НЕ задвоился, заявка осталась SHIPPED.
+        qty_after = (
+            await db_session.execute(
+                select(WarehouseStock.quantity).where(
+                    WarehouseStock.project_id == PROJECT_ID,
+                    WarehouseStock.warehouse_id == wh_id,
+                    WarehouseStock.nomenclature_id == nom_id,
+                )
+            )
+        ).scalar_one()
+        assert qty_after == qty_before
+        reloaded = await get_assembly_request(db_session, PROJECT_ID, req.id)
+        assert reloaded is not None
+        assert reloaded.status == AssemblyStatus.SHIPPED
+
+    async def test_return_from_delivered(self, db_session):
+        """DELIVERED → CLOSED тоже работает (возврат после приёмки WB)."""
+        req = await _create_and_ship(db_session)
+        req = await deliver_request(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.DELIVERED
+        req = await return_to_warehouse(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.CLOSED
+
+
+@pytest.mark.asyncio
+class TestEditClosedStatuses:
+    """Редактирование мета-полей разрешено в SHIPPED; позиции — нет."""
+
+    async def test_edit_meta_allowed_when_shipped(self, db_session):
+        req = await _create_and_ship(db_session)
+        updated = await update_assembly_request(
+            db_session,
+            PROJECT_ID,
+            req.id,
+            AssemblyRequestUpdate(pallets_count=9, comment="скорректировано после отгрузки"),
+        )
+        assert updated.status == AssemblyStatus.SHIPPED
+        assert updated.pallets_count == 9
+        assert updated.comment == "скорректировано после отгрузки"
+
+    async def test_edit_items_blocked_when_shipped(self, db_session):
+        req = await _create_and_ship(db_session)
+        with pytest.raises(ValueError):
+            await update_assembly_request(
+                db_session,
+                PROJECT_ID,
+                req.id,
+                AssemblyRequestUpdate(items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=3)]),
+            )
 
 
 @pytest.mark.asyncio
