@@ -89,18 +89,33 @@ async def create_receipt(db: AsyncSession, project_id: int, warehouse_id: int, p
     db.add(receipt)
     await db.flush()  # get receipt.id
 
-    # Add items — resolve barcodes in one batch query
+    # Add items — resolve barcodes in one batch query.
+    # Collapse duplicate barcode lines into a single line (summing qty). The
+    # receipt model assumes one line per barcode (see update_receipt's
+    # {barcode: item} map); without this dedup a payload that repeats a barcode
+    # creates duplicate lines that double the stock on accept.
     items_data = payload.get("items", [])
-    barcode_map = await _resolve_barcodes_batch(db, project_id, [d["barcode"] for d in items_data])
-    for item_data in items_data:
-        nom = barcode_map[item_data["barcode"]]
+    merged: dict[str, dict] = {}
+    for d in items_data:
+        bc = d["barcode"]
+        if bc in merged:
+            merged[bc]["expected_qty"] += d.get("expected_qty", 0) or 0
+            merged[bc]["actual_qty"] += d.get("actual_qty", 0) or 0
+        else:
+            merged[bc] = {
+                "expected_qty": d.get("expected_qty", 0) or 0,
+                "actual_qty": d.get("actual_qty", 0) or 0,
+            }
+    barcode_map = await _resolve_barcodes_batch(db, project_id, list(merged.keys()))
+    for bc, qty in merged.items():
+        nom = barcode_map[bc]
         item = InboundReceiptItem(
             project_id=project_id,
             receipt_id=receipt.id,
             nomenclature_id=nom.id,
-            barcode=item_data["barcode"],
-            expected_qty=item_data["expected_qty"],
-            actual_qty=item_data.get("actual_qty", 0),
+            barcode=bc,
+            expected_qty=qty["expected_qty"],
+            actual_qty=qty["actual_qty"],
         )
         db.add(item)
 

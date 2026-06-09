@@ -80,6 +80,38 @@ class TestCreateReceipt:
         assert receipt.items[0].barcode == barcode
 
     @pytest.mark.asyncio
+    async def test_create_receipt_dedupes_duplicate_barcode(self, db_session, project, warehouse, nomenclature_id):
+        """Duplicate barcode lines collapse into one (summed). The receipt model
+        assumes one line per barcode; without dedup a repeated barcode doubles
+        stock on accept (prod bug: vehicle items arriving from 2+ sources)."""
+        barcode, nom_id = nomenclature_id
+        receipt = await create_receipt(
+            db_session,
+            project.id,
+            warehouse.id,
+            {
+                "items": [
+                    {"barcode": barcode, "expected_qty": 8, "actual_qty": 8},
+                    {"barcode": barcode, "expected_qty": 154, "actual_qty": 154},
+                ],
+            },
+        )
+        assert len(receipt.items) == 1
+        assert receipt.items[0].expected_qty == 162
+        assert receipt.items[0].actual_qty == 162
+
+        # Accept applies the merged qty once — stock is 162, not 324.
+        await accept_receipt(db_session, project.id, receipt.id)
+        result = await db_session.execute(
+            text(
+                "SELECT quantity FROM warehouse_stock WHERE project_id = :pid "
+                "AND warehouse_id = :wid AND nomenclature_id = :nid"
+            ),
+            {"pid": project.id, "wid": warehouse.id, "nid": nom_id},
+        )
+        assert result.scalar() == 162
+
+    @pytest.mark.asyncio
     async def test_create_receipt_warehouse_not_found(self, db_session, project):
         with pytest.raises(ValueError, match="Warehouse not found"):
             await create_receipt(db_session, project.id, 999999, {"items": []})
@@ -264,3 +296,99 @@ class TestInboundProjectIsolation:
         # Should not be visible from other project
         found = await get_receipt(db_session, other_project.id, receipt.id)
         assert found is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# reconcile_receipt_from_vehicle — vehicle→receipt item sync (anti-doubling)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestReconcileReceiptFromVehicle:
+    @pytest.mark.asyncio
+    async def test_reconcile_collapses_stale_duplicate_lines(self, db_session, project, warehouse, nomenclature_id):
+        """Editing vehicle items (soft-delete old + re-add) left stale duplicate
+        receipt lines that doubled stock on accept (prod bug, receipt IN-111 →
+        324 instead of 162). Reconcile rebuilds the EXPECTED receipt from the
+        vehicle's ACTIVE cost items → exactly one line per barcode."""
+        from backend.models.cost import CostOrder, CostOrderItem
+        from backend.models.enums import VehicleStatus
+        from backend.models.warehouse import InboundReceipt, InboundReceiptItem
+        from backend.services.supply_chain.vehicle_delivery import reconcile_receipt_from_vehicle
+
+        barcode, nom_id = nomenclature_id
+        order_no = f"V-{_uid()}"
+        vehicle = CostOrder(
+            project_id=project.id,
+            order_no=order_no,
+            status=VehicleStatus.DISPATCHED,
+            target_warehouse_id=warehouse.id,
+        )
+        db_session.add(vehicle)
+        await db_session.flush()
+
+        # Active cost items: same barcode as two sub-lots (8 + 154) = 162.
+        # Plus a soft-deleted duplicate pair (the replaced ones) — must be ignored.
+        db_session.add_all(
+            [
+                CostOrderItem(project_id=project.id, order_no=order_no, barcode=barcode, qty=8, is_deleted=False),
+                CostOrderItem(project_id=project.id, order_no=order_no, barcode=barcode, qty=154, is_deleted=False),
+                CostOrderItem(project_id=project.id, order_no=order_no, barcode=barcode, qty=8, is_deleted=True),
+                CostOrderItem(project_id=project.id, order_no=order_no, barcode=barcode, qty=154, is_deleted=True),
+            ]
+        )
+
+        # Linked EXPECTED receipt carrying the doubled lines (8,154,8,154 = 324).
+        receipt = InboundReceipt(
+            project_id=project.id,
+            warehouse_id=warehouse.id,
+            number=f"IN-{_uid()}",
+            status=InboundStatus.EXPECTED,
+            cost_order_id=vehicle.id,
+        )
+        db_session.add(receipt)
+        await db_session.flush()
+        db_session.add_all(
+            [
+                InboundReceiptItem(
+                    project_id=project.id,
+                    receipt_id=receipt.id,
+                    nomenclature_id=nom_id,
+                    barcode=barcode,
+                    expected_qty=q,
+                    actual_qty=0,
+                )
+                for q in (8, 154, 8, 154)
+            ]
+        )
+        await db_session.flush()
+
+        changed = await reconcile_receipt_from_vehicle(db_session, project.id, vehicle.id)
+        assert changed > 0
+        await db_session.flush()
+
+        result = await db_session.execute(
+            text("SELECT expected_qty FROM inbound_receipt_items WHERE receipt_id = :rid ORDER BY id"),
+            {"rid": receipt.id},
+        )
+        qtys = [row[0] for row in result.all()]
+        # One line per barcode, expected_qty = sum of ACTIVE cost items (162).
+        assert qtys == [162]
+
+    @pytest.mark.asyncio
+    async def test_reconcile_noop_without_expected_receipt(self, db_session, project, warehouse):
+        """No linked EXPECTED receipt → reconcile is a safe no-op (returns 0)."""
+        from backend.models.cost import CostOrder
+        from backend.models.enums import VehicleStatus
+        from backend.services.supply_chain.vehicle_delivery import reconcile_receipt_from_vehicle
+
+        vehicle = CostOrder(
+            project_id=project.id,
+            order_no=f"V-{_uid()}",
+            status=VehicleStatus.FORMING,
+            target_warehouse_id=warehouse.id,
+        )
+        db_session.add(vehicle)
+        await db_session.flush()
+
+        changed = await reconcile_receipt_from_vehicle(db_session, project.id, vehicle.id)
+        assert changed == 0
