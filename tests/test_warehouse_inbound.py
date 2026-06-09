@@ -163,6 +163,56 @@ class TestAcceptReceipt:
         with pytest.raises(ValueError, match="Cannot accept"):
             await accept_receipt(db_session, project.id, receipt.id)
 
+    @pytest.mark.asyncio
+    async def test_accept_is_idempotent_does_not_double_stock(self, db_session, project, warehouse, nomenclature_id):
+        """Re-accepting a receipt whose stock was already applied must NOT double it.
+
+        Reproduces the prod incident (receipt #123, Газпром): a transparent
+        401-retry / double-submit re-ran accept while the receipt still looked
+        acceptable (its status snapshot was read before the winning accept
+        committed), applying +162 twice → 324. Acceptance must be idempotent
+        per receipt.
+
+        The second accept runs on a *fresh* session — a separate request and
+        DB connection, with no stale identity-map state — which is how the bug
+        actually manifests in prod.
+        """
+        from tests.conftest_api import TestSessionLocal
+
+        barcode, nom_id = nomenclature_id
+        receipt = await create_receipt(
+            db_session,
+            project.id,
+            warehouse.id,
+            {"items": [{"barcode": barcode, "expected_qty": 162}]},
+        )
+        await accept_receipt(db_session, project.id, receipt.id)
+
+        # Simulate the race window: the receipt looks acceptable again to a
+        # separate caller (status snapshot taken before the winner committed),
+        # while INBOUND movements for this receipt already exist.
+        await db_session.execute(
+            text("UPDATE inbound_receipts SET status = 'EXPECTED' WHERE id = :id"),
+            {"id": receipt.id},
+        )
+        await db_session.commit()
+
+        # The second accept must be rejected, not re-applied.
+        async with TestSessionLocal() as other:
+            with pytest.raises(ValueError):
+                await accept_receipt(other, project.id, receipt.id)
+
+        # Stock stays at the single application — 162, not 324.
+        async with TestSessionLocal() as reader:
+            qty = await reader.execute(
+                text(
+                    "SELECT quantity FROM warehouse_stock "
+                    "WHERE project_id = :p AND warehouse_id = :w AND nomenclature_id = :n"
+                ),
+                {"p": project.id, "w": warehouse.id, "n": nom_id},
+            )
+            assert qty.scalar() == 162
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # cancel_receipt

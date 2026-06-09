@@ -14,6 +14,7 @@ from backend.models.warehouse import (
     InboundReceiptItem,
     InboundStatus,
     MovementType,
+    StockMovement,
 )
 from backend.services.warehouse_crud import get_warehouse
 from backend.services.warehouse_stock_engine import (
@@ -212,6 +213,43 @@ async def accept_receipt(
 
     if not receipt.items:
         raise ValueError("Cannot accept receipt with no items")
+
+    # Serialize concurrent accepts. The status check above reads an unlocked
+    # snapshot, so two near-simultaneous requests (a double-click, or the API
+    # client's transparent 401-retry) both see DRAFT/EXPECTED before either
+    # commits and both apply stock → quantity doubled (prod incident: receipt
+    # #123 went 162 → 324). Lock the receipt row and re-check the *committed*
+    # status under the lock: the second caller blocks until the first commits,
+    # then sees ACCEPTED and bails.
+    locked = await db.execute(
+        select(InboundReceipt.status)
+        .where(
+            InboundReceipt.id == receipt_id,
+            InboundReceipt.project_id == project_id,
+        )
+        .with_for_update()
+    )
+    locked_status = locked.scalar_one_or_none()
+    if locked_status not in (InboundStatus.DRAFT, InboundStatus.EXPECTED):
+        raise ValueError(f"Cannot accept receipt in status {locked_status}")
+
+    # Idempotency net: if INBOUND stock was already booked for this receipt
+    # (e.g. a retry that landed after a prior accept committed), do not book it
+    # again. cancel_receipt adds offsetting INBOUND_CANCEL rows and moves the
+    # receipt to CANCELLED, so it can never reach this point — only a genuine
+    # re-application trips this guard.
+    already_applied = await db.execute(
+        select(StockMovement.id)
+        .where(
+            StockMovement.project_id == project_id,
+            StockMovement.reference_type == "RECEIPT",
+            StockMovement.reference_id == receipt_id,
+            StockMovement.movement_type == MovementType.INBOUND,
+        )
+        .limit(1)
+    )
+    if already_applied.first() is not None:
+        raise ValueError("Receipt stock already applied")
 
     # Apply provided actual quantities
     if actual_quantities:
