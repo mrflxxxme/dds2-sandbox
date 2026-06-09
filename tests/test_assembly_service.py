@@ -187,6 +187,40 @@ async def _create_test_request(db_session) -> AssemblyRequest:
     return await create_assembly_request(db_session, PROJECT_ID, payload)
 
 
+async def _create_second_fulfillment_wh(db_session, stock_for: list[str] | None = None) -> int:
+    """Helper: create a 2nd FULFILLMENT warehouse; optionally seed stock for barcodes."""
+    await db_session.execute(
+        text(
+            "INSERT INTO warehouses (project_id, name, warehouse_type, sort_order, is_active, is_deleted, created_at, updated_at) "
+            "VALUES (:pid, 'Test Fulfillment WH 2', 'FULFILLMENT', 3, true, false, NOW(), NOW())"
+        ),
+        {"pid": PROJECT_ID},
+    )
+    await db_session.commit()
+    wh2_id = (
+        await db_session.execute(
+            text("SELECT id FROM warehouses WHERE project_id = :pid AND name = 'Test Fulfillment WH 2' LIMIT 1"),
+            {"pid": PROJECT_ID},
+        )
+    ).scalar()
+    for barcode in stock_for or []:
+        nom_id = (
+            await db_session.execute(
+                text("SELECT id FROM nomenclature WHERE project_id = :pid AND barcode = :bc"),
+                {"pid": PROJECT_ID, "bc": barcode},
+            )
+        ).scalar()
+        await db_session.execute(
+            text(
+                "INSERT INTO warehouse_stock (project_id, warehouse_id, nomenclature_id, barcode, quantity, in_transit, updated_at) "
+                "VALUES (:pid, :wid, :nid, :bc, 100, 0, NOW())"
+            ),
+            {"pid": PROJECT_ID, "wid": wh2_id, "nid": nom_id, "bc": barcode},
+        )
+    await db_session.commit()
+    return wh2_id
+
+
 # --- Tests ------------------------------------------------------------------
 
 
@@ -406,6 +440,115 @@ class TestUpdateAssemblyRequest:
         updated = await update_assembly_request(db_session, PROJECT_ID, req.id, payload)
         assert len(updated.items) == 1
         assert updated.items[0].barcode == TEST_BARCODE_2
+
+
+@pytest.mark.asyncio
+class TestChangeWarehouse:
+    """Смена склада-источника заявки через update."""
+
+    async def test_change_warehouse_in_progress_allowed(self, db_session):
+        """IN_PROGRESS + достаточный сток на новом складе → склад меняется."""
+        req = await _create_test_request(db_session)
+        wh2_id = await _create_second_fulfillment_wh(db_session, stock_for=[TEST_BARCODE_1])
+
+        updated = await update_assembly_request(
+            db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(warehouse_id=wh2_id)
+        )
+        assert updated.warehouse_id == wh2_id
+
+    async def test_change_warehouse_vehicle_assigned_skips_stock_check(self, db_session):
+        """VEHICLE_ASSIGNED: смена склада разрешена даже без стока (факт подгоняют под WB)."""
+        req = await _create_test_request(db_session)
+        await mark_ready(db_session, PROJECT_ID, req.id)
+        await assign_vehicle(
+            db_session,
+            PROJECT_ID,
+            req.id,
+            AssignVehicle(
+                vehicle_info="Truck WH-MOVE",
+                vehicle_brand="GAZ",
+                driver_phone="+79991234567",
+                pickup_date="2026-03-22",
+                pickup_time_slot="08:00-12:00",
+                pickup_cost=1,
+                delivery_date="2026-03-23",
+            ),
+        )
+        wh2_id = await _create_second_fulfillment_wh(db_session, stock_for=[])  # без стока
+
+        updated = await update_assembly_request(
+            db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(warehouse_id=wh2_id)
+        )
+        assert updated.warehouse_id == wh2_id
+
+    async def test_change_warehouse_nonexistent_rejected(self, db_session):
+        req = await _create_test_request(db_session)
+        with pytest.raises(ValueError, match="Warehouse not found"):
+            await update_assembly_request(db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(warehouse_id=99999999))
+
+    async def test_change_warehouse_other_project_rejected(self, db_session):
+        """Склад чужого проекта → not found (изоляция по project_id)."""
+        req = await _create_test_request(db_session)
+        await db_session.execute(
+            text(
+                "INSERT INTO warehouses (project_id, name, warehouse_type, sort_order, is_active, is_deleted, created_at, updated_at) "
+                "VALUES (:pid, 'Foreign WH', 'FULFILLMENT', 7, true, false, NOW(), NOW())"
+            ),
+            {"pid": OTHER_PROJECT_ID},
+        )
+        await db_session.commit()
+        foreign_id = (
+            await db_session.execute(
+                text("SELECT id FROM warehouses WHERE project_id = :pid AND name = 'Foreign WH' LIMIT 1"),
+                {"pid": OTHER_PROJECT_ID},
+            )
+        ).scalar()
+        with pytest.raises(ValueError, match="Warehouse not found"):
+            await update_assembly_request(
+                db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(warehouse_id=foreign_id)
+            )
+
+    async def test_change_warehouse_non_fulfillment_rejected(self, db_session):
+        req = await _create_test_request(db_session)
+        await db_session.execute(
+            text(
+                "INSERT INTO warehouses (project_id, name, warehouse_type, sort_order, is_active, is_deleted, created_at, updated_at) "
+                "VALUES (:pid, 'Transit WH X', 'TRANSIT', 5, true, false, NOW(), NOW())"
+            ),
+            {"pid": PROJECT_ID},
+        )
+        await db_session.commit()
+        transit_id = (
+            await db_session.execute(
+                text("SELECT id FROM warehouses WHERE project_id = :pid AND name = 'Transit WH X' LIMIT 1"),
+                {"pid": PROJECT_ID},
+            )
+        ).scalar()
+        with pytest.raises(ValueError, match="FULFILLMENT"):
+            await update_assembly_request(
+                db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(warehouse_id=transit_id)
+            )
+
+    async def test_change_warehouse_deficit_rejected(self, db_session):
+        """IN_PROGRESS + новый склад без стока → дефицит → ValueError."""
+        req = await _create_test_request(db_session)
+        wh2_id = await _create_second_fulfillment_wh(db_session, stock_for=[])
+        with pytest.raises(ValueError):
+            await update_assembly_request(db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(warehouse_id=wh2_id))
+
+    async def test_change_warehouse_blocked_when_shipped(self, db_session):
+        """Закрытый статус (SHIPPED) → смена склада запрещена."""
+        req = await _create_test_request(db_session)
+        req_id = req.id  # захватываем ДО expire_all (иначе sync lazy-load в async)
+        wh2_id = await _create_second_fulfillment_wh(db_session, stock_for=[TEST_BARCODE_1])
+        await db_session.execute(
+            text("UPDATE assembly_requests SET status = 'SHIPPED' WHERE id = :rid"),
+            {"rid": req_id},
+        )
+        await db_session.commit()
+        db_session.expire_all()  # чтобы сервис перечитал SHIPPED, а не стейл из identity map
+        with pytest.raises(ValueError, match="status"):
+            await update_assembly_request(db_session, PROJECT_ID, req_id, AssemblyRequestUpdate(warehouse_id=wh2_id))
 
 
 @pytest.mark.asyncio

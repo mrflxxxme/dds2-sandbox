@@ -1561,6 +1561,7 @@ export interface AssemblyRequestCreate {
 }
 
 export interface AssemblyRequestUpdate {
+  warehouse_id?: number;
   estimated_ready_date?: string | null;
   pallets_count?: number;
   pallet_weight_kg?: number;
