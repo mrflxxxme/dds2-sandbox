@@ -28,6 +28,7 @@ const ASM_STATUS: Record<AssemblyStatus, { label: string; className: string }> =
     VEHICLE_ASSIGNED: { label: 'Машина',        className: 'badge-info' },
     SHIPPED:          { label: 'Отгружена',     className: 'badge-success' },
     DELIVERED:        { label: 'Принята WB',    className: 'badge-success' },
+    CLOSED:           { label: 'Закрыт',        className: 'badge-warning' },
     CANCELLED:        { label: 'Отменена',      className: 'badge-secondary' },
 };
 

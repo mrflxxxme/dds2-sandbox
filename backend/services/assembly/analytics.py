@@ -168,11 +168,13 @@ async def get_logistics_analytics(
 
     src_warehouse = Warehouse.name.label("src_warehouse")
 
-    # Base filters — always applied
+    # Base filters — always applied.
+    # CLOSED (возврат: WB не принял, товар вернулся) тоже считается: перевозка
+    # оплачена, поэтому логистика этой заявки остаётся в аналитике.
     base_filters = [
         AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,  # noqa: E712
-        AssemblyRequest.status.in_([AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED]),
+        AssemblyRequest.status.in_([AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CLOSED]),
     ]
 
     # Optional filters

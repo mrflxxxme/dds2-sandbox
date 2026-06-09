@@ -30,6 +30,7 @@ from backend.services.assembly import (  # noqa: F401
     list_wb_warehouses,
     mark_ready,
     refresh_from_fbo,
+    return_to_warehouse,
     ship_bulk,
     ship_request,
     start_assembly,

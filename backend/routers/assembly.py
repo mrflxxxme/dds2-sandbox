@@ -262,6 +262,20 @@ async def cancel_request(
         raise HTTPException(400, str(e)) from None
 
 
+@router.post("/{request_id}/return", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
+async def return_to_warehouse(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """SHIPPED/DELIVERED -> CLOSED: WB не принял поставку, товар вернулся на склад."""
+    try:
+        req = await assembly_service.return_to_warehouse(db, project.id, request_id)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
 @router.delete("/{request_id}", status_code=204, dependencies=[Depends(rate_limit_write)])
 async def delete_request(
     request_id: int,

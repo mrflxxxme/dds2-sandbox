@@ -183,7 +183,7 @@ export default function AssemblyEditPage() {
 
     const selectedWarehouse = warehouses.find(w => w.id === warehouseId) || null;
     const totalWeight = palletsCount * palletWeightKg;
-    const canEditItems = assembly && !['SHIPPED', 'DELIVERED', 'CANCELLED'].includes(assembly.status);
+    const canEditItems = assembly && !['SHIPPED', 'DELIVERED', 'CLOSED', 'CANCELLED'].includes(assembly.status);
 
     // ─── Item management ──────────────────────────────────────────────────
 
