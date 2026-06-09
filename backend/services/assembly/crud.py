@@ -808,6 +808,20 @@ async def update_assembly_request(
         # Auto-set wb_warehouse_name_manual from FBO supply
         req.wb_warehouse_name_manual = fbo_supply.warehouse_name
 
+    # Change source warehouse — structural, like items: only до отгрузки.
+    # Ставим ДО блока позиций, чтобы их валидация стока шла по новому складу.
+    warehouse_changed = False
+    if payload.warehouse_id is not None and payload.warehouse_id != req.warehouse_id:
+        if _is_closed:
+            raise ValueError(f"Cannot change warehouse in status {req.status}")
+        new_wh = await get_warehouse(db, project_id, payload.warehouse_id)
+        if not new_wh:
+            raise ValueError("Warehouse not found")
+        if new_wh.warehouse_type != WarehouseType.FULFILLMENT:
+            raise ValueError("Assembly requests can only be created for FULFILLMENT warehouses")
+        req.warehouse_id = payload.warehouse_id
+        warehouse_changed = True
+
     # Update scalar fields — not allowed in closed statuses
     if not _is_closed:
         if payload.pallets_count is not None:
@@ -881,6 +895,24 @@ async def update_assembly_request(
             )
             if deficits:
                 raise ValueError(_format_deficit_error(deficits))
+
+    # Warehouse changed without an items edit → re-validate existing items' available
+    # stock on the NEW warehouse (same status gate as item edits: до READY).
+    if (
+        warehouse_changed
+        and payload.items is None
+        and req.status in (AssemblyStatus.PENDING, AssemblyStatus.IN_PROGRESS)
+    ):
+        existing_items = (
+            (await db.execute(select(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == req.id)))
+            .scalars()
+            .all()
+        )
+        deficits = await _validate_available_for_assembly(
+            db, project_id, req.warehouse_id, list(existing_items), exclude_request_id=req.id
+        )
+        if deficits:
+            raise ValueError(_format_deficit_error(deficits))
 
     await db.commit()
     # Expunge all cached objects so selectinload re-fetches fresh data from DB

@@ -32,6 +32,7 @@ class AssemblyRequestCreate(BaseModel):
 
 
 class AssemblyRequestUpdate(BaseModel):
+    warehouse_id: int | None = None  # сменить склад-источник (только до отгрузки)
     wb_fbo_supply_id: int | None = None
     estimated_ready_date: date | None = None
     pallets_count: int | None = None

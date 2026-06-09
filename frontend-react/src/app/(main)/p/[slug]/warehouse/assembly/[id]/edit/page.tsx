@@ -238,6 +238,7 @@ export default function AssemblyEditPage() {
         setError('');
         try {
             await api.updateAssemblyRequest(id, {
+                ...(canEditItems && warehouseId ? { warehouse_id: Number(warehouseId) } : {}),
                 wb_fbo_supply_id: fboSupplyId ? Number(fboSupplyId) : null,
                 wb_warehouse_name_manual: fboSupplyId ? undefined : (wbWarehouseName || null),
                 estimated_ready_date: estimatedReadyDate || null,
@@ -295,12 +296,24 @@ export default function AssemblyEditPage() {
             {/* Form */}
             <div className="glass-card" style={{ padding: 24, marginBottom: 16 }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                    {/* Warehouse — read-only */}
+                    {/* Warehouse — editable until shipping */}
                     <div className="form-group">
                         <label className="form-label">Склад</label>
-                        <div style={{ padding: '8px 12px', background: 'var(--color-bg-secondary)', borderRadius: 8 }}>
-                            {assembly.warehouse_name || 'Склад #' + assembly.warehouse_id}
-                        </div>
+                        {canEditItems ? (
+                            <select
+                                className="form-input"
+                                value={warehouseId}
+                                onChange={e => setWarehouseId(e.target.value ? Number(e.target.value) : '')}
+                            >
+                                {warehouses.map(w => (
+                                    <option key={w.id} value={w.id}>{w.name}</option>
+                                ))}
+                            </select>
+                        ) : (
+                            <div style={{ padding: '8px 12px', background: 'var(--color-bg-secondary)', borderRadius: 8 }}>
+                                {assembly.warehouse_name || 'Склад #' + assembly.warehouse_id}
+                            </div>
+                        )}
                     </div>
 
                     {/* FBO Supply — searchable dropdown */}
