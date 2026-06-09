@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxesWithMix } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime, exportToExcel, calcTotalBoxesWithMix, calcCombinedBoxDetail } from '@/lib/utils';
 
 let captured: { columns: any[]; rows: any[] } | null = null;
 
@@ -219,5 +219,53 @@ describe('calcTotalBoxesWithMix', () => {
             { qty: 30, pcs_per_box: 22 },
         ]);
         expect(boxes).toBe(3); // no barcode -> cannot combine -> 1 + 2
+    });
+});
+
+describe('calcCombinedBoxDetail', () => {
+    it('combines two sources of one barcode into whole boxes (V-0015 bug)', () => {
+        // 208 + 2 @ 14/box = 210 -> [14×15] (15 полных, 0 неполных),
+        // НЕ [14×14, 12] (ВИНТАЖ) + [2] (тиамо). Хвосты 12+2=14 сливаются.
+        expect(calcCombinedBoxDetail([
+            { qty: 208, pcs_per_box: 14 },
+            { qty: 2, pcs_per_box: 14 },
+        ])).toEqual(Array(15).fill(14));
+    });
+
+    it('leaves exactly one partial box when combined qty is not divisible', () => {
+        // 209 + 2 @ 14 = 211 -> 15×14 + 1 (ровно одна неполная)
+        expect(calcCombinedBoxDetail([
+            { qty: 209, pcs_per_box: 14 },
+            { qty: 2, pcs_per_box: 14 },
+        ])).toEqual([...Array(15).fill(14), 1]);
+    });
+
+    it('single source equals plain autoBoxDetail', () => {
+        expect(calcCombinedBoxDetail([{ qty: 45, pcs_per_box: 22 }])).toEqual([22, 22, 1]);
+    });
+
+    it('returns null when pcs_per_box differs across sources (cannot merge box sizes)', () => {
+        expect(calcCombinedBoxDetail([
+            { qty: 10, pcs_per_box: 22 },
+            { qty: 10, pcs_per_box: 10 },
+        ])).toBeNull();
+    });
+
+    it('returns null when any source carries a manual box_detail override', () => {
+        // override фиксирует фактическую упаковку источника — не поглощаем в сводную.
+        expect(calcCombinedBoxDetail([
+            { qty: 208, pcs_per_box: 14, box_detail: [14, 14, 180] },
+            { qty: 2, pcs_per_box: 14 },
+        ])).toBeNull();
+    });
+
+    it('returns null for mix-group items', () => {
+        expect(calcCombinedBoxDetail([
+            { qty: 22, pcs_per_box: 22, mix_group_id: 'g1' },
+        ])).toBeNull();
+    });
+
+    it('returns null when pcs_per_box is missing or zero', () => {
+        expect(calcCombinedBoxDetail([{ qty: 10 }])).toBeNull();
     });
 });
