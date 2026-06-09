@@ -132,7 +132,9 @@ async def test_remove_shipped_restores_assigned_qty(db_session, project):
 
 @pytest.mark.asyncio
 async def test_remove_dispatched_decrements_receipt_item(db_session, project):
-    """DISPATCHED → InboundReceiptItem.expected_qty уменьшается на удалённое qty."""
+    """DISPATCHED → линкованная EXPECTED-приёмка пересобирается из активных
+    cost_items: убрали единственную позицию → строка приёмки по этому баркоду
+    удаляется (чище, чем 0-qty призрак)."""
     _fo, vehicle_no, cost_item_id, _foi, wh_id, co_id = await _setup_vehicle(
         db_session, project.id, VehicleStatus.DISPATCHED, fo_qty=100, vehicle_qty=20
     )
@@ -167,10 +169,12 @@ async def test_remove_dispatched_decrements_receipt_item(db_session, project):
     result = await remove_item_from_vehicle(db_session, project.id, vehicle_no, cost_item_id)
     assert result["receipt_items_affected"] == 1
 
+    # Reconcile rebuilt the receipt from active cost items — the removed barcode
+    # has none left, so its line is dropped entirely.
     ri = (
         await db_session.execute(select(InboundReceiptItem).where(InboundReceiptItem.receipt_id == receipt.id))
-    ).scalar_one()
-    assert ri.expected_qty == 0
+    ).scalar_one_or_none()
+    assert ri is None
 
 
 @pytest.mark.asyncio

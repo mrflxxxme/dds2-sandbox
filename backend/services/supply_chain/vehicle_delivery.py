@@ -624,6 +624,10 @@ async def add_items_post_shipment(
                     vehicle.order_no,
                 )
 
+    # Rebuild the linked EXPECTED receipt from the vehicle's active items so a
+    # post-shipment add can't leave duplicate receipt lines (one per barcode).
+    await reconcile_receipt_from_vehicle(db, project_id, vehicle.id)
+
     await db.commit()
 
     from backend.services.cost.items import recalculate_order_items
@@ -641,51 +645,102 @@ async def add_items_post_shipment(
     }
 
 
-async def _cleanup_dispatched_receipt_items(
-    db: AsyncSession,
-    project_id: int,
-    vehicle_id: int,
-    barcodes_to_qty: dict[str, int],
-    user_name: str | None = None,
-) -> int:
-    """sc19: при удалении CostOrderItem(s) из машины DISPATCHED — уменьшить
-    expected_qty в InboundReceiptItem (или soft-delete если expected_qty падает до 0).
+async def reconcile_receipt_from_vehicle(db: AsyncSession, project_id: int, vehicle_id: int) -> int:
+    """Rebuild the linked EXPECTED receipt's lines from the vehicle's CURRENT
+    active cost items (aggregated by barcode), enforcing one line per barcode.
 
-    barcodes_to_qty: {barcode: total_qty_to_remove} — по сумме всех удаляемых cost_items.
-    Возвращает кол-во затронутых receipt_items.
+    Idempotent reconciliation — closes the gap where editing vehicle items
+    (soft-delete + re-add, often the same factory_order_item) left stale
+    duplicate receipt lines that doubled the stock on accept. Only touches
+    EXPECTED receipts: ACCEPTED stock has already been applied and is corrected
+    via a separate writeoff/return flow. Returns the number of lines changed.
     """
-    receipt_result = await db.execute(
-        select(InboundReceipt).where(
-            InboundReceipt.cost_order_id == vehicle_id,
-            InboundReceipt.project_id == project_id,
-            InboundReceipt.status == InboundStatus.EXPECTED,
-        )
-    )
-    receipt = receipt_result.scalar_one_or_none()
-    if not receipt:
-        return 0
-
-    affected = 0
-    for barcode, qty_to_remove in barcodes_to_qty.items():
-        items_result = await db.execute(
-            select(InboundReceiptItem).where(
-                InboundReceiptItem.receipt_id == receipt.id,
-                InboundReceiptItem.project_id == project_id,
-                InboundReceiptItem.barcode == barcode,
+    receipt = (
+        await db.execute(
+            select(InboundReceipt).where(
+                InboundReceipt.cost_order_id == vehicle_id,
+                InboundReceipt.project_id == project_id,
+                InboundReceipt.status == InboundStatus.EXPECTED,
+                InboundReceipt.is_deleted == False,
             )
         )
-        for ri in items_result.scalars().all():
-            if qty_to_remove <= 0:
-                break
-            if ri.expected_qty <= qty_to_remove:
-                qty_to_remove -= ri.expected_qty
-                ri.expected_qty = 0
-                affected += 1
-            else:
-                ri.expected_qty -= qty_to_remove
-                qty_to_remove = 0
-                affected += 1
-    return affected
+    ).scalar_one_or_none()
+    if receipt is None:
+        return 0
+
+    # Target expected_qty per barcode from ACTIVE cost items of this vehicle.
+    target_rows = (
+        await db.execute(
+            select(CostOrderItem.barcode, func.sum(CostOrderItem.qty))
+            .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
+            .where(
+                CostOrder.id == vehicle_id,
+                CostOrder.project_id == project_id,
+                CostOrderItem.project_id == project_id,
+                CostOrderItem.is_deleted == False,
+            )
+            .group_by(CostOrderItem.barcode)
+        )
+    ).all()
+    target: dict[str, int] = {bc: int(qty or 0) for bc, qty in target_rows}
+
+    existing = (
+        (
+            await db.execute(
+                select(InboundReceiptItem).where(
+                    InboundReceiptItem.receipt_id == receipt.id,
+                    InboundReceiptItem.project_id == project_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    changed = 0
+    by_barcode: dict[str, InboundReceiptItem] = {}
+    for item in existing:
+        if item.barcode in by_barcode:
+            # Duplicate line for the same barcode — the bug we're fixing.
+            await db.delete(item)  # no-soft-delete-check: InboundReceiptItem has no SoftDeleteMixin
+            changed += 1
+            continue
+        by_barcode[item.barcode] = item
+
+    for barcode, qty in target.items():
+        existing_item = by_barcode.pop(barcode) if barcode in by_barcode else None
+        if existing_item is None:
+            try:
+                nom = await _resolve_barcode(db, project_id, barcode)
+            except ValueError:
+                logger.warning(
+                    "reconcile: barcode %s not in nomenclature (project %d, vehicle %d), skipping",
+                    barcode,
+                    project_id,
+                    vehicle_id,
+                )
+                continue
+            db.add(
+                InboundReceiptItem(
+                    project_id=project_id,
+                    receipt_id=receipt.id,
+                    nomenclature_id=nom.id,
+                    barcode=barcode,
+                    expected_qty=qty,
+                    actual_qty=0,
+                )
+            )
+            changed += 1
+        elif existing_item.expected_qty != qty:
+            existing_item.expected_qty = qty
+            changed += 1
+
+    # Barcodes no longer present on the vehicle → drop their receipt lines.
+    for item in by_barcode.values():
+        await db.delete(item)  # no-soft-delete-check: InboundReceiptItem has no SoftDeleteMixin
+        changed += 1
+
+    return changed
 
 
 _REMOVE_ALLOWED = {
@@ -812,11 +867,9 @@ async def remove_item_from_vehicle(
             mix_ci.soft_delete()
             removed += 1
 
-        receipt_items_affected = 0
-        if vehicle.status == VehicleStatus.DISPATCHED:
-            receipt_items_affected = await _cleanup_dispatched_receipt_items(
-                db, project_id, vehicle.id, barcodes_to_qty, user_name=user_name
-            )
+        # Rebuild the linked EXPECTED receipt from the vehicle's active items —
+        # supersedes the incremental cleanup and guarantees one line per barcode.
+        receipt_items_affected = await reconcile_receipt_from_vehicle(db, project_id, vehicle.id)
 
         await db.commit()
 
@@ -853,13 +906,10 @@ async def remove_item_from_vehicle(
                 )
                 db.add(history)
 
-    receipt_items_affected_single = 0
-    if vehicle.status == VehicleStatus.DISPATCHED:
-        receipt_items_affected_single = await _cleanup_dispatched_receipt_items(
-            db, project_id, vehicle.id, {cost_item.barcode: cost_item.qty}, user_name=user_name
-        )
-
     cost_item.soft_delete()
+    # Rebuild the linked EXPECTED receipt from the vehicle's active items (after
+    # the soft-delete) — supersedes incremental cleanup, one line per barcode.
+    receipt_items_affected_single = await reconcile_receipt_from_vehicle(db, project_id, vehicle.id)
     await db.commit()
 
     # Recalculate remaining items (delivery allocation changes)
@@ -1821,22 +1871,32 @@ async def _create_inbound_from_vehicle(
     db.add(receipt)
     await db.flush()  # get receipt.id
 
+    # Aggregate ACTIVE cost items by barcode → one receipt line per barcode.
+    # vehicle.items is unfiltered (includes soft-deleted), and the same barcode
+    # can arrive as separate cost items from 2+ factory orders — either would
+    # create duplicate receipt lines that double the stock on accept.
+    qty_by_barcode: dict[str, int] = {}
     for cost_item in vehicle.items:
+        if cost_item.is_deleted:
+            continue
+        qty_by_barcode[cost_item.barcode] = qty_by_barcode.get(cost_item.barcode, 0) + (cost_item.qty or 0)
+
+    for barcode, qty in qty_by_barcode.items():
         try:
-            nom = await _resolve_barcode(db, project_id, cost_item.barcode)
+            nom = await _resolve_barcode(db, project_id, barcode)
             item = InboundReceiptItem(
                 project_id=project_id,
                 receipt_id=receipt.id,
                 nomenclature_id=nom.id,
-                barcode=cost_item.barcode,
-                expected_qty=cost_item.qty,
+                barcode=barcode,
+                expected_qty=qty,
                 actual_qty=0,
             )
             db.add(item)
         except ValueError:
             logger.warning(
                 "Barcode %s not found in nomenclature for project %d, " "skipping inbound receipt item (vehicle %s)",
-                cost_item.barcode,
+                barcode,
                 project_id,
                 vehicle.order_no,
             )
