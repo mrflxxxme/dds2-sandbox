@@ -2,7 +2,7 @@
 name: performance-optimizer
 description: "Performance-специалист DDS2. Ловит N+1, slow queries, bundle bloat. Используй ПРОАКТИВНО при новых endpoint'ах, массовых выборках, загрузке страниц."
 tools: ["Read", "Grep", "Glob", "Bash"]
-model: opus
+model: fable
 ---
 
 # Performance Optimizer — DDS2

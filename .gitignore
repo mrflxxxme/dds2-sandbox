@@ -23,6 +23,7 @@ backend/*_mockup.png
 .claude/plans/
 .claude/.pending-learn.log
 .claude/.pending-docs.log
+.claude/.last-push.log
 .claude/.session-counter
 .claude/.cache/
 .claude/scheduled_tasks.lock

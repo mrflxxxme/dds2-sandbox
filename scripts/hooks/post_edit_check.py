@@ -11,35 +11,52 @@ Checks after Edit/Write:
 7. Business logic (DB access) in routers
 """
 
+import ast
 import json
 import re
 import sys
+from functools import lru_cache
 from pathlib import Path
 
-# Models known to use SoftDeleteMixin (must filter is_deleted)
-SOFT_DELETE_MODELS = {
-    "Transaction",
-    "TransactionCategory",
-    "Account",
-    "Counterparty",
-    "Project",
-    "CostItem",
-    "CostOrder",
-    "CostContainer",
-    "WbProduct",
-    "WbOrder",
-    "WbSale",
-    "WbReturn",
-    "WarehouseReceipt",
-    "WarehouseReceiptItem",
-    "PlanItem",
-    "BrandNote",
-    "Assembly",
-    "AssemblyItem",
-    "FboSupply",
-    "FboSupplyItem",
-    "FactoryOrder",
-}
+
+@lru_cache(maxsize=1)
+def discover_soft_delete_models() -> frozenset[str]:
+    """Discover models using SoftDeleteMixin by AST-parsing backend/models/.
+
+    Replaces a hardcoded list that had rotted (15 phantom names, 31 real models
+    silently unchecked — the ProjectMember-incident class of bug). Self-maintaining:
+    a new ``class X(Base, SoftDeleteMixin)`` is picked up with zero edits here.
+    Stays advisory: a half-edited or unreadable model file is skipped, never raises.
+    """
+    models_dir = Path(__file__).resolve().parents[2] / "backend" / "models"
+    if not models_dir.is_dir():
+        return frozenset()
+    names: set[str] = set()
+    for f in models_dir.glob("*.py"):
+        names |= _soft_delete_classes(f)
+    return frozenset(names)
+
+
+def _soft_delete_classes(path: Path) -> set[str]:
+    """SoftDeleteMixin class names declared in one model file.
+
+    Returns an empty set for a half-edited or unreadable file, so the hook stays
+    advisory and never crashes while a model is mid-edit.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (SyntaxError, OSError, UnicodeDecodeError):
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        bases = {b.id for b in node.bases if isinstance(b, ast.Name)}
+        bases |= {b.attr for b in node.bases if isinstance(b, ast.Attribute)}
+        if "SoftDeleteMixin" in bases:
+            names.add(node.name)
+    return names
+
 
 QUERY_PATTERN = re.compile(r"(\.select\(|\.query\(|\.filter|\.where\(|text\(|execute\()")
 DATETIME_PATTERN = re.compile(r"datetime\.(utcnow|now)\(\)")
@@ -63,7 +80,7 @@ def check_python_file(filepath: str, content: str) -> list[str]:
             has_is_deleted = any("is_deleted" in line for line in lines)
             has_project_id = any("project_id" in line for line in lines)
 
-            if not has_is_deleted and any(m in content for m in SOFT_DELETE_MODELS):
+            if not has_is_deleted and any(m in content for m in discover_soft_delete_models()):
                 warnings.append(
                     "[DDS2] is_deleted filter NOT found -- SoftDeleteMixin models"
                     " MUST filter .where(Model.is_deleted == False)"
@@ -107,6 +124,13 @@ def check_python_file(filepath: str, content: str) -> list[str]:
 
 
 def main():
+    # `--list-soft-models`: single source of truth consumed by check_conventions.sh
+    # (Check 6 + its regression guard). Prints discovered model names, one per line.
+    if "--list-soft-models" in sys.argv[1:]:
+        for name in sorted(discover_soft_delete_models()):
+            print(name)
+        sys.exit(0)
+
     raw = sys.stdin.read()
 
     try:
@@ -126,7 +150,7 @@ def main():
     warnings = check_python_file(filepath, content)
 
     for w in warnings:
-        print(w, file=sys.stderr)  # noqa: T201
+        print(w, file=sys.stderr)
 
     sys.exit(0)
 

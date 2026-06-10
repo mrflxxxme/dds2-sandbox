@@ -2,7 +2,7 @@
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "ENABLE_PROMPT_CACHING_1H": "1",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-4-8"
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-fable-5"
   },
   "effortLevel": "high",
   "permissions": {
@@ -10,6 +10,18 @@
       "WebFetch(domain:code.claude.com)",
       "WebFetch(domain:docs.claude.com)",
       "WebFetch(domain:raw.githubusercontent.com)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+      "Write(./.env)",
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)"
     ]
   },
   "hooks": {

@@ -102,22 +102,36 @@ echo ""
 
 # ─── 6. Missing is_deleted filter on SoftDelete models ───────────────
 echo "── Check 6: Queries on SoftDelete models without is_deleted filter ──"
-# Models with SoftDeleteMixin: Transaction, Account, CounterpartyCategory, Override,
-# Order, PlannedPayment, PlannedIncome, WbPayout, PaymentFactLink, CostOrder,
-# DutyRule, CustomsTopup, CustomsDT, IntegrationKey, Warehouse, InboundReceipt,
-# OutboundShipment, StockTransfer, AssemblyRequest
-SOFT_MODELS="Transaction\|Account\|CounterpartyCategory\|Override\|IntegrationKey\|PlannedPayment\|PlannedIncome\|WbPayout\|PaymentFactLink\|CostOrder\|CostOrderItem\|DutyRule\|CustomsTopup\|CustomsDT\|Order\|CategoryRef\|CategoryRule\|WbTariff\|Warehouse\|InboundReceipt\|OutboundShipment\|StockTransfer\|AssemblyRequest\|AssemblyDraft\|ProductTag\|FactoryOrder\|FactoryOrderItem\|Project\|ProjectMember\|AiConversation\|VehicleDocument\|Supplier\|DefectMarkOperation\|Counterparty\|CounterpartyDocument\|Loan\|WbGoodsReturn"
-FOUND=$(grep -rn "select($SOFT_MODELS)" backend/services/ backend/etl/ --include="*.py" \
-    | grep -v "is_deleted" \
-    | grep -v "__pycache__" \
-    | grep -v "# no-soft-delete-check" \
-    | grep -v "\.soft_delete\|\.add\|test_" \
-    2>/dev/null || true)
-if [ -n "$FOUND" ]; then
-    warn "Queries on SoftDelete models without is_deleted filter"
-    echo "$FOUND"
+# SoftDeleteMixin model list is discovered dynamically — single source of truth is
+# `scripts/hooks/post_edit_check.py --list-soft-models` (AST-parses backend/models/).
+# No hardcoded list to rot: a stale list silently skipping models was the root cause
+# of the ProjectMember soft-delete incident.
+SOFT_LIST=$(python3 scripts/hooks/post_edit_check.py --list-soft-models 2>/dev/null || true)
+SOFT_COUNT=$(printf '%s\n' "$SOFT_LIST" | grep -c . || true)
+# Regression guard: cross-validate the AST source against an independent regex.
+# AST is authoritative — AST < regex means the source of truth is UNDER-counting
+# (a real soft-delete model escaping the enforcer); AST == 0 means discovery is
+# broken (e.g. the mixin was renamed). Hard error: enforcer integrity guards a
+# data-integrity Iron Rule, not a style nit.
+REGEX_COUNT=$(grep -rEh '^class \w+\(.*SoftDeleteMixin' backend/models/ 2>/dev/null | wc -l | tr -d ' ')
+if [ "$SOFT_COUNT" -eq 0 ]; then
+    error "SoftDelete discovery returned 0 models — enforcer integrity broken (renamed mixin? broken post_edit_check.py --list-soft-models?)"
+elif [ "$SOFT_COUNT" -lt "$REGEX_COUNT" ]; then
+    error "SoftDelete discovery under-counts: AST=$SOFT_COUNT < regex=$REGEX_COUNT — a real soft-delete model is escaping the enforcer"
 else
-    ok "All SoftDelete model queries filter is_deleted"
+    SOFT_MODELS=$(printf '%s\n' "$SOFT_LIST" | paste -sd '|' - | sed 's/|/\\|/g')
+    FOUND=$(grep -rn "select($SOFT_MODELS)" backend/services/ backend/etl/ --include="*.py" \
+        | grep -v "is_deleted" \
+        | grep -v "__pycache__" \
+        | grep -v "# no-soft-delete-check" \
+        | grep -v "\.soft_delete\|\.add\|test_" \
+        2>/dev/null || true)
+    if [ -n "$FOUND" ]; then
+        warn "Queries on SoftDelete models without is_deleted filter"
+        echo "$FOUND"
+    else
+        ok "All SoftDelete model queries filter is_deleted ($SOFT_COUNT models tracked)"
+    fi
 fi
 echo ""
 
@@ -170,7 +184,7 @@ echo ""
 echo "── Check 10: db.delete() on SoftDelete models (use soft_delete()) ──"
 # Whitelist via inline comment `# no-soft-delete-check: <reason>` для моделей БЕЗ SoftDeleteMixin.
 # Прецедент audit 2026-04-13 #1: FactoryOrderItem.delete() обходил soft-delete → восстановление невозможно.
-FOUND=$(grep -rn "db\.delete(" backend/services/ backend/routers/ --include="*.py" \
+FOUND=$(grep -rn "db\.delete(" backend/services/ backend/routers/ backend/etl/ --include="*.py" \
     | grep -v "__pycache__" \
     | grep -v "# no-soft-delete-check" \
     | grep -v "test_" \

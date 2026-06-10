@@ -3,7 +3,7 @@
 set -uo pipefail
 
 # --- Float in models check ---
-changed=$(git diff --name-only 2>/dev/null)
+changed=$(git diff --name-only HEAD 2>/dev/null)
 for f in $changed; do
   case "$f" in
     */models/*.py)

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Объединённый PreToolUse хук: Bash safety + .env/.credentials блокировка
 # Заменяет 2 отдельных хука → 1
-set -euo pipefail
+set -uo pipefail  # не -e: пустой grep на не-Bash payload не должен ронять хук ДО .env-проверки (был fail-open)
 
 input=$(cat)
 
@@ -29,7 +29,7 @@ fi
 file=$(echo "$input" | grep -oE '"file_path":"[^"]*"' | head -1 | sed 's/"file_path":"//;s/"$//')
 if [ -n "$file" ]; then
   base=$(basename "$file")
-  if echo "$base" | grep -qE '^\\.env($|\\.)'; then
+  if echo "$base" | grep -qE '^\.env($|\.)'; then
     echo 'BLOCKED: Доступ к .env файлам запрещён. Секреты только через переменные окружения.' >&2; exit 2
   fi
   if echo "$base" | grep -qiE '(credentials|secrets|private.key)'; then
