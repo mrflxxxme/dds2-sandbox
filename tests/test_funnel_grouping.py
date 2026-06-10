@@ -615,3 +615,223 @@ class TestGetFunnelBySubject:
         # commission = revenue * 20% = 2000
         assert item["revenue"] == 10000.0
         assert item["commission"] == pytest.approx(2000.0, rel=1e-2)
+
+
+# ─── get_funnel_by_tag / get_funnel_by_imt (queries_grouping.py) ─────────────
+
+
+def _make_scalar_result(rows: list) -> MagicMock:
+    """Mock result for queries consumed via .scalars().all()."""
+    m = MagicMock()
+    m.scalars.return_value.all.return_value = rows
+    return m
+
+
+def _make_iter_result(tuples: list) -> MagicMock:
+    """Mock result for queries iterated directly (tuple unpacking)."""
+    m = MagicMock()
+    m.__iter__ = MagicMock(side_effect=lambda: iter(tuples))
+    return m
+
+
+def _make_db_seq(*results) -> AsyncMock:
+    """Mock DB whose execute() returns the given results in order."""
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(side_effect=list(results))
+    return mock_db
+
+
+def _patch_grouping_maps(buyout_map: dict | None = None):
+    """Patch tariff/buyout maps for queries_grouping module."""
+    return (
+        patch(
+            "backend.services.funnel.queries_grouping.get_tariff_map",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+        patch(
+            "backend.services.funnel.queries_grouping.get_avg_buyout_map",
+            new_callable=AsyncMock,
+            return_value=buyout_map or {},
+        ),
+    )
+
+
+class TestGetFunnelByTag:
+    """get_funnel_by_tag — aggregation by tag with expandable SKU children."""
+
+    async def _run(self, funnel_rows: list, tag_tuples: list):
+        """Call get_funnel_by_tag with mocked DB: funnel rows + tag mapping."""
+        from backend.services.funnel.queries_grouping import get_funnel_by_tag
+
+        mock_db = _make_db_seq(_make_scalar_result(funnel_rows), _make_iter_result(tag_tuples))
+        buyout = {r.nm_id: 100 for r in funnel_rows}
+        p1, p2 = _patch_grouping_maps(buyout)
+        with p1, p2:
+            return await get_funnel_by_tag(mock_db, PROJECT_ID, TAX_INFO, "2024-01-01", "2024-01-31", None, None)
+
+    @pytest.mark.asyncio
+    async def test_groups_by_tag_with_untagged_fallback(self):
+        """Tagged product goes to its tag group, untagged — to 'Без ярлыка'."""
+        rows = [
+            _make_funnel_row(nm_id=1, orders_sum_rub=8000.0),
+            _make_funnel_row(nm_id=2, orders_sum_rub=2000.0),
+        ]
+        result = await self._run(rows, [(1, 10, "Хиты")])
+
+        tags = {item["tag"] for item in result}
+        assert tags == {"Хиты", "Без ярлыка"}
+
+    @pytest.mark.asyncio
+    async def test_groups_have_children_with_sku_rows(self):
+        """Each tag group carries children — per-SKU rows with identity fields."""
+        rows = [
+            _make_funnel_row(nm_id=1, orders_sum_rub=8000.0),
+            _make_funnel_row(nm_id=2, orders_sum_rub=2000.0),
+        ]
+        rows[0].vendor_code = "ART-1"
+        rows[1].vendor_code = "ART-2"
+        result = await self._run(rows, [(1, 10, "Хиты"), (2, 10, "Хиты")])
+
+        hits = next(item for item in result if item["tag"] == "Хиты")
+        assert "children" in hits
+        assert {c["nm_id"] for c in hits["children"]} == {1, 2}
+        child1 = next(c for c in hits["children"] if c["nm_id"] == 1)
+        assert child1["vendor_code"] == "ART-1"
+        assert child1["brand"] == "BrandA"
+        assert child1["subject"] == "Ковры"
+
+    @pytest.mark.asyncio
+    async def test_multi_tag_product_appears_in_each_groups_children(self):
+        """Product with two tags appears in children of both tag groups."""
+        rows = [_make_funnel_row(nm_id=1, orders_sum_rub=5000.0)]
+        result = await self._run(rows, [(1, 10, "Хиты"), (1, 20, "Новинки")])
+
+        for tag_name in ("Хиты", "Новинки"):
+            grp = next(item for item in result if item["tag"] == tag_name)
+            assert [c["nm_id"] for c in grp["children"]] == [1]
+
+    @pytest.mark.asyncio
+    async def test_children_aggregate_multiple_days_per_sku(self):
+        """Two daily rows of the same SKU collapse into one child with summed metrics."""
+        rows = [
+            _make_funnel_row(nm_id=1, orders_sum_rub=3000.0, orders_count=3, row_date=date(2024, 1, 10)),
+            _make_funnel_row(nm_id=1, orders_sum_rub=7000.0, orders_count=7, row_date=date(2024, 1, 11)),
+        ]
+        result = await self._run(rows, [(1, 10, "Хиты")])
+
+        grp = next(item for item in result if item["tag"] == "Хиты")
+        assert len(grp["children"]) == 1
+        child = grp["children"][0]
+        assert child["orders_sum_rub"] == 10000.0
+        assert child["orders_count"] == 10
+
+    @pytest.mark.asyncio
+    async def test_children_sorted_by_orders_sum_desc(self):
+        """Children inside a group are sorted by orders_sum_rub descending."""
+        rows = [
+            _make_funnel_row(nm_id=1, orders_sum_rub=1000.0),
+            _make_funnel_row(nm_id=2, orders_sum_rub=9000.0),
+            _make_funnel_row(nm_id=3, orders_sum_rub=5000.0),
+        ]
+        result = await self._run(rows, [(1, 10, "Хиты"), (2, 10, "Хиты"), (3, 10, "Хиты")])
+
+        grp = next(item for item in result if item["tag"] == "Хиты")
+        assert [c["nm_id"] for c in grp["children"]] == [2, 3, 1]
+
+    @pytest.mark.asyncio
+    async def test_children_contain_metric_fields(self):
+        """Child rows expose the same metric fields the SKU table renders."""
+        rows = [_make_funnel_row(nm_id=1)]
+        result = await self._run(rows, [(1, 10, "Хиты")])
+
+        child = result[0]["children"][0]
+        for field in [
+            "nm_id",
+            "vendor_code",
+            "brand",
+            "subject",
+            "open_card",
+            "add_to_cart",
+            "orders_count",
+            "orders_sum_rub",
+            "revenue",
+            "adv_sum",
+            "adv_views",
+            "adv_clicks",
+            "tax",
+            "profit",
+            "margin",
+            "commission",
+            "commission_rate",
+            "avg_price",
+            "add_to_cart_pct",
+            "cart_to_order_pct",
+            "spp_rate",
+            "buyout_percent",
+            "ctr",
+            "cpc",
+            "cpm",
+            "drr",
+        ]:
+            assert field in child, f"Missing child field: {field}"
+
+    @pytest.mark.asyncio
+    async def test_children_sums_match_group_totals(self):
+        """Sum of children metrics equals the parent group aggregate."""
+        rows = [
+            _make_funnel_row(nm_id=1, orders_sum_rub=4000.0, orders_count=4, adv_sum=200.0),
+            _make_funnel_row(nm_id=2, orders_sum_rub=6000.0, orders_count=6, adv_sum=300.0),
+        ]
+        result = await self._run(rows, [(1, 10, "Хиты"), (2, 10, "Хиты")])
+
+        grp = next(item for item in result if item["tag"] == "Хиты")
+        assert sum(c["orders_sum_rub"] for c in grp["children"]) == grp["orders_sum_rub"]
+        assert sum(c["orders_count"] for c in grp["children"]) == grp["orders_count"]
+        assert sum(c["adv_sum"] for c in grp["children"]) == grp["adv_sum"]
+        assert sum(c["profit"] for c in grp["children"]) == pytest.approx(grp["profit"], abs=0.05)
+
+
+class TestGetFunnelByImtChildren:
+    """get_funnel_by_imt — regression: children survive the shared-helper refactor."""
+
+    async def _run(self, funnel_rows: list, nom_tuples: list, alias_rows: list | None = None):
+        from backend.services.funnel.queries_grouping import get_funnel_by_imt
+
+        mock_db = _make_db_seq(
+            _make_scalar_result(funnel_rows),
+            _make_iter_result(nom_tuples),
+            _make_iter_result(alias_rows or []),
+        )
+        buyout = {r.nm_id: 100 for r in funnel_rows}
+        p1, p2 = _patch_grouping_maps(buyout)
+        with p1, p2:
+            return await get_funnel_by_imt(mock_db, PROJECT_ID, TAX_INFO, "2024-01-01", "2024-01-31", None, None)
+
+    @pytest.mark.asyncio
+    async def test_imt_groups_have_children(self):
+        """IMT group exposes per-SKU children; SKU without imt goes to 'Без склейки'."""
+        rows = [
+            _make_funnel_row(nm_id=1, orders_sum_rub=8000.0),
+            _make_funnel_row(nm_id=2, orders_sum_rub=4000.0),
+            _make_funnel_row(nm_id=3, orders_sum_rub=2000.0),
+        ]
+        result = await self._run(rows, [(1, 555), (2, 555)])
+
+        grp = next(item for item in result if item["imt_group"] == "#555")
+        assert {c["nm_id"] for c in grp["children"]} == {1, 2}
+        loose = next(item for item in result if item["imt_group"] == "Без склейки")
+        assert [c["nm_id"] for c in loose["children"]] == [3]
+
+    @pytest.mark.asyncio
+    async def test_imt_children_sums_match_group_totals(self):
+        """Sum of imt children metrics equals the parent group aggregate."""
+        rows = [
+            _make_funnel_row(nm_id=1, orders_sum_rub=4000.0, orders_count=4),
+            _make_funnel_row(nm_id=2, orders_sum_rub=6000.0, orders_count=6),
+        ]
+        result = await self._run(rows, [(1, 555), (2, 555)])
+
+        grp = next(item for item in result if item["imt_group"] == "#555")
+        assert sum(c["orders_sum_rub"] for c in grp["children"]) == grp["orders_sum_rub"]
+        assert sum(c["orders_count"] for c in grp["children"]) == grp["orders_count"]

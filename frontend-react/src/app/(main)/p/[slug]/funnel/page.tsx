@@ -34,7 +34,7 @@ export default function FunnelPage() {
     const [groupData, setGroupData] = useState<FunnelGroupRow[]>([]);
     const [abcData, setAbcData] = useState<FunnelAbcRow[]>([]);
     const [expandedAbc, setExpandedAbc] = useState<Set<string>>(new Set());
-    const [expandedImts, setExpandedImts] = useState<Set<string>>(new Set());
+    const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
     // Filters
     const [dateFrom, setDateFrom] = useState('');
@@ -423,7 +423,7 @@ export default function FunnelPage() {
                     {/* Group by toggle */}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                         <h3 style={{ fontSize: 16, fontWeight: 600, color: '#111827', margin: 0 }}>
-                            {groupBy === 'day' ? 'Сводка по дням' : groupBy === 'sku' ? 'Сводка по товарам' : groupBy === 'brand' ? 'Сводка по брендам' : groupBy === 'abc' ? 'ABC анализ' : 'Сводка по категориям'}
+                            {groupBy === 'day' ? 'Сводка по дням' : groupBy === 'sku' ? 'Сводка по товарам' : groupBy === 'brand' ? 'Сводка по брендам' : groupBy === 'tag' ? 'Сводка по ярлыкам' : groupBy === 'imt' ? 'Сводка по склейкам' : groupBy === 'abc' ? 'ABC анализ' : 'Сводка по категориям'}
                         </h3>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <button onClick={handleExportFunnel} className="btn btn-secondary btn-sm" style={{ fontSize: 13, padding: '6px 14px', whiteSpace: 'nowrap' }}>📥 Excel</button>
@@ -433,7 +433,7 @@ export default function FunnelPage() {
                                 return (
                                     <button
                                         key={mode}
-                                        onClick={() => { setGroupBy(mode); loadData(undefined, undefined, mode); }}
+                                        onClick={() => { setGroupBy(mode); setExpandedGroups(new Set()); loadData(undefined, undefined, mode); }}
                                         style={{
                                             padding: '6px 16px', fontSize: 13, fontWeight: 500, cursor: 'pointer', border: 'none',
                                             borderLeft: idx > 0 ? '1px solid #e5e7eb' : 'none',
@@ -595,17 +595,17 @@ export default function FunnelPage() {
                                         }).map((r, i) => {
                                             const grpLabel = groupBy === 'brand' ? (r.brand || '\u2014') : groupBy === 'tag' ? (r.tag || '\u2014') : groupBy === 'imt' ? (r.imt_group || '\u2014') : (r.subject || '\u2014');
                                             const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
-                                            const isImtMode = groupBy === 'imt';
-                                            const isExpanded = isImtMode && expandedImts.has(grpLabel);
-                                            const children = isImtMode ? (r.children || []) : [];
+                                            const expandable = groupBy === 'imt' || groupBy === 'tag';
+                                            const isExpanded = expandable && expandedGroups.has(grpLabel);
+                                            const children = expandable ? (r.children || []) : [];
                                             return (
                                                 <React.Fragment key={grpLabel}>
-                                                <tr style={{ background: rowBg, color: '#111827', cursor: isImtMode ? 'pointer' : undefined }} onClick={isImtMode ? () => setExpandedImts(prev => { const n = new Set(prev); n.has(grpLabel) ? n.delete(grpLabel) : n.add(grpLabel); return n; }) : undefined}>
+                                                <tr style={{ background: rowBg, color: '#111827', cursor: expandable ? 'pointer' : undefined }} onClick={expandable ? () => setExpandedGroups(prev => { const n = new Set(prev); n.has(grpLabel) ? n.delete(grpLabel) : n.add(grpLabel); return n; }) : undefined}>
                                                     <td style={{ position: 'sticky', left: 0, background: rowBg, zIndex: 2, padding: '8px 12px', borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', minWidth: 200 }}>
                                                         <div style={{ fontWeight: 600, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                            {isImtMode && <span style={{ fontSize: 10, color: '#9ca3af', width: 14 }}>{isExpanded ? '\u25BC' : '\u25B6'}</span>}
+                                                            {expandable && <span style={{ fontSize: 10, color: '#9ca3af', width: 14 }}>{isExpanded ? '\u25BC' : '\u25B6'}</span>}
                                                             {grpLabel}
-                                                            {isImtMode && children.length > 0 && <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400 }}>({children.length})</span>}
+                                                            {expandable && children.length > 0 && <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400 }}>({children.length})</span>}
                                                         </div>
                                                     </td>
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.open_card)}</td>
