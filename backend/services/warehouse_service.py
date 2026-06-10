@@ -34,6 +34,7 @@ from backend.services.warehouse_inbound import (  # noqa: F401
 # ─── Outbound ─────────────────────────────────────────────────────────────
 from backend.services.warehouse_outbound import (  # noqa: F401
     cancel_shipment,
+    cancel_transfer,
     complete_transfer,
     create_shipment,
     create_transfer,

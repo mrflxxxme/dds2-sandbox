@@ -149,13 +149,25 @@ export default function NewTransferPage() {
     const handleCreate = async () => {
         if (!toWarehouseId) { setError('Выберите склад назначения'); return; }
         if (filledRows.length === 0) { setError('Добавьте хотя бы одну позицию'); return; }
+        const items = filledRows.map(r => ({
+            barcode: r.barcode.trim(),
+            quantity: parseInt(r.quantity) || 0,
+        }));
+        const zero = items.filter(it => it.quantity <= 0);
+        if (zero.length > 0) {
+            setError(`Количество должно быть больше нуля: ${zero.map(it => it.barcode).join(', ')}`);
+            return;
+        }
+        // Предвалидация остатков — иначе send упадёт уже после создания черновика
+        const availMap = isDefect ? defectMap : stockMap;
+        const over = items.filter(it => it.quantity > (availMap[it.barcode] || 0));
+        if (over.length > 0) {
+            setError(`Недостаточно остатка: ${over.map(it => `${it.barcode} (есть ${formatNumber(availMap[it.barcode] || 0)})`).join(', ')}`);
+            return;
+        }
         setSaving(true);
         setError('');
         try {
-            const items = filledRows.map(r => ({
-                barcode: r.barcode.trim(),
-                quantity: parseInt(r.quantity) || 0,
-            }));
             const transfer = await api.createTransfer({
                 from_warehouse_id: fromWarehouseId,
                 to_warehouse_id: Number(toWarehouseId),
@@ -164,10 +176,24 @@ export default function NewTransferPage() {
                 defect_reason: isDefect && defectReason.trim() ? defectReason.trim() : undefined,
                 items,
             });
-            if (isDefect && transfer?.id) {
-                // Auto-send defect transfer (source deducted immediately)
-                // Destination must accept via "Принять" on Брак tab
-                await api.sendTransfer(transfer.id);
+            if (transfer?.id) {
+                // Auto-send (source deducted immediately, destination gets in_transit).
+                // Destination must accept via "Принять": брак — вкладка «Брак»,
+                // обычные — вкладка «Перемещения»
+                try {
+                    await api.sendTransfer(transfer.id);
+                } catch (sendErr: unknown) {
+                    // Откат черновика, чтобы не оставлять сироту (ретрай создал бы дубль)
+                    try {
+                        await api.cancelTransfer(transfer.id);
+                    } catch {
+                        setError(`Отправка не удалась, черновик ${transfer.number} остался — управляйте им на вкладке «Перемещения». ` +
+                            (sendErr instanceof Error ? sendErr.message : ''));
+                        setSaving(false);
+                        return;
+                    }
+                    throw sendErr;
+                }
             }
             router.push(`/p/${slug}/warehouse/${fromWarehouseId}`);
         } catch (e: unknown) {

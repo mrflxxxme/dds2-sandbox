@@ -471,11 +471,12 @@ async def cancel_shipment(
 @router.get("/transfers")
 async def list_transfers(
     in_transit: bool = Query(False),
+    warehouse_id: int | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """List transfers. ?in_transit=true for only active ones."""
-    rows = await warehouse_service.list_transfers(db, project.id, in_transit)
+    """List transfers. ?in_transit=true for only active ones, ?warehouse_id= for source OR destination."""
+    rows = await warehouse_service.list_transfers(db, project.id, in_transit, warehouse_id)
     return [StockTransferSchema.model_validate(r) for r in rows]
 
 
@@ -521,6 +522,20 @@ async def complete_transfer(
     try:
         transfer = await warehouse_service.complete_transfer(db, project.id, transfer_id)
         return StockTransferSchema.model_validate(transfer)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.delete("/transfers/{transfer_id}", dependencies=[Depends(rate_limit_write)])
+async def cancel_transfer(
+    transfer_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel DRAFT transfer (soft-delete). Sent transfers cannot be cancelled."""
+    try:
+        await warehouse_service.cancel_transfer(db, project.id, transfer_id)
+        return {"message": "Перемещение удалено"}
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 

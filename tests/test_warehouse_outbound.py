@@ -14,12 +14,14 @@ from backend.services.warehouse_crud import create_warehouse
 from backend.services.warehouse_inbound import accept_receipt, create_receipt
 from backend.services.warehouse_outbound import (
     cancel_shipment,
+    cancel_transfer,
     complete_transfer,
     create_shipment,
     create_transfer,
     deliver_shipment,
     get_shipment,
     get_transfer,
+    list_transfers,
     send_transfer,
     ship_shipment,
 )
@@ -319,6 +321,91 @@ class TestCompleteTransfer:
         )
         with pytest.raises(ValueError, match="Cannot complete"):
             await complete_transfer(db_session, project.id, transfer.id)
+
+
+class TestListTransfers:
+    @pytest.mark.asyncio
+    async def test_list_transfers_warehouse_filter(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        third_wh = await create_warehouse(
+            db_session,
+            project.id,
+            {"name": f"TH-{_uid()}", "warehouse_type": "EXTERNAL"},
+        )
+        t1 = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": 5}],
+            },
+        )
+        t2 = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": external_wh.id,
+                "to_warehouse_id": third_wh.id,
+                "items": [{"barcode": barcode, "quantity": 3}],
+            },
+        )
+        # По fulfillment_wh — только t1 (источник); по external_wh — оба (получатель t1, источник t2)
+        ids_ff = {t.id for t in await list_transfers(db_session, project.id, warehouse_id=fulfillment_wh.id)}
+        assert ids_ff == {t1.id}
+        ids_ex = {t.id for t in await list_transfers(db_session, project.id, warehouse_id=external_wh.id)}
+        assert ids_ex == {t1.id, t2.id}
+
+
+class TestCancelTransfer:
+    @pytest.mark.asyncio
+    async def test_cancel_draft(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": 10}],
+            },
+        )
+        await cancel_transfer(db_session, project.id, transfer.id)
+        found = await get_transfer(db_session, project.id, transfer.id)
+        assert found is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_in_transit_fails(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        await _stock_warehouse(db_session, project, fulfillment_wh, barcode, 100)
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": 10}],
+            },
+        )
+        await send_transfer(db_session, project.id, transfer.id)
+        with pytest.raises(ValueError, match="Cannot cancel"):
+            await cancel_transfer(db_session, project.id, transfer.id)
+
+    @pytest.mark.asyncio
+    async def test_cancel_transfer_isolation(
+        self, db_session, project, other_project, fulfillment_wh, external_wh, barcode
+    ):
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": 5}],
+            },
+        )
+        with pytest.raises(ValueError, match="not found"):
+            await cancel_transfer(db_session, other_project.id, transfer.id)
+        # И не удалён: в своём проекте всё ещё виден
+        found = await get_transfer(db_session, project.id, transfer.id)
+        assert found is not None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
