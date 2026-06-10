@@ -14,7 +14,7 @@ description: "Alembic-миграция DDS2: проверка heads, генер�
 
 ## Процесс
 1. **Состояние:** `alembic current` + `alembic heads`. Несколько heads → сначала `alembic merge heads -m "merge"` → `upgrade head`.
-2. **Модель:** правка в `backend/models/{domain}.py` — `Numeric(18,2)` для денег, `DateTime(timezone=True)` для дат, `BigInteger` для ID. Новая SoftDelete-модель → добавить в `SOFT_MODELS` в `scripts/check_conventions.sh`.
+2. **Модель:** правка в `backend/models/{domain}.py` — `Numeric(18,2)` для денег, `DateTime(timezone=True)` для дат, `BigInteger` для ID. Новые SoftDelete-модели энфорсеры обнаруживают автоматически (AST по `backend/models/`) — список вручную вести не нужно.
 3. **Генерация:** `alembic revision --autogenerate -m "имя"`. Проверить файл: корректный `upgrade()`, непустой `downgrade()`, имена индексов `ix_table_column`, partial-индекс `WHERE is_deleted = false` для soft-delete.
 4. **Backfill:** ALTER + NOT NULL → `server_default` ИЛИ batch UPDATE до ALTER. Большие таблицы — batched в отдельном скрипте, не в `upgrade()`.
 5. **Тест:** `alembic upgrade head && downgrade -1 && upgrade head` — без ошибок, данные не теряются.

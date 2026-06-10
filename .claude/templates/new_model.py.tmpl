@@ -6,7 +6,8 @@ After creating this model:
 1. Run: docker compose exec backend alembic revision --autogenerate -m "add_xxx"
 2. Run: docker compose exec backend alembic upgrade head
 3. Add to backend/models/__init__.py __all__ list
-4. If model uses SoftDeleteMixin, add to SOFT_MODELS in scripts/check_conventions.sh
+4. SoftDeleteMixin models are auto-discovered by the enforcers (post_edit_check.py /
+   check_conventions.sh AST-parse backend/models/) — no list to update by hand.
 """
 
 from __future__ import annotations
@@ -67,7 +68,7 @@ class Xxx(Base, SoftDeleteMixin):
 
 # ─── TODO checklist after creating model ──────────────────────────────────────
 # [ ] Add "Xxx" to __all__ in backend/models/__init__.py
-# [ ] Add "Xxx" to SOFT_MODELS in scripts/check_conventions.sh  (has SoftDeleteMixin)
+# [ ] (SoftDeleteMixin needs no manual list — enforcers auto-discover it from backend/models/)
 # [ ] Run: alembic revision --autogenerate -m "add_xxxs"
 # [ ] Run: alembic upgrade head
 # [ ] Verify migration has downgrade() defined

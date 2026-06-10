@@ -8,8 +8,8 @@ description: "Экстренный фикс прода DDS2: диагности�
 
 ## 1. Диагностика
 ```bash
-ssh dds-app "cd /opt/dds && docker compose logs backend --tail=200 | grep -E 'ERROR|CRITICAL|Traceback'"
-curl -sf https://app.vyatkin-wb.ru/api/health
+ssh dds-app "cd /opt/dds_app && docker compose logs backend --tail=200 | grep -E 'ERROR|CRITICAL|Traceback'"
+curl -sf https://app.vyatkin-wb.ru/health
 gh run list --workflow=cd-production.yml --limit=3
 git log --oneline -10 main
 ```
@@ -26,8 +26,8 @@ git log --oneline -10 main
 ## 3. Верификация
 ```bash
 gh run watch
-curl -sf https://app.vyatkin-wb.ru/api/health
-ssh dds-app "cd /opt/dds && docker compose logs backend --tail=100 | grep -c ERROR"
+curl -sf https://app.vyatkin-wb.ru/health
+ssh dds-app "cd /opt/dds_app && docker compose logs backend --tail=100 | grep -c ERROR"
 ```
 
 ## 4. Postmortem

@@ -61,7 +61,7 @@ fi
 # 3. Model (display_name, abbreviated)
 model=$(printf '%s' "$input" | jq -r '.model.display_name // empty' 2>/dev/null)
 if [ -n "$model" ]; then
-  # Shorten "Claude 3.5 Sonnet" -> "sonnet", "Claude Opus 4.7" -> "opus-4.7", etc.
+  # Shorten "Claude 3.5 Sonnet" -> "sonnet", "Claude Opus 4.8" -> "opus-4.8", etc.
   model_short=$(printf '%s' "$model" | sed 's/Claude //' | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
   model_part=$(printf "${DIM}${model_short}${RESET}")
 else
