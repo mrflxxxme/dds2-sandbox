@@ -11,6 +11,22 @@ import type {
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 
+/* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
+
+const TRANSFER_STATUS_LABELS: Record<string, string> = {
+    DRAFT: 'Черновик',
+    IN_TRANSIT: 'В пути',
+    COMPLETED: 'Завершено',
+};
+
+// Требуют действия: входящие «в пути» (принять) + исходящие черновики (отправить/удалить)
+function countActionableTransfers(transfers: StockTransfer[], warehouseId: number): number {
+    return transfers.filter(t =>
+        (t.status === 'IN_TRANSIT' && t.to_warehouse_id === warehouseId) ||
+        (t.status === 'DRAFT' && t.from_warehouse_id === warehouseId)
+    ).length;
+}
+
 /* ─── Main page ────────────────────────────────────────────────────────────── */
 
 export default function WarehouseDetailPage() {
@@ -18,7 +34,7 @@ export default function WarehouseDetailPage() {
     const router = useRouter();
     const slug = params.slug as string;
     const warehouseId = Number(params.id);
-    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'stock' | 'defects' | 'delivery' | 'requisites'>('receipts');
+    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'transfers' | 'stock' | 'defects' | 'delivery' | 'requisites'>('receipts');
     const [warehouse, setWarehouse] = useState<Warehouse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -26,9 +42,18 @@ export default function WarehouseDetailPage() {
     // Counts for tab badges
     const [receiptCount, setReceiptCount] = useState(0);
     const [shipmentCount, setShipmentCount] = useState(0);
+    const [transferCount, setTransferCount] = useState(0);
     const [defectCount, setDefectCount] = useState(0);
 
     // No modals — all create/detail views are separate pages
+
+    // Бейдж «Перемещения» считается на уровне страницы — иначе он «0» до открытия вкладки
+    const refreshTransferCount = useCallback(async () => {
+        try {
+            const transfers = await api.getTransfers(false, warehouseId);
+            setTransferCount(countActionableTransfers(transfers, warehouseId));
+        } catch { /* не валим страницу из-за бейджа */ }
+    }, [warehouseId]);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -37,11 +62,12 @@ export default function WarehouseDetailPage() {
             const whs = await api.getWarehouses();
             const wh = whs.find(w => w.id === warehouseId);
             setWarehouse(wh || null);
+            refreshTransferCount();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
         setLoading(false);
-    }, [warehouseId]);
+    }, [warehouseId, refreshTransferCount]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -54,6 +80,7 @@ export default function WarehouseDetailPage() {
     const tabs = [
         { key: 'receipts' as const, label: 'Приёмки', count: receiptCount },
         ...(isFulfillment ? [{ key: 'shipments' as const, label: 'Отгрузки', count: shipmentCount }] : []),
+        { key: 'transfers' as const, label: 'Перемещения', count: transferCount },
         { key: 'stock' as const, label: 'Остатки и статистика' },
         { key: 'defects' as const, label: 'Брак', count: defectCount },
         { key: 'delivery' as const, label: 'Время доставки' },
@@ -126,6 +153,7 @@ export default function WarehouseDetailPage() {
                 <ReceiptsTab
                     warehouseId={warehouseId}
                     onCountChange={setReceiptCount}
+                    onTransfersChanged={refreshTransferCount}
                 />
             )}
             {tab === 'shipments' && (
@@ -133,6 +161,12 @@ export default function WarehouseDetailPage() {
                     warehouseId={warehouseId}
                     warehouseType={warehouse.warehouse_type}
                     onCountChange={setShipmentCount}
+                />
+            )}
+            {tab === 'transfers' && (
+                <TransfersTab
+                    warehouseId={warehouseId}
+                    onCountChange={setTransferCount}
                 />
             )}
             {tab === 'stock' && <StockTab warehouseId={warehouseId} />}
@@ -478,9 +512,10 @@ type UnifiedDoc = {
     mark?: DefectMarkOperation;
 };
 
-function ReceiptsTab({ warehouseId, onCountChange }: {
+function ReceiptsTab({ warehouseId, onCountChange, onTransfersChanged }: {
     warehouseId: number;
     onCountChange: (n: number) => void;
+    onTransfersChanged?: () => void;
 }) {
     const params = useParams();
     const router = useRouter();
@@ -559,6 +594,7 @@ function ReceiptsTab({ warehouseId, onCountChange }: {
         try {
             await api.completeTransfer(transferId);
             await load();
+            onTransfersChanged?.();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
@@ -732,6 +768,171 @@ function ShipmentsTab({ warehouseId, warehouseType, onCountChange }: {
             {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
 
             <TanStackDataTable columns={cols} data={shipments} emptyText="Нет отгрузок" emptyIcon="📤" onRowClick={(row) => router.push(`/p/${slug}/warehouse/${warehouseId}/shipment/${row.id}`)} />
+        </>
+    );
+}
+
+/* ─── Tab: Перемещения ──────────────────────────────────────────────────── */
+
+function TransfersTab({ warehouseId, onCountChange }: {
+    warehouseId: number;
+    onCountChange: (n: number) => void;
+}) {
+    const [transfers, setTransfers] = useState<StockTransfer[]>([]);
+    const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [actingId, setActingId] = useState<number | null>(null);
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            const [mine, whs] = await Promise.all([
+                api.getTransfers(false, warehouseId),
+                api.getWarehouses(),
+            ]);
+            setTransfers(mine);
+            setWarehouses(whs);
+            onCountChange(countActionableTransfers(mine, warehouseId));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setLoading(false);
+    }, [warehouseId, onCountChange]);
+
+    useEffect(() => { load(); }, [load]);
+
+    const whName = (id: number) => warehouses.find(w => w.id === id)?.name || `#${id}`;
+
+    const handleSend = async (t: StockTransfer) => {
+        if (!confirm(`Отправить ${t.number}? Товар спишется со склада-источника.`)) return;
+        setActingId(t.id);
+        try {
+            await api.sendTransfer(t.id);
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка отправки');
+        } finally {
+            setActingId(null);
+        }
+    };
+
+    const handleAccept = async (t: StockTransfer) => {
+        if (!confirm(`Принять ${t.number}? Товар зачислится на этот склад.`)) return;
+        setActingId(t.id);
+        try {
+            await api.completeTransfer(t.id);
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка приёмки');
+        } finally {
+            setActingId(null);
+        }
+    };
+
+    const handleCancel = async (t: StockTransfer) => {
+        if (!confirm(`Удалить черновик ${t.number}?`)) return;
+        setActingId(t.id);
+        try {
+            await api.cancelTransfer(t.id);
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка удаления');
+        } finally {
+            setActingId(null);
+        }
+    };
+
+    const statusBadge = (s: string) => {
+        const styleMap: Record<string, { bg: string; color: string }> = {
+            DRAFT: { bg: 'rgba(0,0,0,0.06)', color: 'var(--color-text-muted)' },
+            IN_TRANSIT: { bg: 'rgba(245,158,11,0.1)', color: '#b45309' },
+            COMPLETED: { bg: 'rgba(34,197,94,0.1)', color: '#16a34a' },
+        };
+        const label = TRANSFER_STATUS_LABELS[s] || s;
+        const { bg, color } = styleMap[s] || { bg: 'transparent', color: 'inherit' };
+        return <span style={{ color, background: bg, padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{label}</span>;
+    };
+
+    const directionText = (row: StockTransfer) => row.from_warehouse_id === warehouseId
+        ? `Исходящее → ${whName(row.to_warehouse_id)}`
+        : `Входящее ← ${whName(row.from_warehouse_id)}`;
+    const itemsText = (row: StockTransfer) => {
+        const qty = row.items.reduce((s: number, it: { quantity: number }) => s + it.quantity, 0);
+        return `${row.items.length} поз., ${formatNumber(qty)} шт.`;
+    };
+
+    const cols: Column[] = [
+        { key: 'number', label: '№' },
+        {
+            key: 'from_warehouse_id', label: 'Направление',
+            render: (_: unknown, row: StockTransfer) => <span>{directionText(row)}</span>,
+            exportValue: (row: StockTransfer) => directionText(row),
+        },
+        {
+            key: 'status', label: 'Статус',
+            render: (v: string) => statusBadge(v),
+            exportValue: (row: StockTransfer) => TRANSFER_STATUS_LABELS[row.status] || row.status,
+        },
+        {
+            key: 'is_defect', label: 'Тип',
+            render: (v: boolean, row: StockTransfer) => v
+                ? <span className="badge badge-danger" title={row.defect_reason || ''}>Брак</span>
+                : <span style={{ color: 'var(--color-text-muted)' }}>Годный</span>,
+            exportValue: (row: StockTransfer) => row.is_defect ? 'Брак' : 'Годный',
+        },
+        {
+            key: 'items', label: 'Позиции',
+            render: (_: unknown, row: StockTransfer) => (
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{itemsText(row)}</span>
+            ),
+            exportValue: (row: StockTransfer) => itemsText(row),
+        },
+        { key: 'comment', label: 'Комментарий' },
+        { key: 'created_at', label: 'Создано', format: 'date' },
+        {
+            key: 'id', label: '', align: 'center',
+            exportValue: () => '',
+            render: (_v: number, row: StockTransfer) => {
+                const acting = actingId === row.id;
+                if (row.status === 'DRAFT' && row.from_warehouse_id === warehouseId) {
+                    return (
+                        <span style={{ display: 'inline-flex', gap: 6 }}>
+                            <button className="btn btn-sm btn-primary" onClick={() => handleSend(row)} disabled={acting}>
+                                {acting ? '...' : 'Отправить'}
+                            </button>
+                            <button className="btn btn-sm btn-danger" onClick={() => handleCancel(row)} disabled={acting} title="Удалить черновик">
+                                ×
+                            </button>
+                        </span>
+                    );
+                }
+                if (row.status === 'IN_TRANSIT' && row.to_warehouse_id === warehouseId) {
+                    return (
+                        <button className="btn btn-sm btn-success" onClick={() => handleAccept(row)} disabled={acting}>
+                            {acting ? '...' : 'Принять'}
+                        </button>
+                    );
+                }
+                return null;
+            },
+        },
+    ];
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
+
+    return (
+        <>
+            {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
+
+            <TanStackDataTable
+                columns={cols}
+                data={transfers}
+                emptyText="Нет перемещений"
+                emptyIcon="🔄"
+                exportName="transfers"
+            />
         </>
     );
 }

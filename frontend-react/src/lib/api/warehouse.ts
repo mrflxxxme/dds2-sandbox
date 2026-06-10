@@ -120,12 +120,17 @@ export function addWarehouseMethods(api: ApiClient) {
         cancelShipment(shipmentId: number) { return api.request<OutboundShipment>('POST', `/api/v1/warehouse/shipments/${shipmentId}/cancel`); },
 
         // ─── Stock Transfers ─────────────────────────────────────────
-        getTransfers(inTransitOnly = false) { return api.request<StockTransfer[]>('GET', `/api/v1/warehouse/transfers?in_transit=${inTransitOnly}`); },
+        getTransfers(inTransitOnly = false, warehouseId?: number) {
+            const qs = new URLSearchParams({ in_transit: String(inTransitOnly) });
+            if (warehouseId !== undefined) qs.set('warehouse_id', String(warehouseId));
+            return api.request<StockTransfer[]>('GET', `/api/v1/warehouse/transfers?${qs.toString()}`);
+        },
         createTransfer(data: { from_warehouse_id: number; to_warehouse_id: number; comment?: string; is_defect?: boolean; defect_reason?: string; items: { barcode: string; quantity: number }[] }) {
             return api.request<StockTransfer>('POST', '/api/v1/warehouse/transfers', data);
         },
         sendTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/send`); },
         completeTransfer(transferId: number) { return api.request<StockTransfer>('POST', `/api/v1/warehouse/transfers/${transferId}/complete`); },
+        cancelTransfer(transferId: number) { return api.request<MessageResponse>('DELETE', `/api/v1/warehouse/transfers/${transferId}`); },
 
         // ─── Defects ─────────────────────────────────────────────────
         getDefectStock(warehouseId: number) { return api.request<WarehouseStockRow[]>('GET', `/api/v1/warehouse/${warehouseId}/defects`); },

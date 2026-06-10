@@ -42,4 +42,22 @@ test.describe('Warehouse', () => {
     await waitForPageLoad(page);
     await expectNoAuthError(page);
   });
+
+  test('should open transfers tab on warehouse detail page', async ({ page }) => {
+    await page.goto(projectUrl('/warehouse'));
+    await waitForPageLoad(page);
+    await expectNoAuthError(page);
+    const row = page.locator('tbody tr').first();
+    const hasWarehouse = await row.isVisible({ timeout: 5_000 }).catch(() => false);
+    test.skip(!hasWarehouse, 'Нет складов в проекте');
+    await row.click();
+    await page.waitForURL(/\/warehouse\/\d+/, { timeout: 10_000 });
+    await waitForPageLoad(page);
+    // Вкладка «Перемещения» (бейдж в имени допустим); «+ Перемещение» не матчится
+    const transfersTab = page.getByRole('button', { name: /^Перемещения/ });
+    await expect(transfersTab).toBeVisible({ timeout: 10_000 });
+    await transfersTab.click();
+    const content = page.locator('table, .empty-state, .glass-card');
+    await expect(content.first()).toBeVisible({ timeout: 10_000 });
+  });
 });

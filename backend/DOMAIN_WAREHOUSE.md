@@ -52,7 +52,7 @@
 ### Статусные переходы
 - **Приёмка:** DRAFT → EXPECTED → ACCEPTED; cancel из любого статуса → CANCELLED (cancel из ACCEPTED откатывает сток).
 - **Отгрузка:** DRAFT → SHIPPED → DELIVERED; cancel из SHIPPED → CANCELLED (возвращает сток). Отгрузка **только с FULFILLMENT** складов.
-- **Перемещение:** DRAFT → IN_TRANSIT → COMPLETED. На source `qty -= delta` (TRANSFER_OUT), на target `qty += delta` (TRANSFER_IN); `in_transit` на target растёт при send, падает при complete.
+- **Перемещение:** DRAFT → IN_TRANSIT → COMPLETED. На source `qty -= delta` (TRANSFER_OUT), на target `qty += delta` (TRANSFER_IN); `in_transit` на target растёт при send, падает при complete. Cancel (`DELETE /transfers/{id}`) — только из DRAFT, soft-delete; мутации статуса берут row-lock (`_get_transfer_locked`, FOR UPDATE) против гонки send/cancel. UI: создание всегда сразу делает send (черновик не остаётся); приём/отправка/удаление — вкладка «Перемещения» на странице склада; `GET /transfers?warehouse_id=` фильтрует source OR destination.
 
 ### Accept / Cancel / Update приёмки
 - **Accept (DRAFT|EXPECTED → ACCEPTED):** если `actual_qty <= 0` и `expected_qty > 0` — автозаполнение `actual_qty = expected_qty`. Для каждого item с `actual_qty > 0` — `_update_stock(+actual_qty, INBOUND)`. **Если `receipt.is_defect`** (возвраты WB с ПВЗ) — сток идёт в брак: `_update_stock(delta=0, defect_delta=+actual_qty, DEFECT_RECEIVE)` (симметрия с Cancel; idempotency-guard проверяет DEFECT_RECEIVE, а не INBOUND). `status = ACCEPTED`, `actual_date = today`.

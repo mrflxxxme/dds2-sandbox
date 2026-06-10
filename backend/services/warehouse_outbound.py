@@ -5,7 +5,7 @@ Warehouse outbound — shipments and stock transfers.
 import logging
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -207,8 +207,13 @@ async def cancel_shipment(db: AsyncSession, project_id: int, shipment_id: int) -
 # ─── Stock Transfers (Перемещение) ─────────────────────────────────────────
 
 
-async def list_transfers(db: AsyncSession, project_id: int, in_transit_only: bool = False) -> list:
-    """List transfers. Optionally filter only IN_TRANSIT."""
+async def list_transfers(
+    db: AsyncSession,
+    project_id: int,
+    in_transit_only: bool = False,
+    warehouse_id: int | None = None,
+) -> list:
+    """List transfers. Optionally filter only IN_TRANSIT and/or by warehouse (source OR destination)."""
     query = (
         select(StockTransfer)
         .options(selectinload(StockTransfer.items))
@@ -219,6 +224,13 @@ async def list_transfers(db: AsyncSession, project_id: int, in_transit_only: boo
     )
     if in_transit_only:
         query = query.where(StockTransfer.status == TransferStatus.IN_TRANSIT)
+    if warehouse_id is not None:
+        query = query.where(
+            or_(
+                StockTransfer.from_warehouse_id == warehouse_id,
+                StockTransfer.to_warehouse_id == warehouse_id,
+            )
+        )
     query = query.order_by(StockTransfer.id.desc()).limit(500)
     result = await db.execute(query)
     return list(result.scalars().all())
@@ -283,12 +295,41 @@ async def create_transfer(db: AsyncSession, project_id: int, payload: dict) -> S
     return transfer
 
 
+async def _get_transfer_locked(db: AsyncSession, project_id: int, transfer_id: int) -> StockTransfer | None:
+    """Get transfer with row lock (FOR UPDATE) — для мутаций статуса, против гонки send/cancel."""
+    result = await db.execute(
+        select(StockTransfer)
+        .where(
+            StockTransfer.id == transfer_id,
+            StockTransfer.project_id == project_id,
+            StockTransfer.is_deleted == False,  # noqa: E712
+        )
+        .with_for_update()
+    )
+    transfer = result.scalar_one_or_none()
+    if transfer:
+        await db.refresh(transfer, ["items"])
+    return transfer
+
+
+async def cancel_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> None:
+    """Cancel (soft-delete) a transfer. Only DRAFT — sent transfers already moved stock."""
+    transfer = await _get_transfer_locked(db, project_id, transfer_id)
+    if not transfer:
+        raise ValueError("Transfer not found")
+    if transfer.status != TransferStatus.DRAFT:
+        raise ValueError(f"Cannot cancel in status {transfer.status}")
+
+    transfer.soft_delete()
+    await db.commit()
+
+
 async def send_transfer(db: AsyncSession, project_id: int, transfer_id: int) -> StockTransfer:
     """
     Send transfer: DRAFT → IN_TRANSIT.
     source.stock -= qty, target.in_transit += qty.
     """
-    transfer = await get_transfer(db, project_id, transfer_id)
+    transfer = await _get_transfer_locked(db, project_id, transfer_id)
     if not transfer:
         raise ValueError("Transfer not found")
 
@@ -370,7 +411,7 @@ async def complete_transfer(db: AsyncSession, project_id: int, transfer_id: int)
     Complete transfer: IN_TRANSIT → COMPLETED.
     target.stock += qty, target.in_transit -= qty.
     """
-    transfer = await get_transfer(db, project_id, transfer_id)
+    transfer = await _get_transfer_locked(db, project_id, transfer_id)
     if not transfer:
         raise ValueError("Transfer not found")
 
