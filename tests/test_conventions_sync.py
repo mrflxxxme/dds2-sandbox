@@ -2,12 +2,14 @@
 Tests that project conventions stay in sync.
 
 Catches drift between:
-- SoftDeleteMixin models ↔ check_conventions.sh SOFT_MODELS
+- SoftDeleteMixin models ↔ dynamic discovery in post_edit_check.py (--list-soft-models)
 - @cached prefixes ↔ invalidate_project_reports() prefixes
 """
 
 import ast
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 BACKEND = Path(__file__).parent.parent / "backend"
@@ -15,7 +17,7 @@ SCRIPTS = Path(__file__).parent.parent / "scripts"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1. SoftDeleteMixin — every model must be in check_conventions.sh
+# 1. SoftDeleteMixin — dynamic discovery must see every model
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -42,35 +44,41 @@ def _find_soft_delete_models() -> set[str]:
     return soft_models
 
 
-def _get_conventions_soft_models() -> set[str]:
-    """Extract SOFT_MODELS list from check_conventions.sh."""
-    script = SCRIPTS / "check_conventions.sh"
-    content = script.read_text()
-    match = re.search(r'SOFT_MODELS="([^"]+)"', content)
-    assert match, "SOFT_MODELS not found in check_conventions.sh"
-    # Format: Model1\|Model2\|Model3
-    raw = match.group(1)
-    return set(raw.replace("\\|", "|").split("|"))
+def _get_enforcer_soft_models() -> set[str]:
+    """Discovered model list as the enforcers see it (post_edit_check.py --list-soft-models).
+
+    Same single source of truth that check_conventions.sh Check 6 consumes.
+    """
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS / "hooks" / "post_edit_check.py"), "--list-soft-models"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
 class TestSoftDeleteSync:
     def test_all_soft_delete_models_in_conventions(self):
-        """Every SoftDeleteMixin model must appear in check_conventions.sh."""
+        """Every SoftDeleteMixin model must be seen by the dynamic enforcer discovery."""
         code_models = _find_soft_delete_models()
-        script_models = _get_conventions_soft_models()
-        missing = code_models - script_models
+        enforcer_models = _get_enforcer_soft_models()
+        assert code_models, "Test AST scan found no SoftDeleteMixin models — scan broken?"
+        missing = code_models - enforcer_models
         assert not missing, (
-            f"SoftDeleteMixin models NOT in check_conventions.sh: {missing}. "
-            f"Add them to SOFT_MODELS in scripts/check_conventions.sh"
+            f"SoftDeleteMixin models NOT discovered by post_edit_check.py --list-soft-models: {missing}. "
+            f"Discovery in scripts/hooks/post_edit_check.py is under-counting."
         )
 
     def test_no_stale_models_in_conventions(self):
-        """check_conventions.sh should not list models that no longer use SoftDeleteMixin."""
+        """Discovery must not report models that no longer use SoftDeleteMixin."""
         code_models = _find_soft_delete_models()
-        script_models = _get_conventions_soft_models()
-        stale = script_models - code_models
+        enforcer_models = _get_enforcer_soft_models()
+        stale = enforcer_models - code_models
         assert not stale, (
-            f"Models in check_conventions.sh but NOT SoftDeleteMixin: {stale}. " f"Remove them from SOFT_MODELS."
+            f"Models discovered by --list-soft-models but NOT SoftDeleteMixin: {stale}. "
+            f"Discovery in scripts/hooks/post_edit_check.py is over-counting."
         )
 
 

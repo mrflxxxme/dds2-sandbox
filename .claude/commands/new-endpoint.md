@@ -13,7 +13,7 @@ description: "Новый API endpoint DDS2: schema → service → router → te
 3. **Router** — `backend/routers/{domain}.py`. Только HTTP — вызов сервиса, без логики. Шаблон: `new_router.py.tmpl`. `Depends(get_current_project)` + на write-методах `Depends(rate_limit_write)`. Upload — проверка `MAX_UPLOAD_SIZE_MB` до обработки. Новый файл-роутер → зарегистрировать в `backend/main.py`.
 4. **Test** — `tests/test_{resource}.py`. Шаблон: `new_test.py.tmpl`. Покрыть: happy path, edge case, multi-tenancy (чужой `project_id` не видит), soft-delete, Decimal для денег.
 5. **Frontend** (если нужен UI) — тип в `src/types/api.ts`, метод в `src/lib/api/{domain}.ts`.
-6. **Docs** — обновить `backend/DOMAIN_{DOMAIN}.md`; новая модель → `models/__init__.py` + `SOFT_MODELS`.
+6. **Docs** — обновить `backend/DOMAIN_{DOMAIN}.md`; новая модель → `models/__init__.py` (SoftDelete-модели энфорсеры находят сами).
 
 ## Verify
 `bash scripts/check_conventions.sh` · `make test-changed` · `bash scripts/check_docs.sh`.

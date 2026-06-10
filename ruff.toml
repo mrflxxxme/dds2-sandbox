@@ -28,7 +28,7 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
-"tests/**/*.py" = ["S101", "S106", "T20", "RUF001", "RUF002", "RUF003", "E402"]  # assert, hardcoded pass, print, Cyrillic in identifiers/docstrings/comments, late imports (TESTING=1 env setup before app import)
+"tests/**/*.py" = ["S101", "S106", "S603", "T20", "RUF001", "RUF002", "RUF003", "E402"]  # assert, hardcoded pass, subprocess with fixed args (conventions sync), print, Cyrillic in identifiers/docstrings/comments, late imports (TESTING=1 env setup before app import)
 "backend/alembic/**/*.py" = ["E402", "I001"]      # alembic auto-generated
 "backend/seeds/**/*.py" = ["T20", "S"]            # seed scripts can print
 "scripts/**/*.py" = ["T20", "S608"]               # CLI scripts: print + DDL with sanitized names
