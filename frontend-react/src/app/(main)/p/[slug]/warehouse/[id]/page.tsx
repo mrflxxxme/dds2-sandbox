@@ -1,5 +1,5 @@
 'use client';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -9,7 +9,7 @@ import type {
     Warehouse, InboundReceipt, OutboundShipment,
     WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
     DefectMarkOperation, VehicleStatus,
-    FulfillmentStatus, FfStocksResponse, FfStockRow, FfRequestRow, FfRequestKind,
+    FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfRequestRow, FfRequestKind,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffStageBadge } from './ff-shared';
@@ -332,16 +332,23 @@ function RequisitesTab({ warehouse, onChanged }: { warehouse: Warehouse; onChang
     );
 }
 
-/* ─── Fulfillment integration (skladbot) — блок в «Реквизитах» ──────────── */
+/* ─── Fulfillment integration (skladbot / wmscelicom) — блок в «Реквизитах» ── */
 
 const FF_EXPIRY_WARNING_MS = 30 * 24 * 60 * 60 * 1000; // 30 дней
+
+const FF_PROVIDER_LABELS: Record<string, string> = {
+    skladbot: 'skladbot.ru',
+    wmscelicom: 'Целиком (WMS Celicom)',
+};
 
 function FulfillmentSection({ warehouseId, status, onChanged }: {
     warehouseId: number;
     status: FulfillmentStatus | null;
     onChanged: () => void;
 }) {
+    const [provider, setProvider] = useState<FulfillmentProviderId>('skladbot');
     const [token, setToken] = useState('');
+    const [baseUrl, setBaseUrl] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [syncMsg, setSyncMsg] = useState('');
@@ -353,12 +360,21 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
             setError('Введите токен');
             return;
         }
+        if (provider === 'wmscelicom' && !baseUrl.trim()) {
+            setError('Укажите адрес инстанса (например client.wmscelicom.ru)');
+            return;
+        }
         setBusy(true);
         setError('');
         setSyncMsg('');
         try {
-            await api.connectFulfillment(warehouseId, token.trim());
+            await api.connectFulfillment(warehouseId, {
+                provider,
+                token: token.trim(),
+                base_url: provider === 'wmscelicom' ? baseUrl.trim() : null,
+            });
             setToken('');
+            setBaseUrl('');
             onChanged();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка подключения');
@@ -409,23 +425,50 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
 
     return (
         <div className="glass-card" style={{ padding: 24, marginTop: 16 }}>
-            <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0, marginBottom: 8 }}>Фулфилмент-интеграция (skladbot)</h3>
+            <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0, marginBottom: 8 }}>
+                Фулфилмент-интеграция
+                {connected && status?.provider ? ` (${FF_PROVIDER_LABELS[status.provider] || status.provider})` : ''}
+            </h3>
 
             {!connected ? (
                 <>
                     <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 20 }}>
-                        Подключите личный кабинет skladbot.ru по seller-токену — появятся вкладки
-                        «ФФ остатки», «ФФ сборка» и «ФФ приёмки» с данными фулфилмента.
+                        {provider === 'skladbot'
+                            ? 'Подключите личный кабинет skladbot.ru по seller-токену — появятся вкладки «ФФ остатки», «ФФ сборка» и «ФФ приёмки» с данными фулфилмента.'
+                            : 'Подключите инстанс «Целиком» (WMS Celicom) по API-токену и адресу инстанса — появятся вкладки «ФФ остатки», «ФФ сборка» (отгрузки FBO) и «ФФ приёмки».'}
                     </p>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', maxWidth: 700 }}>
-                        <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', maxWidth: 860, flexWrap: 'wrap' }}>
+                        <div className="form-group" style={{ width: 220, marginBottom: 0 }}>
+                            <label className="form-label">Провайдер</label>
+                            <select
+                                className="form-input"
+                                value={provider}
+                                onChange={e => setProvider(e.target.value as FulfillmentProviderId)}
+                            >
+                                <option value="skladbot">skladbot.ru</option>
+                                <option value="wmscelicom">Целиком (WMS Celicom)</option>
+                            </select>
+                        </div>
+                        {provider === 'wmscelicom' && (
+                            <div className="form-group" style={{ width: 260, marginBottom: 0 }}>
+                                <label className="form-label">Адрес инстанса</label>
+                                <input
+                                    className="form-input"
+                                    value={baseUrl}
+                                    onChange={e => setBaseUrl(e.target.value)}
+                                    placeholder="client.wmscelicom.ru"
+                                    autoComplete="off"
+                                />
+                            </div>
+                        )}
+                        <div className="form-group" style={{ flex: 1, minWidth: 220, marginBottom: 0 }}>
                             <label className="form-label">Токен</label>
                             <input
                                 className="form-input"
                                 type="password"
                                 value={token}
                                 onChange={e => setToken(e.target.value)}
-                                placeholder="Seller-токен skladbot.ru"
+                                placeholder={provider === 'skladbot' ? 'Seller-токен skladbot.ru' : 'API-токен Целиком'}
                                 autoComplete="off"
                             />
                         </div>
@@ -439,21 +482,25 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
                     <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '8px 16px', fontSize: 13, maxWidth: 700, marginBottom: 16 }}>
                         <span style={{ color: 'var(--color-text-muted)' }}>Кабинет</span>
                         <span style={{ fontWeight: 600 }}>
-                            {status?.customer_name || '—'}
+                            {status?.customer_name || status?.api_base_url || '—'}
                             {status?.customer_id ? ` (#${status.customer_id})` : ''}
                         </span>
                         <span style={{ color: 'var(--color-text-muted)' }}>Токен</span>
                         <span>{status?.key_preview || '—'}</span>
-                        <span style={{ color: 'var(--color-text-muted)' }}>Действует до</span>
-                        <span
-                            style={{
-                                color: expired ? 'var(--color-danger)' : expiringSoon ? 'var(--color-warning)' : undefined,
-                                fontWeight: expired || expiringSoon ? 600 : 400,
-                            }}
-                        >
-                            {status?.token_expires_at ? formatDate(status.token_expires_at) : '—'}
-                            {expired ? ' — истёк, переподключите' : expiringSoon ? ' — скоро истечёт' : ''}
-                        </span>
+                        {(status?.token_expires_at || status?.provider === 'skladbot') && (
+                            <>
+                                <span style={{ color: 'var(--color-text-muted)' }}>Действует до</span>
+                                <span
+                                    style={{
+                                        color: expired ? 'var(--color-danger)' : expiringSoon ? 'var(--color-warning)' : undefined,
+                                        fontWeight: expired || expiringSoon ? 600 : 400,
+                                    }}
+                                >
+                                    {status?.token_expires_at ? formatDate(status.token_expires_at) : '—'}
+                                    {expired ? ' — истёк, переподключите' : expiringSoon ? ' — скоро истечёт' : ''}
+                                </span>
+                            </>
+                        )}
                         <span style={{ color: 'var(--color-text-muted)' }}>Последняя синхронизация</span>
                         <span>{status?.last_sync_at ? formatDateTime(status.last_sync_at) : 'ещё не выполнялась'}</span>
                     </div>
@@ -1640,12 +1687,18 @@ function DeliveryTab({ warehouseId }: { warehouseId: number }) {
     );
 }
 
-/* ─── Tab: ФФ остатки (skladbot) ────────────────────────────────────────── */
+/* ─── Tab: ФФ остатки ───────────────────────────────────────────────────── */
+
+type FfStockQuickFilter = 'diff' | 'unmatched' | null;
 
 function FfStocksTab({ warehouseId }: { warehouseId: number }) {
     const [data, setData] = useState<FfStocksResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [subjectFilter, setSubjectFilter] = useState('');
+    const [brandFilter, setBrandFilter] = useState('');
+    const [search, setSearch] = useState('');
+    const [quickFilter, setQuickFilter] = useState<FfStockQuickFilter>(null);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -1658,11 +1711,28 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
         return () => controller.abort();
     }, [warehouseId]);
 
+    const rows = useMemo(() => {
+        let result = data?.rows ?? [];
+        if (subjectFilter) result = result.filter(r => r.subject === subjectFilter);
+        if (brandFilter) result = result.filter(r => r.brand === brandFilter);
+        const q = search.trim().toLowerCase();
+        if (q) {
+            result = result.filter(r =>
+                r.barcode.toLowerCase().includes(q)
+                || (r.article_seller ?? '').toLowerCase().includes(q)
+                || (r.vendor_code ?? '').toLowerCase().includes(q)
+            );
+        }
+        if (quickFilter === 'diff') result = result.filter(r => r.diff !== 0);
+        if (quickFilter === 'unmatched') result = result.filter(r => r.nomenclature_id === null);
+        return result;
+    }, [data, subjectFilter, brandFilter, search, quickFilter]);
+
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
     if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>;
 
     const totals = data?.totals;
-    const rows = data?.rows ?? [];
+    const hasFilters = Boolean(subjectFilter || brandFilter || search.trim() || quickFilter);
 
     const diffCell = (v: number) => {
         if (!v) return <span style={{ color: 'var(--color-text-muted)' }}>0</span>;
@@ -1677,21 +1747,18 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
         { key: 'barcode', label: 'ШК' },
         {
             key: 'article_seller', label: 'Наш артикул',
-            render: (_: unknown, row: FfStockRow) => row.article_seller ?? row.vendor_code ?? '—',
-            exportValue: (row: FfStockRow) => row.article_seller ?? row.vendor_code ?? '',
-        },
-        {
-            key: 'name', label: 'Название',
-            render: (v: string | null, row: FfStockRow) => (
+            render: (_: unknown, row: FfStockRow) => (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <span>{v || '—'}</span>
+                    <span>{row.article_seller ?? row.vendor_code ?? '—'}</span>
                     {row.nomenclature_id === null && (
                         <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>нет в номенклатуре</span>
                     )}
                 </span>
             ),
-            exportValue: (row: FfStockRow) => row.name ?? '',
+            exportValue: (row: FfStockRow) => row.article_seller ?? row.vendor_code ?? '',
         },
+        { key: 'subject', label: 'Предмет', render: (v: string | null) => v || '—' },
+        { key: 'brand', label: 'Бренд', render: (v: string | null) => v || '—' },
         { key: 'ff_good', label: 'ФФ годный', align: 'right', format: 'number' },
         { key: 'ff_reserve', label: 'ФФ резерв', align: 'right', format: 'number' },
         {
@@ -1714,38 +1781,86 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
         { key: 'diff', label: 'Расхождение', align: 'right', render: (v: number) => diffCell(v) },
     ];
 
-    const summary: { label: string; value: number; color?: string }[] = totals ? [
+    const summary: { label: string; value: number; color?: string; filter?: FfStockQuickFilter }[] = totals ? [
         { label: 'Годный ФФ', value: totals.ff_good },
         { label: 'Резерв', value: totals.ff_reserve },
         { label: 'Брак ФФ', value: totals.ff_defect, color: totals.ff_defect > 0 ? 'var(--color-warning)' : undefined },
         { label: 'У нас', value: totals.our_quantity },
-        { label: 'Расхождение', value: totals.diff, color: totals.diff > 0 ? 'var(--color-success)' : totals.diff < 0 ? 'var(--color-danger)' : undefined },
-        { label: 'Несматчено', value: totals.unmatched, color: totals.unmatched > 0 ? 'var(--color-warning)' : undefined },
+        { label: 'Расхождение', value: totals.diff, color: totals.diff > 0 ? 'var(--color-success)' : totals.diff < 0 ? 'var(--color-danger)' : undefined, filter: 'diff' },
+        { label: 'Несматчено', value: totals.unmatched, color: totals.unmatched > 0 ? 'var(--color-warning)' : undefined, filter: 'unmatched' },
     ] : [];
 
     return (
         <>
             {totals && (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12, marginBottom: 16 }}>
-                    {summary.map(s => (
-                        <div key={s.label} className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
-                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{s.label}</div>
-                            <div style={{ fontSize: 24, fontWeight: 700, color: s.color }}>
-                                {s.label === 'Расхождение' && s.value > 0 ? '+' : ''}{formatNumber(s.value, 0)}
+                    {summary.map(s => {
+                        const filter = s.filter ?? null;
+                        const active = filter !== null && quickFilter === filter;
+                        return (
+                            <div
+                                key={s.label}
+                                className="glass-card"
+                                onClick={filter ? () => setQuickFilter(prev => prev === filter ? null : filter) : undefined}
+                                title={filter ? (active ? 'Сбросить фильтр' : 'Показать товары с этим признаком') : undefined}
+                                style={{
+                                    padding: 16,
+                                    textAlign: 'center',
+                                    cursor: filter ? 'pointer' : undefined,
+                                    border: active ? '1px solid var(--color-accent)' : '1px solid transparent',
+                                }}
+                            >
+                                <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{s.label}</div>
+                                <div style={{ fontSize: 24, fontWeight: 700, color: s.color }}>
+                                    {s.label === 'Расхождение' && s.value > 0 ? '+' : ''}{formatNumber(s.value, 0)}
+                                </div>
                             </div>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
             )}
 
-            <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-                Синхронизировано: {data?.synced_at ? formatDateTime(data.synced_at) : 'ещё не выполнялась'}
+            <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                <select className="input" style={{ maxWidth: 200, fontSize: 13 }} value={subjectFilter} onChange={e => setSubjectFilter(e.target.value)}>
+                    <option value="">Предмет: Все</option>
+                    {(data?.subjects ?? []).map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <select className="input" style={{ maxWidth: 200, fontSize: 13 }} value={brandFilter} onChange={e => setBrandFilter(e.target.value)}>
+                    <option value="">Бренд: Все</option>
+                    {(data?.brands ?? []).map(b => <option key={b} value={b}>{b}</option>)}
+                </select>
+                <input
+                    className="input"
+                    style={{ maxWidth: 240, fontSize: 13 }}
+                    placeholder="🔍 Баркод / артикул"
+                    value={search}
+                    onChange={e => setSearch(e.target.value)}
+                />
+                {quickFilter && (
+                    <span className="badge badge-info" style={{ fontSize: 12 }}>
+                        {quickFilter === 'diff' ? 'Только с расхождением' : 'Только несматченные'}
+                    </span>
+                )}
+                {hasFilters && (
+                    <button
+                        className="btn btn-sm btn-secondary"
+                        onClick={() => { setSubjectFilter(''); setBrandFilter(''); setSearch(''); setQuickFilter(null); }}
+                    >
+                        Сбросить
+                    </button>
+                )}
+                <span style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--color-text-muted)' }}>
+                    {hasFilters ? `Показано: ${formatNumber(rows.length, 0)} из ${formatNumber(data?.rows.length ?? 0, 0)} · ` : ''}
+                    Синхронизировано: {data?.synced_at ? formatDateTime(data.synced_at) : 'ещё не выполнялась'}
+                </span>
             </div>
 
             <TanStackDataTable
                 columns={cols}
                 data={rows}
-                emptyText="Нет данных — выполните синхронизацию во вкладке «Реквизиты»"
+                emptyText={hasFilters
+                    ? 'Ничего не найдено по заданным фильтрам'
+                    : 'Нет данных — выполните синхронизацию во вкладке «Реквизиты»'}
                 emptyIcon="📦"
                 exportName="ff_stocks"
             />
@@ -1753,7 +1868,7 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
     );
 }
 
-/* ─── Tabs: ФФ сборка / ФФ приёмки (skladbot) ───────────────────────────── */
+/* ─── Tabs: ФФ сборка / ФФ приёмки ──────────────────────────────────────── */
 
 function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug: string; kind: FfRequestKind }) {
     const [rows, setRows] = useState<FfRequestRow[]>([]);

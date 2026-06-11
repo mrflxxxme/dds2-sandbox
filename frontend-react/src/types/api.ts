@@ -3169,7 +3169,9 @@ export interface BasketEvaluation {
   cities: CitySpeedDTO[] | null;
 }
 
-// ─── Fulfillment integration (skladbot) ────────────────────────────────────
+// ─── Fulfillment integration (skladbot, wmscelicom) ────────────────────────
+
+export type FulfillmentProviderId = 'skladbot' | 'wmscelicom';
 
 export interface FulfillmentStatus {
   connected: boolean;
@@ -3179,12 +3181,16 @@ export interface FulfillmentStatus {
   customer_id: number | null;
   customer_name: string | null;
   token_expires_at: string | null;
+  /** wmscelicom: адрес клиентского инстанса, на который ходим */
+  api_base_url: string | null;
   last_sync_at: string | null;
 }
 
 export interface FulfillmentConnectPayload {
-  provider: 'skladbot';
+  provider: FulfillmentProviderId;
   token: string;
+  /** wmscelicom: адрес инстанса {client}.wmscelicom.ru */
+  base_url?: string | null;
 }
 
 export interface FfSyncResult {
@@ -3201,6 +3207,10 @@ export interface FfStockRow {
   nomenclature_id: number | null;
   /** наш артикул (если товар сматчен) */
   article_seller: string | null;
+  /** предмет из номенклатуры (если сматчен) */
+  subject: string | null;
+  /** бренд из номенклатуры (если сматчен) */
+  brand: string | null;
   ff_good: number;
   ff_reserve: number;
   ff_defect: number;
@@ -3225,6 +3235,10 @@ export interface FfStocksResponse {
   rows: FfStockRow[];
   totals: FfStockTotals;
   synced_at: string | null;
+  /** distinct предметы для фильтра */
+  subjects: string[];
+  /** distinct бренды для фильтра */
+  brands: string[];
 }
 
 export type FfRequestKind = 'assembly' | 'inbound';
