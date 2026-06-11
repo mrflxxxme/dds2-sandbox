@@ -11,6 +11,7 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.assembly import (
+    AssemblyFlowAnalyticsResponse,
     AssemblyHistoryResponse,
     AssemblyListResponse,
     AssemblyRequestCreate,
@@ -23,10 +24,21 @@ from backend.schemas.assembly import (
     RefreshFromFboResponse,
     ShipBulk,
 )
-from backend.services import assembly_service
+from backend.services import assembly_service, fulfillment_service
+from backend.services.assembly.analytics import get_assembly_flow_analytics
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse/assembly", tags=["Assembly"])
+
+
+def _parse_warehouse_ids(warehouse_ids: str | None) -> list[int] | None:
+    """CSV warehouse_ids → list[int]; нечисловой ввод → 422 (не 500)."""
+    if not warehouse_ids:
+        return None
+    try:
+        return [int(x) for x in warehouse_ids.split(",") if x.strip()] or None
+    except ValueError:
+        raise HTTPException(status_code=422, detail="warehouse_ids: ожидаются целые через запятую") from None
 
 
 # --- List -------------------------------------------------------------------
@@ -107,7 +119,7 @@ async def get_logistics_analytics(
     db: AsyncSession = Depends(get_db),
 ):
     """Logistics cost analytics: summary, by destination, by route."""
-    wh_ids = [int(x) for x in warehouse_ids.split(",") if x.strip()] if warehouse_ids else None
+    wh_ids = _parse_warehouse_ids(warehouse_ids)
     brand_list = [x.strip() for x in brands.split(",") if x.strip()] if brands else None
     return await assembly_service.get_logistics_analytics(
         db,
@@ -116,6 +128,34 @@ async def get_logistics_analytics(
         date_to=date_to,
         warehouse_ids=wh_ids,
         brands=brand_list,
+    )
+
+
+# --- Flow analytics ----------------------------------------------------------
+
+
+@router.get("/flow-analytics", response_model=AssemblyFlowAnalyticsResponse)
+async def get_flow_analytics(
+    date_from: date | None = Query(None, description="Период по created_at заявки; пусто — всё время"),
+    date_to: date | None = Query(None),
+    warehouse_ids: str | None = Query(None, description="Comma-separated warehouse IDs"),
+    assembly_threshold_days: int = Query(3, ge=1, le=365),
+    ship_threshold_days: int = Query(2, ge=1, le=365),
+    delivery_threshold_days: int = Query(7, ge=1, le=365),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Аналитика потока сборки: длительности этапов, матрица переходов, аномалии."""
+    wh_ids = _parse_warehouse_ids(warehouse_ids)
+    return await get_assembly_flow_analytics(
+        db,
+        project.id,
+        date_from=date_from,
+        date_to=date_to,
+        warehouse_ids=wh_ids,
+        assembly_threshold_days=assembly_threshold_days,
+        ship_threshold_days=ship_threshold_days,
+        delivery_threshold_days=delivery_threshold_days,
     )
 
 
@@ -145,11 +185,13 @@ async def get_assembly_request(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get a single assembly request by ID."""
+    """Get a single assembly request by ID (+ привязанная ФФ-заявка, если есть)."""
     req = await assembly_service.get_assembly_request(db, project.id, request_id)
     if not req:
         raise HTTPException(404, "Assembly request not found")
-    return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    data = await assembly_service._build_response(db, req)
+    data.update(await fulfillment_service.get_ff_link_for_assembly(db, project.id, request_id) or {})
+    return AssemblyRequestResponse.model_validate(data)
 
 
 # --- Update -----------------------------------------------------------------

@@ -35,6 +35,9 @@ const navGroups = [
         items: [
             { href: '/warehouse', label: 'Склады', icon: '🏢', pageKey: 'warehouse' },
             { href: '/warehouse/assembly', label: 'Заявки на сборку', icon: '📋', pageKey: 'assembly' },
+            { href: '/warehouse/assembly/distribution', label: 'Распределение', icon: '🧩', pageKey: 'assembly' },
+            { href: '/warehouse/assembly/analytics', label: 'Анализ сборки', icon: '⏱️', pageKey: 'assembly' },
+            { href: '/warehouse/ff-requests', label: 'Заявки ФФ', icon: '🔗', pageKey: 'assembly' },
             { href: '/warehouse/logistics', label: 'Лист логиста', icon: '🚛', pageKey: 'logistics' },
             { href: '/warehouse/stock', label: 'Сводные остатки', icon: '📦', pageKey: 'stocks' },
             { href: '/warehouse/fbo-supplies', label: 'Поставки FBO', icon: '📮', pageKey: 'fbo' },

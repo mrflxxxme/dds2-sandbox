@@ -1,7 +1,8 @@
-/** Fulfillment integration API methods (skladbot.ru) */
+/** Fulfillment integration API methods (skladbot.ru, wmscelicom) */
 import { ApiClient } from './client';
 import type {
     FfLinkPayload,
+    FfOverviewResponse,
     FfRequestDetail,
     FfRequestKind,
     FfRequestRow,
@@ -17,9 +18,8 @@ export function addFulfillmentMethods(api: ApiClient) {
         getFulfillmentStatus(warehouseId: number) {
             return api.request<FulfillmentStatus>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/status`);
         },
-        connectFulfillment(warehouseId: number, token: string) {
-            const body: FulfillmentConnectPayload = { provider: 'skladbot', token };
-            return api.request<FulfillmentStatus>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/connect`, body);
+        connectFulfillment(warehouseId: number, payload: FulfillmentConnectPayload) {
+            return api.request<FulfillmentStatus>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/connect`, payload);
         },
         disconnectFulfillment(warehouseId: number) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/connect`);
@@ -33,6 +33,16 @@ export function addFulfillmentMethods(api: ApiClient) {
         // ─── Stocks ──────────────────────────────────────────────────
         getFulfillmentStocks(warehouseId: number) {
             return api.request<FfStocksResponse>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/stocks`);
+        },
+
+        // ─── Overview (сводная «Заявки ФФ» по всем складам) ─────────
+        getFfOverview(params?: { kind?: FfRequestKind; warehouse_id?: number; only_unlinked?: boolean }) {
+            const query = new URLSearchParams();
+            if (params?.kind) query.set('kind', params.kind);
+            if (params?.warehouse_id != null) query.set('warehouse_id', String(params.warehouse_id));
+            if (params?.only_unlinked) query.set('only_unlinked', 'true');
+            const qs = query.toString();
+            return api.request<FfOverviewResponse>('GET', `/api/v1/warehouse/fulfillment/overview${qs ? `?${qs}` : ''}`);
         },
 
         // ─── Requests (заявки ФФ: сборка / приёмки) ─────────────────

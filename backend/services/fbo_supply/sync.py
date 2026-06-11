@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import and_, exists, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.cache import invalidate_cache
 from backend.models.assembly import AssemblyRequest, AssemblyStatus, AssemblyStatusHistory
 from backend.models.integrations import SyncLog
 from backend.models.warehouse import OutboundShipment, OutboundStatus
@@ -141,12 +142,16 @@ async def sync_fbo_supplies(
         await _backfill_supply_shipment_links(db, project_id, list(existing_map.values()))
 
         # 5. Auto-deliver linked shipments for ACCEPTED supplies
+        assembly_delivered = False
         for _wb_supply_id, supply in existing_map.items():
             if supply.wb_status == WbSupplyStatus.ACCEPTED and supply.outbound_shipment_id:
                 await _auto_deliver_shipment(db, project_id, supply.outbound_shipment_id)
-                await _auto_deliver_assembly(db, project_id, supply.id)
+                if await _auto_deliver_assembly(db, project_id, supply.id):
+                    assembly_delivered = True
 
         await db.commit()
+        if assembly_delivered:
+            await invalidate_cache("reports:assembly_flow")
 
         sync_log.status = "OK"
         sync_log.rows_fetched = len(all_supplies)
@@ -339,6 +344,7 @@ async def sync_fbo_statuses(
 
     updated = 0
     errors = 0
+    assembly_delivered = False
 
     try:
         # Fetch active supplies from FBW API (statuses 1-3 = non-final)
@@ -390,7 +396,8 @@ async def sync_fbo_statuses(
                     and supply.outbound_shipment_id
                 ):
                     await _auto_deliver_shipment(db, project_id, supply.outbound_shipment_id)
-                    await _auto_deliver_assembly(db, project_id, supply.id)
+                    if await _auto_deliver_assembly(db, project_id, supply.id):
+                        assembly_delivered = True
 
             except Exception as e:
                 logger.warning(
@@ -410,6 +417,8 @@ async def sync_fbo_statuses(
         errors += 1
 
     await db.commit()
+    if assembly_delivered:
+        await invalidate_cache("reports:assembly_flow")
 
     return {
         "synced": updated,
@@ -515,8 +524,13 @@ async def _auto_deliver_assembly(
     db: AsyncSession,
     project_id: int,
     fbo_supply_id: int,
-) -> None:
-    """Auto-deliver AssemblyRequest when linked FBO supply is ACCEPTED."""
+) -> bool:
+    """Auto-deliver AssemblyRequest when linked FBO supply is ACCEPTED.
+
+    Returns True если заявка переведена в DELIVERED (статус меняется в обход
+    assembly/status.py → после commit вызывающий обязан инвалидировать
+    reports:assembly_flow).
+    """
     result = await db.execute(
         select(AssemblyRequest).where(
             AssemblyRequest.wb_fbo_supply_id == fbo_supply_id,
@@ -542,3 +556,5 @@ async def _auto_deliver_assembly(
             "fbo_sync.auto_deliver_assembly",
             extra={"assembly_id": assembly_req.id, "project_id": project_id},
         )
+        return True
+    return False

@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.cache import invalidate_cache
 from backend.models.assembly import (
     AssemblyDraft,
     AssemblyRequest,
@@ -533,6 +534,8 @@ async def commit_draft(
     base_comment = draft.comment
 
     # 6. Create AssemblyRequest per pair (atomic — single transaction)
+    from backend.services.assembly.status import _log_status_change
+
     created_ids: list[int] = []
     try:
         for (source_ff_id, target_wb_name, package_type), barcodes in pair_items.items():
@@ -561,6 +564,18 @@ async def commit_draft(
             )
             db.add(assembly_req)
             await db.flush()
+
+            # Стартовая запись истории (None → IN_PROGRESS) — как в _create_one_request:
+            # без неё аналитика потока не знает момент входа в IN_PROGRESS.
+            await _log_status_change(
+                db,
+                project_id,
+                assembly_req.id,
+                None,
+                AssemblyStatus.IN_PROGRESS,
+                changed_by="system",
+                comment="Создана из черновика",
+            )
 
             for barcode, qty in barcodes.items():
                 if qty <= 0:
@@ -593,6 +608,8 @@ async def commit_draft(
         await db.rollback()
         logger.exception("commit_draft failed for draft_id=%s", draft_id)
         raise HTTPException(status_code=400, detail=f"Failed to commit draft: {e}") from None
+
+    await invalidate_cache("reports:assembly_flow")
 
     return AssemblyDraftCommitResponse(
         created_request_ids=created_ids,
@@ -717,6 +734,21 @@ async def _create_one_request(
     )
     db.add(req)
     await db.flush()
+
+    # Стартовая запись истории (None → IN_PROGRESS): без неё аналитика потока
+    # сборки не знает момент входа в IN_PROGRESS и падает на fallback created_at.
+    from backend.services.assembly.status import _log_status_change
+
+    await _log_status_change(
+        db,
+        project_id,
+        req.id,
+        None,
+        AssemblyStatus.IN_PROGRESS,
+        changed_by="system",
+        comment="Создана из черновика",
+    )
+
     for bc, qty in barcodes.items():
         if qty <= 0:
             continue
@@ -960,6 +992,8 @@ async def commit_unit(
         await db.rollback()
         logger.exception("commit_unit failed for draft_id=%s", draft_id)
         raise HTTPException(status_code=400, detail=f"Failed to commit unit: {e}") from None
+
+    await invalidate_cache("reports:assembly_flow")
 
     return AssemblyDraftCommitResponse(created_request_ids=created_ids, draft_id=draft_id)
 

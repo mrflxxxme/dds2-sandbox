@@ -687,6 +687,20 @@ export default function AssemblyDetailPage() {
                     {assembly.shipped_at && (
                         <InfoField label="Отгружена" value={formatDateTime(assembly.shipped_at)} />
                     )}
+                    {assembly.ff_request_id && (
+                        <InfoField
+                            label="Заявка ФФ"
+                            value={
+                                <Link
+                                    href={`/p/${slug}/warehouse/${assembly.ff_warehouse_id ?? assembly.warehouse_id}/ff-request/${assembly.ff_request_id}`}
+                                    title="Открыть ФФ-заявку и сверку состава"
+                                    style={{ color: 'var(--color-accent)' }}
+                                >
+                                    {assembly.ff_request_number}{assembly.ff_stage_title ? ` (${assembly.ff_stage_title})` : ''} →
+                                </Link>
+                            }
+                        />
+                    )}
                     {assembly.comment && (
                         <div style={{ gridColumn: '1 / -1' }}>
                             <InfoField label="Комментарий" value={assembly.comment} />
@@ -950,7 +964,7 @@ export default function AssemblyDetailPage() {
 
 // ─── Helper ──────────────────────────────────────────────────────────────────
 
-function InfoField({ label, value }: { label: string; value: string }) {
+function InfoField({ label, value }: { label: string; value: React.ReactNode }) {
     return (
         <div>
             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>{label}</div>

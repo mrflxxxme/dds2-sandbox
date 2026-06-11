@@ -1,6 +1,7 @@
 """
 Scheduler job: sync fulfillment stocks/requests for all warehouses with
-active skladbot integrations. Runs every 15 minutes (worker container only).
+active fulfillment integrations (skladbot, wmscelicom). Runs every
+15 minutes (worker container only).
 """
 
 import asyncio
@@ -18,7 +19,7 @@ SYNC_TIMEOUT = 600  # seconds per warehouse
 
 
 async def sync_all_fulfillment_warehouses():
-    """Iterate all active skladbot keys bound to warehouses and sync each.
+    """Iterate all active fulfillment keys bound to warehouses and sync each.
 
     Called by APScheduler every 15 minutes.
     SyncLog обновляется отдельной сессией в finally — никогда не остаётся
@@ -26,10 +27,17 @@ async def sync_all_fulfillment_warehouses():
     """
     logger.info("Fulfillment sync: starting for all warehouses")
 
+    from backend.services.fulfillment_service import SYNCABLE_FF_SERVICES, sync_warehouse
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(IntegrationKey.id, IntegrationKey.project_id, IntegrationKey.warehouse_id).where(
-                IntegrationKey.service == "skladbot",
+            select(
+                IntegrationKey.id,
+                IntegrationKey.project_id,
+                IntegrationKey.warehouse_id,
+                IntegrationKey.service,
+            ).where(
+                IntegrationKey.service.in_(SYNCABLE_FF_SERVICES),
                 IntegrationKey.warehouse_id.isnot(None),
                 IntegrationKey.is_active.is_(True),
                 IntegrationKey.is_deleted == False,  # noqa: E712
@@ -38,15 +46,13 @@ async def sync_all_fulfillment_warehouses():
         targets = result.all()
 
     if not targets:
-        logger.info("Fulfillment sync: no active skladbot keys, skipping")
+        logger.info("Fulfillment sync: no active fulfillment keys, skipping")
         return
-
-    from backend.services.fulfillment_service import sync_warehouse
 
     ok = 0
     errors = 0
 
-    for key_id, project_id, warehouse_id in targets:
+    for key_id, project_id, warehouse_id, service in targets:
         log_id = None
         log_status = "ERROR"
         log_error: str | None = None
@@ -57,7 +63,7 @@ async def sync_all_fulfillment_warehouses():
             async with AsyncSessionLocal() as db:
                 sync_log = SyncLog(
                     integration_id=key_id,
-                    service="skladbot",
+                    service=service,
                     sync_type="fulfillment",
                     started_at=utcnow(),
                     status="RUNNING",

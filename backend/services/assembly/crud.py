@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.cache import invalidate_cache
 from backend.models.assembly import (
     AssemblyDraft,
     AssemblyRequest,
@@ -746,6 +747,7 @@ async def create_assembly_request(
 
     await db.commit()
     await db.refresh(assembly_req)
+    await invalidate_cache("reports:assembly_flow")
     return assembly_req
 
 
@@ -923,6 +925,7 @@ async def update_assembly_request(
             raise ValueError(_format_deficit_error(deficits))
 
     await db.commit()
+    await invalidate_cache("reports:assembly_flow")
     # Expunge all cached objects so selectinload re-fetches fresh data from DB
     db.expunge_all()
     updated = await get_assembly_request(db, project_id, req.id)

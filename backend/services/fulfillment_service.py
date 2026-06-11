@@ -1,17 +1,22 @@
 # ruff: noqa: RUF001, RUF002, RUF003, E712
 """
-Service: fulfillment — интеграция с внешними фулфилментами (skladbot, migfull).
+Service: fulfillment — интеграция с внешними фулфилментами (skladbot, wmscelicom, migfull).
 
 Слой read-only зеркала: остатки (FulfillmentStock, полная замена при синке)
 и заявки (FulfillmentRequest, UPSERT с сохранением ручных связей).
 Документный контур (WarehouseStock / StockMovement) НЕ трогаем.
+
+Провайдеры различаются формой API; внутри сервиса всё сводится к
+нормализованным dict'ам (см. _apply_stocks / _apply_requests), дальше
+путь общий. Деталка заявки: skladbot — живой HTTP-вызов, wmscelicom —
+из raw зеркала (by-id эндпоинта у провайдера нет, состав приходит в списке).
 """
 
 import logging
 from datetime import date
 
 import httpx
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,25 +28,48 @@ from backend.integrations.skladbot_client import (
     SkladbotClient,
     decode_jwt_exp,
 )
+from backend.integrations.wmscelicom_client import WmsCelicomClient, normalize_base_url
 from backend.models import (
     FfRequestKind,
     FulfillmentRequest,
     FulfillmentStock,
     InboundReceipt,
+    InboundReceiptItem,
     IntegrationKey,
     Nomenclature,
     Warehouse,
     WarehouseStock,
 )
-from backend.models.assembly import AssemblyRequest
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.utils.crypto import decrypt as _decrypt, encrypt as _encrypt
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.fulfillment")
 
-FF_SERVICES = ("skladbot", "migfull")
+FF_SERVICES = ("skladbot", "migfull", "wmscelicom")
+# Провайдеры с реализованным pull-синком (migfull — будущий, ключ подключить нельзя)
+SYNCABLE_FF_SERVICES = ("skladbot", "wmscelicom")
 STOCKS_LIMIT = 5000
 REQUESTS_LIMIT = 500
+
+# Эвристика подбора кандидатов для несвязанных ФФ-заявок (overview):
+# база — близость дат |external_created_at − created_at| в днях → score,
+# дальше кандидат отбрасывается.
+_SUGGEST_DATE_SCORES = {0: 70, 1: 55, 2: 40}
+_SUGGEST_MIN_SCORE = 30
+_SUGGEST_TOP_N = 3
+_SUGGEST_CANDIDATES_LIMIT = 500
+_SUGGEST_CANDIDATE_STATUSES = (
+    AssemblyStatus.IN_PROGRESS.value,
+    AssemblyStatus.READY.value,
+    AssemblyStatus.VEHICLE_ASSIGNED.value,
+)
+
+
+def _provider_human(provider: str) -> str:
+    """Имя провайдера для пользовательских сообщений об ошибках."""
+    return "skladbot.ru" if provider == "skladbot" else "WMS Celicom"
+
 
 # Advisory lock namespace для синка (pg_advisory_xact_lock(ns, project_id)).
 # Лок по project_id (не warehouse_id): uq заявок — (project_id, provider,
@@ -80,6 +108,7 @@ async def get_status(db: AsyncSession, project_id: int, warehouse_id: int) -> di
         "customer_id": config.get("customer_id"),
         "customer_name": config.get("customer_name"),
         "token_expires_at": config.get("token_expires_at"),
+        "api_base_url": config.get("api_base_url"),
         "last_sync_at": key.last_sync_at,
     }
 
@@ -90,11 +119,14 @@ async def connect(
     warehouse_id: int,
     provider: str,
     token: str,
+    base_url: str | None = None,
 ) -> dict:
     """Validate the token and bind a fulfillment key to the warehouse.
 
-    Возвращает статус (FulfillmentStatus shape). Raises ValueError при
-    невалидном токене или отсутствующем складе.
+    Для wmscelicom обязателен base_url — адрес клиентского инстанса
+    ({client}.wmscelicom.ru), API живёт на нём. Возвращает статус
+    (FulfillmentStatus shape). Raises ValueError при невалидном токене,
+    провайдере или отсутствующем складе.
     """
     result = await db.execute(
         select(Warehouse.id).where(
@@ -106,20 +138,44 @@ async def connect(
     if result.scalar_one_or_none() is None:
         raise ValueError("Склад не найден в проекте")
 
-    client = SkladbotClient(token, project_id=project_id)
-    try:
-        customer = await client.test_connection()
-    except CircuitOpenError as e:
-        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
-    if customer is None:
-        raise ValueError("Токен невалидный: skladbot.ru не вернул данные customer. Проверьте токен.")
+    # Один склад — один активный провайдер: иначе get_integration() неоднозначен
+    current = await get_integration(db, project_id, warehouse_id)
+    if current and current.service != provider:
+        raise ValueError(f"К складу уже подключён {_provider_human(current.service)} — сначала отключите его")
 
-    expires_at = decode_jwt_exp(token)
-    config = {
-        "customer_id": customer.get("id"),
-        "customer_name": customer.get("name"),
-        "token_expires_at": expires_at.isoformat() if expires_at else None,
-    }
+    if provider == "skladbot":
+        skl_client = SkladbotClient(token, project_id=project_id)
+        try:
+            customer = await skl_client.test_connection()
+        except CircuitOpenError as e:
+            raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+        if customer is None:
+            raise ValueError("Токен невалидный: skladbot.ru не вернул данные customer. Проверьте токен.")
+
+        expires_at = decode_jwt_exp(token)
+        config = {
+            "customer_id": customer.get("id"),
+            "customer_name": customer.get("name"),
+            "token_expires_at": expires_at.isoformat() if expires_at else None,
+        }
+    elif provider == "wmscelicom":
+        api_base = normalize_base_url(base_url or "")
+        wms_client = WmsCelicomClient(api_base, token, project_id=project_id)
+        try:
+            ok = await wms_client.test_connection()
+        except CircuitOpenError as e:
+            raise ValueError(f"WMS Celicom временно недоступен, попробуйте позже ({e})") from e
+        if not ok:
+            raise ValueError("WMS Celicom не ответил на тестовый запрос. Проверьте адрес инстанса и токен.")
+
+        config = {
+            "api_base_url": api_base,
+            # «Кабинет» в UI — домен инстанса (другого имени API не отдаёт)
+            "customer_name": api_base.removeprefix("https://"),
+        }
+    else:
+        raise ValueError(f"Неподдерживаемый провайдер фулфилмента: {provider}")
+
     label = f"warehouse:{warehouse_id}"
 
     # UniqueConstraint(project_id, service, label) НЕ учитывает is_deleted:
@@ -162,9 +218,10 @@ async def connect(
         "connected": True,
         "provider": provider,
         "key_preview": "***" + token[-4:],
-        "customer_id": config["customer_id"],
-        "customer_name": config["customer_name"],
-        "token_expires_at": config["token_expires_at"],
+        "customer_id": config.get("customer_id"),
+        "customer_name": config.get("customer_name"),
+        "token_expires_at": config.get("token_expires_at"),
+        "api_base_url": config.get("api_base_url"),
         "last_sync_at": key.last_sync_at,
     }
 
@@ -204,29 +261,44 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     token = _decrypt(key.encrypted_key)
     config = key.config or {}
     customer_id = config.get("customer_id")
-    if not customer_id:
-        raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
+    api_base = str(config.get("api_base_url") or "")
+    if provider == "skladbot":
+        if not customer_id:
+            raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
+    elif provider == "wmscelicom":
+        if not api_base:
+            raise ValueError("В конфигурации ключа нет адреса инстанса — переподключите фулфилмент")
+    else:
+        raise ValueError(f"Синк для провайдера «{provider}» не реализован")
     await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
 
-    client = SkladbotClient(token, project_id=project_id)
+    human = _provider_human(provider)
     try:
-        items = await client.fetch_all_products(customer_id)
-        fetched_requests: list[tuple[int, list[dict]]] = []
-        for type_id in sorted(ASSEMBLY_TYPE_IDS | INBOUND_TYPE_IDS):
-            fetched_requests.append((type_id, await client.fetch_requests(type_id)))
+        if provider == "skladbot":
+            skl_client = SkladbotClient(token, project_id=project_id)
+            stock_items = [_normalize_skladbot_stock(i) for i in await skl_client.fetch_all_products(customer_id)]
+            fetched_requests: list[tuple[int, list[dict]]] = []
+            for type_id in sorted(ASSEMBLY_TYPE_IDS | INBOUND_TYPE_IDS):
+                fetched_requests.append((type_id, await skl_client.fetch_requests(type_id)))
+            request_rows = _normalize_skladbot_requests(fetched_requests)
+        else:
+            wms_client = WmsCelicomClient(api_base, token, project_id=project_id)
+            stock_items = [_normalize_wms_stock(i) for i in await wms_client.fetch_all_items()]
+            request_rows = [_normalize_wms_shipment(r) for r in await wms_client.fetch_shipments_fbo()]
+            request_rows += [_normalize_wms_unloading(r) for r in await wms_client.fetch_unloading_orders()]
     except CircuitOpenError as e:
-        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+        raise ValueError(f"{human} временно недоступен, попробуйте позже ({e})") from e
     except RateLimitError as e:
-        raise ValueError("skladbot.ru ограничил частоту запросов — повторите синк через минуту") from e
+        raise ValueError(f"{human} ограничил частоту запросов — повторите синк через минуту") from e
     except httpx.HTTPError as e:
-        raise ValueError(f"Сетевая ошибка при обращении к skladbot.ru: {e}") from e
+        raise ValueError(f"Сетевая ошибка при обращении к {human}: {e}") from e
 
     await db.execute(
         text("SELECT pg_advisory_xact_lock(:ns, :project_id)"),
         {"ns": _FF_SYNC_LOCK_NS, "project_id": project_id},
     )
-    stocks_synced, unmatched = await _apply_stocks(db, project_id, warehouse_id, provider, items)
-    requests_synced = await _apply_requests(db, project_id, warehouse_id, provider, fetched_requests)
+    stocks_synced, unmatched = await _apply_stocks(db, project_id, warehouse_id, provider, stock_items)
+    requests_synced = await _apply_requests(db, project_id, warehouse_id, provider, request_rows)
 
     synced_at = utcnow()
     key = await db.get(IntegrationKey, key_id)
@@ -250,6 +322,120 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     }
 
 
+# ─── Нормализация провайдер → общий вид ─────────────────────────────────────
+# Остатки: {barcode, name, vendor_code, external_product_id, qty_good,
+#           qty_reserve, qty_defect, qty_nominal}
+# Заявки:  {external_id, kind, number, type_id, type_name, status, stage_code,
+#           stage_title, is_completed, archived, expired, external_created_at, raw}
+
+
+def _normalize_skladbot_stock(item: dict) -> dict:
+    """skladbot /v1/products item → нормализованный остаток."""
+    pdid = item.get("product_data_id")
+    return {
+        "barcode": item.get("barcode"),
+        "name": item.get("name"),
+        "vendor_code": item.get("vendor_code"),
+        "external_product_id": str(pdid) if pdid is not None else None,
+        "qty_good": item.get("amount"),
+        "qty_reserve": item.get("reserve_amount"),
+        "qty_defect": item.get("repair_amount"),
+        "qty_nominal": item.get("nominale_amount"),
+    }
+
+
+def _normalize_skladbot_requests(fetched_by_type: list[tuple[int, list[dict]]]) -> list[dict]:
+    """skladbot /v1/requests rows → нормализованные заявки (kind по type_id)."""
+    rows: list[dict] = []
+    for type_id, items in fetched_by_type:
+        kind = FfRequestKind.ASSEMBLY.value if type_id in ASSEMBLY_TYPE_IDS else FfRequestKind.INBOUND.value
+        for row in items:
+            rows.append(
+                {
+                    "external_id": str(row.get("id")),
+                    "kind": kind,
+                    "number": row.get("delivery_number"),
+                    "type_id": type_id,
+                    "type_name": row.get("type"),
+                    "status": row.get("status"),
+                    "stage_code": row.get("stage_code"),
+                    "stage_title": row.get("stage_title"),
+                    "is_completed": bool(row.get("is_completed")),
+                    "archived": bool(row.get("archived")),
+                    "expired": bool(row.get("expired")),
+                    "external_created_at": _parse_date(row.get("created_at")),
+                    "raw": row,
+                }
+            )
+    return rows
+
+
+def _normalize_wms_stock(item: dict) -> dict:
+    """wmscelicom items/get item → нормализованный остаток.
+
+    Barcodes — массив (версии ШК); снапшот ключуется одним barcode — берём
+    первый непустой. Count → good, CountVirtual → nominal; reserve/defect API не отдаёт.
+    """
+    barcodes = item.get("Barcodes") or []
+    barcode = next((str(b).strip() for b in barcodes if b), "")
+    item_id = item.get("Id")
+    return {
+        "barcode": barcode,
+        "name": item.get("Name"),
+        "vendor_code": item.get("Article"),
+        "external_product_id": str(item_id) if item_id is not None else None,
+        "qty_good": item.get("Count"),
+        "qty_reserve": 0,
+        "qty_defect": 0,
+        "qty_nominal": item.get("CountVirtual"),
+    }
+
+
+def _wms_shipment_completed(status: str) -> bool:
+    """Терминальные статусы отгрузки FBO (в т.ч. «Принята в СЦ…» с латинской «c»)."""
+    return status in {"Отгружена", "Вручена получателю"} or status.startswith("Принята в СЦ")
+
+
+def _normalize_wms_shipment(row: dict) -> dict:
+    """wmscelicom shipmentsfbo/list row → нормализованная заявка kind=assembly."""
+    status = str(row.get("status") or "")
+    return {
+        "external_id": str(row.get("shipment_fbo_id") or ""),
+        "kind": FfRequestKind.ASSEMBLY.value,
+        "number": row.get("external_order") or None,
+        "type_id": None,
+        "type_name": "Отгрузка FBO",
+        "status": status or None,
+        "stage_code": None,
+        "stage_title": status or None,
+        "is_completed": _wms_shipment_completed(status),
+        "archived": status == "Аннулирована",
+        "expired": False,
+        "external_created_at": _parse_date(row.get("date_time")),
+        "raw": row,
+    }
+
+
+def _normalize_wms_unloading(row: dict) -> dict:
+    """wmscelicom unloadingorders/list row → нормализованная заявка kind=inbound."""
+    status = row.get("status")
+    return {
+        "external_id": str(row.get("unloading_order_id") or ""),
+        "kind": FfRequestKind.INBOUND.value,
+        "number": None,
+        "type_id": None,
+        "type_name": "Заявка на приёмку",
+        "status": status,
+        "stage_code": None,
+        "stage_title": row.get("unloading_status") or status,
+        "is_completed": bool(row.get("unloading_close_date")),
+        "archived": False,
+        "expired": False,
+        "external_created_at": _parse_date(row.get("create_date_time")),
+        "raw": row,
+    }
+
+
 async def _apply_stocks(
     db: AsyncSession,
     project_id: int,
@@ -257,7 +443,7 @@ async def _apply_stocks(
     provider: str,
     items: list[dict],
 ) -> tuple[int, int]:
-    """Aggregate fetched provider stock and fully replace the snapshot.
+    """Aggregate normalized provider stock and fully replace the snapshot.
 
     Returns (rows_written, unmatched_barcodes).
     """
@@ -271,20 +457,19 @@ async def _apply_stocks(
             continue
         agg = aggregated.get(barcode)
         if agg is None:
-            pdid = item.get("product_data_id")
             agg = aggregated[barcode] = {
                 "name": item.get("name"),
                 "vendor_code": item.get("vendor_code"),
-                "external_product_id": str(pdid) if pdid is not None else None,
+                "external_product_id": item.get("external_product_id"),
                 "qty_good": 0,
                 "qty_reserve": 0,
                 "qty_defect": 0,
                 "qty_nominal": 0,
             }
-        agg["qty_good"] += int(item.get("amount") or 0)
-        agg["qty_reserve"] += int(item.get("reserve_amount") or 0)
-        agg["qty_defect"] += int(item.get("repair_amount") or 0)
-        agg["qty_nominal"] += int(item.get("nominale_amount") or 0)
+        agg["qty_good"] += int(item.get("qty_good") or 0)
+        agg["qty_reserve"] += int(item.get("qty_reserve") or 0)
+        agg["qty_defect"] += int(item.get("qty_defect") or 0)
+        agg["qty_nominal"] += int(item.get("qty_nominal") or 0)
 
     # Резолв номенклатуры одним запросом по всем barcode
     nom_by_barcode: dict[str, int] = {}
@@ -336,23 +521,22 @@ async def _apply_requests(
     project_id: int,
     warehouse_id: int,
     provider: str,
-    fetched_by_type: list[tuple[int, list[dict]]],
+    rows: list[dict],
 ) -> int:
-    """UPSERT the request mirror from prefetched provider data.
+    """UPSERT the request mirror from normalized provider rows.
 
     Существующие строки: обновляем status/stage/number/type_name/даты/флаги/
     synced_at/raw; ручные связи (assembly_request_id/inbound_receipt_id) НЕ трогаем.
     """
-    fetched: list[tuple[int, dict]] = []
-    for type_id, rows in fetched_by_type:
-        fetched.extend((type_id, row) for row in rows)
-
-    # Дедуп по external_id в рамках батча (защита от пересечения выборок)
-    by_external: dict[str, tuple[int, dict]] = {}
-    for type_id, row in fetched:
-        external_id = str(row.get("id"))
+    # Дедуп по external_id в рамках батча (защита от пересечения выборок);
+    # строки без id (битый ответ провайдера) пропускаем.
+    by_external: dict[str, dict] = {}
+    for row in rows:
+        external_id = row.get("external_id")
+        if not external_id or external_id == "None":
+            continue
         if external_id not in by_external:
-            by_external[external_id] = (type_id, row)
+            by_external[external_id] = row
 
     if not by_external:
         return 0
@@ -367,40 +551,39 @@ async def _apply_requests(
     existing = {r.external_id: r for r in result.scalars().all()}
 
     synced_at = utcnow()
-    for external_id, (type_id, row) in by_external.items():
+    for external_id, row in by_external.items():
         req = existing.get(external_id)
         if req:
-            req.number = row.get("delivery_number") or req.number
-            req.type_name = row.get("type") or req.type_name
-            req.status = row.get("status")
-            req.stage_code = row.get("stage_code")
-            req.stage_title = row.get("stage_title")
-            req.archived = bool(row.get("archived"))
-            req.expired = bool(row.get("expired"))
-            req.is_completed = bool(row.get("is_completed"))
-            req.external_created_at = _parse_date(row.get("created_at")) or req.external_created_at
+            req.number = row["number"] or req.number
+            req.type_name = row["type_name"] or req.type_name
+            req.status = row["status"]
+            req.stage_code = row["stage_code"]
+            req.stage_title = row["stage_title"]
+            req.archived = row["archived"]
+            req.expired = row["expired"]
+            req.is_completed = row["is_completed"]
+            req.external_created_at = row["external_created_at"] or req.external_created_at
             req.synced_at = synced_at
-            req.raw = row
+            req.raw = row["raw"]
         else:
-            kind = FfRequestKind.ASSEMBLY.value if type_id in ASSEMBLY_TYPE_IDS else FfRequestKind.INBOUND.value
             db.add(
                 FulfillmentRequest(
                     project_id=project_id,
                     warehouse_id=warehouse_id,
                     provider=provider,
                     external_id=external_id,
-                    number=row.get("delivery_number"),
-                    kind=kind,
-                    type_id=type_id,
-                    type_name=row.get("type"),
-                    status=row.get("status"),
-                    stage_code=row.get("stage_code"),
-                    stage_title=row.get("stage_title"),
-                    is_completed=bool(row.get("is_completed")),
-                    archived=bool(row.get("archived")),
-                    expired=bool(row.get("expired")),
-                    external_created_at=_parse_date(row.get("created_at")),
-                    raw=row,
+                    number=row["number"],
+                    kind=row["kind"],
+                    type_id=row["type_id"],
+                    type_name=row["type_name"],
+                    status=row["status"],
+                    stage_code=row["stage_code"],
+                    stage_title=row["stage_title"],
+                    is_completed=row["is_completed"],
+                    archived=row["archived"],
+                    expired=row["expired"],
+                    external_created_at=row["external_created_at"],
+                    raw=row["raw"],
                     synced_at=synced_at,
                 )
             )
@@ -446,27 +629,38 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     )
     our_rows = list(ws_result.scalars().all())
 
-    # article_seller одним запросом для всех номенклатур (без N+1)
+    # article_seller / subject / brand одним запросом для всех номенклатур (без N+1)
     nom_ids = {r.nomenclature_id for r in ff_rows if r.nomenclature_id}
     nom_ids |= {r.nomenclature_id for r in our_rows if r.nomenclature_id}
-    article_by_nom: dict[int, str | None] = {}
+    nom_by_id: dict[int, tuple[str | None, str | None, str | None]] = {}
     if nom_ids:
         nom_result = await db.execute(
-            select(Nomenclature.id, Nomenclature.article_seller).where(
+            select(
+                Nomenclature.id,
+                Nomenclature.article_seller,
+                Nomenclature.subject,
+                Nomenclature.brand,
+            ).where(
                 Nomenclature.project_id == project_id,
                 Nomenclature.id.in_(nom_ids),
             )
         )
-        article_by_nom = {row.id: row.article_seller for row in nom_result.all()}
+        nom_by_id = {row.id: (row.article_seller, row.subject, row.brand) for row in nom_result.all()}
+
+    def _nom_fields(nom_id: int | None) -> tuple[str | None, str | None, str | None]:
+        return nom_by_id.get(nom_id, (None, None, None)) if nom_id else (None, None, None)
 
     rows: dict[str, dict] = {}
     for r in ff_rows:
+        article, subject, brand = _nom_fields(r.nomenclature_id)
         rows[r.barcode] = {
             "barcode": r.barcode,
             "name": r.name,
             "vendor_code": r.vendor_code,
             "nomenclature_id": r.nomenclature_id,
-            "article_seller": article_by_nom.get(r.nomenclature_id) if r.nomenclature_id else None,
+            "article_seller": article,
+            "subject": subject,
+            "brand": brand,
             "ff_good": r.qty_good,
             "ff_reserve": r.qty_reserve,
             "ff_defect": r.qty_defect,
@@ -478,12 +672,15 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     for wr in our_rows:
         row = rows.get(wr.barcode)
         if row is None:
+            article, subject, brand = _nom_fields(wr.nomenclature_id)
             row = rows[wr.barcode] = {
                 "barcode": wr.barcode,
                 "name": None,
                 "vendor_code": None,
                 "nomenclature_id": wr.nomenclature_id,
-                "article_seller": article_by_nom.get(wr.nomenclature_id),
+                "article_seller": article,
+                "subject": subject,
+                "brand": brand,
                 "ff_good": 0,
                 "ff_reserve": 0,
                 "ff_defect": 0,
@@ -493,8 +690,11 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
                 "diff": 0,
             }
         elif row["nomenclature_id"] is None:
+            article, subject, brand = _nom_fields(wr.nomenclature_id)
             row["nomenclature_id"] = wr.nomenclature_id
-            row["article_seller"] = article_by_nom.get(wr.nomenclature_id)
+            row["article_seller"] = article
+            row["subject"] = subject
+            row["brand"] = brand
         row["our_quantity"] = wr.quantity
         row["our_defect"] = wr.defect_quantity
         row["diff"] = row["ff_good"] - wr.quantity
@@ -509,7 +709,13 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         "unmatched": sum(1 for r in ff_rows if r.nomenclature_id is None),
     }
     synced_at = max((r.synced_at for r in ff_rows), default=None)
-    return {"rows": out_rows, "totals": totals, "synced_at": synced_at}
+    return {
+        "rows": out_rows,
+        "totals": totals,
+        "synced_at": synced_at,
+        "subjects": sorted({r["subject"] for r in out_rows if r["subject"]}),
+        "brands": sorted({r["brand"] for r in out_rows if r["brand"]}),
+    }
 
 
 # ─── Requests view + linking ─────────────────────────────────────────────────
@@ -595,6 +801,321 @@ async def list_requests(
     return [_request_to_dict(r, assembly_map, inbound_map) for r in requests]
 
 
+# ─── Overview: сводка по всем складам с активной ФФ-интеграцией ─────────────
+
+
+def _raw_assembly_composition(provider: str, raw: dict | None) -> dict[str, int]:
+    """{barcode: qty} из raw зеркала assembly-заявки.
+
+    Только wmscelicom: состав приходит в списочном методе внутри коробов
+    (packages → items, см. _wms_detail_parts). У skladbot состава в списке
+    нет (только в живой деталке) → пустой dict.
+    """
+    if provider != "wmscelicom" or not raw:
+        return {}
+    packages = raw.get("packages") or {}
+    pkg_rows = packages.values() if isinstance(packages, dict) else packages
+    out: dict[str, int] = {}
+    for pkg in pkg_rows:
+        if not isinstance(pkg, dict):
+            continue
+        for item in pkg.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            barcode = str(item.get("barcode") or "").strip()
+            if not barcode:
+                continue
+            out[barcode] = out.get(barcode, 0) + int(item.get("count") or 0)
+    return out
+
+
+def _suggest_for_request(
+    ff_created: date,
+    ff_comp: dict[str, int],
+    candidates: list[AssemblyRequest],
+    items_by_candidate: dict[int, dict[str, int]],
+) -> list[dict]:
+    """Топ-кандидаты мэтчинга для одной ФФ-заявки (FfMatchSuggestion shapes).
+
+    score = date_score (0/1/2 дн → 70/55/40, дальше отсев)
+          + barcode-бонус (доля пересечения ШК, Jaccard × 30; только при
+            составе с обеих сторон)
+          + qty-бонус 10 (суммарное qty в ±10%, когда qty есть в raw);
+    cap 100, порог _SUGGEST_MIN_SCORE, топ _SUGGEST_TOP_N по score.
+    """
+    ff_total = sum(ff_comp.values())
+    scored: list[tuple[int, int, int, dict]] = []
+    for cand in candidates:
+        if cand.created_at is None:
+            continue
+        diff_days = abs((ff_created - cand.created_at.date()).days)
+        date_score = _SUGGEST_DATE_SCORES.get(diff_days)
+        if date_score is None:
+            continue
+
+        score = date_score
+        reason_parts = ["дата совпадает" if diff_days == 0 else f"дата ±{diff_days} дн"]
+
+        cand_items = items_by_candidate.get(cand.id, {})
+        if ff_comp and cand_items:
+            inter = set(ff_comp) & set(cand_items)
+            share = len(inter) / len(set(ff_comp) | set(cand_items))
+            bonus = round(share * 30)
+            if bonus:
+                score += bonus
+                reason_parts.append(f"ШК {round(share * 100)}%")
+
+        cand_total = sum(cand_items.values())
+        if ff_total > 0 and cand_total > 0 and abs(cand_total - ff_total) <= 0.1 * ff_total:
+            score += 10
+            reason_parts.append("кол-во ±10%")
+
+        score = min(100, score)
+        if score < _SUGGEST_MIN_SCORE:
+            continue
+        scored.append(
+            (
+                score,
+                diff_days,
+                -cand.id,
+                {
+                    "assembly_request_id": cand.id,
+                    "number": cand.number,
+                    "status": cand.status,
+                    "created_at": cand.created_at,
+                    "total_qty": cand_total,
+                    "score": score,
+                    "reason": ", ".join(reason_parts),
+                },
+            )
+        )
+    scored.sort(key=lambda t: (-t[0], t[1], t[2]))
+    return [t[3] for t in scored[:_SUGGEST_TOP_N]]
+
+
+async def _load_match_suggestions(
+    db: AsyncSession,
+    project_id: int,
+    requests: list[FulfillmentRequest],
+) -> dict[int, list[dict]]:
+    """{ff_request_id: [FfMatchSuggestion]} для несвязанных активных assembly-заявок.
+
+    Эвристика работает ТОЛЬКО по зеркалу и нашей БД (без HTTP к провайдерам);
+    кандидаты и их позиции грузятся пачками — без N+1.
+    """
+    targets = [
+        r
+        for r in requests
+        if r.kind == FfRequestKind.ASSEMBLY.value
+        and r.assembly_request_id is None
+        and not r.archived
+        and not r.is_completed
+        and r.external_created_at is not None
+    ]
+    if not targets:
+        return {}
+
+    # Кандидаты: активные сборки тех же складов, ещё не связанные ни с одной ФФ-заявкой
+    linked_subq = select(FulfillmentRequest.assembly_request_id).where(
+        FulfillmentRequest.project_id == project_id,
+        FulfillmentRequest.assembly_request_id.is_not(None),
+    )
+    result = await db.execute(
+        select(AssemblyRequest)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.warehouse_id.in_({r.warehouse_id for r in targets}),
+            AssemblyRequest.is_deleted == False,
+            AssemblyRequest.status.in_(_SUGGEST_CANDIDATE_STATUSES),
+            AssemblyRequest.id.not_in(linked_subq),
+        )
+        .limit(_SUGGEST_CANDIDATES_LIMIT)
+    )
+    candidates = list(result.scalars().all())
+    if not candidates:
+        return {}
+
+    candidates_by_wh: dict[int, list[AssemblyRequest]] = {}
+    for cand in candidates:
+        candidates_by_wh.setdefault(cand.warehouse_id, []).append(cand)
+
+    items_result = await db.execute(
+        select(
+            AssemblyRequestItem.assembly_request_id,
+            AssemblyRequestItem.barcode,
+            func.sum(AssemblyRequestItem.quantity),
+        )
+        .where(
+            AssemblyRequestItem.project_id == project_id,
+            AssemblyRequestItem.assembly_request_id.in_([c.id for c in candidates]),
+        )
+        .group_by(AssemblyRequestItem.assembly_request_id, AssemblyRequestItem.barcode)
+    )
+    items_by_candidate: dict[int, dict[str, int]] = {}
+    for cand_id, barcode, qty in items_result.all():
+        items_by_candidate.setdefault(cand_id, {})[barcode] = int(qty or 0)
+
+    out: dict[int, list[dict]] = {}
+    for r in targets:
+        ff_created = r.external_created_at
+        if ff_created is None:  # сужение типа для mypy: отфильтровано выше
+            continue
+        out[r.id] = _suggest_for_request(
+            ff_created,
+            _raw_assembly_composition(r.provider, r.raw),
+            candidates_by_wh.get(r.warehouse_id, []),
+            items_by_candidate,
+        )
+    return out
+
+
+async def get_overview(
+    db: AsyncSession,
+    project_id: int,
+    kind: str = FfRequestKind.ASSEMBLY.value,
+    warehouse_id: int | None = None,
+    only_unlinked: bool = False,
+) -> dict:
+    """Сводка ФФ по всем складам проекта с активной интеграцией (FfOverviewResponse shape).
+
+    warehouses — ВСЕ интегрированные склады с каунтами активных assembly-заявок
+    (независимо от фильтров); requests — зеркало по этим складам с фильтрами
+    kind / warehouse_id / only_unlinked (сортировка external_created_at desc,
+    limit REQUESTS_LIMIT) + suggestions для несвязанных активных assembly-заявок.
+
+    Каунты и список фильтруются по парам (warehouse_id, provider) АКТИВНЫХ
+    ключей: после смены провайдера зеркальные строки старого не синкаются и
+    не должны инфлировать requests_total/unlinked.
+    """
+    integrations = (
+        await db.execute(
+            select(
+                IntegrationKey.warehouse_id,
+                IntegrationKey.service,
+                IntegrationKey.last_sync_at,
+                Warehouse.name,
+            )
+            .join(Warehouse, Warehouse.id == IntegrationKey.warehouse_id)
+            .where(
+                IntegrationKey.project_id == project_id,
+                IntegrationKey.service.in_(FF_SERVICES),
+                IntegrationKey.is_active.is_(True),
+                IntegrationKey.is_deleted == False,
+                Warehouse.project_id == project_id,
+                Warehouse.is_deleted == False,
+            )
+            .order_by(Warehouse.name, IntegrationKey.warehouse_id)
+            .limit(500)
+        )
+    ).all()
+    # Пары (warehouse_id, provider) активных ключей: зеркальные строки старого
+    # провайдера (после смены ключа) в каунты/список не попадают.
+    wh_provider_pairs = [(row.warehouse_id, row.service) for row in integrations]
+
+    # Каунты активных assembly-заявок по складам — одним агрегатом (без N+1)
+    counts: dict[tuple[int, str], tuple[int, int]] = {}
+    if wh_provider_pairs:
+        counts_result = await db.execute(
+            select(
+                FulfillmentRequest.warehouse_id,
+                FulfillmentRequest.provider,
+                func.count(FulfillmentRequest.id),
+                func.count(FulfillmentRequest.id).filter(FulfillmentRequest.assembly_request_id.is_(None)),
+            )
+            .where(
+                FulfillmentRequest.project_id == project_id,
+                tuple_(FulfillmentRequest.warehouse_id, FulfillmentRequest.provider).in_(wh_provider_pairs),
+                FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+                FulfillmentRequest.archived == False,
+                FulfillmentRequest.is_completed == False,
+            )
+            .group_by(FulfillmentRequest.warehouse_id, FulfillmentRequest.provider)
+        )
+        counts = {(wid, prov): (total, unlinked) for wid, prov, total, unlinked in counts_result.all()}
+
+    warehouses = [
+        {
+            "warehouse_id": row.warehouse_id,
+            "warehouse_name": row.name,
+            "provider": row.service,
+            "provider_label": _provider_human(row.service),
+            "last_sync_at": row.last_sync_at,
+            "requests_total": counts.get((row.warehouse_id, row.service), (0, 0))[0],
+            "requests_unlinked": counts.get((row.warehouse_id, row.service), (0, 0))[1],
+        }
+        for row in integrations
+    ]
+
+    # Заявки зеркала — только по интегрированным складам (активный провайдер), с фильтрами
+    target_pairs = [(wid, svc) for wid, svc in wh_provider_pairs if warehouse_id is None or wid == warehouse_id]
+    requests: list[FulfillmentRequest] = []
+    if target_pairs:
+        q = select(FulfillmentRequest).where(
+            FulfillmentRequest.project_id == project_id,
+            tuple_(FulfillmentRequest.warehouse_id, FulfillmentRequest.provider).in_(target_pairs),
+            FulfillmentRequest.kind == kind,
+        )
+        if only_unlinked:
+            if kind == FfRequestKind.INBOUND.value:
+                q = q.where(FulfillmentRequest.inbound_receipt_id.is_(None))
+            elif kind == FfRequestKind.ASSEMBLY.value:
+                q = q.where(FulfillmentRequest.assembly_request_id.is_(None))
+            else:
+                q = q.where(
+                    FulfillmentRequest.assembly_request_id.is_(None),
+                    FulfillmentRequest.inbound_receipt_id.is_(None),
+                )
+        q = q.order_by(
+            FulfillmentRequest.external_created_at.desc().nullslast(),
+            FulfillmentRequest.id.desc(),
+        ).limit(REQUESTS_LIMIT)
+        requests = list((await db.execute(q)).scalars().all())
+
+    # Обогащение связями — как в list_requests (по одному запросу на тип)
+    assembly_ids = {r.assembly_request_id for r in requests if r.assembly_request_id}
+    inbound_ids = {r.inbound_receipt_id for r in requests if r.inbound_receipt_id}
+
+    assembly_map: dict[int, tuple] = {}
+    if assembly_ids:
+        result = await db.execute(
+            select(AssemblyRequest.id, AssemblyRequest.number, AssemblyRequest.status).where(
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.id.in_(assembly_ids),
+                AssemblyRequest.is_deleted == False,
+            )
+        )
+        assembly_map = {row[0]: (row[1], row[2]) for row in result.all()}
+
+    inbound_map: dict[int, tuple] = {}
+    if inbound_ids:
+        result = await db.execute(
+            select(InboundReceipt.id, InboundReceipt.number, InboundReceipt.status).where(
+                InboundReceipt.project_id == project_id,
+                InboundReceipt.id.in_(inbound_ids),
+                InboundReceipt.is_deleted == False,
+            )
+        )
+        inbound_map = {row[0]: (row[1], row[2]) for row in result.all()}
+
+    suggestions_by_request = await _load_match_suggestions(db, project_id, requests)
+
+    wh_name_by_id = {row.warehouse_id: row.name for row in integrations}
+    out_requests = []
+    for r in requests:
+        row_dict = _request_to_dict(r, assembly_map, inbound_map)
+        row_dict.update(
+            {
+                "warehouse_id": r.warehouse_id,
+                "warehouse_name": wh_name_by_id.get(r.warehouse_id, ""),
+                "provider": r.provider,
+                "suggestions": suggestions_by_request.get(r.id, []),
+            }
+        )
+        out_requests.append(row_dict)
+
+    return {"warehouses": warehouses, "requests": out_requests}
+
+
 def _coerce_name(value: object) -> str | None:
     """Провайдер отдаёт исполнителя/создателя то строкой, то объектом {name}."""
     if value is None:
@@ -604,17 +1125,200 @@ def _coerce_name(value: object) -> str | None:
     return str(value)
 
 
+def _wms_detail_parts(req: FulfillmentRequest) -> tuple[list[dict], list[dict], str | None]:
+    """Состав/поля/создатель wmscelicom-заявки из зеркального raw.
+
+    Returns (products, fields, creator); products — {barcode, name, qty,
+    comment}. Для отгрузок FBO товары лежат внутри коробов (packages),
+    агрегируем по barcode.
+    """
+    raw = req.raw or {}
+    products: list[dict] = []
+    fields: list[tuple[str, object]] = []
+
+    if req.kind == FfRequestKind.ASSEMBLY.value:
+        packages = raw.get("packages") or {}
+        pkg_rows = [p for p in (packages.values() if isinstance(packages, dict) else packages) if isinstance(p, dict)]
+        by_barcode: dict[str, dict] = {}
+        for pkg in pkg_rows:
+            for item in pkg.get("items") or []:
+                barcode = str(item.get("barcode") or "").strip()
+                agg = by_barcode.get(barcode)
+                if agg is None:
+                    agg = by_barcode[barcode] = {"barcode": barcode or None, "name": item.get("name"), "qty": 0}
+                agg["qty"] += int(item.get("count") or 0)
+        products = list(by_barcode.values())
+        fields = [
+            ("Площадка", raw.get("shipped_target")),
+            ("Внешний заказ", raw.get("external_order")),
+            ("План отгрузки", raw.get("dispatch_date")),
+            ("Передана", raw.get("shipped_datetime")),
+            ("Вручена", raw.get("delivered_date_time")),
+            ("Коробов", len(pkg_rows) or None),
+        ]
+    else:
+        for item in raw.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            barcode = str(item.get("barcode") or "").strip()
+            products.append(
+                {
+                    "barcode": barcode or None,
+                    "name": item.get("name"),
+                    "qty": int(item.get("count") or 0),
+                    "comment": item.get("comment") or None,
+                }
+            )
+        fields = [
+            ("Дата поставки", raw.get("delivery_date_time")),
+            ("Статус приёмки", raw.get("unloading_status")),
+            ("Приёмка начата", raw.get("unloading_time_start")),
+            ("Приёмка завершена", raw.get("unloading_time_end")),
+            ("Закрыта", raw.get("unloading_close_date")),
+        ]
+
+    user = raw.get("user") or {}
+    creator = " ".join(filter(None, (user.get("first_name"), user.get("last_name")))) or None
+    out_fields = [{"name": name, "field": None, "value": str(value)} for name, value in fields if value]
+    return products, out_fields, creator
+
+
+async def _resolve_noms(db: AsyncSession, project_id: int, barcodes: set[str]) -> dict[str, tuple[int, str | None]]:
+    """{barcode: (nomenclature_id, article_seller)} одним запросом."""
+    barcodes.discard("")
+    if not barcodes:
+        return {}
+    result = await db.execute(
+        select(Nomenclature.id, Nomenclature.barcode, Nomenclature.article_seller).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.barcode.in_(list(barcodes)),
+        )
+    )
+    return {barcode: (nom_id, article) for nom_id, barcode, article in result.all()}
+
+
+async def _load_linked_doc_items(
+    db: AsyncSession,
+    project_id: int,
+    req: FulfillmentRequest,
+    has_assembly: bool,
+    has_inbound: bool,
+) -> dict[str, int] | None:
+    """Состав связанного нашего документа {barcode: qty}. None — связи нет.
+
+    has_assembly/has_inbound — связанный документ существует и не удалён
+    (проверено выборкой assembly_map/inbound_map); сами items без is_deleted.
+    """
+    if req.assembly_request_id and has_assembly:
+        result = await db.execute(
+            select(AssemblyRequestItem.barcode, func.sum(AssemblyRequestItem.quantity))
+            .where(
+                AssemblyRequestItem.project_id == project_id,
+                AssemblyRequestItem.assembly_request_id == req.assembly_request_id,
+            )
+            .group_by(AssemblyRequestItem.barcode)
+        )
+    elif req.inbound_receipt_id and has_inbound:
+        result = await db.execute(
+            select(InboundReceiptItem.barcode, func.sum(InboundReceiptItem.expected_qty))
+            .where(
+                InboundReceiptItem.project_id == project_id,
+                InboundReceiptItem.receipt_id == req.inbound_receipt_id,
+            )
+            .group_by(InboundReceiptItem.barcode)
+        )
+    else:
+        return None
+    return {barcode: int(qty or 0) for barcode, qty in result.all()}
+
+
+def _build_match(
+    products: list[dict],
+    our_by_barcode: dict[str, int],
+    nom_by_barcode: dict[str, tuple[int, str | None]],
+) -> dict:
+    """Сверка состава ФФ-заявки с нашим документом (FfRequestMatch shape).
+
+    Обе стороны по barcode: qty отличается / есть только у ФФ / есть только
+    у нас. Позиции ФФ без barcode сверке не подлежат и в тоталы не входят.
+    """
+    ff_by_barcode: dict[str, int] = {}
+    name_by_barcode: dict[str, str | None] = {}
+    for p in products:
+        barcode = p.get("barcode")
+        if not barcode:
+            continue
+        ff_by_barcode[barcode] = ff_by_barcode.get(barcode, 0) + p["qty"]
+        name_by_barcode.setdefault(barcode, p.get("name"))
+
+    mismatch_rows: list[tuple[int, str, dict]] = []
+    for barcode in set(ff_by_barcode) | set(our_by_barcode):
+        ff_qty = ff_by_barcode.get(barcode, 0)
+        our_qty = our_by_barcode.get(barcode, 0)
+        if ff_qty == our_qty:
+            continue
+        _nom_id, article = nom_by_barcode.get(barcode, (None, None))
+        row = {
+            "barcode": barcode,
+            "article_seller": article,
+            "name": name_by_barcode.get(barcode),
+            "ff_qty": ff_qty,
+            "our_qty": our_qty,
+            "diff": ff_qty - our_qty,
+        }
+        mismatch_rows.append((-abs(ff_qty - our_qty), barcode, row))
+    mismatches = [row for _, _, row in sorted(mismatch_rows, key=lambda t: (t[0], t[1]))]
+
+    return {
+        "matched": not mismatches,
+        "ff_positions": len(ff_by_barcode),
+        "our_positions": len(our_by_barcode),
+        "ff_total": sum(ff_by_barcode.values()),
+        "our_total": sum(our_by_barcode.values()),
+        "mismatches": mismatches,
+    }
+
+
+async def get_ff_link_for_assembly(db: AsyncSession, project_id: int, assembly_request_id: int) -> dict | None:
+    """Зеркальная ФФ-заявка, привязанная к нашей заявке на сборку (или None)."""
+    result = await db.execute(
+        select(
+            FulfillmentRequest.id,
+            FulfillmentRequest.number,
+            FulfillmentRequest.external_id,
+            FulfillmentRequest.stage_title,
+            FulfillmentRequest.warehouse_id,
+        )
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.assembly_request_id == assembly_request_id,
+        )
+        .limit(1)
+    )
+    row = result.first()
+    if row is None:
+        return None
+    return {
+        "ff_request_id": row.id,
+        "ff_request_number": row.number or row.external_id,
+        "ff_stage_title": row.stage_title,
+        "ff_warehouse_id": row.warehouse_id,
+    }
+
+
 async def get_request_detail(
     db: AsyncSession,
     project_id: int,
     warehouse_id: int,
     ff_request_id: int,
 ) -> dict | None:
-    """Деталка ФФ-заявки: зеркальная шапка + ЖИВОЙ состав от провайдера.
+    """Деталка ФФ-заявки: зеркальная шапка + состав.
 
-    Тянет GET /v1/requests/show/{external_id} при каждом открытии (не кэшируем:
-    состав и принятые количества меняются на стороне ФФ). None — заявка не
-    найдена; ValueError — не подключено / провайдер недоступен.
+    skladbot: ЖИВОЙ состав — GET /v1/requests/show/{external_id} при каждом
+    открытии (не кэшируем: принятые количества меняются на стороне ФФ).
+    wmscelicom: из зеркального raw — by-id эндпоинта у провайдера нет, состав
+    приходит уже в списочных методах (актуальность = последний синк).
+    None — заявка не найдена; ValueError — не подключено / провайдер недоступен.
     """
     result = await db.execute(
         select(FulfillmentRequest).where(
@@ -626,11 +1330,6 @@ async def get_request_detail(
     req = result.scalar_one_or_none()
     if not req:
         return None
-
-    key = await get_integration(db, project_id, warehouse_id)
-    if not key:
-        raise ValueError("Фулфилмент не подключён к этому складу")
-    token = _decrypt(key.encrypted_key)
 
     # Связанный документ — до закрытия транзакции
     assembly_map: dict[int, tuple] = {}
@@ -653,6 +1352,58 @@ async def get_request_detail(
             )
         )
         inbound_map = {row[0]: (row[1], row[2]) for row in result.all()}
+
+    # Состав связанного нашего документа — для сверки (None, если связи нет)
+    our_by_barcode = await _load_linked_doc_items(db, project_id, req, bool(assembly_map), bool(inbound_map))
+
+    if req.provider == "wmscelicom":
+        wms_products, wms_fields, creator = _wms_detail_parts(req)
+        match_barcodes = {p["barcode"] or "" for p in wms_products} | set(our_by_barcode or {})
+        nom_by_barcode = await _resolve_noms(db, project_id, match_barcodes)
+        products = []
+        for p in wms_products:
+            barcode = p["barcode"]
+            nom_id, article = nom_by_barcode.get(barcode, (None, None)) if barcode else (None, None)
+            products.append(
+                {
+                    "barcode": barcode,
+                    "vendor_code": None,
+                    "name": p.get("name"),
+                    "nomenclature_id": nom_id,
+                    "article_seller": article,
+                    "qty": p["qty"],
+                    "accepted_qty": 0,
+                    "delivery_qty": 0,
+                    "defect_qty": 0,
+                    "color": None,
+                    "size": None,
+                    "comment": p.get("comment"),
+                    "image": None,
+                    "our_qty": our_by_barcode.get(barcode or "", 0) if our_by_barcode is not None else None,
+                }
+            )
+        row = _request_to_dict(req, assembly_map, inbound_map)
+        row.update(
+            {
+                "comment": None,
+                "customer_name": None,
+                "executor": None,
+                "creator": creator,
+                "stage_description": None,
+                "total_qty": sum(p["qty"] for p in products),
+                "total_accepted": 0,
+                "products": products,
+                "stage_logs": [],
+                "fields": wms_fields,
+                "match": _build_match(products, our_by_barcode, nom_by_barcode) if our_by_barcode is not None else None,
+            }
+        )
+        return row
+
+    key = await get_integration(db, project_id, warehouse_id)
+    if not key:
+        raise ValueError("Фулфилмент не подключён к этому складу")
+    token = _decrypt(key.encrypted_key)
     external_id = req.external_id
     await db.commit()  # закрыть read-транзакцию до внешнего HTTP-вызова
 
@@ -672,17 +1423,8 @@ async def get_request_detail(
         raise ValueError(f"skladbot.ru вернул ошибку сервера, попробуйте позже ({str(e)[:100]})") from e
 
     raw_products = detail.get("products") or []
-    barcodes = {str(p.get("barcode") or "").strip() for p in raw_products}
-    barcodes.discard("")
-    nom_by_barcode: dict[str, tuple[int, str | None]] = {}
-    if barcodes:
-        result = await db.execute(
-            select(Nomenclature.id, Nomenclature.barcode, Nomenclature.article_seller).where(
-                Nomenclature.project_id == project_id,
-                Nomenclature.barcode.in_(list(barcodes)),
-            )
-        )
-        nom_by_barcode = {barcode: (nom_id, article) for nom_id, barcode, article in result.all()}
+    match_barcodes = {str(p.get("barcode") or "").strip() for p in raw_products} | set(our_by_barcode or {})
+    nom_by_barcode = await _resolve_noms(db, project_id, match_barcodes)
 
     products = []
     for p in raw_products:
@@ -703,6 +1445,7 @@ async def get_request_detail(
                 "size": p.get("size"),
                 "comment": p.get("comment") or None,
                 "image": p.get("image"),
+                "our_qty": our_by_barcode.get(barcode or "", 0) if our_by_barcode is not None else None,
             }
         )
 
@@ -739,6 +1482,7 @@ async def get_request_detail(
             "products": products,
             "stage_logs": stage_logs,
             "fields": fields,
+            "match": _build_match(products, our_by_barcode, nom_by_barcode) if our_by_barcode is not None else None,
         }
     )
     return row
