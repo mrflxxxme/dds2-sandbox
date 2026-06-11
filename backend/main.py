@@ -27,6 +27,7 @@ from backend.routers import (
     cost,
     counterparty,
     fbo_supplies,
+    fulfillment,
     funnel,
     import_txn,
     integrations,
@@ -504,6 +505,12 @@ app.include_router(
     warehouse_speed.router,
     prefix="/api/v1",
     tags=["Warehouse Speed"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    fulfillment.router,
+    prefix="/api/v1",
+    tags=["Fulfillment"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

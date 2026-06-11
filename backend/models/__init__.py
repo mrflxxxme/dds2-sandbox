@@ -63,6 +63,14 @@ from backend.models.enums import (
     VehicleStatus,
 )
 
+# Fulfillment (external FF providers: skladbot, migfull)
+from backend.models.fulfillment import (
+    FfRequestKind,
+    FulfillmentProvider,
+    FulfillmentRequest,
+    FulfillmentStock,
+)
+
 # FX Rates
 from backend.models.fx_rates import (
     FxRate,
@@ -267,6 +275,11 @@ __all__ = [
     "WbWarehouseStock",
     # FX Rates
     "FxRate",
+    # Fulfillment
+    "FulfillmentProvider",
+    "FulfillmentRequest",
+    "FulfillmentStock",
+    "FfRequestKind",
     # Tax
     "TaxRate",
     # WB Finance

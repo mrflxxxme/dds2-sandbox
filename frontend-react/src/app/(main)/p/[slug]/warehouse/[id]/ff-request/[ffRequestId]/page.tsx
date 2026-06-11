@@ -1,0 +1,264 @@
+'use client';
+import React, { useEffect, useState } from 'react';
+import { useParams, useRouter } from 'next/navigation';
+import { api } from '@/lib/api';
+import { formatNumber, formatDate } from '@/lib/utils';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { FfRequestDetail, FfRequestDetailProduct } from '@/types/api';
+import type { Column } from '@/components/DataTable';
+import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffStageBadge } from '../../ff-shared';
+
+/* ─── Page: деталка заявки ФФ (состав, поля, история стадий) ─────────────── */
+
+export default function FfRequestDetailPage() {
+    const params = useParams();
+    const router = useRouter();
+    const slug = params.slug as string;
+    const warehouseId = Number(params.id);
+    const ffRequestId = Number(params.ffRequestId);
+
+    const [detail, setDetail] = useState<FfRequestDetail | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+
+    // Связывание с нашим документом (модал-пикер + отвязка)
+    const [linkOpen, setLinkOpen] = useState(false);
+    const [linkActing, setLinkActing] = useState(false);
+    const [linkError, setLinkError] = useState('');
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true);
+        setError('');
+        api.getFfRequestDetail(warehouseId, ffRequestId)
+            .then(r => { if (!controller.signal.aborted) setDetail(r); })
+            .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка'); })
+            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [warehouseId, ffRequestId]);
+
+    // Назад — на вкладку склада по kind заявки; пока kind неизвестен — просто на склад
+    const backUrl = detail && (detail.kind === 'assembly' || detail.kind === 'inbound')
+        ? `/p/${slug}/warehouse/${warehouseId}?tab=${detail.kind === 'assembly' ? 'ff-assembly' : 'ff-inbound'}`
+        : `/p/${slug}/warehouse/${warehouseId}`;
+    const goBack = () => router.push(backUrl);
+
+    // Значение динамического поля: похожее на ISO-дату — через formatDate, иначе как есть
+    const fieldValue = (v: string | null) => {
+        if (!v) return '—';
+        return /^\d{4}-\d{2}-\d{2}($|[T ])/.test(v) ? formatDate(v) : v;
+    };
+
+    const infoCell = (label: string, value: React.ReactNode) => (
+        <div key={label}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)' }}>{label}</div>
+            <div style={{ fontSize: 14, fontWeight: 500 }}>{value}</div>
+        </div>
+    );
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
+
+    if (error) {
+        return (
+            <div className="animate-in">
+                <div className="page-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <button onClick={goBack} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: 18, lineHeight: 1 }} title="Назад">&larr;</button>
+                        <div>
+                            <h1 className="page-title">Заявка ФФ</h1>
+                            <p className="page-subtitle">Деталка заявки фулфилмента</p>
+                        </div>
+                    </div>
+                </div>
+                <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>
+                <div style={{ display: 'flex', justifyContent: 'flex-start', marginTop: 16 }}>
+                    <button className="btn btn-secondary" onClick={goBack}>&larr; Назад к складу</button>
+                </div>
+            </div>
+        );
+    }
+
+    if (!detail) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Заявка не найдена</div>;
+
+    const d = detail;
+
+    const handleUnlink = async () => {
+        if (!d.linked_number) return;
+        if (!confirm(`Отвязать заявку ${d.number || d.external_id} от документа ${d.linked_number}?`)) return;
+        setLinkActing(true);
+        setLinkError('');
+        try {
+            const updated = await api.unlinkFulfillmentRequest(warehouseId, ffRequestId);
+            setDetail(prev => (prev ? { ...prev, ...updated } : prev));
+        } catch (e: unknown) {
+            setLinkError(e instanceof Error ? e.message : 'Ошибка отвязки');
+        } finally {
+            setLinkActing(false);
+        }
+    };
+
+    const productCols: Column[] = [
+        { key: 'barcode', label: 'ШК', render: (v: string | null) => v || '—' },
+        {
+            key: 'article_seller', label: 'Наш артикул',
+            render: (_: unknown, p: FfRequestDetailProduct) => (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <span>{p.article_seller ?? p.vendor_code ?? '—'}</span>
+                    {p.nomenclature_id === null && (
+                        <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>нет в номенклатуре</span>
+                    )}
+                </span>
+            ),
+            exportValue: (p: FfRequestDetailProduct) => p.article_seller ?? p.vendor_code ?? '',
+        },
+        { key: 'qty', label: 'Заявлено', align: 'right', render: (v: number) => formatNumber(v, 0) },
+        { key: 'accepted_qty', label: 'Принято', align: 'right', render: (v: number) => formatNumber(v, 0) },
+        {
+            key: 'defect_qty', label: 'Брак', align: 'right',
+            render: (v: number) => (
+                <span style={{ color: v > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: v > 0 ? 600 : 400 }}>
+                    {formatNumber(v, 0)}
+                </span>
+            ),
+        },
+    ];
+
+    const summary = [
+        { label: 'Позиций', value: d.products.length },
+        { label: 'Заявлено', value: d.total_qty },
+        { label: 'Принято', value: d.total_accepted },
+    ];
+
+    return (
+        <div className="animate-in">
+            {/* Header */}
+            <div className="page-header">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <button onClick={goBack} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: 18, lineHeight: 1 }} title="Назад к складу">&larr;</button>
+                    <div>
+                        <h1 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                            <span>Заявка {d.number || d.external_id}</span>
+                            {ffStageBadge(d)}
+                        </h1>
+                        <p className="page-subtitle">{d.kind === 'assembly' ? 'ФФ сборка' : d.kind === 'inbound' ? 'ФФ приёмка' : 'Заявка ФФ'}{d.type_name ? ` — ${d.type_name}` : ''}</p>
+                    </div>
+                </div>
+            </div>
+
+            {/* Шапка: реквизиты заявки */}
+            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+                    {infoCell('Тип', d.type_name || '—')}
+                    {infoCell('Стадия', (
+                        <>
+                            <div>{d.stage_title || d.status || '—'}</div>
+                            {d.stage_description && (
+                                <div style={{ fontSize: 12, fontWeight: 400, color: 'var(--color-text-muted)' }}>{d.stage_description}</div>
+                            )}
+                        </>
+                    ))}
+                    {infoCell('Исполнитель', d.executor || '—')}
+                    {infoCell('Создатель', d.creator || '—')}
+                    {infoCell('Кабинет', d.customer_name || '—')}
+                </div>
+                {d.comment && (
+                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 12 }}>
+                        Комментарий: <span style={{ color: 'var(--color-text)' }}>{d.comment}</span>
+                    </div>
+                )}
+                {(d.kind === 'assembly' || d.kind === 'inbound') ? (
+                    <div style={{ fontSize: 13, marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                        {d.linked_number ? (
+                            <>
+                                <span>
+                                    Связана с <span style={{ fontWeight: 600 }}>{d.linked_number}</span>
+                                    {d.linked_status ? ` (${FF_LINKED_STATUS_LABELS[d.linked_status] || d.linked_status})` : ''}
+                                </span>
+                                <button className="btn btn-sm btn-secondary" onClick={handleUnlink} disabled={linkActing}>
+                                    {linkActing ? '...' : 'Отвязать'}
+                                </button>
+                            </>
+                        ) : (
+                            <button className="btn btn-sm btn-secondary" onClick={() => setLinkOpen(true)}>Связать</button>
+                        )}
+                        {linkError && <span style={{ color: 'var(--color-danger)' }}>{linkError}</span>}
+                    </div>
+                ) : d.linked_number && (
+                    <div style={{ fontSize: 13, marginTop: 12 }}>
+                        Связана с <span style={{ fontWeight: 600 }}>{d.linked_number}</span>
+                        {d.linked_status ? ` (${FF_LINKED_STATUS_LABELS[d.linked_status] || d.linked_status})` : ''}
+                    </div>
+                )}
+            </div>
+
+            {/* Поля заявки */}
+            {d.fields.length > 0 && (
+                <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+                        {d.fields.map((f, i) => (
+                            <div key={`${f.field ?? f.name ?? 'f'}-${i}`}>
+                                <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--color-text-muted)' }}>{f.name || f.field || '—'}</div>
+                                <div style={{ fontSize: 14, fontWeight: 500 }}>{fieldValue(f.value)}</div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Сводка */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
+                {summary.map(s => (
+                    <div key={s.label} className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{s.label}</div>
+                        <div style={{ fontSize: 24, fontWeight: 700 }}>{formatNumber(s.value, 0)}</div>
+                    </div>
+                ))}
+            </div>
+
+            {/* Товары */}
+            <TanStackDataTable
+                columns={productCols}
+                data={d.products}
+                emptyText="Провайдер не вернул состав заявки"
+                emptyIcon="📦"
+                exportName="ff_request_products"
+            />
+
+            {/* История стадий */}
+            {d.stage_logs.length > 0 && (
+                <div className="glass-card" style={{ padding: 20, marginTop: 16 }}>
+                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 8px' }}>История стадий</h3>
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        {d.stage_logs.map((l, i) => (
+                            <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 12, fontSize: 13, padding: '6px 0', borderBottom: '1px solid var(--color-border)' }}>
+                                <span style={{ fontWeight: 500, flex: 1 }}>{l.stage || '—'}</span>
+                                <span style={{ color: 'var(--color-text-muted)' }}>{l.executor || '—'}</span>
+                                <span style={{ color: 'var(--color-text-muted)' }}>{l.created_at || ''}</span>
+                                <span style={{ color: 'var(--color-text-muted)' }}>{l.spent_time || ''}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Bottom back */}
+            <div style={{ display: 'flex', justifyContent: 'flex-start', marginTop: 20, paddingBottom: 20 }}>
+                <button className="btn btn-secondary" onClick={goBack}>&larr; Назад к складу</button>
+            </div>
+
+            {/* Модал «Связать» */}
+            {linkOpen && (d.kind === 'assembly' || d.kind === 'inbound') && (
+                <FfLinkModal
+                    warehouseId={warehouseId}
+                    kind={d.kind}
+                    request={d}
+                    onClose={() => setLinkOpen(false)}
+                    onLinked={updated => {
+                        setDetail(prev => (prev ? { ...prev, ...updated } : prev));
+                        setLinkOpen(false);
+                    }}
+                />
+            )}
+        </div>
+    );
+}

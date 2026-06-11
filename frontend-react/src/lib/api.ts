@@ -22,6 +22,7 @@ import { addImportMethods } from './api/imports';
 import { addTelegramMethods } from './api/telegram';
 import { addWarehouseMethods } from './api/warehouse';
 import { addWarehouseSpeedMethods } from './api/warehouse-speed';
+import { addFulfillmentMethods } from './api/fulfillment';
 import { addMonitoringMethods } from './api/monitoring';
 import { addSupplyChainMethods } from './api/supply-chain';
 import { addAiChatMethods } from './api/ai-chat';
@@ -46,6 +47,7 @@ export const api = Object.assign(client, {
     ...addTelegramMethods(client),
     ...addWarehouseMethods(client),
     ...addWarehouseSpeedMethods(client),
+    ...addFulfillmentMethods(client),
     ...addMonitoringMethods(client),
     ...addSupplyChainMethods(client),
     ...addAiChatMethods(client),

@@ -1,15 +1,18 @@
 'use client';
 import React, { useCallback, useEffect, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type {
     Warehouse, InboundReceipt, OutboundShipment,
     WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
     DefectMarkOperation, VehicleStatus,
+    FulfillmentStatus, FfStocksResponse, FfStockRow, FfRequestRow, FfRequestKind,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
+import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffStageBadge } from './ff-shared';
 
 /* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
 
@@ -29,15 +32,27 @@ function countActionableTransfers(transfers: StockTransfer[], warehouseId: numbe
 
 /* ─── Main page ────────────────────────────────────────────────────────────── */
 
+type WarehouseTab = 'all' | 'receipts' | 'shipments' | 'transfers' | 'stock' | 'defects' | 'delivery' | 'requisites' | 'ff-stocks' | 'ff-assembly' | 'ff-inbound';
+const WAREHOUSE_TABS: WarehouseTab[] = ['all', 'receipts', 'shipments', 'transfers', 'stock', 'defects', 'delivery', 'requisites', 'ff-stocks', 'ff-assembly', 'ff-inbound'];
+
 export default function WarehouseDetailPage() {
     const params = useParams();
     const router = useRouter();
+    const searchParams = useSearchParams();
     const slug = params.slug as string;
     const warehouseId = Number(params.id);
-    const [tab, setTab] = useState<'all' | 'receipts' | 'shipments' | 'transfers' | 'stock' | 'defects' | 'delivery' | 'requisites'>('receipts');
+    const [tab, setTab] = useState<WarehouseTab>('receipts');
+
+    // Активная вкладка из ?tab= (back-ссылки подстраниц).
+    // useSearchParams пуст на первом рендере до гидратации — реагируем только на непустое значение, без редиректов.
+    useEffect(() => {
+        const raw = searchParams.get('tab') ?? '';
+        if (raw && (WAREHOUSE_TABS as string[]).includes(raw)) setTab(raw as WarehouseTab);
+    }, [searchParams]);
     const [warehouse, setWarehouse] = useState<Warehouse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [ffStatus, setFfStatus] = useState<FulfillmentStatus | null>(null);
 
     // Counts for tab badges
     const [receiptCount, setReceiptCount] = useState(0);
@@ -55,6 +70,14 @@ export default function WarehouseDetailPage() {
         } catch { /* не валим страницу из-за бейджа */ }
     }, [warehouseId]);
 
+    // Статус ФФ-интеграции — определяет видимость вкладок «ФФ …»
+    const refreshFfStatus = useCallback(async () => {
+        try {
+            const s = await api.getFulfillmentStatus(warehouseId);
+            setFfStatus(s);
+        } catch { /* интеграция недоступна — вкладки просто не показываем */ }
+    }, [warehouseId]);
+
     const load = useCallback(async () => {
         setLoading(true);
         setError('');
@@ -63,13 +86,24 @@ export default function WarehouseDetailPage() {
             const wh = whs.find(w => w.id === warehouseId);
             setWarehouse(wh || null);
             refreshTransferCount();
+            refreshFfStatus();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
         setLoading(false);
-    }, [warehouseId, refreshTransferCount]);
+    }, [warehouseId, refreshTransferCount, refreshFfStatus]);
 
     useEffect(() => { load(); }, [load]);
+
+    const ffConnected = ffStatus?.connected === true;
+
+    // Если интеграцию отключили, а открыта ФФ-вкладка — возвращаемся на «Реквизиты».
+    // Пока статус не загружен (ffStatus === null) — не сбрасываем: иначе ?tab=ff-* проигрывает гонку загрузке статуса.
+    useEffect(() => {
+        if (ffStatus && !ffStatus.connected && (tab === 'ff-stocks' || tab === 'ff-assembly' || tab === 'ff-inbound')) {
+            setTab('requisites');
+        }
+    }, [ffStatus, tab]);
 
     if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
     if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>;
@@ -85,6 +119,11 @@ export default function WarehouseDetailPage() {
         { key: 'defects' as const, label: 'Брак', count: defectCount },
         { key: 'delivery' as const, label: 'Время доставки' },
         { key: 'all' as const, label: 'История движений' },
+        ...(ffConnected ? [
+            { key: 'ff-stocks' as const, label: 'ФФ остатки' },
+            { key: 'ff-assembly' as const, label: 'ФФ сборка' },
+            { key: 'ff-inbound' as const, label: 'ФФ приёмки' },
+        ] : []),
         { key: 'requisites' as const, label: 'Реквизиты' },
     ];
 
@@ -172,7 +211,15 @@ export default function WarehouseDetailPage() {
             {tab === 'stock' && <StockTab warehouseId={warehouseId} />}
             {tab === 'defects' && <DefectsTab warehouseId={warehouseId} onCountChange={setDefectCount} />}
             {tab === 'delivery' && <DeliveryTab warehouseId={warehouseId} />}
-            {tab === 'requisites' && <RequisitesTab warehouse={warehouse} onChanged={load} />}
+            {tab === 'ff-stocks' && ffConnected && <FfStocksTab warehouseId={warehouseId} />}
+            {tab === 'ff-assembly' && ffConnected && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="assembly" />}
+            {tab === 'ff-inbound' && ffConnected && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="inbound" />}
+            {tab === 'requisites' && (
+                <>
+                    <RequisitesTab warehouse={warehouse} onChanged={load} />
+                    <FulfillmentSection warehouseId={warehouseId} status={ffStatus} onChanged={refreshFfStatus} />
+                </>
+            )}
         </div>
     );
 }
@@ -281,6 +328,148 @@ function RequisitesTab({ warehouse, onChanged }: { warehouse: Warehouse; onChang
                     {warehouse.counterparty_name ? ` · ${warehouse.counterparty_name}` : ''}
                 </div>
             )}
+        </div>
+    );
+}
+
+/* ─── Fulfillment integration (skladbot) — блок в «Реквизитах» ──────────── */
+
+const FF_EXPIRY_WARNING_MS = 30 * 24 * 60 * 60 * 1000; // 30 дней
+
+function FulfillmentSection({ warehouseId, status, onChanged }: {
+    warehouseId: number;
+    status: FulfillmentStatus | null;
+    onChanged: () => void;
+}) {
+    const [token, setToken] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState('');
+    const [syncMsg, setSyncMsg] = useState('');
+
+    const connected = status?.connected === true;
+
+    const handleConnect = async () => {
+        if (!token.trim()) {
+            setError('Введите токен');
+            return;
+        }
+        setBusy(true);
+        setError('');
+        setSyncMsg('');
+        try {
+            await api.connectFulfillment(warehouseId, token.trim());
+            setToken('');
+            onChanged();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка подключения');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const handleDisconnect = async () => {
+        if (!confirm('Отключить фулфилмент-интеграцию? Токен будет удалён.')) return;
+        setBusy(true);
+        setError('');
+        setSyncMsg('');
+        try {
+            await api.disconnectFulfillment(warehouseId);
+            onChanged();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка отключения');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const handleSync = async () => {
+        setBusy(true);
+        setError('');
+        setSyncMsg('');
+        try {
+            const r = await api.syncFulfillment(warehouseId);
+            const unmatched = r.unmatched_barcodes > 0
+                ? `, несматченных ШК: ${formatNumber(r.unmatched_barcodes, 0)}`
+                : '';
+            setSyncMsg(`Синхронизировано: ${formatNumber(r.stocks_synced, 0)} остатков / ${formatNumber(r.requests_synced, 0)} заявок${unmatched}`);
+            onChanged();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка синхронизации');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    // token_expires_at — naive UTC ISO без зоны; добавляем 'Z', чтобы Date.parse не счёл локальным
+    const expiresMs = status?.token_expires_at
+        ? Date.parse(status.token_expires_at.endsWith('Z') ? status.token_expires_at : status.token_expires_at + 'Z')
+        : null;
+    const expired = expiresMs !== null && expiresMs <= Date.now();
+    const expiringSoon = !expired && expiresMs !== null && expiresMs - Date.now() < FF_EXPIRY_WARNING_MS;
+
+    return (
+        <div className="glass-card" style={{ padding: 24, marginTop: 16 }}>
+            <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0, marginBottom: 8 }}>Фулфилмент-интеграция (skladbot)</h3>
+
+            {!connected ? (
+                <>
+                    <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 20 }}>
+                        Подключите личный кабинет skladbot.ru по seller-токену — появятся вкладки
+                        «ФФ остатки», «ФФ сборка» и «ФФ приёмки» с данными фулфилмента.
+                    </p>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', maxWidth: 700 }}>
+                        <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                            <label className="form-label">Токен</label>
+                            <input
+                                className="form-input"
+                                type="password"
+                                value={token}
+                                onChange={e => setToken(e.target.value)}
+                                placeholder="Seller-токен skladbot.ru"
+                                autoComplete="off"
+                            />
+                        </div>
+                        <button className="btn btn-primary" onClick={handleConnect} disabled={busy}>
+                            {busy ? 'Подключение...' : 'Подключить'}
+                        </button>
+                    </div>
+                </>
+            ) : (
+                <>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '8px 16px', fontSize: 13, maxWidth: 700, marginBottom: 16 }}>
+                        <span style={{ color: 'var(--color-text-muted)' }}>Кабинет</span>
+                        <span style={{ fontWeight: 600 }}>
+                            {status?.customer_name || '—'}
+                            {status?.customer_id ? ` (#${status.customer_id})` : ''}
+                        </span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>Токен</span>
+                        <span>{status?.key_preview || '—'}</span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>Действует до</span>
+                        <span
+                            style={{
+                                color: expired ? 'var(--color-danger)' : expiringSoon ? 'var(--color-warning)' : undefined,
+                                fontWeight: expired || expiringSoon ? 600 : 400,
+                            }}
+                        >
+                            {status?.token_expires_at ? formatDate(status.token_expires_at) : '—'}
+                            {expired ? ' — истёк, переподключите' : expiringSoon ? ' — скоро истечёт' : ''}
+                        </span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>Последняя синхронизация</span>
+                        <span>{status?.last_sync_at ? formatDateTime(status.last_sync_at) : 'ещё не выполнялась'}</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-primary btn-sm" onClick={handleSync} disabled={busy}>
+                            {busy ? 'Синхронизация...' : 'Синхронизировать сейчас'}
+                        </button>
+                        <button className="btn btn-danger btn-sm" onClick={handleDisconnect} disabled={busy}>
+                            Отключить
+                        </button>
+                    </div>
+                </>
+            )}
+
+            {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 12 }}>{error}</div>}
+            {syncMsg && <div style={{ color: 'var(--color-success)', fontSize: 13, marginTop: 12 }}>{syncMsg}</div>}
         </div>
     );
 }
@@ -1448,5 +1637,247 @@ function DeliveryTab({ warehouseId }: { warehouseId: number }) {
                 </button>
             </div>
         </div>
+    );
+}
+
+/* ─── Tab: ФФ остатки (skladbot) ────────────────────────────────────────── */
+
+function FfStocksTab({ warehouseId }: { warehouseId: number }) {
+    const [data, setData] = useState<FfStocksResponse | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true);
+        setError('');
+        api.getFulfillmentStocks(warehouseId)
+            .then(r => { if (!controller.signal.aborted) setData(r); })
+            .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка'); })
+            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [warehouseId]);
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
+    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>;
+
+    const totals = data?.totals;
+    const rows = data?.rows ?? [];
+
+    const diffCell = (v: number) => {
+        if (!v) return <span style={{ color: 'var(--color-text-muted)' }}>0</span>;
+        return (
+            <span style={{ color: v > 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 600 }}>
+                {v > 0 ? '+' : ''}{formatNumber(v, 0)}
+            </span>
+        );
+    };
+
+    const cols: Column[] = [
+        { key: 'barcode', label: 'ШК' },
+        {
+            key: 'article_seller', label: 'Наш артикул',
+            render: (_: unknown, row: FfStockRow) => row.article_seller ?? row.vendor_code ?? '—',
+            exportValue: (row: FfStockRow) => row.article_seller ?? row.vendor_code ?? '',
+        },
+        {
+            key: 'name', label: 'Название',
+            render: (v: string | null, row: FfStockRow) => (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <span>{v || '—'}</span>
+                    {row.nomenclature_id === null && (
+                        <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>нет в номенклатуре</span>
+                    )}
+                </span>
+            ),
+            exportValue: (row: FfStockRow) => row.name ?? '',
+        },
+        { key: 'ff_good', label: 'ФФ годный', align: 'right', format: 'number' },
+        { key: 'ff_reserve', label: 'ФФ резерв', align: 'right', format: 'number' },
+        {
+            key: 'ff_defect', label: 'ФФ брак', align: 'right',
+            render: (v: number) => (
+                <span style={{ color: v > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: v > 0 ? 600 : 400 }}>
+                    {formatNumber(v, 0)}
+                </span>
+            ),
+        },
+        { key: 'our_quantity', label: 'У нас', align: 'right', format: 'number' },
+        {
+            key: 'our_defect', label: 'У нас брак', align: 'right',
+            render: (v: number) => (
+                <span style={{ color: v > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: v > 0 ? 600 : 400 }}>
+                    {formatNumber(v, 0)}
+                </span>
+            ),
+        },
+        { key: 'diff', label: 'Расхождение', align: 'right', render: (v: number) => diffCell(v) },
+    ];
+
+    const summary: { label: string; value: number; color?: string }[] = totals ? [
+        { label: 'Годный ФФ', value: totals.ff_good },
+        { label: 'Резерв', value: totals.ff_reserve },
+        { label: 'Брак ФФ', value: totals.ff_defect, color: totals.ff_defect > 0 ? 'var(--color-warning)' : undefined },
+        { label: 'У нас', value: totals.our_quantity },
+        { label: 'Расхождение', value: totals.diff, color: totals.diff > 0 ? 'var(--color-success)' : totals.diff < 0 ? 'var(--color-danger)' : undefined },
+        { label: 'Несматчено', value: totals.unmatched, color: totals.unmatched > 0 ? 'var(--color-warning)' : undefined },
+    ] : [];
+
+    return (
+        <>
+            {totals && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12, marginBottom: 16 }}>
+                    {summary.map(s => (
+                        <div key={s.label} className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{s.label}</div>
+                            <div style={{ fontSize: 24, fontWeight: 700, color: s.color }}>
+                                {s.label === 'Расхождение' && s.value > 0 ? '+' : ''}{formatNumber(s.value, 0)}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                Синхронизировано: {data?.synced_at ? formatDateTime(data.synced_at) : 'ещё не выполнялась'}
+            </div>
+
+            <TanStackDataTable
+                columns={cols}
+                data={rows}
+                emptyText="Нет данных — выполните синхронизацию во вкладке «Реквизиты»"
+                emptyIcon="📦"
+                exportName="ff_stocks"
+            />
+        </>
+    );
+}
+
+/* ─── Tabs: ФФ сборка / ФФ приёмки (skladbot) ───────────────────────────── */
+
+function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug: string; kind: FfRequestKind }) {
+    const [rows, setRows] = useState<FfRequestRow[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [actingId, setActingId] = useState<number | null>(null);
+
+    // Модал «Связать» (общий пикер — ff-shared)
+    const [linkFor, setLinkFor] = useState<FfRequestRow | null>(null);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true);
+        setError('');
+        api.getFulfillmentRequests(warehouseId, kind)
+            .then(r => { if (!controller.signal.aborted) setRows(r); })
+            .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка'); })
+            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [warehouseId, kind]);
+
+    const handleUnlink = async (row: FfRequestRow) => {
+        if (!confirm(`Отвязать заявку ${row.number || row.external_id} от документа ${row.linked_number}?`)) return;
+        setActingId(row.id);
+        setError('');
+        try {
+            const updated = await api.unlinkFulfillmentRequest(warehouseId, row.id);
+            setRows(prev => prev.map(r => r.id === updated.id ? updated : r));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка отвязки');
+        } finally {
+            setActingId(null);
+        }
+    };
+
+    const linkedStatusLabel = (s: string | null) => (s ? (FF_LINKED_STATUS_LABELS[s] || s) : '');
+
+    const cols: Column[] = [
+        {
+            key: 'number', label: 'Номер',
+            render: (v: string | null, row: FfRequestRow) => (
+                <Link
+                    href={`/p/${slug}/warehouse/${warehouseId}/ff-request/${row.id}`}
+                    title="Открыть состав заявки"
+                    style={{ fontWeight: 600, color: 'var(--color-accent)', textDecoration: 'none' }}
+                >
+                    {v || row.external_id}
+                </Link>
+            ),
+            exportValue: (row: FfRequestRow) => row.number || row.external_id,
+        },
+        {
+            key: 'external_created_at', label: 'Создана',
+            render: (v: string | null) => (v ? formatDate(v) : '—'),
+        },
+        { key: 'type_name', label: 'Тип', render: (v: string | null) => v || '—' },
+        {
+            key: 'stage_title', label: 'Стадия',
+            render: (v: string | null, row: FfRequestRow) => (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <span>{v || row.status || '—'}</span>
+                    {ffStageBadge(row)}
+                </span>
+            ),
+            exportValue: (row: FfRequestRow) => row.stage_title || row.status || '',
+        },
+        {
+            key: 'linked_number', label: 'Связь',
+            render: (_: unknown, row: FfRequestRow) => {
+                const acting = actingId === row.id;
+                if (row.linked_number) {
+                    return (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontWeight: 600 }}>{row.linked_number}</span>
+                            {row.linked_status && (
+                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{linkedStatusLabel(row.linked_status)}</span>
+                            )}
+                            <button className="btn btn-sm btn-secondary" onClick={() => handleUnlink(row)} disabled={acting}>
+                                {acting ? '...' : 'Отвязать'}
+                            </button>
+                        </span>
+                    );
+                }
+                return (
+                    <button className="btn btn-sm btn-secondary" onClick={() => setLinkFor(row)} disabled={acting}>
+                        Связать
+                    </button>
+                );
+            },
+            exportValue: (row: FfRequestRow) => row.linked_number
+                ? `${row.linked_number}${row.linked_status ? ` (${linkedStatusLabel(row.linked_status)})` : ''}`
+                : '',
+        },
+    ];
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
+    if (error && rows.length === 0) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>;
+
+    return (
+        <>
+            {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
+
+            <TanStackDataTable
+                columns={cols}
+                data={rows}
+                emptyText={kind === 'assembly'
+                    ? 'Нет заявок на сборку — выполните синхронизацию во вкладке «Реквизиты»'
+                    : 'Нет заявок на приёмку — выполните синхронизацию во вкладке «Реквизиты»'}
+                emptyIcon={kind === 'assembly' ? '🧰' : '📥'}
+                exportName={kind === 'assembly' ? 'ff_assembly_requests' : 'ff_inbound_requests'}
+            />
+
+            {linkFor && (
+                <FfLinkModal
+                    warehouseId={warehouseId}
+                    kind={kind}
+                    request={linkFor}
+                    onClose={() => setLinkFor(null)}
+                    onLinked={updated => {
+                        setRows(prev => prev.map(r => r.id === updated.id ? updated : r));
+                        setLinkFor(null);
+                    }}
+                />
+            )}
+        </>
     );
 }

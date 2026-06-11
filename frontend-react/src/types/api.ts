@@ -3168,3 +3168,135 @@ export interface BasketEvaluation {
   per_okrug: OkrugBasketStats[];
   cities: CitySpeedDTO[] | null;
 }
+
+// ─── Fulfillment integration (skladbot) ────────────────────────────────────
+
+export interface FulfillmentStatus {
+  connected: boolean;
+  provider: string | null;
+  /** "***xxxx" — сам токен назад не отдаётся */
+  key_preview: string | null;
+  customer_id: number | null;
+  customer_name: string | null;
+  token_expires_at: string | null;
+  last_sync_at: string | null;
+}
+
+export interface FulfillmentConnectPayload {
+  provider: 'skladbot';
+  token: string;
+}
+
+export interface FfSyncResult {
+  stocks_synced: number;
+  requests_synced: number;
+  unmatched_barcodes: number;
+  synced_at: string;
+}
+
+export interface FfStockRow {
+  barcode: string;
+  name: string | null;
+  vendor_code: string | null;
+  nomenclature_id: number | null;
+  /** наш артикул (если товар сматчен) */
+  article_seller: string | null;
+  ff_good: number;
+  ff_reserve: number;
+  ff_defect: number;
+  ff_nominal: number;
+  our_quantity: number;
+  our_defect: number;
+  /** ff_good - our_quantity */
+  diff: number;
+}
+
+export interface FfStockTotals {
+  ff_good: number;
+  ff_reserve: number;
+  ff_defect: number;
+  our_quantity: number;
+  diff: number;
+  /** строк ФФ без нашей номенклатуры */
+  unmatched: number;
+}
+
+export interface FfStocksResponse {
+  rows: FfStockRow[];
+  totals: FfStockTotals;
+  synced_at: string | null;
+}
+
+export type FfRequestKind = 'assembly' | 'inbound';
+
+export interface FfRequestRow {
+  id: number;
+  external_id: string;
+  number: string | null;
+  kind: 'assembly' | 'inbound' | 'other';
+  type_name: string | null;
+  status: string | null;
+  stage_code: string | null;
+  stage_title: string | null;
+  is_completed: boolean;
+  archived: boolean;
+  expired: boolean;
+  external_created_at: string | null;
+  synced_at: string;
+  assembly_request_id: number | null;
+  inbound_receipt_id: number | null;
+  /** Обогащение по связанному документу (заполняет сервис) */
+  linked_number: string | null;
+  linked_status: string | null;
+}
+
+export interface FfRequestDetailProduct {
+  barcode: string | null;
+  vendor_code: string | null;
+  name: string | null;
+  nomenclature_id: number | null;
+  /** наш артикул (если товар сматчен) */
+  article_seller: string | null;
+  qty: number;
+  accepted_qty: number;
+  delivery_qty: number;
+  defect_qty: number;
+  color: string | null;
+  size: string | null;
+  comment: string | null;
+  image: string | null;
+}
+
+export interface FfRequestStageLog {
+  stage: string | null;
+  executor: string | null;
+  /** формат провайдера «10.06.2026 17:53:35» — показывать как есть */
+  created_at: string | null;
+  spent_time: string | null;
+}
+
+/** Динамическое поле заявки (Маркетплейс, Склад МП, Дата забора, ...) */
+export interface FfRequestFieldValue {
+  name: string | null;
+  field: string | null;
+  value: string | null;
+}
+
+/** Деталка заявки ФФ: шапка списочной строки + живой состав от провайдера */
+export interface FfRequestDetail extends FfRequestRow {
+  comment: string | null;
+  customer_name: string | null;
+  executor: string | null;
+  creator: string | null;
+  stage_description: string | null;
+  total_qty: number;
+  total_accepted: number;
+  products: FfRequestDetailProduct[];
+  stage_logs: FfRequestStageLog[];
+  fields: FfRequestFieldValue[];
+}
+
+export interface FfLinkPayload {
+  assembly_request_id?: number | null;
+  inbound_receipt_id?: number | null;
+}
