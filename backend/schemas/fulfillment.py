@@ -13,8 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class FulfillmentConnectPayload(BaseModel):
-    provider: Literal["skladbot"] = "skladbot"
+    provider: Literal["skladbot", "wmscelicom"] = "skladbot"
     token: str = Field(min_length=20, max_length=4096)
+    # wmscelicom: адрес клиентского инстанса ({client}.wmscelicom.ru)
+    base_url: str | None = Field(None, max_length=200)
 
 
 class FulfillmentStatus(BaseModel):
@@ -24,6 +26,7 @@ class FulfillmentStatus(BaseModel):
     customer_id: int | None = None
     customer_name: str | None = None
     token_expires_at: datetime | None = None
+    api_base_url: str | None = None  # wmscelicom: инстанс, на который ходим
     last_sync_at: datetime | None = None
 
 

@@ -15,6 +15,7 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from backend.integrations.skladbot_client import SkladbotClient, decode_jwt_exp
+from backend.integrations.wmscelicom_client import WmsCelicomClient, normalize_base_url
 from backend.models import (
     FulfillmentRequest,
     FulfillmentStock,
@@ -755,3 +756,342 @@ async def test_request_detail_project_isolation(
     _mock_detail(monkeypatch, _detail())
     row = await fulfillment_service.get_request_detail(db_session, other_project.id, other_warehouse.id, mirror.id)
     assert row is None
+
+
+# ─── WMS Celicom (wmscelicom) ────────────────────────────────────────────────
+
+WMS_TOKEN = "0fake0fake0fake0fake0fake0fake00"  # noqa: S105 — фейковый 32-hex
+WMS_BASE_INPUT = "test-client.wmscelicom.ru"
+WMS_BASE = "https://test-client.wmscelicom.ru"
+
+
+def _wms_item(item_id, barcode, count=0, virtual=0, name="Товар WMS", article="WMS-ART"):
+    """wmscelicom items/get item."""
+    return {
+        "Id": item_id,
+        "Name": name,
+        "Count": count,
+        "CountVirtual": virtual,
+        "Article": article,
+        "Barcodes": [barcode] if barcode else [],
+        "Complect": 0,
+    }
+
+
+def _wms_shipment(sid, status="Новая", external_order=None, date_time="2026-06-01 10:00:00", packages=None):
+    """wmscelicom shipmentsfbo/list row (packages — dict {номер: короб})."""
+    row = {
+        "shipment_fbo_id": sid,
+        "date_time": date_time,
+        "status": status,
+        "laststatus_datetime": date_time,
+        "external_order": external_order,
+        "shipped_target": "Маркетплейс Склад",
+        "dispatch_date": "2026-06-09 00:00:00",
+        "user": {"first_name": "Иван", "last_name": "Петров"},
+    }
+    if packages is not None:
+        row["packages"] = packages
+    return row
+
+
+def _wms_unloading(uid, status="Новая", close=None, create="2026-06-02 09:00:00", items=None):
+    """wmscelicom unloadingorders/list row."""
+    return {
+        "unloading_order_id": uid,
+        "create_date_time": create,
+        "delivery_date_time": "2026-06-05 12:00:00",
+        "status": status,
+        "unloading_status": None,
+        "unloading_close_date": close,
+        "items": items or [],
+    }
+
+
+def _mock_wms_connection(monkeypatch, ok=True):
+    async def fake_test_connection(self):
+        return ok
+
+    monkeypatch.setattr(WmsCelicomClient, "test_connection", fake_test_connection)
+
+
+def _mock_wms_fetches(monkeypatch, items=(), shipments=(), unloadings=()):
+    async def fake_items(self):
+        return list(items)
+
+    async def fake_shipments(self):
+        return list(shipments)
+
+    async def fake_unloadings(self):
+        return list(unloadings)
+
+    monkeypatch.setattr(WmsCelicomClient, "fetch_all_items", fake_items)
+    monkeypatch.setattr(WmsCelicomClient, "fetch_shipments_fbo", fake_shipments)
+    monkeypatch.setattr(WmsCelicomClient, "fetch_unloading_orders", fake_unloadings)
+
+
+@pytest_asyncio.fixture
+async def connected_wms_key(db_session, project, warehouse, monkeypatch):
+    """Подключённый wmscelicom-ключ (test_connection замокан)."""
+    _mock_wms_connection(monkeypatch)
+    await fulfillment_service.connect(
+        db_session, project.id, warehouse.id, "wmscelicom", WMS_TOKEN, base_url=WMS_BASE_INPUT
+    )
+    return await fulfillment_service.get_integration(db_session, project.id, warehouse.id)
+
+
+# ─── normalize_base_url ──────────────────────────────────────────────────────
+
+
+def test_normalize_base_url_variants():
+    assert normalize_base_url("client.wmscelicom.ru") == "https://client.wmscelicom.ru"
+    assert normalize_base_url(" https://client.wmscelicom.ru/ ") == "https://client.wmscelicom.ru"
+    assert normalize_base_url("CLIENT.WMSCELICOM.RU") == "https://client.wmscelicom.ru"
+
+
+def test_normalize_base_url_rejects_foreign_and_garbage():
+    for bad in (
+        "",
+        "evil.com",
+        "https://evil.com",
+        "wmscelicom.ru",  # голый корень — не инстанс
+        "https://client.wmscelicom.ru/path",
+        "https://client.wmscelicom.ru:8080",
+        "http://client.wmscelicom.ru",  # plain http
+        "https://evil.com/?x=.wmscelicom.ru",
+        "https://user@evil.com#.wmscelicom.ru",
+    ):
+        with pytest.raises(ValueError):
+            normalize_base_url(bad)
+
+
+# ─── Connect (wmscelicom) ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_connect_wms_and_status(db_session, project, warehouse, connected_wms_key):
+    status = await fulfillment_service.get_status(db_session, project.id, warehouse.id)
+    assert status["connected"] is True
+    assert status["provider"] == "wmscelicom"
+    assert status["key_preview"] == "***" + WMS_TOKEN[-4:]
+    assert status["api_base_url"] == WMS_BASE
+    assert status["customer_name"] == "test-client.wmscelicom.ru"
+    assert status["customer_id"] is None
+    assert status["token_expires_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_connect_wms_requires_base_url(db_session, project, warehouse, monkeypatch):
+    _mock_wms_connection(monkeypatch)
+    with pytest.raises(ValueError, match="адрес"):
+        await fulfillment_service.connect(db_session, project.id, warehouse.id, "wmscelicom", WMS_TOKEN)
+
+
+@pytest.mark.asyncio
+async def test_connect_wms_failed_probe_raises(db_session, project, warehouse, monkeypatch):
+    _mock_wms_connection(monkeypatch, ok=False)
+    with pytest.raises(ValueError, match="WMS Celicom"):
+        await fulfillment_service.connect(
+            db_session, project.id, warehouse.id, "wmscelicom", WMS_TOKEN, base_url=WMS_BASE_INPUT
+        )
+
+
+@pytest.mark.asyncio
+async def test_connect_second_provider_over_active_raises(db_session, project, warehouse, connected_key, monkeypatch):
+    """Один склад — один активный провайдер: skladbot уже подключён → wmscelicom отказ."""
+    _mock_wms_connection(monkeypatch)
+    with pytest.raises(ValueError, match="отключите"):
+        await fulfillment_service.connect(
+            db_session, project.id, warehouse.id, "wmscelicom", WMS_TOKEN, base_url=WMS_BASE_INPUT
+        )
+
+
+@pytest.mark.asyncio
+async def test_connect_unsupported_provider_raises(db_session, project, warehouse):
+    with pytest.raises(ValueError, match="провайдер"):
+        await fulfillment_service.connect(db_session, project.id, warehouse.id, "migfull", WMS_TOKEN)
+
+
+# ─── Sync (wmscelicom) ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_wms_stocks_mapping(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """Count→good, CountVirtual→nominal, Article→vendor_code, Id→external_product_id, Barcodes[0]."""
+    bc_known = f"BC-{_uid()}"
+    bc_unknown = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc_known)
+
+    _mock_wms_fetches(
+        monkeypatch,
+        items=[
+            _wms_item(11, bc_known, count=7, virtual=2, article="ART-W1"),
+            _wms_item(22, bc_unknown, count=3),
+            _wms_item(33, None, count=99),  # без barcode — мимо
+        ],
+    )
+
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["stocks_synced"] == 2
+    assert result["unmatched_barcodes"] == 1
+
+    rows = {r.barcode: r for r in await _ff_stocks(db_session, project.id, warehouse.id)}
+    row = rows[bc_known]
+    assert row.provider == "wmscelicom"
+    assert row.qty_good == 7
+    assert row.qty_nominal == 2
+    assert row.qty_reserve == 0 and row.qty_defect == 0
+    assert row.vendor_code == "ART-W1"
+    assert row.external_product_id == "11"
+    assert row.nomenclature_id == nom.id
+    assert rows[bc_unknown].nomenclature_id is None
+
+
+@pytest.mark.asyncio
+async def test_sync_wms_requests_kinds_and_statuses(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    _mock_wms_fetches(
+        monkeypatch,
+        shipments=[
+            _wms_shipment(101, status="Новая"),
+            _wms_shipment(102, status="Отгружена", external_order="ORD-9921"),
+            _wms_shipment(103, status="Принята в СЦ c разногласиями"),
+            _wms_shipment(104, status="Аннулирована"),
+        ],
+        unloadings=[
+            _wms_unloading(201, status="Новая"),
+            _wms_unloading(202, status="Принята", close="2026-06-07 18:00:00"),
+        ],
+    )
+
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["requests_synced"] == 6
+
+    rows = {r["external_id"]: r for r in await fulfillment_service.list_requests(db_session, project.id, warehouse.id)}
+    assert rows["101"]["kind"] == "assembly"
+    assert rows["101"]["is_completed"] is False
+    assert rows["101"]["type_name"] == "Отгрузка FBO"
+    assert rows["101"]["external_created_at"] is not None
+
+    assert rows["102"]["is_completed"] is True
+    assert rows["102"]["number"] == "ORD-9921"
+    assert rows["103"]["is_completed"] is True
+    assert rows["104"]["archived"] is True
+
+    assert rows["201"]["kind"] == "inbound"
+    assert rows["201"]["is_completed"] is False
+    assert rows["202"]["is_completed"] is True
+
+    assembly_only = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    assert {r["external_id"] for r in assembly_only} == {"101", "102", "103", "104"}
+
+
+@pytest.mark.asyncio
+async def test_sync_wms_upsert_preserves_links(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    _mock_wms_fetches(monkeypatch, unloadings=[_wms_unloading(301, status="Новая")])
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = InboundReceipt(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        number=f"IR-{_uid()}",
+        status="EXPECTED",
+    )
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "inbound")
+    ff_id = next(r["id"] for r in rows if r["external_id"] == "301")
+    await fulfillment_service.link_request(db_session, project.id, ff_id, inbound_receipt_id=doc.id)
+
+    _mock_wms_fetches(monkeypatch, unloadings=[_wms_unloading(301, status="Принята", close="2026-06-08 10:00:00")])
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "inbound")
+    row = next(r for r in rows if r["external_id"] == "301")
+    assert row["inbound_receipt_id"] == doc.id  # связь пережила ресинк
+    assert row["status"] == "Принята"
+    assert row["is_completed"] is True
+
+
+# ─── Деталка (wmscelicom, из raw) ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_wms_request_detail_assembly_from_raw(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """Деталка отгрузки FBO: товары агрегируются из коробов, без HTTP-вызова."""
+    bc_known = f"BC-{_uid()}"
+    bc_unknown = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc_known, article="ART-WMS-D")
+
+    packages = {
+        "1": {
+            "number": 1,
+            "barcode": "WB_1",
+            "items": [
+                {"name": "Товар А", "barcode": bc_known, "count": 3},
+                {"name": "Товар Б", "barcode": bc_unknown, "count": 2},
+            ],
+        },
+        "2": {
+            "number": 2,
+            "barcode": "WB_2",
+            "items": [
+                {"name": "Товар А", "barcode": bc_known, "count": 4},
+            ],
+        },
+    }
+    _mock_wms_fetches(monkeypatch, shipments=[_wms_shipment(401, status="На сборке", packages=packages)])
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    ff_id = next(r["id"] for r in rows if r["external_id"] == "401")
+
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    assert row is not None
+    assert row["total_qty"] == 9
+    assert row["creator"] == "Иван Петров"
+    by_bc = {p["barcode"]: p for p in row["products"]}
+    assert by_bc[bc_known]["qty"] == 7  # 3 + 4 из двух коробов
+    assert by_bc[bc_known]["nomenclature_id"] == nom.id
+    assert by_bc[bc_known]["article_seller"] == "ART-WMS-D"
+    assert by_bc[bc_unknown]["qty"] == 2
+    assert by_bc[bc_unknown]["nomenclature_id"] is None
+    field_names = {f["name"] for f in row["fields"]}
+    assert "Площадка" in field_names
+    assert "Коробов" in field_names
+
+
+@pytest.mark.asyncio
+async def test_wms_request_detail_inbound_from_raw(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    bc = f"BC-{_uid()}"
+    items = [{"item_id": 5, "name": "Товар В", "barcode": bc, "count": 6, "comment": "хрупкое"}]
+    _mock_wms_fetches(monkeypatch, unloadings=[_wms_unloading(501, status="Новая", items=items)])
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "inbound")
+    ff_id = next(r["id"] for r in rows if r["external_id"] == "501")
+
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    assert row is not None
+    assert row["total_qty"] == 6
+    assert row["products"][0]["barcode"] == bc
+    assert row["products"][0]["comment"] == "хрупкое"
+    field_names = {f["name"] for f in row["fields"]}
+    assert "Дата поставки" in field_names
+
+
+@pytest.mark.asyncio
+async def test_wms_request_detail_works_without_connection(
+    db_session, project, warehouse, connected_wms_key, monkeypatch
+):
+    """Деталка wmscelicom строится из raw — работает даже после disconnect."""
+    _mock_wms_fetches(monkeypatch, unloadings=[_wms_unloading(601, status="Новая")])
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "inbound")
+    ff_id = next(r["id"] for r in rows if r["external_id"] == "601")
+
+    await fulfillment_service.disconnect(db_session, project.id, warehouse.id)
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    assert row is not None
+    assert row["products"] == []

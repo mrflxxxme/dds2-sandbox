@@ -1,6 +1,19 @@
-# DOMAIN_FULFILLMENT — интеграция внешних фулфилментов (skladbot.ru, позже migfull)
+# DOMAIN_FULFILLMENT — интеграция внешних фулфилментов (skladbot.ru, wmscelicom; позже migfull)
 
 Generic-слой зеркалирования данных фулфилмент-провайдеров на странице склада: остатки (snapshot + расхождения), заявки на сборку и приёмки (зеркало + ручная связь с нашими документами). Фаза 1 — read-only pull; push-создание заявок — фаза 2.
+
+## Провайдеры
+| | skladbot.ru | wmscelicom («Целиком») |
+|---|---|---|
+| База API | `api.skladbot.ru`, Bearer-токен | клиентский инстанс `{client}.wmscelicom.ru` (поле при подключении), **токен в URL-пути** `/api/{token}/…` — не логировать URL |
+| Остатки | `POST /v1/products` (amount/reserve/repair/nominale) | `GET items/get/` — Count→good, CountVirtual→nominal, reserve/defect нет; `Barcodes[]` — берём первый |
+| Сборка | `/v1/requests?type_id=851` | `shipmentsfbo/list/?with_packages=1&with_items=1` (отгрузки FBO) |
+| Приёмки | `/v1/requests?type_id=852,2644` | `unloadingorders/list/` (items в ответе списка) |
+| Деталка | живой `GET /v1/requests/show/{id}` | **из raw зеркала** — by-id эндпоинта нет; актуальность = последний синк |
+| Лимиты | 60/120 rpm | 150 rpm, max 30 элементов/страница |
+| Токен | RS256 JWT (exp → token_expires_at) | hex-строка, без срока в самом токене |
+
+Внутри сервиса провайдер-специфика заканчивается на нормализаторах `_normalize_*` (fulfillment_service.py); `_apply_stocks`/`_apply_requests` работают с нормализованными dict.
 
 ## Таблицы
 | Модель | Назначение | Ключ / constraint |
@@ -15,7 +28,9 @@ Generic-слой зеркалирования данных фулфилмент-
 - Дубликаты barcode на стороне ФФ (версии товара под WB/OZON) агрегируются суммированием до записи.
 - Заявки ФФ — UPSERT по `external_id`; связи `assembly_request_id`/`inbound_receipt_id` при обновлении НЕ перетираются.
 - Один наш документ ↔ максимум одна заявка ФФ (проверка при link).
-- `kind` определяется по `type_id` провайдера: skladbot — 851 → `assembly`, 852/2644 → `inbound`.
+- `kind`: skladbot — по `type_id` (851 → `assembly`, 852/2644 → `inbound`); wmscelicom — по источнику (shipmentsfbo → `assembly`, unloadingorders → `inbound`).
+- Один склад — один активный провайдер (guard в `connect`); `IntegrationKey.config`: skladbot — customer_id/token_expires_at, wmscelicom — api_base_url (хост валидируется суффиксом `.wmscelicom.ru` — SSRF-guard).
+- wmscelicom-статусы: отгрузка завершена при «Отгружена»/«Вручена получателю»/«Принята в СЦ…», «Аннулирована» → archived; приёмка завершена при заполненном `unloading_close_date`.
 - Статусы ФФ (stage_code/is_completed) — информативные; наши статусы документов автоматически НЕ меняются.
 - Токен write-only: наружу только `key_preview` (***последние 4); шифрование `backend/utils/crypto.py`; `config` хранит customer_id и token_expires_at (exp из JWT, ~180 дней — следить за истечением).
 
@@ -33,7 +48,8 @@ Generic-слой зеркалирования данных фулфилмент-
 
 ## Файлы
 - `backend/integrations/skladbot_client.py` — httpx-клиент (Bearer, 429→RateLimitError, circuit breaker).
-- `backend/services/fulfillment_service.py` — connect/status/sync/list/link.
+- `backend/integrations/wmscelicom_client.py` — httpx-клиент wmscelicom (токен в path, normalize_base_url, circuit breaker).
+- `backend/services/fulfillment_service.py` — connect/status/sync/list/link + нормализаторы провайдеров.
 - `backend/routers/fulfillment.py` — `/warehouse/{id}/fulfillment/*`.
 - `backend/scheduler/jobs/fulfillment_sync.py` — периодический синк (15 мин, worker).
 - `frontend-react/src/app/(main)/p/[slug]/warehouse/[id]/page.tsx` — вкладки «ФФ остатки / ФФ сборка / ФФ приёмки» + блок подключения в «Реквизитах».

@@ -1,4 +1,4 @@
-/** Fulfillment integration API methods (skladbot.ru) */
+/** Fulfillment integration API methods (skladbot.ru, wmscelicom) */
 import { ApiClient } from './client';
 import type {
     FfLinkPayload,
@@ -17,9 +17,8 @@ export function addFulfillmentMethods(api: ApiClient) {
         getFulfillmentStatus(warehouseId: number) {
             return api.request<FulfillmentStatus>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/status`);
         },
-        connectFulfillment(warehouseId: number, token: string) {
-            const body: FulfillmentConnectPayload = { provider: 'skladbot', token };
-            return api.request<FulfillmentStatus>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/connect`, body);
+        connectFulfillment(warehouseId: number, payload: FulfillmentConnectPayload) {
+            return api.request<FulfillmentStatus>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/connect`, payload);
         },
         disconnectFulfillment(warehouseId: number) {
             return api.request<{ ok: boolean }>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/connect`);

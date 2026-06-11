@@ -30,6 +30,7 @@ from backend.utils.time import utcnow
 class FulfillmentProvider(str, enum.Enum):
     SKLADBOT = "skladbot"
     MIGFULL = "migfull"  # «Натали» — будущий провайдер
+    WMSCELICOM = "wmscelicom"  # WMS Celicom («Целиком»), токен в URL-пути
 
 
 class FfRequestKind(str, enum.Enum):

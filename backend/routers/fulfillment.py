@@ -45,7 +45,14 @@ async def connect(
 ):
     """Подключить фулфилмент: валидация токена + сохранение ключа."""
     try:
-        return await fulfillment_service.connect(db, project.id, warehouse_id, payload.provider, payload.token)
+        return await fulfillment_service.connect(
+            db,
+            project.id,
+            warehouse_id,
+            payload.provider,
+            payload.token,
+            base_url=payload.base_url,
+        )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
