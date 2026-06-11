@@ -102,6 +102,16 @@ export function formatDateTime(d: string | null | undefined): string {
     return new Date(d).toLocaleString('ru-RU');
 }
 
+/** Русская плюрализация: pluralRu(3, ['черновик', 'черновика', 'черновиков']). */
+export function pluralRu(n: number, forms: [string, string, string]): string {
+    const abs = Math.abs(n) % 100;
+    const tail = abs % 10;
+    if (abs > 10 && abs < 20) return forms[2];
+    if (tail === 1) return forms[0];
+    if (tail >= 2 && tail <= 4) return forms[1];
+    return forms[2];
+}
+
 /**
  * Calculate total boxes with mix group deduplication.
  *
