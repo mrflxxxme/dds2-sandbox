@@ -8,6 +8,7 @@ import type {
     AssemblyDraftCreate,
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
+    AssemblyFlowAnalyticsResponse,
     HandedUnitItem,
     AssemblyHistoryEntry,
     AssemblyListResponse,
@@ -413,6 +414,20 @@ export function addWarehouseMethods(api: ApiClient) {
             }
             const qs = query.toString();
             return api.request<LogisticsAnalyticsResponse>('GET', `/api/v1/warehouse/assembly/shipments/analytics${qs ? `?${qs}` : ''}`);
+        },
+        /** Анализ потока сборки: длительности этапов, переходы, аномалии. */
+        getAssemblyFlowAnalytics(params?: {
+            date_from?: string; date_to?: string; warehouse_ids?: string;
+            assembly_threshold_days?: number; ship_threshold_days?: number; delivery_threshold_days?: number;
+        }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
+            return api.request<AssemblyFlowAnalyticsResponse>('GET', `/api/v1/warehouse/assembly/flow-analytics${qs ? `?${qs}` : ''}`);
         },
 
         // ─── Assembly Drafts ────────────────────────────────────────────

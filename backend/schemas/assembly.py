@@ -140,6 +140,11 @@ class AssemblyRequestResponse(BaseModel):
     items: list[AssemblyItemResponse] = []
     created_at: datetime
     updated_at: datetime
+    # Привязанная ФФ-заявка (зеркало фулфилмента) — заполняется только в GET деталки
+    ff_request_id: int | None = None
+    ff_request_number: str | None = None
+    ff_stage_title: str | None = None
+    ff_warehouse_id: int | None = None
 
 
 class AssemblyListResponse(BaseModel):
@@ -225,3 +230,74 @@ class LogisticsAnalyticsResponse(BaseModel):
     summary: LogisticsCostSummary
     by_destination: list[LogisticsDestStat]
     by_route: list[LogisticsRouteStat]
+
+
+# ─── Flow analytics (анализ потока сборки) ─────────────────────────────────
+# Зеркало TS-контракта: frontend-react/src/types/api.ts, блок
+# «Анализ потока сборки (flow analytics)».
+
+AssemblyAnomalyKind = Literal[
+    "stuck_assembly",  # IN_PROGRESS дольше порога
+    "stuck_shipment",  # READY/VEHICLE_ASSIGNED дольше порога от готовности
+    "wb_accepted_not_shipped",  # ВБ уже принял поставку, но заявка не отгружена
+    "shipped_not_accepted",  # SHIPPED дольше порога без DELIVERED
+]
+
+
+class AssemblyStageDuration(BaseModel):
+    stage: str  # IN_PROGRESS | READY | VEHICLE_ASSIGNED | SHIPPED
+    avg_days: float | None
+    median_days: float | None
+    count: int  # на скольких заявках посчитано
+
+
+class AssemblyTransitionStat(BaseModel):
+    from_status: str | None  # null = создание заявки
+    to_status: str
+    count: int
+    avg_days: float | None  # среднее время в from_status до перехода, дни
+
+
+class AssemblyAnomalyRow(BaseModel):
+    id: int
+    number: str
+    status: str
+    warehouse_id: int
+    warehouse_name: str | None
+    wb_warehouse_name: str | None
+    kind: AssemblyAnomalyKind
+    days_stuck: int  # сколько дней висит на текущем этапе
+    since: str | None  # ISO — начало текущего этапа
+    total_qty: int
+    wb_fbo_status: str | None  # статус связанной WB FBO-поставки
+
+
+class AssemblyWarehouseFlowStat(BaseModel):
+    warehouse_id: int
+    warehouse_name: str | None
+    active_count: int
+    avg_cycle_days: float | None
+    anomaly_count: int
+
+
+class AssemblyFlowSummary(BaseModel):
+    active_count: int  # заявок в работе сейчас (IN_PROGRESS..SHIPPED)
+    completed_in_period: int  # дошло до DELIVERED («Принято ВБ») за период; CLOSED (возврат) не считается
+    avg_cycle_days: float | None  # создание → отгрузка, дни
+    avg_assembly_days: float | None  # создание → READY, дни
+    anomaly_count: int
+
+
+class AssemblyFlowThresholds(BaseModel):
+    assembly_days: int
+    ship_days: int
+    delivery_days: int
+
+
+class AssemblyFlowAnalyticsResponse(BaseModel):
+    summary: AssemblyFlowSummary
+    stages: list[AssemblyStageDuration]
+    transitions: list[AssemblyTransitionStat]
+    by_warehouse: list[AssemblyWarehouseFlowStat]
+    anomalies: list[AssemblyAnomalyRow]
+    thresholds: AssemblyFlowThresholds
