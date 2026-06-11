@@ -1627,6 +1627,16 @@ export interface AssemblyFlowDailyStat {
   avg_cycle_days: number | null;
 }
 
+/** Товары по этапам на конец дня (снимок): сколько шт лежало в каждом этапе. */
+export interface AssemblyFlowStageDailyStat {
+  /** ISO YYYY-MM-DD */
+  date: string;
+  in_progress_qty: number;
+  ready_qty: number;
+  vehicle_assigned_qty: number;
+  shipped_qty: number;
+}
+
 export interface AssemblyFlowSummary {
   /** заявок в работе сейчас (IN_PROGRESS..SHIPPED) */
   active_count: number;
@@ -1652,6 +1662,7 @@ export interface AssemblyFlowAnalyticsResponse {
   by_warehouse: AssemblyWarehouseFlowStat[];
   anomalies: AssemblyAnomalyRow[];
   daily: AssemblyFlowDailyStat[];
+  stage_daily: AssemblyFlowStageDailyStat[];
   thresholds: AssemblyFlowThresholds;
 }
 

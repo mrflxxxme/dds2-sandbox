@@ -7,10 +7,13 @@
  *  1. KPI: средний цикл, средняя сборка, в работе, аномалии.
  *  1а. График «Динамика по дням»: заявки/товары (по дате создания, переключатель)
  *      + средний цикл (по дате отгрузки, правая ось).
+ *  1б. График «Товары по этапам»: стек шт по этапам на конец каждого дня
+ *      (включая заявки, созданные до начала периода).
  *  2. Пайплайн этапов: Сборка → Готов → Машина → Отгружено → Принято ВБ
  *     (средняя/медианная длительность каждого этапа, подсветка превышений порога).
  *
- * Фильтры всей страницы: период, склад, категория (Nomenclature.subject).
+ * Фильтры всей страницы: период, склад, категория (Nomenclature.subject),
+ * город сдачи (целевой склад ВБ).
  *  3. Нестандартные переходы (отмены и «откаты назад») — свёрнутый блок.
  *  4. Аномалии — зависшие заявки, сгруппированные по типу проблемы.
  *     В каждой группе: Excel-экспорт; в «Готово, но не отгружается» — фильтр
@@ -178,6 +181,14 @@ const CHART_BAR_METRICS: { key: 'created_count' | 'created_qty'; label: string }
     { key: 'created_qty', label: 'Товары, шт' },
 ];
 
+/** Серии стекового графика «товары по этапам» (порядок = порядок потока). */
+const STAGE_SERIES: { key: 'in_progress_qty' | 'ready_qty' | 'vehicle_assigned_qty' | 'shipped_qty'; label: string; color: string }[] = [
+    { key: 'in_progress_qty', label: 'В сборке', color: 'var(--color-accent)' },
+    { key: 'ready_qty', label: 'Готово', color: 'var(--color-success)' },
+    { key: 'vehicle_assigned_qty', label: 'Машина назначена', color: 'var(--color-warning)' },
+    { key: 'shipped_qty', label: 'В пути (отгружено)', color: 'var(--color-text-dim)' },
+];
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /**
@@ -330,6 +341,8 @@ export default function AssemblyFlowAnalyticsPage() {
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [category, setCategory] = useState('');
     const [subjects, setSubjects] = useState<string[]>([]);
+    const [wbWarehouse, setWbWarehouse] = useState('');
+    const [wbWarehouses, setWbWarehouses] = useState<string[]>([]);
 
     // Метрика столбцов графика «динамика по дням»
     const [chartBarMetric, setChartBarMetric] = useState<'created_count' | 'created_qty'>('created_count');
@@ -368,6 +381,12 @@ export default function AssemblyFlowAnalyticsPage() {
                 setSubjects(list);
             })
             .catch(() => {});
+        api.getAssemblyWbWarehouses()
+            .then(list => {
+                if (controller.signal.aborted) return;
+                setWbWarehouses(list);
+            })
+            .catch(() => {});
         return () => controller.abort();
     }, []);
 
@@ -380,6 +399,7 @@ export default function AssemblyFlowAnalyticsPage() {
                 date_from: period === 'all' ? undefined : isoDaysAgo(period === '30' ? 30 : 90),
                 warehouse_ids: warehouseId ? String(warehouseId) : undefined,
                 categories: category || undefined,
+                wb_warehouses: wbWarehouse || undefined,
                 assembly_threshold_days: thresholds.assembly_days,
                 ship_threshold_days: thresholds.ship_days,
                 delivery_threshold_days: thresholds.delivery_days,
@@ -392,7 +412,7 @@ export default function AssemblyFlowAnalyticsPage() {
         } finally {
             if (!signal.aborted) setLoading(false);
         }
-    }, [period, warehouseId, category, thresholds]);
+    }, [period, warehouseId, category, wbWarehouse, thresholds]);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -483,6 +503,13 @@ export default function AssemblyFlowAnalyticsPage() {
 
     // График «динамика по дням»: пропущенные дни → нули (ровная ось X)
     const chartData = useMemo(() => fillDailyGaps(data?.daily ?? []), [data]);
+
+    // График «товары по этапам»: backend отдаёт непрерывный ряд; прячем, если всё нули
+    const stageChartData = data?.stage_daily ?? [];
+    const hasStageData = useMemo(
+        () => stageChartData.some(r => r.in_progress_qty || r.ready_qty || r.vehicle_assigned_qty || r.shipped_qty),
+        [stageChartData],
+    );
 
     const appliedThresholds = data?.thresholds ?? thresholds;
     const periodSub = period === 'all' ? 'за всё время' : `за ${period} дн`;
@@ -594,6 +621,21 @@ export default function AssemblyFlowAnalyticsPage() {
                             <option value="">Все категории</option>
                             {subjects.map(s => (
                                 <option key={s} value={s}>{s}</option>
+                            ))}
+                        </select>
+                    )}
+                    {/* Город сдачи (целевой склад ВБ) */}
+                    {wbWarehouses.length > 0 && (
+                        <select
+                            className="form-input"
+                            style={{ width: 'auto', minWidth: 150, maxWidth: 220 }}
+                            value={wbWarehouse}
+                            onChange={e => setWbWarehouse(e.target.value)}
+                            title="Целевой склад ВБ: имя из связанной поставки, fallback — ручное поле заявки"
+                        >
+                            <option value="">Все города сдачи</option>
+                            {wbWarehouses.map(w => (
+                                <option key={w} value={w}>{w}</option>
                             ))}
                         </select>
                     )}
@@ -783,6 +825,39 @@ export default function AssemblyFlowAnalyticsPage() {
                             </ResponsiveContainer>
                             <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 6 }}>
                                 Заявки и товары — по дате создания заявки; средний цикл — по дате отгрузки (создание → отгрузка отгруженных в этот день).
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Товары по этапам по дням */}
+                    {hasStageData && (
+                        <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                            <SectionTitle>Товары по этапам · шт на конец дня</SectionTitle>
+                            <ResponsiveContainer width="100%" height={280}>
+                                <ComposedChart data={stageChartData} margin={{ top: 5, right: 8, bottom: 5, left: 0 }}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                                    <XAxis dataKey="date" tickFormatter={fmtDayTick} tick={{ fontSize: 11 }} minTickGap={24} />
+                                    <YAxis tick={{ fontSize: 12 }} allowDecimals={false} />
+                                    <RechartsTooltip
+                                        formatter={(value: number, name: string) => [formatNumber(value, 0), name]}
+                                        labelFormatter={(l: string) => formatDate(l)}
+                                        contentStyle={{ borderRadius: 12, border: '1px solid var(--color-border)', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', fontSize: 13 }}
+                                    />
+                                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                                    {STAGE_SERIES.map(s => (
+                                        <Bar
+                                            key={s.key}
+                                            dataKey={s.key}
+                                            name={s.label}
+                                            stackId="stages"
+                                            fill={s.color}
+                                            maxBarSize={26}
+                                        />
+                                    ))}
+                                </ComposedChart>
+                            </ResponsiveContainer>
+                            <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 6 }}>
+                                Снимок на конец каждого дня: сколько штук находилось в сборке / готово / с назначенной машиной / в пути (отгружено, приёмка ВБ не подтверждена). Учитываются и заявки, созданные до начала периода.
                             </div>
                         </div>
                     )}

@@ -305,12 +305,23 @@ class AssemblyFlowDailyStat(BaseModel):
     avg_cycle_days: float | None  # средний цикл (создание → отгрузка) отгруженных в этот день
 
 
+class AssemblyFlowStageDailyStat(BaseModel):
+    """Товары по этапам на конец дня (снимок): сколько шт лежало в каждом этапе."""
+
+    date: str  # ISO YYYY-MM-DD
+    in_progress_qty: int
+    ready_qty: int
+    vehicle_assigned_qty: int
+    shipped_qty: int
+
+
 class AssemblyFlowAnalyticsResponse(BaseModel):
     summary: AssemblyFlowSummary
     stages: list[AssemblyStageDuration]
     transitions: list[AssemblyTransitionStat]
     by_warehouse: list[AssemblyWarehouseFlowStat]
     anomalies: list[AssemblyAnomalyRow]
-    # Дефолт — на случай записи в кэше от прошлой версии без этого ключа.
+    # Дефолты — на случай записи в кэше от прошлой версии без этих ключей.
     daily: list[AssemblyFlowDailyStat] = []
+    stage_daily: list[AssemblyFlowStageDailyStat] = []
     thresholds: AssemblyFlowThresholds
