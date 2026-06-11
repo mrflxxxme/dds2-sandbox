@@ -31,7 +31,8 @@ Generic-слой зеркалирования данных фулфилмент-
 - `kind`: skladbot — по `type_id` (851 → `assembly`, 852/2644 → `inbound`); wmscelicom — по источнику (shipmentsfbo → `assembly`, unloadingorders → `inbound`).
 - Один склад — один активный провайдер (guard в `connect`); `IntegrationKey.config`: skladbot — customer_id/token_expires_at, wmscelicom — api_base_url (хост валидируется суффиксом `.wmscelicom.ru` — SSRF-guard).
 - wmscelicom-статусы: отгрузка завершена при «Отгружена»/«Вручена получателю»/«Принята в СЦ…», «Аннулирована» → archived; приёмка завершена при заполненном `unloading_close_date`.
-- Статусы ФФ (stage_code/is_completed) — информативные; наши статусы документов автоматически НЕ меняются.
+- **Авто-READY связанных сборок**: при синке и при link связанная `AssemblyRequest` переводится `IN_PROGRESS → READY` (история `changed_by=ff_sync`, `actual_ready_date`, invalidate `reports:assembly_flow`), когда стадия ФФ говорит «груз собран» (`_assembly_ready_signal`): skladbot — стадия вне сборочных (`ASSEMBLY_WIP_STAGE_CODES` = cargo_pickup, delivery_to_the_marketplace_warehouse + title-маркеры «забор груза»/«объема груза» в обеих орфографиях) или `is_completed`; wmscelicom — только `is_completed`. Прочие статусы (VEHICLE_ASSIGNED+) не трогаются, обратных переходов нет; archived/expired не триггерят. Намеренно мимо `mark_ready` (его пред-условия FBO-supply/палеты не применимы к внешнему сигналу).
+- **Обогащение зеркала заявок** (`total_qty` — заявлено всего, `dest_warehouse` — «Склад МП»): skladbot — живая деталка `show` при синке (активные сборки каждый синк, завершённые — разовый бэкфилл, cap 100/синк, 429 прекращает обогащение не валя синк); wmscelicom — из raw списка (`packages.items` / `shipped_target`; пустой состав → None, не 0). UPSERT не затирает обогащение `None`'ом.
 - Токен write-only: наружу только `key_preview` (***последние 4); шифрование `backend/utils/crypto.py`; `config` хранит customer_id и token_expires_at (exp из JWT, ~180 дней — следить за истечением).
 
 ## Сводная страница «Заявки ФФ»
@@ -48,6 +49,7 @@ Generic-слой зеркалирования данных фулфилмент-
 - **`/v1/products` отдаёт сырой Laravel-paginator**: `data` — dict с ключом system_product_id и списком barcode-уровневых item'ов внутри; `limit` в body работает (1000), пагинация `?page=N`.
 - **`IntegrationKey` = SoftDeleteMixin + UniqueConstraint без is_deleted** — повторный connect обязан искать строку включая soft-deleted и делать `.restore()`, иначе IntegrityError.
 - **Создание заявки у ФФ = реальный заказ** — POST /v1/requests только после явного подтверждения пользователя; локалка и тесты не ходят в живой API (в тестах клиент мокается).
+- **Коды стадий skladbot ≠ названия** (тип 851, живые пробы 2026-06-11): `cargo_pickup`=«Забор груза» → `delivery_to_the_marketplace_warehouse`=«Указание обьема груза v2» (!) → «Указание виды работ логистики» (код неизвестен — живых примеров не было). Орфография провайдера гуляет («обьема»/«объема», «виды работ») — классификатор матчит и код, и title-маркеры.
 
 ## Файлы
 - `backend/integrations/skladbot_client.py` — httpx-клиент (Bearer, 429→RateLimitError, circuit breaker).

@@ -261,9 +261,14 @@ async def test_request_detail_not_connected_400(client, auth_headers, monkeypatc
             ]
         return []
 
+    async def fake_fetch_request_detail(self, external_id):
+        # Синк обогащает активные assembly-строки живой деталкой — мок против сети
+        return {}
+
     monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
     monkeypatch.setattr(SkladbotClient, "fetch_all_products", fake_fetch_all_products)
     monkeypatch.setattr(SkladbotClient, "fetch_requests", fake_fetch_requests)
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_fetch_request_detail)
 
     headers = await _project_headers(client, auth_headers)
     wh_id = await _create_warehouse(client, headers)

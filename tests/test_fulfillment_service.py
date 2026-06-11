@@ -7,14 +7,15 @@ SkladbotClient полностью мокается через monkeypatch — н
 import base64
 import json
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
-from backend.integrations.skladbot_client import SkladbotClient, decode_jwt_exp
+from backend.integrations.resilience import RateLimitError
+from backend.integrations.skladbot_client import SkladbotApiError, SkladbotClient, decode_jwt_exp
 from backend.integrations.wmscelicom_client import WmsCelicomClient, normalize_base_url
 from backend.models import (
     FulfillmentRequest,
@@ -26,7 +27,7 @@ from backend.models import (
     Warehouse,
     WarehouseStock,
 )
-from backend.models.assembly import AssemblyRequest, AssemblyRequestItem
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus, AssemblyStatusHistory
 from backend.services import fulfillment_service
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -67,7 +68,16 @@ def _item(barcode, amount=0, reserve=0, repair=0, nominal=0, name="Товар", 
     }
 
 
-def _req(req_id, number=None, status="new", created="2026-06-10", archived=0, completed=0, stage_title="Новая"):
+def _req(
+    req_id,
+    number=None,
+    status="new",
+    created="2026-06-10",
+    archived=0,
+    completed=0,
+    stage_title="Новая",
+    stage_code=None,
+):
     """skladbot /v1/requests row."""
     return {
         "id": req_id,
@@ -79,7 +89,7 @@ def _req(req_id, number=None, status="new", created="2026-06-10", archived=0, co
         "archived": archived,
         "type": "тип заявки",
         "stage_title": stage_title,
-        "stage_code": None,
+        "stage_code": stage_code,
         "can_be_executed": True,
         "time_to_process": None,
         "expired": False,
@@ -106,6 +116,13 @@ def _mock_requests(monkeypatch, by_type: dict):
         return by_type.get(type_id, [])
 
     monkeypatch.setattr(SkladbotClient, "fetch_requests", fake_fetch_requests)
+
+    # Синк обогащает активные assembly-строки живой деталкой — без дефолтного
+    # мока тесты ходили бы в сеть. Тесты со своей деталкой переопределяют ПОСЛЕ.
+    async def fake_fetch_request_detail(self, external_id):
+        return {}
+
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_fetch_request_detail)
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -1253,3 +1270,450 @@ async def test_wms_request_detail_works_without_connection(
     row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
     assert row is not None
     assert row["products"] == []
+
+
+# ─── Классификатор стадий сборки (_assembly_ready_signal) ────────────────────
+
+
+def test_assembly_ready_signal_skladbot_codes_and_titles():
+    sig = fulfillment_service._assembly_ready_signal
+    # Стадии 1–2 (WIP) по stage_code → сборка ещё идёт
+    assert sig("skladbot", "cargo_pickup", "Забор груза", False) is False
+    assert sig("skladbot", "delivery_to_the_marketplace_warehouse", "Указание обьема груза v2", False) is False
+    # Fallback по названию (код пуст) — обе орфографии провайдера
+    assert sig("skladbot", None, "Забор груза", False) is False
+    assert sig("skladbot", None, "Указание обьема груза v2", False) is False
+    assert sig("skladbot", None, "Указание объема груза", False) is False
+    # Стадия 3+ (логистика) → готов
+    assert sig("skladbot", None, "Указание виды работ логистики", False) is True
+    assert sig("skladbot", "driver_assignment", "Назначение водителя", False) is True
+    # Завершённая → готов независимо от стадии
+    assert sig("skladbot", "cargo_pickup", "Забор груза", True) is True
+    # Стадия неизвестна → НЕ сигнал (не рискуем ложным READY)
+    assert sig("skladbot", None, None, False) is False
+    assert sig("skladbot", "", "  ", False) is False
+
+
+def test_assembly_ready_signal_wmscelicom_only_completed():
+    sig = fulfillment_service._assembly_ready_signal
+    assert sig("wmscelicom", None, "На сборке", False) is False
+    assert sig("wmscelicom", None, "Передана в доставку", False) is False
+    assert sig("wmscelicom", None, "Отгружена", True) is True
+
+
+# ─── total_qty / dest_warehouse: merge-семантика _apply_requests ─────────────
+
+
+def _norm_row(external_id="7001", total_qty=None, dest_warehouse=None, **over):
+    """Нормализованная строка заявки (общий вид после _normalize_*)."""
+    row = {
+        "external_id": external_id,
+        "kind": "assembly",
+        "number": f"WH-R-{external_id}",
+        "type_id": 851,
+        "type_name": "3. Доставка на склад МП",
+        "status": "new",
+        "stage_code": "cargo_pickup",
+        "stage_title": "Забор груза",
+        "is_completed": False,
+        "archived": False,
+        "expired": False,
+        "total_qty": total_qty,
+        "dest_warehouse": dest_warehouse,
+        "external_created_at": None,
+        "raw": {},
+    }
+    row.update(over)
+    return row
+
+
+async def _mirror_row(db_session, project_id, external_id) -> FulfillmentRequest:
+    result = await db_session.execute(
+        select(FulfillmentRequest).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.external_id == str(external_id),
+        )
+    )
+    return result.scalars().one()
+
+
+@pytest.mark.asyncio
+async def test_apply_requests_writes_and_keeps_enrichment(db_session, project, warehouse):
+    """INSERT пишет total_qty/dest_warehouse; UPDATE не затирает их None'ом."""
+    await fulfillment_service._apply_requests(
+        db_session, project.id, warehouse.id, "skladbot", [_norm_row(total_qty=50, dest_warehouse="Москва (Коледино)")]
+    )
+    await db_session.commit()
+    req = await _mirror_row(db_session, project.id, "7001")
+    assert req.total_qty == 50
+    assert req.dest_warehouse == "Москва (Коледино)"
+
+    # None (деталка не запрашивалась) → старое значение остаётся
+    await fulfillment_service._apply_requests(db_session, project.id, warehouse.id, "skladbot", [_norm_row()])
+    await db_session.commit()
+    req = await _mirror_row(db_session, project.id, "7001")
+    assert req.total_qty == 50
+    assert req.dest_warehouse == "Москва (Коледино)"
+
+    # Новое не-None → перезапись
+    await fulfillment_service._apply_requests(
+        db_session, project.id, warehouse.id, "skladbot", [_norm_row(total_qty=60, dest_warehouse="Казань")]
+    )
+    await db_session.commit()
+    req = await _mirror_row(db_session, project.id, "7001")
+    assert req.total_qty == 60
+    assert req.dest_warehouse == "Казань"
+
+
+# ─── Обогащение skladbot живой деталкой при синке ────────────────────────────
+
+
+def _enrich_detail(amounts=(3, 4), mp_value="Москва (Коледино)"):
+    """Деталка /v1/requests/show/{id} для обогащения: products + поле «Склад МП»."""
+    return {
+        "products": [{"amount": a, "barcode": f"B-{i}"} for i, a in enumerate(amounts)],
+        "fields": [
+            {"name": "Маркетплейс", "field": "marketplace", "value": "Wildberries"},
+            {"name": "Склад МП", "field": "marketplace_warehouse", "value": mp_value},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_sync_enriches_active_assembly_with_detail(db_session, project, warehouse, connected_key, monkeypatch):
+    """Активная assembly-строка получает total_qty/dest_warehouse из деталки; inbound — нет."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(8001)], 852: [_req(8002)]})
+    calls: list[str] = []
+
+    async def fake_detail(self, external_id):
+        calls.append(str(external_id))
+        return _enrich_detail()
+
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_detail)
+
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    assert calls == ["8001"]  # только assembly; inbound деталкой не обогащаем
+    row = await _mirror_row(db_session, project.id, "8001")
+    assert row.total_qty == 7
+    assert row.dest_warehouse == "Москва (Коледино)"
+    inbound = await _mirror_row(db_session, project.id, "8002")
+    assert inbound.total_qty is None
+    assert inbound.dest_warehouse is None
+
+    # Новые поля отдаются наружу (list_requests / _request_to_dict)
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    assert rows[0]["total_qty"] == 7
+    assert rows[0]["dest_warehouse"] == "Москва (Коледино)"
+
+
+@pytest.mark.asyncio
+async def test_sync_detail_backfill_rules(db_session, project, warehouse, connected_key, monkeypatch):
+    """Активным — деталка каждый синк; завершённым — только пока total_qty IS NULL."""
+    _mock_products(monkeypatch, [])
+    calls: list[str] = []
+
+    async def fake_detail(self, external_id):
+        calls.append(str(external_id))
+        return _enrich_detail(amounts=(5,))
+
+    _mock_requests(monkeypatch, {851: [_req(8101)]})
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_detail)
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert calls == ["8101", "8101"]  # активная — на каждом синке (заявлено меняется)
+
+    # Завершённая с уже известным total_qty → деталка не дёргается
+    calls.clear()
+    _mock_requests(monkeypatch, {851: [_req(8101, completed=1)]})
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_detail)
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert calls == []
+
+    # Завершённая, но в зеркале total_qty IS NULL → бэкфилл один раз
+    req = await _mirror_row(db_session, project.id, "8101")
+    req.total_qty = None
+    await db_session.commit()
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert calls == ["8101"]
+    req = await _mirror_row(db_session, project.id, "8101")
+    assert req.total_qty == 5
+
+
+@pytest.mark.asyncio
+async def test_sync_detail_rate_limit_stops_enrichment_not_sync(
+    db_session, project, warehouse, connected_key, monkeypatch
+):
+    """429 на деталке прекращает обогащение, но синк завершается успешно."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(8201), _req(8202)]})
+    calls: list[str] = []
+
+    async def fake_detail(self, external_id):
+        calls.append(str(external_id))
+        raise RateLimitError("429")
+
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_detail)
+
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["requests_synced"] == 2  # синк не упал
+    assert len(calls) == 1  # после 429 остальные деталки пропущены
+    for ext in ("8201", "8202"):
+        row = await _mirror_row(db_session, project.id, ext)
+        assert row.total_qty is None
+
+
+@pytest.mark.asyncio
+async def test_sync_detail_api_error_skips_row(db_session, project, warehouse, connected_key, monkeypatch):
+    """4xx/мусор на одной деталке пропускает строку, остальные обогащаются."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(8301), _req(8302)]})
+
+    async def fake_detail(self, external_id):
+        if str(external_id) == "8301":
+            raise SkladbotApiError("not found", status_code=404)
+        return _enrich_detail(amounts=(2,))
+
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_detail)
+
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert (await _mirror_row(db_session, project.id, "8301")).total_qty is None
+    assert (await _mirror_row(db_session, project.id, "8302")).total_qty == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_detail_garbage_does_not_break_sync(db_session, project, warehouse, connected_key, monkeypatch):
+    """PHP-мусор в деталке (amount «12,5»/None, не-dict product, склад >300 симв.) не валит синк."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(8401)]})
+
+    async def fake_detail(self, external_id):
+        return {
+            "products": [{"amount": "12,5"}, {"amount": None}, "junk", {"amount": "7"}],
+            "fields": [{"field": "marketplace_warehouse", "value": "С" * 400}],
+        }
+
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_detail)
+
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["requests_synced"] == 1  # синк жив
+    row = await _mirror_row(db_session, project.id, "8401")
+    assert row.total_qty == 7  # мусорные amount → 0, валидный учтён
+    assert row.dest_warehouse == "С" * 300  # кламп под String(300)
+
+
+@pytest.mark.asyncio
+async def test_sync_detail_all_garbage_keeps_previous_total(db_session, project, warehouse, connected_key, monkeypatch):
+    """Дрейф формы деталки (всё нечитаемо / data списком) не затирает прежний total_qty нулём."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(8402)]})
+
+    async def good_detail(self, external_id):
+        return _enrich_detail(amounts=(5,))
+
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", good_detail)
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert (await _mirror_row(db_session, project.id, "8402")).total_qty == 5
+
+    async def broken_detail(self, external_id):
+        return {"products": [{"amount": "abc"}], "fields": []}
+
+    _mock_requests(monkeypatch, {851: [_req(8402)]})
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", broken_detail)
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert (await _mirror_row(db_session, project.id, "8402")).total_qty == 5  # не затёрто нулём
+
+    async def list_detail(self, external_id):
+        return ["laravel", "may", "return", "list"]
+
+    _mock_requests(monkeypatch, {851: [_req(8402)]})
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", list_detail)
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["requests_synced"] == 1  # неожиданная форма — пропуск, не падение
+    assert (await _mirror_row(db_session, project.id, "8402")).total_qty == 5
+
+
+def test_safe_int_php_coercion():
+    """'2' → 2, мусор/None/false → 0 — не роняет нормализацию wms/skladbot."""
+    assert fulfillment_service._safe_int("2") == 2
+    assert fulfillment_service._safe_int(3) == 3
+    assert fulfillment_service._safe_int("12,5") == 0
+    assert fulfillment_service._safe_int("abc") == 0
+    assert fulfillment_service._safe_int(None) == 0
+    assert fulfillment_service._safe_int(False) == 0
+    assert fulfillment_service._safe_int([1]) == 0
+
+
+# ─── Авто-READY: стадия 3+ у ФФ переводит связанную сборку в READY ───────────
+
+
+async def _make_assembly_doc(db_session, project, warehouse, status=AssemblyStatus.IN_PROGRESS.value):
+    doc = AssemblyRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        number=f"A-{_uid()[:6]}",
+        status=status,
+        pallets_count=1,
+        pallet_weight_kg=Decimal("10.00"),
+    )
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+    return doc
+
+
+async def _history_rows(db_session, project_id, doc_id) -> list[AssemblyStatusHistory]:
+    result = await db_session.execute(
+        select(AssemblyStatusHistory)
+        .where(
+            AssemblyStatusHistory.project_id == project_id,
+            AssemblyStatusHistory.assembly_request_id == doc_id,
+        )
+        .order_by(AssemblyStatusHistory.id)
+        .limit(100)
+    )
+    return list(result.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_sync_marks_linked_assembly_ready(db_session, project, warehouse, connected_key, monkeypatch):
+    """Стадии 1–2 не триггерят; стадия 3+ переводит связанную сборку IN_PROGRESS → READY."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(9001, stage_title="Забор груза", stage_code="cargo_pickup")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_assembly_doc(db_session, project, warehouse)
+    mirror = await _mirror_row(db_session, project.id, "9001")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    # Стадия 2 («объём груза») — сборка ещё идёт
+    _mock_requests(monkeypatch, {851: [_req(9001, stage_title="Указание обьема груза v2")]})
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_marked_ready"] == 0
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.IN_PROGRESS.value
+
+    # Стадия логистики → READY + история + actual_ready_date
+    _mock_requests(monkeypatch, {851: [_req(9001, stage_title="Назначение водителя")]})
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_marked_ready"] == 1
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.READY.value
+    assert doc.actual_ready_date == date.today()
+
+    history = await _history_rows(db_session, project.id, doc.id)
+    assert len(history) == 1
+    assert history[0].old_status == AssemblyStatus.IN_PROGRESS.value
+    assert history[0].new_status == AssemblyStatus.READY.value
+    assert history[0].changed_by == "ff_sync"
+    assert "WH-R-9001" in (history[0].comment or "")
+
+    # Повторный синк идемпотентен: заявка уже READY
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_marked_ready"] == 0
+    history = await _history_rows(db_session, project.id, doc.id)
+    assert len(history) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_auto_ready_negative_cases(db_session, project, warehouse, connected_key, monkeypatch):
+    """VEHICLE_ASSIGNED и несвязанные не трогаются; archived ФФ не триггерит."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(
+        monkeypatch,
+        {
+            851: [
+                _req(9101, stage_title="Назначение водителя"),  # привязана к VEHICLE_ASSIGNED
+                _req(9102, stage_title="Назначение водителя"),  # не привязана
+                _req(9103, stage_title="Назначение водителя", archived=1),  # archived → мимо
+            ]
+        },
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc_vehicle = await _make_assembly_doc(db_session, project, warehouse, status=AssemblyStatus.VEHICLE_ASSIGNED.value)
+    doc_archived_ff = await _make_assembly_doc(db_session, project, warehouse)
+    m1 = await _mirror_row(db_session, project.id, "9101")
+    m3 = await _mirror_row(db_session, project.id, "9103")
+    await fulfillment_service.link_request(db_session, project.id, m1.id, assembly_request_id=doc_vehicle.id)
+    await fulfillment_service.link_request(db_session, project.id, m3.id, assembly_request_id=doc_archived_ff.id)
+
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_marked_ready"] == 0
+    await db_session.refresh(doc_vehicle)
+    await db_session.refresh(doc_archived_ff)
+    assert doc_vehicle.status == AssemblyStatus.VEHICLE_ASSIGNED.value
+    assert doc_archived_ff.status == AssemblyStatus.IN_PROGRESS.value
+    assert await _history_rows(db_session, project.id, doc_vehicle.id) == []
+    assert await _history_rows(db_session, project.id, doc_archived_ff.id) == []
+
+
+@pytest.mark.asyncio
+async def test_link_request_with_ready_stage_marks_ready(db_session, project, warehouse, connected_key, monkeypatch):
+    """Привязка к ФФ-заявке на готовой стадии сразу переводит сборку IN_PROGRESS → READY."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(9201, stage_title="Погрузка")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_assembly_doc(db_session, project, warehouse)
+    mirror = await _mirror_row(db_session, project.id, "9201")
+    row = await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    assert row["linked_status"] == AssemblyStatus.READY.value  # UI сразу видит новый статус
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.READY.value
+    assert doc.actual_ready_date == date.today()
+    history = await _history_rows(db_session, project.id, doc.id)
+    assert [h.changed_by for h in history] == ["ff_sync"]
+    assert history[0].new_status == AssemblyStatus.READY.value
+
+
+@pytest.mark.asyncio
+async def test_link_request_wip_stage_keeps_in_progress(db_session, project, warehouse, connected_key, monkeypatch):
+    """Привязка на WIP-стадии статус сборки не меняет."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(9301, stage_title="Забор груза", stage_code="cargo_pickup")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_assembly_doc(db_session, project, warehouse)
+    mirror = await _mirror_row(db_session, project.id, "9301")
+    row = await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    assert row["linked_status"] == AssemblyStatus.IN_PROGRESS.value
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.IN_PROGRESS.value
+    assert await _history_rows(db_session, project.id, doc.id) == []
+
+
+# ─── wmscelicom: total_qty / dest_warehouse из списочных методов ─────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_wms_enrichment_fields(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """total_qty из packages.items / items (PHP-коэрсия), dest_warehouse из shipped_target."""
+    packages = {
+        "1": {"number": 1, "items": [{"barcode": "BC-1", "count": 3}, {"barcode": "BC-2", "count": 2}]},
+        "2": {"number": 2, "items": [{"barcode": "BC-1", "count": 4}]},
+    }
+    _mock_wms_fetches(
+        monkeypatch,
+        shipments=[
+            _wms_shipment(701, packages=packages),
+            _wms_shipment(702),  # packages нет (ограничение провайдера) → нет данных
+        ],
+        unloadings=[
+            _wms_unloading(801, items=[{"barcode": "BC-3", "count": 6}, None, {"barcode": "BC-4", "count": "2"}]),
+        ],
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    shipment = await _mirror_row(db_session, project.id, "701")
+    assert shipment.total_qty == 9
+    assert shipment.dest_warehouse == "Маркетплейс Склад"
+    empty = await _mirror_row(db_session, project.id, "702")
+    assert empty.total_qty is None  # пустой состав = нет данных, не 0
+    assert empty.dest_warehouse == "Маркетплейс Склад"
+    unloading = await _mirror_row(db_session, project.id, "801")
+    assert unloading.total_qty == 8  # null-элемент пропущен, "2" скоэрсирован
+    assert unloading.dest_warehouse is None

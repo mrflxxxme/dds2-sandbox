@@ -1925,6 +1925,19 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             render: (v: string | null) => (v ? formatDate(v) : '—'),
         },
         { key: 'type_name', label: 'Тип', render: (v: string | null) => v || '—' },
+        // Только для сборки: склад отгрузки МП и заявленное кол-во (из деталки skladbot)
+        ...(kind === 'assembly' ? [
+            {
+                key: 'dest_warehouse', label: 'Склад отгрузки',
+                render: (v: string | null) => v || '—',
+                exportValue: (row: FfRequestRow) => row.dest_warehouse || '',
+            } as Column,
+            {
+                key: 'total_qty', label: 'Кол-во товаров', align: 'right',
+                render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
+                exportValue: (row: FfRequestRow) => row.total_qty ?? '',
+            } as Column,
+        ] : []),
         {
             key: 'stage_title', label: 'Стадия',
             render: (v: string | null, row: FfRequestRow) => (

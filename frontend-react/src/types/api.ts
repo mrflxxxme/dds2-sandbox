@@ -3355,6 +3355,10 @@ export interface FfRequestRow {
   is_completed: boolean;
   archived: boolean;
   expired: boolean;
+  /** заявлено всего, шт (skladbot — из деталки) */
+  total_qty: number | null;
+  /** склад отгрузки МП («Склад МП» / shipped_target) */
+  dest_warehouse: string | null;
   external_created_at: string | null;
   synced_at: string;
   assembly_request_id: number | null;

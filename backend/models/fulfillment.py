@@ -86,6 +86,9 @@ class FulfillmentRequest(Base):
     is_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     expired: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Обогащение составом: skladbot — из деталки при синке, wmscelicom — из raw списка
+    total_qty: Mapped[int | None] = mapped_column(Integer)  # заявлено всего, шт
+    dest_warehouse: Mapped[str | None] = mapped_column(String(300))  # склад отгрузки МП
     external_created_at: Mapped[date | None] = mapped_column(Date)
     raw: Mapped[dict | None] = mapped_column(JSONB)
     synced_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
