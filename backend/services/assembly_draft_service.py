@@ -778,24 +778,17 @@ def _carve_unit_from_rows(
     return carved, remaining
 
 
-async def hand_off_unit(
-    db: AsyncSession,
-    project_id: int,
-    draft_id: int,
+def _freeze_unit_in_place(
+    distribution: AssemblyDraftDistribution,
     source_ff_id: int,
     target_wb_name: str,
-    package_type: str,
-) -> AssemblyDraftRead:
-    """«Передать на ФФ»: заморозить заявку-юнит со статусом handed. Вырезает поток
-    ff→wb из rows (новинки + обычные вместе) и сливает с уже существующим снимком
-    этого склада, если он есть (старые черновики с раздельными снимками). Если
-    позиций для передачи нет и снимка нет — 400."""
-    draft = await get_draft(db, project_id, draft_id)
-    if draft is None:
-        raise HTTPException(status_code=404, detail="Draft not found")
-    distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
-    norm_pkg = _norm_pkg(package_type)
-
+    norm_pkg: str,
+) -> int | None:
+    """Заморозить юнит: вырезать поток ff→wb из rows (новинки + обычные вместе)
+    и слить с уже существующим снимком этого склада, если он есть (старые
+    черновики с раздельными снимками). Мутирует distribution; статус юнита
+    становится handed. Возвращает индекс юнита в handed_units или None, если
+    позиций нет ни в rows, ни в снимке."""
     distribution.handed_units = _normalize_handed_units(distribution.handed_units)
     carved, remaining = _carve_unit_from_rows(distribution.rows, source_ff_id, target_wb_name, norm_pkg)
     distribution.rows = remaining
@@ -815,7 +808,7 @@ async def hand_off_unit(
         units[idx].status = "handed"
     else:
         if not carved:
-            raise HTTPException(status_code=400, detail="В заявке нет позиций для передачи")
+            return None
         units.append(
             HandedUnit(
                 source_ff_id=source_ff_id,
@@ -825,7 +818,30 @@ async def hand_off_unit(
                 items=list(carved.values()),
             ),
         )
+        idx = len(units) - 1
     distribution.handed_units = units
+    return idx
+
+
+async def hand_off_unit(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    source_ff_id: int,
+    target_wb_name: str,
+    package_type: str,
+) -> AssemblyDraftRead:
+    """«Передать на ФФ»: заморозить заявку-юнит со статусом handed. Если
+    позиций для передачи нет и снимка нет — 400."""
+    draft = await get_draft(db, project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
+    norm_pkg = _norm_pkg(package_type)
+
+    idx = _freeze_unit_in_place(distribution, source_ff_id, target_wb_name, norm_pkg)
+    if idx is None:
+        raise HTTPException(status_code=400, detail="В заявке нет позиций для передачи")
     draft.distribution = distribution.model_dump(mode="json")
     await db.commit()
     await db.refresh(draft)
@@ -888,20 +904,18 @@ async def commit_unit(
     target_wb_name: str,
     package_type: str,
 ) -> AssemblyDraftCommitResponse:
-    """«В сборку»: создать AssemblyRequest из замороженного handed-юнита и убрать
-    его из черновика. Если черновик опустел (нет rows и handed_units) — soft-delete."""
+    """«В сборку»: создать AssemblyRequest из юнита и убрать его из черновика.
+    Юнит в rows замораживается неявно (отдельный шаг «Передать на ФФ» не нужен).
+    Если черновик опустел (нет rows и handed_units) — soft-delete."""
     draft = await get_draft(db, project_id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
     distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
     norm_pkg = _norm_pkg(package_type)
-    distribution.handed_units = _normalize_handed_units(distribution.handed_units)
-    units = list(distribution.handed_units)
-    idx = _find_handed_index(units, source_ff_id, target_wb_name, norm_pkg)
+    idx = _freeze_unit_in_place(distribution, source_ff_id, target_wb_name, norm_pkg)
     if idx is None:
-        raise HTTPException(status_code=404, detail="Переданная заявка не найдена")
-    if units[idx].status != "handed":
-        raise HTTPException(status_code=400, detail="Сначала передайте заявку на ФФ")
+        raise HTTPException(status_code=404, detail="Заявка не найдена: нет позиций для сборки")
+    units = list(distribution.handed_units)
 
     unit = units[idx]
     barcodes: dict[str, int] = {}

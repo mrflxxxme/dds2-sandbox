@@ -956,8 +956,45 @@ async def test_commit_unit_creates_request_and_clears_draft(db_session, setup_ne
 
 
 @pytest.mark.asyncio
-async def test_commit_unit_404_when_not_handed(db_session, setup_newcomer_nomenclature):
-    """commit_unit без предварительного hand-off → 404 (юнит не заморожен)."""
+async def test_commit_unit_direct_from_rows(db_session, setup_newcomer_nomenclature):
+    """commit_unit без предварительного hand-off: юнит замораживается неявно
+    и заявка создаётся сразу (один клик «В сборку»)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=REGULAR_NM_ID,
+            barcode=REGULAR_BARCODE,
+            src={str(wh_a): 12},
+            tgt={"Электросталь": 7, "Казань": 5},
+            package_type="BOX",
+        )
+    ]
+    payload = _build_payload([wh_a], ["Электросталь", "Казань"], rows)
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    resp = await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+
+    assert len(resp.created_request_ids) == 1
+    res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids)))
+    req = res.scalars().one()
+    assert req.status == "IN_PROGRESS"
+    items_res = await db_session.execute(
+        select(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == req.id)
+    )
+    assert sum(it.quantity for it in items_res.scalars().all()) == 7
+    # Поток на Казань остался в rows, черновик жив.
+    read = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    assert read is not None
+    await db_session.refresh(read)
+    dist = AssemblyDraftDistribution.model_validate(read.distribution)
+    assert dist.handed_units == []
+    assert len(dist.rows) == 1
+    assert dist.rows[0].tgt == {"Казань": 5}
+
+
+@pytest.mark.asyncio
+async def test_commit_unit_404_when_unit_missing(db_session, setup_newcomer_nomenclature):
+    """commit_unit по несуществующему направлению (нет ни в rows, ни в handed) → 404."""
     wh_a, _ = await _get_warehouse_ids(db_session)
     rows = [
         AssemblyDraftRow(
@@ -971,7 +1008,7 @@ async def test_commit_unit_404_when_not_handed(db_session, setup_newcomer_nomenc
     payload = _build_payload([wh_a], ["Электросталь"], rows)
     draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
     with pytest.raises(HTTPException) as exc:
-        await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Электросталь", "BOX")
+        await assembly_draft_service.commit_unit(db_session, PROJECT_ID, draft.id, wh_a, "Несуществующий", "BOX")
     assert exc.value.status_code == 404
 
 
