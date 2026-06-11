@@ -137,21 +137,21 @@ async def get_stock_cost_map(db: AsyncSession, pid: int) -> dict[int, dict]:
             }
         return stock_map[nm_id]
 
-    for r in wb_rows:
-        e = _entry(r.nm_id)
-        e["wb_qty"] = int(r.qty or 0)
-        e["brand"] = r.brand or e["brand"]
-        e["subject"] = r.subject or e["subject"]
+    for wr in wb_rows:
+        e = _entry(wr.nm_id)
+        e["wb_qty"] = int(wr.qty or 0)
+        e["brand"] = wr.brand or e["brand"]
+        e["subject"] = wr.subject or e["subject"]
 
-    for r in own_rows:
-        e = _entry(r.nm_id)
-        e["own_qty"] = int(r.qty or 0)
-        e["brand"] = e["brand"] or r.brand or ""
-        e["subject"] = e["subject"] or r.subject or ""
-        if r.article_seller:
-            article_by_nm.setdefault(r.nm_id, r.article_seller)
-        if r.stock_cost_price and float(r.stock_cost_price) > 0:
-            stock_cost_price[r.nm_id] = float(r.stock_cost_price)
+    for orow in own_rows:
+        e = _entry(orow.nm_id)
+        e["own_qty"] = int(orow.qty or 0)
+        e["brand"] = e["brand"] or orow.brand or ""
+        e["subject"] = e["subject"] or orow.subject or ""
+        if orow.article_seller:
+            article_by_nm.setdefault(orow.nm_id, orow.article_seller)
+        if orow.stock_cost_price and float(orow.stock_cost_price) > 0:
+            stock_cost_price[orow.nm_id] = float(orow.stock_cost_price)
 
     for nm_id, e in stock_map.items():
         # Приоритет цены: avg по заказам → override → cost_price складской строки
@@ -229,7 +229,8 @@ def merge_stock_costs(rows: list[dict], stock_map: dict[int, dict], group_by: st
     """
     if group_by in ("sku", "abc"):
         for row in rows:
-            _merge_nm_ids(row, [row.get("nm_id")], stock_map)
+            nm = row.get("nm_id")
+            _merge_nm_ids(row, [nm] if isinstance(nm, int) else [], stock_map)
         return
 
     if group_by in ("tag", "imt"):

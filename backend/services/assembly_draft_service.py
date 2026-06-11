@@ -782,7 +782,7 @@ def _freeze_unit_in_place(
     distribution: AssemblyDraftDistribution,
     source_ff_id: int,
     target_wb_name: str,
-    norm_pkg: str,
+    norm_pkg: PackageTypeStr,
 ) -> int | None:
     """Заморозить юнит: вырезать поток ff→wb из rows (новинки + обычные вместе)
     и слить с уже существующим снимком этого склада, если он есть (старые
