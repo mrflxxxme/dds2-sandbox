@@ -4,7 +4,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
-import type { FfRequestDetail, FfRequestDetailProduct } from '@/types/api';
+import type { FfMatchRow, FfRequestDetail, FfRequestDetailProduct } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffStageBadge } from '../../ff-shared';
 
@@ -97,6 +97,8 @@ export default function FfRequestDetailPage() {
         }
     };
 
+    const hasMatch = d.match !== null;
+
     const productCols: Column[] = [
         { key: 'barcode', label: 'ШК', render: (v: string | null) => v || '—' },
         {
@@ -112,6 +114,21 @@ export default function FfRequestDetailPage() {
             exportValue: (p: FfRequestDetailProduct) => p.article_seller ?? p.vendor_code ?? '',
         },
         { key: 'qty', label: 'Заявлено', align: 'right', render: (v: number) => formatNumber(v, 0) },
+        ...(hasMatch ? [
+            {
+                key: 'our_qty', label: 'В нашей заявке', align: 'right',
+                render: (v: number | null, p: FfRequestDetailProduct) => {
+                    const our = v ?? 0;
+                    const same = our === p.qty;
+                    return (
+                        <span style={{ color: same ? undefined : 'var(--color-danger)', fontWeight: same ? 400 : 600 }}>
+                            {formatNumber(our, 0)}
+                        </span>
+                    );
+                },
+                exportValue: (p: FfRequestDetailProduct) => String(p.our_qty ?? 0),
+            } as Column,
+        ] : []),
         { key: 'accepted_qty', label: 'Принято', align: 'right', render: (v: number) => formatNumber(v, 0) },
         {
             key: 'defect_qty', label: 'Брак', align: 'right',
@@ -127,6 +144,30 @@ export default function FfRequestDetailPage() {
         { label: 'Позиций', value: d.products.length },
         { label: 'Заявлено', value: d.total_qty },
         { label: 'Принято', value: d.total_accepted },
+    ];
+
+    const matchCols: Column[] = [
+        { key: 'barcode', label: 'ШК' },
+        {
+            key: 'article_seller', label: 'Наш артикул',
+            render: (v: string | null, m: FfMatchRow) => v ?? m.name ?? '—',
+            exportValue: (m: FfMatchRow) => m.article_seller ?? m.name ?? '',
+        },
+        { key: 'ff_qty', label: 'У ФФ', align: 'right', render: (v: number) => formatNumber(v, 0) },
+        { key: 'our_qty', label: 'В нашей заявке', align: 'right', render: (v: number) => formatNumber(v, 0) },
+        {
+            key: 'diff', label: 'Расхождение', align: 'right',
+            render: (v: number, m: FfMatchRow) => (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    {m.ff_qty === 0 && <span className="badge badge-danger" style={{ fontSize: 11, padding: '2px 8px' }}>нет у ФФ</span>}
+                    {m.our_qty === 0 && <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>нет в нашей</span>}
+                    <span style={{ color: v > 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 600 }}>
+                        {v > 0 ? '+' : ''}{formatNumber(v, 0)}
+                    </span>
+                </span>
+            ),
+            exportValue: (m: FfMatchRow) => String(m.diff),
+        },
     ];
 
     return (
@@ -202,6 +243,38 @@ export default function FfRequestDetailPage() {
                             </div>
                         ))}
                     </div>
+                </div>
+            )}
+
+            {/* Сверка со связанным нашим документом */}
+            {d.match && (
+                <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                        {d.match.matched ? (
+                            <span className="badge badge-success" style={{ fontSize: 13, padding: '4px 12px' }}>
+                                ✓ Состав совпадает с {d.linked_number}
+                            </span>
+                        ) : (
+                            <span className="badge badge-danger" style={{ fontSize: 13, padding: '4px 12px' }}>
+                                Расхождение с {d.linked_number}: {formatNumber(d.match.mismatches.length, 0)} поз.
+                            </span>
+                        )}
+                        <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                            У ФФ: {formatNumber(d.match.ff_total, 0)} шт / {formatNumber(d.match.ff_positions, 0)} поз. ·
+                            {' '}В нашей заявке: {formatNumber(d.match.our_total, 0)} шт / {formatNumber(d.match.our_positions, 0)} поз.
+                        </span>
+                    </div>
+                    {!d.match.matched && (
+                        <div style={{ marginTop: 12 }}>
+                            <TanStackDataTable
+                                columns={matchCols}
+                                data={d.match.mismatches}
+                                emptyText="Расхождений нет"
+                                emptyIcon="✓"
+                                exportName="ff_request_mismatches"
+                            />
+                        </div>
+                    )}
                 </div>
             )}
 

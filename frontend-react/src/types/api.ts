@@ -1526,6 +1526,11 @@ export interface AssemblyRequest {
   items: AssemblyRequestItem[];
   created_at: string;
   updated_at: string;
+  /** привязанная ФФ-заявка (зеркало фулфилмента) — только в GET деталки */
+  ff_request_id?: number | null;
+  ff_request_number?: string | null;
+  ff_stage_title?: string | null;
+  ff_warehouse_id?: number | null;
 }
 
 export interface AssemblyListResponse {
@@ -1553,6 +1558,84 @@ export interface CreatedAssemblyGroup {
   total_qty: number;
   total_sku: number;
   requests: CreatedRequestBrief[];
+}
+
+/* ─── Анализ потока сборки (flow analytics) ─── */
+
+export type AssemblyAnomalyKind =
+  | 'stuck_assembly'          // IN_PROGRESS дольше порога
+  | 'stuck_shipment'          // READY/VEHICLE_ASSIGNED дольше порога от готовности
+  | 'wb_accepted_not_shipped' // ВБ уже принял поставку, а заявка не отгружена — забыли отгрузить
+  | 'shipped_not_accepted';   // SHIPPED дольше порога без DELIVERED
+
+export interface AssemblyStageDuration {
+  /** этап, длительность которого измерена: IN_PROGRESS | READY | VEHICLE_ASSIGNED | SHIPPED */
+  stage: AssemblyStatus;
+  avg_days: number | null;
+  median_days: number | null;
+  /** на скольких заявках посчитано */
+  count: number;
+}
+
+export interface AssemblyTransitionStat {
+  /** null = создание заявки */
+  from_status: string | null;
+  to_status: string;
+  count: number;
+  /** среднее время в from_status до этого перехода, дни */
+  avg_days: number | null;
+}
+
+export interface AssemblyAnomalyRow {
+  id: number;
+  number: string;
+  status: AssemblyStatus;
+  warehouse_id: number;
+  warehouse_name: string | null;
+  wb_warehouse_name: string | null;
+  kind: AssemblyAnomalyKind;
+  /** сколько дней висит на текущем этапе */
+  days_stuck: number;
+  /** ISO — начало текущего этапа */
+  since: string | null;
+  total_qty: number;
+  /** статус связанной WB FBO-поставки (для wb_accepted_not_shipped) */
+  wb_fbo_status: string | null;
+}
+
+export interface AssemblyWarehouseFlowStat {
+  warehouse_id: number;
+  warehouse_name: string | null;
+  active_count: number;
+  avg_cycle_days: number | null;
+  anomaly_count: number;
+}
+
+export interface AssemblyFlowSummary {
+  /** заявок в работе сейчас (IN_PROGRESS..SHIPPED) */
+  active_count: number;
+  /** дошло до DELIVERED за период (CLOSED — «ВБ не принял» — не считается) */
+  completed_in_period: number;
+  /** создание → отгрузка, дни */
+  avg_cycle_days: number | null;
+  /** создание → READY, дни */
+  avg_assembly_days: number | null;
+  anomaly_count: number;
+}
+
+export interface AssemblyFlowThresholds {
+  assembly_days: number;
+  ship_days: number;
+  delivery_days: number;
+}
+
+export interface AssemblyFlowAnalyticsResponse {
+  summary: AssemblyFlowSummary;
+  stages: AssemblyStageDuration[];
+  transitions: AssemblyTransitionStat[];
+  by_warehouse: AssemblyWarehouseFlowStat[];
+  anomalies: AssemblyAnomalyRow[];
+  thresholds: AssemblyFlowThresholds;
 }
 
 export interface AssemblyHistoryEntry {
@@ -3275,10 +3358,34 @@ export interface FfRequestDetailProduct {
   accepted_qty: number;
   delivery_qty: number;
   defect_qty: number;
+  /** кол-во в связанном нашем документе; null — связи нет */
+  our_qty: number | null;
   color: string | null;
   size: string | null;
   comment: string | null;
   image: string | null;
+}
+
+/** Строка расхождения состава: ФФ-заявка vs наш документ (по barcode) */
+export interface FfMatchRow {
+  barcode: string;
+  article_seller: string | null;
+  /** название со стороны ФФ (если позиция там есть) */
+  name: string | null;
+  ff_qty: number;
+  our_qty: number;
+  /** ff_qty - our_qty */
+  diff: number;
+}
+
+/** Итог сверки состава ФФ-заявки со связанным нашим документом */
+export interface FfRequestMatch {
+  matched: boolean;
+  ff_positions: number;
+  our_positions: number;
+  ff_total: number;
+  our_total: number;
+  mismatches: FfMatchRow[];
 }
 
 export interface FfRequestStageLog {
@@ -3308,6 +3415,49 @@ export interface FfRequestDetail extends FfRequestRow {
   products: FfRequestDetailProduct[];
   stage_logs: FfRequestStageLog[];
   fields: FfRequestFieldValue[];
+  /** сверка состава со связанным нашим документом; null — связи нет */
+  match: FfRequestMatch | null;
+}
+
+/* ─── Сводная страница «Заявки ФФ» (все склады с интеграцией) ─── */
+
+export interface FfIntegratedWarehouse {
+  warehouse_id: number;
+  warehouse_name: string;
+  /** skladbot | wmscelicom */
+  provider: string;
+  /** человекочитаемое имя провайдера */
+  provider_label: string;
+  last_sync_at: string | null;
+  requests_total: number;
+  /** активные несвязанные заявки kind=assembly */
+  requests_unlinked: number;
+}
+
+/** Кандидат авто-мэтчинга ФФ-заявки к нашей заявке на сборку */
+export interface FfMatchSuggestion {
+  assembly_request_id: number;
+  number: string;
+  status: AssemblyStatus;
+  created_at: string;
+  total_qty: number;
+  /** 0..100 — уверенность эвристики */
+  score: number;
+  /** объяснение: «дата ±1 дн», «пересечение ШК 80%» */
+  reason: string;
+}
+
+export interface FfOverviewRequestRow extends FfRequestRow {
+  warehouse_id: number;
+  warehouse_name: string;
+  provider: string;
+  /** топ-кандидаты для несвязанных активных заявок (иначе []) */
+  suggestions: FfMatchSuggestion[];
+}
+
+export interface FfOverviewResponse {
+  warehouses: FfIntegratedWarehouse[];
+  requests: FfOverviewRequestRow[];
 }
 
 export interface FfLinkPayload {

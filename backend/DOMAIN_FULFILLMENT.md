@@ -34,6 +34,9 @@ Generic-слой зеркалирования данных фулфилмент-
 - Статусы ФФ (stage_code/is_completed) — информативные; наши статусы документов автоматически НЕ меняются.
 - Токен write-only: наружу только `key_preview` (***последние 4); шифрование `backend/utils/crypto.py`; `config` хранит customer_id и token_expires_at (exp из JWT, ~180 дней — следить за истечением).
 
+## Сводная страница «Заявки ФФ»
+`GET /warehouse/fulfillment/overview` (query: `kind=assembly|inbound|other`, `warehouse_id`, `only_unlinked`) — сводка по всем складам проекта с активной интеграцией: список складов с каунтами активных assembly-заявок (total / unlinked) + заявки зеркала (limit 500) с `suggestions` — топ-3 кандидата мэтчинга к нашим AssemblyRequest. Эвристика (`_load_match_suggestions`, без HTTP к провайдерам): date_score по |external_created_at − created_at| (0/1/2 дн → 70/55/40, дальше отсев) + пересечение ШК из raw (только wmscelicom: packages→items; Jaccard × 30) + бонус 10 за суммарное qty в ±10%; cap 100, порог 30. Кандидаты — статусы IN_PROGRESS/READY/VEHICLE_ASSIGNED того же склада, ещё не связанные с ФФ-заявками. Роут со статическим префиксом объявлен раньше параметризованного `/{warehouse_id}/fulfillment/*` (отдельный sub-router в `routers/fulfillment.py`).
+
 ## Зависимости
 - `DOMAIN_WAREHOUSE` — Warehouse, WarehouseStock (для диффа), InboundReceipt (связь приёмок).
 - `DOMAIN_ASSEMBLY` — AssemblyRequest (связь заявок на сборку).
@@ -50,6 +53,6 @@ Generic-слой зеркалирования данных фулфилмент-
 - `backend/integrations/skladbot_client.py` — httpx-клиент (Bearer, 429→RateLimitError, circuit breaker).
 - `backend/integrations/wmscelicom_client.py` — httpx-клиент wmscelicom (токен в path, normalize_base_url, circuit breaker).
 - `backend/services/fulfillment_service.py` — connect/status/sync/list/link + нормализаторы провайдеров.
-- `backend/routers/fulfillment.py` — `/warehouse/{id}/fulfillment/*`.
+- `backend/routers/fulfillment.py` — `/warehouse/fulfillment/overview` + `/warehouse/{id}/fulfillment/*`.
 - `backend/scheduler/jobs/fulfillment_sync.py` — периодический синк (15 мин, worker).
 - `frontend-react/src/app/(main)/p/[slug]/warehouse/[id]/page.tsx` — вкладки «ФФ остатки / ФФ сборка / ФФ приёмки» + блок подключения в «Реквизитах».

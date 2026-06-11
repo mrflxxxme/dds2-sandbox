@@ -20,12 +20,13 @@ from backend.models import (
     FulfillmentRequest,
     FulfillmentStock,
     InboundReceipt,
+    InboundReceiptItem,
     IntegrationKey,
     Nomenclature,
     Warehouse,
     WarehouseStock,
 )
-from backend.models.assembly import AssemblyRequest
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem
 from backend.services import fulfillment_service
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -756,6 +757,163 @@ async def test_request_detail_project_isolation(
     _mock_detail(monkeypatch, _detail())
     row = await fulfillment_service.get_request_detail(db_session, other_project.id, other_warehouse.id, mirror.id)
     assert row is None
+
+
+# ─── Request detail: сверка состава со связанным документом ─────────────────
+
+
+async def _make_linked_assembly(db_session, project, warehouse, mirror, items):
+    """Заявка на сборку с составом [(barcode, nomenclature_id, qty)], привязанная к ФФ-заявке."""
+    doc = AssemblyRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        number=f"A-{_uid()[:6]}",
+        pallets_count=1,
+        pallet_weight_kg=Decimal("10.00"),
+    )
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+    db_session.add_all(
+        [
+            AssemblyRequestItem(
+                project_id=project.id,
+                assembly_request_id=doc.id,
+                nomenclature_id=nom_id,
+                barcode=barcode,
+                quantity=qty,
+            )
+            for barcode, nom_id, qty in items
+        ]
+    )
+    await db_session.commit()
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_request_detail_match_full(db_session, project, warehouse, connected_key, monkeypatch):
+    """Состав ФФ-заявки совпадает с нашей → matched=True, our_qty по строкам."""
+    bc_a, bc_b = f"20{_uid()}", f"21{_uid()}"
+    nom_a = await _make_nomenclature(db_session, project.id, bc_a, article="ART-A")
+    nom_b = await _make_nomenclature(db_session, project.id, bc_b, article="ART-B")
+    mirror = await _mirror_request(db_session, project, warehouse, monkeypatch)
+    await _make_linked_assembly(db_session, project, warehouse, mirror, [(bc_a, nom_a.id, 10), (bc_b, nom_b.id, 3)])
+    _mock_detail(monkeypatch, _detail(products=[_detail_product(bc_a, amount=10), _detail_product(bc_b, amount=3)]))
+
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, mirror.id)
+
+    assert row is not None
+    match = row["match"]
+    assert match["matched"] is True
+    assert match["mismatches"] == []
+    assert match["ff_total"] == 13 and match["our_total"] == 13
+    assert match["ff_positions"] == 2 and match["our_positions"] == 2
+    by_bc = {p["barcode"]: p for p in row["products"]}
+    assert by_bc[bc_a]["our_qty"] == 10
+    assert by_bc[bc_b]["our_qty"] == 3
+
+
+@pytest.mark.asyncio
+async def test_request_detail_match_mismatches_both_directions(
+    db_session, project, warehouse, connected_key, monkeypatch
+):
+    """Расхождения в обе стороны: qty отличается, есть только у ФФ, есть только у нас."""
+    bc_qty, bc_ff_only, bc_our_only = f"20{_uid()}", f"21{_uid()}", f"22{_uid()}"
+    nom_qty = await _make_nomenclature(db_session, project.id, bc_qty, article="ART-QTY")
+    nom_our = await _make_nomenclature(db_session, project.id, bc_our_only, article="ART-OUR")
+    mirror = await _mirror_request(db_session, project, warehouse, monkeypatch)
+    await _make_linked_assembly(
+        db_session, project, warehouse, mirror, [(bc_qty, nom_qty.id, 7), (bc_our_only, nom_our.id, 2)]
+    )
+    _mock_detail(
+        monkeypatch, _detail(products=[_detail_product(bc_qty, amount=10), _detail_product(bc_ff_only, amount=4)])
+    )
+
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, mirror.id)
+
+    match = row["match"]
+    assert match["matched"] is False
+    assert match["ff_total"] == 14 and match["our_total"] == 9
+    assert match["ff_positions"] == 2 and match["our_positions"] == 2
+    by_bc = {m["barcode"]: m for m in match["mismatches"]}
+    assert set(by_bc) == {bc_qty, bc_ff_only, bc_our_only}
+    assert by_bc[bc_qty]["ff_qty"] == 10 and by_bc[bc_qty]["our_qty"] == 7 and by_bc[bc_qty]["diff"] == 3
+    assert by_bc[bc_ff_only]["ff_qty"] == 4 and by_bc[bc_ff_only]["our_qty"] == 0
+    assert by_bc[bc_our_only]["ff_qty"] == 0 and by_bc[bc_our_only]["our_qty"] == 2
+    assert by_bc[bc_our_only]["article_seller"] == "ART-OUR"  # номенклатура и для our-only строк
+    products = {p["barcode"]: p for p in row["products"]}
+    assert products[bc_ff_only]["our_qty"] == 0  # связь есть, в нашей заявке нет
+    assert products[bc_qty]["our_qty"] == 7
+
+
+@pytest.mark.asyncio
+async def test_request_detail_without_link_has_no_match(db_session, project, warehouse, connected_key, monkeypatch):
+    """Без привязки match=None и our_qty=None."""
+    bc = f"20{_uid()}"
+    mirror = await _mirror_request(db_session, project, warehouse, monkeypatch)
+    _mock_detail(monkeypatch, _detail(products=[_detail_product(bc, amount=5)]))
+
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, mirror.id)
+
+    assert row["match"] is None
+    assert row["products"][0]["our_qty"] is None
+
+
+@pytest.mark.asyncio
+async def test_request_detail_match_inbound(db_session, project, warehouse, connected_key, monkeypatch):
+    """Сверка для приёмки: our_qty из expected_qty InboundReceiptItem."""
+    bc = f"20{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-IN")
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {852: [_req(3001)]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    result = await db_session.execute(
+        select(FulfillmentRequest).where(
+            FulfillmentRequest.project_id == project.id,
+            FulfillmentRequest.external_id == "3001",
+        )
+    )
+    mirror = result.scalars().one()
+
+    receipt = InboundReceipt(project_id=project.id, warehouse_id=warehouse.id, number=f"IN-{_uid()[:6]}")
+    db_session.add(receipt)
+    await db_session.commit()
+    await db_session.refresh(receipt)
+    db_session.add(
+        InboundReceiptItem(
+            project_id=project.id, receipt_id=receipt.id, nomenclature_id=nom.id, barcode=bc, expected_qty=8
+        )
+    )
+    await db_session.commit()
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, inbound_receipt_id=receipt.id)
+    _mock_detail(monkeypatch, _detail(products=[_detail_product(bc, amount=8)]))
+
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, mirror.id)
+
+    assert row["match"]["matched"] is True
+    assert row["match"]["our_total"] == 8
+    assert row["products"][0]["our_qty"] == 8
+
+
+# ─── ФФ-связь для нашей заявки на сборку ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_ff_link_for_assembly(db_session, project, other_project, warehouse, connected_key, monkeypatch):
+    """Обратный lookup: зеркальная ФФ-заявка по id нашей сборки + изоляция проекта."""
+    mirror = await _mirror_request(db_session, project, warehouse, monkeypatch)
+    doc = await _make_linked_assembly(db_session, project, warehouse, mirror, [])
+
+    link = await fulfillment_service.get_ff_link_for_assembly(db_session, project.id, doc.id)
+    assert link is not None
+    assert link["ff_request_id"] == mirror.id
+    assert link["ff_request_number"] == "WH-R-2001"
+    assert link["ff_stage_title"] == "Новая"
+    assert link["ff_warehouse_id"] == warehouse.id
+
+    assert await fulfillment_service.get_ff_link_for_assembly(db_session, other_project.id, doc.id) is None
+    assert await fulfillment_service.get_ff_link_for_assembly(db_session, project.id, 99999999) is None
 
 
 # ─── WMS Celicom (wmscelicom) ────────────────────────────────────────────────

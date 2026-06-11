@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002, RUF003
 """
 Pydantic schemas: fulfillment integration (skladbot, migfull).
 
@@ -105,10 +106,33 @@ class FfRequestDetailProduct(BaseModel):
     accepted_qty: int = 0  # принято (acceptedAmount)
     delivery_qty: int = 0  # отгружено (delivery_amount)
     defect_qty: int = 0  # брак (repairAmount)
+    our_qty: int | None = None  # кол-во в связанном нашем документе; None — связи нет
     color: str | None = None
     size: str | None = None
     comment: str | None = None
     image: str | None = None
+
+
+class FfMatchRow(BaseModel):
+    """Строка расхождения состава: ФФ-заявка vs наш документ (по barcode)."""
+
+    barcode: str
+    article_seller: str | None = None
+    name: str | None = None  # название со стороны ФФ (если позиция там есть)
+    ff_qty: int = 0
+    our_qty: int = 0
+    diff: int = 0  # ff_qty - our_qty
+
+
+class FfRequestMatch(BaseModel):
+    """Итог сверки состава ФФ-заявки со связанным нашим документом."""
+
+    matched: bool
+    ff_positions: int = 0
+    our_positions: int = 0
+    ff_total: int = 0
+    our_total: int = 0
+    mismatches: list[FfMatchRow] = Field(default_factory=list)
 
 
 class FfRequestStageLog(BaseModel):
@@ -139,11 +163,51 @@ class FfRequestDetail(FfRequestRow):
     products: list[FfRequestDetailProduct] = Field(default_factory=list)
     stage_logs: list[FfRequestStageLog] = Field(default_factory=list)
     fields: list[FfRequestFieldValue] = Field(default_factory=list)
+    # Сверка состава со связанным нашим документом (None — связи нет)
+    match: FfRequestMatch | None = None
 
 
 class FfLinkPayload(BaseModel):
     assembly_request_id: int | None = None
     inbound_receipt_id: int | None = None
+
+
+# ─── Сводная страница «Заявки ФФ» (все склады с интеграцией) ────────────────
+
+
+class FfIntegratedWarehouse(BaseModel):
+    warehouse_id: int
+    warehouse_name: str
+    provider: str  # skladbot | wmscelicom
+    provider_label: str  # человекочитаемое имя провайдера
+    last_sync_at: datetime | None = None
+    requests_total: int = 0
+    requests_unlinked: int = 0  # активные несвязанные заявки kind=assembly
+
+
+class FfMatchSuggestion(BaseModel):
+    """Кандидат авто-мэтчинга ФФ-заявки к нашей заявке на сборку."""
+
+    assembly_request_id: int
+    number: str
+    status: str  # AssemblyStatus
+    created_at: datetime
+    total_qty: int = 0
+    score: int  # 0..100 — уверенность эвристики
+    reason: str  # объяснение: «дата ±1 дн», «ШК 80%»
+
+
+class FfOverviewRequestRow(FfRequestRow):
+    warehouse_id: int
+    warehouse_name: str
+    provider: str
+    # топ-кандидаты для несвязанных активных заявок (иначе [])
+    suggestions: list[FfMatchSuggestion] = Field(default_factory=list)
+
+
+class FfOverviewResponse(BaseModel):
+    warehouses: list[FfIntegratedWarehouse]
+    requests: list[FfOverviewRequestRow]
 
 
 # ─── Sync ────────────────────────────────────────────────────────────────────

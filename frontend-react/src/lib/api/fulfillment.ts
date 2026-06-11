@@ -2,6 +2,7 @@
 import { ApiClient } from './client';
 import type {
     FfLinkPayload,
+    FfOverviewResponse,
     FfRequestDetail,
     FfRequestKind,
     FfRequestRow,
@@ -32,6 +33,16 @@ export function addFulfillmentMethods(api: ApiClient) {
         // ─── Stocks ──────────────────────────────────────────────────
         getFulfillmentStocks(warehouseId: number) {
             return api.request<FfStocksResponse>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/stocks`);
+        },
+
+        // ─── Overview (сводная «Заявки ФФ» по всем складам) ─────────
+        getFfOverview(params?: { kind?: FfRequestKind; warehouse_id?: number; only_unlinked?: boolean }) {
+            const query = new URLSearchParams();
+            if (params?.kind) query.set('kind', params.kind);
+            if (params?.warehouse_id != null) query.set('warehouse_id', String(params.warehouse_id));
+            if (params?.only_unlinked) query.set('only_unlinked', 'true');
+            const qs = query.toString();
+            return api.request<FfOverviewResponse>('GET', `/api/v1/warehouse/fulfillment/overview${qs ? `?${qs}` : ''}`);
         },
 
         // ─── Requests (заявки ФФ: сборка / приёмки) ─────────────────
