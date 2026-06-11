@@ -10,7 +10,7 @@ import statistics
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached, invalidate_cache
@@ -357,11 +357,12 @@ async def get_assembly_flow_analytics(
     date_from: date | None = None,
     date_to: date | None = None,
     warehouse_ids: list[int] | None = None,
+    categories: list[str] | None = None,
     assembly_threshold_days: int = 3,
     ship_threshold_days: int = 2,
     delivery_threshold_days: int = 7,
 ) -> dict:
-    """Аналитика потока сборки: этапы, переходы, аномалии.
+    """Аналитика потока сборки: этапы, переходы, аномалии, дневная динамика.
 
     Период (date_from/date_to, по created_at; None = без границы — «всё время»)
     применяется к stages / transitions / summary-метрикам. АНОМАЛИИ считаются
@@ -380,6 +381,22 @@ async def get_assembly_flow_analytics(
     """
     now = utcnow()
 
+    # Фильтр по категориям (Nomenclature.subject) — заявка попадает, если в ней
+    # есть хотя бы одна позиция выбранной категории. Применяется и к периодной,
+    # и к active-выборке (аномалии).
+    cat_subq = None
+    if categories:
+        cat_subq = (
+            select(AssemblyRequestItem.assembly_request_id)
+            .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+            .where(
+                AssemblyRequestItem.project_id == project_id,
+                Nomenclature.subject.in_(categories),
+            )
+            .distinct()
+            .scalar_subquery()
+        )
+
     # --- Load period requests (для stages/transitions/summary) ---
     period_filters = [
         AssemblyRequest.project_id == project_id,
@@ -391,6 +408,8 @@ async def get_assembly_flow_analytics(
         period_filters.append(AssemblyRequest.created_at < datetime.combine(date_to + timedelta(days=1), time.min))
     if warehouse_ids:
         period_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))
+    if cat_subq is not None:
+        period_filters.append(AssemblyRequest.id.in_(cat_subq))
 
     period_reqs = list(
         (
@@ -413,6 +432,8 @@ async def get_assembly_flow_analytics(
     ]
     if warehouse_ids:
         active_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))
+    if cat_subq is not None:
+        active_filters.append(AssemblyRequest.id.in_(cat_subq))
 
     active_reqs = list(
         (
@@ -489,6 +510,66 @@ async def get_assembly_flow_analytics(
     ]
     # Только DELIVERED («Принято ВБ»): CLOSED — возврат (ВБ не принял), не успех.
     completed_in_period = sum(1 for r in period_reqs if r.status == AssemblyStatus.DELIVERED)
+
+    # --- Daily series (график «динамика по дням») ---
+    # Заявки/товары — по дате создания; средний цикл — по дате отгрузки.
+    # SQL-агрегация по тем же period_filters (без _FLOW_LIMIT-усечения).
+    created_day = func.date(AssemblyRequest.created_at)
+    created_rows = (
+        await db.execute(
+            select(
+                created_day.label("day"),
+                func.count(func.distinct(AssemblyRequest.id)).label("created_count"),
+                func.coalesce(func.sum(AssemblyRequestItem.quantity), 0).label("created_qty"),
+            )
+            .outerjoin(
+                AssemblyRequestItem,
+                # project_id в ON (не WHERE): иначе outer-join выродится во
+                # внутренний и заявки без позиций выпадут из created_count.
+                and_(
+                    AssemblyRequestItem.assembly_request_id == AssemblyRequest.id,
+                    AssemblyRequestItem.project_id == project_id,
+                ),
+            )
+            .where(*period_filters)
+            .group_by(created_day)
+        )
+    ).all()
+
+    shipped_day = func.date(AssemblyRequest.shipped_at)
+    cycle_rows = (
+        await db.execute(
+            select(
+                shipped_day.label("day"),
+                func.count().label("shipped_count"),
+                func.avg(
+                    func.extract("epoch", AssemblyRequest.shipped_at - AssemblyRequest.created_at) / 86400.0
+                ).label("avg_cycle_days"),
+            )
+            .where(*period_filters, AssemblyRequest.shipped_at.isnot(None))
+            .group_by(shipped_day)
+        )
+    ).all()
+
+    daily_map: dict[str, dict] = {}
+    for row in created_rows:
+        d = row.day.isoformat()
+        daily_map[d] = {
+            "date": d,
+            "created_count": int(row.created_count),
+            "created_qty": int(row.created_qty),
+            "shipped_count": 0,
+            "avg_cycle_days": None,
+        }
+    for row in cycle_rows:
+        d = row.day.isoformat()
+        entry = daily_map.setdefault(
+            d,
+            {"date": d, "created_count": 0, "created_qty": 0, "shipped_count": 0, "avg_cycle_days": None},
+        )
+        entry["shipped_count"] = int(row.shipped_count)
+        entry["avg_cycle_days"] = round(float(row.avg_cycle_days), 2) if row.avg_cycle_days is not None else None
+    daily = sorted(daily_map.values(), key=lambda x: x["date"])
 
     # --- WB supplies for active requests — one query ---
     supply_ids = {r.wb_fbo_supply_id for r in active_reqs if r.wb_fbo_supply_id is not None}
@@ -657,6 +738,7 @@ async def get_assembly_flow_analytics(
         "transitions": transitions,
         "by_warehouse": by_warehouse,
         "anomalies": anomalies,
+        "daily": daily,
         "thresholds": {
             "assembly_days": assembly_threshold_days,
             "ship_days": ship_threshold_days,

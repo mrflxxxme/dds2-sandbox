@@ -532,6 +532,103 @@ class TestAnomalies:
         assert res["anomalies"] == []
 
 
+# --- Daily series -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestDailySeries:
+    async def test_daily_created_and_cycle(self, db_session, env):
+        """Заявки/товары — по дате создания; средний цикл — по дате отгрузки."""
+        t0 = utcnow() - timedelta(days=10)
+        await _mk_request(
+            db_session,
+            env,
+            status=AssemblyStatus.SHIPPED,
+            created_at=t0,
+            shipped_at=t0 + timedelta(days=4),
+            item_qtys=[3, 4],
+        )
+        # Второй — создан в тот же день, не отгружен
+        await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, item_qtys=[5])
+
+        res = await _flow(db_session, env.project_id)
+
+        by_date = {d["date"]: d for d in res["daily"]}
+        created_day = t0.date().isoformat()
+        shipped_day = (t0 + timedelta(days=4)).date().isoformat()
+
+        assert by_date[created_day]["created_count"] == 2
+        assert by_date[created_day]["created_qty"] == 12
+        assert by_date[shipped_day]["shipped_count"] == 1
+        assert by_date[shipped_day]["avg_cycle_days"] == pytest.approx(4.0, abs=0.05)
+        # В день создания отгрузок не было
+        assert by_date[created_day]["shipped_count"] == 0
+        assert by_date[created_day]["avg_cycle_days"] is None
+
+    async def test_daily_respects_period(self, db_session, env):
+        t0 = utcnow() - timedelta(days=200)
+        await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, item_qtys=[2])
+
+        res = await _flow(db_session, env.project_id, date_from=(utcnow() - timedelta(days=90)).date())
+        assert res["daily"] == []
+
+        res_all = await _flow(db_session, env.project_id)
+        assert len(res_all["daily"]) == 1
+
+
+# --- Categories filter --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCategoriesFilter:
+    async def test_categories_filter_scopes_everything(self, db_session, env):
+        """Фильтр по категории (Nomenclature.subject) сужает period- и active-выборки."""
+        nom_socks = (
+            await db_session.execute(
+                text(
+                    "INSERT INTO nomenclature (project_id, barcode, subject, updated_at) "
+                    "VALUES (:pid, 'TEST_BC_FLOW_SOCKS', 'Носки', NOW()) RETURNING id"
+                ),
+                {"pid": env.project_id},
+            )
+        ).scalar()
+        await db_session.commit()
+
+        t0 = utcnow() - timedelta(days=5)
+        # Заявка с «Носки» — застряла в сборке
+        req_socks = await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0)
+        db_session.add(
+            AssemblyRequestItem(
+                project_id=env.project_id,
+                assembly_request_id=req_socks.id,
+                nomenclature_id=nom_socks,
+                barcode="TEST_BC_FLOW_SOCKS",
+                quantity=4,
+            )
+        )
+        await db_session.commit()
+        await _add_history(db_session, env, req_socks.id, None, "IN_PROGRESS", t0)
+        # Заявка с номенклатурой без subject — тоже застряла
+        req_other = await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, item_qtys=[7])
+        await _add_history(db_session, env, req_other.id, None, "IN_PROGRESS", t0)
+
+        res = await _flow(db_session, env.project_id, categories=["Носки"])
+        assert [a["id"] for a in res["anomalies"]] == [req_socks.id]
+        assert res["summary"]["active_count"] == 1
+        assert len(res["daily"]) == 1
+        assert res["daily"][0]["created_count"] == 1
+        assert res["daily"][0]["created_qty"] == 4
+
+        res_none = await _flow(db_session, env.project_id, categories=["Платья"])
+        assert res_none["anomalies"] == []
+        assert res_none["summary"]["active_count"] == 0
+        assert res_none["daily"] == []
+
+        # Без фильтра видны обе
+        res_all = await _flow(db_session, env.project_id)
+        assert res_all["summary"]["active_count"] == 2
+
+
 # --- Router validation ----------------------------------------------------------
 
 

@@ -5,8 +5,12 @@
  *
  * Структура:
  *  1. KPI: средний цикл, средняя сборка, в работе, аномалии.
+ *  1а. График «Динамика по дням»: заявки/товары (по дате создания, переключатель)
+ *      + средний цикл (по дате отгрузки, правая ось).
  *  2. Пайплайн этапов: Сборка → Готов → Машина → Отгружено → Принято ВБ
  *     (средняя/медианная длительность каждого этапа, подсветка превышений порога).
+ *
+ * Фильтры всей страницы: период, склад, категория (Nomenclature.subject).
  *  3. Нестандартные переходы (отмены и «откаты назад») — свёрнутый блок.
  *  4. Аномалии — зависшие заявки, сгруппированные по типу проблемы.
  *     В каждой группе: Excel-экспорт; в «Готово, но не отгружается» — фильтр
@@ -18,6 +22,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import {
+    Bar,
+    CartesianGrid,
+    ComposedChart,
+    Legend,
+    Line,
+    ResponsiveContainer,
+    Tooltip as RechartsTooltip,
+    XAxis,
+    YAxis,
+} from 'recharts';
 import { api } from '@/lib/api';
 import { Toast } from '@/components';
 import { exportToExcel, formatDate, formatNumber, pluralRu } from '@/lib/utils';
@@ -25,6 +40,7 @@ import type {
     AssemblyAnomalyKind,
     AssemblyAnomalyRow,
     AssemblyFlowAnalyticsResponse,
+    AssemblyFlowDailyStat,
     AssemblyFlowThresholds,
     AssemblyStatus,
     AssemblyTransitionStat,
@@ -156,7 +172,39 @@ function anomalyToExportRow(row: AssemblyAnomalyRow): Record<string, string | nu
     };
 }
 
+/** Переключатель столбцов графика «динамика по дням». */
+const CHART_BAR_METRICS: { key: 'created_count' | 'created_qty'; label: string }[] = [
+    { key: 'created_count', label: 'Заявки' },
+    { key: 'created_qty', label: 'Товары, шт' },
+];
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Заполняет пропущенные дни нулями, чтобы бары шли равномерно по оси X.
+ * Диапазоны > 400 дней не заполняем (режим «всё время» с редкими точками).
+ */
+function fillDailyGaps(daily: AssemblyFlowDailyStat[]): AssemblyFlowDailyStat[] {
+    if (daily.length < 2) return daily;
+    const start = new Date(`${daily[0].date}T00:00:00Z`).getTime();
+    const end = new Date(`${daily[daily.length - 1].date}T00:00:00Z`).getTime();
+    if ((end - start) / 86_400_000 > 400) return daily;
+    const byDate = new Map(daily.map(d => [d.date, d]));
+    const out: AssemblyFlowDailyStat[] = [];
+    for (let t = start; t <= end; t += 86_400_000) {
+        const iso = new Date(t).toISOString().slice(0, 10);
+        out.push(
+            byDate.get(iso)
+            ?? { date: iso, created_count: 0, created_qty: 0, shipped_count: 0, avg_cycle_days: null },
+        );
+    }
+    return out;
+}
+
+/** «2026-06-05» → «05.06» для оси X. */
+function fmtDayTick(iso: string): string {
+    return `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
+}
 
 function isoDaysAgo(days: number): string {
     const d = new Date();
@@ -280,6 +328,11 @@ export default function AssemblyFlowAnalyticsPage() {
     const [period, setPeriod] = useState<PeriodKey>('90');
     const [warehouseId, setWarehouseId] = useState<number | ''>('');
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+    const [category, setCategory] = useState('');
+    const [subjects, setSubjects] = useState<string[]>([]);
+
+    // Метрика столбцов графика «динамика по дням»
+    const [chartBarMetric, setChartBarMetric] = useState<'created_count' | 'created_qty'>('created_count');
 
     // Thresholds: applied (триггерит перезапрос) + draft (строки в инпутах)
     const [thresholds, setThresholds] = useState<AssemblyFlowThresholds>(DEFAULT_THRESHOLDS);
@@ -300,13 +353,19 @@ export default function AssemblyFlowAnalyticsPage() {
 
     const anomaliesRef = useRef<HTMLDivElement>(null);
 
-    // ─── Load warehouses (один раз) ───────────────────────────────────────
+    // ─── Load warehouses + категории (один раз) ───────────────────────────
     useEffect(() => {
         const controller = new AbortController();
         api.getWarehouses()
             .then(whs => {
                 if (controller.signal.aborted) return;
                 setWarehouses(whs.filter(w => w.warehouse_type === 'FULFILLMENT'));
+            })
+            .catch(() => {});
+        api.getNomenclatureSubjects()
+            .then(list => {
+                if (controller.signal.aborted) return;
+                setSubjects(list);
             })
             .catch(() => {});
         return () => controller.abort();
@@ -320,6 +379,7 @@ export default function AssemblyFlowAnalyticsPage() {
             const resp = await api.getAssemblyFlowAnalytics({
                 date_from: period === 'all' ? undefined : isoDaysAgo(period === '30' ? 30 : 90),
                 warehouse_ids: warehouseId ? String(warehouseId) : undefined,
+                categories: category || undefined,
                 assembly_threshold_days: thresholds.assembly_days,
                 ship_threshold_days: thresholds.ship_days,
                 delivery_threshold_days: thresholds.delivery_days,
@@ -332,7 +392,7 @@ export default function AssemblyFlowAnalyticsPage() {
         } finally {
             if (!signal.aborted) setLoading(false);
         }
-    }, [period, warehouseId, thresholds]);
+    }, [period, warehouseId, category, thresholds]);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -417,8 +477,12 @@ export default function AssemblyFlowAnalyticsPage() {
             || data.summary.completed_in_period > 0
             || data.anomalies.length > 0
             || data.stages.some(s => s.count > 0)
-            || data.by_warehouse.length > 0;
+            || data.by_warehouse.length > 0
+            || (data.daily?.length ?? 0) > 0;
     }, [data]);
+
+    // График «динамика по дням»: пропущенные дни → нули (ровная ось X)
+    const chartData = useMemo(() => fillDailyGaps(data?.daily ?? []), [data]);
 
     const appliedThresholds = data?.thresholds ?? thresholds;
     const periodSub = period === 'all' ? 'за всё время' : `за ${period} дн`;
@@ -518,6 +582,21 @@ export default function AssemblyFlowAnalyticsPage() {
                             <option key={w.id} value={w.id}>{w.name}</option>
                         ))}
                     </select>
+                    {/* Категория (Nomenclature.subject) */}
+                    {subjects.length > 0 && (
+                        <select
+                            className="form-input"
+                            style={{ width: 'auto', minWidth: 150, maxWidth: 220 }}
+                            value={category}
+                            onChange={e => setCategory(e.target.value)}
+                            title="Заявка попадает в выборку, если содержит хотя бы одну позицию категории"
+                        >
+                            <option value="">Все категории</option>
+                            {subjects.map(s => (
+                                <option key={s} value={s}>{s}</option>
+                            ))}
+                        </select>
+                    )}
                     {/* Пороги */}
                     <div ref={thresholdsRef} style={{ position: 'relative' }}>
                         <button
@@ -648,6 +727,65 @@ export default function AssemblyFlowAnalyticsPage() {
                             onClick={data.summary.anomaly_count > 0 ? scrollToAnomalies : undefined}
                         />
                     </div>
+
+                    {/* Динамика по дням */}
+                    {chartData.length > 0 && (
+                        <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                                <SectionTitle>Динамика по дням · {periodSub}</SectionTitle>
+                                <div style={{ display: 'flex', gap: 4 }}>
+                                    {CHART_BAR_METRICS.map(m => (
+                                        <button
+                                            key={m.key}
+                                            type="button"
+                                            className={`btn btn-sm ${chartBarMetric === m.key ? 'btn-primary' : 'btn-secondary'}`}
+                                            onClick={() => setChartBarMetric(m.key)}
+                                        >
+                                            {m.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                            <ResponsiveContainer width="100%" height={280}>
+                                <ComposedChart data={chartData} margin={{ top: 5, right: 8, bottom: 5, left: 0 }}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                                    <XAxis dataKey="date" tickFormatter={fmtDayTick} tick={{ fontSize: 11 }} minTickGap={24} />
+                                    <YAxis yAxisId="left" tick={{ fontSize: 12 }} allowDecimals={false} />
+                                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 12 }} />
+                                    <RechartsTooltip
+                                        formatter={(value: number, name: string) =>
+                                            name === 'Средний цикл, дн'
+                                                ? [`${formatNumber(value, 1)} дн`, name]
+                                                : [formatNumber(value, 0), name]}
+                                        labelFormatter={(l: string) => formatDate(l)}
+                                        contentStyle={{ borderRadius: 12, border: '1px solid var(--color-border)', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', fontSize: 13 }}
+                                    />
+                                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                                    <Bar
+                                        yAxisId="left"
+                                        dataKey={chartBarMetric}
+                                        name={CHART_BAR_METRICS.find(m => m.key === chartBarMetric)?.label}
+                                        fill="var(--color-accent)"
+                                        radius={[3, 3, 0, 0]}
+                                        maxBarSize={26}
+                                    />
+                                    <Line
+                                        yAxisId="right"
+                                        type="monotone"
+                                        dataKey="avg_cycle_days"
+                                        name="Средний цикл, дн"
+                                        stroke="var(--color-warning)"
+                                        strokeWidth={2}
+                                        dot={false}
+                                        connectNulls
+                                    />
+                                </ComposedChart>
+                            </ResponsiveContainer>
+                            <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 6 }}>
+                                Заявки и товары — по дате создания заявки; средний цикл — по дате отгрузки (создание → отгрузка отгруженных в этот день).
+                            </div>
+                        </div>
+                    )}
 
                     {/* Пайплайн этапов */}
                     <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>

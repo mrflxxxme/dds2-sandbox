@@ -297,10 +297,20 @@ class AssemblyFlowThresholds(BaseModel):
     delivery_days: int
 
 
+class AssemblyFlowDailyStat(BaseModel):
+    date: str  # ISO YYYY-MM-DD
+    created_count: int  # заявок создано в этот день
+    created_qty: int  # товаров (шт) в созданных заявках
+    shipped_count: int  # заявок отгружено в этот день
+    avg_cycle_days: float | None  # средний цикл (создание → отгрузка) отгруженных в этот день
+
+
 class AssemblyFlowAnalyticsResponse(BaseModel):
     summary: AssemblyFlowSummary
     stages: list[AssemblyStageDuration]
     transitions: list[AssemblyTransitionStat]
     by_warehouse: list[AssemblyWarehouseFlowStat]
     anomalies: list[AssemblyAnomalyRow]
+    # Дефолт — на случай записи в кэше от прошлой версии без этого ключа.
+    daily: list[AssemblyFlowDailyStat] = []
     thresholds: AssemblyFlowThresholds

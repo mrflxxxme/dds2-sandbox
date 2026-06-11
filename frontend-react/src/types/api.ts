@@ -1614,6 +1614,19 @@ export interface AssemblyWarehouseFlowStat {
   anomaly_count: number;
 }
 
+export interface AssemblyFlowDailyStat {
+  /** ISO YYYY-MM-DD */
+  date: string;
+  /** заявок создано в этот день */
+  created_count: number;
+  /** товаров (шт) в созданных заявках */
+  created_qty: number;
+  /** заявок отгружено в этот день */
+  shipped_count: number;
+  /** средний цикл (создание → отгрузка) отгруженных в этот день */
+  avg_cycle_days: number | null;
+}
+
 export interface AssemblyFlowSummary {
   /** заявок в работе сейчас (IN_PROGRESS..SHIPPED) */
   active_count: number;
@@ -1638,6 +1651,7 @@ export interface AssemblyFlowAnalyticsResponse {
   transitions: AssemblyTransitionStat[];
   by_warehouse: AssemblyWarehouseFlowStat[];
   anomalies: AssemblyAnomalyRow[];
+  daily: AssemblyFlowDailyStat[];
   thresholds: AssemblyFlowThresholds;
 }
 

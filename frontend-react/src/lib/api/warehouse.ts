@@ -415,9 +415,9 @@ export function addWarehouseMethods(api: ApiClient) {
             const qs = query.toString();
             return api.request<LogisticsAnalyticsResponse>('GET', `/api/v1/warehouse/assembly/shipments/analytics${qs ? `?${qs}` : ''}`);
         },
-        /** Анализ потока сборки: длительности этапов, переходы, аномалии. */
+        /** Анализ потока сборки: длительности этапов, переходы, аномалии, дневная динамика. */
         getAssemblyFlowAnalytics(params?: {
-            date_from?: string; date_to?: string; warehouse_ids?: string;
+            date_from?: string; date_to?: string; warehouse_ids?: string; categories?: string;
             assembly_threshold_days?: number; ship_threshold_days?: number; delivery_threshold_days?: number;
         }) {
             const query = new URLSearchParams();
