@@ -36,6 +36,8 @@ class FfStockRow(BaseModel):
     vendor_code: str | None = None
     nomenclature_id: int | None = None
     article_seller: str | None = None  # наш артикул (если товар сматчен)
+    subject: str | None = None  # предмет из номенклатуры (если сматчен)
+    brand: str | None = None  # бренд из номенклатуры (если сматчен)
     ff_good: int = 0
     ff_reserve: int = 0
     ff_defect: int = 0
@@ -58,6 +60,8 @@ class FfStocksResponse(BaseModel):
     rows: list[FfStockRow]
     totals: FfStockTotals
     synced_at: datetime | None = None
+    subjects: list[str] = Field(default_factory=list)  # distinct предметы для фильтра
+    brands: list[str] = Field(default_factory=list)  # distinct бренды для фильтра
 
 
 # ─── Requests ────────────────────────────────────────────────────────────────

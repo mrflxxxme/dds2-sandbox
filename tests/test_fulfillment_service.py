@@ -135,8 +135,8 @@ async def connected_key(db_session, project, warehouse, monkeypatch):
     return await fulfillment_service.get_integration(db_session, project.id, warehouse.id)
 
 
-async def _make_nomenclature(db_session, project_id, barcode, article="ART-X"):
-    nom = Nomenclature(project_id=project_id, barcode=barcode, article_seller=article)
+async def _make_nomenclature(db_session, project_id, barcode, article="ART-X", subject=None, brand=None):
+    nom = Nomenclature(project_id=project_id, barcode=barcode, article_seller=article, subject=subject, brand=brand)
     db_session.add(nom)
     await db_session.commit()
     await db_session.refresh(nom)
@@ -501,8 +501,12 @@ async def test_list_stocks_union_and_diff(db_session, project, warehouse, connec
     bc_ff_only = f"BC-{_uid()}"  # только ФФ (без номенклатуры)
     bc_our_only = f"BC-{_uid()}"  # только у нас
 
-    nom_both = await _make_nomenclature(db_session, project.id, bc_both, article="ART-BOTH")
-    nom_our = await _make_nomenclature(db_session, project.id, bc_our_only, article="ART-OUR")
+    nom_both = await _make_nomenclature(
+        db_session, project.id, bc_both, article="ART-BOTH", subject="Накидки", brand="DIVANDEK"
+    )
+    nom_our = await _make_nomenclature(
+        db_session, project.id, bc_our_only, article="ART-OUR", subject="Покрывала", brand="ELKA"
+    )
 
     db_session.add_all(
         [
@@ -538,14 +542,23 @@ async def test_list_stocks_union_and_diff(db_session, project, warehouse, connec
     assert rows[bc_both]["our_defect"] == 1
     assert rows[bc_both]["diff"] == 3
     assert rows[bc_both]["article_seller"] == "ART-BOTH"
+    assert rows[bc_both]["subject"] == "Накидки"
+    assert rows[bc_both]["brand"] == "DIVANDEK"
 
     assert rows[bc_ff_only]["diff"] == 3
     assert rows[bc_ff_only]["nomenclature_id"] is None
+    assert rows[bc_ff_only]["subject"] is None
+    assert rows[bc_ff_only]["brand"] is None
 
     assert rows[bc_our_only]["ff_good"] == 0
     assert rows[bc_our_only]["our_quantity"] == 4
     assert rows[bc_our_only]["diff"] == -4
     assert rows[bc_our_only]["article_seller"] == "ART-OUR"
+    assert rows[bc_our_only]["subject"] == "Покрывала"
+
+    # Списки значений для фильтров — distinct + sorted
+    assert data["subjects"] == ["Накидки", "Покрывала"]
+    assert data["brands"] == ["DIVANDEK", "ELKA"]
 
     totals = data["totals"]
     assert totals["ff_good"] == 13

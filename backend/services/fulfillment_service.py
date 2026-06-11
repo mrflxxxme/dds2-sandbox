@@ -446,27 +446,38 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     )
     our_rows = list(ws_result.scalars().all())
 
-    # article_seller одним запросом для всех номенклатур (без N+1)
+    # article_seller / subject / brand одним запросом для всех номенклатур (без N+1)
     nom_ids = {r.nomenclature_id for r in ff_rows if r.nomenclature_id}
     nom_ids |= {r.nomenclature_id for r in our_rows if r.nomenclature_id}
-    article_by_nom: dict[int, str | None] = {}
+    nom_by_id: dict[int, tuple[str | None, str | None, str | None]] = {}
     if nom_ids:
         nom_result = await db.execute(
-            select(Nomenclature.id, Nomenclature.article_seller).where(
+            select(
+                Nomenclature.id,
+                Nomenclature.article_seller,
+                Nomenclature.subject,
+                Nomenclature.brand,
+            ).where(
                 Nomenclature.project_id == project_id,
                 Nomenclature.id.in_(nom_ids),
             )
         )
-        article_by_nom = {row.id: row.article_seller for row in nom_result.all()}
+        nom_by_id = {row.id: (row.article_seller, row.subject, row.brand) for row in nom_result.all()}
+
+    def _nom_fields(nom_id: int | None) -> tuple[str | None, str | None, str | None]:
+        return nom_by_id.get(nom_id, (None, None, None)) if nom_id else (None, None, None)
 
     rows: dict[str, dict] = {}
     for r in ff_rows:
+        article, subject, brand = _nom_fields(r.nomenclature_id)
         rows[r.barcode] = {
             "barcode": r.barcode,
             "name": r.name,
             "vendor_code": r.vendor_code,
             "nomenclature_id": r.nomenclature_id,
-            "article_seller": article_by_nom.get(r.nomenclature_id) if r.nomenclature_id else None,
+            "article_seller": article,
+            "subject": subject,
+            "brand": brand,
             "ff_good": r.qty_good,
             "ff_reserve": r.qty_reserve,
             "ff_defect": r.qty_defect,
@@ -478,12 +489,15 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     for wr in our_rows:
         row = rows.get(wr.barcode)
         if row is None:
+            article, subject, brand = _nom_fields(wr.nomenclature_id)
             row = rows[wr.barcode] = {
                 "barcode": wr.barcode,
                 "name": None,
                 "vendor_code": None,
                 "nomenclature_id": wr.nomenclature_id,
-                "article_seller": article_by_nom.get(wr.nomenclature_id),
+                "article_seller": article,
+                "subject": subject,
+                "brand": brand,
                 "ff_good": 0,
                 "ff_reserve": 0,
                 "ff_defect": 0,
@@ -493,8 +507,11 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
                 "diff": 0,
             }
         elif row["nomenclature_id"] is None:
+            article, subject, brand = _nom_fields(wr.nomenclature_id)
             row["nomenclature_id"] = wr.nomenclature_id
-            row["article_seller"] = article_by_nom.get(wr.nomenclature_id)
+            row["article_seller"] = article
+            row["subject"] = subject
+            row["brand"] = brand
         row["our_quantity"] = wr.quantity
         row["our_defect"] = wr.defect_quantity
         row["diff"] = row["ff_good"] - wr.quantity
@@ -509,7 +526,13 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         "unmatched": sum(1 for r in ff_rows if r.nomenclature_id is None),
     }
     synced_at = max((r.synced_at for r in ff_rows), default=None)
-    return {"rows": out_rows, "totals": totals, "synced_at": synced_at}
+    return {
+        "rows": out_rows,
+        "totals": totals,
+        "synced_at": synced_at,
+        "subjects": sorted({r["subject"] for r in out_rows if r["subject"]}),
+        "brands": sorted({r["brand"] for r in out_rows if r["brand"]}),
+    }
 
 
 # ─── Requests view + linking ─────────────────────────────────────────────────
