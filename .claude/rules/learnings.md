@@ -11,6 +11,7 @@ paths:
 > Только то, что реально предотвращает баги. CI/hooks/worktree quirks — уже в коде.
 
 ## JS/TS ловушки
+- `formatNumber()` по умолчанию 2 знака — для счётчиков/штук всегда `formatNumber(x, 0)`, иначе UI показывает «3,00 черновика» (поймано сразу на двух новых страницах)
 - `?? null` вместо `|| null` для API body — `||` теряет `[]`/`0`/`''` (falsy)
 - `URLSearchParams` для query, НИКОГДА template literals — `H&M` ломает `&`
 - `\b` regex НЕ матчит кириллицу — использовать `includes()` для русских маркеров
@@ -22,6 +23,11 @@ paths:
 
 ## Python/DB паттерны
 - `_UNSET = object()` для partial PATCH — различает «не передано» vs «null=clear»
+- «Дольше N дней» через `timedelta.days > N` опаздывает почти на сутки (int-усечение: 3.9 суток → days=3) — сравнивать `total_seconds()/86400 > N`
+- `Date`-колонка (без времени) через `datetime.combine(d, time.min)` = полночь UTC → длительности завышаются до суток; если точный момент есть в истории/audit-таблице — брать его `changed_at`, Date только fallback
+- Секрет в URL-пути (wmscelicom-стиль `/api/{token}/…`): `str()` httpx-ошибки содержит полный URL → токен утекает в UI/логи. Все тексты ошибок клиента прогонять через `_redact()` (token→`***`), логировать только path-суффикс ПОСЛЕ токена
+- PHP-API внешних провайдеров: вместо null приходят `false`/`""`/`"0000-00-00 00:00:00"`, пустой `data`-dict сериализуется как `[]`, в массивах бывают null-элементы (`Barcodes:[null]`) — коэрсить `or None`, `next((x for x in arr if x), default)`, парсер контейнера принимает и dict, и list (подтверждено живым wmscelicom)
+- User-supplied base_url для server-side запросов = SSRF-вектор: allowlist-суффикс хоста + только https + запрет порта/пути/userinfo (`normalize_base_url` в wmscelicom_client); httpx по умолчанию НЕ следует редиректам — не включать follow_redirects у таких клиентов
 - UPSERT batch: дедуп ключей в Python ДО executemany (CardinalityViolation)
 - `func.greatest(excluded.x, Model.x)` при partial-sync UPSERT — не затирать нулями
 - `CREATE INDEX CONCURRENTLY` + `AUTOCOMMIT` для partial index в Alembic

@@ -16,6 +16,6 @@
 | Планирование | плановые показатели, платежи, таможня, кэшфлоу | [DOMAIN_PLANNING.md](DOMAIN_PLANNING.md) |
 | Локализация | индекс ИЛ / ИРП, региональные продажи, cold-start | [DOMAIN_LOCALIZATION.md](DOMAIN_LOCALIZATION.md) |
 | Telegram | бот + Telegram Mini App, авторизация, дайджест | [DOMAIN_TELEGRAM.md](DOMAIN_TELEGRAM.md) |
-| Фулфилмент | интеграция skladbot/migfull: остатки-зеркало, заявки, связь с документами | [DOMAIN_FULFILLMENT.md](DOMAIN_FULFILLMENT.md) |
+| Фулфилмент | интеграция skladbot/wmscelicom (позже migfull): остатки-зеркало, заявки, связь с документами | [DOMAIN_FULFILLMENT.md](DOMAIN_FULFILLMENT.md) |
 
 Новый домен: скопировать `.claude/templates/DOMAIN_template.md` → `backend/DOMAIN_<NAME>.md`, добавить строку сюда.
