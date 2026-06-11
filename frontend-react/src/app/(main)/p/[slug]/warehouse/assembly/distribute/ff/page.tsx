@@ -148,20 +148,6 @@ export default function AssemblyFfPage() {
         router.push(`/p/${slug}/warehouse/assembly/distribute/request?${qs.toString()}`);
     }, [draftId, router, slug]);
 
-    const handleHandOff = useCallback(async (u: DraftUnit) => {
-        if (!draftId) return;
-        setBusy(true);
-        try {
-            const d = await api.handOffDraftUnit(draftId, unitRef(u));
-            setDraft(d);
-            setToast({ message: `«${u.wbName}» передан на ФФ`, type: 'success' });
-        } catch (e: unknown) {
-            setToast({ message: e instanceof Error ? e.message : 'Ошибка', type: 'error' });
-        } finally {
-            setBusy(false);
-        }
-    }, [draftId]);
-
     const handleRevert = useCallback(async (u: DraftUnit) => {
         if (!draftId) return;
         setBusy(true);
@@ -305,9 +291,7 @@ export default function AssemblyFfPage() {
                                     {u.status === 'draft' ? (
                                         <>
                                             <button className="btn btn-danger btn-sm" onClick={() => handleDeleteUnit(u)} disabled={busy} title="Удалить заявку (товар останется на ФФ)">🗑</button>
-                                            <button className="btn btn-sm" style={{ borderColor: '#a16207', color: '#a16207' }} onClick={() => handleHandOff(u)} disabled={busy}>
-                                                Передать на ФФ
-                                            </button>
+                                            <button className="btn btn-primary btn-sm" onClick={() => handleCommitUnit(u)} disabled={busy} title="Создать заявку на сборку — появится в «Заявки на сборку»">В сборку</button>
                                         </>
                                     ) : (
                                         <>
@@ -335,7 +319,7 @@ export default function AssemblyFfPage() {
                 </div>
                 {history.length === 0 ? (
                     <div className="glass-card" style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>
-                        Пока нет заявок на сборку из этого раздела. Жми «В сборку» у переданного юнита — он появится здесь.
+                        Пока нет заявок на сборку из этого раздела. Жми «В сборку» у заявки — она появится здесь.
                     </div>
                 ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

@@ -37,6 +37,9 @@ class IntegrationKey(Base, SoftDeleteMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Fulfillment: ключ, привязанный к конкретному складу (skladbot, migfull)
+    warehouse_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("warehouses.id"))
+    config: Mapped[dict | None] = mapped_column(JSONB)  # customer_id, token_expires_at, ...
 
     __table_args__ = (UniqueConstraint("project_id", "service", "label", name="uq_integration_project_service_label"),)
 

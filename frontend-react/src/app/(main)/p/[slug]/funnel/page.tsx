@@ -10,6 +10,15 @@ import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelAbcRow, FunnelSu
 
 const fmt = (n: number | undefined) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtPct = (n: number | undefined) => (n || 0).toFixed(2) + '%';
+// Расширенный режим: прогноз исчерпания стока (999 = нет продаж → «∞»)
+const fmtDays = (d: number | undefined) => (d == null || d >= 999 ? '∞' : fmt(d));
+const daysColor = (d: number | undefined) => {
+    if (d == null || d >= 999) return '#9ca3af';
+    if (d < 7) return '#ef4444';
+    if (d <= 14) return '#f59e0b';
+    if (d <= 29) return '#eab308';
+    return '#10b981';
+};
 
 /* ─── Main page ──────────────────────────────────────────────── */
 
@@ -44,6 +53,32 @@ export default function FunnelPage() {
     const [search, setSearch] = useState('');
     const [filterTag, setFilterTag] = useState('');
     const [filterImt, setFilterImt] = useState('');
+    const [extended, setExtended] = useState(false);
+    const [minOrders, setMinOrders] = useState(0);
+    // Сортировка складских колонок (клик по заголовку: ↓ → ↑ → сброс)
+    const [stockSort, setStockSort] = useState<{ field: string; dir: 'asc' | 'desc' } | null>(null);
+
+    const toggleStockSort = (field: string) => {
+        // Себестоимости — сначала крупные (↓); «Хватит, дн» — сначала срочные (↑)
+        const first: 'asc' | 'desc' = field === 'stock_days_left' ? 'asc' : 'desc';
+        const second: 'asc' | 'desc' = first === 'desc' ? 'asc' : 'desc';
+        setStockSort(prev => {
+            if (prev?.field !== field) return { field, dir: first };
+            return prev.dir === first ? { field, dir: second } : null;
+        });
+    };
+    const stockSortArrow = (field: string) => stockSort?.field === field ? (stockSort.dir === 'desc' ? ' ↓' : ' ↑') : '';
+    const sortStockRows = useCallback(<T extends { wb_stock_cost?: number; own_stock_cost?: number; stock_days_left?: number },>(rows: T[]): T[] => {
+        if (!stockSort || !extended) return rows;
+        const val = (r: T): number => {
+            if (stockSort.field === 'wb_stock_cost') return r.wb_stock_cost ?? 0;
+            if (stockSort.field === 'own_stock_cost') return r.own_stock_cost ?? 0;
+            if (stockSort.field === 'stock_days_left') return r.stock_days_left ?? 0;
+            return (r.wb_stock_cost ?? 0) + (r.own_stock_cost ?? 0); // total_stock_cost
+        };
+        const sign = stockSort.dir === 'desc' ? -1 : 1;
+        return [...rows].sort((a, b) => sign * (val(a) - val(b)));
+    }, [stockSort, extended]);
     const [tagOptions, setTagOptions] = useState<{ id: number; name: string }[]>([]);
     const [imtOptions, setImtOptions] = useState<{ id: string; name: string }[]>([]);
 
@@ -79,7 +114,7 @@ export default function FunnelPage() {
         setLoading(true);
         try {
             const [res, sum] = await Promise.all([
-                api.getFunnelData({ date_from: from, date_to: to, brand, vendor_code: search, subject, group_by: mode }),
+                api.getFunnelData({ date_from: from, date_to: to, brand, vendor_code: search, subject, group_by: mode, extended, min_orders: minOrders, tag: filterTag, imt: filterImt }),
                 api.getFunnelSummary(from, to, brand, subject),
             ]);
             if (mode === 'abc') {
@@ -113,7 +148,7 @@ export default function FunnelPage() {
         } finally {
             setLoading(false);
         }
-    }, [dateFrom, dateTo, brand, subject, search, groupBy]);
+    }, [dateFrom, dateTo, brand, subject, search, groupBy, extended, minOrders, filterTag, filterImt]);
 
     const loadSyncStatus = useCallback(async () => {
         try {
@@ -161,7 +196,7 @@ export default function FunnelPage() {
         })();
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    useEffect(() => { if (initDone && dateFrom && dateTo) loadData(); }, [dateFrom, dateTo, brand, subject, search]);
+    useEffect(() => { if (initDone && dateFrom && dateTo) loadData(); }, [dateFrom, dateTo, brand, subject, search, extended, minOrders, filterTag, filterImt]);
 
 
     // Summary card definitions
@@ -222,16 +257,25 @@ export default function FunnelPage() {
             'Ср. цена ₽': r.avg_price ?? '',
             'В корзину %': r.add_to_cart_pct ?? '',
             'В заказ %': r.cart_to_order_pct ?? '',
+            ...(extended ? {
+                'Остаток WB, шт': r.wb_stock_qty ?? '',
+                'Себест. WB ₽': r.wb_stock_cost ?? '',
+                'Остаток наши склады, шт': r.own_stock_qty ?? '',
+                'Себест. наши склады ₽': r.own_stock_cost ?? '',
+                'Себест. остатков всего ₽': (r.wb_stock_cost ?? 0) + (r.own_stock_cost ?? 0),
+                'Хватит, дн': r.stock_days_left == null || r.stock_days_left >= 999 ? '' : r.stock_days_left,
+                'Закончится': r.stock_out_date ?? '',
+            } : {}),
         });
 
         let rows: Record<string, string | number>[] = [];
         if (groupBy === 'sku') {
-            rows = skuData.map(r => ({ 'Бренд': r.brand || '', 'Артикул': r.vendor_code || '', 'WB ID': r.nm_id, 'Категория': r.subject || '', ...metricCols(r) }));
+            rows = sortStockRows(skuData).map(r => ({ 'Бренд': r.brand || '', 'Артикул': r.vendor_code || '', 'WB ID': r.nm_id, 'Категория': r.subject || '', ...metricCols(r) }));
         } else if (groupBy === 'brand' || groupBy === 'subject' || groupBy === 'tag' || groupBy === 'imt') {
             const colName = groupBy === 'brand' ? 'Бренд' : groupBy === 'tag' ? 'Ярлык' : groupBy === 'imt' ? 'Склейка' : 'Категория';
-            rows = groupData
+            rows = sortStockRows(groupData
                 .filter(r => !(filterTag && groupBy === 'tag' && r.tag !== filterTag))
-                .filter(r => !(filterImt && groupBy === 'imt' && r.imt_group !== filterImt))
+                .filter(r => !(filterImt && groupBy === 'imt' && r.imt_group !== filterImt)))
                 .map(r => {
                     const label = groupBy === 'brand' ? (r.brand || '—') : groupBy === 'tag' ? (r.tag || '—') : groupBy === 'imt' ? (r.imt_group || '—') : (r.subject || '—');
                     return { [colName]: label, ...metricCols(r) };
@@ -243,6 +287,12 @@ export default function FunnelPage() {
                 'Заказы': r.orders_count ?? '', 'Сумма ₽': r.orders_sum ?? '', 'Выручка ₽': r.revenue ?? '',
                 'Расходы рекл. ₽': r.adv_sum ?? '', 'Просмотры': r.adv_views ?? '', 'Клики': r.adv_clicks ?? '',
                 'ДРР %': r.drr ?? '', 'Прибыль ₽': r.profit ?? '', 'Маржа %': r.margin_pct ?? '',
+                ...(extended ? {
+                    'Себест. WB ₽': r.wb_stock_cost ?? '',
+                    'Себест. наши склады ₽': r.own_stock_cost ?? '',
+                    'Себест. остатков всего ₽': (r.wb_stock_cost ?? 0) + (r.own_stock_cost ?? 0),
+                    'Хватит, дн': r.stock_days_left == null || r.stock_days_left >= 999 ? '' : r.stock_days_left,
+                } : {}),
             }));
         } else {
             rows = data.map(r => ({
@@ -415,6 +465,15 @@ export default function FunnelPage() {
                     <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
                         <input placeholder="🔍 Артикул..." value={search} onChange={e => setSearch(e.target.value)}
                             style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13, width: 160 }} />
+                        {groupBy !== 'day' && (
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--color-text-dim)' }}
+                                title="Скрыть строки, у которых заказов за период меньше указанного">
+                                Мин. заказов:
+                                <input type="number" min={0} value={minOrders || ''} placeholder="0"
+                                    onChange={e => setMinOrders(Math.max(0, Number(e.target.value) || 0))}
+                                    style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13, width: 70 }} />
+                            </label>
+                        )}
                         {detailed && (
                             <span style={{ fontSize: 12, color: '#f59e0b', marginLeft: 8 }}>📋 Детализация по артикулам</span>
                         )}
@@ -426,6 +485,18 @@ export default function FunnelPage() {
                             {groupBy === 'day' ? 'Сводка по дням' : groupBy === 'sku' ? 'Сводка по товарам' : groupBy === 'brand' ? 'Сводка по брендам' : groupBy === 'tag' ? 'Сводка по ярлыкам' : groupBy === 'imt' ? 'Сводка по склейкам' : groupBy === 'abc' ? 'ABC анализ' : 'Сводка по категориям'}
                         </h3>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <button onClick={() => groupBy !== 'day' && setExtended(v => !v)}
+                            disabled={groupBy === 'day'}
+                            title={groupBy === 'day'
+                                ? 'Доступно в группировках по товарам (артикулы, бренды, категории, ярлыки, склейки, ABC)'
+                                : 'Остатки и себестоимость: WB, наши склады (с резервом, без брака), прогноз исчерпания'}
+                            style={{
+                                padding: '6px 14px', fontSize: 13, fontWeight: 500, whiteSpace: 'nowrap',
+                                cursor: groupBy === 'day' ? 'not-allowed' : 'pointer', opacity: groupBy === 'day' ? 0.45 : 1,
+                                border: '1px solid ' + (extended && groupBy !== 'day' ? '#3b82f6' : '#e5e7eb'), borderRadius: 8,
+                                background: extended && groupBy !== 'day' ? '#3b82f6' : '#fff',
+                                color: extended && groupBy !== 'day' ? '#fff' : '#374151',
+                            }}>📦 Расширенное</button>
                         <button onClick={handleExportFunnel} className="btn btn-secondary btn-sm" style={{ fontSize: 13, padding: '6px 14px', whiteSpace: 'nowrap' }}>📥 Excel</button>
                         <div style={{ display: 'flex', gap: 0, border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
                             {(['day', 'sku', 'brand', 'subject', 'tag', 'imt', 'abc'] as const).map((mode, idx) => {
@@ -466,6 +537,7 @@ export default function FunnelPage() {
                                             <th colSpan={7} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
                                             <th colSpan={8} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ФИНАНСЫ</th>
                                             <th colSpan={2} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>КОНВЕРСИЯ</th>
+                                            {extended && <th colSpan={4} style={{ position: 'sticky', top: 0, background: '#f0f9ff', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ОСТАТКИ</th>}
                                         </tr>
                                         <tr>
                                             <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Переходы</th>
@@ -490,6 +562,10 @@ export default function FunnelPage() {
                                             <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Ср. цена</th>
                                             <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>В корзину</th>
                                             <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>В заказ</th>
+                                            {extended && <th onClick={() => toggleStockSort('wb_stock_cost')} title="Себестоимость остатков на складах WB (включая товары в пути). Клик — сортировка" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb', cursor: 'pointer', userSelect: 'none' }}>Себест. WB ₽{stockSortArrow('wb_stock_cost')}</th>}
+                                            {extended && <th onClick={() => toggleStockSort('own_stock_cost')} title="Себестоимость остатков на наших складах: все склады, с резервом, без брака. Клик — сортировка" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', cursor: 'pointer', userSelect: 'none' }}>Себест. склад ₽{stockSortArrow('own_stock_cost')}</th>}
+                                            {extended && <th onClick={() => toggleStockSort('total_stock_cost')} title="Себестоимость всех остатков: WB + наши склады. Клик — сортировка" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', cursor: 'pointer', userSelect: 'none' }}>Сумма ₽{stockSortArrow('total_stock_cost')}</th>}
+                                            {extended && <th onClick={() => toggleStockSort('stock_days_left')} title="Через сколько дней закончится сток (WB + наши склады) при темпе продаж за последние 7 дней. Клик — сортировка" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', cursor: 'pointer', userSelect: 'none' }}>Хватит, дн{stockSortArrow('stock_days_left')}</th>}
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -498,7 +574,7 @@ export default function FunnelPage() {
                                                 Нет данных за выбранный период
                                             </td></tr>
                                         )}
-                                        {skuData.map((r, i) => {
+                                        {sortStockRows(skuData).map((r, i) => {
                                             const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
                                             return (
                                                 <tr key={r.nm_id} style={{ background: rowBg, color: '#111827' }}>
@@ -529,6 +605,10 @@ export default function FunnelPage() {
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.avg_price)}</td>
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{fmtPct(r.add_to_cart_pct)}</td>
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.cart_to_order_pct)}</td>
+                                                    {extended && <td title={`${fmt(r.wb_stock_qty)} шт на WB`} style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{fmt(r.wb_stock_cost)}</td>}
+                                                    {extended && <td title={`${fmt(r.own_stock_qty)} шт на наших складах (с резервом, без брака)`} style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.own_stock_cost)}</td>}
+                                                    {extended && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', fontWeight: 600 }}>{fmt((r.wb_stock_cost ?? 0) + (r.own_stock_cost ?? 0))}</td>}
+                                                    {extended && <td title={r.stock_out_date ? `Закончится ≈ ${r.stock_out_date} (тренд ${(r.stock_trend_pct ?? 0) > 0 ? '+' : ''}${r.stock_trend_pct ?? 0}% к прошлой неделе)` : 'Нет продаж за последние 7 дней'} style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: daysColor(r.stock_days_left), fontWeight: 600 }}>{fmtDays(r.stock_days_left)}</td>}
                                                 </tr>
                                             );
                                         })}
@@ -556,6 +636,7 @@ export default function FunnelPage() {
                                             <th colSpan={7} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
                                             <th colSpan={8} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ФИНАНСЫ</th>
                                             <th colSpan={2} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>КОНВЕРСИЯ</th>
+                                            {extended && <th colSpan={4} style={{ position: 'sticky', top: 0, background: '#f0f9ff', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ОСТАТКИ</th>}
                                         </tr>
                                         <tr>
                                             <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Переходы</th>
@@ -580,6 +661,10 @@ export default function FunnelPage() {
                                             <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>Ср. цена</th>
                                             <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>В корзину</th>
                                             <th style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb' }}>В заказ</th>
+                                            {extended && <th onClick={() => toggleStockSort('wb_stock_cost')} title="Себестоимость остатков на складах WB (включая товары в пути). Клик — сортировка" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', borderLeft: '1px solid #e5e7eb', cursor: 'pointer', userSelect: 'none' }}>Себест. WB ₽{stockSortArrow('wb_stock_cost')}</th>}
+                                            {extended && <th onClick={() => toggleStockSort('own_stock_cost')} title="Себестоимость остатков на наших складах: все склады, с резервом, без брака. Клик — сортировка" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', cursor: 'pointer', userSelect: 'none' }}>Себест. склад ₽{stockSortArrow('own_stock_cost')}</th>}
+                                            {extended && <th onClick={() => toggleStockSort('total_stock_cost')} title="Себестоимость всех остатков: WB + наши склады. Клик — сортировка" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', cursor: 'pointer', userSelect: 'none' }}>Сумма ₽{stockSortArrow('total_stock_cost')}</th>}
+                                            {extended && <th onClick={() => toggleStockSort('stock_days_left')} title="Через сколько дней закончится сток (WB + наши склады) при темпе продаж за последние 7 дней. Клик — сортировка" style={{ position: 'sticky', top: row1H, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', cursor: 'pointer', userSelect: 'none' }}>Хватит, дн{stockSortArrow('stock_days_left')}</th>}
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -588,11 +673,11 @@ export default function FunnelPage() {
                                                 Нет данных за выбранный период
                                             </td></tr>
                                         )}
-                                        {groupData.filter(r => {
+                                        {sortStockRows(groupData.filter(r => {
                                             if (filterTag && groupBy === 'tag' && r.tag !== filterTag) return false;
                                             if (filterImt && groupBy === 'imt' && r.imt_group !== filterImt) return false;
                                             return true;
-                                        }).map((r, i) => {
+                                        })).map((r, i) => {
                                             const grpLabel = groupBy === 'brand' ? (r.brand || '\u2014') : groupBy === 'tag' ? (r.tag || '\u2014') : groupBy === 'imt' ? (r.imt_group || '\u2014') : (r.subject || '\u2014');
                                             const rowBg = i % 2 === 0 ? '#ffffff' : '#f9fafb';
                                             const expandable = groupBy === 'imt' || groupBy === 'tag';
@@ -630,8 +715,12 @@ export default function FunnelPage() {
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.avg_price)}</td>
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{fmtPct(r.add_to_cart_pct)}</td>
                                                     <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.cart_to_order_pct)}</td>
+                                                    {extended && <td title={`${fmt(r.wb_stock_qty)} шт на WB`} style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{fmt(r.wb_stock_cost)}</td>}
+                                                    {extended && <td title={`${fmt(r.own_stock_qty)} шт на наших складах (с резервом, без брака)`} style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.own_stock_cost)}</td>}
+                                                    {extended && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', fontWeight: 600 }}>{fmt((r.wb_stock_cost ?? 0) + (r.own_stock_cost ?? 0))}</td>}
+                                                    {extended && <td title={r.stock_out_date ? `Закончится ≈ ${r.stock_out_date} (тренд ${(r.stock_trend_pct ?? 0) > 0 ? '+' : ''}${r.stock_trend_pct ?? 0}% к прошлой неделе)` : 'Нет продаж за последние 7 дней'} style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: daysColor(r.stock_days_left), fontWeight: 600 }}>{fmtDays(r.stock_days_left)}</td>}
                                                 </tr>
-                                                {isExpanded && children.map((c, ci) => {
+                                                {isExpanded && sortStockRows(children).map((c, ci) => {
                                                     const cBg = ci % 2 === 0 ? '#fafafa' : '#ffffff';
                                                     return (
                                                         <tr key={c.nm_id} style={{ background: cBg, fontSize: 12, color: '#374151' }}>
@@ -661,6 +750,10 @@ export default function FunnelPage() {
                                                             <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(c.avg_price)}</td>
                                                             <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{fmtPct(c.add_to_cart_pct)}</td>
                                                             <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmtPct(c.cart_to_order_pct)}</td>
+                                                            {extended && <td title={`${fmt(c.wb_stock_qty)} шт на WB`} style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{fmt(c.wb_stock_cost)}</td>}
+                                                            {extended && <td title={`${fmt(c.own_stock_qty)} шт на наших складах (с резервом, без брака)`} style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(c.own_stock_cost)}</td>}
+                                                            {extended && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', fontWeight: 600 }}>{fmt((c.wb_stock_cost ?? 0) + (c.own_stock_cost ?? 0))}</td>}
+                                                            {extended && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: daysColor(c.stock_days_left), fontWeight: 600 }}>{fmtDays(c.stock_days_left)}</td>}
                                                         </tr>
                                                     );
                                                 })}
@@ -705,7 +798,8 @@ export default function FunnelPage() {
                             const cpm = views ? (adv / views * 1000) : 0;
                             const cartPct = openCard ? (addToCart / openCard * 100) : 0;
                             const orderPct = addToCart ? (ordersCount / addToCart * 100) : 0;
-                            return { cat, items, revenue, profit, ordersCount, ordersSum, adv, views, clicks, openCard, addToCart, tax, commission, costTotal, margin, drr, pctRev, ctr, cpc, cpm, cartPct, orderPct };
+                            const wbStockCost = sum('wb_stock_cost'); const ownStockCost = sum('own_stock_cost');
+                            return { cat, items, revenue, profit, ordersCount, ordersSum, adv, views, clicks, openCard, addToCart, tax, commission, costTotal, margin, drr, pctRev, ctr, cpc, cpm, cartPct, orderPct, wbStockCost, ownStockCost };
                         });
                         const thS = { position: 'sticky' as const, top: 0, background: '#fff', zIndex: 20, borderBottom: '2px solid #e5e7eb', padding: '8px 10px', fontSize: 11, textAlign: 'right' as const, color: '#374151' };
                         return (
@@ -737,10 +831,14 @@ export default function FunnelPage() {
                                             <th style={thS}>МАРЖА</th>
                                             <th style={thS}>В КОРЗИНУ</th>
                                             <th style={thS}>В ЗАКАЗ</th>
+                                            {extended && <th onClick={() => toggleStockSort('wb_stock_cost')} title="Себестоимость остатков на складах WB. Клик — сортировка товаров внутри категорий" style={{ ...thS, cursor: 'pointer', userSelect: 'none' }}>СЕБЕСТ. WB ₽{stockSortArrow('wb_stock_cost')}</th>}
+                                            {extended && <th onClick={() => toggleStockSort('own_stock_cost')} title="Себестоимость остатков на наших складах: с резервом, без брака. Клик — сортировка товаров внутри категорий" style={{ ...thS, cursor: 'pointer', userSelect: 'none' }}>СЕБЕСТ. СКЛАД ₽{stockSortArrow('own_stock_cost')}</th>}
+                                            {extended && <th onClick={() => toggleStockSort('total_stock_cost')} title="Себестоимость всех остатков: WB + наши склады. Клик — сортировка товаров внутри категорий" style={{ ...thS, cursor: 'pointer', userSelect: 'none' }}>СУММА ₽{stockSortArrow('total_stock_cost')}</th>}
+                                            {extended && <th onClick={() => toggleStockSort('stock_days_left')} title="Через сколько дней закончится сток (WB + наши). Клик — сортировка товаров внутри категорий" style={{ ...thS, cursor: 'pointer', userSelect: 'none' }}>ХВАТИТ, ДН{stockSortArrow('stock_days_left')}</th>}
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {d.length === 0 && <tr><td colSpan={22} style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>Нет данных</td></tr>}
+                                        {d.length === 0 && <tr><td colSpan={extended ? 26 : 22} style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>Нет данных</td></tr>}
                                         {groups.map(g => {
                                             const isExp = expandedAbc.has(g.cat);
                                             const tdS = { padding: '10px 10px', borderBottom: '1px solid #e5e7eb', textAlign: 'right' as const };
@@ -770,8 +868,12 @@ export default function FunnelPage() {
                                                         <td style={{ ...tdS, color: g.margin > 20 ? '#10b981' : g.margin > 0 ? '#65a30d' : '#ef4444' }}>{fmtPct(g.margin)}</td>
                                                         <td style={tdS}>{fmtPct(g.cartPct)}</td>
                                                         <td style={tdS}>{fmtPct(g.orderPct)}</td>
+                                                        {extended && <td style={tdS}>{fmt(g.wbStockCost)}</td>}
+                                                        {extended && <td style={tdS}>{fmt(g.ownStockCost)}</td>}
+                                                        {extended && <td style={{ ...tdS, fontWeight: 700 }}>{fmt(g.wbStockCost + g.ownStockCost)}</td>}
+                                                        {extended && <td style={{ ...tdS, color: '#9ca3af' }}>—</td>}
                                                     </tr>
-                                                    {isExp && g.items.map((r: any, i: number) => (
+                                                    {isExp && sortStockRows(g.items).map((r: any, i: number) => (
                                                         <tr key={r.nm_id || i} style={{ background: i % 2 === 0 ? '#fafafa' : '#fff', fontSize: 12 }}>
                                                             <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}></td>
                                                             <td style={{ ...tdS, textAlign: 'left', borderBottom: '1px solid #f3f4f6' }}>
@@ -798,6 +900,10 @@ export default function FunnelPage() {
                                                             <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.margin)}</td>
                                                             <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.add_to_cart_pct)}</td>
                                                             <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.cart_to_order_pct)}</td>
+                                                            {extended && <td title={`${fmt(r.wb_stock_qty)} шт на WB`} style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.wb_stock_cost)}</td>}
+                                                            {extended && <td title={`${fmt(r.own_stock_qty)} шт на наших складах`} style={{ ...tdS, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.own_stock_cost)}</td>}
+                                                            {extended && <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6', fontWeight: 600 }}>{fmt((r.wb_stock_cost ?? 0) + (r.own_stock_cost ?? 0))}</td>}
+                                                            {extended && <td style={{ ...tdS, borderBottom: '1px solid #f3f4f6', color: daysColor(r.stock_days_left), fontWeight: 600 }}>{fmtDays(r.stock_days_left)}</td>}
                                                         </tr>
                                                     ))}
                                                 </React.Fragment>

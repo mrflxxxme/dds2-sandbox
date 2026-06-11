@@ -7,7 +7,7 @@ export function addFunnelMethods(api: ApiClient) {
         syncFunnel(dateFrom: string, dateTo: string) {
             return api.request<{ ok: boolean; days_synced: number }>('POST', '/api/v1/funnel/sync', { date_from: dateFrom, date_to: dateTo });
         },
-        getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string; group_by?: 'day' | 'sku' | 'brand' | 'subject' | 'tag' | 'imt' | 'abc' }) {
+        getFunnelData(params?: { date_from?: string; date_to?: string; brand?: string; vendor_code?: string; subject?: string; group_by?: 'day' | 'sku' | 'brand' | 'subject' | 'tag' | 'imt' | 'abc'; extended?: boolean; min_orders?: number; tag?: string; imt?: string }) {
             const q = new URLSearchParams();
             if (params?.date_from) q.set('date_from', params.date_from);
             if (params?.date_to) q.set('date_to', params.date_to);
@@ -15,6 +15,10 @@ export function addFunnelMethods(api: ApiClient) {
             if (params?.vendor_code) q.set('vendor_code', params.vendor_code);
             if (params?.subject) q.set('subject', params.subject);
             if (params?.group_by) q.set('group_by', params.group_by);
+            if (params?.extended) q.set('extended', 'true');
+            if (params?.min_orders) q.set('min_orders', String(params.min_orders));
+            if (params?.tag) q.set('tag', params.tag);
+            if (params?.imt) q.set('imt', params.imt);
             return api.request<{ data: (FunnelDayRow | FunnelSkuRow | FunnelGroupRow)[]; detailed: boolean; tax_rate: number; has_bdr?: boolean; group_by?: string }>('GET', `/api/v1/funnel/data?${q.toString()}`);
         },
         getFunnelSummary(dateFrom?: string, dateTo?: string, brand?: string, subject?: string) {

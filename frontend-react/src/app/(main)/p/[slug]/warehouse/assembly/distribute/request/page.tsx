@@ -322,14 +322,6 @@ export default function AssemblyRequestUnitPage() {
         }
     }, [draftId, unitRef, ffName, effectiveWb, router, slug, backToFf]);
 
-    const handleHandOff = useCallback(async () => {
-        if (!draftId) return;
-        setBusy(true);
-        try { setDraft(await api.handOffDraftUnit(draftId, unitRef)); setToast({ message: 'Передан на ФФ', type: 'success' }); }
-        catch (e: unknown) { setToast({ message: e instanceof Error ? e.message : 'Ошибка', type: 'error' }); }
-        finally { setBusy(false); }
-    }, [draftId, unitRef]);
-
     const handleRevert = useCallback(async () => {
         if (!draftId) return;
         setBusy(true);
@@ -547,7 +539,7 @@ export default function AssemblyRequestUnitPage() {
                             {unit.status === 'draft' ? (
                                 <>
                                     <button className="btn btn-danger" onClick={handleDelete} disabled={busy} title="Удалить заявку целиком (товар останется на ФФ)">🗑 Удалить</button>
-                                    <button className="btn btn-primary" onClick={handleHandOff} disabled={busy}>Передать на ФФ →</button>
+                                    <button className="btn btn-primary" onClick={handleCommit} disabled={busy} title="Создать заявку на сборку — появится в «Заявки на сборку»">{busy ? 'Создание…' : 'В сборку ✓'}</button>
                                 </>
                             ) : (
                                 <>

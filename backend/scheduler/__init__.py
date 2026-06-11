@@ -20,6 +20,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from backend.scheduler.jobs.ai_digest import send_daily_digests
 from backend.scheduler.jobs.fbo_supplies import enrich_all_projects_fbo_supplies, sync_all_projects_fbo_supplies
+from backend.scheduler.jobs.fulfillment_sync import sync_all_fulfillment_warehouses
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
     fast_backfill_tick,
@@ -227,6 +228,17 @@ def start_scheduler():
         name="WB warehouse stocks snapshot (daily 00:00 MSK)",
         replace_existing=True,
         misfire_grace_time=600,
+    )
+
+    # Fulfillment (skladbot) stocks + requests mirror: every 15 min
+    _scheduler.add_job(
+        sync_all_fulfillment_warehouses,
+        trigger=IntervalTrigger(minutes=15),
+        id="fulfillment_sync",
+        name="Fulfillment sync (skladbot, every 15min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=300,
     )
 
     # WB goods returns (возвраты на ПВЗ): дважды в день — 08:00 (утренний срез)

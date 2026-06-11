@@ -42,6 +42,7 @@ from backend.services.funnel.queries import (
     get_funnel_detailed,
     get_missing_costs,
     get_summary,
+    resolve_filter_nm_ids,
     set_cost_override,
 )
 
@@ -49,6 +50,13 @@ from backend.services.funnel.queries import (
 from backend.services.funnel.queries_grouping import (
     get_funnel_by_imt,
     get_funnel_by_tag,
+)
+
+# ─── Stock costs (расширенный режим воронки) ─────────────────────────────────
+from backend.services.funnel.stock_costs import (
+    apply_min_orders,
+    get_stock_cost_map,
+    merge_stock_costs,
 )
 
 # ─── Sync ────────────────────────────────────────────────────────────────────
@@ -87,6 +95,7 @@ __all__ = [
     "get_missing_costs",
     "set_cost_override",
     "bulk_set_cost_overrides",
+    "resolve_filter_nm_ids",
     # analysis
     "get_day_analysis",
     "get_product_trends",
@@ -97,4 +106,8 @@ __all__ = [
     # grouping
     "get_funnel_by_tag",
     "get_funnel_by_imt",
+    # stock costs
+    "get_stock_cost_map",
+    "merge_stock_costs",
+    "apply_min_orders",
 ]

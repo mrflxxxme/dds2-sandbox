@@ -1,13 +1,23 @@
 'use client';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 /* ─── Multi-line overlay chart (all selected metrics on one canvas) ── */
+
+// Trailing moving average over `window` points (window=7 → сглаживание недельной пилы)
+function movingAvg(values: number[], window: number): number[] {
+    return values.map((_, i) => {
+        const from = Math.max(0, i - window + 1);
+        const slice = values.slice(from, i + 1);
+        return slice.reduce((s, v) => s + v, 0) / slice.length;
+    });
+}
 
 export function MultiLineChart({ data, lines }: {
     data: any[];
     lines: { field: string; label: string; color: string }[];
 }) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const [smooth, setSmooth] = useState(false);
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -35,6 +45,16 @@ export function MultiLineChart({ data, lines }: {
 
         ctx.clearRect(0, 0, W, H);
 
+        // Weekend shading — вертикальные полосы сб/вс объясняют недельную сезонность
+        dates.forEach((d, i) => {
+            const day = new Date(d + 'T00:00:00').getDay();
+            if (day !== 0 && day !== 6) return;
+            const x0 = Math.max(padLeft, padLeft + i * xStep - xStep / 2);
+            const x1 = Math.min(W - padRight, padLeft + i * xStep + xStep / 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.045)';
+            ctx.fillRect(x0, padTop, x1 - x0, chartH);
+        });
+
         // Grid lines
         ctx.strokeStyle = 'rgba(255,255,255,0.06)';
         ctx.lineWidth = 1;
@@ -52,7 +72,8 @@ export function MultiLineChart({ data, lines }: {
             data.forEach(r => {
                 byDate[r.date] = (byDate[r.date] || 0) + (r[line.field] || 0);
             });
-            const values = dates.map(d => byDate[d] || 0);
+            let values = dates.map(d => byDate[d] || 0);
+            if (smooth) values = movingAvg(values, 7);
             const maxVal = Math.max(...values, 1);
             const minVal = Math.min(...values, 0);
             const range = maxVal - minVal || 1;
@@ -78,15 +99,17 @@ export function MultiLineChart({ data, lines }: {
             ctx.fillStyle = gradient;
             ctx.fill();
 
-            // Dots
-            values.forEach((v, i) => {
-                const x = padLeft + i * xStep;
-                const y = padTop + chartH - ((v - minVal) / range) * chartH;
-                ctx.beginPath();
-                ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-                ctx.fillStyle = line.color;
-                ctx.fill();
-            });
+            // Dots — при сглаживании точки сырых значений не рисуем
+            if (!smooth) {
+                values.forEach((v, i) => {
+                    const x = padLeft + i * xStep;
+                    const y = padTop + chartH - ((v - minVal) / range) * chartH;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+                    ctx.fillStyle = line.color;
+                    ctx.fill();
+                });
+            }
         });
 
         // X labels
@@ -113,12 +136,22 @@ export function MultiLineChart({ data, lines }: {
             ctx.fillStyle = 'rgba(255,255,255,0.7)';
             ctx.fillText(line.label, legendX, y + 5);
         });
-    }, [data, lines]);
+    }, [data, lines, smooth]);
 
     return (
         <div className="glass-card" style={{ marginBottom: 12, padding: '12px 16px' }}>
-            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-dim)' }}>
-                Динамика по дням
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--color-text-dim)' }}>
+                    Динамика по дням <span style={{ fontSize: 11, opacity: 0.7 }}>(серые полосы — выходные)</span>
+                </div>
+                <button onClick={() => setSmooth(v => !v)}
+                    title="Скользящая средняя за 7 дней — тренд без недельной пилы"
+                    style={{
+                        padding: '3px 10px', fontSize: 11, fontWeight: 500, cursor: 'pointer', borderRadius: 12,
+                        border: '1px solid ' + (smooth ? 'var(--color-accent)' : 'var(--color-border)'),
+                        background: smooth ? 'var(--color-accent)' : 'transparent',
+                        color: smooth ? '#fff' : 'var(--color-text-dim)',
+                    }}>MA-7</button>
             </div>
             <canvas ref={canvasRef}
                 style={{ width: '100%', height: 200, borderRadius: 8 }} />

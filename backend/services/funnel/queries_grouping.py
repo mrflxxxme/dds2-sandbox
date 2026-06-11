@@ -312,9 +312,11 @@ def _finalize_children(children_map: dict[int, dict], tax_rate: float) -> list[d
     return children
 
 
-async def _load_funnel_rows(db: AsyncSession, pid: int, date_from, date_to, brand, subject):
+async def _load_funnel_rows(db: AsyncSession, pid: int, date_from, date_to, brand, subject, nm_ids=None):
     """Load filtered funnel rows."""
     q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
+    if nm_ids is not None:
+        q = q.where(WbFunnelDaily.nm_id.in_(nm_ids))
     if date_from:
         q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
     if date_to:
@@ -341,6 +343,7 @@ async def get_funnel_by_tag(
     subject: str | None,
     bdr_rates_map: BdrRatesLookup | None = None,
     limit: int = 500,
+    nm_ids: set[int] | None = None,
 ) -> list[dict]:
     """Get funnel data aggregated by product tag.
 
@@ -349,7 +352,7 @@ async def get_funnel_by_tag(
     """
     from backend.models.refs import ProductTag, ProductTagMap
 
-    rows = await _load_funnel_rows(db, pid, date_from, date_to, brand, subject)
+    rows = await _load_funnel_rows(db, pid, date_from, date_to, brand, subject, nm_ids=nm_ids)
 
     # Load tag mapping: nm_id → [(tag_id, tag_name)]
     tag_result = await db.execute(
@@ -401,6 +404,7 @@ async def get_funnel_by_imt(
     subject: str | None,
     bdr_rates_map: BdrRatesLookup | None = None,
     limit: int = 500,
+    nm_ids: set[int] | None = None,
 ) -> list[dict]:
     """Get funnel data aggregated by imt_id (WB card group / склейка).
 
@@ -410,7 +414,7 @@ async def get_funnel_by_imt(
     from backend.models.cost import Nomenclature
     from backend.models.refs import ImtAlias
 
-    rows = await _load_funnel_rows(db, pid, date_from, date_to, brand, subject)
+    rows = await _load_funnel_rows(db, pid, date_from, date_to, brand, subject, nm_ids=nm_ids)
 
     # Load nm_id → imt_id mapping from nomenclature
     nom_result = await db.execute(
