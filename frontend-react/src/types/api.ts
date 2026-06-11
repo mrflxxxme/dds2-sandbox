@@ -1601,6 +1601,9 @@ export interface AssemblyAnomalyRow {
   total_qty: number;
   /** статус связанной WB FBO-поставки (для wb_accepted_not_shipped) */
   wb_fbo_status: string | null;
+  /** номер WB-поставки (wb_fbo_supplies.wb_supply_id) */
+  wb_supply_number: string | null;
+  pallets_count: number;
 }
 
 export interface AssemblyWarehouseFlowStat {

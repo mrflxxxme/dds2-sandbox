@@ -84,6 +84,7 @@ async def _mk_request(
     actual_ready_date=None,
     wb_fbo_supply_id: int | None = None,
     item_qtys: list[int] | None = None,
+    pallets_count: int = 1,
 ) -> AssemblyRequest:
     req = AssemblyRequest(
         project_id=env.project_id,
@@ -91,7 +92,7 @@ async def _mk_request(
         number=f"ASM-T{uuid.uuid4().hex[:8]}",
         status=status,
         wb_fbo_supply_id=wb_fbo_supply_id,
-        pallets_count=1,
+        pallets_count=pallets_count,
         pallet_weight_kg=Decimal("100.00"),
         created_at=created_at,
         updated_at=created_at,
@@ -331,7 +332,14 @@ class TestDraftStartHistory:
 class TestAnomalies:
     async def test_stuck_assembly(self, db_session, env):
         t0 = utcnow() - timedelta(days=5)
-        req = await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, item_qtys=[3, 4])
+        req = await _mk_request(
+            db_session,
+            env,
+            status=AssemblyStatus.IN_PROGRESS,
+            created_at=t0,
+            item_qtys=[3, 4],
+            pallets_count=2,
+        )
         await _add_history(db_session, env, req.id, None, "IN_PROGRESS", t0)
         # Свежая заявка — не аномалия
         await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=utcnow() - timedelta(days=1))
@@ -346,6 +354,8 @@ class TestAnomalies:
         assert a["warehouse_id"] == env.wh_id
         assert a["warehouse_name"] == "Flow FF WH"
         assert a["wb_fbo_status"] is None
+        assert a["wb_supply_number"] is None  # поставка не привязана
+        assert a["pallets_count"] == 2
         assert a["since"] is not None
         assert res["summary"]["anomaly_count"] == 1
 
@@ -415,7 +425,9 @@ class TestAnomalies:
         assert by_id[req.id]["kind"] == "wb_accepted_not_shipped"
         assert by_id[req.id]["wb_fbo_status"] == "ACCEPTED"
         assert by_id[req.id]["wb_warehouse_name"] == "Казань"
+        assert by_id[req.id]["wb_supply_number"] == supply.wb_supply_id
         assert by_id[req2.id]["kind"] == "wb_accepted_not_shipped"
+        assert by_id[req2.id]["wb_supply_number"] == supply2.wb_supply_id
 
     async def test_shipped_not_accepted(self, db_session, env):
         supply = await _mk_supply(db_session, env, WbSupplyStatus.ON_DELIVERY)
@@ -443,6 +455,8 @@ class TestAnomalies:
         assert a["kind"] == "shipped_not_accepted"
         assert a["days_stuck"] == 10
         assert a["wb_fbo_status"] == "ON_DELIVERY"
+        assert a["wb_supply_number"] == supply.wb_supply_id
+        assert a["pallets_count"] == 1
 
         res2 = await _flow(db_session, env.project_id, delivery_threshold_days=30)
         assert res2["anomalies"] == []

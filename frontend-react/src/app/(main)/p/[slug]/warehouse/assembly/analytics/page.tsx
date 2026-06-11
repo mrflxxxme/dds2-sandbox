@@ -9,6 +9,9 @@
  *     (средняя/медианная длительность каждого этапа, подсветка превышений порога).
  *  3. Нестандартные переходы (отмены и «откаты назад») — свёрнутый блок.
  *  4. Аномалии — зависшие заявки, сгруппированные по типу проблемы.
+ *     В каждой группе: Excel-экспорт; в «Готово, но не отгружается» — фильтр
+ *     по статусу; в «Забыли отгрузить» — bulk-кнопка «Отгрузить машины»
+ *     (только заявки в VEHICLE_ASSIGNED).
  *  5. Разрез по складам.
  */
 
@@ -16,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { Toast } from '@/components';
 import { exportToExcel, formatDate, formatNumber, pluralRu } from '@/lib/utils';
 import type {
     AssemblyAnomalyKind,
@@ -115,6 +119,42 @@ const ANOMALY_GROUPS: {
         thresholdKey: 'delivery_days',
     },
 ];
+
+/** Фильтр статуса в группе «Готово, но не отгружается». */
+const STUCK_STATUS_FILTERS: { key: 'ALL' | 'READY' | 'VEHICLE_ASSIGNED'; label: string }[] = [
+    { key: 'ALL', label: 'Все' },
+    { key: 'READY', label: 'Готово' },
+    { key: 'VEHICLE_ASSIGNED', label: 'Машина назначена' },
+];
+
+/** Колонки Excel-выгрузки аномалий — общие для сводного и посекционного экспорта. */
+const EXPORT_COLUMNS: { key: string; label: string }[] = [
+    { key: 'number', label: '№' },
+    { key: 'status', label: 'Статус' },
+    { key: 'warehouse', label: 'Склад' },
+    { key: 'wb_warehouse', label: 'Целевой склад ВБ' },
+    { key: 'wb_supply_number', label: 'ФБО-поставка' },
+    { key: 'pallets', label: 'Паллет' },
+    { key: 'qty', label: 'Шт' },
+    { key: 'days_stuck', label: 'Висит дн' },
+    { key: 'since', label: 'С какого числа' },
+    { key: 'wb_fbo_status', label: 'Статус WB-поставки' },
+];
+
+function anomalyToExportRow(row: AssemblyAnomalyRow): Record<string, string | number> {
+    return {
+        number: row.number,
+        status: STATUS_BADGE[row.status]?.label ?? row.status,
+        warehouse: row.warehouse_name || '',
+        wb_warehouse: row.wb_warehouse_name || '',
+        wb_supply_number: row.wb_supply_number || '',
+        pallets: row.pallets_count,
+        qty: row.total_qty,
+        days_stuck: row.days_stuck,
+        since: row.since ? formatDate(row.since) : '',
+        wb_fbo_status: row.wb_fbo_status || '',
+    };
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -250,6 +290,13 @@ export default function AssemblyFlowAnalyticsPage() {
     });
     const [thresholdsOpen, setThresholdsOpen] = useState(false);
     const thresholdsRef = useRef<HTMLDivElement>(null);
+
+    // Фильтр статуса в «Готово, но не отгружается»
+    const [stuckStatusFilter, setStuckStatusFilter] = useState<'ALL' | 'READY' | 'VEHICLE_ASSIGNED'>('ALL');
+
+    // Bulk-отгрузка из «Забыли отгрузить»
+    const [shipping, setShipping] = useState(false);
+    const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
     const anomaliesRef = useRef<HTMLDivElement>(null);
 
@@ -388,29 +435,50 @@ export default function AssemblyFlowAnalyticsPage() {
         exportToExcel(
             rows.map(row => ({
                 category: titleByKind.get(row.kind) ?? row.kind,
-                number: row.number,
-                status: STATUS_BADGE[row.status]?.label ?? row.status,
-                warehouse: row.warehouse_name || '',
-                wb_warehouse: row.wb_warehouse_name || '',
-                qty: row.total_qty,
-                days_stuck: row.days_stuck,
-                since: row.since ? formatDate(row.since) : '',
-                wb_fbo_status: row.wb_fbo_status || '',
+                ...anomalyToExportRow(row),
             })),
             'assembly_flow_anomalies',
-            [
-                { key: 'category', label: 'Категория' },
-                { key: 'number', label: '№' },
-                { key: 'status', label: 'Статус' },
-                { key: 'warehouse', label: 'Склад' },
-                { key: 'wb_warehouse', label: 'Целевой склад ВБ' },
-                { key: 'qty', label: 'Шт' },
-                { key: 'days_stuck', label: 'Висит дн' },
-                { key: 'since', label: 'С какого числа' },
-                { key: 'wb_fbo_status', label: 'Статус WB-поставки' },
-            ],
+            [{ key: 'category', label: 'Категория' }, ...EXPORT_COLUMNS],
         );
     }, [anomaliesByKind]);
+
+    // Выгрузка одной секции (видимые строки — с учётом фильтра статуса)
+    const handleExportGroup = useCallback((kind: AssemblyAnomalyKind, rows: AssemblyAnomalyRow[]) => {
+        if (rows.length === 0) return;
+        exportToExcel(rows.map(anomalyToExportRow), `assembly_${kind}`, EXPORT_COLUMNS);
+    }, []);
+
+    // «Отгрузить машины»: заявки группы «Забыли отгрузить» с назначенной машиной.
+    // READY/IN_PROGRESS пропускаются — отгрузка возможна только из VEHICLE_ASSIGNED.
+    const forgottenVehicleIds = useMemo(
+        () => (anomaliesByKind.get('wb_accepted_not_shipped') ?? [])
+            .filter(r => r.status === 'VEHICLE_ASSIGNED')
+            .map(r => r.id),
+        [anomaliesByKind],
+    );
+
+    const handleShipForgotten = useCallback(async () => {
+        if (forgottenVehicleIds.length === 0 || shipping) return;
+        const n = forgottenVehicleIds.length;
+        const ok = window.confirm(
+            `Отгрузить ${formatNumber(n, 0)} ${pluralRu(n, ['заявку', 'заявки', 'заявок'])} с назначенной машиной? Остатки будут списаны со склада.`,
+        );
+        if (!ok) return;
+        setShipping(true);
+        try {
+            const shipped = await api.shipBulk(forgottenVehicleIds);
+            setToast({
+                message: `Отгружено: ${formatNumber(shipped.length, 0)} ${pluralRu(shipped.length, ['заявка', 'заявки', 'заявок'])}`,
+                type: 'success',
+            });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка отгрузки', type: 'error' });
+        } finally {
+            setShipping(false);
+            // Частичная отгрузка возможна (bulk коммитит по одной) — перезагружаем всегда
+            setReloadTick(t => t + 1);
+        }
+    }, [forgottenVehicleIds, shipping]);
 
     // ─── Render ───────────────────────────────────────────────────────────
 
@@ -762,8 +830,11 @@ export default function AssemblyFlowAnalyticsPage() {
                                 </div>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                                 {ANOMALY_GROUPS.map(group => {
-                                    const rows = anomaliesByKind.get(group.kind);
-                                    if (!rows || rows.length === 0) return null;
+                                    const allRows = anomaliesByKind.get(group.kind);
+                                    if (!allRows || allRows.length === 0) return null;
+                                    const rows = group.kind === 'stuck_shipment' && stuckStatusFilter !== 'ALL'
+                                        ? allRows.filter(r => r.status === stuckStatusFilter)
+                                        : allRows;
                                     const limit = group.thresholdKey ? appliedThresholds[group.thresholdKey] : 0;
                                     return (
                                         <div
@@ -784,13 +855,61 @@ export default function AssemblyFlowAnalyticsPage() {
                                                             fontWeight: 700,
                                                         }}
                                                     >
-                                                        {formatNumber(rows.length, 0)}
+                                                        {formatNumber(allRows.length, 0)}
                                                     </span>
+                                                    <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                                                        {group.kind === 'stuck_shipment' && (
+                                                            <div style={{ display: 'flex', gap: 4 }}>
+                                                                {STUCK_STATUS_FILTERS.map(f => {
+                                                                    const cnt = f.key === 'ALL'
+                                                                        ? allRows.length
+                                                                        : allRows.filter(r => r.status === f.key).length;
+                                                                    return (
+                                                                        <button
+                                                                            key={f.key}
+                                                                            type="button"
+                                                                            className={`btn btn-sm ${stuckStatusFilter === f.key ? 'btn-primary' : 'btn-secondary'}`}
+                                                                            onClick={() => setStuckStatusFilter(f.key)}
+                                                                        >
+                                                                            {f.label} · {formatNumber(cnt, 0)}
+                                                                        </button>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        )}
+                                                        {group.kind === 'wb_accepted_not_shipped' && forgottenVehicleIds.length > 0 && (
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-danger btn-sm"
+                                                                onClick={handleShipForgotten}
+                                                                disabled={shipping}
+                                                                title="Отгрузить заявки группы с назначенной машиной — остатки будут списаны со склада"
+                                                            >
+                                                                {shipping
+                                                                    ? 'Отгружаем…'
+                                                                    : `🚚 Отгрузить машины · ${formatNumber(forgottenVehicleIds.length, 0)}`}
+                                                            </button>
+                                                        )}
+                                                        <button
+                                                            type="button"
+                                                            className="btn btn-secondary btn-sm"
+                                                            onClick={() => handleExportGroup(group.kind, rows)}
+                                                            disabled={rows.length === 0}
+                                                            title="Выгрузить эту секцию в Excel"
+                                                        >
+                                                            ⬇ Excel
+                                                        </button>
+                                                    </div>
                                                 </div>
                                                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                                                     {group.desc(appliedThresholds)}
                                                 </div>
                                             </div>
+                                            {rows.length === 0 ? (
+                                                <div style={{ padding: '14px 20px 18px', fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                    Нет заявок с выбранным статусом
+                                                </div>
+                                            ) : (
                                             <div style={{ overflowX: 'auto' }}>
                                                 <table className="data-table" style={{ fontSize: 13 }}>
                                                     <thead>
@@ -799,6 +918,8 @@ export default function AssemblyFlowAnalyticsPage() {
                                                             <th>Статус</th>
                                                             <th>Склад</th>
                                                             <th>Целевой склад ВБ</th>
+                                                            <th>ФБО-поставка</th>
+                                                            <th style={{ textAlign: 'right' }}>Паллет</th>
                                                             <th style={{ textAlign: 'right' }}>Шт</th>
                                                             <th style={{ textAlign: 'right' }}>Висит</th>
                                                             <th>С какого числа</th>
@@ -835,6 +956,10 @@ export default function AssemblyFlowAnalyticsPage() {
                                                                             </div>
                                                                         )}
                                                                     </td>
+                                                                    <td style={{ color: 'var(--color-text-muted)' }}>
+                                                                        {row.wb_supply_number || '—'}
+                                                                    </td>
+                                                                    <td style={{ textAlign: 'right' }}>{formatNumber(row.pallets_count, 0)}</td>
                                                                     <td style={{ textAlign: 'right' }}>{formatNumber(row.total_qty, 0)}</td>
                                                                     <td style={{ textAlign: 'right' }}>
                                                                         <span
@@ -855,6 +980,7 @@ export default function AssemblyFlowAnalyticsPage() {
                                                     </tbody>
                                                 </table>
                                             </div>
+                                            )}
                                         </div>
                                     );
                                 })}
@@ -904,6 +1030,15 @@ export default function AssemblyFlowAnalyticsPage() {
                         </div>
                     )}
                 </>
+            )}
+
+            {toast && (
+                <Toast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={() => setToast(null)}
+                    duration={toast.type === 'error' ? 5000 : 2500}
+                />
             )}
 
             <style jsx>{`

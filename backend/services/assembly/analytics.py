@@ -492,17 +492,22 @@ async def get_assembly_flow_analytics(
 
     # --- WB supplies for active requests — one query ---
     supply_ids = {r.wb_fbo_supply_id for r in active_reqs if r.wb_fbo_supply_id is not None}
-    supply_map: dict[int, tuple[str, str | None]] = {}
+    supply_map: dict[int, tuple[str, str | None, str]] = {}
     if supply_ids:
         supply_rows = (
             await db.execute(
-                select(WbFboSupply.id, WbFboSupply.wb_status, WbFboSupply.warehouse_name).where(
+                select(
+                    WbFboSupply.id,
+                    WbFboSupply.wb_status,
+                    WbFboSupply.warehouse_name,
+                    WbFboSupply.wb_supply_id,
+                ).where(
                     WbFboSupply.project_id == project_id,
                     WbFboSupply.id.in_(supply_ids),
                 )
             )
         ).all()
-        supply_map = {row.id: (row.wb_status, row.warehouse_name) for row in supply_rows}
+        supply_map = {row.id: (row.wb_status, row.warehouse_name, row.wb_supply_id) for row in supply_rows}
 
     # --- Anomalies (текущее состояние, максимум одна категория на заявку) ---
     anomalies_raw: list[tuple[AssemblyRequest, str, datetime | None]] = []
@@ -610,6 +615,8 @@ async def get_assembly_flow_analytics(
                 "since": since.isoformat() if since is not None else None,
                 "total_qty": qty_map.get(req.id, 0),
                 "wb_fbo_status": supply[0] if supply else None,
+                "wb_supply_number": supply[2] if supply else None,
+                "pallets_count": req.pallets_count,
             }
         )
     anomalies.sort(key=lambda a: (_ANOMALY_PRIORITY[a["kind"]], -a["days_stuck"]))

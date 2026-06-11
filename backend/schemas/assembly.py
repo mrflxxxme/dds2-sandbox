@@ -270,6 +270,9 @@ class AssemblyAnomalyRow(BaseModel):
     since: str | None  # ISO — начало текущего этапа
     total_qty: int
     wb_fbo_status: str | None  # статус связанной WB FBO-поставки
+    # Дефолты — на случай записи в кэше от прошлой версии без этих ключей.
+    wb_supply_number: str | None = None  # номер WB-поставки (wb_fbo_supplies.wb_supply_id)
+    pallets_count: int = 0
 
 
 class AssemblyWarehouseFlowStat(BaseModel):
