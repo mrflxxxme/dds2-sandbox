@@ -270,6 +270,9 @@ class AssemblyAnomalyRow(BaseModel):
     since: str | None  # ISO — начало текущего этапа
     total_qty: int
     wb_fbo_status: str | None  # статус связанной WB FBO-поставки
+    # Дефолты — на случай записи в кэше от прошлой версии без этих ключей.
+    wb_supply_number: str | None = None  # номер WB-поставки (wb_fbo_supplies.wb_supply_id)
+    pallets_count: int = 0
 
 
 class AssemblyWarehouseFlowStat(BaseModel):
@@ -294,10 +297,31 @@ class AssemblyFlowThresholds(BaseModel):
     delivery_days: int
 
 
+class AssemblyFlowDailyStat(BaseModel):
+    date: str  # ISO YYYY-MM-DD
+    created_count: int  # заявок создано в этот день
+    created_qty: int  # товаров (шт) в созданных заявках
+    shipped_count: int  # заявок отгружено в этот день
+    avg_cycle_days: float | None  # средний цикл (создание → отгрузка) отгруженных в этот день
+
+
+class AssemblyFlowStageDailyStat(BaseModel):
+    """Товары по этапам на конец дня (снимок): сколько шт лежало в каждом этапе."""
+
+    date: str  # ISO YYYY-MM-DD
+    in_progress_qty: int
+    ready_qty: int
+    vehicle_assigned_qty: int
+    shipped_qty: int
+
+
 class AssemblyFlowAnalyticsResponse(BaseModel):
     summary: AssemblyFlowSummary
     stages: list[AssemblyStageDuration]
     transitions: list[AssemblyTransitionStat]
     by_warehouse: list[AssemblyWarehouseFlowStat]
     anomalies: list[AssemblyAnomalyRow]
+    # Дефолты — на случай записи в кэше от прошлой версии без этих ключей.
+    daily: list[AssemblyFlowDailyStat] = []
+    stage_daily: list[AssemblyFlowStageDailyStat] = []
     thresholds: AssemblyFlowThresholds

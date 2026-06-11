@@ -85,6 +85,8 @@ class FfRequestRow(BaseModel):
     is_completed: bool = False
     archived: bool = False
     expired: bool = False
+    total_qty: int | None = None  # заявлено всего, шт (skladbot — из деталки)
+    dest_warehouse: str | None = None  # склад отгрузки МП («Склад МП» / shipped_target)
     external_created_at: date | None = None
     synced_at: datetime
     assembly_request_id: int | None = None
@@ -217,4 +219,5 @@ class FfSyncResult(BaseModel):
     stocks_synced: int = 0
     requests_synced: int = 0
     unmatched_barcodes: int = 0
+    assemblies_marked_ready: int = 0  # наших заявок переведено в READY по стадии ФФ
     synced_at: datetime

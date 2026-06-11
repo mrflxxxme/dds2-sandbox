@@ -1601,6 +1601,9 @@ export interface AssemblyAnomalyRow {
   total_qty: number;
   /** статус связанной WB FBO-поставки (для wb_accepted_not_shipped) */
   wb_fbo_status: string | null;
+  /** номер WB-поставки (wb_fbo_supplies.wb_supply_id) */
+  wb_supply_number: string | null;
+  pallets_count: number;
 }
 
 export interface AssemblyWarehouseFlowStat {
@@ -1609,6 +1612,29 @@ export interface AssemblyWarehouseFlowStat {
   active_count: number;
   avg_cycle_days: number | null;
   anomaly_count: number;
+}
+
+export interface AssemblyFlowDailyStat {
+  /** ISO YYYY-MM-DD */
+  date: string;
+  /** заявок создано в этот день */
+  created_count: number;
+  /** товаров (шт) в созданных заявках */
+  created_qty: number;
+  /** заявок отгружено в этот день */
+  shipped_count: number;
+  /** средний цикл (создание → отгрузка) отгруженных в этот день */
+  avg_cycle_days: number | null;
+}
+
+/** Товары по этапам на конец дня (снимок): сколько шт лежало в каждом этапе. */
+export interface AssemblyFlowStageDailyStat {
+  /** ISO YYYY-MM-DD */
+  date: string;
+  in_progress_qty: number;
+  ready_qty: number;
+  vehicle_assigned_qty: number;
+  shipped_qty: number;
 }
 
 export interface AssemblyFlowSummary {
@@ -1635,6 +1661,8 @@ export interface AssemblyFlowAnalyticsResponse {
   transitions: AssemblyTransitionStat[];
   by_warehouse: AssemblyWarehouseFlowStat[];
   anomalies: AssemblyAnomalyRow[];
+  daily: AssemblyFlowDailyStat[];
+  stage_daily: AssemblyFlowStageDailyStat[];
   thresholds: AssemblyFlowThresholds;
 }
 
@@ -3338,6 +3366,10 @@ export interface FfRequestRow {
   is_completed: boolean;
   archived: boolean;
   expired: boolean;
+  /** заявлено всего, шт (skladbot — из деталки) */
+  total_qty: number | null;
+  /** склад отгрузки МП («Склад МП» / shipped_target) */
+  dest_warehouse: string | null;
   external_created_at: string | null;
   synced_at: string;
   assembly_request_id: number | null;

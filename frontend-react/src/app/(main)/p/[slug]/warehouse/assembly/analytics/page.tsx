@@ -5,22 +5,45 @@
  *
  * Структура:
  *  1. KPI: средний цикл, средняя сборка, в работе, аномалии.
+ *  1а. График «Динамика по дням»: заявки/товары (по дате создания, переключатель)
+ *      + средний цикл (по дате отгрузки, правая ось).
+ *  1б. График «Товары по этапам»: стек шт по этапам на конец каждого дня
+ *      (включая заявки, созданные до начала периода).
  *  2. Пайплайн этапов: Сборка → Готов → Машина → Отгружено → Принято ВБ
  *     (средняя/медианная длительность каждого этапа, подсветка превышений порога).
+ *
+ * Фильтры всей страницы: период, склад, категория (Nomenclature.subject),
+ * город сдачи (целевой склад ВБ).
  *  3. Нестандартные переходы (отмены и «откаты назад») — свёрнутый блок.
  *  4. Аномалии — зависшие заявки, сгруппированные по типу проблемы.
+ *     В каждой группе: Excel-экспорт; в «Готово, но не отгружается» — фильтр
+ *     по статусу; в «Забыли отгрузить» — bulk-кнопка «Отгрузить машины»
+ *     (только заявки в VEHICLE_ASSIGNED).
  *  5. Разрез по складам.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import {
+    Bar,
+    CartesianGrid,
+    ComposedChart,
+    Legend,
+    Line,
+    ResponsiveContainer,
+    Tooltip as RechartsTooltip,
+    XAxis,
+    YAxis,
+} from 'recharts';
 import { api } from '@/lib/api';
+import { Toast } from '@/components';
 import { exportToExcel, formatDate, formatNumber, pluralRu } from '@/lib/utils';
 import type {
     AssemblyAnomalyKind,
     AssemblyAnomalyRow,
     AssemblyFlowAnalyticsResponse,
+    AssemblyFlowDailyStat,
     AssemblyFlowThresholds,
     AssemblyStatus,
     AssemblyTransitionStat,
@@ -116,7 +139,83 @@ const ANOMALY_GROUPS: {
     },
 ];
 
+/** Фильтр статуса в группе «Готово, но не отгружается». */
+const STUCK_STATUS_FILTERS: { key: 'ALL' | 'READY' | 'VEHICLE_ASSIGNED'; label: string }[] = [
+    { key: 'ALL', label: 'Все' },
+    { key: 'READY', label: 'Готово' },
+    { key: 'VEHICLE_ASSIGNED', label: 'Машина назначена' },
+];
+
+/** Колонки Excel-выгрузки аномалий — общие для сводного и посекционного экспорта. */
+const EXPORT_COLUMNS: { key: string; label: string }[] = [
+    { key: 'number', label: '№' },
+    { key: 'status', label: 'Статус' },
+    { key: 'warehouse', label: 'Склад' },
+    { key: 'wb_warehouse', label: 'Целевой склад ВБ' },
+    { key: 'wb_supply_number', label: 'ФБО-поставка' },
+    { key: 'pallets', label: 'Паллет' },
+    { key: 'qty', label: 'Шт' },
+    { key: 'days_stuck', label: 'Висит дн' },
+    { key: 'since', label: 'С какого числа' },
+    { key: 'wb_fbo_status', label: 'Статус WB-поставки' },
+];
+
+function anomalyToExportRow(row: AssemblyAnomalyRow): Record<string, string | number> {
+    return {
+        number: row.number,
+        status: STATUS_BADGE[row.status]?.label ?? row.status,
+        warehouse: row.warehouse_name || '',
+        wb_warehouse: row.wb_warehouse_name || '',
+        wb_supply_number: row.wb_supply_number || '',
+        pallets: row.pallets_count,
+        qty: row.total_qty,
+        days_stuck: row.days_stuck,
+        since: row.since ? formatDate(row.since) : '',
+        wb_fbo_status: row.wb_fbo_status || '',
+    };
+}
+
+/** Переключатель столбцов графика «динамика по дням». */
+const CHART_BAR_METRICS: { key: 'created_count' | 'created_qty'; label: string }[] = [
+    { key: 'created_count', label: 'Заявки' },
+    { key: 'created_qty', label: 'Товары, шт' },
+];
+
+/** Серии стекового графика «товары по этапам» (порядок = порядок потока). */
+const STAGE_SERIES: { key: 'in_progress_qty' | 'ready_qty' | 'vehicle_assigned_qty' | 'shipped_qty'; label: string; color: string }[] = [
+    { key: 'in_progress_qty', label: 'В сборке', color: 'var(--color-accent)' },
+    { key: 'ready_qty', label: 'Готово', color: 'var(--color-success)' },
+    { key: 'vehicle_assigned_qty', label: 'Машина назначена', color: 'var(--color-warning)' },
+    { key: 'shipped_qty', label: 'В пути (отгружено)', color: 'var(--color-text-dim)' },
+];
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Заполняет пропущенные дни нулями, чтобы бары шли равномерно по оси X.
+ * Диапазоны > 400 дней не заполняем (режим «всё время» с редкими точками).
+ */
+function fillDailyGaps(daily: AssemblyFlowDailyStat[]): AssemblyFlowDailyStat[] {
+    if (daily.length < 2) return daily;
+    const start = new Date(`${daily[0].date}T00:00:00Z`).getTime();
+    const end = new Date(`${daily[daily.length - 1].date}T00:00:00Z`).getTime();
+    if ((end - start) / 86_400_000 > 400) return daily;
+    const byDate = new Map(daily.map(d => [d.date, d]));
+    const out: AssemblyFlowDailyStat[] = [];
+    for (let t = start; t <= end; t += 86_400_000) {
+        const iso = new Date(t).toISOString().slice(0, 10);
+        out.push(
+            byDate.get(iso)
+            ?? { date: iso, created_count: 0, created_qty: 0, shipped_count: 0, avg_cycle_days: null },
+        );
+    }
+    return out;
+}
+
+/** «2026-06-05» → «05.06» для оси X. */
+function fmtDayTick(iso: string): string {
+    return `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
+}
 
 function isoDaysAgo(days: number): string {
     const d = new Date();
@@ -240,6 +339,13 @@ export default function AssemblyFlowAnalyticsPage() {
     const [period, setPeriod] = useState<PeriodKey>('90');
     const [warehouseId, setWarehouseId] = useState<number | ''>('');
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+    const [category, setCategory] = useState('');
+    const [subjects, setSubjects] = useState<string[]>([]);
+    const [wbWarehouse, setWbWarehouse] = useState('');
+    const [wbWarehouses, setWbWarehouses] = useState<string[]>([]);
+
+    // Метрика столбцов графика «динамика по дням»
+    const [chartBarMetric, setChartBarMetric] = useState<'created_count' | 'created_qty'>('created_count');
 
     // Thresholds: applied (триггерит перезапрос) + draft (строки в инпутах)
     const [thresholds, setThresholds] = useState<AssemblyFlowThresholds>(DEFAULT_THRESHOLDS);
@@ -251,15 +357,34 @@ export default function AssemblyFlowAnalyticsPage() {
     const [thresholdsOpen, setThresholdsOpen] = useState(false);
     const thresholdsRef = useRef<HTMLDivElement>(null);
 
+    // Фильтр статуса в «Готово, но не отгружается»
+    const [stuckStatusFilter, setStuckStatusFilter] = useState<'ALL' | 'READY' | 'VEHICLE_ASSIGNED'>('ALL');
+
+    // Bulk-отгрузка из «Забыли отгрузить»
+    const [shipping, setShipping] = useState(false);
+    const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
     const anomaliesRef = useRef<HTMLDivElement>(null);
 
-    // ─── Load warehouses (один раз) ───────────────────────────────────────
+    // ─── Load warehouses + категории (один раз) ───────────────────────────
     useEffect(() => {
         const controller = new AbortController();
         api.getWarehouses()
             .then(whs => {
                 if (controller.signal.aborted) return;
                 setWarehouses(whs.filter(w => w.warehouse_type === 'FULFILLMENT'));
+            })
+            .catch(() => {});
+        api.getNomenclatureSubjects()
+            .then(list => {
+                if (controller.signal.aborted) return;
+                setSubjects(list);
+            })
+            .catch(() => {});
+        api.getAssemblyWbWarehouses()
+            .then(list => {
+                if (controller.signal.aborted) return;
+                setWbWarehouses(list);
             })
             .catch(() => {});
         return () => controller.abort();
@@ -273,6 +398,8 @@ export default function AssemblyFlowAnalyticsPage() {
             const resp = await api.getAssemblyFlowAnalytics({
                 date_from: period === 'all' ? undefined : isoDaysAgo(period === '30' ? 30 : 90),
                 warehouse_ids: warehouseId ? String(warehouseId) : undefined,
+                categories: category || undefined,
+                wb_warehouses: wbWarehouse || undefined,
                 assembly_threshold_days: thresholds.assembly_days,
                 ship_threshold_days: thresholds.ship_days,
                 delivery_threshold_days: thresholds.delivery_days,
@@ -285,7 +412,7 @@ export default function AssemblyFlowAnalyticsPage() {
         } finally {
             if (!signal.aborted) setLoading(false);
         }
-    }, [period, warehouseId, thresholds]);
+    }, [period, warehouseId, category, wbWarehouse, thresholds]);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -370,8 +497,19 @@ export default function AssemblyFlowAnalyticsPage() {
             || data.summary.completed_in_period > 0
             || data.anomalies.length > 0
             || data.stages.some(s => s.count > 0)
-            || data.by_warehouse.length > 0;
+            || data.by_warehouse.length > 0
+            || (data.daily?.length ?? 0) > 0;
     }, [data]);
+
+    // График «динамика по дням»: пропущенные дни → нули (ровная ось X)
+    const chartData = useMemo(() => fillDailyGaps(data?.daily ?? []), [data]);
+
+    // График «товары по этапам»: backend отдаёт непрерывный ряд; прячем, если всё нули
+    const stageChartData = data?.stage_daily ?? [];
+    const hasStageData = useMemo(
+        () => stageChartData.some(r => r.in_progress_qty || r.ready_qty || r.vehicle_assigned_qty || r.shipped_qty),
+        [stageChartData],
+    );
 
     const appliedThresholds = data?.thresholds ?? thresholds;
     const periodSub = period === 'all' ? 'за всё время' : `за ${period} дн`;
@@ -388,29 +526,50 @@ export default function AssemblyFlowAnalyticsPage() {
         exportToExcel(
             rows.map(row => ({
                 category: titleByKind.get(row.kind) ?? row.kind,
-                number: row.number,
-                status: STATUS_BADGE[row.status]?.label ?? row.status,
-                warehouse: row.warehouse_name || '',
-                wb_warehouse: row.wb_warehouse_name || '',
-                qty: row.total_qty,
-                days_stuck: row.days_stuck,
-                since: row.since ? formatDate(row.since) : '',
-                wb_fbo_status: row.wb_fbo_status || '',
+                ...anomalyToExportRow(row),
             })),
             'assembly_flow_anomalies',
-            [
-                { key: 'category', label: 'Категория' },
-                { key: 'number', label: '№' },
-                { key: 'status', label: 'Статус' },
-                { key: 'warehouse', label: 'Склад' },
-                { key: 'wb_warehouse', label: 'Целевой склад ВБ' },
-                { key: 'qty', label: 'Шт' },
-                { key: 'days_stuck', label: 'Висит дн' },
-                { key: 'since', label: 'С какого числа' },
-                { key: 'wb_fbo_status', label: 'Статус WB-поставки' },
-            ],
+            [{ key: 'category', label: 'Категория' }, ...EXPORT_COLUMNS],
         );
     }, [anomaliesByKind]);
+
+    // Выгрузка одной секции (видимые строки — с учётом фильтра статуса)
+    const handleExportGroup = useCallback((kind: AssemblyAnomalyKind, rows: AssemblyAnomalyRow[]) => {
+        if (rows.length === 0) return;
+        exportToExcel(rows.map(anomalyToExportRow), `assembly_${kind}`, EXPORT_COLUMNS);
+    }, []);
+
+    // «Отгрузить машины»: заявки группы «Забыли отгрузить» с назначенной машиной.
+    // READY/IN_PROGRESS пропускаются — отгрузка возможна только из VEHICLE_ASSIGNED.
+    const forgottenVehicleIds = useMemo(
+        () => (anomaliesByKind.get('wb_accepted_not_shipped') ?? [])
+            .filter(r => r.status === 'VEHICLE_ASSIGNED')
+            .map(r => r.id),
+        [anomaliesByKind],
+    );
+
+    const handleShipForgotten = useCallback(async () => {
+        if (forgottenVehicleIds.length === 0 || shipping) return;
+        const n = forgottenVehicleIds.length;
+        const ok = window.confirm(
+            `Отгрузить ${formatNumber(n, 0)} ${pluralRu(n, ['заявку', 'заявки', 'заявок'])} с назначенной машиной? Остатки будут списаны со склада.`,
+        );
+        if (!ok) return;
+        setShipping(true);
+        try {
+            const shipped = await api.shipBulk(forgottenVehicleIds);
+            setToast({
+                message: `Отгружено: ${formatNumber(shipped.length, 0)} ${pluralRu(shipped.length, ['заявка', 'заявки', 'заявок'])}`,
+                type: 'success',
+            });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка отгрузки', type: 'error' });
+        } finally {
+            setShipping(false);
+            // Частичная отгрузка возможна (bulk коммитит по одной) — перезагружаем всегда
+            setReloadTick(t => t + 1);
+        }
+    }, [forgottenVehicleIds, shipping]);
 
     // ─── Render ───────────────────────────────────────────────────────────
 
@@ -450,6 +609,36 @@ export default function AssemblyFlowAnalyticsPage() {
                             <option key={w.id} value={w.id}>{w.name}</option>
                         ))}
                     </select>
+                    {/* Категория (Nomenclature.subject) */}
+                    {subjects.length > 0 && (
+                        <select
+                            className="form-input"
+                            style={{ width: 'auto', minWidth: 150, maxWidth: 220 }}
+                            value={category}
+                            onChange={e => setCategory(e.target.value)}
+                            title="Заявка попадает в выборку, если содержит хотя бы одну позицию категории"
+                        >
+                            <option value="">Все категории</option>
+                            {subjects.map(s => (
+                                <option key={s} value={s}>{s}</option>
+                            ))}
+                        </select>
+                    )}
+                    {/* Город сдачи (целевой склад ВБ) */}
+                    {wbWarehouses.length > 0 && (
+                        <select
+                            className="form-input"
+                            style={{ width: 'auto', minWidth: 150, maxWidth: 220 }}
+                            value={wbWarehouse}
+                            onChange={e => setWbWarehouse(e.target.value)}
+                            title="Целевой склад ВБ: имя из связанной поставки, fallback — ручное поле заявки"
+                        >
+                            <option value="">Все города сдачи</option>
+                            {wbWarehouses.map(w => (
+                                <option key={w} value={w}>{w}</option>
+                            ))}
+                        </select>
+                    )}
                     {/* Пороги */}
                     <div ref={thresholdsRef} style={{ position: 'relative' }}>
                         <button
@@ -580,6 +769,98 @@ export default function AssemblyFlowAnalyticsPage() {
                             onClick={data.summary.anomaly_count > 0 ? scrollToAnomalies : undefined}
                         />
                     </div>
+
+                    {/* Динамика по дням */}
+                    {chartData.length > 0 && (
+                        <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                                <SectionTitle>Динамика по дням · {periodSub}</SectionTitle>
+                                <div style={{ display: 'flex', gap: 4 }}>
+                                    {CHART_BAR_METRICS.map(m => (
+                                        <button
+                                            key={m.key}
+                                            type="button"
+                                            className={`btn btn-sm ${chartBarMetric === m.key ? 'btn-primary' : 'btn-secondary'}`}
+                                            onClick={() => setChartBarMetric(m.key)}
+                                        >
+                                            {m.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                            <ResponsiveContainer width="100%" height={280}>
+                                <ComposedChart data={chartData} margin={{ top: 5, right: 8, bottom: 5, left: 0 }}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                                    <XAxis dataKey="date" tickFormatter={fmtDayTick} tick={{ fontSize: 11 }} minTickGap={24} />
+                                    <YAxis yAxisId="left" tick={{ fontSize: 12 }} allowDecimals={false} />
+                                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 12 }} />
+                                    <RechartsTooltip
+                                        formatter={(value: number, name: string) =>
+                                            name === 'Средний цикл, дн'
+                                                ? [`${formatNumber(value, 1)} дн`, name]
+                                                : [formatNumber(value, 0), name]}
+                                        labelFormatter={(l: string) => formatDate(l)}
+                                        contentStyle={{ borderRadius: 12, border: '1px solid var(--color-border)', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', fontSize: 13 }}
+                                    />
+                                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                                    <Bar
+                                        yAxisId="left"
+                                        dataKey={chartBarMetric}
+                                        name={CHART_BAR_METRICS.find(m => m.key === chartBarMetric)?.label}
+                                        fill="var(--color-accent)"
+                                        radius={[3, 3, 0, 0]}
+                                        maxBarSize={26}
+                                    />
+                                    <Line
+                                        yAxisId="right"
+                                        type="monotone"
+                                        dataKey="avg_cycle_days"
+                                        name="Средний цикл, дн"
+                                        stroke="var(--color-warning)"
+                                        strokeWidth={2}
+                                        dot={false}
+                                        connectNulls
+                                    />
+                                </ComposedChart>
+                            </ResponsiveContainer>
+                            <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 6 }}>
+                                Заявки и товары — по дате создания заявки; средний цикл — по дате отгрузки (создание → отгрузка отгруженных в этот день).
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Товары по этапам по дням */}
+                    {hasStageData && (
+                        <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                            <SectionTitle>Товары по этапам · шт на конец дня</SectionTitle>
+                            <ResponsiveContainer width="100%" height={280}>
+                                <ComposedChart data={stageChartData} margin={{ top: 5, right: 8, bottom: 5, left: 0 }}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                                    <XAxis dataKey="date" tickFormatter={fmtDayTick} tick={{ fontSize: 11 }} minTickGap={24} />
+                                    <YAxis tick={{ fontSize: 12 }} allowDecimals={false} />
+                                    <RechartsTooltip
+                                        formatter={(value: number, name: string) => [formatNumber(value, 0), name]}
+                                        labelFormatter={(l: string) => formatDate(l)}
+                                        contentStyle={{ borderRadius: 12, border: '1px solid var(--color-border)', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', fontSize: 13 }}
+                                    />
+                                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                                    {STAGE_SERIES.map(s => (
+                                        <Bar
+                                            key={s.key}
+                                            dataKey={s.key}
+                                            name={s.label}
+                                            stackId="stages"
+                                            fill={s.color}
+                                            maxBarSize={26}
+                                        />
+                                    ))}
+                                </ComposedChart>
+                            </ResponsiveContainer>
+                            <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 6 }}>
+                                Снимок на конец каждого дня: сколько штук находилось в сборке / готово / с назначенной машиной / в пути (отгружено, приёмка ВБ не подтверждена). Учитываются и заявки, созданные до начала периода.
+                            </div>
+                        </div>
+                    )}
 
                     {/* Пайплайн этапов */}
                     <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
@@ -762,8 +1043,11 @@ export default function AssemblyFlowAnalyticsPage() {
                                 </div>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                                 {ANOMALY_GROUPS.map(group => {
-                                    const rows = anomaliesByKind.get(group.kind);
-                                    if (!rows || rows.length === 0) return null;
+                                    const allRows = anomaliesByKind.get(group.kind);
+                                    if (!allRows || allRows.length === 0) return null;
+                                    const rows = group.kind === 'stuck_shipment' && stuckStatusFilter !== 'ALL'
+                                        ? allRows.filter(r => r.status === stuckStatusFilter)
+                                        : allRows;
                                     const limit = group.thresholdKey ? appliedThresholds[group.thresholdKey] : 0;
                                     return (
                                         <div
@@ -784,13 +1068,61 @@ export default function AssemblyFlowAnalyticsPage() {
                                                             fontWeight: 700,
                                                         }}
                                                     >
-                                                        {formatNumber(rows.length, 0)}
+                                                        {formatNumber(allRows.length, 0)}
                                                     </span>
+                                                    <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                                                        {group.kind === 'stuck_shipment' && (
+                                                            <div style={{ display: 'flex', gap: 4 }}>
+                                                                {STUCK_STATUS_FILTERS.map(f => {
+                                                                    const cnt = f.key === 'ALL'
+                                                                        ? allRows.length
+                                                                        : allRows.filter(r => r.status === f.key).length;
+                                                                    return (
+                                                                        <button
+                                                                            key={f.key}
+                                                                            type="button"
+                                                                            className={`btn btn-sm ${stuckStatusFilter === f.key ? 'btn-primary' : 'btn-secondary'}`}
+                                                                            onClick={() => setStuckStatusFilter(f.key)}
+                                                                        >
+                                                                            {f.label} · {formatNumber(cnt, 0)}
+                                                                        </button>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        )}
+                                                        {group.kind === 'wb_accepted_not_shipped' && forgottenVehicleIds.length > 0 && (
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-danger btn-sm"
+                                                                onClick={handleShipForgotten}
+                                                                disabled={shipping}
+                                                                title="Отгрузить заявки группы с назначенной машиной — остатки будут списаны со склада"
+                                                            >
+                                                                {shipping
+                                                                    ? 'Отгружаем…'
+                                                                    : `🚚 Отгрузить машины · ${formatNumber(forgottenVehicleIds.length, 0)}`}
+                                                            </button>
+                                                        )}
+                                                        <button
+                                                            type="button"
+                                                            className="btn btn-secondary btn-sm"
+                                                            onClick={() => handleExportGroup(group.kind, rows)}
+                                                            disabled={rows.length === 0}
+                                                            title="Выгрузить эту секцию в Excel"
+                                                        >
+                                                            ⬇ Excel
+                                                        </button>
+                                                    </div>
                                                 </div>
                                                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                                                     {group.desc(appliedThresholds)}
                                                 </div>
                                             </div>
+                                            {rows.length === 0 ? (
+                                                <div style={{ padding: '14px 20px 18px', fontSize: 13, color: 'var(--color-text-muted)' }}>
+                                                    Нет заявок с выбранным статусом
+                                                </div>
+                                            ) : (
                                             <div style={{ overflowX: 'auto' }}>
                                                 <table className="data-table" style={{ fontSize: 13 }}>
                                                     <thead>
@@ -799,6 +1131,8 @@ export default function AssemblyFlowAnalyticsPage() {
                                                             <th>Статус</th>
                                                             <th>Склад</th>
                                                             <th>Целевой склад ВБ</th>
+                                                            <th>ФБО-поставка</th>
+                                                            <th style={{ textAlign: 'right' }}>Паллет</th>
                                                             <th style={{ textAlign: 'right' }}>Шт</th>
                                                             <th style={{ textAlign: 'right' }}>Висит</th>
                                                             <th>С какого числа</th>
@@ -835,6 +1169,10 @@ export default function AssemblyFlowAnalyticsPage() {
                                                                             </div>
                                                                         )}
                                                                     </td>
+                                                                    <td style={{ color: 'var(--color-text-muted)' }}>
+                                                                        {row.wb_supply_number || '—'}
+                                                                    </td>
+                                                                    <td style={{ textAlign: 'right' }}>{formatNumber(row.pallets_count, 0)}</td>
                                                                     <td style={{ textAlign: 'right' }}>{formatNumber(row.total_qty, 0)}</td>
                                                                     <td style={{ textAlign: 'right' }}>
                                                                         <span
@@ -855,6 +1193,7 @@ export default function AssemblyFlowAnalyticsPage() {
                                                     </tbody>
                                                 </table>
                                             </div>
+                                            )}
                                         </div>
                                     );
                                 })}
@@ -904,6 +1243,15 @@ export default function AssemblyFlowAnalyticsPage() {
                         </div>
                     )}
                 </>
+            )}
+
+            {toast && (
+                <Toast
+                    message={toast.message}
+                    type={toast.type}
+                    onClose={() => setToast(null)}
+                    duration={toast.type === 'error' ? 5000 : 2500}
+                />
             )}
 
             <style jsx>{`

@@ -84,6 +84,7 @@ async def _mk_request(
     actual_ready_date=None,
     wb_fbo_supply_id: int | None = None,
     item_qtys: list[int] | None = None,
+    pallets_count: int = 1,
 ) -> AssemblyRequest:
     req = AssemblyRequest(
         project_id=env.project_id,
@@ -91,7 +92,7 @@ async def _mk_request(
         number=f"ASM-T{uuid.uuid4().hex[:8]}",
         status=status,
         wb_fbo_supply_id=wb_fbo_supply_id,
-        pallets_count=1,
+        pallets_count=pallets_count,
         pallet_weight_kg=Decimal("100.00"),
         created_at=created_at,
         updated_at=created_at,
@@ -331,7 +332,14 @@ class TestDraftStartHistory:
 class TestAnomalies:
     async def test_stuck_assembly(self, db_session, env):
         t0 = utcnow() - timedelta(days=5)
-        req = await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, item_qtys=[3, 4])
+        req = await _mk_request(
+            db_session,
+            env,
+            status=AssemblyStatus.IN_PROGRESS,
+            created_at=t0,
+            item_qtys=[3, 4],
+            pallets_count=2,
+        )
         await _add_history(db_session, env, req.id, None, "IN_PROGRESS", t0)
         # Свежая заявка — не аномалия
         await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=utcnow() - timedelta(days=1))
@@ -346,6 +354,8 @@ class TestAnomalies:
         assert a["warehouse_id"] == env.wh_id
         assert a["warehouse_name"] == "Flow FF WH"
         assert a["wb_fbo_status"] is None
+        assert a["wb_supply_number"] is None  # поставка не привязана
+        assert a["pallets_count"] == 2
         assert a["since"] is not None
         assert res["summary"]["anomaly_count"] == 1
 
@@ -415,7 +425,9 @@ class TestAnomalies:
         assert by_id[req.id]["kind"] == "wb_accepted_not_shipped"
         assert by_id[req.id]["wb_fbo_status"] == "ACCEPTED"
         assert by_id[req.id]["wb_warehouse_name"] == "Казань"
+        assert by_id[req.id]["wb_supply_number"] == supply.wb_supply_id
         assert by_id[req2.id]["kind"] == "wb_accepted_not_shipped"
+        assert by_id[req2.id]["wb_supply_number"] == supply2.wb_supply_id
 
     async def test_shipped_not_accepted(self, db_session, env):
         supply = await _mk_supply(db_session, env, WbSupplyStatus.ON_DELIVERY)
@@ -443,6 +455,8 @@ class TestAnomalies:
         assert a["kind"] == "shipped_not_accepted"
         assert a["days_stuck"] == 10
         assert a["wb_fbo_status"] == "ON_DELIVERY"
+        assert a["wb_supply_number"] == supply.wb_supply_id
+        assert a["pallets_count"] == 1
 
         res2 = await _flow(db_session, env.project_id, delivery_threshold_days=30)
         assert res2["anomalies"] == []
@@ -516,6 +530,233 @@ class TestAnomalies:
 
         res = await _flow(db_session, env.project_id)
         assert res["anomalies"] == []
+
+
+# --- Daily series -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestDailySeries:
+    async def test_daily_created_and_cycle(self, db_session, env):
+        """Заявки/товары — по дате создания; средний цикл — по дате отгрузки."""
+        t0 = utcnow() - timedelta(days=10)
+        await _mk_request(
+            db_session,
+            env,
+            status=AssemblyStatus.SHIPPED,
+            created_at=t0,
+            shipped_at=t0 + timedelta(days=4),
+            item_qtys=[3, 4],
+        )
+        # Второй — создан в тот же день, не отгружен
+        await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, item_qtys=[5])
+
+        res = await _flow(db_session, env.project_id)
+
+        by_date = {d["date"]: d for d in res["daily"]}
+        created_day = t0.date().isoformat()
+        shipped_day = (t0 + timedelta(days=4)).date().isoformat()
+
+        assert by_date[created_day]["created_count"] == 2
+        assert by_date[created_day]["created_qty"] == 12
+        assert by_date[shipped_day]["shipped_count"] == 1
+        assert by_date[shipped_day]["avg_cycle_days"] == pytest.approx(4.0, abs=0.05)
+        # В день создания отгрузок не было
+        assert by_date[created_day]["shipped_count"] == 0
+        assert by_date[created_day]["avg_cycle_days"] is None
+
+    async def test_daily_respects_period(self, db_session, env):
+        t0 = utcnow() - timedelta(days=200)
+        await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, item_qtys=[2])
+
+        res = await _flow(db_session, env.project_id, date_from=(utcnow() - timedelta(days=90)).date())
+        assert res["daily"] == []
+
+        res_all = await _flow(db_session, env.project_id)
+        assert len(res_all["daily"]) == 1
+
+
+# --- Categories filter --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCategoriesFilter:
+    async def test_categories_filter_scopes_everything(self, db_session, env):
+        """Фильтр по категории (Nomenclature.subject) сужает period- и active-выборки."""
+        nom_socks = (
+            await db_session.execute(
+                text(
+                    "INSERT INTO nomenclature (project_id, barcode, subject, updated_at) "
+                    "VALUES (:pid, 'TEST_BC_FLOW_SOCKS', 'Носки', NOW()) RETURNING id"
+                ),
+                {"pid": env.project_id},
+            )
+        ).scalar()
+        await db_session.commit()
+
+        t0 = utcnow() - timedelta(days=5)
+        # Заявка с «Носки» — застряла в сборке
+        req_socks = await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0)
+        db_session.add(
+            AssemblyRequestItem(
+                project_id=env.project_id,
+                assembly_request_id=req_socks.id,
+                nomenclature_id=nom_socks,
+                barcode="TEST_BC_FLOW_SOCKS",
+                quantity=4,
+            )
+        )
+        await db_session.commit()
+        await _add_history(db_session, env, req_socks.id, None, "IN_PROGRESS", t0)
+        # Заявка с номенклатурой без subject — тоже застряла
+        req_other = await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, item_qtys=[7])
+        await _add_history(db_session, env, req_other.id, None, "IN_PROGRESS", t0)
+
+        res = await _flow(db_session, env.project_id, categories=["Носки"])
+        assert [a["id"] for a in res["anomalies"]] == [req_socks.id]
+        assert res["summary"]["active_count"] == 1
+        assert len(res["daily"]) == 1
+        assert res["daily"][0]["created_count"] == 1
+        assert res["daily"][0]["created_qty"] == 4
+
+        res_none = await _flow(db_session, env.project_id, categories=["Платья"])
+        assert res_none["anomalies"] == []
+        assert res_none["summary"]["active_count"] == 0
+        assert res_none["daily"] == []
+
+        # Без фильтра видны обе
+        res_all = await _flow(db_session, env.project_id)
+        assert res_all["summary"]["active_count"] == 2
+
+
+# --- WB destination (город сдачи) filter ---------------------------------------
+
+
+@pytest.mark.asyncio
+class TestWbWarehouseFilter:
+    async def test_filter_by_supply_name_and_manual_fallback(self, db_session, env):
+        """Город сдачи: имя из WbFboSupply приоритетно, manual — fallback."""
+        t0 = utcnow() - timedelta(days=5)
+        supply = await _mk_supply(db_session, env, WbSupplyStatus.ACTIVE, warehouse_name="Казань")
+        req_kazan = await _mk_request(
+            db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, wb_fbo_supply_id=supply.id
+        )
+        await _add_history(db_session, env, req_kazan.id, None, "IN_PROGRESS", t0)
+
+        req_tula = await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0)
+        req_tula.wb_warehouse_name_manual = "Тула"
+        await db_session.commit()
+        await _add_history(db_session, env, req_tula.id, None, "IN_PROGRESS", t0)
+
+        res = await _flow(db_session, env.project_id, wb_warehouses=["Казань"])
+        assert [a["id"] for a in res["anomalies"]] == [req_kazan.id]
+        assert res["summary"]["active_count"] == 1
+
+        res2 = await _flow(db_session, env.project_id, wb_warehouses=["Тула"])
+        assert [a["id"] for a in res2["anomalies"]] == [req_tula.id]
+
+        res3 = await _flow(db_session, env.project_id, wb_warehouses=["Екатеринбург"])
+        assert res3["summary"]["active_count"] == 0
+        assert res3["daily"] == []
+
+    async def test_wb_warehouses_list(self, db_session, env):
+        from backend.services.assembly.analytics import get_assembly_wb_warehouses
+
+        t0 = utcnow() - timedelta(days=2)
+        supply = await _mk_supply(db_session, env, WbSupplyStatus.ACTIVE, warehouse_name="Казань")
+        await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, wb_fbo_supply_id=supply.id)
+        req2 = await _mk_request(db_session, env, status=AssemblyStatus.READY, created_at=t0)
+        req2.wb_warehouse_name_manual = "Тула"
+        await db_session.commit()
+
+        names = await get_assembly_wb_warehouses(db_session, env.project_id)
+        assert names == ["Казань", "Тула"]
+        # Изоляция
+        assert await get_assembly_wb_warehouses(db_session, env.other_project_id) == []
+
+
+# --- Stage occupancy (товары по этапам по дням) ---------------------------------
+
+
+@pytest.mark.asyncio
+class TestStageDaily:
+    async def test_stage_occupancy_by_day(self, db_session, env):
+        """Снимок на конец дня: qty заявки лежит в том этапе, где она была в этот день."""
+        now = utcnow()
+        t0 = now - timedelta(days=6)
+        req = await _mk_request(db_session, env, status=AssemblyStatus.SHIPPED, created_at=t0, item_qtys=[3, 4])
+        await _add_history(db_session, env, req.id, None, "IN_PROGRESS", t0)
+        await _add_history(db_session, env, req.id, "IN_PROGRESS", "READY", t0 + timedelta(days=2))
+        await _add_history(db_session, env, req.id, "READY", "VEHICLE_ASSIGNED", t0 + timedelta(days=4))
+        await _add_history(db_session, env, req.id, "VEHICLE_ASSIGNED", "SHIPPED", t0 + timedelta(days=5))
+
+        res = await _flow(db_session, env.project_id, date_from=(now - timedelta(days=8)).date())
+        by_date = {d["date"]: d for d in res["stage_daily"]}
+
+        today = now.date()
+        # Полный диапазон окна заполнен (нулями в т.ч.)
+        assert res["stage_daily"][0]["date"] == (today - timedelta(days=8)).isoformat()
+        assert res["stage_daily"][-1]["date"] == today.isoformat()
+
+        d = lambda offset: (today - timedelta(days=offset)).isoformat()  # noqa: E731
+        # До создания — нули
+        assert by_date[d(7)] == {
+            "date": d(7),
+            "in_progress_qty": 0,
+            "ready_qty": 0,
+            "vehicle_assigned_qty": 0,
+            "shipped_qty": 0,
+        }
+        # Сборка: дни -6, -5
+        assert by_date[d(6)]["in_progress_qty"] == 7
+        assert by_date[d(5)]["in_progress_qty"] == 7
+        # Готово: дни -4, -3
+        assert by_date[d(4)]["ready_qty"] == 7
+        assert by_date[d(3)]["ready_qty"] == 7
+        # Машина: день -2
+        assert by_date[d(2)]["vehicle_assigned_qty"] == 7
+        # В пути: день -1 и сегодня (текущий статус)
+        assert by_date[d(1)]["shipped_qty"] == 7
+        assert by_date[d(0)]["shipped_qty"] == 7
+        # С момента создания заявка каждый день ровно в одном этапе
+        for row in res["stage_daily"]:
+            if row["date"] < d(6):
+                continue
+            total = row["in_progress_qty"] + row["ready_qty"] + row["vehicle_assigned_qty"] + row["shipped_qty"]
+            assert total == 7, row
+
+    async def test_stage_occupancy_includes_pre_period_requests(self, db_session, env):
+        """Заявка, созданная ДО date_from, но активная в окне — учитывается."""
+        now = utcnow()
+        t0 = now - timedelta(days=40)
+        req = await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0, item_qtys=[5])
+        await _add_history(db_session, env, req.id, None, "IN_PROGRESS", t0)
+
+        res = await _flow(db_session, env.project_id, date_from=(now - timedelta(days=7)).date())
+        assert all(row["in_progress_qty"] == 5 for row in res["stage_daily"])
+
+    async def test_terminal_requests_occupy_nothing(self, db_session, env):
+        now = utcnow()
+        req = await _mk_request(
+            db_session,
+            env,
+            status=AssemblyStatus.DELIVERED,
+            created_at=now - timedelta(days=6),
+            shipped_at=now - timedelta(days=5),
+            item_qtys=[9],
+        )
+        await _add_history(db_session, env, req.id, None, "IN_PROGRESS", now - timedelta(days=6))
+        await _add_history(db_session, env, req.id, "IN_PROGRESS", "SHIPPED", now - timedelta(days=5))
+        await _add_history(db_session, env, req.id, "SHIPPED", "DELIVERED", now - timedelta(days=3))
+
+        res = await _flow(db_session, env.project_id, date_from=(now - timedelta(days=8)).date())
+        by_date = {d["date"]: d for d in res["stage_daily"]}
+        today = now.date()
+        # Пока была SHIPPED — считалась «в пути»
+        assert by_date[(today - timedelta(days=4)).isoformat()]["shipped_qty"] == 9
+        # После DELIVERED — не занимает этапов
+        assert by_date[(today - timedelta(days=2)).isoformat()]["shipped_qty"] == 0
+        assert by_date[today.isoformat()]["shipped_qty"] == 0
 
 
 # --- Router validation ----------------------------------------------------------

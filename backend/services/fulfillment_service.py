@@ -10,6 +10,11 @@ Service: fulfillment — интеграция с внешними фулфилм
 нормализованным dict'ам (см. _apply_stocks / _apply_requests), дальше
 путь общий. Деталка заявки: skladbot — живой HTTP-вызов, wmscelicom —
 из raw зеркала (by-id эндпоинта у провайдера нет, состав приходит в списке).
+
+Синк дополнительно: обогащает зеркало skladbot живой деталкой (total_qty /
+dest_warehouse — списочный метод их не отдаёт) и автоматически переводит
+связанные заявки на сборку IN_PROGRESS → READY, когда стадия ФФ говорит
+«груз собран» (см. _assembly_ready_signal).
 """
 
 import logging
@@ -20,9 +25,12 @@ from sqlalchemy import delete, func, select, text, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.cache import invalidate_cache
 from backend.integrations.resilience import CircuitOpenError, RateLimitError
 from backend.integrations.skladbot_client import (
     ASSEMBLY_TYPE_IDS,
+    ASSEMBLY_WIP_STAGE_CODES,
+    ASSEMBLY_WIP_TITLE_MARKERS,
     INBOUND_TYPE_IDS,
     SkladbotApiError,
     SkladbotClient,
@@ -40,7 +48,12 @@ from backend.models import (
     Warehouse,
     WarehouseStock,
 )
-from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.assembly import (
+    AssemblyRequest,
+    AssemblyRequestItem,
+    AssemblyStatus,
+    AssemblyStatusHistory,
+)
 from backend.utils.crypto import decrypt as _decrypt, encrypt as _encrypt
 from backend.utils.time import utcnow
 
@@ -51,6 +64,31 @@ FF_SERVICES = ("skladbot", "migfull", "wmscelicom")
 SYNCABLE_FF_SERVICES = ("skladbot", "wmscelicom")
 STOCKS_LIMIT = 5000
 REQUESTS_LIMIT = 500
+
+# Обогащение skladbot живой деталкой: cap вызовов show за один синк
+# (rate limit /v1/requests/* — 120 req/min) и потолок чтения зеркала.
+_ENRICH_DETAIL_CAP = 100
+_MIRROR_SELECT_LIMIT = 10_000
+_QTY_MAX = 2**31 - 1  # Integer-колонка: мусорная сумма провайдера не должна валить flush
+_DEST_WAREHOUSE_MAX = 300  # String(300): значение длиннее уронит транзакцию синка
+
+
+def _safe_int(value: object) -> int:
+    """PHP-API коэрсия: '2' → 2, '12,5'/'abc'/None/false/контейнер → 0 — мусор не валит синк."""
+    if not isinstance(value, int | float | str):
+        return 0
+    try:
+        return int(value or 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _coerce_dest(value: object) -> str | None:
+    """Склад отгрузки от провайдера → str с клампом длины; пусто/false → None."""
+    if not value:
+        return None
+    return str(value).strip()[:_DEST_WAREHOUSE_MAX] or None
+
 
 # Эвристика подбора кандидатов для несвязанных ФФ-заявок (overview):
 # база — близость дат |external_created_at − created_at| в днях → score,
@@ -69,6 +107,66 @@ _SUGGEST_CANDIDATE_STATUSES = (
 def _provider_human(provider: str) -> str:
     """Имя провайдера для пользовательских сообщений об ошибках."""
     return "skladbot.ru" if provider == "skladbot" else "WMS Celicom"
+
+
+def _assembly_ready_signal(
+    provider: str,
+    stage_code: str | None,
+    stage_title: str | None,
+    is_completed: bool,
+) -> bool:
+    """Стадия ФФ говорит «сборка готова» → нашу заявку можно переводить в READY.
+
+    skladbot (тип 851): deny-list — стадии 1–2 (забор груза, указание объёма)
+    это WIP, любая ДРУГАЯ непустая стадия трактуется как «готов» (стадий после
+    сборки много: виды работ, водитель, погрузка, отгрузка — и код стадии 3
+    неизвестен, allowlist не собрать). Осознанный риск: новая РАННЯЯ стадия
+    провайдера даст ложный READY (обратимо: READY → IN_PROGRESS разрешён) —
+    при появлении пополнить ASSEMBLY_WIP_STAGE_CODES/MARKERS. Пустая стадия —
+    НЕ сигнал. wmscelicom: стадий нет — только is_completed (терминальные
+    статусы отгрузки FBO).
+    """
+    if is_completed:
+        return True
+    if provider != "skladbot":
+        return False
+    code = (stage_code or "").strip()
+    title = (stage_title or "").strip()
+    if not code and not title:
+        return False
+    if code in ASSEMBLY_WIP_STAGE_CODES:
+        return False
+    title_low = title.lower()
+    return not any(marker in title_low for marker in ASSEMBLY_WIP_TITLE_MARKERS)
+
+
+def _transition_assembly_to_ready(
+    db: AsyncSession,
+    project_id: int,
+    doc: AssemblyRequest,
+    ff_req: FulfillmentRequest,
+) -> None:
+    """IN_PROGRESS → READY по сигналу стадии ФФ: статус + actual_ready_date + история.
+
+    Намеренно мимо assembly.status.mark_ready: его пред-условия (FBO-supply,
+    палеты) не применимы к авто-переходу по внешнему сигналу. Переход
+    IN_PROGRESS → READY разрешён ASSEMBLY_TRANSITIONS; историю пишем напрямую
+    (changed_by=ff_sync), не тянем пакет services.assembly.
+    """
+    old_status = doc.status
+    doc.status = AssemblyStatus.READY.value
+    doc.actual_ready_date = date.today()
+    db.add(
+        AssemblyStatusHistory(
+            project_id=project_id,
+            assembly_request_id=doc.id,
+            old_status=old_status,
+            new_status=AssemblyStatus.READY.value,
+            changed_at=utcnow(),
+            changed_by="ff_sync",
+            comment=f"ФФ {ff_req.number or ff_req.external_id}: стадия «{ff_req.stage_title or 'завершена'}»",
+        )
+    )
 
 
 # Advisory lock namespace для синка (pg_advisory_xact_lock(ns, project_id)).
@@ -270,6 +368,25 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             raise ValueError("В конфигурации ключа нет адреса инстанса — переподключите фулфилмент")
     else:
         raise ValueError(f"Синк для провайдера «{provider}» не реализован")
+
+    # Снимок обогащения зеркала — читаем ДО закрытия транзакции: по нему
+    # решаем, каким skladbot-заявкам нужна живая деталка (бэкфилл total_qty)
+    mirror_enrichment: dict[str, tuple[int | None, str | None]] = {}
+    if provider == "skladbot":
+        enrich_result = await db.execute(
+            select(
+                FulfillmentRequest.external_id,
+                FulfillmentRequest.total_qty,
+                FulfillmentRequest.dest_warehouse,
+            )
+            .where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.warehouse_id == warehouse_id,
+                FulfillmentRequest.provider == "skladbot",
+            )
+            .limit(_MIRROR_SELECT_LIMIT)
+        )
+        mirror_enrichment = {ext: (qty, dest) for ext, qty, dest in enrich_result.all()}
     await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
 
     human = _provider_human(provider)
@@ -281,6 +398,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             for type_id in sorted(ASSEMBLY_TYPE_IDS | INBOUND_TYPE_IDS):
                 fetched_requests.append((type_id, await skl_client.fetch_requests(type_id)))
             request_rows = _normalize_skladbot_requests(fetched_requests)
+            await _enrich_skladbot_requests(skl_client, request_rows, mirror_enrichment)
         else:
             wms_client = WmsCelicomClient(api_base, token, project_id=project_id)
             stock_items = [_normalize_wms_stock(i) for i in await wms_client.fetch_all_items()]
@@ -300,24 +418,47 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     stocks_synced, unmatched = await _apply_stocks(db, project_id, warehouse_id, provider, stock_items)
     requests_synced = await _apply_requests(db, project_id, warehouse_id, provider, request_rows)
 
+    # Авто-READY связанных сборок: flush, чтобы пере-SELECT зеркала видел
+    # свежие стадии после UPSERT (новые INSERT'ы — тоже)
+    await db.flush()
+    linked_result = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.provider == provider,
+            FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+            FulfillmentRequest.assembly_request_id.is_not(None),
+            FulfillmentRequest.archived == False,
+            FulfillmentRequest.expired == False,
+        )
+        .limit(_MIRROR_SELECT_LIMIT)
+    )
+    assemblies_marked_ready = await _mark_linked_assemblies_ready(db, project_id, list(linked_result.scalars().all()))
+
     synced_at = utcnow()
     key = await db.get(IntegrationKey, key_id)
     if key:
         key.last_sync_at = synced_at
     await db.commit()
 
+    if assemblies_marked_ready:
+        await invalidate_cache("reports:assembly_flow")
+
     logger.info(
-        "Fulfillment sync: project=%s warehouse=%s stocks=%d requests=%d unmatched=%d",
+        "Fulfillment sync: project=%s warehouse=%s stocks=%d requests=%d unmatched=%d marked_ready=%d",
         project_id,
         warehouse_id,
         stocks_synced,
         requests_synced,
         unmatched,
+        assemblies_marked_ready,
     )
     return {
         "stocks_synced": stocks_synced,
         "requests_synced": requests_synced,
         "unmatched_barcodes": unmatched,
+        "assemblies_marked_ready": assemblies_marked_ready,
         "synced_at": synced_at,
     }
 
@@ -326,7 +467,10 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
 # Остатки: {barcode, name, vendor_code, external_product_id, qty_good,
 #           qty_reserve, qty_defect, qty_nominal}
 # Заявки:  {external_id, kind, number, type_id, type_name, status, stage_code,
-#           stage_title, is_completed, archived, expired, external_created_at, raw}
+#           stage_title, is_completed, archived, expired, total_qty,
+#           dest_warehouse, external_created_at, raw}
+# total_qty/dest_warehouse = None означает «нет данных» (UPDATE их не затирает);
+# skladbot получает их позже из живой деталки (_enrich_skladbot_requests).
 
 
 def _normalize_skladbot_stock(item: dict) -> dict:
@@ -363,6 +507,8 @@ def _normalize_skladbot_requests(fetched_by_type: list[tuple[int, list[dict]]]) 
                     "is_completed": bool(row.get("is_completed")),
                     "archived": bool(row.get("archived")),
                     "expired": bool(row.get("expired")),
+                    "total_qty": None,  # списочный метод состава не отдаёт — из деталки
+                    "dest_warehouse": None,
                     "external_created_at": _parse_date(row.get("created_at")),
                     "raw": row,
                 }
@@ -399,6 +545,10 @@ def _wms_shipment_completed(status: str) -> bool:
 def _normalize_wms_shipment(row: dict) -> dict:
     """wmscelicom shipmentsfbo/list row → нормализованная заявка kind=assembly."""
     status = str(row.get("status") or "")
+    # Состав уже в списочном методе (packages → items); часть инстансов отдаёт
+    # packages.items пустыми (ограничение провайдера) → None («нет данных»), не 0
+    total = min(sum(_raw_assembly_composition("wmscelicom", row).values()), _QTY_MAX)
+    target = row.get("shipped_target")  # PHP-API: бывает false/"" вместо null
     return {
         "external_id": str(row.get("shipment_fbo_id") or ""),
         "kind": FfRequestKind.ASSEMBLY.value,
@@ -411,6 +561,8 @@ def _normalize_wms_shipment(row: dict) -> dict:
         "is_completed": _wms_shipment_completed(status),
         "archived": status == "Аннулирована",
         "expired": False,
+        "total_qty": total or None,
+        "dest_warehouse": _coerce_dest(target),
         "external_created_at": _parse_date(row.get("date_time")),
         "raw": row,
     }
@@ -419,6 +571,12 @@ def _normalize_wms_shipment(row: dict) -> dict:
 def _normalize_wms_unloading(row: dict) -> dict:
     """wmscelicom unloadingorders/list row → нормализованная заявка kind=inbound."""
     status = row.get("status")
+    total = 0
+    for item in row.get("items") or []:  # PHP-API: в массиве бывают null-элементы
+        if not isinstance(item, dict):
+            continue
+        total += _safe_int(item.get("count"))
+    total = min(total, _QTY_MAX)
     return {
         "external_id": str(row.get("unloading_order_id") or ""),
         "kind": FfRequestKind.INBOUND.value,
@@ -431,9 +589,72 @@ def _normalize_wms_unloading(row: dict) -> dict:
         "is_completed": bool(row.get("unloading_close_date")),
         "archived": False,
         "expired": False,
+        "total_qty": total or None,
+        "dest_warehouse": None,
         "external_created_at": _parse_date(row.get("create_date_time")),
         "raw": row,
     }
+
+
+async def _enrich_skladbot_requests(
+    client: SkladbotClient,
+    rows: list[dict],
+    mirror: dict[str, tuple[int | None, str | None]],
+) -> None:
+    """Обогатить assembly-строки живой деталкой (total_qty, dest_warehouse) in-place.
+
+    Списочный /v1/requests не отдаёт ни состав, ни склад МП — только
+    недокументированный show. Активным заявкам деталка нужна каждый синк
+    (заявленное количество меняется), завершённым/архивным — разовый бэкфилл,
+    пока в зеркале total_qty IS NULL. Cap _ENRICH_DETAIL_CAP вызовов за синк
+    (rate limit /v1/requests/* — 120 req/min). Ошибки обогащения синк НЕ валят:
+    429/circuit — прекращаем обогащение, прочее — пропуск строки.
+    """
+    active_targets: list[dict] = []
+    backfill_targets: list[dict] = []
+    for row in rows:
+        if row.get("kind") != FfRequestKind.ASSEMBLY.value:
+            continue
+        if not row.get("archived") and not row.get("is_completed"):
+            active_targets.append(row)
+        elif mirror.get(row["external_id"], (None, None))[0] is None:
+            backfill_targets.append(row)
+
+    targets = active_targets + backfill_targets  # при cap'е бэкфилл жертвуем первым
+    if len(targets) > _ENRICH_DETAIL_CAP:
+        logger.warning(
+            "Fulfillment enrich: detail cap %d exceeded, %d requests skipped",
+            _ENRICH_DETAIL_CAP,
+            len(targets) - _ENRICH_DETAIL_CAP,
+        )
+        targets = targets[:_ENRICH_DETAIL_CAP]
+
+    for row in targets:
+        try:
+            detail = await client.fetch_request_detail(row["external_id"])
+        except (RateLimitError, CircuitOpenError) as e:
+            logger.warning("Fulfillment enrich: stopped, remaining details skipped (%s)", e)
+            break
+        except (SkladbotApiError, httpx.HTTPError, ValueError) as e:
+            logger.warning("Fulfillment enrich: request %s skipped (%s)", row["external_id"], e)
+            continue
+        if not isinstance(detail, dict):
+            # show недокументирован: Laravel может отдать data списком — форма дрейфует
+            logger.warning("Fulfillment enrich: request %s — unexpected detail shape, skipped", row["external_id"])
+            continue
+        products = detail.get("products") or []
+        total = min(sum(_safe_int(p.get("amount")) for p in products if isinstance(p, dict)), _QTY_MAX)
+        # 0/пусто = «нет данных»: при дрейфе формы ответа не затираем прежнее значение нулём
+        row["total_qty"] = total or None
+        dest = next(
+            (
+                f.get("value")
+                for f in (detail.get("fields") or [])
+                if isinstance(f, dict) and f.get("field") == "marketplace_warehouse"
+            ),
+            None,
+        )
+        row["dest_warehouse"] = _coerce_dest(dest)
 
 
 async def _apply_stocks(
@@ -562,6 +783,11 @@ async def _apply_requests(
             req.archived = row["archived"]
             req.expired = row["expired"]
             req.is_completed = row["is_completed"]
+            # None = «нет данных» (деталка не запрашивалась) — старое не затираем
+            if row.get("total_qty") is not None:
+                req.total_qty = row["total_qty"]
+            if row.get("dest_warehouse") is not None:
+                req.dest_warehouse = row["dest_warehouse"]
             req.external_created_at = row["external_created_at"] or req.external_created_at
             req.synced_at = synced_at
             req.raw = row["raw"]
@@ -582,12 +808,57 @@ async def _apply_requests(
                     is_completed=row["is_completed"],
                     archived=row["archived"],
                     expired=row["expired"],
+                    total_qty=row.get("total_qty"),
+                    dest_warehouse=row.get("dest_warehouse"),
                     external_created_at=row["external_created_at"],
                     raw=row["raw"],
                     synced_at=synced_at,
                 )
             )
     return len(by_external)
+
+
+async def _mark_linked_assemblies_ready(
+    db: AsyncSession,
+    project_id: int,
+    ff_requests: list[FulfillmentRequest],
+) -> int:
+    """Перевести связанные сборки IN_PROGRESS → READY по сигналу стадии ФФ.
+
+    Берём живые связанные assembly-строки (не archived/expired) с
+    _assembly_ready_signal() == True; наши заявки выбираются одним запросом
+    (project_id + is_deleted + только IN_PROGRESS — прочие статусы не трогаем,
+    переход выполняем напрямую, история changed_by=ff_sync). Возвращает число
+    переходов. Commit — на стороне вызывающего.
+    """
+    ff_by_assembly: dict[int, FulfillmentRequest] = {}
+    for req in ff_requests:
+        if req.kind != FfRequestKind.ASSEMBLY.value or req.assembly_request_id is None:
+            continue
+        if req.archived or req.expired:
+            continue
+        if not _assembly_ready_signal(req.provider, req.stage_code, req.stage_title, req.is_completed):
+            continue
+        ff_by_assembly[req.assembly_request_id] = req
+    if not ff_by_assembly:
+        return 0
+
+    result = await db.execute(
+        select(AssemblyRequest)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.id.in_(list(ff_by_assembly)),
+            AssemblyRequest.is_deleted == False,
+            AssemblyRequest.status == AssemblyStatus.IN_PROGRESS.value,
+        )
+        # row-lock: ручной переход/линк в параллельной транзакции не должен
+        # дать lost update или дубль строки истории
+        .with_for_update()
+    )
+    docs = list(result.scalars().all())
+    for doc in docs:
+        _transition_assembly_to_ready(db, project_id, doc, ff_by_assembly[doc.id])
+    return len(docs)
 
 
 def _parse_date(value: object) -> date | None:
@@ -744,6 +1015,8 @@ def _request_to_dict(
         "is_completed": req.is_completed,
         "archived": req.archived,
         "expired": req.expired,
+        "total_qty": req.total_qty,
+        "dest_warehouse": req.dest_warehouse,
         "external_created_at": req.external_created_at,
         "synced_at": req.synced_at,
         "assembly_request_id": req.assembly_request_id,
@@ -825,7 +1098,7 @@ def _raw_assembly_composition(provider: str, raw: dict | None) -> dict[str, int]
             barcode = str(item.get("barcode") or "").strip()
             if not barcode:
                 continue
-            out[barcode] = out.get(barcode, 0) + int(item.get("count") or 0)
+            out[barcode] = out.get(barcode, 0) + _safe_int(item.get("count"))
     return out
 
 
@@ -1518,18 +1791,22 @@ async def link_request(
 
     assembly_map: dict[int, tuple] = {}
     inbound_map: dict[int, tuple] = {}
+    marked_ready = False
 
     if assembly_request_id is not None:
         if req.kind != FfRequestKind.ASSEMBLY.value:
             raise ValueError("assembly_request_id можно привязать только к ФФ-заявке типа assembly")
-        result = await db.execute(
-            select(AssemblyRequest).where(
+        asm_result = await db.execute(
+            select(AssemblyRequest)
+            .where(
                 AssemblyRequest.id == assembly_request_id,
                 AssemblyRequest.project_id == project_id,
                 AssemblyRequest.is_deleted == False,
             )
+            # row-lock: сериализация с авто-READY синка (advisory lock линк не берёт)
+            .with_for_update()
         )
-        doc = result.scalar_one_or_none()
+        doc = asm_result.scalar_one_or_none()
         if not doc:
             raise ValueError("Заявка на сборку не найдена в проекте")
         if doc.warehouse_id != req.warehouse_id:
@@ -1546,21 +1823,31 @@ async def link_request(
         if conflict.scalar_one_or_none() is not None:
             raise ValueError("Заявка на сборку уже связана с другой ФФ-заявкой")
         req.assembly_request_id = assembly_request_id
-        assembly_map = {doc.id: (doc.number, doc.status)}
+        # Авто-READY при привязке: стадия ФФ уже «готов», наша заявка ещё
+        # IN_PROGRESS → переводим сразу (та же логика, что при синке)
+        if (
+            not req.archived
+            and not req.expired
+            and doc.status == AssemblyStatus.IN_PROGRESS.value
+            and _assembly_ready_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
+        ):
+            _transition_assembly_to_ready(db, project_id, doc, req)
+            marked_ready = True
+        assembly_map = {doc.id: (doc.number, doc.status)}  # после перехода — статус уже новый
     else:
         if req.kind != FfRequestKind.INBOUND.value:
             raise ValueError("inbound_receipt_id можно привязать только к ФФ-заявке типа inbound")
-        result = await db.execute(
+        inb_result = await db.execute(
             select(InboundReceipt).where(
                 InboundReceipt.id == inbound_receipt_id,
                 InboundReceipt.project_id == project_id,
                 InboundReceipt.is_deleted == False,
             )
         )
-        doc = result.scalar_one_or_none()
-        if not doc:
+        inb_doc = inb_result.scalar_one_or_none()
+        if not inb_doc:
             raise ValueError("Приёмка не найдена в проекте")
-        if doc.warehouse_id != req.warehouse_id:
+        if inb_doc.warehouse_id != req.warehouse_id:
             raise ValueError("Приёмка принадлежит другому складу")
         conflict = await db.execute(
             select(FulfillmentRequest.id)
@@ -1574,9 +1861,11 @@ async def link_request(
         if conflict.scalar_one_or_none() is not None:
             raise ValueError("Приёмка уже связана с другой ФФ-заявкой")
         req.inbound_receipt_id = inbound_receipt_id
-        inbound_map = {doc.id: (doc.number, doc.status)}
+        inbound_map = {inb_doc.id: (inb_doc.number, inb_doc.status)}
 
     await db.commit()
+    if marked_ready:
+        await invalidate_cache("reports:assembly_flow")
     return _request_to_dict(req, assembly_map, inbound_map)
 
 

@@ -89,7 +89,8 @@ export default function FfRequestDetailPage() {
         setLinkError('');
         try {
             const updated = await api.unlinkFulfillmentRequest(warehouseId, ffRequestId);
-            setDetail(prev => (prev ? { ...prev, ...updated } : prev));
+            // total_qty в строке — зеркало БД (бывает null); в деталке — живая сумма состава, не затираем
+            setDetail(prev => (prev ? { ...prev, ...updated, total_qty: prev.total_qty } : prev));
         } catch (e: unknown) {
             setLinkError(e instanceof Error ? e.message : 'Ошибка отвязки');
         } finally {
@@ -129,21 +130,25 @@ export default function FfRequestDetailPage() {
                 exportValue: (p: FfRequestDetailProduct) => String(p.our_qty ?? 0),
             } as Column,
         ] : []),
-        { key: 'accepted_qty', label: 'Принято', align: 'right', render: (v: number) => formatNumber(v, 0) },
-        {
-            key: 'defect_qty', label: 'Брак', align: 'right',
-            render: (v: number) => (
-                <span style={{ color: v > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: v > 0 ? 600 : 400 }}>
-                    {formatNumber(v, 0)}
-                </span>
-            ),
-        },
+        // Приёмка-специфика: у сборки приёмки нет — accepted/defect всегда 0
+        ...(d.kind !== 'assembly' ? [
+            { key: 'accepted_qty', label: 'Принято', align: 'right', render: (v: number) => formatNumber(v, 0) } as Column,
+            {
+                key: 'defect_qty', label: 'Брак', align: 'right',
+                render: (v: number) => (
+                    <span style={{ color: v > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: v > 0 ? 600 : 400 }}>
+                        {formatNumber(v, 0)}
+                    </span>
+                ),
+            } as Column,
+        ] : []),
     ];
 
     const summary = [
         { label: 'Позиций', value: d.products.length },
         { label: 'Заявлено', value: d.total_qty },
-        { label: 'Принято', value: d.total_accepted },
+        // У сборки total_accepted всегда 0 (нет стадии приёмки) — карточка не нужна
+        ...(d.kind !== 'assembly' ? [{ label: 'Принято', value: d.total_accepted }] : []),
     ];
 
     const matchCols: Column[] = [
@@ -327,7 +332,8 @@ export default function FfRequestDetailPage() {
                     request={d}
                     onClose={() => setLinkOpen(false)}
                     onLinked={updated => {
-                        setDetail(prev => (prev ? { ...prev, ...updated } : prev));
+                        // total_qty в строке — зеркало БД (бывает null); в деталке — живая сумма состава, не затираем
+                        setDetail(prev => (prev ? { ...prev, ...updated, total_qty: prev.total_qty } : prev));
                         setLinkOpen(false);
                     }}
                 />

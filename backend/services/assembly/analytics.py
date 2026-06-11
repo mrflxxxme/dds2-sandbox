@@ -6,11 +6,12 @@ Part of the assembly service package. See backend/DOMAIN_ASSEMBLY.md for spec.
 One-way dependency: analytics -> crud (never crud -> analytics).
 """
 
+import logging
 import statistics
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached, invalidate_cache
@@ -26,6 +27,8 @@ from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem
 from backend.schemas.assembly import AssemblyItemResponse, RefreshFromFboResponse
 from backend.services.warehouse_service import _resolve_barcode
 from backend.utils.time import utcnow
+
+logger = logging.getLogger(__name__)
 
 # --- FBO sync ---------------------------------------------------------------
 
@@ -349,6 +352,92 @@ def _walk_history(
     return stage_days, transitions
 
 
+async def get_assembly_wb_warehouses(db: AsyncSession, project_id: int) -> list[str]:
+    """Distinct «города сдачи» (целевой склад ВБ) по заявкам проекта.
+
+    Имя из связанной поставки приоритетно, wb_warehouse_name_manual — fallback
+    (та же семантика, что в строках аномалий и фильтре wb_warehouses).
+    """
+    dest = func.coalesce(WbFboSupply.warehouse_name, AssemblyRequest.wb_warehouse_name_manual)
+    rows = (
+        (
+            await db.execute(
+                select(dest)
+                .select_from(AssemblyRequest)
+                .outerjoin(
+                    WbFboSupply,
+                    and_(
+                        WbFboSupply.id == AssemblyRequest.wb_fbo_supply_id,
+                        WbFboSupply.project_id == project_id,
+                    ),
+                )
+                .where(
+                    AssemblyRequest.project_id == project_id,
+                    AssemblyRequest.is_deleted == False,  # noqa: E712
+                    dest.isnot(None),
+                )
+                .distinct()
+                .order_by(dest)
+                .limit(500)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [r for r in rows if r]
+
+
+# Терминальные статусы: заявка больше не занимает ни одного этапа потока.
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    (AssemblyStatus.DELIVERED.value, AssemblyStatus.CANCELLED.value, AssemblyStatus.CLOSED.value)
+)
+
+
+def _occupancy_intervals(
+    req: AssemblyRequest,
+    recs: list[AssemblyStatusHistory],
+) -> list[tuple[str | None, datetime, datetime | None]]:
+    """Интервалы пребывания заявки в статусах: (status, start, end|None).
+
+    end=None — открытый интервал по текущий момент; его статус берётся из
+    req.status (источник истины), а не из последней записи истории.
+    Терминальные заявки открытого интервала не имеют. Fallback для заявок
+    без стартовой записи — как в _walk_history (вход в IN_PROGRESS = created_at).
+    """
+    intervals: list[tuple[str | None, datetime, datetime | None]] = []
+    cur_status: str | None = None
+    cur_since: datetime = req.created_at
+    if not any(r.old_status is None for r in recs):
+        cur_status = AssemblyStatus.IN_PROGRESS.value
+
+    for r in recs:
+        intervals.append((cur_status, cur_since, r.changed_at))
+        cur_status = r.new_status
+        cur_since = r.changed_at
+
+    if req.status not in _TERMINAL_STATUSES:
+        intervals.append((req.status, cur_since, None))
+    return intervals
+
+
+def _snap_day_range(t1: datetime, t2: datetime | None, today: date) -> tuple[date, date] | None:
+    """Дни D, в чьи end-of-day снапшоты (min(now, полночь D+1)) попадает [t1, t2).
+
+    Возвращает (first, last) включительно или None, если интервал короче суток
+    и ни один снапшот в него не попал.
+    """
+    base = t1 - timedelta(days=1)
+    first = base.date() if base == datetime.combine(base.date(), time.min) else base.date() + timedelta(days=1)
+    if t2 is None:
+        last = today
+    else:
+        base2 = t2 - timedelta(days=1)
+        last = base2.date() - timedelta(days=1) if base2 == datetime.combine(base2.date(), time.min) else base2.date()
+    if last < first:
+        return None
+    return first, last
+
+
 @cached(prefix="reports:assembly_flow", ttl=300)
 async def get_assembly_flow_analytics(
     db: AsyncSession,
@@ -357,11 +446,13 @@ async def get_assembly_flow_analytics(
     date_from: date | None = None,
     date_to: date | None = None,
     warehouse_ids: list[int] | None = None,
+    categories: list[str] | None = None,
+    wb_warehouses: list[str] | None = None,
     assembly_threshold_days: int = 3,
     ship_threshold_days: int = 2,
     delivery_threshold_days: int = 7,
 ) -> dict:
-    """Аналитика потока сборки: этапы, переходы, аномалии.
+    """Аналитика потока сборки: этапы, переходы, аномалии, дневная динамика.
 
     Период (date_from/date_to, по created_at; None = без границы — «всё время»)
     применяется к stages / transitions / summary-метрикам. АНОМАЛИИ считаются
@@ -380,17 +471,47 @@ async def get_assembly_flow_analytics(
     """
     now = utcnow()
 
-    # --- Load period requests (для stages/transitions/summary) ---
-    period_filters = [
+    # --- Общие scope-фильтры (применяются к периодной, active- и occupancy-выборкам) ---
+    scope_filters = [
         AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,  # noqa: E712
     ]
+    if warehouse_ids:
+        scope_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))
+    # Категория (Nomenclature.subject) — заявка попадает, если в ней есть хотя бы
+    # одна позиция выбранной категории.
+    if categories:
+        cat_subq = (
+            select(AssemblyRequestItem.assembly_request_id)
+            .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+            .where(
+                AssemblyRequestItem.project_id == project_id,
+                Nomenclature.subject.in_(categories),
+            )
+            .distinct()
+            .scalar_subquery()
+        )
+        scope_filters.append(AssemblyRequest.id.in_(cat_subq))
+    # Город сдачи (целевой склад ВБ): имя из связанной поставки приоритетно,
+    # wb_warehouse_name_manual — fallback (та же семантика, что в строках аномалий).
+    if wb_warehouses:
+        supply_name_sq = (
+            select(WbFboSupply.warehouse_name)
+            .where(
+                WbFboSupply.id == AssemblyRequest.wb_fbo_supply_id,
+                WbFboSupply.project_id == project_id,
+            )
+            .correlate(AssemblyRequest)
+            .scalar_subquery()
+        )
+        scope_filters.append(func.coalesce(supply_name_sq, AssemblyRequest.wb_warehouse_name_manual).in_(wb_warehouses))
+
+    # --- Load period requests (для stages/transitions/summary) ---
+    period_filters = [*scope_filters]
     if date_from is not None:
         period_filters.append(AssemblyRequest.created_at >= datetime.combine(date_from, time.min))
     if date_to is not None:
         period_filters.append(AssemblyRequest.created_at < datetime.combine(date_to + timedelta(days=1), time.min))
-    if warehouse_ids:
-        period_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))
 
     period_reqs = list(
         (
@@ -406,13 +527,7 @@ async def get_assembly_flow_analytics(
     )
 
     # --- Load active requests (текущее состояние — для аномалий и active_count) ---
-    active_filters = [
-        AssemblyRequest.project_id == project_id,
-        AssemblyRequest.is_deleted == False,  # noqa: E712
-        AssemblyRequest.status.in_(_FLOW_ACTIVE_STATUSES),
-    ]
-    if warehouse_ids:
-        active_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))
+    active_filters = [*scope_filters, AssemblyRequest.status.in_(_FLOW_ACTIVE_STATUSES)]
 
     active_reqs = list(
         (
@@ -427,8 +542,44 @@ async def get_assembly_flow_analytics(
         .all()
     )
 
-    # --- History for both sets — one query ---
-    all_ids = {r.id for r in period_reqs} | {r.id for r in active_reqs}
+    # --- Occupancy-кандидаты (для stage_daily): жившие в окне, включая созданные
+    # ДО date_from. Окно ≤ 365 дней (для «всё время» — последний год).
+    occ_to = min(date_to, now.date()) if date_to is not None else now.date()
+    occ_from = date_from if date_from is not None else occ_to - timedelta(days=364)
+    if (occ_to - occ_from).days > 364:
+        occ_from = occ_to - timedelta(days=364)
+    occ_window_start = datetime.combine(occ_from, time.min)
+    occ_window_end = datetime.combine(occ_to + timedelta(days=1), time.min)
+
+    occ_filters = [
+        *scope_filters,
+        AssemblyRequest.created_at < occ_window_end,
+        # Либо ещё в потоке, либо покинула его не раньше начала окна
+        # (updated_at — дешёвый верхний прокси момента терминального перехода).
+        or_(
+            AssemblyRequest.status.in_(_FLOW_ACTIVE_STATUSES),
+            AssemblyRequest.updated_at >= occ_window_start,
+        ),
+    ]
+    occ_reqs = list(
+        (
+            await db.execute(
+                select(AssemblyRequest)
+                .where(*occ_filters)
+                .order_by(AssemblyRequest.created_at.desc())
+                .limit(_FLOW_LIMIT)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(occ_reqs) == _FLOW_LIMIT:
+        # Срезались самые старые — именно долгоживущие «созданные до периода»,
+        # ради которых выборка и делалась. stage_daily будет занижен.
+        logger.warning("assembly_flow occupancy: достигнут _FLOW_LIMIT=%s, stage_daily занижен", _FLOW_LIMIT)
+
+    # --- History for all sets — one query ---
+    all_ids = {r.id for r in period_reqs} | {r.id for r in active_reqs} | {r.id for r in occ_reqs}
     history_map: dict[int, list[AssemblyStatusHistory]] = {}
     if all_ids:
         hist_rows = (
@@ -446,6 +597,11 @@ async def get_assembly_flow_analytics(
             .scalars()
             .all()
         )
+        if len(hist_rows) == _FLOW_LIMIT * 10:
+            logger.warning(
+                "assembly_flow history: достигнут лимит %s — отрезаны новейшие переходы, интервалы неполные",
+                _FLOW_LIMIT * 10,
+            )
         for h in hist_rows:
             history_map.setdefault(h.assembly_request_id, []).append(h)
 
@@ -490,19 +646,138 @@ async def get_assembly_flow_analytics(
     # Только DELIVERED («Принято ВБ»): CLOSED — возврат (ВБ не принял), не успех.
     completed_in_period = sum(1 for r in period_reqs if r.status == AssemblyStatus.DELIVERED)
 
+    # --- Daily series (график «динамика по дням») ---
+    # Заявки/товары — по дате создания; средний цикл — по дате отгрузки.
+    # SQL-агрегация по тем же period_filters (без _FLOW_LIMIT-усечения).
+    created_day = func.date(AssemblyRequest.created_at)
+    created_rows = (
+        await db.execute(
+            select(
+                created_day.label("day"),
+                func.count(func.distinct(AssemblyRequest.id)).label("created_count"),
+                func.coalesce(func.sum(AssemblyRequestItem.quantity), 0).label("created_qty"),
+            )
+            .outerjoin(
+                AssemblyRequestItem,
+                # project_id в ON (не WHERE): иначе outer-join выродится во
+                # внутренний и заявки без позиций выпадут из created_count.
+                and_(
+                    AssemblyRequestItem.assembly_request_id == AssemblyRequest.id,
+                    AssemblyRequestItem.project_id == project_id,
+                ),
+            )
+            .where(*period_filters)
+            .group_by(created_day)
+        )
+    ).all()
+
+    shipped_day = func.date(AssemblyRequest.shipped_at)
+    cycle_rows = (
+        await db.execute(
+            select(
+                shipped_day.label("day"),
+                func.count().label("shipped_count"),
+                func.avg(
+                    func.extract("epoch", AssemblyRequest.shipped_at - AssemblyRequest.created_at) / 86400.0
+                ).label("avg_cycle_days"),
+            )
+            .where(*period_filters, AssemblyRequest.shipped_at.isnot(None))
+            .group_by(shipped_day)
+        )
+    ).all()
+
+    daily_map: dict[str, dict] = {}
+    for row in created_rows:
+        d = row.day.isoformat()
+        daily_map[d] = {
+            "date": d,
+            "created_count": int(row.created_count),
+            "created_qty": int(row.created_qty),
+            "shipped_count": 0,
+            "avg_cycle_days": None,
+        }
+    for row in cycle_rows:
+        d = row.day.isoformat()
+        entry = daily_map.setdefault(
+            d,
+            {"date": d, "created_count": 0, "created_qty": 0, "shipped_count": 0, "avg_cycle_days": None},
+        )
+        entry["shipped_count"] = int(row.shipped_count)
+        entry["avg_cycle_days"] = round(float(row.avg_cycle_days), 2) if row.avg_cycle_days is not None else None
+    daily = sorted(daily_map.values(), key=lambda x: x["date"])
+
+    # --- Stage occupancy (товары по этапам по дням): снимок на конец дня ---
+    occ_qty_map: dict[int, int] = {}
+    occ_ids = [r.id for r in occ_reqs]
+    if occ_ids:
+        occ_qty_rows = (
+            await db.execute(
+                select(
+                    AssemblyRequestItem.assembly_request_id,
+                    func.coalesce(func.sum(AssemblyRequestItem.quantity), 0).label("qty"),
+                )
+                .where(
+                    AssemblyRequestItem.project_id == project_id,
+                    AssemblyRequestItem.assembly_request_id.in_(occ_ids),
+                )
+                .group_by(AssemblyRequestItem.assembly_request_id)
+            )
+        ).all()
+        occ_qty_map = {row.assembly_request_id: int(row.qty) for row in occ_qty_rows}
+
+    _stage_key = {
+        AssemblyStatus.IN_PROGRESS.value: "in_progress_qty",
+        AssemblyStatus.READY.value: "ready_qty",
+        AssemblyStatus.VEHICLE_ASSIGNED.value: "vehicle_assigned_qty",
+        AssemblyStatus.SHIPPED.value: "shipped_qty",
+    }
+    today = now.date()
+    stage_daily: list[dict] = [
+        {
+            "date": (occ_from + timedelta(days=i)).isoformat(),
+            "in_progress_qty": 0,
+            "ready_qty": 0,
+            "vehicle_assigned_qty": 0,
+            "shipped_qty": 0,
+        }
+        for i in range((occ_to - occ_from).days + 1)
+    ]
+    for req in occ_reqs:
+        qty = occ_qty_map.get(req.id, 0)
+        if qty == 0:
+            continue
+        for status_name, t1, t2 in _occupancy_intervals(req, history_map.get(req.id, [])):
+            key = _stage_key.get(status_name) if status_name is not None else None
+            if key is None:
+                continue
+            rng = _snap_day_range(t1, t2, today)
+            if rng is None:
+                continue
+            first = max(rng[0], occ_from)
+            last = min(rng[1], occ_to)
+            if first > last:
+                continue
+            for i in range((first - occ_from).days, (last - occ_from).days + 1):
+                stage_daily[i][key] += qty
+
     # --- WB supplies for active requests — one query ---
     supply_ids = {r.wb_fbo_supply_id for r in active_reqs if r.wb_fbo_supply_id is not None}
-    supply_map: dict[int, tuple[str, str | None]] = {}
+    supply_map: dict[int, tuple[str, str | None, str]] = {}
     if supply_ids:
         supply_rows = (
             await db.execute(
-                select(WbFboSupply.id, WbFboSupply.wb_status, WbFboSupply.warehouse_name).where(
+                select(
+                    WbFboSupply.id,
+                    WbFboSupply.wb_status,
+                    WbFboSupply.warehouse_name,
+                    WbFboSupply.wb_supply_id,
+                ).where(
                     WbFboSupply.project_id == project_id,
                     WbFboSupply.id.in_(supply_ids),
                 )
             )
         ).all()
-        supply_map = {row.id: (row.wb_status, row.warehouse_name) for row in supply_rows}
+        supply_map = {row.id: (row.wb_status, row.warehouse_name, row.wb_supply_id) for row in supply_rows}
 
     # --- Anomalies (текущее состояние, максимум одна категория на заявку) ---
     anomalies_raw: list[tuple[AssemblyRequest, str, datetime | None]] = []
@@ -610,6 +885,8 @@ async def get_assembly_flow_analytics(
                 "since": since.isoformat() if since is not None else None,
                 "total_qty": qty_map.get(req.id, 0),
                 "wb_fbo_status": supply[0] if supply else None,
+                "wb_supply_number": supply[2] if supply else None,
+                "pallets_count": req.pallets_count,
             }
         )
     anomalies.sort(key=lambda a: (_ANOMALY_PRIORITY[a["kind"]], -a["days_stuck"]))
@@ -650,6 +927,8 @@ async def get_assembly_flow_analytics(
         "transitions": transitions,
         "by_warehouse": by_warehouse,
         "anomalies": anomalies,
+        "daily": daily,
+        "stage_daily": stage_daily,
         "thresholds": {
             "assembly_days": assembly_threshold_days,
             "ship_days": ship_threshold_days,

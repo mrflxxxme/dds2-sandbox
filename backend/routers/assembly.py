@@ -25,7 +25,7 @@ from backend.schemas.assembly import (
     ShipBulk,
 )
 from backend.services import assembly_service, fulfillment_service
-from backend.services.assembly.analytics import get_assembly_flow_analytics
+from backend.services.assembly.analytics import get_assembly_flow_analytics, get_assembly_wb_warehouses
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse/assembly", tags=["Assembly"])
@@ -139,24 +139,42 @@ async def get_flow_analytics(
     date_from: date | None = Query(None, description="Период по created_at заявки; пусто — всё время"),
     date_to: date | None = Query(None),
     warehouse_ids: str | None = Query(None, description="Comma-separated warehouse IDs"),
+    categories: str | None = Query(None, description="Comma-separated категории (Nomenclature.subject)"),
+    wb_warehouses: str | None = Query(None, description="Comma-separated города сдачи (целевой склад ВБ)"),
     assembly_threshold_days: int = Query(3, ge=1, le=365),
     ship_threshold_days: int = Query(2, ge=1, le=365),
     delivery_threshold_days: int = Query(7, ge=1, le=365),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Аналитика потока сборки: длительности этапов, матрица переходов, аномалии."""
+    """Аналитика потока сборки: длительности этапов, матрица переходов, аномалии, дневная динамика."""
     wh_ids = _parse_warehouse_ids(warehouse_ids)
+    cat_list = [x.strip() for x in categories.split(",") if x.strip()] if categories else None
+    wb_list = [x.strip() for x in wb_warehouses.split(",") if x.strip()] if wb_warehouses else None
     return await get_assembly_flow_analytics(
         db,
         project.id,
         date_from=date_from,
         date_to=date_to,
         warehouse_ids=wh_ids,
+        categories=cat_list,
+        wb_warehouses=wb_list,
         assembly_threshold_days=assembly_threshold_days,
         ship_threshold_days=ship_threshold_days,
         delivery_threshold_days=delivery_threshold_days,
     )
+
+
+# Путь намеренно отличается от /wb-warehouses: тот занят list_wb_warehouses
+# (union всех manual-имён и поставок — автокомплит в new/edit). Здесь — только
+# реальные «города сдачи» заявок (coalesce поставка → manual) для фильтра аналитики.
+@router.get("/flow-analytics/wb-warehouses", response_model=list[str])
+async def get_flow_wb_warehouses(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Distinct «города сдачи» (целевые склады ВБ) по заявкам — фильтр аналитики."""
+    return await get_assembly_wb_warehouses(db, project.id)
 
 
 # --- Create -----------------------------------------------------------------
