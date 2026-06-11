@@ -96,34 +96,44 @@ class WmsCelicomClient:
         self.project_id = project_id
         self._circuit = _wms_circuits.get(project_id)
 
+    def _redact(self, text: str) -> str:
+        """Убрать токен из произвольного текста (URL в httpx-ошибках, echo в body)."""
+        return text.replace(self.token, "***")
+
     async def _request(self, path: str, params: dict | None = None) -> dict | list:
         """GET `{base}/api/{token}/{path}`; raise on errors.
 
         В логи и тексты ошибок попадает только `path` (после токена) — сам URL
-        содержит секрет.
+        содержит секрет; httpx-ошибки дополнительно редактируются (_redact).
         """
         url = f"{self.base_url}/api/{self.token}/{path.lstrip('/')}"
         async with self._circuit, httpx.AsyncClient(timeout=TIMEOUT) as client:
             logger.info("wmscelicom_api.request", path=path, params=params)
-            response = await client.get(url, params=params, headers={"Accept": "application/json"})
+            try:
+                response = await client.get(url, params=params, headers={"Accept": "application/json"})
+            except httpx.HTTPError as e:
+                # str(httpx-ошибки) может содержать полный URL — а в нём токен
+                raise httpx.ConnectError(self._redact(f"{type(e).__name__}: {e}")) from None
 
             if response.status_code == 429:
                 retry_after = int(response.headers.get("Retry-After", "60"))
                 raise RateLimitError("WMS Celicom API rate limited (429)", retry_after=retry_after)
             if 400 <= response.status_code < 500:
                 raise WmsCelicomApiError(
-                    f"WMS Celicom API error ({response.status_code}) at {path}: {response.text[:200]}",
+                    self._redact(f"WMS Celicom API error ({response.status_code}) at {path}: {response.text[:200]}"),
                     status_code=response.status_code,
                 )
             if response.status_code != 200:
                 # 5xx — деградация сервиса: считается circuit breaker'ом и ретраится
-                raise ValueError(f"WMS Celicom API error ({response.status_code}) at {path}: {response.text[:200]}")
+                raise ValueError(
+                    self._redact(f"WMS Celicom API error ({response.status_code}) at {path}: {response.text[:200]}")
+                )
 
             data = response.json()
             # API может вернуть 200 + {status: ERROR, message} (см. спеку oneOf)
             if isinstance(data, dict) and str(data.get("status", "")).upper() == "ERROR":
                 raise WmsCelicomApiError(
-                    f"WMS Celicom API error at {path}: {str(data.get('message'))[:200]}",
+                    self._redact(f"WMS Celicom API error at {path}: {str(data.get('message'))[:200]}"),
                     status_code=response.status_code,
                 )
             return data

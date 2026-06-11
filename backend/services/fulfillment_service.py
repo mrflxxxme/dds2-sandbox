@@ -360,10 +360,10 @@ def _normalize_wms_stock(item: dict) -> dict:
     """wmscelicom items/get item → нормализованный остаток.
 
     Barcodes — массив (версии ШК); снапшот ключуется одним barcode — берём
-    первый. Count → good, CountVirtual → nominal; reserve/defect API не отдаёт.
+    первый непустой. Count → good, CountVirtual → nominal; reserve/defect API не отдаёт.
     """
     barcodes = item.get("Barcodes") or []
-    barcode = str(barcodes[0]).strip() if barcodes else ""
+    barcode = next((str(b).strip() for b in barcodes if b), "")
     item_id = item.get("Id")
     return {
         "barcode": barcode,
