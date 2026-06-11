@@ -435,7 +435,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     )
     ff_rows = list(result.scalars().all())
 
-    result = await db.execute(
+    ws_result = await db.execute(
         select(WarehouseStock)
         .where(
             WarehouseStock.project_id == project_id,
@@ -444,7 +444,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         )
         .limit(STOCKS_LIMIT)
     )
-    our_rows = list(result.scalars().all())
+    our_rows = list(ws_result.scalars().all())
 
     # article_seller одним запросом для всех номенклатур (без N+1)
     nom_ids = {r.nomenclature_id for r in ff_rows if r.nomenclature_id}
