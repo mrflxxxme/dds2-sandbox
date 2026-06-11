@@ -125,14 +125,14 @@ async def connect(
     # UniqueConstraint(project_id, service, label) НЕ учитывает is_deleted:
     # после soft_delete строка занимает уникальный слот. Ищем существующую
     # ВКЛЮЧАЯ soft-deleted → restore() + обновление полей, НЕ новый INSERT.
-    result = await db.execute(
+    key_result = await db.execute(
         select(IntegrationKey).where(
             IntegrationKey.project_id == project_id,
             IntegrationKey.service == provider,
             IntegrationKey.label == label,
         )
     )
-    key = result.scalars().first()
+    key = key_result.scalars().first()
     if key:
         key.restore()
         key.encrypted_key = _encrypt(token)
@@ -407,7 +407,7 @@ async def _apply_requests(
     return len(by_external)
 
 
-def _parse_date(value) -> date | None:
+def _parse_date(value: object) -> date | None:
     """'2026-06-10' → date; мусор/None → None."""
     if not value:
         return None
@@ -448,16 +448,16 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
 
     # article_seller одним запросом для всех номенклатур (без N+1)
     nom_ids = {r.nomenclature_id for r in ff_rows if r.nomenclature_id}
-    nom_ids |= {r.nomenclature_id for r in our_rows}
+    nom_ids |= {r.nomenclature_id for r in our_rows if r.nomenclature_id}
     article_by_nom: dict[int, str | None] = {}
     if nom_ids:
-        result = await db.execute(
+        nom_result = await db.execute(
             select(Nomenclature.id, Nomenclature.article_seller).where(
                 Nomenclature.project_id == project_id,
                 Nomenclature.id.in_(nom_ids),
             )
         )
-        article_by_nom = dict(result.all())
+        article_by_nom = {row.id: row.article_seller for row in nom_result.all()}
 
     rows: dict[str, dict] = {}
     for r in ff_rows:
@@ -466,7 +466,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
             "name": r.name,
             "vendor_code": r.vendor_code,
             "nomenclature_id": r.nomenclature_id,
-            "article_seller": article_by_nom.get(r.nomenclature_id),
+            "article_seller": article_by_nom.get(r.nomenclature_id) if r.nomenclature_id else None,
             "ff_good": r.qty_good,
             "ff_reserve": r.qty_reserve,
             "ff_defect": r.qty_defect,
@@ -475,15 +475,15 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
             "our_defect": 0,
             "diff": r.qty_good,
         }
-    for r in our_rows:
-        row = rows.get(r.barcode)
+    for wr in our_rows:
+        row = rows.get(wr.barcode)
         if row is None:
-            row = rows[r.barcode] = {
-                "barcode": r.barcode,
+            row = rows[wr.barcode] = {
+                "barcode": wr.barcode,
                 "name": None,
                 "vendor_code": None,
-                "nomenclature_id": r.nomenclature_id,
-                "article_seller": article_by_nom.get(r.nomenclature_id),
+                "nomenclature_id": wr.nomenclature_id,
+                "article_seller": article_by_nom.get(wr.nomenclature_id),
                 "ff_good": 0,
                 "ff_reserve": 0,
                 "ff_defect": 0,
@@ -493,11 +493,11 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
                 "diff": 0,
             }
         elif row["nomenclature_id"] is None:
-            row["nomenclature_id"] = r.nomenclature_id
-            row["article_seller"] = article_by_nom.get(r.nomenclature_id)
-        row["our_quantity"] = r.quantity
-        row["our_defect"] = r.defect_quantity
-        row["diff"] = row["ff_good"] - r.quantity
+            row["nomenclature_id"] = wr.nomenclature_id
+            row["article_seller"] = article_by_nom.get(wr.nomenclature_id)
+        row["our_quantity"] = wr.quantity
+        row["our_defect"] = wr.defect_quantity
+        row["diff"] = row["ff_good"] - wr.quantity
 
     out_rows = sorted(rows.values(), key=lambda x: (-x["diff"], x["barcode"]))
     totals = {
@@ -595,7 +595,7 @@ async def list_requests(
     return [_request_to_dict(r, assembly_map, inbound_map) for r in requests]
 
 
-def _coerce_name(value) -> str | None:
+def _coerce_name(value: object) -> str | None:
     """Провайдер отдаёт исполнителя/создателя то строкой, то объектом {name}."""
     if value is None:
         return None
