@@ -74,7 +74,9 @@ _DEST_WAREHOUSE_MAX = 300  # String(300): значение длиннее уро
 
 
 def _safe_int(value: object) -> int:
-    """PHP-API коэрсия: '2' → 2, '12,5'/'abc'/None/false → 0 — мусор не валит синк."""
+    """PHP-API коэрсия: '2' → 2, '12,5'/'abc'/None/false/контейнер → 0 — мусор не валит синк."""
+    if not isinstance(value, int | float | str):
+        return 0
     try:
         return int(value or 0)
     except (ValueError, TypeError):
@@ -1794,7 +1796,7 @@ async def link_request(
     if assembly_request_id is not None:
         if req.kind != FfRequestKind.ASSEMBLY.value:
             raise ValueError("assembly_request_id можно привязать только к ФФ-заявке типа assembly")
-        result = await db.execute(
+        asm_result = await db.execute(
             select(AssemblyRequest)
             .where(
                 AssemblyRequest.id == assembly_request_id,
@@ -1804,7 +1806,7 @@ async def link_request(
             # row-lock: сериализация с авто-READY синка (advisory lock линк не берёт)
             .with_for_update()
         )
-        doc = result.scalar_one_or_none()
+        doc = asm_result.scalar_one_or_none()
         if not doc:
             raise ValueError("Заявка на сборку не найдена в проекте")
         if doc.warehouse_id != req.warehouse_id:
@@ -1835,17 +1837,17 @@ async def link_request(
     else:
         if req.kind != FfRequestKind.INBOUND.value:
             raise ValueError("inbound_receipt_id можно привязать только к ФФ-заявке типа inbound")
-        result = await db.execute(
+        inb_result = await db.execute(
             select(InboundReceipt).where(
                 InboundReceipt.id == inbound_receipt_id,
                 InboundReceipt.project_id == project_id,
                 InboundReceipt.is_deleted == False,
             )
         )
-        doc = result.scalar_one_or_none()
-        if not doc:
+        inb_doc = inb_result.scalar_one_or_none()
+        if not inb_doc:
             raise ValueError("Приёмка не найдена в проекте")
-        if doc.warehouse_id != req.warehouse_id:
+        if inb_doc.warehouse_id != req.warehouse_id:
             raise ValueError("Приёмка принадлежит другому складу")
         conflict = await db.execute(
             select(FulfillmentRequest.id)
@@ -1859,7 +1861,7 @@ async def link_request(
         if conflict.scalar_one_or_none() is not None:
             raise ValueError("Приёмка уже связана с другой ФФ-заявкой")
         req.inbound_receipt_id = inbound_receipt_id
-        inbound_map = {doc.id: (doc.number, doc.status)}
+        inbound_map = {inb_doc.id: (inb_doc.number, inb_doc.status)}
 
     await db.commit()
     if marked_ready:
