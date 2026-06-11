@@ -22,6 +22,7 @@ Iron rules, архитектура слоёв и анти-паттерны — �
 
 ## Кэш
 `@cached(prefix, ttl=300)` для чтения — ключ обязан включать `project_id`.
+Новый prefix → зарегистрировать в `invalidate_project_reports()` (`backend/cache.py`) и прогнать `tests/test_conventions_sync.py` — иначе доменные сьюты зелёные, а CI красный.
 
 ## Безопасность
 - Upload-файлы → проверять `MAX_UPLOAD_SIZE_MB` до обработки.
