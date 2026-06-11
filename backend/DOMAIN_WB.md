@@ -45,6 +45,7 @@ WB публикует финотчёт за прошлый день к 03–05 M
 - Воронка: transitions → add_to_cart → orders_count → orders_sum → buyout_count.
 - Реклама: ad_spend, ad_views, ad_clicks → CTR, CPC, CPM.
 - Unit-экономика: `revenue − cost − ads − tax = profit` per unit.
+- Расширенный режим (`GET /funnel/data?extended=true`, `services/funnel/stock_costs.py`): себестоимость остатков WB (`Σ quantity_full × цена`), своих складов (`Σ quantity` — с резервом, без брака) и прогноз исчерпания (заказы/день за 7 дн, якорь на вчера + тренд 7д-vs-7д). Цена единицы: avg по `cost_order_items` → `WbCostOverride` → `WarehouseStock.cost_price`. `min_orders=N` — серверный порог по заказам. Оба параметра — для всех группировок, кроме `day`.
 
 ### Локализация (ИЛ + ИРП) — с 23.03.2026
 - Источник: WB Analytics v3 `sales-funnel/products` → `localizationPercent`, `timeToReady`.

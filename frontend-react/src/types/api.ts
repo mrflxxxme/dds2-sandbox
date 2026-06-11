@@ -441,6 +441,14 @@ export interface FunnelSkuRow {
   cpm: number;
   cr: number;
   drr: number;
+  // Расширенный режим (extended=true): остатки и себестоимость
+  wb_stock_qty?: number;
+  wb_stock_cost?: number;
+  own_stock_qty?: number;
+  own_stock_cost?: number;
+  stock_days_left?: number;
+  stock_out_date?: string | null;
+  stock_trend_pct?: number;
 }
 
 export interface FunnelAbcRow {
@@ -459,6 +467,14 @@ export interface FunnelAbcRow {
     abc_profit: string;
     drr: number;
     margin_pct: number;
+    // Расширенный режим (extended=true): остатки и себестоимость
+    wb_stock_qty?: number;
+    wb_stock_cost?: number;
+    own_stock_qty?: number;
+    own_stock_cost?: number;
+    stock_days_left?: number;
+    stock_out_date?: string | null;
+    stock_trend_pct?: number;
 }
 
 export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_code' | 'brand' | 'subject'> {

@@ -96,6 +96,7 @@ async def get_funnel_aggregated(
     brand: str | None,
     subject: str | None,
     bdr_rates_map: BdrRatesLookup | None = None,
+    nm_ids: set[int] | None = None,
 ) -> list[dict]:
     """Get funnel data aggregated by day.
 
@@ -103,6 +104,8 @@ async def get_funnel_aggregated(
     Falls back to tariff-based calculation otherwise.
     """
     q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
+    if nm_ids is not None:
+        q = q.where(WbFunnelDaily.nm_id.in_(nm_ids))
 
     if date_from:
         q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
@@ -296,12 +299,15 @@ async def get_funnel_by_sku(
     subject: str | None,
     bdr_rates_map: BdrRatesLookup | None = None,
     limit: int = 500,
+    nm_ids: set[int] | None = None,
 ) -> list[dict]:
     """Get funnel data aggregated by SKU (nm_id) for the entire period.
 
     Same profit logic as get_funnel_aggregated but grouped by product instead of day.
     """
     q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
+    if nm_ids is not None:
+        q = q.where(WbFunnelDaily.nm_id.in_(nm_ids))
 
     if date_from:
         q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
@@ -634,12 +640,15 @@ async def get_funnel_by_brand(
     subject: str | None,
     bdr_rates_map: BdrRatesLookup | None = None,
     limit: int = 500,
+    nm_ids: set[int] | None = None,
 ) -> list[dict]:
     """Get funnel data aggregated by brand for the entire period.
 
     Same profit logic as get_funnel_by_sku but grouped by brand.
     """
     q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
+    if nm_ids is not None:
+        q = q.where(WbFunnelDaily.nm_id.in_(nm_ids))
 
     if date_from:
         q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
@@ -827,12 +836,15 @@ async def get_funnel_by_subject(
     subject: str | None,
     bdr_rates_map: BdrRatesLookup | None = None,
     limit: int = 500,
+    nm_ids: set[int] | None = None,
 ) -> list[dict]:
     """Get funnel data aggregated by subject (category) for the entire period.
 
     Same profit logic as get_funnel_by_sku but grouped by subject.
     """
     q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
+    if nm_ids is not None:
+        q = q.where(WbFunnelDaily.nm_id.in_(nm_ids))
 
     if date_from:
         q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
@@ -1020,12 +1032,15 @@ async def get_funnel_detailed(
     vendor_code: str | None,
     subject: str | None,
     bdr_rates_map: BdrRatesLookup | None = None,
+    nm_ids: set[int] | None = None,
 ) -> list[dict]:
     """Get detailed funnel data per product.
 
     Uses BDR rates when available, falls back to tariff-based calculation.
     """
     q = select(WbFunnelDaily).where(WbFunnelDaily.project_id == pid)
+    if nm_ids is not None:
+        q = q.where(WbFunnelDaily.nm_id.in_(nm_ids))
 
     if date_from:
         q = q.where(WbFunnelDaily.date >= date.fromisoformat(date_from))
@@ -1145,6 +1160,58 @@ async def get_summary(
         if float(row.orders_sum_rub or 0) > 0
         else 0,
     }
+
+
+async def resolve_filter_nm_ids(
+    db: AsyncSession,
+    pid: int,
+    tag: str | None = None,
+    imt: str | None = None,
+) -> set[int] | None:
+    """nm_id, попадающие под фильтр по ярлыку и/или склейке.
+
+    None — фильтр не задан (не ограничивать). Пустое множество — ничего
+    не подошло (запросы вернут пустой результат). imt — имя алиаса или "#<imt_id>".
+    """
+    if not tag and not imt:
+        return None
+    from backend.models.cost import Nomenclature
+    from backend.models.refs import ImtAlias, ProductTag, ProductTagMap
+
+    result: set[int] | None = None
+    if tag:
+        rows = await db.execute(
+            select(ProductTagMap.nm_id)
+            .join(ProductTag, ProductTag.id == ProductTagMap.tag_id)
+            .where(
+                ProductTagMap.project_id == pid,
+                ProductTag.is_deleted.is_(False),
+                ProductTag.name == tag,
+            )
+            .limit(50000)
+        )
+        result = {r[0] for r in rows}
+    if imt:
+        if imt.startswith("#") and imt[1:].isdigit():
+            imt_id: int | None = int(imt[1:])
+        else:
+            imt_id = (
+                await db.execute(select(ImtAlias.imt_id).where(ImtAlias.project_id == pid, ImtAlias.name == imt))
+            ).scalar()
+        imt_set: set[int] = set()
+        if imt_id is not None:
+            rows = await db.execute(
+                select(Nomenclature.article_wb)
+                .where(
+                    Nomenclature.project_id == pid,
+                    Nomenclature.imt_id == imt_id,
+                    Nomenclature.article_wb.isnot(None),
+                )
+                .limit(50000)
+            )
+            imt_set = {r[0] for r in rows}
+        result = imt_set if result is None else result & imt_set
+    return result
 
 
 async def get_filters(db: AsyncSession, pid: int) -> dict:

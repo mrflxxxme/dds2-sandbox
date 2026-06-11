@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002
 """
 Router: /funnel — WB Sales funnel analytics (воронка продаж).
 Thin HTTP layer — all business logic is in services/funnel/ package.
@@ -164,6 +165,22 @@ async def backfill_funnel(
 # ─── Data endpoints ─────────────────────────────────────────────────────────
 
 
+async def _postprocess_funnel_rows(
+    db: AsyncSession,
+    pid: int,
+    data: list[dict],
+    group_by: str,
+    extended: bool,
+    min_orders: int,
+) -> list[dict]:
+    """Расширенный режим (остатки/себестоимость/прогноз) + серверный порог по заказам."""
+    data = funnel_service.apply_min_orders(data, min_orders)
+    if extended:
+        stock_map = await funnel_service.get_stock_cost_map(db, pid)
+        funnel_service.merge_stock_costs(data, stock_map, group_by)
+    return data
+
+
 @router.get("/data")
 async def get_funnel_data(
     date_from: str | None = Query(None),
@@ -172,12 +189,23 @@ async def get_funnel_data(
     vendor_code: str | None = Query(None),
     subject: str | None = Query(None),
     group_by: str = Query("day"),
+    extended: bool = Query(False),
+    min_orders: int = Query(0, ge=0),
+    tag: str | None = Query(None),
+    imt: str | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get funnel data. Supports grouping by day, sku, or detailed (per article filter)."""
+    """Get funnel data. Supports grouping by day, sku, or detailed (per article filter).
+
+    extended=true добавляет складские поля (себестоимость остатков WB/свои, прогноз
+    исчерпания); min_orders скрывает строки с меньшим числом заказов за период
+    (оба — для всех группировок, кроме day). tag/imt — фильтр по ярлыку/склейке,
+    работает во ВСЕХ группировках, включая day.
+    """
     tax_info = await _load_tax_info(db, project)
     bdr_rates_map = await _load_bdr_rates(db, project.id)
+    nm_filter = await funnel_service.resolve_filter_nm_ids(db, project.id, tag, imt)
 
     if group_by == "abc":
         # Use full SKU data + ABC classification
@@ -190,12 +218,14 @@ async def get_funnel_data(
             brand,
             subject,
             bdr_rates_map=bdr_rates_map,
+            nm_ids=nm_filter,
         )
         # Add ABC classification
         from backend.services.funnel.ad_campaigns_service import _assign_abc
 
         _assign_abc(data, "revenue", "abc_revenue")
         _assign_abc(data, "profit", "abc_profit")
+        data = await _postprocess_funnel_rows(db, project.id, data, "abc", extended, min_orders)
         return {
             "data": data,
             "tax_info": tax_info,
@@ -214,7 +244,9 @@ async def get_funnel_data(
             brand,
             subject,
             bdr_rates_map=bdr_rates_map,
+            nm_ids=nm_filter,
         )
+        data = await _postprocess_funnel_rows(db, project.id, data, "sku", extended, min_orders)
         return {
             "data": data,
             "tax_info": tax_info,
@@ -233,7 +265,9 @@ async def get_funnel_data(
             brand,
             subject,
             bdr_rates_map=bdr_rates_map,
+            nm_ids=nm_filter,
         )
+        data = await _postprocess_funnel_rows(db, project.id, data, "brand", extended, min_orders)
         return {
             "data": data,
             "tax_info": tax_info,
@@ -252,7 +286,9 @@ async def get_funnel_data(
             brand,
             subject,
             bdr_rates_map=bdr_rates_map,
+            nm_ids=nm_filter,
         )
+        data = await _postprocess_funnel_rows(db, project.id, data, "tag", extended, min_orders)
         return {
             "data": data,
             "tax_info": tax_info,
@@ -271,7 +307,9 @@ async def get_funnel_data(
             brand,
             subject,
             bdr_rates_map=bdr_rates_map,
+            nm_ids=nm_filter,
         )
+        data = await _postprocess_funnel_rows(db, project.id, data, "imt", extended, min_orders)
         return {
             "data": data,
             "tax_info": tax_info,
@@ -290,7 +328,9 @@ async def get_funnel_data(
             brand,
             subject,
             bdr_rates_map=bdr_rates_map,
+            nm_ids=nm_filter,
         )
+        data = await _postprocess_funnel_rows(db, project.id, data, "subject", extended, min_orders)
         return {
             "data": data,
             "tax_info": tax_info,
@@ -311,6 +351,7 @@ async def get_funnel_data(
             brand,
             subject,
             bdr_rates_map=bdr_rates_map,
+            nm_ids=nm_filter,
         )
         return {
             "data": data,
@@ -330,6 +371,7 @@ async def get_funnel_data(
             vendor_code,
             subject,
             bdr_rates_map=bdr_rates_map,
+            nm_ids=nm_filter,
         )
         return {"data": data, "tax_info": tax_info, "has_bdr": bool(bdr_rates_map), "detailed": True, "group_by": "day"}
 
