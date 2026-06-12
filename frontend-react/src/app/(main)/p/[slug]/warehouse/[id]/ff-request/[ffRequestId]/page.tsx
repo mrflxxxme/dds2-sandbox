@@ -4,7 +4,8 @@ import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
-import type { FfMatchRow, FfRequestDetail, FfRequestDetailProduct } from '@/types/api';
+import Toast from '@/components/Toast';
+import type { FfMatchRow, FfRequestDetail, FfRequestDetailProduct, FfRequestRow } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffStageBadge } from '../../ff-shared';
 
@@ -25,6 +26,12 @@ export default function FfRequestDetailPage() {
     const [linkOpen, setLinkOpen] = useState(false);
     const [linkActing, setLinkActing] = useState(false);
     const [linkError, setLinkError] = useState('');
+
+    // Архив (local_archived) и создание заявки на сборку из ФФ
+    const [archActing, setArchActing] = useState(false);
+    const [archError, setArchError] = useState('');
+    const [toast, setToast] = useState('');
+    const [notice, setNotice] = useState('');
 
     useEffect(() => {
         const controller = new AbortController();
@@ -93,6 +100,46 @@ export default function FfRequestDetailPage() {
             setDetail(prev => (prev ? { ...prev, ...updated, total_qty: prev.total_qty } : prev));
         } catch (e: unknown) {
             setLinkError(e instanceof Error ? e.message : 'Ошибка отвязки');
+        } finally {
+            setLinkActing(false);
+        }
+    };
+
+    // Применить обновлённую строку заявки к деталке (паттерн «не затираем total_qty»)
+    const applyUpdatedRow = (updated: FfRequestRow) => {
+        setDetail(prev => (prev ? { ...prev, ...updated, total_qty: prev.total_qty } : prev));
+    };
+
+    const handleArchiveToggle = async () => {
+        setArchActing(true);
+        setArchError('');
+        try {
+            const updated = d.local_archived
+                ? await api.unarchiveFulfillmentRequest(warehouseId, ffRequestId)
+                : await api.archiveFulfillmentRequest(warehouseId, ffRequestId);
+            applyUpdatedRow(updated);
+        } catch (e: unknown) {
+            setArchError(e instanceof Error ? e.message : (d.local_archived ? 'Ошибка возврата из архива' : 'Ошибка архивирования'));
+        } finally {
+            setArchActing(false);
+        }
+    };
+
+    // Создать заявку на сборку из состава ФФ-заявки (kind=assembly, без связи)
+    const handleCreateAssembly = async () => {
+        if (!confirm(`Создать заявку на сборку из ФФ-заявки ${d.number || d.external_id}?`)) return;
+        setLinkActing(true);
+        setLinkError('');
+        setNotice('');
+        try {
+            const result = await api.createAssemblyFromFf(warehouseId, ffRequestId);
+            applyUpdatedRow(result.request);
+            setToast(`Создана заявка на сборку № ${result.assembly_number}`);
+            if (result.skipped_barcodes.length > 0) {
+                setNotice(`Заявка № ${result.assembly_number} создана без ${formatNumber(result.skipped_barcodes.length, 0)} ШК: ${result.skipped_barcodes.join(', ')}`);
+            }
+        } catch (e: unknown) {
+            setLinkError(e instanceof Error ? e.message : 'Ошибка создания заявки на сборку');
         } finally {
             setLinkActing(false);
         }
@@ -185,11 +232,32 @@ export default function FfRequestDetailPage() {
                         <h1 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                             <span>Заявка {d.number || d.external_id}</span>
                             {ffStageBadge(d)}
+                            {d.local_archived && (
+                                <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>В архиве</span>
+                            )}
                         </h1>
                         <p className="page-subtitle">{d.kind === 'assembly' ? 'ФФ сборка' : d.kind === 'inbound' ? 'ФФ приёмка' : 'Заявка ФФ'}{d.type_name ? ` — ${d.type_name}` : ''}</p>
                     </div>
+                    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {archError && <span style={{ fontSize: 13, color: 'var(--color-danger)' }}>{archError}</span>}
+                        <button
+                            className="btn btn-sm btn-secondary"
+                            title={d.local_archived ? 'Вернуть из архива в активные' : 'Убрать в архив (локальная пометка)'}
+                            onClick={handleArchiveToggle}
+                            disabled={archActing}
+                        >
+                            {archActing ? '...' : (d.local_archived ? 'Вернуть' : 'В архив')}
+                        </button>
+                    </div>
                 </div>
             </div>
+
+            {notice && (
+                <div style={{ color: 'var(--color-warning)', marginBottom: 12, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                    <span>{notice}</span>
+                    <button className="btn btn-sm btn-secondary" onClick={() => setNotice('')}>✕</button>
+                </div>
+            )}
 
             {/* Шапка: реквизиты заявки */}
             <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
@@ -225,7 +293,19 @@ export default function FfRequestDetailPage() {
                                 </button>
                             </>
                         ) : (
-                            <button className="btn btn-sm btn-secondary" onClick={() => setLinkOpen(true)}>Связать</button>
+                            <>
+                                <button className="btn btn-sm btn-secondary" onClick={() => setLinkOpen(true)} disabled={linkActing}>Связать</button>
+                                {d.kind === 'assembly' && d.assembly_request_id == null && (
+                                    <button
+                                        className="btn btn-sm btn-primary"
+                                        title="Создать заявку на сборку из состава этой ФФ-заявки"
+                                        onClick={handleCreateAssembly}
+                                        disabled={linkActing}
+                                    >
+                                        {linkActing ? '...' : 'Создать заявку'}
+                                    </button>
+                                )}
+                            </>
                         )}
                         {linkError && <span style={{ color: 'var(--color-danger)' }}>{linkError}</span>}
                     </div>
@@ -333,11 +413,13 @@ export default function FfRequestDetailPage() {
                     onClose={() => setLinkOpen(false)}
                     onLinked={updated => {
                         // total_qty в строке — зеркало БД (бывает null); в деталке — живая сумма состава, не затираем
-                        setDetail(prev => (prev ? { ...prev, ...updated, total_qty: prev.total_qty } : prev));
+                        applyUpdatedRow(updated);
                         setLinkOpen(false);
                     }}
                 />
             )}
+
+            {toast && <Toast message={toast} onClose={() => setToast('')} />}
         </div>
     );
 }

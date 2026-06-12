@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 from starlette.routing import Match
 
+from backend.integrations.migfull_client import MigfullClient
 from backend.integrations.skladbot_client import SkladbotClient
 from backend.integrations.wmscelicom_client import WmsCelicomClient
 from backend.models import FulfillmentRequest, Nomenclature, Warehouse
@@ -28,6 +29,8 @@ def _uid() -> str:
 
 FAKE_SKLADBOT_TOKEN = "x" * 32  # фейковый токен
 FAKE_WMS_TOKEN = "0" * 32  # фейковый токен
+FAKE_MIG_TOKEN = "1" * 32  # фейковый токен
+FAKE_MIG_GUID = "11111111-2222-3333-4444-555555555555"
 
 
 async def _connect_skladbot(db_session, project_id, warehouse_id, monkeypatch):
@@ -45,6 +48,16 @@ async def _connect_wms(db_session, project_id, warehouse_id, monkeypatch):
     monkeypatch.setattr(WmsCelicomClient, "test_connection", fake_test_connection)
     await fulfillment_service.connect(
         db_session, project_id, warehouse_id, "wmscelicom", FAKE_WMS_TOKEN, base_url="test-client.wmscelicom.ru"
+    )
+
+
+async def _connect_migfull(db_session, project_id, warehouse_id, monkeypatch):
+    async def fake_test_connection(self):
+        return True
+
+    monkeypatch.setattr(MigfullClient, "test_connection", fake_test_connection)
+    await fulfillment_service.connect(
+        db_session, project_id, warehouse_id, "migfull", FAKE_MIG_TOKEN, tenant_guid=FAKE_MIG_GUID
     )
 
 
@@ -518,3 +531,19 @@ def test_parametrized_fulfillment_routes_still_resolve():
     assert route is not None
     assert route.name == "list_requests"
     assert child_scope["path_params"] == {"warehouse_id": "123"}
+
+
+@pytest.mark.asyncio
+async def test_overview_migfull_provider_label(db_session, project, monkeypatch):
+    """Третий провайдер в сводке: label «Натали (migfull.app)», каунты считаются."""
+    wh = await _make_warehouse(db_session, project.id)
+    await _connect_migfull(db_session, project.id, wh.id, monkeypatch)
+    db_session.add(_mirror(project.id, wh.id, provider="migfull"))
+    await db_session.commit()
+
+    data = await fulfillment_service.get_overview(db_session, project.id)
+    row = next(w for w in data["warehouses"] if w["warehouse_id"] == wh.id)
+    assert row["provider"] == "migfull"
+    assert row["provider_label"] == "Натали (migfull.app)"
+    assert row["requests_total"] == 1
+    assert row["requests_unlinked"] == 1

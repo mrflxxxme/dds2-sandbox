@@ -9,7 +9,9 @@ Service: fulfillment — интеграция с внешними фулфилм
 Провайдеры различаются формой API; внутри сервиса всё сводится к
 нормализованным dict'ам (см. _apply_stocks / _apply_requests), дальше
 путь общий. Деталка заявки: skladbot — живой HTTP-вызов, wmscelicom —
-из raw зеркала (by-id эндпоинта у провайдера нет, состав приходит в списке).
+из raw зеркала (by-id эндпоинта у провайдера нет, состав приходит в списке),
+migfull — сборки из raw (planned/shipped_lines приходят в списке целиком,
+сверено с *_lines_count живьём), приёмки — живые lines/incoming+received.
 
 Синк дополнительно: обогащает зеркало skladbot живой деталкой (total_qty /
 dest_warehouse — списочный метод их не отдаёт) и автоматически переводит
@@ -18,14 +20,17 @@ dest_warehouse — списочный метод их не отдаёт) и ав
 """
 
 import logging
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal
 
 import httpx
 from sqlalchemy import delete, func, select, text, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from backend.cache import invalidate_cache
+from backend.integrations.migfull_client import MigfullApiError, MigfullClient, normalize_tenant_guid
 from backend.integrations.resilience import CircuitOpenError, RateLimitError
 from backend.integrations.skladbot_client import (
     ASSEMBLY_TYPE_IDS,
@@ -54,14 +59,16 @@ from backend.models.assembly import (
     AssemblyStatus,
     AssemblyStatusHistory,
 )
+from backend.schemas.assembly import AssemblyItemCreate, AssemblyRequestCreate
+from backend.services.assembly.crud import create_assembly_request
 from backend.utils.crypto import decrypt as _decrypt, encrypt as _encrypt
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.fulfillment")
 
 FF_SERVICES = ("skladbot", "migfull", "wmscelicom")
-# Провайдеры с реализованным pull-синком (migfull — будущий, ключ подключить нельзя)
-SYNCABLE_FF_SERVICES = ("skladbot", "wmscelicom")
+# Провайдеры с реализованным pull-синком
+SYNCABLE_FF_SERVICES = ("skladbot", "wmscelicom", "migfull")
 STOCKS_LIMIT = 5000
 REQUESTS_LIMIT = 500
 
@@ -69,6 +76,12 @@ REQUESTS_LIMIT = 500
 # (rate limit /v1/requests/* — 120 req/min) и потолок чтения зеркала.
 _ENRICH_DETAIL_CAP = 100
 _MIRROR_SELECT_LIMIT = 10_000
+# migfull: штрихкоды отдаются только карточкой товара — cap detail-вызовов
+# guid→barcode за один синк (~1050 товаров, из них ~300 с остатком; хвост
+# дотягивается следующими синками). Кэш — снапшот fulfillment_stocks.
+_MIGFULL_BARCODE_CAP = 300
+# Служебные позиции migfull (учёт грузомест склада) — не товары
+_MIGFULL_SERVICE_ITEM_MARKER = "фф грузовое место"
 _QTY_MAX = 2**31 - 1  # Integer-колонка: мусорная сумма провайдера не должна валить flush
 _DEST_WAREHOUSE_MAX = 300  # String(300): значение длиннее уронит транзакцию синка
 
@@ -103,10 +116,26 @@ _SUGGEST_CANDIDATE_STATUSES = (
     AssemblyStatus.VEHICLE_ASSIGNED.value,
 )
 
+# Кандидаты для модалки «Связать» (get_link_candidates). Когда состав
+# ФФ-заявки доступен, главный сигнал — «подходит под наполнение»:
+# Jaccard множеств ШК × 60 + qty-бонус 20 (±10%) + дата-бонус 20/15/10
+# (0/±1/±2 дн), порог 40 и обязательное пересечение ШК. Без состава —
+# фолбэк на эвристику дат (_SUGGEST_DATE_SCORES, qty-бонус 10, порог 30).
+_LINK_CANDIDATES_LIMIT = 300
+_CAND_COMP_DATE_SCORES = {0: 20, 1: 15, 2: 10}
+_CAND_COMP_MIN_SCORE = 40
+
+
+_PROVIDER_LABELS = {
+    "skladbot": "skladbot.ru",
+    "wmscelicom": "WMS Celicom",
+    "migfull": "Натали (migfull.app)",
+}
+
 
 def _provider_human(provider: str) -> str:
     """Имя провайдера для пользовательских сообщений об ошибках."""
-    return "skladbot.ru" if provider == "skladbot" else "WMS Celicom"
+    return _PROVIDER_LABELS.get(provider, provider)
 
 
 def _assembly_ready_signal(
@@ -124,10 +153,13 @@ def _assembly_ready_signal(
     провайдера даст ложный READY (обратимо: READY → IN_PROGRESS разрешён) —
     при появлении пополнить ASSEMBLY_WIP_STAGE_CODES/MARKERS. Пустая стадия —
     НЕ сигнал. wmscelicom: стадий нет — только is_completed (терминальные
-    статусы отгрузки FBO).
+    статусы отгрузки FBO). migfull: stage_code = слаг статуса отгрузки
+    (uploaded → ready → closed) — ready («Собран») и есть сигнал готовности.
     """
     if is_completed:
         return True
+    if provider == "migfull":
+        return (stage_code or "").strip().lower() == "ready"
     if provider != "skladbot":
         return False
     code = (stage_code or "").strip()
@@ -207,6 +239,7 @@ async def get_status(db: AsyncSession, project_id: int, warehouse_id: int) -> di
         "customer_name": config.get("customer_name"),
         "token_expires_at": config.get("token_expires_at"),
         "api_base_url": config.get("api_base_url"),
+        "tenant_guid": config.get("tenant_guid"),
         "last_sync_at": key.last_sync_at,
     }
 
@@ -218,13 +251,15 @@ async def connect(
     provider: str,
     token: str,
     base_url: str | None = None,
+    tenant_guid: str | None = None,
 ) -> dict:
     """Validate the token and bind a fulfillment key to the warehouse.
 
     Для wmscelicom обязателен base_url — адрес клиентского инстанса
-    ({client}.wmscelicom.ru), API живёт на нём. Возвращает статус
-    (FulfillmentStatus shape). Raises ValueError при невалидном токене,
-    провайдере или отсутствующем складе.
+    ({client}.wmscelicom.ru), API живёт на нём. Для migfull обязателен
+    tenant_guid — GUID кабинета клиента (хост фиксированный). Возвращает
+    статус (FulfillmentStatus shape). Raises ValueError при невалидном
+    токене, провайдере или отсутствующем складе.
     """
     result = await db.execute(
         select(Warehouse.id).where(
@@ -270,6 +305,21 @@ async def connect(
             "api_base_url": api_base,
             # «Кабинет» в UI — домен инстанса (другого имени API не отдаёт)
             "customer_name": api_base.removeprefix("https://"),
+        }
+    elif provider == "migfull":
+        guid = normalize_tenant_guid(tenant_guid or "")
+        mig_client = MigfullClient(guid, token, project_id=project_id)
+        try:
+            ok = await mig_client.test_connection()
+        except CircuitOpenError as e:
+            raise ValueError(f"migfull.app временно недоступен, попробуйте позже ({e})") from e
+        if not ok:
+            raise ValueError("migfull.app не ответил на тестовый запрос. Проверьте токен и GUID кабинета.")
+
+        config = {
+            "tenant_guid": guid,
+            # Имени кабинета API не отдаёт — «кабинет» в UI = укороченный GUID
+            "customer_name": f"migfull.app · {guid[:8]}",
         }
     else:
         raise ValueError(f"Неподдерживаемый провайдер фулфилмента: {provider}")
@@ -320,6 +370,7 @@ async def connect(
         "customer_name": config.get("customer_name"),
         "token_expires_at": config.get("token_expires_at"),
         "api_base_url": config.get("api_base_url"),
+        "tenant_guid": config.get("tenant_guid"),
         "last_sync_at": key.last_sync_at,
     }
 
@@ -360,19 +411,24 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     config = key.config or {}
     customer_id = config.get("customer_id")
     api_base = str(config.get("api_base_url") or "")
+    tenant_guid = str(config.get("tenant_guid") or "")
     if provider == "skladbot":
         if not customer_id:
             raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
     elif provider == "wmscelicom":
         if not api_base:
             raise ValueError("В конфигурации ключа нет адреса инстанса — переподключите фулфилмент")
+    elif provider == "migfull":
+        if not tenant_guid:
+            raise ValueError("В конфигурации ключа нет GUID кабинета — переподключите фулфилмент")
     else:
         raise ValueError(f"Синк для провайдера «{provider}» не реализован")
 
     # Снимок обогащения зеркала — читаем ДО закрытия транзакции: по нему
-    # решаем, каким skladbot-заявкам нужна живая деталка (бэкфилл total_qty)
+    # решаем, каким заявкам нужна живая деталка (skladbot — деталка сборок,
+    # migfull — lines/incoming приёмок; бэкфилл total_qty)
     mirror_enrichment: dict[str, tuple[int | None, str | None]] = {}
-    if provider == "skladbot":
+    if provider in ("skladbot", "migfull"):
         enrich_result = await db.execute(
             select(
                 FulfillmentRequest.external_id,
@@ -382,11 +438,27 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             .where(
                 FulfillmentRequest.project_id == project_id,
                 FulfillmentRequest.warehouse_id == warehouse_id,
-                FulfillmentRequest.provider == "skladbot",
+                FulfillmentRequest.provider == provider,
             )
             .limit(_MIRROR_SELECT_LIMIT)
         )
         mirror_enrichment = {ext: (qty, dest) for ext, qty, dest in enrich_result.all()}
+
+    # migfull: персистентный кэш guid→barcode = прошлый снапшот остатков
+    # (штрихкоды отдаются только детальной карточкой товара)
+    barcode_by_guid: dict[str, str] = {}
+    if provider == "migfull":
+        bc_result = await db.execute(
+            select(FulfillmentStock.external_product_id, FulfillmentStock.barcode)
+            .where(
+                FulfillmentStock.project_id == project_id,
+                FulfillmentStock.warehouse_id == warehouse_id,
+                FulfillmentStock.provider == "migfull",
+                FulfillmentStock.external_product_id.is_not(None),
+            )
+            .limit(_MIRROR_SELECT_LIMIT)
+        )
+        barcode_by_guid = {guid: barcode for guid, barcode in bc_result.all() if guid and barcode}
     await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
 
     human = _provider_human(provider)
@@ -399,6 +471,14 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
                 fetched_requests.append((type_id, await skl_client.fetch_requests(type_id)))
             request_rows = _normalize_skladbot_requests(fetched_requests)
             await _enrich_skladbot_requests(skl_client, request_rows, mirror_enrichment)
+        elif provider == "migfull":
+            mig_client = MigfullClient(tenant_guid, token, project_id=project_id)
+            products = [p for p in await mig_client.fetch_all_products() if not _is_migfull_service_item(p)]
+            await _resolve_migfull_barcodes(mig_client, products, barcode_by_guid)
+            stock_items = [_normalize_migfull_stock(p, barcode_by_guid) for p in products]
+            request_rows = [_normalize_migfull_shipment(r) for r in await mig_client.fetch_shipments()]
+            request_rows += [_normalize_migfull_submission(r) for r in await mig_client.fetch_submissions()]
+            await _enrich_migfull_submissions(mig_client, request_rows, mirror_enrichment)
         else:
             wms_client = WmsCelicomClient(api_base, token, project_id=project_id)
             stock_items = [_normalize_wms_stock(i) for i in await wms_client.fetch_all_items()]
@@ -431,6 +511,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             FulfillmentRequest.assembly_request_id.is_not(None),
             FulfillmentRequest.archived == False,
             FulfillmentRequest.expired == False,
+            FulfillmentRequest.local_archived == False,
         )
         .limit(_MIRROR_SELECT_LIMIT)
     )
@@ -594,6 +675,197 @@ def _normalize_wms_unloading(row: dict) -> dict:
         "external_created_at": _parse_date(row.get("create_date_time")),
         "raw": row,
     }
+
+
+def _is_migfull_service_item(item: dict) -> bool:
+    """Служебные позиции migfull («ФФ грузовое место — короб…») — учёт
+    грузомест самого склада, не товары: в снапшот/тоталы не попадают."""
+    return str(item.get("name") or "").strip().lower().startswith(_MIGFULL_SERVICE_ITEM_MARKER)
+
+
+def _migfull_primary_barcode(detail: dict) -> str | None:
+    """Карточка товара → штрихкод: is_primary, иначе первый непустой."""
+    barcodes = [b for b in (detail.get("barcodes") or []) if isinstance(b, dict)]
+    ordered = sorted(barcodes, key=lambda b: not b.get("is_primary"))
+    return next((str(b.get("value") or "").strip() for b in ordered if b.get("value")), None)
+
+
+async def _resolve_migfull_barcodes(
+    client: MigfullClient,
+    products: list[dict],
+    barcode_by_guid: dict[str, str],
+) -> None:
+    """Дозаполнить кэш guid→barcode из детальных карточек товара (in-place).
+
+    В списке /products штрихкоды пустые у ВСЕХ товаров (sku/gtin) — они
+    отдаются только GET /products/{guid}. Детальку зовём ТОЛЬКО для
+    незакэшированных guid с ненулевым остатком (кэш = прошлый снапшот
+    fulfillment_stocks), cap _MIGFULL_BARCODE_CAP вызовов за синк — хвост
+    дотянется следующими синками. Товар с остатком, у которого карточка БЕЗ
+    штрихкодов, в кэш не попадает и ре-фетчится каждый синк — осознанно:
+    склад может дозаполнить ШК позже (cap ограничивает ущерб). Ошибки резолва
+    синк НЕ валят: 429/circuit — прекращаем резолв, прочее — пропуск товара.
+    """
+    targets = [
+        p
+        for p in products
+        if str(p.get("guid") or "") not in barcode_by_guid
+        and (_safe_int(p.get("stock_actual")) or _safe_int(p.get("stock_locked")))
+    ]
+    if len(targets) > _MIGFULL_BARCODE_CAP:
+        logger.warning(
+            "Fulfillment migfull: barcode detail cap %d exceeded, %d products deferred",
+            _MIGFULL_BARCODE_CAP,
+            len(targets) - _MIGFULL_BARCODE_CAP,
+        )
+        targets = targets[:_MIGFULL_BARCODE_CAP]
+
+    for product in targets:
+        guid = str(product.get("guid") or "")
+        try:
+            detail = await client.fetch_product(guid)
+        except (RateLimitError, CircuitOpenError) as e:
+            logger.warning("Fulfillment migfull: barcode resolve stopped (%s)", e)
+            break
+        except (MigfullApiError, httpx.HTTPError, ValueError) as e:
+            logger.warning("Fulfillment migfull: product %s barcode skipped (%s)", guid, e)
+            continue
+        barcode = _migfull_primary_barcode(detail)
+        if barcode:
+            barcode_by_guid[guid] = barcode
+
+
+def _normalize_migfull_stock(item: dict, barcode_by_guid: dict[str, str]) -> dict:
+    """migfull /products item → нормализованный остаток.
+
+    barcode — из кэша guid→barcode (нерезолвленные строки отсеет _apply_stocks
+    по пустому barcode). stock_actual → good, stock_locked → reserve,
+    stock_available → nominal; брака в остатках API не отдаёт.
+    """
+    guid = str(item.get("guid") or "")
+    return {
+        "barcode": barcode_by_guid.get(guid, ""),
+        "name": item.get("name"),
+        "vendor_code": item.get("sku"),
+        "external_product_id": guid or None,
+        "qty_good": _safe_int(item.get("stock_actual")),
+        "qty_reserve": _safe_int(item.get("stock_locked")),
+        "qty_defect": 0,
+        "qty_nominal": _safe_int(item.get("stock_available")),
+    }
+
+
+_MIGFULL_SHIPMENT_TYPE_NAMES = {"fbo": "Отгрузка FBO", "client": "Отгрузка клиенту"}
+
+
+def _normalize_migfull_shipment(row: dict) -> dict:
+    """migfull /shipments row → нормализованная заявка kind=assembly.
+
+    Слаг статуса (uploaded → ready → closed; canceled) кладём в stage_code —
+    по нему работает _assembly_ready_signal; человекочитаемый status_display —
+    в status/stage_title. planned/shipped_lines приходят в списке целиком
+    (сверено с *_lines_count) и остаются в raw — деталка строится из зеркала.
+    """
+    status = str(row.get("status") or "")
+    dest = row.get("destination_marketplace")
+    dest_name = dest.get("name") if isinstance(dest, dict) else None
+    return {
+        "external_id": str(row.get("guid") or ""),
+        "kind": FfRequestKind.ASSEMBLY.value,
+        "number": row.get("reference") or None,
+        "type_id": None,
+        "type_name": _MIGFULL_SHIPMENT_TYPE_NAMES.get(str(row.get("shipment_type") or ""), "Отгрузка"),
+        "status": row.get("status_display") or status or None,
+        "stage_code": status or None,
+        "stage_title": row.get("status_display") or status or None,
+        "is_completed": status == "closed",
+        "archived": status == "canceled",
+        "expired": False,
+        "total_qty": min(_safe_int(row.get("planned_quantity_total")), _QTY_MAX) or None,
+        "dest_warehouse": _coerce_dest(dest_name),
+        "external_created_at": _parse_date(row.get("created_at")),
+        "raw": row,
+    }
+
+
+def _normalize_migfull_submission(row: dict) -> dict:
+    """migfull /submissions row → нормализованная заявка kind=inbound.
+
+    Состава в списке нет (только submission_lines_count) — total_qty
+    дотягивает _enrich_migfull_submissions из lines/incoming.
+    """
+    status = str(row.get("status") or "")
+    return {
+        "external_id": str(row.get("guid") or ""),
+        "kind": FfRequestKind.INBOUND.value,
+        "number": row.get("reference") or None,
+        "type_id": None,
+        "type_name": "Приёмка",
+        "status": row.get("status_display") or status or None,
+        "stage_code": status or None,  # processing → send → closed; canceled
+        "stage_title": row.get("status_display") or status or None,
+        "is_completed": status == "closed",
+        "archived": status == "canceled",
+        "expired": False,
+        "total_qty": None,
+        "dest_warehouse": None,
+        "external_created_at": _parse_date(row.get("submission_date") or row.get("created_at")),
+        "raw": row,
+    }
+
+
+async def _enrich_migfull_submissions(
+    client: MigfullClient,
+    rows: list[dict],
+    mirror: dict[str, tuple[int | None, str | None]],
+) -> None:
+    """Обогатить inbound-строки заявленным количеством из lines/incoming in-place.
+
+    Активным приёмкам lines нужны каждый синк (заявленное меняется),
+    закрытым — разовый бэкфилл, пока в зеркале total_qty IS NULL. Отменённые
+    не бэкфиллим: их пустые lines давали бы вечный NULL → пере-fetch каждый
+    синк и голодание cap'а. Служебные позиции («ФФ грузовое место») в тотал
+    не входят. Cap _ENRICH_DETAIL_CAP; ошибки обогащения синк НЕ валят:
+    429/circuit — стоп, прочее — пропуск.
+    """
+    active_targets: list[dict] = []
+    backfill_targets: list[dict] = []
+    for row in rows:
+        if row.get("kind") != FfRequestKind.INBOUND.value:
+            continue
+        if not row.get("archived") and not row.get("is_completed"):
+            active_targets.append(row)
+        elif not row.get("archived") and mirror.get(row["external_id"], (None, None))[0] is None:
+            backfill_targets.append(row)
+
+    targets = active_targets + backfill_targets  # при cap'е бэкфилл жертвуем первым
+    if len(targets) > _ENRICH_DETAIL_CAP:
+        logger.warning(
+            "Fulfillment migfull: submission lines cap %d exceeded, %d skipped",
+            _ENRICH_DETAIL_CAP,
+            len(targets) - _ENRICH_DETAIL_CAP,
+        )
+        targets = targets[:_ENRICH_DETAIL_CAP]
+
+    for row in targets:
+        try:
+            lines = await client.fetch_submission_lines(row["external_id"], "incoming")
+        except (RateLimitError, CircuitOpenError) as e:
+            logger.warning("Fulfillment migfull: enrich stopped, remaining submissions skipped (%s)", e)
+            break
+        except (MigfullApiError, httpx.HTTPError, ValueError) as e:
+            logger.warning("Fulfillment migfull: submission %s skipped (%s)", row["external_id"], e)
+            continue
+        total = min(
+            sum(
+                _safe_int(line.get("quantity"))
+                for line in lines
+                if isinstance(line, dict) and not _is_migfull_service_item(line.get("product") or {})
+            ),
+            _QTY_MAX,
+        )
+        # 0/пусто = «нет данных»: не затираем прежнее значение нулём
+        row["total_qty"] = total or None
 
 
 async def _enrich_skladbot_requests(
@@ -1015,6 +1287,8 @@ def _request_to_dict(
         "is_completed": req.is_completed,
         "archived": req.archived,
         "expired": req.expired,
+        "local_archived": req.local_archived,
+        "local_archived_at": req.local_archived_at,
         "total_qty": req.total_qty,
         "dest_warehouse": req.dest_warehouse,
         "external_created_at": req.external_created_at,
@@ -1031,11 +1305,17 @@ async def list_requests(
     project_id: int,
     warehouse_id: int,
     kind: str | None = None,
+    show_archived: bool = False,
 ) -> list[dict]:
-    """Зеркало заявок ФФ с обогащением linked_number/linked_status (без N+1)."""
+    """Зеркало заявок ФФ с обогащением linked_number/linked_status (без N+1).
+
+    show_archived=False (дефолт) — только НЕ архивные локально;
+    show_archived=True — только локальный архив (вид «Архив»).
+    """
     q = select(FulfillmentRequest).where(
         FulfillmentRequest.project_id == project_id,
         FulfillmentRequest.warehouse_id == warehouse_id,
+        FulfillmentRequest.local_archived == show_archived,
     )
     if kind:
         q = q.where(FulfillmentRequest.kind == kind)
@@ -1182,6 +1462,7 @@ async def _load_match_suggestions(
         if r.kind == FfRequestKind.ASSEMBLY.value
         and r.assembly_request_id is None
         and not r.archived
+        and not r.local_archived
         and not r.is_completed
         and r.external_created_at is not None
     ]
@@ -1301,6 +1582,7 @@ async def get_overview(
                 FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
                 FulfillmentRequest.archived == False,
                 FulfillmentRequest.is_completed == False,
+                FulfillmentRequest.local_archived == False,
             )
             .group_by(FulfillmentRequest.warehouse_id, FulfillmentRequest.provider)
         )
@@ -1327,6 +1609,7 @@ async def get_overview(
             FulfillmentRequest.project_id == project_id,
             tuple_(FulfillmentRequest.warehouse_id, FulfillmentRequest.provider).in_(target_pairs),
             FulfillmentRequest.kind == kind,
+            FulfillmentRequest.local_archived == False,
         )
         if only_unlinked:
             if kind == FfRequestKind.INBOUND.value:
@@ -1454,6 +1737,112 @@ def _wms_detail_parts(req: FulfillmentRequest) -> tuple[list[dict], list[dict], 
     creator = " ".join(filter(None, (user.get("first_name"), user.get("last_name")))) or None
     out_fields = [{"name": name, "field": None, "value": str(value)} for name, value in fields if value]
     return products, out_fields, creator
+
+
+def _migfull_line_rows(value: object) -> list[dict]:
+    """raw-поле со строками → список dict (защита от мусора/None)."""
+    rows = value if isinstance(value, list) else []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _migfull_products_from_lines(
+    base_lines: list[dict],
+    fact_lines: list[dict],
+    *,
+    fact_field: str,
+) -> list[dict]:
+    """Строки заявки migfull → позиции по товарам (ключ — product_guid).
+
+    base_lines — заявленное (planned/incoming) → qty; fact_lines — факт
+    (shipped → delivery_qty / received → accepted_qty), брак received
+    (is_defective) → defect_qty. Служебные позиции отфильтрованы.
+    """
+    by_guid: dict[str, dict] = {}
+
+    def _slot(line: dict) -> dict | None:
+        product = line.get("product")
+        if not isinstance(product, dict):
+            product = {}
+        if _is_migfull_service_item(product):
+            return None
+        guid = str(line.get("product_guid") or product.get("guid") or "")
+        if not guid:
+            return None
+        slot = by_guid.get(guid)
+        if slot is None:
+            slot = by_guid[guid] = {
+                "guid": guid,
+                "name": product.get("name"),
+                "color": product.get("color"),
+                "size": product.get("size"),
+                "qty": 0,
+                "accepted_qty": 0,
+                "delivery_qty": 0,
+                "defect_qty": 0,
+            }
+        return slot
+
+    for line in base_lines:
+        slot = _slot(line)
+        if slot is not None:
+            slot["qty"] += _safe_int(line.get("quantity"))
+    for line in fact_lines:
+        slot = _slot(line)
+        if slot is None:
+            continue
+        if line.get("is_defective"):
+            slot["defect_qty"] += _safe_int(line.get("quantity"))
+        else:
+            slot[fact_field] += _safe_int(line.get("quantity"))
+    return list(by_guid.values())
+
+
+def _migfull_detail_fields(req: FulfillmentRequest) -> list[dict]:
+    """Динамические поля деталки migfull-заявки из зеркального raw."""
+    raw = req.raw or {}
+    fields: list[tuple[str, object]]
+    if req.kind == FfRequestKind.ASSEMBLY.value:
+        marketplace = raw.get("marketplace") if isinstance(raw.get("marketplace"), dict) else {}
+        fields = [
+            ("Маркетплейс", (marketplace or {}).get("name")),
+            ("Склад МП", req.dest_warehouse),
+            ("Дата отгрузки", raw.get("shipment_date")),
+            ("Прогноз отгрузки", raw.get("shipment_forecast")),
+            ("Коробов", raw.get("containers_count")),
+            ("Паллет", raw.get("pallets_count")),
+            ("План, шт", raw.get("planned_quantity_total")),
+            ("Факт, шт", raw.get("shipped_quantity_total")),
+            ("Номер поставки", raw.get("client_shipment_number")),
+        ]
+    else:
+        fields = [
+            ("Дата поставки", raw.get("submission_date")),
+            ("Заметка клиента", raw.get("client_reference")),
+            ("Комментарий", raw.get("client_comment")),
+            ("Строк в приёмке", raw.get("submission_lines_count")),
+        ]
+    return [{"name": name, "field": None, "value": str(value)} for name, value in fields if value]
+
+
+async def _migfull_guid_barcodes(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    guids: set[str],
+) -> dict[str, str]:
+    """{product_guid: barcode} из зеркала остатков (штрихкоды только в карточке
+    товара — при синке они оседают в fulfillment_stocks.external_product_id)."""
+    guids.discard("")
+    if not guids:
+        return {}
+    result = await db.execute(
+        select(FulfillmentStock.external_product_id, FulfillmentStock.barcode).where(
+            FulfillmentStock.project_id == project_id,
+            FulfillmentStock.warehouse_id == warehouse_id,
+            FulfillmentStock.external_product_id.in_(list(guids)),
+        )
+    )
+    return {guid: barcode for guid, barcode in result.all() if guid and barcode}
 
 
 async def _resolve_noms(db: AsyncSession, project_id: int, barcodes: set[str]) -> dict[str, tuple[int, str | None]]:
@@ -1591,6 +1980,8 @@ async def get_request_detail(
     открытии (не кэшируем: принятые количества меняются на стороне ФФ).
     wmscelicom: из зеркального raw — by-id эндпоинта у провайдера нет, состав
     приходит уже в списочных методах (актуальность = последний синк).
+    migfull: сборки — из raw (planned/shipped_lines в списке целиком),
+    приёмки — живые lines/incoming + received.
     None — заявка не найдена; ValueError — не подключено / провайдер недоступен.
     """
     result = await db.execute(
@@ -1668,6 +2059,88 @@ async def get_request_detail(
                 "products": products,
                 "stage_logs": [],
                 "fields": wms_fields,
+                "match": _build_match(products, our_by_barcode, nom_by_barcode) if our_by_barcode is not None else None,
+            }
+        )
+        return row
+
+    if req.provider == "migfull":
+        raw = req.raw or {}
+        if req.kind == FfRequestKind.ASSEMBLY.value:
+            # Состав отгрузки уже в зеркале: planned/shipped_lines из списочного метода
+            mig_products = _migfull_products_from_lines(
+                _migfull_line_rows(raw.get("planned_lines")),
+                _migfull_line_rows(raw.get("shipped_lines")),
+                fact_field="delivery_qty",
+            )
+        else:
+            # Приёмки: состава в списке нет — ЖИВЫЕ lines/incoming + received
+            key = await get_integration(db, project_id, warehouse_id)
+            if not key:
+                raise ValueError("Фулфилмент не подключён к этому складу")
+            config = key.config or {}
+            tenant_guid = str(config.get("tenant_guid") or "")
+            if not tenant_guid:
+                raise ValueError("В конфигурации ключа нет GUID кабинета — переподключите фулфилмент")
+            token = _decrypt(key.encrypted_key)
+            external_id = req.external_id
+            await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
+
+            mig_client = MigfullClient(tenant_guid, token, project_id=project_id)
+            try:
+                incoming = await mig_client.fetch_submission_lines(external_id, "incoming")
+                received = await mig_client.fetch_submission_lines(external_id, "received")
+            except CircuitOpenError as e:
+                raise ValueError(f"migfull.app временно недоступен, попробуйте позже ({e})") from e
+            except RateLimitError as e:
+                raise ValueError("migfull.app ограничил частоту запросов — откройте деталку через минуту") from e
+            except MigfullApiError as e:
+                raise ValueError(f"migfull.app не отдал строки приёмки (HTTP {e.status_code})") from e
+            except httpx.HTTPError as e:
+                raise ValueError(f"Сетевая ошибка при обращении к migfull.app: {e}") from e
+            except ValueError as e:
+                raise ValueError(f"migfull.app вернул ошибку сервера, попробуйте позже ({str(e)[:100]})") from e
+            mig_products = _migfull_products_from_lines(incoming, received, fact_field="accepted_qty")
+
+        # Штрихкоды только в карточке товара → guid→barcode из зеркала остатков
+        guid_barcodes = await _migfull_guid_barcodes(db, project_id, warehouse_id, {p["guid"] for p in mig_products})
+        match_barcodes = {guid_barcodes.get(p["guid"], "") for p in mig_products} | set(our_by_barcode or {})
+        nom_by_barcode = await _resolve_noms(db, project_id, match_barcodes)
+        products = []
+        for p in mig_products:
+            barcode = guid_barcodes.get(p["guid"])
+            nom_id, article = nom_by_barcode.get(barcode, (None, None)) if barcode else (None, None)
+            products.append(
+                {
+                    "barcode": barcode,
+                    "vendor_code": None,
+                    "name": p.get("name"),
+                    "nomenclature_id": nom_id,
+                    "article_seller": article,
+                    "qty": p["qty"],
+                    "accepted_qty": p["accepted_qty"],
+                    "delivery_qty": p["delivery_qty"],
+                    "defect_qty": p["defect_qty"],
+                    "color": p.get("color"),
+                    "size": p.get("size"),
+                    "comment": None,
+                    "image": None,
+                    "our_qty": our_by_barcode.get(barcode or "", 0) if our_by_barcode is not None else None,
+                }
+            )
+        row = _request_to_dict(req, assembly_map, inbound_map)
+        row.update(
+            {
+                "comment": raw.get("notes") or raw.get("client_comment") or None,
+                "customer_name": None,
+                "executor": None,
+                "creator": _coerce_name(raw.get("processor")),
+                "stage_description": None,
+                "total_qty": sum(p["qty"] for p in products),
+                "total_accepted": sum(p["accepted_qty"] for p in products),
+                "products": products,
+                "stage_logs": [],
+                "fields": _migfull_detail_fields(req),
                 "match": _build_match(products, our_by_barcode, nom_by_barcode) if our_by_barcode is not None else None,
             }
         )
@@ -1890,3 +2363,458 @@ async def unlink_request(
     req.inbound_receipt_id = None
     await db.commit()
     return _request_to_dict(req)
+
+
+# ─── Локальный архив (local_archived — пометка DDS, синк её не трогает) ──────
+
+
+async def _get_request(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    ff_request_id: int,
+) -> FulfillmentRequest | None:
+    """ФФ-заявка по id в скоупе (project, warehouse) или None."""
+    result = await db.execute(
+        select(FulfillmentRequest).where(
+            FulfillmentRequest.id == ff_request_id,
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def archive_request(
+    db: AsyncSession,
+    project_id: int,
+    ff_request_id: int,
+    warehouse_id: int,
+) -> dict | None:
+    """Локальный архив: пометить заявку в DDS (зеркальный archived не трогаем).
+
+    Идемпотентно (повторный вызов не сдвигает local_archived_at).
+    None — заявка не найдена.
+    """
+    req = await _get_request(db, project_id, warehouse_id, ff_request_id)
+    if not req:
+        return None
+    if not req.local_archived:
+        req.local_archived = True
+        req.local_archived_at = utcnow()
+        await db.commit()
+    return _request_to_dict(req)
+
+
+async def unarchive_request(
+    db: AsyncSession,
+    project_id: int,
+    ff_request_id: int,
+    warehouse_id: int,
+) -> dict | None:
+    """Вернуть заявку из локального архива. None — заявка не найдена."""
+    req = await _get_request(db, project_id, warehouse_id, ff_request_id)
+    if not req:
+        return None
+    if req.local_archived:
+        req.local_archived = False
+        req.local_archived_at = None
+        await db.commit()
+    return _request_to_dict(req)
+
+
+# ─── Кандидаты для модалки «Связать» + создание сборки из ФФ-заявки ──────────
+
+
+async def _fetch_ff_composition(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    req: FulfillmentRequest,
+) -> dict[str, int] | None:
+    """Состав ФФ-заявки {barcode: qty > 0}. None — состав недоступен.
+
+    wmscelicom: из зеркального raw (assembly — packages → items, inbound —
+    items); пустой результат = «нет данных» (ограничение провайдера) → None.
+    skladbot: живая деталка /v1/requests/show — read-транзакция закрывается
+    ДО HTTP-вызова (PgBouncer: retry/backoff не должен держать
+    idle-in-transaction коннект); любая ошибка провайдера → None, эндпоинт
+    не валим. {} — деталка получена, но состав пуст.
+    migfull: сборки — из зеркального raw (planned_lines), ШК — guid→barcode
+    из зеркала остатков; guid без ШК выпадают из состава (дотянутся синком
+    остатков). Приёмки — строк в списке нет (только живые lines/*), HTTP ради
+    скоринга не тянем → None (фолбэк на эвристику дат).
+    """
+    if req.provider == "wmscelicom":
+        comp: dict[str, int]
+        if req.kind == FfRequestKind.ASSEMBLY.value:
+            comp = _raw_assembly_composition(req.provider, req.raw)
+        else:
+            comp = {}
+            for item in (req.raw or {}).get("items") or []:  # PHP-API: бывают null-элементы
+                if not isinstance(item, dict):
+                    continue
+                barcode = str(item.get("barcode") or "").strip()
+                if not barcode:
+                    continue
+                comp[barcode] = comp.get(barcode, 0) + _safe_int(item.get("count"))
+        comp = {barcode: qty for barcode, qty in comp.items() if qty > 0}
+        return comp or None
+
+    if req.provider == "migfull":
+        if req.kind != FfRequestKind.ASSEMBLY.value:
+            return None
+        raw = req.raw or {}
+        guid_qty: dict[str, int] = {}
+        for p in _migfull_products_from_lines(
+            _migfull_line_rows(raw.get("planned_lines")), [], fact_field="delivery_qty"
+        ):
+            if p["qty"] > 0:
+                guid_qty[p["guid"]] = guid_qty.get(p["guid"], 0) + p["qty"]
+        if not guid_qty:
+            return None
+        guid_barcodes = await _migfull_guid_barcodes(db, project_id, warehouse_id, set(guid_qty))
+        mig_comp: dict[str, int] = {}
+        for guid, qty in guid_qty.items():
+            barcode = guid_barcodes.get(guid)
+            if barcode:
+                mig_comp[barcode] = mig_comp.get(barcode, 0) + qty
+        return mig_comp or None
+
+    if req.provider != "skladbot":
+        return None
+
+    key = await get_integration(db, project_id, warehouse_id)
+    if not key:
+        return None
+    token = _decrypt(key.encrypted_key)
+    external_id = req.external_id
+    await db.commit()  # закрыть read-транзакцию до внешнего HTTP-вызова
+
+    client = SkladbotClient(token, project_id=project_id)
+    try:
+        detail = await client.fetch_request_detail(external_id)
+    except (RateLimitError, CircuitOpenError, SkladbotApiError, httpx.HTTPError, ValueError) as e:
+        logger.warning("FF composition: request %s detail failed (%s)", external_id, e)
+        return None
+    if not isinstance(detail, dict):
+        # show недокументирован: Laravel может отдать data списком — форма дрейфует
+        return None
+    live_comp: dict[str, int] = {}
+    for p in detail.get("products") or []:
+        if not isinstance(p, dict):
+            continue
+        barcode = str(p.get("barcode") or "").strip()
+        if not barcode:
+            continue
+        live_comp[barcode] = live_comp.get(barcode, 0) + _safe_int(p.get("amount"))
+    return {barcode: qty for barcode, qty in live_comp.items() if qty > 0}
+
+
+def _candidate_date_diff(ff_created: date | None, cand_created: datetime | None) -> int | None:
+    """|дата ФФ-заявки − дата документа| в днях; None — дат(ы) нет."""
+    if ff_created is None or cand_created is None:
+        return None
+    return abs((ff_created - cand_created.date()).days)
+
+
+def _date_reason(diff_days: int) -> str:
+    return "дата совпадает" if diff_days == 0 else f"дата ±{diff_days} дн"
+
+
+def _score_by_composition(
+    ff_comp: dict[str, int],
+    cand_items: dict[str, int],
+    diff_days: int | None,
+) -> tuple[int | None, str | None]:
+    """Скоринг «подходит под наполнение»: Jaccard ШК ×60 + qty 20 + дата 20/15/10.
+
+    score/reason только при пересечении ШК (comp > 0) и score ≥ 40.
+    """
+    union = set(ff_comp) | set(cand_items)
+    share = len(set(ff_comp) & set(cand_items)) / len(union) if union else 0.0
+    comp_score = round(share * 60)
+    if comp_score <= 0:
+        return None, None
+    score = comp_score
+    reason_parts = [f"ШК {round(share * 100)}%"]
+
+    ff_total = sum(ff_comp.values())
+    cand_total = sum(cand_items.values())
+    if ff_total > 0 and cand_total > 0 and abs(cand_total - ff_total) <= 0.1 * ff_total:
+        score += 20
+        reason_parts.append("кол-во ±10%")
+
+    if diff_days is not None and diff_days in _CAND_COMP_DATE_SCORES:
+        score += _CAND_COMP_DATE_SCORES[diff_days]
+        reason_parts.append(_date_reason(diff_days))
+
+    score = min(100, score)
+    if score < _CAND_COMP_MIN_SCORE:
+        return None, None
+    return score, ", ".join(reason_parts)
+
+
+def _score_by_date(
+    ff_total: int | None,
+    cand_total: int,
+    diff_days: int | None,
+) -> tuple[int | None, str | None]:
+    """Фолбэк-скоринг без состава: дата 70/55/40 + qty-бонус 10, порог 30."""
+    if diff_days is None:
+        return None, None
+    date_score = _SUGGEST_DATE_SCORES.get(diff_days)
+    if date_score is None:
+        return None, None
+    score = date_score
+    reason_parts = [_date_reason(diff_days)]
+    if ff_total and cand_total and abs(cand_total - ff_total) <= 0.1 * ff_total:
+        score += 10
+        reason_parts.append("кол-во ±10%")
+    if score < _SUGGEST_MIN_SCORE:
+        return None, None
+    return min(100, score), ", ".join(reason_parts)
+
+
+async def _assembly_candidates(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    ff_request_id: int,
+) -> tuple[list[AssemblyRequest], dict[int, dict[str, int]]]:
+    """Заявки на сборку склада, не связанные с ДРУГИМИ ФФ-заявками, + их позиции."""
+    linked_subq = select(FulfillmentRequest.assembly_request_id).where(
+        FulfillmentRequest.project_id == project_id,
+        FulfillmentRequest.assembly_request_id.is_not(None),
+        FulfillmentRequest.id != ff_request_id,
+    )
+    result = await db.execute(
+        select(AssemblyRequest)
+        .options(selectinload(AssemblyRequest.wb_fbo_supply))
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.warehouse_id == warehouse_id,
+            AssemblyRequest.is_deleted == False,
+            AssemblyRequest.status != AssemblyStatus.CANCELLED.value,
+            AssemblyRequest.id.not_in(linked_subq),
+        )
+        .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
+        .limit(_LINK_CANDIDATES_LIMIT)
+    )
+    docs = list(result.scalars().all())
+    items_by_doc: dict[int, dict[str, int]] = {}
+    if docs:
+        items_result = await db.execute(
+            select(
+                AssemblyRequestItem.assembly_request_id,
+                AssemblyRequestItem.barcode,
+                func.sum(AssemblyRequestItem.quantity),
+            )
+            .where(
+                AssemblyRequestItem.project_id == project_id,
+                AssemblyRequestItem.assembly_request_id.in_([d.id for d in docs]),
+            )
+            .group_by(AssemblyRequestItem.assembly_request_id, AssemblyRequestItem.barcode)
+        )
+        for doc_id, barcode, qty in items_result.all():
+            items_by_doc.setdefault(doc_id, {})[barcode] = int(qty or 0)
+    return docs, items_by_doc
+
+
+async def _inbound_candidates(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    ff_request_id: int,
+) -> tuple[list[InboundReceipt], dict[int, dict[str, int]]]:
+    """Приёмки склада, не связанные с ДРУГИМИ ФФ-заявками, + их позиции (expected_qty)."""
+    linked_subq = select(FulfillmentRequest.inbound_receipt_id).where(
+        FulfillmentRequest.project_id == project_id,
+        FulfillmentRequest.inbound_receipt_id.is_not(None),
+        FulfillmentRequest.id != ff_request_id,
+    )
+    result = await db.execute(
+        select(InboundReceipt)
+        .where(
+            InboundReceipt.project_id == project_id,
+            InboundReceipt.warehouse_id == warehouse_id,
+            InboundReceipt.is_deleted == False,
+            InboundReceipt.id.not_in(linked_subq),
+        )
+        .order_by(InboundReceipt.created_at.desc(), InboundReceipt.id.desc())
+        .limit(_LINK_CANDIDATES_LIMIT)
+    )
+    docs = list(result.scalars().all())
+    items_by_doc: dict[int, dict[str, int]] = {}
+    if docs:
+        items_result = await db.execute(
+            select(
+                InboundReceiptItem.receipt_id,
+                InboundReceiptItem.barcode,
+                func.sum(InboundReceiptItem.expected_qty),
+            )
+            .where(
+                InboundReceiptItem.project_id == project_id,
+                InboundReceiptItem.receipt_id.in_([d.id for d in docs]),
+            )
+            .group_by(InboundReceiptItem.receipt_id, InboundReceiptItem.barcode)
+        )
+        for doc_id, barcode, qty in items_result.all():
+            items_by_doc.setdefault(doc_id, {})[barcode] = int(qty or 0)
+    return docs, items_by_doc
+
+
+async def get_link_candidates(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    ff_request_id: int,
+) -> dict | None:
+    """Кандидаты для связывания ФФ-заявки (FfLinkCandidatesResponse shape).
+
+    kind=assembly → наши заявки на сборку склада, kind=inbound → приёмки;
+    уже связанные с другими ФФ-заявками — исключаются. Скоринг: при доступном
+    составе — пересечение ШК (см. _score_by_composition), иначе фолбэк по
+    датам. None — ФФ-заявка не найдена; ValueError — kind=other.
+    """
+    req = await _get_request(db, project_id, warehouse_id, ff_request_id)
+    if not req:
+        return None
+    if req.kind not in (FfRequestKind.ASSEMBLY.value, FfRequestKind.INBOUND.value):
+        raise ValueError("Подбор кандидатов доступен только для заявок типа «сборка» и «приёмка»")
+
+    kind = req.kind
+    ff_number = req.number or req.external_id
+    ff_created = req.external_created_at
+    mirror_total = req.total_qty
+
+    # skladbot: внутри — живой HTTP (транзакция закрывается до вызова)
+    comp = await _fetch_ff_composition(db, project_id, warehouse_id, req)
+    composition_available = bool(comp)
+
+    docs: list[AssemblyRequest] | list[InboundReceipt]
+    if kind == FfRequestKind.ASSEMBLY.value:
+        docs, items_by_doc = await _assembly_candidates(db, project_id, warehouse_id, ff_request_id)
+    else:
+        docs, items_by_doc = await _inbound_candidates(db, project_id, warehouse_id, ff_request_id)
+
+    candidates = []
+    for doc in docs:
+        cand_items = items_by_doc.get(doc.id, {})
+        cand_total = sum(cand_items.values())
+        diff_days = _candidate_date_diff(ff_created, doc.created_at)
+        if comp:
+            score, reason = _score_by_composition(comp, cand_items, diff_days)
+        else:
+            score, reason = _score_by_date(mirror_total, cand_total, diff_days)
+
+        fbo_supply_number = dest_warehouse = None
+        if isinstance(doc, AssemblyRequest):
+            supply = doc.wb_fbo_supply
+            fbo_supply_number = supply.wb_supply_id if supply else None
+            dest_warehouse = doc.wb_warehouse_name_manual or (supply.warehouse_name if supply else None)
+
+        candidates.append(
+            {
+                "doc_id": doc.id,
+                "number": doc.number,
+                "status": doc.status,
+                "created_at": doc.created_at,
+                "total_qty": cand_total,
+                "fbo_supply_number": fbo_supply_number,
+                "dest_warehouse": dest_warehouse,
+                "score": score,
+                "reason": reason,
+            }
+        )
+
+    return {
+        "kind": kind,
+        "ff_number": ff_number,
+        "ff_total_qty": sum(comp.values()) if comp else mirror_total,
+        "composition_available": composition_available,
+        "candidates": candidates,
+    }
+
+
+async def create_assembly_from_ff(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    ff_request_id: int,
+) -> dict | None:
+    """Создать нашу заявку на сборку из состава ФФ-заявки и связать их.
+
+    Состав — через _fetch_ff_composition (wmscelicom — raw, skladbot — живая
+    деталка); в сборку попадают только ШК, найденные в номенклатуре проекта,
+    остальные возвращаются в skipped_barcodes. None — ФФ-заявка не найдена.
+    ValueError — не assembly / уже связана / состав недоступен или пуст /
+    ни один ШК не известен / ошибки create_assembly_request (дефицит
+    доступного стока, не-FULFILLMENT склад).
+
+    НЕ атомарно: create_assembly_request коммитит сборку ДО связывания.
+    Если ФФ-заявку связали параллельно (окно между созданием и пере-SELECT
+    с row-lock) — ValueError, созданная сборка остаётся НЕсвязанной (видна
+    в списке заявок на сборку; пользователь связывает или удаляет вручную).
+    """
+    req = await _get_request(db, project_id, warehouse_id, ff_request_id)
+    if not req:
+        return None
+    if req.kind != FfRequestKind.ASSEMBLY.value:
+        raise ValueError("Создать заявку на сборку можно только из ФФ-заявки типа «сборка»")
+    if req.assembly_request_id is not None:
+        raise ValueError("ФФ-заявка уже связана с заявкой на сборку")
+
+    ff_label = req.number or req.external_id
+    comp = await _fetch_ff_composition(db, project_id, warehouse_id, req)
+    if comp is None:
+        raise ValueError("Состав ФФ-заявки недоступен — попробуйте позже")
+    if not comp:
+        raise ValueError("Состав ФФ-заявки пуст — создавать нечего")
+
+    nom_by_barcode = await _resolve_noms(db, project_id, set(comp))
+    skipped_barcodes = sorted(barcode for barcode in comp if barcode not in nom_by_barcode)
+    items = [
+        AssemblyItemCreate(barcode=barcode, quantity=qty) for barcode, qty in comp.items() if barcode in nom_by_barcode
+    ]
+    if not items:
+        raise ValueError("Ни один ШК из состава ФФ-заявки не найден в номенклатуре проекта")
+
+    payload = AssemblyRequestCreate(
+        warehouse_id=warehouse_id,
+        pallets_count=1,
+        pallet_weight_kg=Decimal("1.00"),
+        comment=f"Создана из ФФ-заявки {ff_label}",
+        items=items,
+    )
+    # ValueError (дефицит доступного стока и т.п.) пробрасываем как есть —
+    # текст человекочитаемый; commit + invalidate_cache внутри.
+    doc = await create_assembly_request(db, project_id, payload)
+
+    # Пере-SELECT под row-lock: параллельный link мог занять ФФ-заявку,
+    # пока создавалась сборка (create_assembly_request коммитит транзакцию)
+    locked = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.id == ff_request_id,
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+        )
+        .with_for_update()
+    )
+    req = locked.scalar_one_or_none()
+    if req is None or req.assembly_request_id is not None:
+        await db.rollback()
+        raise ValueError(
+            f"ФФ-заявку уже связали параллельно — созданная заявка на сборку {doc.number} осталась без связи"
+        )
+    req.assembly_request_id = doc.id
+    await db.commit()
+
+    return {
+        "request": _request_to_dict(req, {doc.id: (doc.number, doc.status)}),
+        "assembly_request_id": doc.id,
+        "assembly_number": doc.number,
+        "items_created": len(items),
+        "skipped_barcodes": skipped_barcodes,
+    }

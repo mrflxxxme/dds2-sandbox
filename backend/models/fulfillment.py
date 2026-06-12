@@ -86,6 +86,10 @@ class FulfillmentRequest(Base):
     is_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     expired: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Локальный архив (пометка пользователя в DDS): синк его НЕ трогает,
+    # в отличие от archived — зеркала провайдера, затираемого каждым синком
+    local_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
+    local_archived_at: Mapped[datetime | None] = mapped_column(DateTime)
     # Обогащение составом: skladbot — из деталки при синке, wmscelicom — из raw списка
     total_qty: Mapped[int | None] = mapped_column(Integer)  # заявлено всего, шт
     dest_warehouse: Mapped[str | None] = mapped_column(String(300))  # склад отгрузки МП

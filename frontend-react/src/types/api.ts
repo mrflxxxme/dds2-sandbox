@@ -3280,9 +3280,9 @@ export interface BasketEvaluation {
   cities: CitySpeedDTO[] | null;
 }
 
-// ─── Fulfillment integration (skladbot, wmscelicom) ────────────────────────
+// ─── Fulfillment integration (skladbot, wmscelicom, migfull) ───────────────
 
-export type FulfillmentProviderId = 'skladbot' | 'wmscelicom';
+export type FulfillmentProviderId = 'skladbot' | 'wmscelicom' | 'migfull';
 
 export interface FulfillmentStatus {
   connected: boolean;
@@ -3294,6 +3294,8 @@ export interface FulfillmentStatus {
   token_expires_at: string | null;
   /** wmscelicom: адрес клиентского инстанса, на который ходим */
   api_base_url: string | null;
+  /** migfull: GUID кабинета */
+  tenant_guid: string | null;
   last_sync_at: string | null;
 }
 
@@ -3302,6 +3304,8 @@ export interface FulfillmentConnectPayload {
   token: string;
   /** wmscelicom: адрес инстанса {client}.wmscelicom.ru */
   base_url?: string | null;
+  /** migfull: GUID кабинета */
+  tenant_guid?: string | null;
 }
 
 export interface FfSyncResult {
@@ -3377,6 +3381,9 @@ export interface FfRequestRow {
   /** Обогащение по связанному документу (заполняет сервис) */
   linked_number: string | null;
   linked_status: string | null;
+  /** Локальный архив (наша пометка, не статус провайдера) */
+  local_archived: boolean;
+  local_archived_at: string | null;
 }
 
 export interface FfRequestDetailProduct {
@@ -3495,4 +3502,42 @@ export interface FfOverviewResponse {
 export interface FfLinkPayload {
   assembly_request_id?: number | null;
   inbound_receipt_id?: number | null;
+}
+
+/** Кандидат для связывания ФФ-заявки с нашим документом (модал «Связать») */
+export interface FfLinkCandidate {
+  doc_id: number;
+  number: string;
+  status: string;
+  created_at: string | null;
+  /** всего, шт */
+  total_qty: number;
+  /** только assembly */
+  fbo_supply_number: string | null;
+  /** только assembly */
+  dest_warehouse: string | null;
+  /** 0..100 — уверенность эвристики «похож по наполнению»; null — не похож */
+  score: number | null;
+  /** объяснение score: «ШК 75%, кол-во ±10%, дата ±1 дн» */
+  reason: string | null;
+}
+
+export interface FfLinkCandidatesResponse {
+  kind: FfRequestKind;
+  ff_number: string | null;
+  ff_total_qty: number | null;
+  /** false — состав ФФ-заявки недоступен, score не рассчитан */
+  composition_available: boolean;
+  candidates: FfLinkCandidate[];
+}
+
+/** Итог создания заявки на сборку из ФФ-заявки */
+export interface FfCreateAssemblyResult {
+  /** ФФ-заявка уже связана с созданной заявкой */
+  request: FfRequestRow;
+  assembly_request_id: number;
+  assembly_number: string;
+  items_created: number;
+  /** ШК из состава ФФ, не найденные в номенклатуре (пропущены) */
+  skipped_barcodes: string[];
 }
