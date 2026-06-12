@@ -32,7 +32,7 @@ from backend.models.mixins import SoftDeleteMixin
 | Pydantic schemas | `schemas/` |
 | Импорт файлов / ETL | `etl/` (парсеры VTB, WB) |
 | WB HTTP-клиент | `integrations/wb_api.py` (+ `resilience.py`) |
-| Фулфилмент (skladbot.ru, wmscelicom) | `integrations/skladbot_client.py`, `integrations/wmscelicom_client.py`, `services/fulfillment_service.py`, `routers/fulfillment.py`, job `scheduler/jobs/fulfillment_sync.py` |
+| Фулфилмент (skladbot.ru, wmscelicom, migfull) | `integrations/skladbot_client.py`, `integrations/wmscelicom_client.py`, `integrations/migfull_client.py`, `services/fulfillment_service.py`, `routers/fulfillment.py`, job `scheduler/jobs/fulfillment_sync.py` |
 | Telegram-бот | `integrations/telegram_bot.py` |
 | Фоновые задачи | `scheduler/jobs/` |
 | Кэш | `cache.py` |
@@ -53,7 +53,7 @@ from backend.models.mixins import SoftDeleteMixin
 | `Order`, `PlannedPayment`, `BrandPlan` | `models/planning.py` | планирование |
 | `Nomenclature`, `CostOrder` | `models/cost.py` | себестоимость |
 | `Warehouse`, `WarehouseStock` | `models/warehouse.py` | склад |
-| `FulfillmentStock`, `FulfillmentRequest` | `models/fulfillment.py` | зеркало остатков/заявок внешнего ФФ (skladbot, wmscelicom) |
+| `FulfillmentStock`, `FulfillmentRequest` | `models/fulfillment.py` | зеркало остатков/заявок внешнего ФФ (skladbot, wmscelicom, migfull) |
 | `Account`, `CategoryRef` | `models/refs.py` | справочники |
 
 ## Тесты

@@ -12,6 +12,7 @@ import type {
     FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfRequestRow, FfRequestKind,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
+import Toast from '@/components/Toast';
 import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffStageBadge } from './ff-shared';
 
 /* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
@@ -332,13 +333,14 @@ function RequisitesTab({ warehouse, onChanged }: { warehouse: Warehouse; onChang
     );
 }
 
-/* ─── Fulfillment integration (skladbot / wmscelicom) — блок в «Реквизитах» ── */
+/* ─── Fulfillment integration (skladbot / wmscelicom / migfull) — блок в «Реквизитах» ── */
 
 const FF_EXPIRY_WARNING_MS = 30 * 24 * 60 * 60 * 1000; // 30 дней
 
 const FF_PROVIDER_LABELS: Record<string, string> = {
     skladbot: 'skladbot.ru',
     wmscelicom: 'Целиком (WMS Celicom)',
+    migfull: 'Натали (migfull.app)',
 };
 
 function FulfillmentSection({ warehouseId, status, onChanged }: {
@@ -349,6 +351,7 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
     const [provider, setProvider] = useState<FulfillmentProviderId>('skladbot');
     const [token, setToken] = useState('');
     const [baseUrl, setBaseUrl] = useState('');
+    const [tenantGuid, setTenantGuid] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [syncMsg, setSyncMsg] = useState('');
@@ -364,6 +367,10 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
             setError('Укажите адрес инстанса (например client.wmscelicom.ru)');
             return;
         }
+        if (provider === 'migfull' && !tenantGuid.trim()) {
+            setError('Укажите GUID кабинета migfull.app');
+            return;
+        }
         setBusy(true);
         setError('');
         setSyncMsg('');
@@ -372,9 +379,11 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
                 provider,
                 token: token.trim(),
                 base_url: provider === 'wmscelicom' ? baseUrl.trim() : null,
+                tenant_guid: provider === 'migfull' ? tenantGuid.trim() : null,
             });
             setToken('');
             setBaseUrl('');
+            setTenantGuid('');
             onChanged();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка подключения');
@@ -435,7 +444,9 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
                     <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 20 }}>
                         {provider === 'skladbot'
                             ? 'Подключите личный кабинет skladbot.ru по seller-токену — появятся вкладки «ФФ остатки», «ФФ сборка» и «ФФ приёмки» с данными фулфилмента.'
-                            : 'Подключите инстанс «Целиком» (WMS Celicom) по API-токену и адресу инстанса — появятся вкладки «ФФ остатки», «ФФ сборка» (отгрузки FBO) и «ФФ приёмки».'}
+                            : provider === 'migfull'
+                                ? 'Read-only API склада «Натали» (migfull.app): остатки, приёмки и отгрузки.'
+                                : 'Подключите инстанс «Целиком» (WMS Celicom) по API-токену и адресу инстанса — появятся вкладки «ФФ остатки», «ФФ сборка» (отгрузки FBO) и «ФФ приёмки».'}
                     </p>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', maxWidth: 860, flexWrap: 'wrap' }}>
                         <div className="form-group" style={{ width: 220, marginBottom: 0 }}>
@@ -443,10 +454,11 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
                             <select
                                 className="form-input"
                                 value={provider}
-                                onChange={e => setProvider(e.target.value as FulfillmentProviderId)}
+                                onChange={e => { setProvider(e.target.value as FulfillmentProviderId); setError(''); }}
                             >
                                 <option value="skladbot">skladbot.ru</option>
                                 <option value="wmscelicom">Целиком (WMS Celicom)</option>
+                                <option value="migfull">Натали (migfull.app)</option>
                             </select>
                         </div>
                         {provider === 'wmscelicom' && (
@@ -461,6 +473,18 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
                                 />
                             </div>
                         )}
+                        {provider === 'migfull' && (
+                            <div className="form-group" style={{ width: 260, marginBottom: 0 }}>
+                                <label className="form-label">GUID кабинета</label>
+                                <input
+                                    className="form-input"
+                                    value={tenantGuid}
+                                    onChange={e => setTenantGuid(e.target.value)}
+                                    placeholder="123e4567-e89b-…"
+                                    autoComplete="off"
+                                />
+                            </div>
+                        )}
                         <div className="form-group" style={{ flex: 1, minWidth: 220, marginBottom: 0 }}>
                             <label className="form-label">Токен</label>
                             <input
@@ -468,7 +492,7 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
                                 type="password"
                                 value={token}
                                 onChange={e => setToken(e.target.value)}
-                                placeholder={provider === 'skladbot' ? 'Seller-токен skladbot.ru' : 'API-токен Целиком'}
+                                placeholder={provider === 'skladbot' ? 'Seller-токен skladbot.ru' : provider === 'migfull' ? 'Bearer-токен migfull.app' : 'API-токен Целиком'}
                                 autoComplete="off"
                             />
                         </div>
@@ -1876,6 +1900,12 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
     const [error, setError] = useState('');
     const [actingId, setActingId] = useState<number | null>(null);
 
+    // Вид «Активные | Архив» (local_archived)
+    const [showArchived, setShowArchived] = useState(false);
+    // Toast успеха + несмахиваемое предупреждение (пропущенные ШК при создании заявки)
+    const [toast, setToast] = useState('');
+    const [notice, setNotice] = useState('');
+
     // Модал «Связать» (общий пикер — ff-shared)
     const [linkFor, setLinkFor] = useState<FfRequestRow | null>(null);
 
@@ -1883,12 +1913,12 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
         const controller = new AbortController();
         setLoading(true);
         setError('');
-        api.getFulfillmentRequests(warehouseId, kind)
+        api.getFulfillmentRequests(warehouseId, kind, showArchived)
             .then(r => { if (!controller.signal.aborted) setRows(r); })
             .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка'); })
             .finally(() => { if (!controller.signal.aborted) setLoading(false); });
         return () => controller.abort();
-    }, [warehouseId, kind]);
+    }, [warehouseId, kind, showArchived]);
 
     const handleUnlink = async (row: FfRequestRow) => {
         if (!confirm(`Отвязать заявку ${row.number || row.external_id} от документа ${row.linked_number}?`)) return;
@@ -1899,6 +1929,42 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             setRows(prev => prev.map(r => r.id === updated.id ? updated : r));
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка отвязки');
+        } finally {
+            setActingId(null);
+        }
+    };
+
+    // В архив / вернуть из архива — строка покидает текущий вид
+    const handleArchiveToggle = async (row: FfRequestRow) => {
+        setActingId(row.id);
+        setError('');
+        try {
+            const updated = row.local_archived
+                ? await api.unarchiveFulfillmentRequest(warehouseId, row.id)
+                : await api.archiveFulfillmentRequest(warehouseId, row.id);
+            setRows(prev => prev.filter(r => r.id !== updated.id));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : (row.local_archived ? 'Ошибка возврата из архива' : 'Ошибка архивирования'));
+        } finally {
+            setActingId(null);
+        }
+    };
+
+    // Создать заявку на сборку из состава ФФ-заявки (kind=assembly, без связи)
+    const handleCreateAssembly = async (row: FfRequestRow) => {
+        if (!confirm(`Создать заявку на сборку из ФФ-заявки ${row.number || row.external_id}?`)) return;
+        setActingId(row.id);
+        setError('');
+        setNotice('');
+        try {
+            const result = await api.createAssemblyFromFf(warehouseId, row.id);
+            setRows(prev => prev.map(r => r.id === result.request.id ? result.request : r));
+            setToast(`Создана заявка на сборку № ${result.assembly_number}`);
+            if (result.skipped_barcodes.length > 0) {
+                setNotice(`Заявка № ${result.assembly_number} создана без ${formatNumber(result.skipped_barcodes.length, 0)} ШК: ${result.skipped_barcodes.join(', ')}`);
+            }
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка создания заявки на сборку');
         } finally {
             setActingId(null);
         }
@@ -1966,33 +2032,92 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                     );
                 }
                 return (
-                    <button className="btn btn-sm btn-secondary" onClick={() => setLinkFor(row)} disabled={acting}>
-                        Связать
-                    </button>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <button className="btn btn-sm btn-secondary" onClick={() => setLinkFor(row)} disabled={acting}>
+                            Связать
+                        </button>
+                        {kind === 'assembly' && row.assembly_request_id == null && (
+                            <button
+                                className="btn btn-sm btn-primary"
+                                title="Создать заявку на сборку из состава этой ФФ-заявки"
+                                onClick={() => handleCreateAssembly(row)}
+                                disabled={acting}
+                            >
+                                {acting ? '...' : 'Создать заявку'}
+                            </button>
+                        )}
+                    </span>
                 );
             },
             exportValue: (row: FfRequestRow) => row.linked_number
                 ? `${row.linked_number}${row.linked_status ? ` (${linkedStatusLabel(row.linked_status)})` : ''}`
                 : '',
         },
+        {
+            key: 'local_archived', label: 'Архив',
+            render: (_: unknown, row: FfRequestRow) => {
+                const acting = actingId === row.id;
+                return (
+                    <button
+                        className="btn btn-sm btn-secondary"
+                        title={row.local_archived ? 'Вернуть из архива в активные' : 'Убрать в архив (локальная пометка)'}
+                        onClick={() => handleArchiveToggle(row)}
+                        disabled={acting}
+                    >
+                        {acting ? '...' : (row.local_archived ? 'Вернуть' : 'В архив')}
+                    </button>
+                );
+            },
+            exportValue: (row: FfRequestRow) => (row.local_archived ? 'архив' : ''),
+        },
     ];
 
-    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
-    if (error && rows.length === 0) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>;
+    // Переключатель вида — виден и во время загрузки/ошибки
+    const viewToggle = (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+            <button
+                className={`btn btn-sm ${!showArchived ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setShowArchived(false)}
+            >
+                Активные
+            </button>
+            <button
+                className={`btn btn-sm ${showArchived ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setShowArchived(true)}
+            >
+                Архив
+            </button>
+        </div>
+    );
+
+    if (loading) return <>{viewToggle}<div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div></>;
+    if (error && rows.length === 0) return <>{viewToggle}<div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div></>;
 
     return (
         <>
+            {viewToggle}
+
             {error && <div style={{ color: 'var(--color-danger)', marginBottom: 12 }}>{error}</div>}
+            {notice && (
+                <div style={{ color: 'var(--color-warning)', marginBottom: 12, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                    <span>{notice}</span>
+                    <button className="btn btn-sm btn-secondary" onClick={() => setNotice('')}>✕</button>
+                </div>
+            )}
 
             <TanStackDataTable
                 columns={cols}
                 data={rows}
-                emptyText={kind === 'assembly'
-                    ? 'Нет заявок на сборку — выполните синхронизацию во вкладке «Реквизиты»'
-                    : 'Нет заявок на приёмку — выполните синхронизацию во вкладке «Реквизиты»'}
-                emptyIcon={kind === 'assembly' ? '🧰' : '📥'}
+                emptyText={showArchived
+                    ? 'Архив пуст'
+                    : (kind === 'assembly'
+                        ? 'Нет заявок на сборку — выполните синхронизацию во вкладке «Реквизиты»'
+                        : 'Нет заявок на приёмку — выполните синхронизацию во вкладке «Реквизиты»')}
+                emptyIcon={showArchived ? '🗄️' : (kind === 'assembly' ? '🧰' : '📥')}
                 exportName={kind === 'assembly' ? 'ff_assembly_requests' : 'ff_inbound_requests'}
             />
+
+            {toast && <Toast message={toast} onClose={() => setToast('')} />}
 
             {linkFor && (
                 <FfLinkModal

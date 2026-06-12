@@ -14,10 +14,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class FulfillmentConnectPayload(BaseModel):
-    provider: Literal["skladbot", "wmscelicom"] = "skladbot"
+    provider: Literal["skladbot", "wmscelicom", "migfull"] = "skladbot"
     token: str = Field(min_length=20, max_length=4096)
     # wmscelicom: адрес клиентского инстанса ({client}.wmscelicom.ru)
     base_url: str | None = Field(None, max_length=200)
+    # migfull («Натали»): GUID кабинета клиента (хост фиксированный — migfull.app)
+    tenant_guid: str | None = Field(None, max_length=64)
 
 
 class FulfillmentStatus(BaseModel):
@@ -28,6 +30,7 @@ class FulfillmentStatus(BaseModel):
     customer_name: str | None = None
     token_expires_at: datetime | None = None
     api_base_url: str | None = None  # wmscelicom: инстанс, на который ходим
+    tenant_guid: str | None = None  # migfull: GUID кабинета
     last_sync_at: datetime | None = None
 
 
@@ -85,6 +88,8 @@ class FfRequestRow(BaseModel):
     is_completed: bool = False
     archived: bool = False
     expired: bool = False
+    local_archived: bool = False  # локальный архив DDS (синк не трогает)
+    local_archived_at: datetime | None = None
     total_qty: int | None = None  # заявлено всего, шт (skladbot — из деталки)
     dest_warehouse: str | None = None  # склад отгрузки МП («Склад МП» / shipped_target)
     external_created_at: date | None = None
@@ -172,6 +177,44 @@ class FfRequestDetail(FfRequestRow):
 class FfLinkPayload(BaseModel):
     assembly_request_id: int | None = None
     inbound_receipt_id: int | None = None
+
+
+class FfLinkCandidate(BaseModel):
+    """Кандидат для связывания ФФ-заявки с нашим документом (модал «Связать»).
+
+    kind=assembly → заявка на сборку; kind=inbound → приёмка.
+    score/reason заполнены, когда эвристика считает кандидата похожим
+    (дата ± дни, пересечение ШК состава, близость количества).
+    """
+
+    doc_id: int
+    number: str
+    status: str
+    created_at: datetime | None = None
+    total_qty: int = 0  # суммарное кол-во позиций документа, шт
+    fbo_supply_number: str | None = None  # ФБО-поставка WB (assembly)
+    dest_warehouse: str | None = None  # склад назначения WB (assembly)
+    score: int | None = None  # 0..100, None — эвристика кандидата не выделила
+    reason: str | None = None  # «дата совпадает, ШК 80%»
+
+
+class FfLinkCandidatesResponse(BaseModel):
+    kind: str  # assembly | inbound
+    ff_number: str | None = None
+    ff_total_qty: int | None = None
+    # Состав ФФ-заявки удалось получить → скоринг учитывает пересечение ШК
+    composition_available: bool = False
+    candidates: list[FfLinkCandidate] = Field(default_factory=list)
+
+
+class FfCreateAssemblyResult(BaseModel):
+    """Итог создания нашей заявки на сборку из ФФ-заявки (kind=assembly)."""
+
+    request: FfRequestRow  # обновлённая ФФ-заявка (уже связана)
+    assembly_request_id: int
+    assembly_number: str
+    items_created: int = 0
+    skipped_barcodes: list[str] = Field(default_factory=list)  # ШК без номенклатуры
 
 
 # ─── Сводная страница «Заявки ФФ» (все склады с интеграцией) ────────────────

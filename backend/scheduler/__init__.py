@@ -230,12 +230,12 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
-    # Fulfillment (skladbot) stocks + requests mirror: every 15 min
+    # Fulfillment (skladbot, wmscelicom, migfull) stocks + requests mirror: every hour
     _scheduler.add_job(
         sync_all_fulfillment_warehouses,
-        trigger=IntervalTrigger(minutes=15),
+        trigger=IntervalTrigger(hours=1),
         id="fulfillment_sync",
-        name="Fulfillment sync (skladbot, every 15min)",
+        name="Fulfillment sync (all FF providers, hourly)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,

@@ -1,6 +1,8 @@
-/** Fulfillment integration API methods (skladbot.ru, wmscelicom) */
+/** Fulfillment integration API methods (skladbot.ru, wmscelicom, migfull.app) */
 import { ApiClient } from './client';
 import type {
+    FfCreateAssemblyResult,
+    FfLinkCandidatesResponse,
     FfLinkPayload,
     FfOverviewResponse,
     FfRequestDetail,
@@ -46,20 +48,33 @@ export function addFulfillmentMethods(api: ApiClient) {
         },
 
         // ─── Requests (заявки ФФ: сборка / приёмки) ─────────────────
-        getFulfillmentRequests(warehouseId: number, kind?: FfRequestKind) {
+        getFulfillmentRequests(warehouseId: number, kind?: FfRequestKind, showArchived?: boolean) {
             const params = new URLSearchParams();
             if (kind) params.set('kind', kind);
+            if (showArchived) params.set('show_archived', 'true');
             const qs = params.toString();
             return api.request<FfRequestRow[]>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/requests${qs ? `?${qs}` : ''}`);
         },
         getFfRequestDetail(warehouseId: number, ffRequestId: number) {
             return api.request<FfRequestDetail>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/detail`);
         },
+        getFfLinkCandidates(warehouseId: number, ffRequestId: number) {
+            return api.request<FfLinkCandidatesResponse>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/link-candidates`);
+        },
         linkFulfillmentRequest(warehouseId: number, ffRequestId: number, payload: FfLinkPayload) {
             return api.request<FfRequestRow>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/link`, payload);
         },
         unlinkFulfillmentRequest(warehouseId: number, ffRequestId: number) {
             return api.request<FfRequestRow>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/link`);
+        },
+        archiveFulfillmentRequest(warehouseId: number, ffRequestId: number) {
+            return api.request<FfRequestRow>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/archive`);
+        },
+        unarchiveFulfillmentRequest(warehouseId: number, ffRequestId: number) {
+            return api.request<FfRequestRow>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/archive`);
+        },
+        createAssemblyFromFf(warehouseId: number, ffRequestId: number) {
+            return api.request<FfCreateAssemblyResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/create-assembly`);
         },
     };
 }

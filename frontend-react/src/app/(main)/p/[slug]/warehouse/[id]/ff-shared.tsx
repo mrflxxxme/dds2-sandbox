@@ -1,9 +1,10 @@
 'use client';
 /** Общие помощники вкладок «ФФ сборка»/«ФФ приёмки» и страницы деталки заявки ФФ */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
-import { formatDate } from '@/lib/utils';
-import type { FfRequestKind, FfRequestRow } from '@/types/api';
+import { formatDate, formatNumber } from '@/lib/utils';
+import { filterFfLinkCandidates, splitFfLinkCandidates } from '@/lib/utils/ffLinkCandidates';
+import type { FfLinkCandidate, FfLinkCandidatesResponse, FfRequestKind, FfRequestRow } from '@/types/api';
 
 // Статусы наших документов (заявки на сборку + приёмки) — для колонки/строки «Связь»
 export const FF_LINKED_STATUS_LABELS: Record<string, string> = {
@@ -32,8 +33,6 @@ export function ffStageBadge(row: FfRequestRow) {
 
 /* ─── Модал «Связать заявку» — пикер документа склада ────────────────────── */
 
-type FfLinkCandidate = { id: number; number: string; status: string; date: string | null };
-
 export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
     warehouseId: number;
     kind: FfRequestKind;
@@ -43,33 +42,22 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
     /** Успешное связывание: обновлённая строка заявки от бэкенда */
     onLinked: (updated: FfRequestRow) => void;
 }) {
-    const [candidates, setCandidates] = useState<FfLinkCandidate[]>([]);
+    const [data, setData] = useState<FfLinkCandidatesResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [acting, setActing] = useState(false);
+    const [search, setSearch] = useState('');
 
     useEffect(() => {
         const controller = new AbortController();
         setLoading(true);
         setError('');
-        const load = async () => {
-            try {
-                if (kind === 'assembly') {
-                    const r = await api.getAssemblyRequests({ warehouse_id: warehouseId, limit: 200 });
-                    if (!controller.signal.aborted) setCandidates(r.items.map(a => ({ id: a.id, number: a.number, status: a.status, date: a.created_at ?? null })));
-                } else {
-                    const r = await api.getReceipts(warehouseId);
-                    if (!controller.signal.aborted) setCandidates(r.map(x => ({ id: x.id, number: x.number, status: x.status, date: x.created_at ?? null })));
-                }
-            } catch (e: unknown) {
-                if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка загрузки документов');
-            } finally {
-                if (!controller.signal.aborted) setLoading(false);
-            }
-        };
-        load();
+        api.getFfLinkCandidates(warehouseId, request.id)
+            .then(r => { if (!controller.signal.aborted) setData(r); })
+            .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка загрузки документов'); })
+            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
         return () => controller.abort();
-    }, [warehouseId, kind]);
+    }, [warehouseId, request.id]);
 
     const handleLink = async (docId: number) => {
         setActing(true);
@@ -86,10 +74,49 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
         }
     };
 
+    // Клиентский поиск + разбивка: «похожие по наполнению» / «все документы»
+    const { scored, others } = useMemo(
+        () => splitFfLinkCandidates(filterFfLinkCandidates(data?.candidates ?? [], search)),
+        [data, search],
+    );
+    const hasCandidates = (data?.candidates.length ?? 0) > 0;
+
+    const candidateRow = (c: FfLinkCandidate, withScore: boolean) => (
+        <div key={c.doc_id} className="ff-link-row">
+            <div className="ff-link-row-main">
+                <div className="ff-link-row-head">
+                    <span className="ff-link-row-number">{c.number}</span>
+                    <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>
+                        {FF_LINKED_STATUS_LABELS[c.status] || c.status}
+                    </span>
+                    {withScore && c.score != null && (
+                        <span className={`badge ${c.score >= 70 ? 'badge-success' : 'badge-info'}`} style={{ fontSize: 11, padding: '2px 8px' }}>
+                            {formatNumber(c.score, 0)}%
+                        </span>
+                    )}
+                    <span className="ff-link-row-meta">
+                        {c.created_at ? `${formatDate(c.created_at)} · ` : ''}{formatNumber(c.total_qty, 0)} шт
+                        {c.fbo_supply_number ? ` · ФБО ${c.fbo_supply_number}` : ''}
+                        {c.dest_warehouse ? ` · ${c.dest_warehouse}` : ''}
+                    </span>
+                </div>
+                {withScore && c.reason && <div className="ff-link-row-reason">{c.reason}</div>}
+            </div>
+            <button className="btn btn-sm btn-primary" onClick={() => handleLink(c.doc_id)} disabled={acting}>
+                {acting ? '...' : 'Выбрать'}
+            </button>
+        </div>
+    );
+
     return (
         <div className="modal-overlay" onClick={onClose}>
-            <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
-                <h2 className="modal-title">Связать заявку {request.number || request.external_id}</h2>
+            <div className="modal-card modal-card-wide modal-card-solid" onClick={e => e.stopPropagation()}>
+                <h2 className="modal-title" style={{ marginBottom: 8 }}>
+                    Связать заявку {data?.ff_number || request.number || request.external_id}
+                    {data?.ff_total_qty != null && (
+                        <span style={{ fontWeight: 500, color: 'var(--color-text-muted)' }}> · {formatNumber(data.ff_total_qty, 0)} шт</span>
+                    )}
+                </h2>
                 <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
                     Выберите {kind === 'assembly' ? 'заявку на сборку' : 'приёмку'} этого склада:
                 </p>
@@ -98,37 +125,45 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
 
                 {loading ? (
                     <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>Загрузка...</div>
-                ) : candidates.length === 0 ? (
+                ) : !hasCandidates ? (
                     <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                         {kind === 'assembly' ? 'Нет заявок на сборку у этого склада' : 'Нет приёмок у этого склада'}
                     </div>
                 ) : (
-                    <div style={{ maxHeight: 360, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        {candidates.map(d => (
-                            <div
-                                key={d.id}
-                                style={{
-                                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                    padding: '10px 12px', border: '1px solid var(--color-border)', borderRadius: 8,
-                                }}
-                            >
-                                <div>
-                                    <span style={{ fontWeight: 600 }}>{d.number}</span>
-                                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)', marginLeft: 8 }}>
-                                        {FF_LINKED_STATUS_LABELS[d.status] || d.status}
-                                        {d.date ? ` · ${formatDate(d.date)}` : ''}
-                                    </span>
-                                </div>
-                                <button
-                                    className="btn btn-sm btn-primary"
-                                    onClick={() => handleLink(d.id)}
-                                    disabled={acting}
-                                >
-                                    {acting ? '...' : 'Выбрать'}
-                                </button>
+                    <>
+                        <input
+                            type="text"
+                            className="form-input ff-link-search"
+                            placeholder="Поиск: номер, ФБО-поставка, склад назначения"
+                            value={search}
+                            onChange={e => setSearch(e.target.value)}
+                        />
+                        {data != null && !data.composition_available && (
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                                Состав ФФ-заявки недоступен — похожие по наполнению не рассчитаны
                             </div>
-                        ))}
-                    </div>
+                        )}
+                        {scored.length === 0 && others.length === 0 ? (
+                            <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                                Ничего не найдено по запросу
+                            </div>
+                        ) : (
+                            <div className="ff-link-list">
+                                {scored.length > 0 && (
+                                    <>
+                                        <div className="ff-link-section-title">Похожие по наполнению</div>
+                                        {scored.map(c => candidateRow(c, true))}
+                                    </>
+                                )}
+                                {others.length > 0 && (
+                                    <>
+                                        <div className="ff-link-section-title">Все документы</div>
+                                        {others.map(c => candidateRow(c, false))}
+                                    </>
+                                )}
+                            </div>
+                        )}
+                    </>
                 )}
 
                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>

@@ -14,6 +14,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+from backend.integrations.migfull_client import MigfullClient, normalize_tenant_guid
 from backend.integrations.resilience import RateLimitError
 from backend.integrations.skladbot_client import SkladbotApiError, SkladbotClient, decode_jwt_exp
 from backend.integrations.wmscelicom_client import WmsCelicomClient, normalize_base_url
@@ -1084,7 +1085,7 @@ async def test_connect_second_provider_over_active_raises(db_session, project, w
 @pytest.mark.asyncio
 async def test_connect_unsupported_provider_raises(db_session, project, warehouse):
     with pytest.raises(ValueError, match="провайдер"):
-        await fulfillment_service.connect(db_session, project.id, warehouse.id, "migfull", WMS_TOKEN)
+        await fulfillment_service.connect(db_session, project.id, warehouse.id, "nosuchff", WMS_TOKEN)
 
 
 # ─── Sync (wmscelicom) ───────────────────────────────────────────────────────
@@ -1717,3 +1718,506 @@ async def test_sync_wms_enrichment_fields(db_session, project, warehouse, connec
     unloading = await _mirror_row(db_session, project.id, "801")
     assert unloading.total_qty == 8  # null-элемент пропущен, "2" скоэрсирован
     assert unloading.dest_warehouse is None
+
+
+# ─── migfull («Натали», migfull.app) ─────────────────────────────────────────
+
+MIG_TOKEN = "0fake0fake0fake0fake0fake0fake00"  # noqa: S105 — фейковый ≥20 симв.
+MIG_GUID = "11111111-2222-3333-4444-555555555555"
+
+
+def _mig_guid(n: int) -> str:
+    """Детерминированный UUID-подобный guid товара/заявки для тестов."""
+    return f"{n:08x}-0000-4000-8000-{n:012x}"
+
+
+def _mig_product(guid, name="Товар Натали", actual=0, locked=0, available=0, sku=None):
+    """migfull /products row (штрихкодов в списке нет — только в карточке)."""
+    return {
+        "guid": guid,
+        "name": name,
+        "sku": sku,
+        "gtin": None,
+        "size": "M",
+        "color": "красный",
+        "stock_actual": actual,
+        "stock_locked": locked,
+        "stock_available": available,
+    }
+
+
+def _mig_line(product_guid, qty, name="Товар Натали", defective=False):
+    """Строка заявки migfull (planned/shipped/incoming/received)."""
+    return {
+        "product_guid": product_guid,
+        "quantity": qty,
+        "is_defective": defective,
+        "product": {"guid": product_guid, "name": name, "size": "M", "color": "красный"},
+    }
+
+
+def _mig_shipment(
+    guid,
+    status="uploaded",
+    display=None,
+    reference="PVB-0000100",
+    planned_total=0,
+    dest="ВБ | МО Коледино",
+    created="2026-06-01T10:00:00.000000Z",
+    planned_lines=None,
+    shipped_lines=None,
+):
+    """migfull /shipments row (planned/shipped_lines приходят в списке целиком)."""
+    return {
+        "guid": guid,
+        "reference": reference,
+        "client_shipment_number": "коледино ковры",
+        "shipment_date": "2026-06-11",
+        "shipment_forecast": "2026-06-11",
+        "status": status,
+        "status_display": display or status,
+        "shipment_type": "fbo",
+        "shipment_type_display": "FBO",
+        "marketplace": {"name": "Вайлдберис"},
+        "destination_marketplace": {"name": dest} if dest else None,
+        "containers_count": 3,
+        "pallets_count": 0,
+        "planned_quantity_total": planned_total,
+        "shipped_quantity_total": 0,
+        "planned_lines": planned_lines or [],
+        "shipped_lines": shipped_lines or [],
+        "created_at": created,
+        "notes": None,
+        "processor": None,
+    }
+
+
+def _mig_submission(
+    guid,
+    status="processing",
+    display=None,
+    reference="PVB-0000050",
+    sub_date="2026-06-02",
+    created="2026-06-01T09:00:00.000000Z",
+):
+    """migfull /submissions row (состава в списке нет — только lines-эндпоинты)."""
+    return {
+        "guid": guid,
+        "reference": reference,
+        "client_reference": "поставка ковров",
+        "submission_date": sub_date,
+        "status": status,
+        "status_display": display or status,
+        "submission_lines_count": 2,
+        "created_at": created,
+        "notes": None,
+        "client_comment": None,
+        "processor": None,
+    }
+
+
+def _mock_mig_connection(monkeypatch, ok=True):
+    async def fake_test_connection(self):
+        return ok
+
+    monkeypatch.setattr(MigfullClient, "test_connection", fake_test_connection)
+
+
+def _mock_mig_fetches(
+    monkeypatch,
+    products=(),
+    shipments=(),
+    submissions=(),
+    product_details=None,
+    submission_lines=None,
+    calls=None,
+):
+    """Замокать ВСЕ fetch-методы MigfullClient (синк зовёт каждый из них).
+
+    product_details: {guid: detail-dict с barcodes[]}; submission_lines:
+    {(guid, line_type): rows}. calls — счётчик вызовов per-метод для ассертов.
+    """
+    counters = calls if calls is not None else {}
+    counters.setdefault("product", 0)
+    counters.setdefault("submission_lines", 0)
+
+    async def fake_products(self):
+        return list(products)
+
+    async def fake_shipments(self):
+        return list(shipments)
+
+    async def fake_submissions(self):
+        return list(submissions)
+
+    async def fake_product(self, guid):
+        counters["product"] += 1
+        return (product_details or {}).get(guid, {})
+
+    async def fake_submission_lines(self, guid, line_type):
+        counters["submission_lines"] += 1
+        return (submission_lines or {}).get((guid, line_type), [])
+
+    monkeypatch.setattr(MigfullClient, "fetch_all_products", fake_products)
+    monkeypatch.setattr(MigfullClient, "fetch_shipments", fake_shipments)
+    monkeypatch.setattr(MigfullClient, "fetch_submissions", fake_submissions)
+    monkeypatch.setattr(MigfullClient, "fetch_product", fake_product)
+    monkeypatch.setattr(MigfullClient, "fetch_submission_lines", fake_submission_lines)
+
+
+@pytest_asyncio.fixture
+async def connected_mig_key(db_session, project, warehouse, monkeypatch):
+    """Подключённый migfull-ключ (test_connection замокан)."""
+    _mock_mig_connection(monkeypatch)
+    await fulfillment_service.connect(db_session, project.id, warehouse.id, "migfull", MIG_TOKEN, tenant_guid=MIG_GUID)
+    return await fulfillment_service.get_integration(db_session, project.id, warehouse.id)
+
+
+# ─── normalize_tenant_guid ───────────────────────────────────────────────────
+
+
+def test_normalize_tenant_guid_variants():
+    assert normalize_tenant_guid(MIG_GUID) == MIG_GUID
+    assert normalize_tenant_guid(f"  {MIG_GUID.upper()}  ") == MIG_GUID
+
+
+def test_normalize_tenant_guid_rejects_garbage():
+    for bad in ("", "not-a-uuid", "8150beac", f"{MIG_GUID}/../admin", f"{MIG_GUID}x"):
+        with pytest.raises(ValueError):
+            normalize_tenant_guid(bad)
+
+
+# ─── Connect (migfull) ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_connect_migfull_and_status(db_session, project, warehouse, connected_mig_key):
+    status = await fulfillment_service.get_status(db_session, project.id, warehouse.id)
+    assert status["connected"] is True
+    assert status["provider"] == "migfull"
+    assert status["key_preview"] == "***" + MIG_TOKEN[-4:]
+    assert status["tenant_guid"] == MIG_GUID
+    assert status["api_base_url"] is None
+    assert "migfull.app" in status["customer_name"]
+    assert status["token_expires_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_connect_migfull_requires_tenant_guid(db_session, project, warehouse, monkeypatch):
+    _mock_mig_connection(monkeypatch)
+    with pytest.raises(ValueError, match="GUID"):
+        await fulfillment_service.connect(db_session, project.id, warehouse.id, "migfull", MIG_TOKEN)
+
+
+@pytest.mark.asyncio
+async def test_connect_migfull_failed_probe_raises(db_session, project, warehouse, monkeypatch):
+    _mock_mig_connection(monkeypatch, ok=False)
+    with pytest.raises(ValueError, match=r"migfull\.app"):
+        await fulfillment_service.connect(
+            db_session, project.id, warehouse.id, "migfull", MIG_TOKEN, tenant_guid=MIG_GUID
+        )
+
+
+# ─── Sync (migfull): остатки и barcode-кэш ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_migfull_stocks_barcode_resolution(db_session, project, warehouse, connected_mig_key, monkeypatch):
+    """Штрихкоды только в карточке: деталка зовётся для товаров с остатком,
+    primary-штрихкод приоритетен, служебные позиции и нерезолвленные — мимо."""
+    bc_known = f"BC-{_uid()}"
+    bc_primary = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc_known)
+
+    p1, p2, p3, p4 = _mig_guid(1), _mig_guid(2), _mig_guid(3), _mig_guid(4)
+    calls: dict = {}
+    _mock_mig_fetches(
+        monkeypatch,
+        products=[
+            _mig_product(p1, actual=7, locked=2, available=5, sku="SKU-1"),
+            _mig_product(p2, actual=3),
+            _mig_product(p3),  # без остатка — деталка не зовётся, строки нет
+            _mig_product(p4, name="ФФ грузовое место - короб 60х40х40", actual=44),  # служебная
+        ],
+        product_details={
+            p1: {"barcodes": [{"value": bc_known, "is_primary": True}]},
+            p2: {
+                "barcodes": [{"value": "BC-SECONDARY", "is_primary": False}, {"value": bc_primary, "is_primary": True}]
+            },
+        },
+        calls=calls,
+    )
+
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["stocks_synced"] == 2
+    assert calls["product"] == 2  # только p1 и p2: с остатком и без кэша
+
+    rows = {r.barcode: r for r in await _ff_stocks(db_session, project.id, warehouse.id)}
+    row = rows[bc_known]
+    assert row.provider == "migfull"
+    assert row.qty_good == 7
+    assert row.qty_reserve == 2
+    assert row.qty_nominal == 5
+    assert row.qty_defect == 0
+    assert row.vendor_code == "SKU-1"
+    assert row.external_product_id == p1
+    assert row.nomenclature_id == nom.id
+    assert rows[bc_primary].nomenclature_id is None  # primary выигрывает у secondary
+
+
+@pytest.mark.asyncio
+async def test_sync_migfull_barcode_cache_persists(db_session, project, warehouse, connected_mig_key, monkeypatch):
+    """Второй синк берёт guid→barcode из прошлого снапшота — деталка не зовётся."""
+    bc = f"BC-{_uid()}"
+    p1 = _mig_guid(11)
+    calls: dict = {}
+    _mock_mig_fetches(
+        monkeypatch,
+        products=[_mig_product(p1, actual=5)],
+        product_details={p1: {"barcodes": [{"value": bc, "is_primary": True}]}},
+        calls=calls,
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert calls["product"] == 1
+
+    calls2: dict = {}
+    _mock_mig_fetches(monkeypatch, products=[_mig_product(p1, actual=6)], calls=calls2)
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert calls2["product"] == 0  # кэш из зеркала, деталек нет
+
+    rows = {r.barcode: r for r in await _ff_stocks(db_session, project.id, warehouse.id)}
+    assert rows[bc].qty_good == 6
+
+
+# ─── Sync (migfull): заявки ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_migfull_requests_kinds_and_statuses(db_session, project, warehouse, connected_mig_key, monkeypatch):
+    s1, s2, s3, s4 = _mig_guid(21), _mig_guid(22), _mig_guid(23), _mig_guid(24)
+    u1, u2 = _mig_guid(31), _mig_guid(32)
+    _mock_mig_fetches(
+        monkeypatch,
+        shipments=[
+            _mig_shipment(s1, status="uploaded", display="Загружен", planned_total=249, reference="PVB-0000217"),
+            _mig_shipment(s2, status="ready", display="Собран"),
+            _mig_shipment(s3, status="closed", display="Закрыт"),
+            _mig_shipment(s4, status="canceled", display="Отменён"),
+        ],
+        submissions=[
+            _mig_submission(u1, status="processing", display="В обработке", reference="PVB-0000105"),
+            _mig_submission(u2, status="closed", display="Закрыт"),
+        ],
+    )
+
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["requests_synced"] == 6
+
+    rows = {r["external_id"]: r for r in await fulfillment_service.list_requests(db_session, project.id, warehouse.id)}
+    assert rows[s1]["kind"] == "assembly"
+    assert rows[s1]["number"] == "PVB-0000217"
+    assert rows[s1]["type_name"] == "Отгрузка FBO"
+    assert rows[s1]["status"] == "Загружен"
+    assert rows[s1]["stage_code"] == "uploaded"
+    assert rows[s1]["total_qty"] == 249
+    assert rows[s1]["dest_warehouse"] == "ВБ | МО Коледино"
+    assert rows[s1]["is_completed"] is False
+    assert rows[s1]["external_created_at"] == date(2026, 6, 1)
+
+    assert rows[s2]["is_completed"] is False
+    assert rows[s2]["stage_code"] == "ready"
+    assert rows[s3]["is_completed"] is True
+    assert rows[s4]["archived"] is True
+
+    assert rows[u1]["kind"] == "inbound"
+    assert rows[u1]["type_name"] == "Приёмка"
+    assert rows[u1]["status"] == "В обработке"
+    assert rows[u1]["external_created_at"] == date(2026, 6, 2)  # submission_date
+    assert rows[u2]["is_completed"] is True
+
+
+@pytest.mark.asyncio
+async def test_sync_migfull_submission_enrichment(db_session, project, warehouse, connected_mig_key, monkeypatch):
+    """Активные приёмки получают total_qty из lines/incoming (служебные позиции
+    не считаются); закрытые — разовый бэкфилл, второй синк их не дёргает;
+    отменённые не бэкфиллятся вовсе (вечный NULL съедал бы cap)."""
+    active, closed, canceled = _mig_guid(41), _mig_guid(42), _mig_guid(43)
+    svc = _mig_line(_mig_guid(99), 100, name="ФФ грузовое место - товар россыпью")
+    lines = {
+        (active, "incoming"): [_mig_line(_mig_guid(51), 3), _mig_line(_mig_guid(52), 4), svc],
+        (closed, "incoming"): [_mig_line(_mig_guid(51), 14)],
+    }
+    calls: dict = {}
+    _mock_mig_fetches(
+        monkeypatch,
+        submissions=[
+            _mig_submission(active, status="processing"),
+            _mig_submission(closed, status="closed"),
+            _mig_submission(canceled, status="canceled"),
+        ],
+        submission_lines=lines,
+        calls=calls,
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert calls["submission_lines"] == 2  # active + бэкфилл closed; canceled — мимо
+
+    assert (await _mirror_row(db_session, project.id, active)).total_qty == 7
+    assert (await _mirror_row(db_session, project.id, closed)).total_qty == 14
+
+    calls2: dict = {}
+    _mock_mig_fetches(
+        monkeypatch,
+        submissions=[
+            _mig_submission(active, status="processing"),
+            _mig_submission(closed, status="closed"),
+        ],
+        submission_lines=lines,
+        calls=calls2,
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert calls2["submission_lines"] == 1  # только активная: closed уже обогащена
+
+
+@pytest.mark.asyncio
+async def test_sync_migfull_enrich_rate_limit_does_not_fail_sync(
+    db_session, project, warehouse, connected_mig_key, monkeypatch
+):
+    sub = _mig_guid(61)
+    _mock_mig_fetches(monkeypatch, submissions=[_mig_submission(sub, status="processing")])
+
+    async def fake_lines(self, guid, line_type):
+        raise RateLimitError("429", retry_after=60)
+
+    monkeypatch.setattr(MigfullClient, "fetch_submission_lines", fake_lines)
+
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["requests_synced"] == 1
+    assert (await _mirror_row(db_session, project.id, sub)).total_qty is None
+
+
+# ─── Деталка (migfull) ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_migfull_request_detail_assembly_from_raw(db_session, project, warehouse, connected_mig_key, monkeypatch):
+    """Деталка отгрузки из raw зеркала (planned/shipped_lines), штрихкоды —
+    из снапшота остатков; работает даже после disconnect."""
+    bc = f"BC-{_uid()}"
+    p1, p2 = _mig_guid(71), _mig_guid(72)
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-MIG-D")
+
+    ship = _mig_shipment(
+        _mig_guid(70),
+        status="ready",
+        display="Собран",
+        planned_total=9,
+        planned_lines=[
+            _mig_line(p1, 3, name="Ковер розовый"),
+            _mig_line(p1, 4, name="Ковер розовый"),
+            _mig_line(p2, 2),
+        ],
+        shipped_lines=[_mig_line(p1, 5)],
+    )
+    _mock_mig_fetches(
+        monkeypatch,
+        products=[_mig_product(p1, actual=7), _mig_product(p2, actual=2)],
+        product_details={
+            p1: {"barcodes": [{"value": bc, "is_primary": True}]},
+            # p2 — карточка без штрихкодов: позиция в деталке остаётся без barcode
+        },
+        shipments=[ship],
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    await fulfillment_service.disconnect(db_session, project.id, warehouse.id)
+
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    ff_id = next(r["id"] for r in rows if r["external_id"] == _mig_guid(70))
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    assert row is not None
+    assert row["total_qty"] == 9
+    by_bc = {p["barcode"]: p for p in row["products"]}
+    assert by_bc[bc]["qty"] == 7  # 3 + 4 агрегированы по товару
+    assert by_bc[bc]["delivery_qty"] == 5
+    assert by_bc[bc]["nomenclature_id"] == nom.id
+    assert by_bc[bc]["article_seller"] == "ART-MIG-D"
+    assert by_bc[None]["qty"] == 2  # p2 без штрихкода
+    field_names = {f["name"] for f in row["fields"]}
+    assert "Склад МП" in field_names
+    assert "Коробов" in field_names
+
+
+@pytest.mark.asyncio
+async def test_migfull_request_detail_inbound_live_lines(
+    db_session, project, warehouse, connected_mig_key, monkeypatch
+):
+    """Деталка приёмки — живые lines/incoming + received (с браком)."""
+    bc = f"BC-{_uid()}"
+    p1 = _mig_guid(81)
+    sub = _mig_guid(80)
+    lines = {
+        (sub, "incoming"): [_mig_line(p1, 10)],
+        (sub, "received"): [_mig_line(p1, 8), _mig_line(p1, 1, defective=True)],
+    }
+    _mock_mig_fetches(
+        monkeypatch,
+        products=[_mig_product(p1, actual=8)],
+        product_details={p1: {"barcodes": [{"value": bc, "is_primary": True}]}},
+        submissions=[_mig_submission(sub, status="processing")],
+        submission_lines=lines,
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "inbound")
+    ff_id = next(r["id"] for r in rows if r["external_id"] == sub)
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    assert row is not None
+    assert row["total_qty"] == 10
+    assert row["total_accepted"] == 8
+    product = row["products"][0]
+    assert product["barcode"] == bc
+    assert product["qty"] == 10
+    assert product["accepted_qty"] == 8
+    assert product["defect_qty"] == 1
+    field_names = {f["name"] for f in row["fields"]}
+    assert "Дата поставки" in field_names
+
+    # Приёмке нужен живой клиент: после disconnect — понятная ошибка
+    await fulfillment_service.disconnect(db_session, project.id, warehouse.id)
+    with pytest.raises(ValueError, match="не подключён"):
+        await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+
+
+# ─── Авто-READY и классификатор (migfull) ────────────────────────────────────
+
+
+def test_assembly_ready_signal_migfull():
+    sig = fulfillment_service._assembly_ready_signal
+    assert sig("migfull", "uploaded", "Загружен", False) is False
+    assert sig("migfull", "ready", "Собран", False) is True
+    assert sig("migfull", "closed", "Закрыт", True) is True  # is_completed
+    assert sig("migfull", None, None, False) is False
+
+
+@pytest.mark.asyncio
+async def test_sync_migfull_marks_linked_assembly_ready(db_session, project, warehouse, connected_mig_key, monkeypatch):
+    """uploaded не триггерит; ready переводит связанную сборку IN_PROGRESS → READY."""
+    ship_guid = _mig_guid(91)
+    _mock_mig_fetches(monkeypatch, shipments=[_mig_shipment(ship_guid, status="uploaded", display="Загружен")])
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_assembly_doc(db_session, project, warehouse)
+    mirror = await _mirror_row(db_session, project.id, ship_guid)
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.IN_PROGRESS.value  # uploaded — не сигнал
+
+    _mock_mig_fetches(monkeypatch, shipments=[_mig_shipment(ship_guid, status="ready", display="Собран")])
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_marked_ready"] == 1
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.READY.value
+    assert doc.actual_ready_date == date.today()
+
+    history = await _history_rows(db_session, project.id, doc.id)
+    assert len(history) == 1
+    assert history[0].changed_by == "ff_sync"

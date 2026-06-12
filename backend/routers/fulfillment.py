@@ -21,6 +21,8 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.fulfillment import (
+    FfCreateAssemblyResult,
+    FfLinkCandidatesResponse,
     FfLinkPayload,
     FfOverviewResponse,
     FfRequestDetail,
@@ -88,6 +90,7 @@ async def connect(
             payload.provider,
             payload.token,
             base_url=payload.base_url,
+            tenant_guid=payload.tenant_guid,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
@@ -133,11 +136,86 @@ async def list_stocks(
 async def list_requests(
     warehouse_id: int,
     kind: str | None = None,
+    show_archived: bool = False,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Зеркало заявок ФФ (фильтр по kind: assembly | inbound | other)."""
-    return await fulfillment_service.list_requests(db, project.id, warehouse_id, kind)
+    """Зеркало заявок ФФ (kind: assembly | inbound | other; show_archived — вид «Архив»)."""
+    return await fulfillment_service.list_requests(db, project.id, warehouse_id, kind, show_archived=show_archived)
+
+
+@wh_router.post(
+    "/requests/{ff_request_id}/archive",
+    response_model=FfRequestRow,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def archive_request(
+    warehouse_id: int,
+    ff_request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Убрать ФФ-заявку в локальный архив DDS (синк пометку не трогает)."""
+    row = await fulfillment_service.archive_request(db, project.id, ff_request_id, warehouse_id)
+    if row is None:
+        raise HTTPException(404, "ФФ-заявка не найдена")
+    return row
+
+
+@wh_router.delete(
+    "/requests/{ff_request_id}/archive",
+    response_model=FfRequestRow,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def unarchive_request(
+    warehouse_id: int,
+    ff_request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Вернуть ФФ-заявку из локального архива."""
+    row = await fulfillment_service.unarchive_request(db, project.id, ff_request_id, warehouse_id)
+    if row is None:
+        raise HTTPException(404, "ФФ-заявка не найдена")
+    return row
+
+
+@wh_router.get("/requests/{ff_request_id}/link-candidates", response_model=FfLinkCandidatesResponse)
+async def link_candidates(
+    warehouse_id: int,
+    ff_request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Кандидаты для модалки «Связать»: наши документы склада со скорингом по составу."""
+    try:
+        data = await fulfillment_service.get_link_candidates(db, project.id, warehouse_id, ff_request_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if data is None:
+        raise HTTPException(404, "ФФ-заявка не найдена")
+    return data
+
+
+@wh_router.post(
+    "/requests/{ff_request_id}/create-assembly",
+    response_model=FfCreateAssemblyResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_assembly_from_ff(
+    warehouse_id: int,
+    ff_request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Создать заявку на сборку из состава ФФ-заявки и сразу связать их."""
+    try:
+        data = await fulfillment_service.create_assembly_from_ff(db, project.id, warehouse_id, ff_request_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if data is None:
+        raise HTTPException(404, "ФФ-заявка не найдена")
+    return data
 
 
 @wh_router.get("/requests/{ff_request_id}/detail", response_model=FfRequestDetail)

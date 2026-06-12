@@ -300,3 +300,25 @@ async def test_request_detail_not_connected_400(client, auth_headers, monkeypatc
 async def test_request_detail_requires_auth(client):
     resp = await client.get("/api/v1/warehouse/1/fulfillment/requests/1/detail")
     assert resp.status_code in (401, 403, 422)
+
+
+@pytest.mark.asyncio
+async def test_connect_migfull_requires_tenant_guid_400(client, auth_headers):
+    """migfull без GUID кабинета (или с мусорным) — 400 до любого HTTP к провайдеру."""
+    headers = await _project_headers(client, auth_headers)
+    wh_id = await _create_warehouse(client, headers)
+
+    resp = await client.post(
+        f"/api/v1/warehouse/{wh_id}/fulfillment/connect",
+        json={"provider": "migfull", "token": FAKE_TOKEN},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert "GUID" in resp.text
+
+    resp = await client.post(
+        f"/api/v1/warehouse/{wh_id}/fulfillment/connect",
+        json={"provider": "migfull", "token": FAKE_TOKEN, "tenant_guid": "../../admin"},
+        headers=headers,
+    )
+    assert resp.status_code == 400

@@ -1,7 +1,7 @@
 """
 Scheduler job: sync fulfillment stocks/requests for all warehouses with
-active fulfillment integrations (skladbot, wmscelicom). Runs every
-15 minutes (worker container only).
+active fulfillment integrations (skladbot, wmscelicom, migfull). Runs every
+hour (worker container only).
 """
 
 import asyncio
@@ -21,7 +21,7 @@ SYNC_TIMEOUT = 600  # seconds per warehouse
 async def sync_all_fulfillment_warehouses():
     """Iterate all active fulfillment keys bound to warehouses and sync each.
 
-    Called by APScheduler every 15 minutes.
+    Called by APScheduler every hour.
     SyncLog обновляется отдельной сессией в finally — никогда не остаётся
     RUNNING, даже если сессия синка умерла в rolled-back состоянии.
     """
