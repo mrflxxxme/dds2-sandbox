@@ -2476,9 +2476,9 @@ async def _fetch_ff_composition(
         guid_barcodes = await _migfull_guid_barcodes(db, project_id, warehouse_id, set(guid_qty))
         mig_comp: dict[str, int] = {}
         for guid, qty in guid_qty.items():
-            barcode = guid_barcodes.get(guid)
-            if barcode:
-                mig_comp[barcode] = mig_comp.get(barcode, 0) + qty
+            mig_barcode = guid_barcodes.get(guid)
+            if mig_barcode:
+                mig_comp[mig_barcode] = mig_comp.get(mig_barcode, 0) + qty
         return mig_comp or None
 
     if req.provider != "skladbot":
