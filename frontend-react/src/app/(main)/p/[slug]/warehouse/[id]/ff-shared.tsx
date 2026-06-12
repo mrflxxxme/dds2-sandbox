@@ -23,6 +23,15 @@ export const FF_LINKED_STATUS_LABELS: Record<string, string> = {
     ACCEPTED: 'Принята',
 };
 
+// Предупреждение о пропущенных ШК при создании сборки из ФФ-заявки (длинный список усекаем)
+const FF_SKIPPED_SHOWN_MAX = 5;
+export function ffSkippedNotice(assemblyNumber: string, skipped: string[]): string {
+    const shown = skipped.slice(0, FF_SKIPPED_SHOWN_MAX).join(', ');
+    const rest = skipped.length - FF_SKIPPED_SHOWN_MAX;
+    return `Заявка № ${assemblyNumber} создана без ${formatNumber(skipped.length, 0)} ШК: ${shown}`
+        + (rest > 0 ? ` и ещё ${formatNumber(rest, 0)}` : '');
+}
+
 // Бейдж стадии заявки ФФ — общий для таблицы и страницы деталки
 export function ffStageBadge(row: FfRequestRow) {
     if (row.is_completed) return <span className="badge badge-success" style={{ fontSize: 11, padding: '2px 8px' }}>Завершена</span>;

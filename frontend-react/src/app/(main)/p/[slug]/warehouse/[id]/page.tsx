@@ -13,7 +13,7 @@ import type {
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
-import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffStageBadge } from './ff-shared';
+import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge } from './ff-shared';
 
 /* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
 
@@ -1950,7 +1950,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
         }
     };
 
-    // Создать заявку на сборку из состава ФФ-заявки (kind=assembly, без связи)
+    // Создать заявку на сборку из состава ФФ-заявки и сразу связать их (kind=assembly)
     const handleCreateAssembly = async (row: FfRequestRow) => {
         if (!confirm(`Создать заявку на сборку из ФФ-заявки ${row.number || row.external_id}?`)) return;
         setActingId(row.id);
@@ -1961,7 +1961,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             setRows(prev => prev.map(r => r.id === result.request.id ? result.request : r));
             setToast(`Создана заявка на сборку № ${result.assembly_number}`);
             if (result.skipped_barcodes.length > 0) {
-                setNotice(`Заявка № ${result.assembly_number} создана без ${formatNumber(result.skipped_barcodes.length, 0)} ШК: ${result.skipped_barcodes.join(', ')}`);
+                setNotice(ffSkippedNotice(result.assembly_number, result.skipped_barcodes));
             }
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка создания заявки на сборку');

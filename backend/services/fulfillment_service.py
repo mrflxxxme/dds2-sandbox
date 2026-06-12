@@ -2747,7 +2747,9 @@ async def create_assembly_from_ff(
 
     Состав — через _fetch_ff_composition (wmscelicom — raw, skladbot — живая
     деталка); в сборку попадают только ШК, найденные в номенклатуре проекта,
-    остальные возвращаются в skipped_barcodes. None — ФФ-заявка не найдена.
+    остальные возвращаются в skipped_barcodes. После автосвязи применяется
+    тот же авто-READY, что и в link_request (стадия ФФ уже «готов» →
+    IN_PROGRESS → READY сразу, не дожидаясь синка). None — ФФ-заявка не найдена.
     ValueError — не assembly / уже связана / состав недоступен или пуст /
     ни один ШК не известен / ошибки create_assembly_request (дефицит
     доступного стока, не-FULFILLMENT склад).
@@ -2771,6 +2773,13 @@ async def create_assembly_from_ff(
         raise ValueError("Состав ФФ-заявки недоступен — попробуйте позже")
     if not comp:
         raise ValueError("Состав ФФ-заявки пуст — создавать нечего")
+    # migfull: ШК берутся из зеркала остатков (guid→barcode); пока часть guid
+    # не разрезолвлена, состав неполный — молча создавать урезанную сборку нельзя
+    if req.provider == "migfull" and req.total_qty and sum(comp.values()) < req.total_qty:
+        raise ValueError(
+            "Состав ФФ-заявки разрезолвлен не полностью (ШК части товаров ещё не синкованы) — "
+            "запустите синк остатков склада и повторите"
+        )
 
     nom_by_barcode = await _resolve_noms(db, project_id, set(comp))
     skipped_barcodes = sorted(barcode for barcode in comp if barcode not in nom_by_barcode)
@@ -2784,7 +2793,7 @@ async def create_assembly_from_ff(
         warehouse_id=warehouse_id,
         pallets_count=1,
         pallet_weight_kg=Decimal("1.00"),
-        comment=f"Создана из ФФ-заявки {ff_label}",
+        comment=f"Создана из ФФ-заявки {ff_label} (паллеты/вес — заглушка 1×1 кг, уточните вручную)",
         items=items,
     )
     # ValueError (дефицит доступного стока и т.п.) пробрасываем как есть —
@@ -2809,7 +2818,21 @@ async def create_assembly_from_ff(
             f"ФФ-заявку уже связали параллельно — созданная заявка на сборку {doc.number} осталась без связи"
         )
     req.assembly_request_id = doc.id
+    # Авто-READY как в link_request: стадия ФФ уже «готов» → созданную
+    # IN_PROGRESS-сборку переводим сразу, не дожидаясь ежечасного синка
+    marked_ready = False
+    if (
+        not req.archived
+        and not req.expired
+        and not req.local_archived
+        and doc.status == AssemblyStatus.IN_PROGRESS.value
+        and _assembly_ready_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
+    ):
+        _transition_assembly_to_ready(db, project_id, doc, req)
+        marked_ready = True
     await db.commit()
+    if marked_ready:
+        await invalidate_cache("reports:assembly_flow")
 
     return {
         "request": _request_to_dict(req, {doc.id: (doc.number, doc.status)}),
