@@ -18,13 +18,14 @@ from backend.integrations.skladbot_client import SkladbotApiError, SkladbotClien
 from backend.integrations.wmscelicom_client import WmsCelicomClient
 from backend.models import (
     FulfillmentRequest,
+    FulfillmentStock,
     InboundReceipt,
     InboundReceiptItem,
     Nomenclature,
     Warehouse,
     WarehouseStock,
 )
-from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus, AssemblyStatusHistory
 from backend.models.wb_fbo import WbFboSupply
 from backend.services import fulfillment_service
 
@@ -51,6 +52,17 @@ def _wms_raw(items):
                 "items": [{"name": "Товар", "barcode": bc, "count": qty} for bc, qty in items],
             }
         },
+    }
+
+
+def _migfull_raw(lines):
+    """raw отгрузки migfull: planned_lines [(guid, qty)] — ШК резолвятся из зеркала остатков."""
+    return {
+        "shipment_guid": _uid(),
+        "planned_lines": [
+            {"product_guid": guid, "quantity": qty, "product": {"guid": guid, "name": f"Товар {guid}"}}
+            for guid, qty in lines
+        ],
     }
 
 
@@ -525,6 +537,90 @@ async def test_create_assembly_from_ff_skipped_barcodes(db_session, project, war
         .limit(10)
     )
     assert [r[0] for r in items_result.all()] == [bc_known]
+
+
+@pytest.mark.asyncio
+async def test_create_assembly_from_ff_auto_ready(db_session, project, warehouse):
+    """Стадия ФФ уже «готов» (is_completed) → созданная сборка сразу READY, как в link_request."""
+    bc = f"30{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    await _seed_stock(db_session, project.id, warehouse.id, nom, bc, 10)
+    ff = _mirror(project.id, warehouse.id, created=date(2026, 6, 8), raw=_wms_raw([(bc, 5)]))
+    ff.is_completed = True
+    ff = await _add(db_session, ff)
+
+    result = await fulfillment_service.create_assembly_from_ff(db_session, project.id, warehouse.id, ff.id)
+
+    assert result["request"]["linked_status"] == AssemblyStatus.READY.value
+    doc = await db_session.get(AssemblyRequest, result["assembly_request_id"])
+    assert doc.status == AssemblyStatus.READY.value
+    history_result = await db_session.execute(
+        select(AssemblyStatusHistory)
+        .where(
+            AssemblyStatusHistory.project_id == project.id,
+            AssemblyStatusHistory.assembly_request_id == doc.id,
+        )
+        .order_by(AssemblyStatusHistory.id)
+        .limit(10)
+    )
+    transitions = [(h.old_status, h.new_status, h.changed_by) for h in history_result.scalars().all()]
+    assert (AssemblyStatus.IN_PROGRESS.value, AssemblyStatus.READY.value, "ff_sync") in transitions
+
+
+@pytest.mark.asyncio
+async def test_create_assembly_from_ff_migfull(db_session, project, warehouse):
+    """migfull: состав из planned_lines + guid→barcode из зеркала остатков; неполный резолв → guard."""
+    bc = f"31{_uid()}"
+    guid_a, guid_b = f"g-{_uid()}", f"g-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    await _seed_stock(db_session, project.id, warehouse.id, nom, bc, 10)
+    await _add(
+        db_session,
+        FulfillmentStock(
+            project_id=project.id,
+            warehouse_id=warehouse.id,
+            provider="migfull",
+            barcode=bc,
+            external_product_id=guid_a,
+            qty_good=10,
+        ),
+    )
+
+    # guid_b без ШК в зеркале остатков, total_qty больше резолвнутого → guard
+    partial = _mirror(
+        project.id,
+        warehouse.id,
+        provider="migfull",
+        created=date(2026, 6, 8),
+        raw=_migfull_raw([(guid_a, 6), (guid_b, 4)]),
+        total_qty=10,
+    )
+    partial = await _add(db_session, partial)
+    with pytest.raises(ValueError, match="не полностью"):
+        await fulfillment_service.create_assembly_from_ff(db_session, project.id, warehouse.id, partial.id)
+
+    # Полностью разрезолвленный состав → happy path
+    full = _mirror(
+        project.id,
+        warehouse.id,
+        provider="migfull",
+        created=date(2026, 6, 8),
+        raw=_migfull_raw([(guid_a, 6)]),
+        total_qty=6,
+    )
+    full = await _add(db_session, full)
+    result = await fulfillment_service.create_assembly_from_ff(db_session, project.id, warehouse.id, full.id)
+    assert result["items_created"] == 1
+    assert result["skipped_barcodes"] == []
+    items_result = await db_session.execute(
+        select(AssemblyRequestItem.barcode, AssemblyRequestItem.quantity)
+        .where(
+            AssemblyRequestItem.project_id == project.id,
+            AssemblyRequestItem.assembly_request_id == result["assembly_request_id"],
+        )
+        .limit(10)
+    )
+    assert [(r[0], r[1]) for r in items_result.all()] == [(bc, 6)]
 
 
 @pytest.mark.asyncio
