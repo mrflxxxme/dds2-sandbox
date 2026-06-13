@@ -6,7 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 # --- Container → Transport mapping ---
 
@@ -483,6 +483,9 @@ class AddItemToVehicle(BaseModel):
     qty: int
     box_size_override: str | None = None
     pcs_per_box_override: int | None = None
+    # strict — превышение остатка → ошибка; extend_plan — добить FactoryOrderItem.qty
+    # (для корзины «!»: заказали больше, чем в заказе → старый заказ авто-растёт).
+    mode: Literal["strict", "extend_plan"] = "strict"
 
 
 class PostShipmentAddItem(BaseModel):
@@ -514,6 +517,67 @@ class PostShipmentItemsRequest(BaseModel):
     """
 
     items: list[PostShipmentAddItem]
+
+
+# --- Unordered items (корзина «✗»: штрихкода нет ни в одном заказе) ---
+
+
+class UnorderedItem(BaseModel):
+    """Позиция, которой нет ни в одном заказе — её надо завести в заказ и положить в машину."""
+
+    barcode: str
+    qty: int
+    price_cny: Decimal = Decimal("0")
+    box_size: str | None = None
+    pcs_per_box: int | None = None
+    weight_kg: Decimal | None = None
+    subject: str | None = None
+    article_seller: str | None = None
+
+    @field_validator("qty")
+    @classmethod
+    def validate_qty(cls, v: int) -> int:
+        if v <= 0:
+            msg = "qty must be > 0"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("price_cny", "weight_kg", "pcs_per_box")
+    @classmethod
+    def validate_non_negative(cls, v: Decimal | int | None) -> Decimal | int | None:
+        if v is not None and v < 0:
+            msg = "must be >= 0"
+            raise ValueError(msg)
+        return v
+
+
+class AddUnorderedItemsRequest(BaseModel):
+    """Создать новый заказ ИЛИ дописать в существующий, затем положить позиции в машину.
+
+    - target=new_order: создаётся новый FactoryOrder (номер генерится авто), поставщик опц.
+    - target=existing_order: позиции мёржатся по barcode в заказ factory_order_id.
+    Затем позиции букаются в машину тем же путём, что и обычное добавление
+    (FORMING → add_items_to_vehicle, SHIPPED+ → add_items_post_shipment).
+    """
+
+    target: Literal["new_order", "existing_order"]
+    factory_order_id: int | None = None  # обязателен для existing_order
+    supplier_id: int | None = None  # опционально для new_order
+    factory_name: str | None = None  # опционально для new_order
+    items: list[UnorderedItem]
+
+    @model_validator(mode="after")
+    def check_target(self) -> "AddUnorderedItemsRequest":
+        if self.target == "existing_order" and self.factory_order_id is None:
+            msg = "factory_order_id required when target=existing_order"
+            raise ValueError(msg)
+        if not self.items:
+            msg = "items must not be empty"
+            raise ValueError(msg)
+        if len(self.items) > 1000:
+            msg = "too many items (max 1000)"
+            raise ValueError(msg)
+        return self
 
 
 # --- Mix Groups ---

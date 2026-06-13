@@ -19,6 +19,7 @@ import type {
     VehicleDocument,
     VehicleStatusHistoryEntry,
     FactoryQtyExceededDetail,
+    FactoryOrder,
 } from '@/types/api';
 import { FactoryQtyExceededError } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
@@ -1792,7 +1793,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
 
     // Paste mode state
     const [rows, setRows] = useState<PasteRow[]>(Array.from({ length: 5 }, emptyRow));
-    const [showMismatchModal, setShowMismatchModal] = useState(false);
+    const [showReconcile, setShowReconcile] = useState(false);
 
     useEffect(() => {
         (async () => {
@@ -2051,104 +2052,112 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
         return taken < qty;
     });
 
-    const performAdd = async (overridesFromPaste = false) => {
-        // sc20: split user qty across multiple FOIs of the same barcode (FIFO),
-        // preferring FOIs whose params (price/box/ppb) match the paste row.
-        // sc20.1: shared `consumed` across all rows so multiple paste rows of
-        // one barcode don't double-book the same FOI.
+    // Build the vehicle-add payload for ✓ valid + (optionally) ! exceeded rows, sharing one
+    // `consumed` map so cumulative qty across rows of the same barcode is respected.
+    // valid → strict (order params, or paste overrides if overwrite); exceeded overflow →
+    // extend_plan on the FIFO-first FOI so the original order line auto-grows.
+    const buildAddItems = (overwrite: boolean, includeExceeded: boolean) => {
         const consumed: Record<number, number> = {};
-        const items = validRows.flatMap(r => {
+        const items: { factory_order_item_id: number; qty: number; box_size_override?: string | null; pcs_per_box_override?: number | null; mode?: 'strict' | 'extend_plan' }[] = [];
+        for (const r of validRows) {
             const bc = r.barcode.trim();
-            return splitRowAcrossFois(
+            const splits = splitRowAcrossFois(
                 foisByBarcode[bc] || [],
-                {
-                    qty: parseInt(r.qty) || 0,
-                    price: parseFloat(r.price) || 0,
-                    boxRaw: r.box_size || '',
-                    pcsPerBox: parseInt(r.pcs_per_box) || 0,
-                },
-                overridesFromPaste,
+                { qty: parseInt(r.qty) || 0, price: parseFloat(r.price) || 0, boxRaw: r.box_size || '', pcsPerBox: parseInt(r.pcs_per_box) || 0 },
+                overwrite,
                 consumed,
             );
-        });
-        const validBarcodes = new Set(validRows.map(r => r.barcode.trim()));
-        if (isPostShipment) {
-            await api.addPostShipmentItems(vehicleOrderNo, {
-                items: items.map(it => ({ ...it, mode: 'strict' as const })),
-            });
-        } else {
-            await api.addItemsToVehicle(vehicleOrderNo, items);
+            for (const s of splits) items.push(s);
         }
-
-        // Keep rows that weren't successfully added (unfound + exceeded qty)
-        const remainingRows = rows.filter(r => {
-            const bc = r.barcode.trim();
-            return bc && !validBarcodes.has(bc);
-        });
-
-        if (remainingRows.length > 0) {
-            setRows([...remainingRows, emptyRow(), emptyRow()]);
-            onPartialAdded();
-            const freshData = await api.getAvailableItems();
-            setGroups(freshData);
-        } else {
-            setRows(Array.from({ length: 5 }, emptyRow));
-            onAdded();
-        }
-    };
-
-    const handlePasteSubmit = async () => {
-        if (!pasteCanSave) return;
-        if (mismatchRows.length > 0) {
-            setShowMismatchModal(true);
-            return;
-        }
-        setSubmitting(true);
-        setError('');
-        try {
-            await performAdd(false);
-        } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : t('msg_error'));
-        }
-        setSubmitting(false);
-    };
-
-    const handleKeepOrderPrices = async () => {
-        setShowMismatchModal(false);
-        setSubmitting(true);
-        setError('');
-        try {
-            await performAdd(false);
-        } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : t('msg_error'));
-        }
-        setSubmitting(false);
-    };
-
-    const handleOverwriteOrderPrices = async () => {
-        setShowMismatchModal(false);
-        setSubmitting(true);
-        setError('');
-        try {
-            // Price mismatches → overwrite factory order prices. A barcode can
-            // map to multiple FOIs across factory orders and the paste qty is
-            // split onto several of them — reprice EVERY booked FOI, not just the
-            // representative one (mirrors performAdd's split). sc20.3 / V-0010.
-            const priceUpdates = buildPriceOverwrites(
-                validRows.map(r => ({
-                    barcode: r.barcode.trim(),
-                    qty: parseInt(r.qty) || 0,
-                    priceRaw: r.price,
-                    boxRaw: r.box_size || '',
-                    pcsPerBox: parseInt(r.pcs_per_box) || 0,
-                })),
-                foisByBarcode,
-            );
-            if (priceUpdates.length > 0) {
-                await api.bulkUpdateFactoryItemPrices(priceUpdates);
+        if (includeExceeded) {
+            for (const r of exceededRows) {
+                const bc = r.barcode.trim();
+                const fois = foisByBarcode[bc] || [];
+                let left = parseInt(r.qty) || 0;
+                if (fois.length === 0 || left <= 0) continue;
+                for (const foi of fois) {
+                    if (left <= 0) break;
+                    const already = consumed[foi.id] || 0;
+                    const avail = Math.max(0, foi.remaining_qty - already);
+                    const take = Math.min(left, avail);
+                    if (take > 0) { items.push({ factory_order_item_id: foi.id, qty: take }); consumed[foi.id] = already + take; left -= take; }
+                }
+                if (left > 0) { items.push({ factory_order_item_id: fois[0].id, qty: left, mode: 'extend_plan' }); consumed[fois[0].id] = (consumed[fois[0].id] || 0) + left; }
             }
-            // Box/ppb mismatches → per-vehicle override on CostOrderItem.
-            await performAdd(true);
+        }
+        return items;
+    };
+
+    // «Добавить» → открыть единое окно проверки (если есть что обрабатывать).
+    const handlePasteSubmit = () => {
+        if (validRows.length + exceededRows.length + invalidRows.length === 0) return;
+        setShowReconcile(true);
+    };
+
+    // Применить все выбранные в окне резолюции одним проходом.
+    const applyReconcile = async (choices: {
+        mismatchMode: 'keep' | 'overwrite';
+        includeExceeded: boolean;
+        invalidTarget: 'new_order' | 'existing_order' | 'skip';
+        invalidOrderId: number | null;
+    }) => {
+        setSubmitting(true);
+        setError('');
+        try {
+            const handled = new Set<string>();
+
+            // 1. ✗ нет в заказе → создать/привязать заказ + положить в машину (атомарно на бэке)
+            if (invalidRows.length > 0 && choices.invalidTarget !== 'skip') {
+                const items = invalidRows
+                    .filter(r => (parseInt(r.qty) || 0) > 0)
+                    .map(r => ({
+                        barcode: r.barcode.trim(),
+                        qty: parseInt(r.qty) || 0,
+                        price_cny: parseFloat(r.price) || 0,
+                        box_size: r.box_size?.trim() || null,
+                        pcs_per_box: parseInt(r.pcs_per_box) || null,
+                        article_seller: r.article || null,
+                    }));
+                if (items.length > 0) {
+                    await api.addUnorderedItemsToVehicle(vehicleOrderNo, {
+                        target: choices.invalidTarget,
+                        factory_order_id: choices.invalidTarget === 'existing_order' ? choices.invalidOrderId : null,
+                        items,
+                    });
+                    invalidRows.forEach(r => handled.add(r.barcode.trim()));
+                }
+            }
+
+            // 2. ⚠ «мои значения» → переписать цены в заказе перед добавлением
+            const overwrite = choices.mismatchMode === 'overwrite';
+            if (mismatchRows.length > 0 && overwrite) {
+                const priceUpdates = buildPriceOverwrites(
+                    validRows.map(r => ({ barcode: r.barcode.trim(), qty: parseInt(r.qty) || 0, priceRaw: r.price, boxRaw: r.box_size || '', pcsPerBox: parseInt(r.pcs_per_box) || 0 })),
+                    foisByBarcode,
+                );
+                if (priceUpdates.length > 0) await api.bulkUpdateFactoryItemPrices(priceUpdates);
+            }
+
+            // 3. ✓ valid + ! exceeded → один вызов добавления в машину
+            const items = buildAddItems(overwrite, choices.includeExceeded);
+            if (items.length > 0) {
+                if (isPostShipment) await api.addPostShipmentItems(vehicleOrderNo, { items: items.map(it => ({ ...it, mode: it.mode || ('strict' as const) })) });
+                else await api.addItemsToVehicle(vehicleOrderNo, items);
+            }
+            validRows.forEach(r => handled.add(r.barcode.trim()));
+            if (choices.includeExceeded) exceededRows.forEach(r => handled.add(r.barcode.trim()));
+
+            // 4. обработанные строки убрать; пропущенные — оставить в сетке
+            setShowReconcile(false);
+            const remaining = rows.filter(r => { const bc = r.barcode.trim(); return bc && !handled.has(bc); });
+            if (remaining.length > 0) {
+                setRows([...remaining, emptyRow(), emptyRow()]);
+                onPartialAdded();
+                setGroups(await api.getAvailableItems());
+            } else {
+                setRows(Array.from({ length: 5 }, emptyRow));
+                onAdded();
+            }
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : t('msg_error'));
         }
@@ -2535,43 +2544,31 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                             </div>
 
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--color-border)' }}>
-                                <div style={{ display: 'flex', gap: 8 }}>
-                                    <button className="btn btn-secondary btn-sm" onClick={() => { setRows(Array.from({ length: 5 }, emptyRow)); setError(''); }}>
-                                        {t('btn_cancel')}
-                                    </button>
-                                    {invalidRows.length > 0 && (
-                                        <button className="btn btn-secondary btn-sm" onClick={() => {
-                                            const text = invalidRows.map(r => `${r.barcode.trim()}\t${r.qty}`).join('\n');
-                                            navigator.clipboard.writeText(text);
-                                        }}>
-                                            ✗ ({invalidRows.length})
-                                        </button>
-                                    )}
-                                    {exceededRows.length > 0 && (
-                                        <button className="btn btn-secondary btn-sm" onClick={() => {
-                                            const text = exceededRows.map(r => {
-                                                const item = allItemMap[r.barcode.trim()];
-                                                return `${r.barcode.trim()}\t${r.qty}\t${item?.remaining_qty || 0}`;
-                                            }).join('\n');
-                                            navigator.clipboard.writeText(`${t('col_barcode')}\t${t('col_qty')}\t${t('col_available')}\n${text}`);
-                                        }}>
-                                            ! ({exceededRows.length})
-                                        </button>
-                                    )}
-                                </div>
-                                <button className="btn btn-primary" onClick={handlePasteSubmit} disabled={!pasteCanSave || submitting}
-                                    style={{ minWidth: 160, opacity: pasteCanSave ? 1 : 0.5 }}>
-                                    {submitting ? t('add_items_adding') : `${t('add_items_count')} (${validRows.length})`}
+                                <button className="btn btn-secondary btn-sm" onClick={() => { setRows(Array.from({ length: 5 }, emptyRow)); setError(''); }}>
+                                    {t('btn_cancel')}
                                 </button>
+                                {(() => {
+                                    const total = validRows.length + exceededRows.length + invalidRows.length;
+                                    return (
+                                        <button className="btn btn-primary" onClick={handlePasteSubmit} disabled={total === 0 || submitting}
+                                            style={{ minWidth: 160, opacity: total === 0 ? 0.5 : 1 }}>
+                                            {`${t('add_items_count')} (${total})`}
+                                        </button>
+                                    );
+                                })()}
                             </div>
 
-                            {showMismatchModal && (
-                                <PriceMismatchModal
-                                    rows={mismatchRows}
+                            {showReconcile && (
+                                <ReconcileModal
+                                    vehicleOrderNo={vehicleOrderNo}
+                                    validRows={validRows}
+                                    mismatchRows={mismatchRows}
+                                    exceededRows={exceededRows}
+                                    invalidRows={invalidRows}
                                     allItemMap={allItemMap}
-                                    onCancel={() => setShowMismatchModal(false)}
-                                    onKeepOrder={handleKeepOrderPrices}
-                                    onOverwrite={handleOverwriteOrderPrices}
+                                    remainingByBarcode={remainingByBarcode}
+                                    onCancel={() => setShowReconcile(false)}
+                                    onApply={applyReconcile}
                                     submitting={submitting}
                                 />
                             )}
@@ -2583,115 +2580,197 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
     );
 }
 
-// ─── Price Mismatch Modal ─────────────────────────────────────────────────
+// ─── Reconcile Modal (единое окно проверки перед добавлением: ✓ / ⚠ / ! / ✗) ──
 
-function PriceMismatchModal({ rows, allItemMap, onCancel, onKeepOrder, onOverwrite, submitting }: {
-    rows: PasteRow[];
+interface ReconcileChoices {
+    mismatchMode: 'keep' | 'overwrite';
+    includeExceeded: boolean;
+    invalidTarget: 'new_order' | 'existing_order' | 'skip';
+    invalidOrderId: number | null;
+}
+
+function ReconcileModal({ vehicleOrderNo, validRows, mismatchRows, exceededRows, invalidRows, allItemMap, remainingByBarcode, onCancel, onApply, submitting }: {
+    vehicleOrderNo: string;
+    validRows: PasteRow[];
+    mismatchRows: PasteRow[];
+    exceededRows: PasteRow[];
+    invalidRows: PasteRow[];
     allItemMap: Record<string, AvailableItem & { source_order: string; source_factory: string }>;
+    remainingByBarcode: Record<string, number>;
     onCancel: () => void;
-    onKeepOrder: () => void;
-    onOverwrite: () => void;
+    onApply: (choices: ReconcileChoices) => void;
     submitting: boolean;
 }) {
     const { t } = useT();
     const [mounted, setMounted] = useState(false);
+    const [mismatchMode, setMismatchMode] = useState<'keep' | 'overwrite'>('overwrite');
+    const [includeExceeded, setIncludeExceeded] = useState(true);
+    const [invalidTarget, setInvalidTarget] = useState<'new_order' | 'existing_order' | 'skip'>('new_order');
+    const [orders, setOrders] = useState<FactoryOrder[]>([]);
+    const [loadingOrders, setLoadingOrders] = useState(false);
+    const [ordersError, setOrdersError] = useState(false);
+    const [invalidOrderId, setInvalidOrderId] = useState<number | null>(null);
+
     useEffect(() => { setMounted(true); }, []);
+    const loadOrders = useCallback(async () => {
+        setLoadingOrders(true);
+        setOrdersError(false);
+        try {
+            const all = await api.getFactoryOrders();
+            const editable = all.filter(o => o.status === 'FORMING' || o.status === 'DISTRIBUTED');
+            setOrders(editable);
+            if (editable.length > 0) setInvalidOrderId(editable[0].id);
+        } catch {
+            setOrdersError(true);  // surface load failure — иначе пустой список ложно читается как «нет заказов»
+        } finally {
+            setLoadingOrders(false);
+        }
+    }, []);
+    useEffect(() => {
+        if (invalidRows.length === 0) return;
+        loadOrders();
+    }, [invalidRows.length, loadOrders]);
+
     if (!mounted) return null;
 
-    const totalDelta = rows.reduce((s, r) => {
-        const item = allItemMap[r.barcode.trim()];
-        const p = parseFloat(r.price) || 0;
-        const op = parseFloat(item?.price_cny || '0') || 0;
-        const qty = parseInt(r.qty) || 0;
-        return s + (p - op) * qty;
-    }, 0);
+    const sumQty = (rs: PasteRow[]) => rs.reduce((s, r) => s + (parseInt(r.qty) || 0), 0);
+    const noEditableOrders = !loadingOrders && !ordersError && orders.length === 0;
+    const invalidActive = invalidRows.length > 0 && invalidTarget !== 'skip';
+    const exceededActive = exceededRows.length > 0 && includeExceeded;
+    const totalRows = validRows.length + (exceededActive ? exceededRows.length : 0) + (invalidActive ? invalidRows.length : 0);
+    const canApply = totalRows > 0 && !submitting && !(invalidActive && invalidTarget === 'existing_order' && invalidOrderId == null);
+
+    const SectionCard = ({ color, icon, title, count, children }: { color: string; icon: string; title: string; count: number; children?: React.ReactNode }) => (
+        <div style={{ border: `1px solid ${color}55`, background: `${color}0d`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 14, color, marginBottom: children ? 10 : 0 }}>
+                <span>{icon}</span><span style={{ color: 'var(--color-text)' }}>{title}</span>
+                <span style={{ marginLeft: 'auto', color, fontWeight: 700 }}>{count}</span>
+            </div>
+            {children}
+        </div>
+    );
+
+    const miniTable = (rows: PasteRow[], extra?: (r: PasteRow) => React.ReactNode) => (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <tbody>
+                {rows.filter(r => (parseInt(r.qty) || 0) > 0).map((r, i) => (
+                    <tr key={i} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                        <td style={{ padding: '4px 6px', fontFamily: 'monospace' }}>{r.barcode.trim()}</td>
+                        <td style={{ padding: '4px 6px', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--color-text-muted)' }}>{r.article || '—'}</td>
+                        <td style={{ padding: '4px 6px', textAlign: 'right' }}>{formatNumber(parseInt(r.qty) || 0, 0)}</td>
+                        {extra && <td style={{ padding: '4px 6px', textAlign: 'right' }}>{extra(r)}</td>}
+                    </tr>
+                ))}
+            </tbody>
+        </table>
+    );
 
     return createPortal(
-        <div
-            onClick={onCancel}
-            style={{
-                position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                zIndex: 10000, padding: 16,
-            }}
-        >
-            <div
-                onClick={e => e.stopPropagation()}
-                className="glass-card"
-                style={{
-                    maxWidth: 900, width: '100%', maxHeight: '85vh', overflowY: 'auto',
-                    padding: 24, background: 'var(--color-bg)',
-                }}
-            >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                    <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{t('paste_mismatch_title')}</h3>
+        <div onClick={onCancel} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000, padding: 16 }}>
+            <div onClick={e => e.stopPropagation()} className="glass-card" style={{ maxWidth: 820, width: '100%', maxHeight: '88vh', overflowY: 'auto', padding: 24, background: 'var(--color-bg)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+                    <div>
+                        <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{t('reconcile_title')} {vehicleOrderNo}</h3>
+                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 2 }}>{t('reconcile_sub')}</div>
+                    </div>
                     <button onClick={onCancel} disabled={submitting} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: 'var(--color-text-muted)', padding: 4 }}>✕</button>
                 </div>
 
-                <div style={{ display: 'flex', gap: 24, fontSize: 13, marginBottom: 16, color: 'var(--color-text-muted)' }}>
-                    <div>{t('paste_mismatch_count')}: <b style={{ color: 'var(--color-text)' }}>{rows.length}</b></div>
-                    {Math.abs(totalDelta) > 0.0001 && (
-                        <div>{t('price_resync_delta')}: <b style={{ color: totalDelta >= 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
-                            {totalDelta >= 0 ? '+' : ''}{formatNumber(totalDelta, 2)} ¥
-                        </b></div>
+                <div style={{ marginTop: 16 }}>
+                    {/* ✓ В заказе */}
+                    {validRows.length > 0 && (
+                        <SectionCard color="#22c55e" icon="✓" title={`${t('reconcile_valid')} — ${t('reconcile_valid_note')}`} count={validRows.length} />
+                    )}
+
+                    {/* ⚠ Параметры отличаются */}
+                    {mismatchRows.length > 0 && (
+                        <SectionCard color="#f59e0b" icon="⚠️" title={t('paste_mismatch_title')} count={mismatchRows.length}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                                    <input type="radio" name="mismatch" checked={mismatchMode === 'overwrite'} onChange={() => setMismatchMode('overwrite')} disabled={submitting} />
+                                    {t('paste_overwrite_order')}
+                                </label>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                                    <input type="radio" name="mismatch" checked={mismatchMode === 'keep'} onChange={() => setMismatchMode('keep')} disabled={submitting} />
+                                    {t('paste_keep_order')}
+                                </label>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }}>{t('paste_mismatch_hint')}</div>
+                            </div>
+                            {miniTable(mismatchRows, r => {
+                                const item = allItemMap[r.barcode.trim()];
+                                const op = parseFloat(item?.price_cny || '0') || 0;
+                                const p = parseFloat(r.price) || 0;
+                                return Math.abs(p - op) > 0.0001
+                                    ? <span style={{ color: '#f59e0b', fontWeight: 600 }}>{formatNumber(op, 2)} → {formatNumber(p, 2)} ¥</span>
+                                    : <span style={{ color: 'var(--color-text-muted)' }}>{formatNumber(op, 2)} ¥</span>;
+                            })}
+                        </SectionCard>
+                    )}
+
+                    {/* ! Больше, чем в заказе */}
+                    {exceededRows.length > 0 && (
+                        <SectionCard color="#f97316" icon="!" title={t('reconcile_exceeded')} count={exceededRows.length}>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer', marginBottom: 8 }}>
+                                <input type="checkbox" checked={includeExceeded} onChange={e => setIncludeExceeded(e.target.checked)} disabled={submitting} />
+                                {t('reconcile_exceeded_toggle')}
+                            </label>
+                            {miniTable(exceededRows, r => {
+                                const bc = r.barcode.trim();
+                                const qty = parseInt(r.qty) || 0;
+                                const avail = remainingByBarcode[bc] || 0;
+                                const grow = Math.max(0, qty - avail);
+                                return <span style={{ color: '#f97316', fontWeight: 600 }}>+{formatNumber(grow, 0)} {t('reconcile_grow')} <span style={{ color: 'var(--color-text-muted)', fontWeight: 400 }}>({t('col_available')} {formatNumber(avail, 0)})</span></span>;
+                            })}
+                        </SectionCard>
+                    )}
+
+                    {/* ✗ Нет ни в одном заказе */}
+                    {invalidRows.length > 0 && (
+                        <SectionCard color="#ef4444" icon="✗" title={t('unordered_title')} count={invalidRows.length}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                                    <input type="radio" name="invalid" checked={invalidTarget === 'new_order'} onChange={() => setInvalidTarget('new_order')} disabled={submitting} />
+                                    {t('unordered_target_new')}
+                                </label>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: noEditableOrders ? 'not-allowed' : 'pointer', opacity: noEditableOrders ? 0.5 : 1 }}>
+                                    <input type="radio" name="invalid" checked={invalidTarget === 'existing_order'} onChange={() => setInvalidTarget('existing_order')} disabled={submitting || noEditableOrders} />
+                                    {t('unordered_target_existing')}
+                                </label>
+                                {invalidTarget === 'existing_order' && (
+                                    ordersError ? (
+                                        <div style={{ marginLeft: 24, fontSize: 12, color: 'var(--color-danger)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                                            {t('unordered_orders_error')}
+                                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => loadOrders()} disabled={submitting}>{t('btn_retry')}</button>
+                                        </div>
+                                    ) : loadingOrders ? <div className="spinner" style={{ marginLeft: 24 }} />
+                                        : noEditableOrders ? <div style={{ marginLeft: 24, fontSize: 12, color: 'var(--color-text-muted)' }}>{t('unordered_no_orders')}</div>
+                                            : <select className="form-input" style={{ marginLeft: 24, maxWidth: 460 }} value={invalidOrderId ?? ''} onChange={e => setInvalidOrderId(Number(e.target.value))} disabled={submitting}>
+                                                {orders.map(o => <option key={o.id} value={o.id}>{o.order_number}{o.factory_name ? ` — ${o.factory_name}` : ''} ({o.status})</option>)}
+                                            </select>
+                                )}
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer', color: 'var(--color-text-muted)' }}>
+                                    <input type="radio" name="invalid" checked={invalidTarget === 'skip'} onChange={() => setInvalidTarget('skip')} disabled={submitting} />
+                                    {t('reconcile_skip')}
+                                </label>
+                            </div>
+                            {miniTable(invalidRows, r => r.price ? <span style={{ color: 'var(--color-text-muted)' }}>{formatNumber(parseFloat(r.price) || 0, 2)} ¥</span> : <span style={{ color: '#ef4444' }}>—</span>)}
+                        </SectionCard>
                     )}
                 </div>
 
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                    <thead>
-                        <tr style={{ borderBottom: '2px solid var(--color-border)', color: 'var(--color-text-muted)' }}>
-                            <th style={{ textAlign: 'left', padding: '8px 6px', fontWeight: 500 }}>{t('col_barcode')}</th>
-                            <th style={{ textAlign: 'left', padding: '8px 6px', fontWeight: 500 }}>{t('col_article')}</th>
-                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('col_qty')}</th>
-                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('col_price_cny')} ({t('paste_col_order')}→{t('paste_col_paste')})</th>
-                            <th style={{ textAlign: 'left', padding: '8px 6px', fontWeight: 500 }}>{t('col_box_spec')}</th>
-                            <th style={{ textAlign: 'right', padding: '8px 6px', fontWeight: 500 }}>{t('col_pcs_per_box')}</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {rows.map((r, i) => {
-                            const item = allItemMap[r.barcode.trim()];
-                            const p = parseFloat(r.price) || 0;
-                            const op = parseFloat(item?.price_cny || '0') || 0;
-                            const qty = parseInt(r.qty) || 0;
-                            const priceDiffers = Math.abs(p - op) > 0.0001;
-                            const orderBox = (item?.box_size || '').trim();
-                            const pasteBox = (r.box_size || '').trim();
-                            const normBox = (s: string) => s.toLowerCase().replace(/[*xхх×]/g, '×');
-                            const boxDiffers = !!(pasteBox && normBox(pasteBox) !== normBox(orderBox));
-                            const orderPpb = item?.pcs_per_box || 0;
-                            const pastePpb = parseInt(r.pcs_per_box) || 0;
-                            const ppbDiffers = !!(pastePpb && pastePpb !== orderPpb);
-                            return (
-                                <tr key={i} style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                    <td style={{ padding: '6px', fontFamily: 'monospace' }}>{r.barcode}</td>
-                                    <td style={{ padding: '6px', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item?.article_seller || ''}>{item?.article_seller || '—'}</td>
-                                    <td style={{ padding: '6px', textAlign: 'right' }}>{formatNumber(qty, 0)}</td>
-                                    <td style={{ padding: '6px', textAlign: 'right', color: priceDiffers ? '#f59e0b' : 'var(--color-text-muted)', fontWeight: priceDiffers ? 600 : 400 }}>
-                                        {priceDiffers ? `${formatNumber(op, 2)} → ${formatNumber(p, 2)}` : formatNumber(op, 2)}
-                                    </td>
-                                    <td style={{ padding: '6px', color: boxDiffers ? '#f59e0b' : 'var(--color-text-muted)', fontWeight: boxDiffers ? 600 : 400 }}>
-                                        {boxDiffers ? `${orderBox || '—'} → ${pasteBox}` : (orderBox || '—')}
-                                    </td>
-                                    <td style={{ padding: '6px', textAlign: 'right', color: ppbDiffers ? '#f59e0b' : 'var(--color-text-muted)', fontWeight: ppbDiffers ? 600 : 400 }}>
-                                        {ppbDiffers ? `${orderPpb || '—'} → ${pastePpb}` : (orderPpb || '—')}
-                                    </td>
-                                </tr>
-                            );
-                        })}
-                    </tbody>
-                </table>
-
-                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 16, padding: 10, background: 'rgba(245,158,11,0.05)', borderRadius: 6 }}>
-                    ℹ️ {t('paste_mismatch_hint')}
-                </div>
-
-                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
-                    <button className="btn btn-secondary btn-sm" onClick={onCancel} disabled={submitting}>{t('price_resync_cancel')}</button>
-                    <button className="btn btn-secondary btn-sm" onClick={onKeepOrder} disabled={submitting}>{t('paste_keep_order')}</button>
-                    <button className="btn btn-primary btn-sm" onClick={onOverwrite} disabled={submitting}>
-                        {submitting ? t('price_resync_applying') : t('paste_overwrite_order')}
-                    </button>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 8, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
+                    <div style={{ fontSize: 13, color: totalRows > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }}>
+                        {totalRows > 0
+                            ? <>{t('reconcile_will_add')}: <b>{totalRows}</b> · {formatNumber(sumQty(validRows) + (exceededActive ? sumQty(exceededRows) : 0) + (invalidActive ? sumQty(invalidRows) : 0), 0)} {t('unit_pcs')}</>
+                            : t('reconcile_nothing')}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-secondary btn-sm" onClick={onCancel} disabled={submitting}>{t('btn_cancel')}</button>
+                        <button className="btn btn-primary btn-sm" disabled={!canApply}
+                            onClick={() => onApply({ mismatchMode, includeExceeded, invalidTarget, invalidOrderId })}>
+                            {submitting ? t('add_items_adding') : `${t('add_items_count')} (${totalRows})`}
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>,

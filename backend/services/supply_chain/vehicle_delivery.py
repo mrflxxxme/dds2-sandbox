@@ -11,10 +11,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.models.cost import CostOrder, CostOrderItem
-from backend.models.enums import VehicleStatus
+from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
+from backend.models.enums import FactoryOrderStatus, VehicleStatus
 from backend.models.planning import LeadTime
-from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem
+from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem, Supplier
 from backend.models.warehouse import (
     InboundReceipt,
     InboundReceiptItem,
@@ -23,6 +23,9 @@ from backend.models.warehouse import (
 from backend.schemas.supply_chain import (
     CONTAINER_TRANSPORT_MAP,
     AddItemsToVehicleRequest,
+    AddItemToVehicle,
+    AddUnorderedItemsRequest,
+    PostShipmentAddItem,
     PostShipmentItemsRequest,
     VehicleCostSummary,
     VehicleCreate,
@@ -35,7 +38,9 @@ from backend.schemas.supply_chain import (
 )
 from backend.services.supply_chain.factory_orders import (
     FactoryQtyExceeded,
+    _add_history,
     _adjust_assigned_qty,
+    _generate_factory_order_number,
     _resolve_existing_drift,
     refresh_factory_order_statuses,
 )
@@ -311,15 +316,75 @@ async def update_vehicle(
     return await _enrich_vehicle(db, project_id, vehicle)
 
 
+async def _bulk_resolve_foi(
+    db: AsyncSession,
+    project_id: int,
+    item_ids: list[int],
+) -> tuple[dict[int, FactoryOrderItem], dict[str, Nomenclature]]:
+    """Батч-резолв для booking-циклов: одним запросом грузит все FactoryOrderItem по id
+    (+ JOIN FactoryOrder для project/soft-delete фильтра), затем одним запросом —
+    Nomenclature по barcode для тех FOI, где пусты subject/article_seller.
+
+    Убирает per-item N+1 (до ~2N последовательных round-trip при cap=1000) в
+    add_items_to_vehicle / add_items_post_shipment: раньше каждая итерация делала
+    отдельный SELECT FOI и почти всегда отдельный SELECT Nomenclature. SQLAlchemy
+    identity-map гарантирует те же объекты, что и при per-item fetch (дубли id → один объект).
+    """
+    foi_map: dict[int, FactoryOrderItem] = {}
+    unique_ids = list(set(item_ids))
+    if unique_ids:
+        rows = (
+            (
+                await db.execute(
+                    select(FactoryOrderItem)
+                    .join(FactoryOrder)
+                    .where(
+                        FactoryOrderItem.id.in_(unique_ids),
+                        FactoryOrderItem.project_id == project_id,
+                        FactoryOrderItem.is_deleted == False,
+                        FactoryOrder.project_id == project_id,
+                        FactoryOrder.is_deleted == False,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        foi_map = {f.id: f for f in rows}
+
+    need = list({f.barcode for f in foi_map.values() if not f.subject or not f.article_seller})
+    nom_map: dict[str, Nomenclature] = {}
+    if need:
+        nom_rows = (
+            (
+                await db.execute(
+                    select(Nomenclature).where(
+                        Nomenclature.barcode.in_(need),
+                        Nomenclature.project_id == project_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        nom_map = {n.barcode: n for n in nom_rows}
+    return foi_map, nom_map
+
+
 async def add_items_to_vehicle(
     db: AsyncSession,
     project_id: int,
     order_no: str,
     data: AddItemsToVehicleRequest,
+    user_name: str | None = None,
 ) -> dict:
     """
     Add items from factory orders to a vehicle (from vehicle side).
     Validates remaining qty and updates assigned_qty on FactoryOrderItem.
+
+    Per-item ``mode``: ``strict`` (default) — превышение остатка → ValueError (400);
+    ``extend_plan`` — добить FactoryOrderItem.qty на overflow (корзина «!»: заказали
+    больше, чем в заказе → старый заказ авто-увеличивается), запись в историю заказа.
     """
     # Get vehicle
     result = await db.execute(
@@ -333,33 +398,27 @@ async def add_items_to_vehicle(
     if not vehicle:
         raise ValueError(f"Vehicle {order_no} not found")
 
+    # Батч-резолв FOI + Nomenclature одним запросом каждого (вместо per-item N+1 в цикле).
+    foi_map, nom_map = await _bulk_resolve_foi(
+        db, project_id, [item_req.factory_order_item_id for item_req in data.items]
+    )
+
     added = 0
     affected_fo_ids: set[int] = set()
     for item_req in data.items:
-        # Get factory order item
-        fo_item_result = await db.execute(
-            select(FactoryOrderItem)
-            .join(FactoryOrder)
-            .where(
-                FactoryOrderItem.id == item_req.factory_order_item_id,
-                FactoryOrderItem.project_id == project_id,
-                FactoryOrderItem.is_deleted == False,
-                FactoryOrder.project_id == project_id,
-                FactoryOrder.is_deleted == False,
-            )
-        )
-        fo_item = fo_item_result.scalar_one_or_none()
+        fo_item = foi_map.get(item_req.factory_order_item_id)
         if not fo_item:
             raise ValueError(f"FactoryOrderItem {item_req.factory_order_item_id} not found")
 
-        # Use shared utility — strict mode for add (route still maps to 400)
+        # Shared utility — mode per item: strict (route maps FactoryQtyExceeded→400)
+        # or extend_plan (grows FactoryOrderItem.qty, no raise).
         try:
             await _adjust_assigned_qty(
                 db,
                 fo_item,
                 delta=item_req.qty,
-                mode="strict",
-                user_name=None,
+                mode=item_req.mode,
+                user_name=user_name,
                 cost_order_no=order_no,
             )
         except FactoryQtyExceeded as e:
@@ -368,19 +427,11 @@ async def add_items_to_vehicle(
 
         affected_fo_ids.add(fo_item.factory_order_id)
 
-        # Resolve subject/article from Nomenclature if missing on factory order item
+        # Resolve subject/article from Nomenclature (batch-resolved выше, без per-item query)
         subject = fo_item.subject
         article_seller = fo_item.article_seller
         if not subject or not article_seller:
-            from backend.models.cost import Nomenclature
-
-            nom_result = await db.execute(
-                select(Nomenclature).where(
-                    Nomenclature.barcode == fo_item.barcode,
-                    Nomenclature.project_id == project_id,
-                )
-            )
-            nom = nom_result.scalar_one_or_none()
+            nom = nom_map.get(fo_item.barcode)
             if nom:
                 subject = subject or nom.subject
                 article_seller = article_seller or nom.article_seller
@@ -468,23 +519,17 @@ async def add_items_post_shipment(
             f"Use regular add_items_to_vehicle for FORMING."
         )
 
+    # Батч-резолв FOI + Nomenclature (вместо per-item N+1 в цикле).
+    foi_map, nom_map = await _bulk_resolve_foi(
+        db, project_id, [item_req.factory_order_item_id for item_req in data.items]
+    )
+
     added = 0
     affected_fo_ids: set[int] = set()
     new_cost_items: list[CostOrderItem] = []
 
     for item_req in data.items:
-        fo_result = await db.execute(
-            select(FactoryOrderItem)
-            .join(FactoryOrder)
-            .where(
-                FactoryOrderItem.id == item_req.factory_order_item_id,
-                FactoryOrderItem.project_id == project_id,
-                FactoryOrderItem.is_deleted == False,
-                FactoryOrder.project_id == project_id,
-                FactoryOrder.is_deleted == False,
-            )
-        )
-        fo_item = fo_result.scalar_one_or_none()
+        fo_item = foi_map.get(item_req.factory_order_item_id)
         if not fo_item:
             raise ValueError(f"FactoryOrderItem {item_req.factory_order_item_id} not found")
 
@@ -501,15 +546,7 @@ async def add_items_post_shipment(
         subject = fo_item.subject
         article_seller = fo_item.article_seller
         if not subject or not article_seller:
-            from backend.models.cost import Nomenclature
-
-            nom_result = await db.execute(
-                select(Nomenclature).where(
-                    Nomenclature.barcode == fo_item.barcode,
-                    Nomenclature.project_id == project_id,
-                )
-            )
-            nom = nom_result.scalar_one_or_none()
+            nom = nom_map.get(fo_item.barcode)
             if nom:
                 subject = subject or nom.subject
                 article_seller = article_seller or nom.article_seller
@@ -642,6 +679,179 @@ async def add_items_post_shipment(
         "receipt_items_added": receipts_updated,
         "new_receipt_id": new_receipt_id,
         "vehicle_status": vehicle.status,
+    }
+
+
+async def add_unordered_items_to_vehicle(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+    data: AddUnorderedItemsRequest,
+    user_name: str | None = None,
+) -> dict:
+    """Корзина «✗»: штрихкода нет ни в одном заказе.
+
+    Заводит позиции в заказ (новый — авто-номер, или существующий — мёрж по barcode),
+    затем кладёт их в машину. Атомарно: новые FactoryOrder/FactoryOrderItem создаются
+    через flush БЕЗ commit; единственный commit делает переиспользуемый booking-путь
+    (add_items_to_vehicle для FORMING / add_items_post_shipment для SHIPPED+), поэтому
+    состояние «заказ создан, но в машину не легло» невозможно.
+    """
+    vehicle = (
+        await db.execute(
+            select(CostOrder).where(
+                CostOrder.order_no == order_no,
+                CostOrder.project_id == project_id,
+                CostOrder.is_deleted == False,
+            )
+        )
+    ).scalar_one_or_none()
+    if not vehicle:
+        raise ValueError(f"Vehicle {order_no} not found")
+
+    # 1. Целевой заказ — существующий или новый.
+    if data.target == "existing_order":
+        order = (
+            await db.execute(
+                select(FactoryOrder).where(
+                    FactoryOrder.id == data.factory_order_id,
+                    FactoryOrder.project_id == project_id,
+                    FactoryOrder.is_deleted == False,
+                )
+            )
+        ).scalar_one_or_none()
+        if not order:
+            raise ValueError(f"Factory order {data.factory_order_id} not found")
+        if order.status not in (FactoryOrderStatus.FORMING.value, FactoryOrderStatus.DISTRIBUTED.value):
+            raise ValueError(f"Нельзя дописать в заказ в статусе {order.status} (доступны FORMING/DISTRIBUTED)")
+    else:  # new_order
+        if data.supplier_id is not None:
+            supplier = (
+                await db.execute(
+                    select(Supplier).where(
+                        Supplier.id == data.supplier_id,
+                        Supplier.project_id == project_id,
+                        Supplier.is_deleted == False,
+                    )
+                )
+            ).scalar_one_or_none()
+            if not supplier:
+                raise ValueError(f"Supplier {data.supplier_id} not found in project {project_id}")
+        order_number = await _generate_factory_order_number(db, project_id, order_no)
+        order = FactoryOrder(
+            project_id=project_id,
+            order_number=order_number,
+            factory_name=data.factory_name,
+            supplier_id=data.supplier_id,
+            status=FactoryOrderStatus.FORMING.value,
+        )
+        db.add(order)
+        await db.flush()  # order.id
+        await _add_history(
+            db,
+            project_id,
+            order.id,
+            "created",
+            new_status=FactoryOrderStatus.FORMING.value,
+            details=f"Заказ создан из машины {order_no} ({len(data.items)} позиций)",
+            changed_by=user_name,
+        )
+
+    # 2. Завести/смёржить позиции по barcode (как factory_orders.add_items).
+    existing_rows = (
+        (
+            await db.execute(
+                select(FactoryOrderItem).where(
+                    FactoryOrderItem.factory_order_id == order.id,
+                    FactoryOrderItem.project_id == project_id,
+                    FactoryOrderItem.is_deleted == False,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    existing_map: dict[str, FactoryOrderItem] = {row.barcode: row for row in existing_rows}
+
+    booked: list[tuple[FactoryOrderItem, int]] = []
+    for it in data.items:
+        existing = existing_map.get(it.barcode)
+        if existing:
+            # ✗-flow добавляет КОЛИЧЕСТВО к существующей строке; согласованную цену/спеки
+            # НЕ перезатираем (только дозаполняем пустые) — для переоценки есть bulk-price/specs.
+            existing.qty += it.qty
+            if it.price_cny and not existing.price_cny:
+                existing.price_cny = it.price_cny
+            if it.box_size and not existing.box_size:
+                existing.box_size = it.box_size
+            if it.pcs_per_box and not existing.pcs_per_box:
+                existing.pcs_per_box = it.pcs_per_box
+            if it.weight_kg and not existing.weight_kg:
+                existing.weight_kg = it.weight_kg
+            if it.subject and not existing.subject:
+                existing.subject = it.subject
+            if it.article_seller and not existing.article_seller:
+                existing.article_seller = it.article_seller
+            foi = existing
+        else:
+            foi = FactoryOrderItem(
+                project_id=project_id,
+                factory_order_id=order.id,
+                barcode=it.barcode,
+                subject=it.subject,
+                article_seller=it.article_seller,
+                qty=it.qty,
+                assigned_qty=0,
+                price_cny=it.price_cny,
+                box_size=it.box_size,
+                pcs_per_box=it.pcs_per_box,
+                weight_kg=it.weight_kg,
+            )
+            db.add(foi)
+            existing_map[it.barcode] = foi
+        booked.append((foi, it.qty))
+
+    await db.flush()  # FactoryOrderItem ids
+
+    if data.target == "existing_order":
+        await _add_history(
+            db,
+            project_id,
+            order.id,
+            "items_added",
+            details=f"Из машины {order_no}: {len(data.items)} позиций",
+            changed_by=user_name,
+        )
+
+    # 3. Положить в машину тем же путём, что и обычное добавление (единственный commit там).
+    if vehicle.status == VehicleStatus.FORMING:
+        result = await add_items_to_vehicle(
+            db,
+            project_id,
+            order_no,
+            AddItemsToVehicleRequest(
+                items=[AddItemToVehicle(factory_order_item_id=foi.id, qty=qty) for foi, qty in booked]
+            ),
+            user_name=user_name,
+        )
+    elif vehicle.status in _POST_SHIPMENT_ALLOWED:
+        result = await add_items_post_shipment(
+            db,
+            project_id,
+            order_no,
+            PostShipmentItemsRequest(
+                items=[PostShipmentAddItem(factory_order_item_id=foi.id, qty=qty, mode="strict") for foi, qty in booked]
+            ),
+            user_name=user_name,
+        )
+    else:
+        raise ValueError(f"Unsupported vehicle status {vehicle.status}")
+
+    return {
+        "ok": True,
+        "added": result.get("added", len(booked)),
+        "factory_order_id": order.id,
+        "factory_order_number": order.order_number,
     }
 
 

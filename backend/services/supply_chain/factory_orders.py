@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -462,6 +462,40 @@ async def create_factory_order(
         msg = f"Failed to reload factory order {order.id} after commit"
         raise RuntimeError(msg)
     return created
+
+
+async def _generate_factory_order_number(db: AsyncSession, project_id: int, base: str) -> str:
+    """Сгенерировать уникальный номер заказа вида ``{base}-Д{n}`` (n — следующий свободный).
+
+    ``base`` — обычно номер машины (V-0026), чтобы авто-заказ читался как «дополнительный
+    к машине». Сканирует ВСЕ строки (включая soft-deleted!), т.к. uq_factory_order_project_number
+    не учитывает is_deleted — иначе повторный INSERT того же номера упадёт IntegrityError.
+    """
+    # order_number — String(50); оставляем место под суффикс "-Д{n}", чтобы не словить DataError.
+    base = base[:40]
+    # Сериализуем конкурентную генерацию для пары (project, base): advisory-xact-lock держится
+    # до конца транзакции (commit делает booking-путь) → второй конкурентный unordered-add ждёт
+    # и видит уже вставленный номер → нет коллизии на uq_factory_order_project_number (recoverable
+    # 409, но под нагрузкой давал повторы). Лок per-(project,base) — разные машины не блокируют друг друга.
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:proj, hashtext(:base))"),
+        {"proj": project_id, "base": base},
+    )
+    # base = номер машины (user-supplied) → экранируем LIKE-метасимволы %/_ (см. learnings)
+    safe_base = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    result = await db.execute(
+        select(FactoryOrder.order_number).where(
+            FactoryOrder.project_id == project_id,
+            FactoryOrder.order_number.like(f"{safe_base}-Д%", escape="\\"),
+        )
+    )
+    prefix = f"{base}-Д"
+    max_n = 0
+    for (number,) in result:
+        suffix = number[len(prefix) :]
+        if suffix.isdigit():
+            max_n = max(max_n, int(suffix))
+    return f"{base}-Д{max_n + 1}"
 
 
 async def update_factory_order(

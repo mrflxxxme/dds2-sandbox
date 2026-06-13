@@ -2190,6 +2190,33 @@ export interface PostShipmentItemsResponse {
   vehicle_status: string;
 }
 
+// Корзина «✗»: штрихкода нет ни в одном заказе — завести в заказ (новый/существующий) + положить в машину.
+export interface UnorderedItem {
+  barcode: string;
+  qty: number;
+  price_cny: string | number;
+  box_size?: string | null;
+  pcs_per_box?: number | null;
+  weight_kg?: string | number | null;
+  subject?: string | null;
+  article_seller?: string | null;
+}
+
+export interface AddUnorderedItemsRequest {
+  target: 'new_order' | 'existing_order';
+  factory_order_id?: number | null;  // обязателен для existing_order
+  supplier_id?: number | null;        // опц. для new_order
+  factory_name?: string | null;       // опц. для new_order
+  items: UnorderedItem[];
+}
+
+export interface AddUnorderedItemsResponse {
+  ok: boolean;
+  added: number;
+  factory_order_id: number;
+  factory_order_number: string;
+}
+
 export interface VehicleSchema {
   id: number;
   order_no: string;

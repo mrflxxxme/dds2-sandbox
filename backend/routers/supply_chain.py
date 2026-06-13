@@ -17,6 +17,7 @@ from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.supply_chain import (
     AddItemsToVehicleRequest,
+    AddUnorderedItemsRequest,
     BulkPriceUpdateRequest,
     BulkUpdateItemSpecs,
     FactoryOrderCreate,
@@ -421,10 +422,35 @@ async def add_items_to_vehicle(
     order_no: str,
     payload: AddItemsToVehicleRequest,
     project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    display_name = user.first_name or user.username or user.email
     try:
-        return await vehicle_delivery.add_items_to_vehicle(db, project.id, order_no, payload)
+        return await vehicle_delivery.add_items_to_vehicle(db, project.id, order_no, payload, user_name=display_name)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/vehicles/{order_no}/unordered-items", dependencies=[Depends(rate_limit_write)])
+async def add_unordered_items_to_vehicle(
+    order_no: str,
+    payload: AddUnorderedItemsRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Корзина «✗»: завести позиции в заказ (новый/существующий) и положить в машину."""
+    display_name = user.first_name or user.username or user.email
+    try:
+        return await vehicle_delivery.add_unordered_items_to_vehicle(
+            db, project.id, order_no, payload, user_name=display_name
+        )
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "Конфликт номера авто-заказа, повторите") from None
+    except FactoryQtyExceeded as e:
+        raise HTTPException(422, detail=e.detail) from e
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 

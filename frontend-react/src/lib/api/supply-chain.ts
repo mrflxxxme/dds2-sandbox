@@ -27,6 +27,8 @@ import type {
     FactoryQtyExceededDetail,
     PostShipmentItemsRequest,
     PostShipmentItemsResponse,
+    AddUnorderedItemsRequest,
+    AddUnorderedItemsResponse,
 } from '@/types/api';
 import { FactoryQtyExceededError } from '@/types/api';
 
@@ -132,8 +134,20 @@ export function addSupplyChainMethods(api: ApiClient) {
         recalcVehicle(orderNo: string) {
             return api.request<VehicleCostSummary>('POST', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/recalc`);
         },
-        addItemsToVehicle(orderNo: string, items: { factory_order_item_id: number; qty: number }[]) {
+        addItemsToVehicle(
+            orderNo: string,
+            items: {
+                factory_order_item_id: number;
+                qty: number;
+                box_size_override?: string | null;
+                pcs_per_box_override?: number | null;
+                mode?: 'strict' | 'extend_plan';
+            }[],
+        ) {
             return api.request<{ ok: boolean; added: number }>('POST', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items`, { items });
+        },
+        addUnorderedItemsToVehicle(orderNo: string, payload: AddUnorderedItemsRequest) {
+            return api.request<AddUnorderedItemsResponse>('POST', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/unordered-items`, payload);
         },
         async addPostShipmentItems(
             orderNo: string,
