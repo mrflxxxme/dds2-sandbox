@@ -4,7 +4,7 @@ description: "Фан-аут ревью DDS2: по diff-путям спавнит
 
 # /review — параллельное ревью по diff
 
-Оживляет 5 профильных субагентов: вместо «модель вспомнит про code-reviewer» — детерминированный фан-аут по тому, что реально изменилось. Работает в любой сессии (через инструмент Agent), без Workflow-tool. Для тяжёлого/ultracode-прогона есть SOTA-версия `.claude/workflows/review.js` (`pipeline`+cache-warmup).
+Оживляет 5 профильных субагентов: вместо «модель вспомнит про code-reviewer» — детерминированный фан-аут по тому, что реально изменилось. Работает в любой сессии (через инструмент Agent), без Workflow-tool. Для тяжёлого/ultracode-прогона есть SOTA-версия `.claude/workflows/review-deep.js` (`pipeline`+cache-warmup), запуск `Workflow({name:'review-deep'})`.
 
 ## 1. Скоуп
 ```bash
