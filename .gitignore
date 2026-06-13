@@ -44,3 +44,8 @@ tests/loadtest/results_*.csv
 /cold-start-*.png
 /distribute-*.png
 .local-backup-*.sql.gz
+
+# Ad-hoc data-экспорты и scratch-пробы (не копить в working tree — грязное дерево блокирует pre-push)
+/override_upload_*.csv
+scripts/_*.py
+scripts/*_probe.py

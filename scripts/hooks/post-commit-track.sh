@@ -16,6 +16,7 @@ MSG=$(git log -1 --format=%s "$HASH" 2>/dev/null) || exit 0
 # Пропустить auto-генерированные
 case "$MSG" in
   *"[auto-docs]"*|*"[auto-learn]"*) exit 0 ;;
+  "docs:"*|"docs("*) exit 0 ;;  # docs-коммиты (вкл. /learn-рефлексию) не возвращаем в очередь /learn
 esac
 
 # Пропустить если pending уже содержит этот hash
