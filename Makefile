@@ -34,8 +34,10 @@ test: ## Запустить все тесты
 test-v: ## Тесты с подробным выводом
 	docker compose exec -T backend pytest tests/ -v --tb=long
 
-test-fast: ## Параллельные тесты (pytest-xdist)
-	docker compose exec -T backend pytest tests/ -n auto --tb=short -q
+# -n 2 (НЕ auto): backend-контейнер 2GB → -n auto=10 воркеров = OOM exit 137 +
+# FK-гонки на shared project_id=1. Значение совпадает с pre-push gate. Не менять на auto.
+test-fast: ## Параллельные тесты (pytest-xdist, -n 2 — см. коммент выше)
+	docker compose exec -T backend pytest tests/ -n 2 --tb=short -q
 
 test-changed: ## Только изменённые тесты (testmon)
 	docker compose exec -T backend pytest --testmon --tb=short -q

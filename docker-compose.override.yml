@@ -8,6 +8,11 @@
 
 services:
   backend:
+    # Dev hot-reload: uvicorn --reload следит за смонтированным ./backend →
+    # правки .py подхватываются без `docker compose restart backend`.
+    # reload-dir ограничен backend/, чтобы не сканировать tests/migrations/scripts.
+    # Прод (docker-compose.prod.yml) этот override НЕ подхватывает → там без --reload.
+    command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "backend", "--timeout-keep-alive", "120"]
     volumes:
       - ./backend:/app/backend
       - ./migrations:/app/migrations

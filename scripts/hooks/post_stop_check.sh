@@ -14,11 +14,8 @@ for f in $changed; do
 done
 
 # --- Pending /learn ---
-ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-PENDING="$ROOT_DIR/.claude/.pending-learn.log"
-if [ -f "$PENDING" ] && [ -s "$PENDING" ]; then
-  echo "[LEARN] $(wc -l < "$PENDING" | tr -d ' ') pending коммит(ов) — запусти /learn" >&2
-fi
+# Напоминание убрано отсюда: дублировало statusline.sh (пассивный индикатор) и
+# инжектило долг в контекст на КАЖДЫЙ Stop. Единственный источник — statusline.
 
 # --- Docs reminder (lightweight) ---
 all_changed=$(git diff --name-only HEAD 2>/dev/null)

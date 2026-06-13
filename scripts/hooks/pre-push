@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # DDS Pre-push hook — прогоняет тесты перед пушем
-# Пропустить: git push --no-verify (ТОЛЬКО для экстренных случаев)
+# Пропустить: git push --no-verify — ТОЛЬКО вручную человеком (агенту заблокировано pre_tool_check)
 
 echo "🔍 Pre-push: запуск проверок..."
 
@@ -131,7 +131,7 @@ fi
 echo ""
 if [ $FAILED -ne 0 ]; then
     echo -e "${RED}━━━ PUSH BLOCKED: исправь ошибки выше ━━━${NC}"
-    echo -e "${YELLOW}Экстренный пуш: git push --no-verify${NC}"
+    echo -e "${YELLOW}Экстренный пуш — ТОЛЬКО вручную человеком (агенту --no-verify заблокирован): git push --no-verify${NC}"
     exit 1
 fi
 
