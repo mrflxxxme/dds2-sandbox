@@ -247,9 +247,37 @@ const ru: TranslationDict = {
     paste_mismatch_count: 'Расхождений',
     paste_col_order: 'В заказе ¥',
     paste_col_paste: 'Введено ¥',
-    paste_mismatch_hint: 'Выберите: использовать значения из заказа (введённые игнорируются) или сохранить свои (цены переписываются в заказе, габариты/шт-кор — как override только в этой машине).',
+    paste_mismatch_hint: 'Выберите: использовать значения из заказа (введённые игнорируются) или сохранить свои (цены переписываются в заказе, габариты/шт-кор — как переопределение только в этой машине).',
     paste_keep_order: 'Использовать значения заказа',
     paste_overwrite_order: 'Сохранить мои значения',
+
+    // ── Корзина «✗» (нет в заказе) + «!» (заказали больше) ──
+    unordered_title: 'Этих позиций нет ни в одном заказе',
+    unordered_hint: 'Позиции будут заведены в заказ и сразу добавлены в машину.',
+    unordered_target_new: 'Создать новый заказ',
+    unordered_target_existing: 'Добавить в существующий',
+    unordered_pick_order: 'Выберите заказ',
+    unordered_no_orders: 'Нет доступных заказов (формируется / распределяется)',
+    unordered_orders_error: 'Не удалось загрузить заказы',
+    unordered_supplier_opt: 'Поставщик (необязательно)',
+    unordered_supplier_none: 'Без поставщика',
+    unordered_submit_new: 'Создать заказ и добавить',
+    unordered_submit_existing: 'Добавить в заказ',
+    unordered_btn_hint: 'Завести позиции в новый/существующий заказ и положить в машину',
+    exceeded_btn_hint: 'Добавить и увеличить старый заказ на превышение',
+
+    // ── Единая модалка проверки перед добавлением ──
+    reconcile_title: 'Добавление в машину',
+    reconcile_sub: 'Проверьте, что и как будет добавлено',
+    reconcile_valid: 'В заказе',
+    reconcile_valid_note: 'добавятся как есть',
+    reconcile_exceeded: 'Больше, чем в заказе',
+    reconcile_exceeded_toggle: 'Увеличить заказ и добавить',
+    reconcile_grow: 'к заказу',
+    reconcile_skip: 'Пропустить',
+    reconcile_will_add: 'Будет добавлено',
+    reconcile_need: 'нужно',
+    reconcile_nothing: 'Нечего добавлять — выберите хотя бы одно действие',
 
     // ── Vehicle cost summary ──
     cost_goods: 'Товар',
@@ -743,6 +771,34 @@ const zh: TranslationDict = {
     paste_mismatch_hint: '选择：使用订单参数（忽略输入）或保存自己的值（价格覆盖订单，箱规/件每箱仅作为本车辆的覆盖）。',
     paste_keep_order: '使用订单参数',
     paste_overwrite_order: '保存我的值',
+
+    // ── 「✗」不在订单 + 「!」超量 ──
+    unordered_title: '这些条目不在任何订单中',
+    unordered_hint: '条目将录入订单并立即加入车辆。',
+    unordered_target_new: '创建新订单',
+    unordered_target_existing: '加入现有订单',
+    unordered_pick_order: '选择订单',
+    unordered_no_orders: '没有可用订单（组建中 / 分配中）',
+    unordered_orders_error: '加载订单失败',
+    unordered_supplier_opt: '供应商（可选）',
+    unordered_supplier_none: '无供应商',
+    unordered_submit_new: '创建订单并添加',
+    unordered_submit_existing: '加入订单',
+    unordered_btn_hint: '将条目录入新/现有订单并放入车辆',
+    exceeded_btn_hint: '添加并按超出量增加原订单',
+
+    // ── 添加前统一确认弹窗 ──
+    reconcile_title: '添加到车辆',
+    reconcile_sub: '请确认将如何添加',
+    reconcile_valid: '订单中',
+    reconcile_valid_note: '按原样添加',
+    reconcile_exceeded: '超出订单数量',
+    reconcile_exceeded_toggle: '增加订单并添加',
+    reconcile_grow: '入订单',
+    reconcile_skip: '跳过',
+    reconcile_will_add: '将添加',
+    reconcile_need: '需要',
+    reconcile_nothing: '无可添加 — 请至少选择一项操作',
 
     // ── Vehicle cost summary ──
     cost_goods: '货物',

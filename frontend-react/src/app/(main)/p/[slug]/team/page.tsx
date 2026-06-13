@@ -23,6 +23,7 @@ const SECTION_PAGES: Record<string, { key: string; label: string }[]> = {
     ],
     'Склад': [
         { key: 'assembly', label: 'Заявки на сборку' },
+        { key: 'assembly-analytics', label: 'Анализ сборки' },
         { key: 'logistics', label: 'Лист логиста' },
         { key: 'fbo', label: 'Поставки FBO' },
         { key: 'stocks', label: 'Остатки WB' },
