@@ -2,7 +2,7 @@
 name: security-reviewer
 description: "Поиск уязвимостей безопасности в DDS2. Используй ПРОАКТИВНО при работе с auth, API, SQL, пользовательским вводом, шифрованием."
 tools: ["Read", "Bash", "Grep", "Glob"]
-model: fable
+model: opus
 ---
 
 # Security Reviewer — DDS2

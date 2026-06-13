@@ -26,6 +26,7 @@ bash scripts/check_conventions.sh
    grep -rn 'Float' --include="*.py" backend/models/ || echo OK
    ```
 4. **Frontend-сборка** — если в diff есть `frontend-react/`: `cd frontend-react && npm run build`.
+5. **Ревью-фан-аут** — если менялся код: запусти `/review` (профильные субагенты на Opus 4.8 по матрице diff→агент, единый вердикт APPROVE/WARNING/BLOCK). BLOCK блокирует коммит. Для тяжёлого прогона — `Workflow({name:'review'})`.
 
 Тяжёлые шаги можно гонять параллельно фоновыми агентами.
 
@@ -36,6 +37,7 @@ bash scripts/check_conventions.sh
   Конвенции:    OK / FAIL
   Безопасность: OK / N проблем
   Сборка:       OK / FAIL / SKIP
+  Ревью:        APPROVE / WARNING / BLOCK (C/H/M)
   → готов к коммиту: ДА / НЕТ
 ```
 

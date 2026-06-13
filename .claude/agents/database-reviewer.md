@@ -2,7 +2,7 @@
 name: database-reviewer
 description: "PostgreSQL специалист для DDS2. Оптимизация запросов, схемы, миграции, PgBouncer. Используй при написании SQL, создании миграций, проблемах с производительностью."
 tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
-model: fable
+model: opus
 ---
 
 # Database Reviewer — DDS2
