@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003
 """
 Assembly Request schemas: Pydantic request/response models.
 See backend/DOMAIN_ASSEMBLY.md for full spec.
@@ -240,6 +241,7 @@ AssemblyAnomalyKind = Literal[
     "stuck_assembly",  # IN_PROGRESS дольше порога
     "stuck_shipment",  # READY/VEHICLE_ASSIGNED дольше порога от готовности
     "wb_accepted_not_shipped",  # ВБ уже принял поставку, но заявка не отгружена
+    "ff_closed_not_shipped",  # ФФ закрыл/заархивировал заявку, а наша сборка ещё не отгружена
     "shipped_not_accepted",  # SHIPPED дольше порога без DELIVERED
 ]
 
@@ -273,6 +275,7 @@ class AssemblyAnomalyRow(BaseModel):
     # Дефолты — на случай записи в кэше от прошлой версии без этих ключей.
     wb_supply_number: str | None = None  # номер WB-поставки (wb_fbo_supplies.wb_supply_id)
     pallets_count: int = 0
+    ff_request_number: str | None = None  # номер ФФ-заявки (для ff_closed_not_shipped)
 
 
 class AssemblyWarehouseFlowStat(BaseModel):

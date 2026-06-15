@@ -114,6 +114,14 @@ const ANOMALY_GROUPS: {
         thresholdKey: null,
     },
     {
+        kind: 'ff_closed_not_shipped',
+        icon: '🟣',
+        title: 'ФФ закрыл заявку — у нас не отгружено',
+        desc: () => 'Фулфилмент закрыл/заархивировал заявку (собрал и отгрузил), а наша сборка ещё не отгружена. Остатки не списаны — проверьте и отгрузите вручную.',
+        color: 'var(--color-danger)',
+        thresholdKey: null,
+    },
+    {
         kind: 'stuck_shipment',
         icon: '🟠',
         title: 'Готово, но не отгружается',
@@ -1166,6 +1174,11 @@ export default function AssemblyFlowAnalyticsPage() {
                                                                         {group.kind === 'wb_accepted_not_shipped' && row.wb_fbo_status && (
                                                                             <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                                                                                 WB: {row.wb_fbo_status}
+                                                                            </div>
+                                                                        )}
+                                                                        {group.kind === 'ff_closed_not_shipped' && row.ff_request_number && (
+                                                                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                                                                ФФ: {row.ff_request_number}
                                                                             </div>
                                                                         )}
                                                                     </td>

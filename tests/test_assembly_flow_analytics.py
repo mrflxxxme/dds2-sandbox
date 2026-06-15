@@ -34,6 +34,7 @@ from backend.models.assembly import (
     AssemblyStatus,
     AssemblyStatusHistory,
 )
+from backend.models.fulfillment import FfRequestKind, FulfillmentRequest
 from backend.models.wb_fbo import WbFboSupply, WbSupplyStatus
 from backend.services.assembly.analytics import get_assembly_flow_analytics
 from backend.utils.time import utcnow
@@ -127,6 +128,34 @@ async def _add_history(db_session, env, req_id: int, old: str | None, new: str, 
         )
     )
     await db_session.commit()
+
+
+async def _mk_ff_request(
+    db_session,
+    env,
+    assembly_request_id: int,
+    *,
+    is_completed: bool = False,
+    archived: bool = False,
+    local_archived: bool = False,
+    number: str | None = None,
+) -> FulfillmentRequest:
+    """Связанная ФФ-заявка зеркала (kind=assembly) для аномалии ff_closed_not_shipped."""
+    ff = FulfillmentRequest(
+        project_id=env.project_id,
+        warehouse_id=env.wh_id,
+        provider="skladbot",
+        external_id=f"FF-{uuid.uuid4().hex[:10]}",
+        number=number,
+        kind=FfRequestKind.ASSEMBLY.value,
+        is_completed=is_completed,
+        archived=archived,
+        local_archived=local_archived,
+        assembly_request_id=assembly_request_id,
+    )
+    db_session.add(ff)
+    await db_session.commit()
+    return ff
 
 
 async def _mk_supply(db_session, env, wb_status: WbSupplyStatus, warehouse_name: str = "Казань") -> WbFboSupply:
@@ -428,6 +457,46 @@ class TestAnomalies:
         assert by_id[req.id]["wb_supply_number"] == supply.wb_supply_id
         assert by_id[req2.id]["kind"] == "wb_accepted_not_shipped"
         assert by_id[req2.id]["wb_supply_number"] == supply2.wb_supply_id
+
+    async def test_ff_closed_not_shipped(self, db_session, env):
+        """ФФ закрыл/заархивировал связанную заявку, а наша сборка ещё не
+        отгружена → аномалия ff_closed_not_shipped (статус НЕ меняется)."""
+        t0 = utcnow() - timedelta(days=1)
+        # is_completed → аномалия; статус сборки IN_PROGRESS (порог сборки НЕ превышен)
+        req_done = await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, created_at=t0)
+        await _mk_ff_request(db_session, env, req_done.id, is_completed=True, number="WH-R-1001")
+        # archived → тоже аномалия; статус VEHICLE_ASSIGNED
+        req_arch = await _mk_request(db_session, env, status=AssemblyStatus.VEHICLE_ASSIGNED, created_at=t0)
+        await _mk_ff_request(db_session, env, req_arch.id, archived=True, number="WH-R-1002")
+        # local_archived → НЕ аномалия (пользователь сам убрал в архив)
+        req_local = await _mk_request(db_session, env, status=AssemblyStatus.READY, created_at=t0)
+        await _mk_ff_request(db_session, env, req_local.id, is_completed=True, local_archived=True)
+        # SHIPPED + закрытая ФФ → ожидаемо, НЕ аномалия
+        req_shipped = await _mk_request(db_session, env, status=AssemblyStatus.SHIPPED, created_at=t0)
+        await _mk_ff_request(db_session, env, req_shipped.id, is_completed=True)
+
+        res = await _flow(db_session, env.project_id)
+        by_id = {a["id"]: a for a in res["anomalies"]}
+        assert set(by_id) == {req_done.id, req_arch.id}
+        assert by_id[req_done.id]["kind"] == "ff_closed_not_shipped"
+        assert by_id[req_done.id]["ff_request_number"] == "WH-R-1001"
+        assert by_id[req_arch.id]["kind"] == "ff_closed_not_shipped"
+        assert by_id[req_arch.id]["ff_request_number"] == "WH-R-1002"
+
+    async def test_ff_closed_yields_to_wb_accepted(self, db_session, env):
+        """Приоритет: ВБ принял (wb_accepted_not_shipped) важнее ФФ-закрытия."""
+        supply = await _mk_supply(db_session, env, WbSupplyStatus.ACCEPTED)
+        req = await _mk_request(
+            db_session,
+            env,
+            status=AssemblyStatus.VEHICLE_ASSIGNED,
+            created_at=utcnow() - timedelta(days=1),
+            wb_fbo_supply_id=supply.id,
+        )
+        await _mk_ff_request(db_session, env, req.id, archived=True)
+        res = await _flow(db_session, env.project_id)
+        assert len(res["anomalies"]) == 1
+        assert res["anomalies"][0]["kind"] == "wb_accepted_not_shipped"
 
     async def test_shipped_not_accepted(self, db_session, env):
         supply = await _mk_supply(db_session, env, WbSupplyStatus.ON_DELIVERY)

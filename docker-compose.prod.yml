@@ -143,6 +143,14 @@ services:
       DDS_ROLE: worker
       DB_POOL_SIZE: 5
       DB_MAX_OVERFLOW: 10
+      # Тированное FF-расписание: приоритетные склады чаще, остальные — раз в час.
+      # FAST: 5 Газпром (skladbot) + 1 натали (migfull) каждые 10 мин;
+      # SLOW: 2 wms (wmscelicom) каждые 30 мин; остальные склады всех проектов —
+      # DEFAULT раз в час (исключая приоритетные, чтобы не дублировать).
+      FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS: "5,1"
+      FULFILLMENT_SYNC_FAST_INTERVAL_MINUTES: "10"
+      FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS: "2"
+      FULFILLMENT_SYNC_SLOW_INTERVAL_MINUTES: "30"
     entrypoint: ["./entrypoint-worker.sh"]
     command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120"]
     deploy:

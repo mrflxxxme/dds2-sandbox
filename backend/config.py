@@ -48,6 +48,26 @@ class Settings(BaseSettings):
 
     # Scheduler
     SCHEDULER_ENABLED: bool = True  # False = no background sync (for dev when server is also running)
+    # ── Фулфилмент-синк (skladbot/wmscelicom/migfull) — тированное расписание ──
+    # Один и тот же тиринг работает и в основном scheduler (прод), и в
+    # FF-only scheduler (локалка). Три контура по складам:
+    #   FAST  — приоритетные склады (CSV id) @ FAST_INTERVAL.
+    #   SLOW  — отдельные склады (CSV id) @ SLOW_INTERVAL (пересечение с FAST
+    #           исключается, чтобы склад не синкался дважды).
+    #   DEFAULT — все остальные склады @ INTERVAL (= прежнее «раз в час»).
+    #           На локалке (FF-only) DEFAULT-контур НЕ поднимается: БД там —
+    #           копия прода (sync-prod) с ~2k замаскированных токенов, синк
+    #           всех = шторм ошибок. Пустые FAST/SLOW → один DEFAULT для всех
+    #           (прежнее прод-поведение, без изменений).
+    FULFILLMENT_SYNC_INTERVAL_MINUTES: int = 60  # DEFAULT-контур (остальные склады)
+    FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS: str = ""
+    FULFILLMENT_SYNC_FAST_INTERVAL_MINUTES: int = 10
+    FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS: str = ""
+    FULFILLMENT_SYNC_SLOW_INTERVAL_MINUTES: int = 30
+    # Поднять FF-only scheduler (только FF-джобы, без тяжёлых WB/Telegram),
+    # когда основной выключен (SCHEDULER_ENABLED=false) — для локалки.
+    # На проде игнорируется (там основной scheduler уже крутит тот же тиринг).
+    FULFILLMENT_SYNC_ENABLED: bool = False
 
     # Admin panel IP whitelist (comma-separated, empty = no restriction)
     ADMIN_ALLOWED_IPS: str = ""  # e.g. "1.2.3.4,2a01:e5c0:6dac::2"

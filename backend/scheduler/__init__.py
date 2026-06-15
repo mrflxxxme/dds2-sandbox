@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003
 """
 Background scheduler for periodic WB funnel sync.
 
@@ -62,7 +63,12 @@ def start_scheduler():
     from backend.config import settings
 
     if not settings.SCHEDULER_ENABLED:
-        logger.info("⏭️ Scheduler disabled (SCHEDULER_ENABLED=false)")
+        # Локалка: основной scheduler выключен (WB/Telegram-джобам нужны живые
+        # ключи), но FF-синк можно поднять отдельно — опт-ин FULFILLMENT_SYNC_ENABLED.
+        if settings.FULFILLMENT_SYNC_ENABLED:
+            _start_fulfillment_only_scheduler()
+        else:
+            logger.info("⏭️ Scheduler disabled (SCHEDULER_ENABLED=false)")
         return
 
     global _scheduler
@@ -230,16 +236,11 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
-    # Fulfillment (skladbot, wmscelicom, migfull) stocks + requests mirror: every hour
-    _scheduler.add_job(
-        sync_all_fulfillment_warehouses,
-        trigger=IntervalTrigger(hours=1),
-        id="fulfillment_sync",
-        name="Fulfillment sync (all FF providers, hourly)",
-        replace_existing=True,
-        max_instances=1,
-        misfire_grace_time=300,
-    )
+    # Fulfillment (skladbot, wmscelicom, migfull) stocks + requests mirror —
+    # тированное расписание (FAST/SLOW по складам + DEFAULT для остальных,
+    # см. config + _add_fulfillment_jobs). Пустые FAST/SLOW → один DEFAULT для
+    # всех складов = прежнее «раз в час».
+    _add_fulfillment_jobs(_scheduler, include_default=True)
 
     # WB goods returns (возвраты на ПВЗ): дважды в день — 08:00 (утренний срез)
     # и 20:00 MSK (вечерний добор). WB публикует отчёт каждые 30 мин, но для
@@ -353,6 +354,87 @@ def start_scheduler():
     logger.info(
         "✅ Scheduler started — daily sync 3x/day + backfill + ad check + wb_finance weekly Mon + wb_finance daily Tue-Sun + prewarm 1h + AI digest 07:00 + finance catch-up"
     )
+
+
+def _parse_warehouse_ids(raw: str) -> list[int]:
+    """CSV id складов → list[int] (дедуп, порядок сохранён); мусор/пусто игнорируется."""
+    return list(dict.fromkeys(int(x) for x in raw.split(",") if x.strip().isdigit()))
+
+
+def _add_fulfillment_jobs(scheduler: AsyncIOScheduler, *, include_default: bool) -> None:
+    """Зарегистрировать тированные FF-синк-джобы (общая логика прод/локалка).
+
+    FAST/SLOW — контуры по спискам складов из настроек (из SLOW вычитается
+    пересечение с FAST, чтобы склад не синкался дважды). include_default=True
+    добавляет DEFAULT-контур для ВСЕХ ОСТАЛЬНЫХ складов (exclude FAST+SLOW) —
+    прод; пустые FAST/SLOW → DEFAULT синкает все (= прежнее «раз в час»).
+    include_default=False (локалка, FF-only) DEFAULT пропускает: БД там копия
+    прода с ~2k замаскированных ключей, синк всех = шторм 401/таймаутов.
+    """
+    from backend.config import settings
+
+    fast = _parse_warehouse_ids(settings.FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS)
+    slow = [w for w in _parse_warehouse_ids(settings.FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS) if w not in fast]
+    prioritized = fast + slow
+
+    if fast:
+        m = settings.FULFILLMENT_SYNC_FAST_INTERVAL_MINUTES
+        scheduler.add_job(
+            sync_all_fulfillment_warehouses,
+            trigger=IntervalTrigger(minutes=m),
+            id="fulfillment_sync_fast",
+            name=f"Fulfillment sync FAST {fast} (every {m}min)",
+            kwargs={"warehouse_ids": fast},
+            replace_existing=True,
+            max_instances=1,
+            misfire_grace_time=300,
+        )
+    if slow:
+        m = settings.FULFILLMENT_SYNC_SLOW_INTERVAL_MINUTES
+        scheduler.add_job(
+            sync_all_fulfillment_warehouses,
+            trigger=IntervalTrigger(minutes=m),
+            id="fulfillment_sync_slow",
+            name=f"Fulfillment sync SLOW {slow} (every {m}min)",
+            kwargs={"warehouse_ids": slow},
+            replace_existing=True,
+            max_instances=1,
+            misfire_grace_time=300,
+        )
+    if include_default:
+        m = settings.FULFILLMENT_SYNC_INTERVAL_MINUTES
+        scheduler.add_job(
+            sync_all_fulfillment_warehouses,
+            trigger=IntervalTrigger(minutes=m),
+            id="fulfillment_sync",
+            name=f"Fulfillment sync DEFAULT (every {m}min)",
+            kwargs={"exclude_warehouse_ids": prioritized or None},
+            replace_existing=True,
+            max_instances=1,
+            misfire_grace_time=300,
+        )
+    logger.info(
+        "Fulfillment jobs: fast=%s slow=%s default=%s",
+        fast or "—",
+        slow or "—",
+        ("all-except-prioritized" if prioritized else "all") if include_default else "off",
+    )
+
+
+def _start_fulfillment_only_scheduler():
+    """FF-only scheduler (локалка): только FF-джобы, без тяжёлых WB/Telegram.
+
+    Поднимается, когда основной scheduler выключен (SCHEDULER_ENABLED=false) и
+    задан FULFILLMENT_SYNC_ENABLED. DEFAULT-контур не добавляется
+    (include_default=False) — синкаются только перечисленные FAST/SLOW склады.
+    Прод сюда не попадает (там SCHEDULER_ENABLED=true → общий scheduler крутит
+    тот же тиринг через _add_fulfillment_jobs(include_default=True)).
+    """
+    global _scheduler
+    _scheduler = AsyncIOScheduler(timezone=MSK)
+    _add_fulfillment_jobs(_scheduler, include_default=False)
+    _scheduler.start()
+    logger.info("✅ Fulfillment-only scheduler started (локалка, FF-only)")
 
 
 def stop_scheduler():
