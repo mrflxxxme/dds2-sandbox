@@ -20,6 +20,7 @@ from backend.integrations.skladbot_client import SkladbotApiError, SkladbotClien
 from backend.integrations.wmscelicom_client import WmsCelicomClient, normalize_base_url
 from backend.models import (
     FulfillmentRequest,
+    FulfillmentStatusEvent,
     FulfillmentStock,
     InboundReceipt,
     InboundReceiptItem,
@@ -2221,3 +2222,172 @@ async def test_sync_migfull_marks_linked_assembly_ready(db_session, project, war
     history = await _history_rows(db_session, project.id, doc.id)
     assert len(history) == 1
     assert history[0].changed_by == "ff_sync"
+
+
+# ─── Status history (журнал смены статусов синком) ───────────────────────────
+
+
+async def _status_events(db_session, project_id, warehouse_id) -> list[FulfillmentStatusEvent]:
+    """Все события истории склада в порядке вставки (id asc)."""
+    result = await db_session.execute(
+        select(FulfillmentStatusEvent)
+        .where(
+            FulfillmentStatusEvent.project_id == project_id,
+            FulfillmentStatusEvent.warehouse_id == warehouse_id,
+        )
+        .order_by(FulfillmentStatusEvent.id)
+        .limit(100)
+    )
+    return list(result.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_status_history_created_on_first_sync(db_session, project, warehouse, connected_key, monkeypatch):
+    """Первый синк → событие `created` на каждую заявку (assembly + inbound)."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(
+        monkeypatch,
+        {
+            851: [_req(7001, status="new", stage_title="Новая", stage_code="cargo_pickup")],
+            852: [_req(7002, status="new", stage_title="Создана")],
+        },
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    events = await _status_events(db_session, project.id, warehouse.id)
+    assert len(events) == 2
+    by_ext = {e.external_id: e for e in events}
+    assert by_ext["7001"].event_type == "created"
+    assert by_ext["7001"].kind == "assembly"
+    assert by_ext["7001"].old_status is None  # появление — старого состояния нет
+    assert by_ext["7001"].new_status == "new"
+    assert by_ext["7001"].new_stage_title == "Новая"
+    assert by_ext["7001"].new_stage_code == "cargo_pickup"
+    assert by_ext["7001"].new_is_completed is False
+    assert by_ext["7002"].kind == "inbound"
+    assert by_ext["7002"].new_stage_title == "Создана"
+
+
+@pytest.mark.asyncio
+async def test_status_history_changed_on_stage_transition(db_session, project, warehouse, connected_key, monkeypatch):
+    """Смена стадии при ресинке → событие `changed` со старым и новым значением."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(7101, status="new", stage_title="Забор груза", stage_code="cargo_pickup")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    _mock_requests(
+        monkeypatch, {851: [_req(7101, status="work", stage_title="Назначен водитель", stage_code="driver")]}
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    events = await _status_events(db_session, project.id, warehouse.id)
+    assert len(events) == 2  # created + changed
+    changed = events[1]
+    assert changed.event_type == "changed"
+    assert changed.old_stage_title == "Забор груза"
+    assert changed.new_stage_title == "Назначен водитель"
+    assert changed.old_status == "new"
+    assert changed.new_status == "work"
+
+
+@pytest.mark.asyncio
+async def test_status_history_no_event_on_unchanged_resync(db_session, project, warehouse, connected_key, monkeypatch):
+    """Ресинк без смены статуса (меняются лишь synced_at/raw) → новых событий нет."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(7201, status="new", stage_title="Новая", stage_code="cargo_pickup")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    events = await _status_events(db_session, project.id, warehouse.id)
+    assert len(events) == 1  # только `created`, повторы статус не меняли
+    assert events[0].event_type == "created"
+
+
+@pytest.mark.asyncio
+async def test_status_history_completed_flag_transition(db_session, project, warehouse, connected_key, monkeypatch):
+    """Завершение заявки фиксируется сменой флага is_completed."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(7301, status="work", stage_title="В работе")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    _mock_requests(monkeypatch, {851: [_req(7301, status="done", stage_title="Завершена", completed=1)]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    events = await _status_events(db_session, project.id, warehouse.id)
+    assert len(events) == 2
+    changed = events[1]
+    assert changed.old_is_completed is False
+    assert changed.new_is_completed is True
+    assert changed.new_stage_title == "Завершена"
+
+
+@pytest.mark.asyncio
+async def test_status_history_archived_flag_transition(db_session, project, warehouse, connected_key, monkeypatch):
+    """Уход заявки в архив провайдера фиксируется сменой флага archived."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(7351, status="work", stage_title="В работе", archived=0)]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    _mock_requests(monkeypatch, {851: [_req(7351, status="work", stage_title="В работе", archived=1)]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    events = await _status_events(db_session, project.id, warehouse.id)
+    assert len(events) == 2
+    changed = events[1]
+    assert changed.event_type == "changed"
+    assert changed.old_archived is False
+    assert changed.new_archived is True
+
+
+@pytest.mark.asyncio
+async def test_list_status_events_ordering_and_filters(db_session, project, warehouse, connected_key, monkeypatch):
+    """list_status_events: новые сверху + фильтры по kind и ff_request_id."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(
+        monkeypatch,
+        {
+            851: [_req(7401, status="new", stage_title="Новая")],
+            852: [_req(7402, status="new", stage_title="Создана")],
+        },
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    # сменим стадию только у сборки
+    _mock_requests(
+        monkeypatch,
+        {
+            851: [_req(7401, status="work", stage_title="В работе")],
+            852: [_req(7402, status="new", stage_title="Создана")],
+        },
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    all_events = await fulfillment_service.list_status_events(db_session, project.id, warehouse.id)
+    assert len(all_events) == 3  # 2 created + 1 changed
+    # Новые сверху: changed-событие (последний синк) первое
+    assert all_events[0]["event_type"] == "changed"
+    assert all_events[0]["external_id"] == "7401"
+
+    assembly_only = await fulfillment_service.list_status_events(db_session, project.id, warehouse.id, kind="assembly")
+    assert {e["external_id"] for e in assembly_only} == {"7401"}
+    assert len(assembly_only) == 2  # created + changed
+
+    ff_id = all_events[0]["fulfillment_request_id"]
+    one_request = await fulfillment_service.list_status_events(
+        db_session, project.id, warehouse.id, ff_request_id=ff_id
+    )
+    assert len(one_request) == 2
+    assert all(e["fulfillment_request_id"] == ff_id for e in one_request)
+
+
+@pytest.mark.asyncio
+async def test_list_status_events_project_isolation(
+    db_session, project, warehouse, connected_key, monkeypatch, other_project
+):
+    """Журнал чужого проекта не виден (фильтр project_id)."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(7501, status="new", stage_title="Новая")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    assert await fulfillment_service.list_status_events(db_session, project.id, warehouse.id)  # есть
+    assert await fulfillment_service.list_status_events(db_session, other_project.id, warehouse.id) == []

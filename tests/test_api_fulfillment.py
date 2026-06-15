@@ -322,3 +322,81 @@ async def test_connect_migfull_requires_tenant_guid_400(client, auth_headers):
         headers=headers,
     )
     assert resp.status_code == 400
+
+
+# ─── Status history (журнал смены статусов) ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_status_history_requires_auth(client):
+    resp = await client.get("/api/v1/warehouse/1/fulfillment/status-history")
+    assert resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_status_history_empty(client, auth_headers):
+    headers = await _project_headers(client, auth_headers)
+    wh_id = await _create_warehouse(client, headers)
+    resp = await client.get(f"/api/v1/warehouse/{wh_id}/fulfillment/status-history", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_status_history_after_sync(client, auth_headers, monkeypatch):
+    """Синк → endpoint отдаёт событие `created`; фильтр kind работает."""
+
+    async def fake_test_connection(self):
+        return {"id": 6282, "name": "ООО ТЕСТ ФФ"}
+
+    async def fake_fetch_all_products(self, customer_id):
+        return []
+
+    async def fake_fetch_requests(self, type_id):
+        if type_id == 851:
+            return [
+                {
+                    "id": 778001,
+                    "delivery_number": "WH-R-778001",
+                    "created_at": "2026-06-10",
+                    "status": "new",
+                    "archived": 0,
+                    "type": "3. Доставка на склад МП",
+                    "stage_title": "Забор груза",
+                    "stage_code": "cargo_pickup",
+                    "expired": False,
+                    "is_completed": 0,
+                }
+            ]
+        return []
+
+    async def fake_fetch_request_detail(self, external_id):
+        return {}
+
+    monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "fetch_all_products", fake_fetch_all_products)
+    monkeypatch.setattr(SkladbotClient, "fetch_requests", fake_fetch_requests)
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_fetch_request_detail)
+
+    headers = await _project_headers(client, auth_headers)
+    wh_id = await _create_warehouse(client, headers)
+    await client.post(
+        f"/api/v1/warehouse/{wh_id}/fulfillment/connect",
+        json={"provider": "skladbot", "token": FAKE_TOKEN},
+        headers=headers,
+    )
+    await client.post(f"/api/v1/warehouse/{wh_id}/fulfillment/sync", headers=headers)
+
+    resp = await client.get(f"/api/v1/warehouse/{wh_id}/fulfillment/status-history", headers=headers)
+    assert resp.status_code == 200, resp.text
+    events = resp.json()
+    assert len(events) == 1
+    assert events[0]["event_type"] == "created"
+    assert events[0]["kind"] == "assembly"
+    assert events[0]["new_stage_title"] == "Забор груза"
+    assert events[0]["external_id"] == "778001"
+
+    # фильтр по чужому kind → пусто
+    resp = await client.get(f"/api/v1/warehouse/{wh_id}/fulfillment/status-history?kind=inbound", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() == []

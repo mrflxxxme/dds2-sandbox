@@ -9,11 +9,11 @@ import type {
     Warehouse, InboundReceipt, OutboundShipment,
     WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
     DefectMarkOperation, VehicleStatus,
-    FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfRequestRow, FfRequestKind,
+    FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfRequestRow, FfRequestKind, FfStatusEvent,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
-import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge } from './ff-shared';
+import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge, ffEventBadge, ffEventSummary } from './ff-shared';
 
 /* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
 
@@ -33,8 +33,8 @@ function countActionableTransfers(transfers: StockTransfer[], warehouseId: numbe
 
 /* ─── Main page ────────────────────────────────────────────────────────────── */
 
-type WarehouseTab = 'all' | 'receipts' | 'shipments' | 'transfers' | 'stock' | 'defects' | 'delivery' | 'requisites' | 'ff-stocks' | 'ff-assembly' | 'ff-inbound';
-const WAREHOUSE_TABS: WarehouseTab[] = ['all', 'receipts', 'shipments', 'transfers', 'stock', 'defects', 'delivery', 'requisites', 'ff-stocks', 'ff-assembly', 'ff-inbound'];
+type WarehouseTab = 'all' | 'receipts' | 'shipments' | 'transfers' | 'stock' | 'defects' | 'delivery' | 'requisites' | 'ff-stocks' | 'ff-assembly' | 'ff-inbound' | 'ff-history';
+const WAREHOUSE_TABS: WarehouseTab[] = ['all', 'receipts', 'shipments', 'transfers', 'stock', 'defects', 'delivery', 'requisites', 'ff-stocks', 'ff-assembly', 'ff-inbound', 'ff-history'];
 
 export default function WarehouseDetailPage() {
     const params = useParams();
@@ -101,7 +101,7 @@ export default function WarehouseDetailPage() {
     // Если интеграцию отключили, а открыта ФФ-вкладка — возвращаемся на «Реквизиты».
     // Пока статус не загружен (ffStatus === null) — не сбрасываем: иначе ?tab=ff-* проигрывает гонку загрузке статуса.
     useEffect(() => {
-        if (ffStatus && !ffStatus.connected && (tab === 'ff-stocks' || tab === 'ff-assembly' || tab === 'ff-inbound')) {
+        if (ffStatus && !ffStatus.connected && (tab === 'ff-stocks' || tab === 'ff-assembly' || tab === 'ff-inbound' || tab === 'ff-history')) {
             setTab('requisites');
         }
     }, [ffStatus, tab]);
@@ -124,6 +124,7 @@ export default function WarehouseDetailPage() {
             { key: 'ff-stocks' as const, label: 'ФФ остатки' },
             { key: 'ff-assembly' as const, label: 'ФФ сборка' },
             { key: 'ff-inbound' as const, label: 'ФФ приёмки' },
+            { key: 'ff-history' as const, label: 'ФФ история' },
         ] : []),
         { key: 'requisites' as const, label: 'Реквизиты' },
     ];
@@ -215,6 +216,7 @@ export default function WarehouseDetailPage() {
             {tab === 'ff-stocks' && ffConnected && <FfStocksTab warehouseId={warehouseId} />}
             {tab === 'ff-assembly' && ffConnected && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="assembly" />}
             {tab === 'ff-inbound' && ffConnected && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="inbound" />}
+            {tab === 'ff-history' && ffConnected && <FfHistoryTab warehouseId={warehouseId} slug={slug} />}
             {tab === 'requisites' && (
                 <>
                     <RequisitesTab warehouse={warehouse} onChanged={load} />
@@ -1845,16 +1847,16 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
             )}
 
             <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-                <select className="input" style={{ maxWidth: 200, fontSize: 13 }} value={subjectFilter} onChange={e => setSubjectFilter(e.target.value)}>
+                <select className="form-input" style={{ maxWidth: 200, fontSize: 13 }} value={subjectFilter} onChange={e => setSubjectFilter(e.target.value)}>
                     <option value="">Предмет: Все</option>
                     {(data?.subjects ?? []).map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
-                <select className="input" style={{ maxWidth: 200, fontSize: 13 }} value={brandFilter} onChange={e => setBrandFilter(e.target.value)}>
+                <select className="form-input" style={{ maxWidth: 200, fontSize: 13 }} value={brandFilter} onChange={e => setBrandFilter(e.target.value)}>
                     <option value="">Бренд: Все</option>
                     {(data?.brands ?? []).map(b => <option key={b} value={b}>{b}</option>)}
                 </select>
                 <input
-                    className="input"
+                    className="form-input"
                     style={{ maxWidth: 240, fontSize: 13 }}
                     placeholder="🔍 Баркод / артикул"
                     value={search}
@@ -1887,6 +1889,134 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
                     : 'Нет данных — выполните синхронизацию во вкладке «Реквизиты»'}
                 emptyIcon="📦"
                 exportName="ff_stocks"
+            />
+        </>
+    );
+}
+
+/* ─── Tab: ФФ история (журнал смены статусов синком) ────────────────────── */
+
+const FF_EVENT_KIND_LABELS: Record<string, string> = {
+    assembly: 'Сборка',
+    inbound: 'Приёмка',
+    other: 'Прочее',
+};
+type FfHistoryKindFilter = 'all' | 'assembly' | 'inbound';
+
+function FfHistoryTab({ warehouseId, slug }: { warehouseId: number; slug: string }) {
+    const [events, setEvents] = useState<FfStatusEvent[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [kindFilter, setKindFilter] = useState<FfHistoryKindFilter>('all');
+    const [search, setSearch] = useState('');
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true);
+        setError('');
+        api.getFfStatusHistory(warehouseId)
+            .then(r => { if (!controller.signal.aborted) setEvents(r); })
+            .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка'); })
+            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [warehouseId]);
+
+    const rows = useMemo(() => {
+        let result = events;
+        if (kindFilter !== 'all') result = result.filter(e => e.kind === kindFilter);
+        const q = search.trim().toLowerCase();
+        if (q) {
+            result = result.filter(e =>
+                (e.number ?? '').toLowerCase().includes(q)
+                || e.external_id.toLowerCase().includes(q)
+                || ffEventSummary(e).toLowerCase().includes(q)
+            );
+        }
+        return result;
+    }, [events, kindFilter, search]);
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
+    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>;
+
+    const hasFilters = kindFilter !== 'all' || Boolean(search.trim());
+
+    const cols: Column[] = [
+        {
+            key: 'changed_at', label: 'Когда',
+            render: (v: string) => formatDateTime(v),
+            exportValue: (row: FfStatusEvent) => row.changed_at,
+        },
+        {
+            key: 'number', label: 'Заявка',
+            render: (_: unknown, row: FfStatusEvent) => (
+                <Link
+                    href={`/p/${slug}/warehouse/${warehouseId}/ff-request/${row.fulfillment_request_id}`}
+                    title="Открыть заявку"
+                    style={{ fontWeight: 600, color: 'var(--color-accent)', textDecoration: 'none' }}
+                >
+                    {row.number || row.external_id}
+                </Link>
+            ),
+            exportValue: (row: FfStatusEvent) => row.number || row.external_id,
+        },
+        {
+            key: 'kind', label: 'Тип',
+            render: (v: string) => FF_EVENT_KIND_LABELS[v] || v,
+        },
+        {
+            key: 'event', label: 'Что изменилось',
+            render: (_: unknown, row: FfStatusEvent) => (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    {ffEventBadge(row)}
+                    <span>{ffEventSummary(row)}</span>
+                </span>
+            ),
+            exportValue: (row: FfStatusEvent) => ffEventSummary(row),
+        },
+    ];
+
+    const filterBtn = (key: FfHistoryKindFilter, label: string) => (
+        <button
+            className={`btn btn-sm ${kindFilter === key ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setKindFilter(key)}
+        >
+            {label}
+        </button>
+    );
+
+    return (
+        <>
+            <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: 4 }}>
+                    {filterBtn('all', 'Все')}
+                    {filterBtn('assembly', 'Сборка')}
+                    {filterBtn('inbound', 'Приёмки')}
+                </div>
+                <input
+                    className="form-input"
+                    style={{ maxWidth: 280, fontSize: 13 }}
+                    placeholder="🔍 Номер заявки / стадия"
+                    value={search}
+                    onChange={e => setSearch(e.target.value)}
+                />
+                {hasFilters && (
+                    <button className="btn btn-sm btn-secondary" onClick={() => { setKindFilter('all'); setSearch(''); }}>
+                        Сбросить
+                    </button>
+                )}
+                <span style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--color-text-muted)' }}>
+                    {hasFilters ? `Показано: ${formatNumber(rows.length, 0)} из ${formatNumber(events.length, 0)}` : `Всего событий: ${formatNumber(events.length, 0)}`}
+                </span>
+            </div>
+
+            <TanStackDataTable
+                columns={cols}
+                data={rows}
+                emptyText={hasFilters
+                    ? 'Нет событий по заданным фильтрам'
+                    : 'История пуста — статусы заявок ещё не менялись. Журнал заполняется при синхронизации.'}
+                emptyIcon="🕓"
+                exportName="ff_status_history"
             />
         </>
     );

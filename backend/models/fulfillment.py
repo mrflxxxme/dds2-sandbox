@@ -19,6 +19,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -106,4 +107,48 @@ class FulfillmentRequest(Base):
         Index("ix_fulfillment_requests_project_wh", "project_id", "warehouse_id"),
         Index("ix_fulfillment_requests_assembly_request_id", "assembly_request_id"),
         Index("ix_fulfillment_requests_inbound_receipt_id", "inbound_receipt_id"),
+    )
+
+
+class FulfillmentStatusEvent(Base):
+    """История смены статусов заявки ФФ — пишется синком при детекте изменения.
+
+    Зеркало провайдера (FulfillmentRequest) хранит лишь ТЕКУЩЕЕ состояние и
+    перетирается каждым синком. Эта таблица — журнал переходов: при каждом
+    синке, если стадия/статус/флаги заявки изменились относительно зеркала,
+    добавляется строка (когда, что → что). Первое появление заявки — событие
+    `created`. Работает для всех провайдеров (в т.ч. wmscelicom/migfull, у
+    которых живой истории стадий нет). Read-only журнал — append-only, без
+    soft-delete; каскадно удаляется вместе с заявкой.
+    """
+
+    __tablename__ = "fulfillment_status_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    fulfillment_request_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("fulfillment_requests.id", ondelete="CASCADE"), nullable=False
+    )
+    # Денормализация для отображения без JOIN (заявка переживёт смену number)
+    external_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    number: Mapped[str | None] = mapped_column(String(100))
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default=FfRequestKind.OTHER.value)
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False)  # created | changed
+    old_status: Mapped[str | None] = mapped_column(String(50))
+    new_status: Mapped[str | None] = mapped_column(String(50))
+    old_stage_code: Mapped[str | None] = mapped_column(String(100))
+    new_stage_code: Mapped[str | None] = mapped_column(String(100))
+    old_stage_title: Mapped[str | None] = mapped_column(String(200))
+    new_stage_title: Mapped[str | None] = mapped_column(String(200))
+    old_is_completed: Mapped[bool | None] = mapped_column(Boolean)
+    new_is_completed: Mapped[bool | None] = mapped_column(Boolean)
+    old_archived: Mapped[bool | None] = mapped_column(Boolean)
+    new_archived: Mapped[bool | None] = mapped_column(Boolean)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_ff_status_events_project_wh_changed", "project_id", "warehouse_id", "changed_at"),
+        Index("ix_ff_status_events_request_id", "fulfillment_request_id"),
     )

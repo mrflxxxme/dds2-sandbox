@@ -3472,6 +3472,29 @@ export interface FfRequestRow {
   local_archived_at: string | null;
 }
 
+/** Событие истории синхронизации: синк зафиксировал смену стадии/статуса заявки ФФ */
+export interface FfStatusEvent {
+  id: number;
+  fulfillment_request_id: number;
+  external_id: string;
+  number: string | null;
+  kind: 'assembly' | 'inbound' | 'other';
+  provider: string;
+  /** created — заявка впервые появилась; changed — статус/стадия изменились */
+  event_type: 'created' | 'changed';
+  old_status: string | null;
+  new_status: string | null;
+  old_stage_code: string | null;
+  new_stage_code: string | null;
+  old_stage_title: string | null;
+  new_stage_title: string | null;
+  old_is_completed: boolean | null;
+  new_is_completed: boolean | null;
+  old_archived: boolean | null;
+  new_archived: boolean | null;
+  changed_at: string;
+}
+
 export interface FfRequestDetailProduct {
   barcode: string | null;
   vendor_code: string | null;

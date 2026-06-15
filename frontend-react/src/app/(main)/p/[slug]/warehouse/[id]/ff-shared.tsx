@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import { filterFfLinkCandidates, splitFfLinkCandidates } from '@/lib/utils/ffLinkCandidates';
-import type { FfLinkCandidate, FfLinkCandidatesResponse, FfRequestKind, FfRequestRow } from '@/types/api';
+import type { FfLinkCandidate, FfLinkCandidatesResponse, FfRequestKind, FfRequestRow, FfStatusEvent } from '@/types/api';
 
 // Статусы наших документов (заявки на сборку + приёмки) — для колонки/строки «Связь»
 export const FF_LINKED_STATUS_LABELS: Record<string, string> = {
@@ -38,6 +38,42 @@ export function ffStageBadge(row: FfRequestRow) {
     if (row.expired) return <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Просрочена</span>;
     if (row.archived) return <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>Архив</span>;
     return null;
+}
+
+/* ─── История синхронизации: помощники отображения событий ───────────────── */
+
+// Человекочитаемая стадия из снимка события (title → status → прочерк)
+function ffEventStage(stageTitle: string | null, status: string | null): string {
+    return stageTitle || status || '—';
+}
+
+// Краткое описание изменения — для таблицы и Excel-экспорта
+export function ffEventSummary(e: FfStatusEvent): string {
+    const newStage = ffEventStage(e.new_stage_title, e.new_status);
+    if (e.event_type === 'created') return `Заявка появилась · ${newStage}`;
+
+    const oldStage = ffEventStage(e.old_stage_title, e.old_status);
+    const parts: string[] = [];
+    if (oldStage !== newStage) parts.push(`${oldStage} → ${newStage}`);
+    if (e.new_is_completed && !e.old_is_completed) parts.push('завершена');
+    if (!e.new_is_completed && e.old_is_completed) parts.push('возобновлена');
+    if (e.new_archived && !e.old_archived) parts.push('в архив (провайдер)');
+    if (!e.new_archived && e.old_archived) parts.push('из архива (провайдер)');
+    return parts.length ? parts.join(' · ') : newStage;
+}
+
+// Бейдж типа события для строки истории
+export function ffEventBadge(e: FfStatusEvent) {
+    if (e.event_type === 'created') {
+        return <span className="badge badge-info" style={{ fontSize: 11, padding: '2px 8px' }}>Появилась</span>;
+    }
+    if (e.new_is_completed && !e.old_is_completed) {
+        return <span className="badge badge-success" style={{ fontSize: 11, padding: '2px 8px' }}>Завершена</span>;
+    }
+    if (e.new_archived && !e.old_archived) {
+        return <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>Архив</span>;
+    }
+    return <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>Смена стадии</span>;
 }
 
 /* ─── Модал «Связать заявку» — пикер документа склада ────────────────────── */

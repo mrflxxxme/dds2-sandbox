@@ -63,6 +63,34 @@ describe('fulfillment.getFulfillmentRequests', () => {
     });
 });
 
+// ─── Status history (журнал смены статусов) ───────────────────────────────
+
+describe('fulfillment.getFfStatusHistory', () => {
+    it('GETs status-history without query when no params', async () => {
+        const spy = mockFetch([]);
+        const api = makeApi();
+        await api.getFfStatusHistory(5);
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/warehouse/5/fulfillment/status-history');
+        expect(url).not.toContain('?');
+        expect((init as RequestInit).method).toBe('GET');
+    });
+
+    it('includes kind when provided', async () => {
+        const spy = mockFetch([]);
+        const api = makeApi();
+        await api.getFfStatusHistory(5, { kind: 'assembly' });
+        expect(spy.mock.calls[0][0]).toContain('kind=assembly');
+    });
+
+    it('includes ff_request_id when provided', async () => {
+        const spy = mockFetch([]);
+        const api = makeApi();
+        await api.getFfStatusHistory(5, { ffRequestId: 42 });
+        expect(spy.mock.calls[0][0]).toContain('ff_request_id=42');
+    });
+});
+
 // ─── Link candidates ──────────────────────────────────────────────────────
 
 describe('fulfillment.getFfLinkCandidates', () => {
