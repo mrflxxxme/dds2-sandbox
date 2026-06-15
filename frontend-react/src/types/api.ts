@@ -265,6 +265,9 @@ export interface PlanFactBrandRow {
   forecast: number;
   days_in_month: number;
   current_day: number;
+  /** Бренд с продажами, но без заведённого плана (или «без бренда») — план=0,
+   *  добавляется для сходимости итога с ОПиУ. */
+  no_plan?: boolean;
 }
 
 // ─── Cost ────────────────────────────────────────────────────────────────────

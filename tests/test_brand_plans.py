@@ -291,3 +291,67 @@ class TestForecastCurrentDayFromData:
         assert len(rows) == 1
         assert rows[0]["current_day"] == 0
         assert rows[0]["forecast"] == 0
+
+
+class TestUnplannedBrandsReconcile:
+    """get_plan_fact_brands surfaces brands with sales but no plan (+ «без бренда»)
+    so the total Факт reconciles with ОПиУ instead of silently dropping revenue."""
+
+    @pytest.mark.asyncio
+    async def test_unplanned_brand_and_empty_brand_surface(self, db_session, project, monkeypatch):
+        class _FakeDate(date):
+            @classmethod
+            def today(cls):
+                return date(2026, 5, 1)  # past-month branch → full month counted
+
+        monkeypatch.setattr("backend.services.planning.brand_plan.date", _FakeDate)
+
+        # Plan only for Brand-A
+        await db_session.execute(
+            text(
+                "INSERT INTO brand_plans (project_id, brand, year, month, plan_amount, created_at) "
+                "VALUES (:pid, 'Brand-A', 2026, 4, 1000000, NOW())"
+            ),
+            {"pid": project.id},
+        )
+        await _insert_wb_row(db_session, project.id, "Brand-A", date(2026, 4, 5), 40001, 500000)
+        await _insert_wb_row(db_session, project.id, "Brand-B", date(2026, 4, 6), 40002, 300000)  # no plan
+        await _insert_wb_row(db_session, project.id, "", date(2026, 4, 7), 40003, 200000)  # no brand
+        await db_session.commit()
+
+        rows = await get_plan_fact_brands(db_session, project.id, 2026, 4)
+        by_brand = {r["brand"]: r for r in rows}
+
+        assert not by_brand["Brand-A"].get("no_plan")
+        assert by_brand["Brand-B"]["no_plan"] is True
+        assert by_brand["Brand-B"]["plan_month"] == 0.0
+        assert by_brand["Brand-B"]["fact_mtd"] == pytest.approx(300000)
+        assert by_brand["(без бренда)"]["no_plan"] is True
+        assert by_brand["(без бренда)"]["fact_mtd"] == pytest.approx(200000)
+
+        # Total reconciles with the full revenue (1:1 с ОПиУ)
+        total_fact = sum(r["fact_mtd"] for r in rows)
+        assert total_fact == pytest.approx(1_000_000)
+
+    @pytest.mark.asyncio
+    async def test_no_unplanned_rows_when_all_branded_and_planned(self, db_session, project, monkeypatch):
+        class _FakeDate(date):
+            @classmethod
+            def today(cls):
+                return date(2026, 5, 1)
+
+        monkeypatch.setattr("backend.services.planning.brand_plan.date", _FakeDate)
+
+        await db_session.execute(
+            text(
+                "INSERT INTO brand_plans (project_id, brand, year, month, plan_amount, created_at) "
+                "VALUES (:pid, 'Brand-A', 2026, 4, 1000000, NOW())"
+            ),
+            {"pid": project.id},
+        )
+        await _insert_wb_row(db_session, project.id, "Brand-A", date(2026, 4, 5), 41001, 500000)
+        await db_session.commit()
+
+        rows = await get_plan_fact_brands(db_session, project.id, 2026, 4)
+        assert len(rows) == 1
+        assert not rows[0].get("no_plan")
