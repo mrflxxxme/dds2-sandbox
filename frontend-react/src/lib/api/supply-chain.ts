@@ -201,6 +201,15 @@ export function addSupplyChainMethods(api: ApiClient) {
         clearAllVehicleItems(orderNo: string) {
             return api.request<{ ok: boolean; removed: number }>('DELETE', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items`);
         },
+        bulkRemoveVehicleItems(orderNo: string, itemIds: number[]) {
+            // Одним вызовом вместо N×DELETE — иначе 30/мин rate_limit_write
+            // обрывает массовое удаление на середине ("Слишком много запросов").
+            return api.request<{ ok: boolean; removed: number; skipped_not_found: number; errors: { item_id: number; error: string }[] }>(
+                'POST',
+                `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/items/bulk-delete`,
+                { item_ids: itemIds },
+            );
+        },
         previewVehiclePriceResync(orderNo: string) {
             return api.request<VehiclePriceResyncPreview>('GET', `/api/v1/supply-chain/vehicles/${encodeURIComponent(orderNo)}/price-resync/preview`);
         },

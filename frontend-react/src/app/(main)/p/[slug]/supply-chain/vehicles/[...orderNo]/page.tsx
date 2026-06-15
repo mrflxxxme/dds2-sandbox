@@ -830,7 +830,12 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
             byBc.set(it.barcode, list);
         }
         for (const [bc, list] of byBc) {
-            combinedBoxDetailByBarcode.set(bc, list.length > 1 ? calcCombinedBoxDetail(list) : null);
+            // fallbackPpb: первый ненулевой ppb среди сиблингов — для строк, у
+            // которых FOI пустой (нет своих специфик). См. sc: «короба разные»
+            // при null-сиблинге → calcCombinedBoxDetail возвращал null и группа
+            // схлопывалась к per-source отображению.
+            const fallbackPpb = list.find(it => (it.pcs_per_box || 0) > 0)?.pcs_per_box || 0;
+            combinedBoxDetailByBarcode.set(bc, list.length > 1 ? calcCombinedBoxDetail(list, fallbackPpb) : null);
         }
     }
     const toggleGroup = (barcode: string) => {
@@ -884,15 +889,14 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                 .replace('{count}', String(groupItems.length))
                 .replace('{status}', vehicleStatus);
         if (!confirm(msg)) return;
-        const errors: string[] = [];
-        for (const it of groupItems) {
-            try {
-                await api.removeItemFromVehicle(vehicleOrderNo, it.id);
-            } catch (e: unknown) {
-                errors.push(`${it.id}: ${e instanceof Error ? e.message : 'error'}`);
+        try {
+            const res = await api.bulkRemoveVehicleItems(vehicleOrderNo, groupItems.map(it => it.id));
+            if (res.errors.length > 0) {
+                alert(`${t('vehicle_items_bulk_delete_partial')}\n${res.errors.map(e => `${e.item_id}: ${e.error}`).join('\n')}`);
             }
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
-        if (errors.length > 0) alert(`${t('vehicle_items_bulk_delete_partial')}\n${errors.join('\n')}`);
         onRemoved();
     };
 
@@ -905,19 +909,16 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                 .replace('{status}', vehicleStatus);
         if (!confirm(msg)) return;
         setBulkDeleting(true);
-        const errors: string[] = [];
-        for (const id of selectedIds) {
-            try {
-                await api.removeItemFromVehicle(vehicleOrderNo, id);
-            } catch (e: unknown) {
-                errors.push(`${id}: ${e instanceof Error ? e.message : 'error'}`);
+        try {
+            const res = await api.bulkRemoveVehicleItems(vehicleOrderNo, Array.from(selectedIds));
+            if (res.errors.length > 0) {
+                alert(`${t('vehicle_items_bulk_delete_partial')}\n${res.errors.map(e => `${e.item_id}: ${e.error}`).join('\n')}`);
             }
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_error'));
         }
         setBulkDeleting(false);
         setSelectedIds(new Set());
-        if (errors.length > 0) {
-            alert(`${t('vehicle_items_bulk_delete_partial')}\n${errors.join('\n')}`);
-        }
         onRemoved();
     };
 
@@ -1151,18 +1152,30 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                     if (row.kind === 'group_head') {
                         const groupItems = row.items;
                         const totalQty = groupItems.reduce((s, it) => s + it.qty, 0);
-                        const allSameBox = groupItems.every(it => it.box_size === groupItems[0].box_size && it.pcs_per_box === groupItems[0].pcs_per_box);
-                        const groupPpb = allSameBox ? (groupItems[0].pcs_per_box || 0) : 0;
+                        // Null/empty sibling spec = "unknown", not "different" — if all
+                        // NON-null siblings agree, propagate to the unknowns for display.
+                        // Genuine divergence (≥2 different non-null specs) keeps allSameBox=false.
+                        const nonNullSiblings = groupItems.filter(it => it.box_size && (it.pcs_per_box || 0) > 0);
+                        const nonNullAgree = nonNullSiblings.length > 0
+                            && nonNullSiblings.every(it => it.box_size === nonNullSiblings[0].box_size && it.pcs_per_box === nonNullSiblings[0].pcs_per_box);
+                        const effectiveBoxSize = nonNullAgree ? nonNullSiblings[0].box_size : null;
+                        const effectivePpb = nonNullAgree ? (nonNullSiblings[0].pcs_per_box || 0) : 0;
+                        const allSameBox = nonNullAgree
+                            && groupItems.every(it => (!it.box_size || it.box_size === effectiveBoxSize)
+                                && (!it.pcs_per_box || it.pcs_per_box === effectivePpb));
+                        const groupPpb = allSameBox ? effectivePpb : 0;
                         // «Мест»: баркод из нескольких ФЗ — для машины единая позиция.
                         // Короба считаем по СУММАРНОМУ qty (calcTotalBoxesWithMix
                         // комбинирует источники одного баркода+ppb ДО округления), а не
                         // округляя каждый источник отдельно — иначе неполные коробки
                         // округляются вверх многократно. Совпадает с футером и Excel.
-                        const groupBoxes = calcTotalBoxesWithMix(groupItems);
+                        // fallbackPpb подкармливает null-сиблингов: без него их qty
+                        // молча выпадал бы из подсчёта (sc: «Мест» меньше суммы).
+                        const groupBoxes = calcTotalBoxesWithMix(groupItems, allSameBox ? effectivePpb : 0);
                         // Сводная разбивка по коробкам для баркода из 2+ ФЗ (или null,
                         // если комбинировать нельзя — тогда показываем число как раньше).
                         const combinedDetail = combinedBoxDetailByBarcode.get(row.barcode) ?? null;
-                        const combinedPpb = groupItems[0].pcs_per_box || 0;
+                        const combinedPpb = effectivePpb || (groupItems[0].pcs_per_box || 0);
                         const totalWeight = groupItems.reduce((s, it) => s + (it.weight_kg || 0) * it.qty, 0);
                         const totalVolume = groupItems.reduce((s, it) => {
                             const d = parseBoxDims(it.box_size);
@@ -1179,8 +1192,8 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                         const groupAllSelected = groupItems.every(it => selectedIds.has(it.id));
                         const groupSomeSelected = !groupAllSelected && groupItems.some(it => selectedIds.has(it.id));
                         const weightPerPc = groupItems[0].weight_kg || null;
-                        const boxLabel = allSameBox && groupItems[0].box_size
-                            ? `${groupItems[0].box_size}${groupPpb ? ` (${groupPpb}${t('unit_pcs')})` : ''}`
+                        const boxLabel = allSameBox && effectiveBoxSize
+                            ? `${effectiveBoxSize}${groupPpb ? ` (${groupPpb}${t('unit_pcs')})` : ''}`
                             : t('vdetail_group_mixed');
                         const groupHasDrift = groupItems.some(it => it.qty_drift != null && it.qty_drift > 0);
                         return (
@@ -2056,9 +2069,12 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
     // `consumed` map so cumulative qty across rows of the same barcode is respected.
     // valid → strict (order params, or paste overrides if overwrite); exceeded overflow →
     // extend_plan on the FIFO-first FOI so the original order line auto-grows.
+    // Returns `bookedByValidRow` index-aligned with `validRows` so the caller can detect
+    // rows that booked 0 items (KEEP-mode no-match) and NOT remove them from the grid.
     const buildAddItems = (overwrite: boolean, includeExceeded: boolean) => {
         const consumed: Record<number, number> = {};
         const items: { factory_order_item_id: number; qty: number; box_size_override?: string | null; pcs_per_box_override?: number | null; mode?: 'strict' | 'extend_plan' }[] = [];
+        const bookedByValidRow: number[] = [];
         for (const r of validRows) {
             const bc = r.barcode.trim();
             const splits = splitRowAcrossFois(
@@ -2068,6 +2084,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                 consumed,
             );
             for (const s of splits) items.push(s);
+            bookedByValidRow.push(splits.reduce((s, it) => s + it.qty, 0));
         }
         if (includeExceeded) {
             for (const r of exceededRows) {
@@ -2085,7 +2102,7 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                 if (left > 0) { items.push({ factory_order_item_id: fois[0].id, qty: left, mode: 'extend_plan' }); consumed[fois[0].id] = (consumed[fois[0].id] || 0) + left; }
             }
         }
-        return items;
+        return { items, bookedByValidRow };
     };
 
     // «Добавить» → открыть единое окно проверки (если есть что обрабатывать).
@@ -2139,13 +2156,29 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
             }
 
             // 3. ✓ valid + ! exceeded → один вызов добавления в машину
-            const items = buildAddItems(overwrite, choices.includeExceeded);
+            const { items, bookedByValidRow } = buildAddItems(overwrite, choices.includeExceeded);
             if (items.length > 0) {
                 if (isPostShipment) await api.addPostShipmentItems(vehicleOrderNo, { items: items.map(it => ({ ...it, mode: it.mode || ('strict' as const) })) });
                 else await api.addItemsToVehicle(vehicleOrderNo, items);
             }
-            validRows.forEach(r => handled.add(r.barcode.trim()));
+            // Помечаем «обработанной» ТОЛЬКО строку, которая что-то забронировала.
+            // KEEP-mode без совпадений по box/ppb → 0 шт → строка остаётся в сетке,
+            // пользователь видит сообщение об ошибке и может переключить на overwrite.
+            let droppedCount = 0;
+            let droppedQty = 0;
+            validRows.forEach((r, i) => {
+                const booked = bookedByValidRow[i] || 0;
+                if (booked > 0) handled.add(r.barcode.trim());
+                else { droppedCount++; droppedQty += (parseInt(r.qty) || 0); }
+            });
             if (choices.includeExceeded) exceededRows.forEach(r => handled.add(r.barcode.trim()));
+            if (droppedCount > 0) {
+                setError(
+                    t('reconcile_keep_no_match')
+                        .replace('{n}', formatNumber(droppedCount, 0))
+                        .replace('{pcs}', formatNumber(droppedQty, 0))
+                );
+            }
 
             // 4. обработанные строки убрать; пропущенные — оставить в сетке
             setShowReconcile(false);

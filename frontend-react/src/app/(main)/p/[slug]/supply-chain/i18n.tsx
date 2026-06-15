@@ -278,6 +278,7 @@ const ru: TranslationDict = {
     reconcile_will_add: 'Будет добавлено',
     reconcile_need: 'нужно',
     reconcile_nothing: 'Нечего добавлять — выберите хотя бы одно действие',
+    reconcile_keep_no_match: '{n} стр. ({pcs} шт.) не добавлены — параметры (короб/шт-кор) не совпали с заказом. Переключите на «Сохранить мои значения», чтобы добавить.',
 
     // ── Vehicle cost summary ──
     cost_goods: 'Товар',
@@ -799,6 +800,7 @@ const zh: TranslationDict = {
     reconcile_will_add: '将添加',
     reconcile_need: '需要',
     reconcile_nothing: '无可添加 — 请至少选择一项操作',
+    reconcile_keep_no_match: '{n} 行 ({pcs} 件) 未添加 — 包装参数与订单不符。请切换到「保留我的参数」后重试。',
 
     // ── Vehicle cost summary ──
     cost_goods: '货物',

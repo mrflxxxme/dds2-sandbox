@@ -1132,6 +1132,43 @@ async def remove_item_from_vehicle(
     return {"ok": True, "receipt_items_affected": receipt_items_affected_single}
 
 
+async def bulk_remove_items_from_vehicle(
+    db: AsyncSession,
+    project_id: int,
+    order_no: str,
+    item_ids: list[int],
+    user_name: str | None = None,
+) -> dict:
+    """Remove multiple CostOrderItems from a vehicle in a single HTTP request.
+
+    Reuses ``remove_item_from_vehicle`` per id (so mix-group expansion, post-shipment
+    history, и reconcile-receipt сохраняются). Главная польза — ОДИН rate_limit_write
+    hit на всю партию (раньше клиент делал N DELETE-запросов и упирался в 30/мин).
+
+    «Not found» от уже удалённых id (mix-сиблинг был удалён предыдущей итерацией)
+    тихо пропускаем — это не ошибка, а ожидаемый дубль в списке.
+    """
+    removed = 0
+    not_found = 0
+    errors: list[dict] = []
+    seen: set[int] = set()
+    for item_id in item_ids:
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        try:
+            await remove_item_from_vehicle(db, project_id, order_no, item_id, user_name=user_name)
+            removed += 1
+        except ValueError as e:
+            msg = str(e)
+            # mix-group: первая итерация удалила всех сиблингов, остальные → not found
+            if "not found" in msg.lower():
+                not_found += 1
+                continue
+            errors.append({"item_id": item_id, "error": msg})
+    return {"ok": True, "removed": removed, "skipped_not_found": not_found, "errors": errors}
+
+
 async def update_vehicle_item(
     db: AsyncSession,
     project_id: int,

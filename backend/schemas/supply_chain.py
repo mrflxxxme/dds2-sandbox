@@ -478,6 +478,16 @@ class AddItemsToVehicleRequest(BaseModel):
     items: list["AddItemToVehicle"]
 
 
+class BulkRemoveVehicleItemsRequest(BaseModel):
+    """Remove multiple CostOrderItems from a vehicle in one call.
+
+    Один HTTP-запрос = один rate_limit_write — старый цикл по одной позиции
+    упирался в 30/мин и обрывался на середине удаления.
+    """
+
+    item_ids: list[int]
+
+
 class AddItemToVehicle(BaseModel):
     factory_order_item_id: int
     qty: int

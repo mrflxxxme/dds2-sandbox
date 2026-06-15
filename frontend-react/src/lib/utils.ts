@@ -121,7 +121,10 @@ export function pluralRu(n: number, forms: [string, string, string]): string {
  * boxes combined, not ceil(14/22)+ceil(30/22)=3). Only combines rows with the
  * same barcode AND the same pcs_per_box.
  */
-export function calcTotalBoxesWithMix(items: { barcode?: string | null | undefined; qty: number; pcs_per_box?: number | null | undefined; mix_group_id?: string | null | undefined; mix_pcs_per_box?: number | null | undefined; box_detail?: number[] | null | undefined }[]): number {
+export function calcTotalBoxesWithMix(
+    items: { barcode?: string | null | undefined; qty: number; pcs_per_box?: number | null | undefined; mix_group_id?: string | null | undefined; mix_pcs_per_box?: number | null | undefined; box_detail?: number[] | null | undefined }[],
+    fallbackPpb: number = 0,
+): number {
     let total = 0;
     const mixBoxes = new Map<string, number>(); // mix_group_id → max boxes in group
     const qtyByBarcode = new Map<string, { qty: number; ppb: number }>(); // barcode|ppb → combined qty
@@ -136,7 +139,9 @@ export function calcTotalBoxesWithMix(items: { barcode?: string | null | undefin
         } else if (item.box_detail && item.box_detail.length > 0) {
             total += item.box_detail.length;
         } else {
-            const ppb = item.pcs_per_box || 0;
+            // Empty ppb on a sibling = "unknown" — when caller provides a fallback
+            // (group's effective ppb), use it instead of dropping the row silently.
+            const ppb = (item.pcs_per_box || 0) || fallbackPpb;
             if (ppb <= 0) continue;
             if (item.barcode) {
                 const key = `${item.barcode}|${ppb}`;
@@ -172,14 +177,20 @@ export function calcTotalBoxesWithMix(items: { barcode?: string | null | undefin
  */
 export function calcCombinedBoxDetail(
     items: { qty: number; pcs_per_box?: number | null; box_detail?: number[] | null; mix_group_id?: string | null }[],
+    fallbackPpb: number = 0,
 ): number[] | null {
     if (items.length === 0) return null;
-    const ppb = items[0].pcs_per_box || 0;
+    // Pick the first non-null ppb so a missing-spec leading sibling doesn't
+    // disqualify the group when the rest agree on one ppb.
+    const seedPpb = items[0].pcs_per_box || 0;
+    const ppb = seedPpb || fallbackPpb;
     if (ppb <= 0) return null;
     for (const it of items) {
         if (it.mix_group_id) return null;
         if (it.box_detail && it.box_detail.length > 0) return null;
-        if ((it.pcs_per_box || 0) !== ppb) return null;
+        // Empty ppb = "unknown" — treat as match when fallback is provided.
+        const itPpb = it.pcs_per_box || 0;
+        if (itPpb && itPpb !== ppb) return null;
     }
     const totalQty = items.reduce((sum, it) => sum + it.qty, 0);
     if (totalQty <= 0) return null;
