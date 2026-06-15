@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002, RUF003
 """
 Cost — Cost Order Items (get, upload Excel, recalculate).
 """
@@ -9,10 +10,35 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.etl.cost_parsers import detect_and_normalize_excel
-from backend.models import CostOrder, CostOrderItem, DutyBasis, DutyRule, Nomenclature
+from backend.models import CostOrder, CostOrderItem, DutyBasis, DutyException, DutyRule, Nomenclature
 from backend.models.supply_chain import FactoryOrderItem
 from backend.services.cost.helpers import DEFAULT_VAT_RATE, parse_box_volume_m3, safe_decimal
 from backend.utils.time import utcnow
+
+
+def _calc_duty_rub(
+    basis,
+    rate,
+    *,
+    cost_rub: Decimal,
+    delivery_rub: Decimal,
+    area_m2: Decimal | None,
+    weight_kg: Decimal | None,
+    rate_eur: Decimal,
+) -> Decimal:
+    """Per-unit duty in RUB for a given basis+rate.
+
+    Shared by upload and recalculate paths, and by both category rules and
+    article-level exceptions (which carry the same basis/rate shape).
+    """
+    rate = Decimal(str(rate))
+    if basis == DutyBasis.WEIGHT:
+        return (weight_kg or Decimal(0)) * rate * rate_eur
+    if basis == DutyBasis.AREA:
+        return (area_m2 or Decimal(0)) * rate * rate_eur
+    if basis == DutyBasis.INVOICE:
+        return (cost_rub + delivery_rub / 2) * rate / 100
+    return Decimal(0)
 
 
 async def get_cost_order_items(db: AsyncSession, project_id: int, order_no: str):
@@ -91,6 +117,12 @@ async def upload_order_items(
     )
     duty_map = {r.subject: r for r in duty_result.scalars().all()}
 
+    # Article-level duty exceptions (override category basis+rate, keyed by article_seller)
+    exc_result = await db.execute(
+        select(DutyException).where(DutyException.project_id == project_id, DutyException.is_deleted == False)
+    )
+    exc_map = {e.article_seller: e for e in exc_result.scalars().all()}
+
     # Calculate totals for delivery split
     if "volume_m3" in df.columns and "qty" in df.columns:
         vol_series = pd.to_numeric(df["volume_m3"], errors="coerce").fillna(0)
@@ -109,6 +141,22 @@ async def upload_order_items(
     unrecognized = 0
     vat_rate_dec = Decimal(str(vat_rate / 100)) if vat_rate else DEFAULT_VAT_RATE
 
+    # Per-barcode metric propagation (see recalculate_order_items): a weight/area present
+    # on one row applies to other rows of the same barcode that leave it blank, so
+    # WEIGHT/AREA-basis duty is not undercounted when a barcode spans multiple rows.
+    sib_weight: dict[str, Decimal] = {}
+    sib_area: dict[str, Decimal] = {}
+    for _, row in df.iterrows():
+        bc0 = str(row.get("barcode", "")).strip()
+        if not bc0 or bc0 == "nan" or bc0 == "0":
+            continue
+        w0 = safe_decimal(row.get("weight_kg", 0))
+        if w0 and w0 > sib_weight.get(bc0, Decimal(0)):
+            sib_weight[bc0] = w0
+        a0 = safe_decimal(row.get("area_m2", 0))
+        if a0 and a0 > sib_area.get(bc0, Decimal(0)):
+            sib_area[bc0] = a0
+
     for _, row in df.iterrows():
         bc = str(row.get("barcode", "")).strip()
         if not bc or bc == "nan" or bc == "0":
@@ -121,9 +169,11 @@ async def upload_order_items(
         volume_m3 = safe_decimal(row.get("volume_m3", 0))
 
         nom = nom_map.get(bc)
-        # Fallback: if area_m2 not in Excel, use value from Nomenclature
-        if not area_m2 and nom and nom.area_m2:
-            area_m2 = nom.area_m2
+        # Fallback: own value → sibling row (same barcode) → Nomenclature reference.
+        if not area_m2:
+            area_m2 = sib_area.get(bc) or (nom.area_m2 if nom and nom.area_m2 else None) or Decimal(0)
+        if not weight_kg:
+            weight_kg = sib_weight.get(bc) or (nom.weight_kg if nom and nom.weight_kg else None) or Decimal(0)
         subject = nom.subject if nom else None
         article_seller = nom.article_seller if nom else None
         is_unrecognized = nom is None
@@ -141,16 +191,22 @@ async def upload_order_items(
 
         duty_rub_unit = Decimal(0)
         util_rub_unit = Decimal(0)
-        if subject and subject in duty_map:
-            rule = duty_map[subject]
-            util_rub_unit = rule.util_collect_rub
-            if rule.basis == DutyBasis.WEIGHT:
-                duty_rub_unit = weight_kg * Decimal(str(rule.rate)) * order.rate_eur
-            elif rule.basis == DutyBasis.AREA:
-                duty_rub_unit = area_m2 * Decimal(str(rule.rate)) * order.rate_eur
-            elif rule.basis == DutyBasis.INVOICE:
-                base = cost_rub_unit + delivery_rub_unit / 2
-                duty_rub_unit = base * Decimal(str(rule.rate)) / 100
+        cat_rule = duty_map.get(subject) if subject else None
+        # Утиль-сбор всегда из правила категории (исключение его не переопределяет).
+        if cat_rule:
+            util_rub_unit = cat_rule.util_collect_rub
+        # Пошлина: исключение по артикулу важнее правила категории.
+        duty_src = (exc_map.get(article_seller) if article_seller else None) or cat_rule
+        if duty_src is not None:
+            duty_rub_unit = _calc_duty_rub(
+                duty_src.basis,
+                duty_src.rate,
+                cost_rub=cost_rub_unit,
+                delivery_rub=delivery_rub_unit,
+                area_m2=area_m2,
+                weight_kg=weight_kg,
+                rate_eur=order.rate_eur,
+            )
 
         vat_base = cost_rub_unit + duty_rub_unit + delivery_rub_unit / 2
         vat_rub_unit = vat_base * vat_rate_dec
@@ -213,6 +269,12 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
     )
     duty_map = {r.subject: r for r in duty_result.scalars().all()}
 
+    # Article-level duty exceptions (override category basis+rate, keyed by article_seller)
+    exc_result = await db.execute(
+        select(DutyException).where(DutyException.project_id == project_id, DutyException.is_deleted == False)
+    )
+    exc_map = {e.article_seller: e for e in exc_result.scalars().all()}
+
     # Always recompute volume_m3 from effective box dimensions (override > FO mix > FO).
     # Items without FO link and without override keep their existing volume_m3 (e.g. Excel-uploaded).
     try:
@@ -270,6 +332,26 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
     vat_rate_dec = Decimal(str(vat_rate / 100)) if vat_rate else DEFAULT_VAT_RATE
     updated = 0
 
+    # Per-barcode metric propagation. A barcode can arrive from several factory-order
+    # sources (separate CostOrderItem rows). weight_kg/area_m2 is a per-unit property
+    # of the SKU, so a value declared on ONE source applies to sibling sources that
+    # left it blank. Without this, WEIGHT/AREA-basis duty on the blank rows computes to
+    # 0 and the barcode's duty is silently undercounted (halved with two sources, etc).
+    # Same invariant the factory-order merge enforces (один баркод ⇒ один вес).
+    sib_weight: dict[str, Decimal] = {}
+    sib_area: dict[str, Decimal] = {}
+    for it in items:
+        if not it.barcode:
+            continue
+        if it.weight_kg and it.weight_kg > 0:
+            w = Decimal(str(it.weight_kg))
+            if w > sib_weight.get(it.barcode, Decimal(0)):
+                sib_weight[it.barcode] = w
+        if it.area_m2 and it.area_m2 > 0:
+            a = Decimal(str(it.area_m2))
+            if a > sib_area.get(it.barcode, Decimal(0)):
+                sib_area[it.barcode] = a
+
     for item in items:
         # For Russia, price_cny is stored in RUB (rate_cny is forced to 1 anyway)
         cost_rub_unit = Decimal(str(item.price_cny or 0)) if is_russia else item.price_cny * order.rate_cny
@@ -288,22 +370,32 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
 
         if not is_russia:
             subject = item.subject
-            # Fallback area_m2 from Nomenclature if not stored on item
+            # Effective metric: own value → sibling source (same barcode) → Nomenclature.
+            # A metric declared on a sibling source is real shipment data and outranks
+            # the generic Nomenclature reference.
+            nom = nom_map.get(item.barcode)
             area_m2 = item.area_m2
             if not area_m2:
-                nom = nom_map.get(item.barcode)
-                if nom and nom.area_m2:
-                    area_m2 = nom.area_m2
-            if subject and subject in duty_map:
-                rule = duty_map[subject]
-                util_rub_unit = rule.util_collect_rub
-                if rule.basis == DutyBasis.WEIGHT:
-                    duty_rub_unit = (item.weight_kg or Decimal(0)) * Decimal(str(rule.rate)) * order.rate_eur
-                elif rule.basis == DutyBasis.AREA:
-                    duty_rub_unit = (area_m2 or Decimal(0)) * Decimal(str(rule.rate)) * order.rate_eur
-                elif rule.basis == DutyBasis.INVOICE:
-                    base = cost_rub_unit + delivery_rub_unit / 2
-                    duty_rub_unit = base * Decimal(str(rule.rate)) / 100
+                area_m2 = sib_area.get(item.barcode) or (nom.area_m2 if nom and nom.area_m2 else None)
+            weight_kg = item.weight_kg
+            if not weight_kg:
+                weight_kg = sib_weight.get(item.barcode) or (nom.weight_kg if nom and nom.weight_kg else None)
+            cat_rule = duty_map.get(subject) if subject else None
+            # Утиль-сбор всегда из правила категории (исключение его не переопределяет).
+            if cat_rule:
+                util_rub_unit = cat_rule.util_collect_rub
+            # Пошлина: исключение по артикулу важнее правила категории.
+            duty_src = (exc_map.get(item.article_seller) if item.article_seller else None) or cat_rule
+            if duty_src is not None:
+                duty_rub_unit = _calc_duty_rub(
+                    duty_src.basis,
+                    duty_src.rate,
+                    cost_rub=cost_rub_unit,
+                    delivery_rub=delivery_rub_unit,
+                    area_m2=area_m2,
+                    weight_kg=weight_kg,
+                    rate_eur=order.rate_eur,
+                )
 
             vat_base = cost_rub_unit + duty_rub_unit + delivery_rub_unit / 2
             vat_rub_unit = vat_base * vat_rate_dec

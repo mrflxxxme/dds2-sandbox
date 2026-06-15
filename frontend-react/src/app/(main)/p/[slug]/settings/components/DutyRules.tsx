@@ -1,20 +1,17 @@
 'use client';
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { api } from '@/lib/api';
-import { exportToExcel, formatNumber } from '@/lib/utils';
+import { exportToExcel } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { Nomenclature, MissingAreaBarcode } from '@/types/api';
-
-interface AreaRow { barcode: string; area_m2: string }
-
-const EMPTY_AREA_ROW = (): AreaRow => ({ barcode: '', area_m2: '' });
+import type { Nomenclature, MissingAreaBarcode, MissingWeightBarcode, DutyException } from '@/types/api';
+import { BarcodeMetricManager } from './BarcodeMetricManager';
 
 export function DutyRules() {
     const [rules, setRules] = useState<any[]>([]);
     const [nomenclature, setNomenclature] = useState<Nomenclature[]>([]);
     const [missingArea, setMissingArea] = useState<MissingAreaBarcode[]>([]);
-    const [missingDraft, setMissingDraft] = useState<Record<string, string>>({});
+    const [missingWeight, setMissingWeight] = useState<MissingWeightBarcode[]>([]);
     const [categories, setCategories] = useState<string[]>([]);
     const [showForm, setShowForm] = useState(false);
     const [form, setForm] = useState({ subject: '', basis: 'INVOICE', rate: '0', util_collect_rub: '0', note: '' });
@@ -22,11 +19,10 @@ export function DutyRules() {
     const [vatRate, setVatRate] = useState<string>('22');
     const [vatSaving, setVatSaving] = useState(false);
 
-    // Area paste grid
-    const [areaRows, setAreaRows] = useState<AreaRow[]>(() => Array.from({ length: 5 }, EMPTY_AREA_ROW));
-    const [areaSaving, setAreaSaving] = useState(false);
-    const [editingBarcode, setEditingBarcode] = useState<string | null>(null);
-    const [editValue, setEditValue] = useState('');
+    // Article-level duty exceptions
+    const [exceptions, setExceptions] = useState<DutyException[]>([]);
+    const [showExcForm, setShowExcForm] = useState(false);
+    const [excForm, setExcForm] = useState({ article_seller: '', basis: 'INVOICE', rate: '0', note: '' });
 
     const loadNomenclature = useCallback(async () => {
         try {
@@ -40,16 +36,25 @@ export function DutyRules() {
         } catch { }
     }, []);
 
+    const loadMissingWeight = useCallback(async () => {
+        try {
+            setMissingWeight(await api.getMissingWeightBarcodes());
+        } catch { }
+    }, []);
+
     const loadCategories = useCallback(async () => {
         try {
             setCategories(await api.getNomenclatureSubjects());
         } catch { }
     }, []);
 
-    useEffect(() => { loadRules(); loadNomenclature(); loadMissingArea(); loadCategories(); loadVatRate(); }, [loadNomenclature, loadMissingArea, loadCategories]);
+    useEffect(() => {
+        loadRules(); loadExceptions(); loadNomenclature(); loadMissingArea(); loadMissingWeight(); loadCategories(); loadVatRate();
+    }, [loadNomenclature, loadMissingArea, loadMissingWeight, loadCategories]);
     useEffect(() => { if (!msg) return; const t = setTimeout(() => setMsg(''), 5000); return () => clearTimeout(t); }, [msg]);
 
     const loadRules = async () => { try { setRules(await api.getDutyRules()); } catch { } };
+    const loadExceptions = async () => { try { setExceptions(await api.getDutyExceptions()); } catch { } };
     const loadVatRate = async () => { try { const res = await api.getVatRate(); setVatRate(String(res.vat_rate)); } catch { } };
 
     const saveVatRate = async () => {
@@ -69,127 +74,28 @@ export function DutyRules() {
         setForm({ subject: r.subject, basis: r.basis, rate: String(r.rate), util_collect_rub: String(r.util_collect_rub), note: r.note || '' }); setShowForm(true);
     };
 
+    const saveExc = async () => {
+        if (!excForm.article_seller.trim()) { setMsg('❌ Укажите артикул'); return; }
+        try {
+            await api.addDutyException({ article_seller: excForm.article_seller.trim(), basis: excForm.basis, rate: parseFloat(excForm.rate) || 0, note: excForm.note || null });
+            setMsg('✅ Исключение сохранено!'); setShowExcForm(false); setExcForm({ article_seller: '', basis: 'INVOICE', rate: '0', note: '' }); loadExceptions();
+        } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    };
+    const delExc = async (id: number) => { if (!confirm('Удалить исключение?')) return; try { await api.deleteDutyException(id); loadExceptions(); } catch (e: any) { setMsg(e.message); } };
+    const editExc = (e: DutyException) => {
+        setExcForm({ article_seller: e.article_seller, basis: e.basis, rate: String(e.rate), note: e.note || '' }); setShowExcForm(true);
+    };
+
     const basisLabels: Record<string, string> = { INVOICE: 'От инвойса (%)', WEIGHT: 'От веса (€/кг)', AREA: 'За м² (€/м²)' };
     const ruledSubjects = new Set(rules.map(r => r.subject));
     const unruled = categories.filter(c => !ruledSubjects.has(c));
 
-    // Nomenclature items with area_m2
-    const nomMap = useMemo(() => {
-        const m: Record<string, Nomenclature> = {};
-        for (const n of nomenclature) { if (n.barcode) m[n.barcode] = n; }
-        return m;
+    // Known seller articles — datalist suggestions for the exception form
+    const articleOptions = useMemo(() => {
+        const set = new Set<string>();
+        for (const n of nomenclature) { if (n.article_seller) set.add(n.article_seller); }
+        return [...set].sort();
     }, [nomenclature]);
-
-    const itemsWithArea = useMemo(() =>
-        nomenclature.filter(n => n.area_m2 && n.area_m2 > 0),
-    [nomenclature]);
-
-    // Area paste handlers
-    const updateAreaRow = (idx: number, field: keyof AreaRow, value: string) => {
-        setAreaRows(prev => {
-            const next = [...prev];
-            next[idx] = { ...next[idx], [field]: value };
-            if (idx === next.length - 1 && value) {
-                next.push(EMPTY_AREA_ROW());
-            }
-            return next;
-        });
-    };
-
-    const handleAreaPaste = (e: React.ClipboardEvent, idx: number, field: keyof AreaRow) => {
-        const text = e.clipboardData.getData('text');
-        if (text.includes('\t') || text.includes('\n')) {
-            e.preventDefault();
-            const lines = text.trim().split('\n').filter(Boolean);
-            setAreaRows(prev => {
-                const next = [...prev];
-                for (let i = 0; i < lines.length; i++) {
-                    const cols = lines[i].split('\t');
-                    const rowIdx = idx + i;
-                    if (rowIdx >= next.length) next.push(EMPTY_AREA_ROW());
-                    next[rowIdx] = {
-                        barcode: (cols[0] || '').trim(),
-                        area_m2: (cols[1] || '').replace(',', '.').trim(),
-                    };
-                }
-                if (next[next.length - 1].barcode) next.push(EMPTY_AREA_ROW());
-                return next;
-            });
-        }
-    };
-
-    const validAreaRows = areaRows.filter(r => r.barcode.trim() && r.area_m2.trim());
-
-    const saveArea = async () => {
-        if (!validAreaRows.length) { setMsg('❌ Нет данных для сохранения'); return; }
-        setAreaSaving(true);
-        try {
-            const items = validAreaRows.map(r => ({
-                barcode: r.barcode.trim(),
-                area_m2: parseFloat(r.area_m2.replace(',', '.')) || 0,
-            }));
-            const res = await api.bulkUpdateNomenclatureArea(items);
-            const parts = [`✅ Обновлено: ${res.updated}`];
-            if (res.not_found.length) parts.push(`Не найдено: ${res.not_found.join(', ')}`);
-            setMsg(parts.join(' | '));
-            setAreaRows(Array.from({ length: 5 }, EMPTY_AREA_ROW));
-            loadNomenclature();
-            loadMissingArea();
-        } catch (e: any) { setMsg(`❌ ${e.message}`); }
-        setAreaSaving(false);
-    };
-
-    // Fill area for a single barcode from the "missing area" list
-    const saveMissingArea = async (barcode: string) => {
-        const area = parseFloat((missingDraft[barcode] ?? '').replace(',', '.'));
-        if (isNaN(area) || area <= 0) { setMsg('❌ Введите корректную площадь'); return; }
-        try {
-            await api.bulkUpdateNomenclatureArea([{ barcode, area_m2: area }]);
-            setMsg('✅ Площадь сохранена');
-            setMissingDraft(prev => { const next = { ...prev }; delete next[barcode]; return next; });
-            loadNomenclature();
-            loadMissingArea();
-        } catch (e: any) { setMsg(`❌ ${e.message}`); }
-    };
-
-    const loadMissingToGrid = () => {
-        const rows: AreaRow[] = missingArea.map(m => ({ barcode: m.barcode, area_m2: '' }));
-        rows.push(EMPTY_AREA_ROW());
-        setAreaRows(rows);
-        setMsg(`✏️ Загружено в форму: ${missingArea.length}. Заполните площади и сохраните.`);
-    };
-
-    // Inline edit / delete for existing area values
-    const startEdit = (barcode: string, area: number) => { setEditingBarcode(barcode); setEditValue(String(area)); };
-    const cancelEdit = () => { setEditingBarcode(null); setEditValue(''); };
-    const saveEdit = async () => {
-        if (!editingBarcode) return;
-        const area = parseFloat(editValue.replace(',', '.'));
-        if (isNaN(area) || area <= 0) { setMsg('❌ Введите корректную площадь'); return; }
-        try {
-            await api.bulkUpdateNomenclatureArea([{ barcode: editingBarcode, area_m2: area }]);
-            setMsg('✅ Площадь обновлена');
-            setEditingBarcode(null);
-            loadNomenclature();
-        } catch (e: any) { setMsg(`❌ ${e.message}`); }
-    };
-    const deleteArea = async (barcode: string) => {
-        if (!confirm('Удалить площадь для этого баркода?')) return;
-        try {
-            await api.bulkUpdateNomenclatureArea([{ barcode, area_m2: 0 }]);
-            setMsg('✅ Площадь удалена');
-            loadNomenclature();
-            loadMissingArea();
-        } catch (e: any) { setMsg(`❌ ${e.message}`); }
-    };
-    const loadAllToGrid = () => {
-        const rows: AreaRow[] = itemsWithArea.map(n => ({
-            barcode: n.barcode || '',
-            area_m2: String(n.area_m2 || ''),
-        }));
-        rows.push(EMPTY_AREA_ROW());
-        setAreaRows(rows);
-    };
 
     const columns: Column[] = useMemo(() => [
         { key: 'id', label: 'ID', render: (v: any) => <span style={{ fontSize: 12 }}>{v}</span> },
@@ -213,67 +119,26 @@ export function DutyRules() {
         },
     ], []);
 
-    const areaColumns: Column[] = [
-        { key: 'barcode', label: 'Баркод', render: (v: any) => <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{v}</span> },
-        { key: 'subject', label: 'Категория', render: (v: any) => <span style={{ fontSize: 13 }}>{v || '—'}</span> },
-        { key: 'article_seller', label: 'Артикул', render: (v: any) => <span style={{ fontSize: 13 }}>{v || '—'}</span> },
+    const excColumns: Column[] = useMemo(() => [
+        { key: 'id', label: 'ID', render: (v: any) => <span style={{ fontSize: 12 }}>{v}</span> },
+        { key: 'article_seller', label: 'Артикул', render: (v: any) => <span style={{ fontWeight: 500, fontFamily: 'monospace', fontSize: 13 }}>{v}</span> },
         {
-            key: 'area_m2', label: 'Площадь м²',
-            render: (v: any, row: any) => editingBarcode === row.barcode ? (
-                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                    <input
-                        className="form-input"
-                        value={editValue}
-                        onChange={e => setEditValue(e.target.value)}
-                        onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
-                        autoFocus
-                        style={{ width: 100, fontSize: 13, fontFamily: 'monospace', textAlign: 'right', padding: '4px 8px' }}
-                    />
-                    <button className="btn btn-success btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={saveEdit}>✓</button>
-                    <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={cancelEdit}>✕</button>
-                </div>
-            ) : (
-                <span style={{ fontFamily: 'monospace', fontWeight: 600, cursor: 'pointer' }} onClick={() => startEdit(row.barcode, v)}>{formatNumber(v)}</span>
-            ),
+            key: 'basis', label: 'Базис',
+            render: (v: any) => <span className="badge badge-info" style={{ fontSize: 10 }}>{basisLabels[v] || v}</span>,
         },
+        { key: 'rate', label: 'Ставка', render: (v: any) => <span style={{ fontFamily: 'monospace' }}>{v}</span> },
+        { key: 'note', label: 'Примечание', render: (v: any) => <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{v || '—'}</span> },
         {
             key: '_actions', label: '',
             sortable: false,
-            render: (_v: any, row: any) => editingBarcode === row.barcode ? null : (
-                <div style={{ display: 'flex', gap: 4 }}>
-                    <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => startEdit(row.barcode, row.area_m2)}>✎</button>
-                    <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => deleteArea(row.barcode)}>✕</button>
-                </div>
-            ),
-        },
-    ];
-
-    const missingColumns: Column[] = [
-        { key: 'barcode', label: 'Баркод', render: (v: any) => <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{v}</span> },
-        { key: 'subject', label: 'Категория', render: (v: any) => <span style={{ fontSize: 13 }}>{v || '—'}</span> },
-        { key: 'article_seller', label: 'Артикул', render: (v: any) => <span style={{ fontSize: 13 }}>{v || '—'}</span> },
-        { key: 'total_qty', label: 'Кол-во, шт', render: (v: any) => <span style={{ fontFamily: 'monospace' }}>{formatNumber(v)}</span> },
-        {
-            key: 'vehicles', label: 'Машины', sortable: false,
-            render: (v: string[]) => <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>{(v || []).join(', ') || '—'}</span>,
-        },
-        {
-            key: '_fill', label: 'Площадь м²', sortable: false,
             render: (_v: any, row: any) => (
-                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                    <input
-                        className="form-input"
-                        value={missingDraft[row.barcode] ?? ''}
-                        onChange={e => setMissingDraft(prev => ({ ...prev, [row.barcode]: e.target.value }))}
-                        onKeyDown={e => { if (e.key === 'Enter') saveMissingArea(row.barcode); }}
-                        placeholder="0.00"
-                        style={{ width: 90, fontSize: 13, fontFamily: 'monospace', textAlign: 'right', padding: '4px 8px' }}
-                    />
-                    <button className="btn btn-success btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => saveMissingArea(row.barcode)}>✓</button>
+                <div style={{ display: 'flex', gap: 4 }}>
+                    <button className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => editExc(row)}>✎</button>
+                    <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => delExc(row.id)}>✕</button>
                 </div>
             ),
         },
-    ];
+    ], []);
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -335,114 +200,79 @@ export function DutyRules() {
                 )}
             </div>
 
-            {/* Area per Barcode Card */}
+            {/* Duty Exceptions by Article Card */}
             <div className="glass-card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                     <div>
-                        <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Площадь по баркодам (м²)</h3>
+                        <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Исключения по артикулам</h3>
                         <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 2 }}>
-                            Для расчёта пошлины по площади (базис &laquo;За м²&raquo;). Баркодов с площадью: {itemsWithArea.length}
+                            Своя пошлина для конкретных артикулов — приоритетнее правила категории. Утиль-сбор берётся из категории. Исключений: {exceptions.length}
                         </div>
                     </div>
-                    {itemsWithArea.length > 0 && (
-                        <div style={{ display: 'flex', gap: 8 }}>
-                            <button className="btn btn-secondary btn-sm" onClick={loadAllToGrid}>✎ Редактировать все</button>
-                            <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(itemsWithArea.map(n => ({ barcode: n.barcode, subject: n.subject, article_seller: n.article_seller, area_m2: n.area_m2 })), 'barcode_area_m2')}>📥 Excel</button>
-                        </div>
-                    )}
-                </div>
-
-                {/* Barcodes in vehicles missing area (AREA-basis duty) */}
-                {missingArea.length > 0 && (
-                    <div style={{ marginBottom: 16, padding: 12, background: 'rgba(245,158,11,0.08)', borderRadius: 8, border: '1px solid rgba(245,158,11,0.2)' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-warning)' }}>
-                                ⚠️ В машинах без площади (пошлина «За м²»): {missingArea.length}
-                            </div>
-                            <div style={{ display: 'flex', gap: 8 }}>
-                                <button className="btn btn-secondary btn-sm" onClick={loadMissingToGrid}>✎ Заполнить в форме ниже</button>
-                                <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(missingArea.map(m => ({ barcode: m.barcode, subject: m.subject, article_seller: m.article_seller, total_qty: m.total_qty, vehicles: (m.vehicles || []).join(', ') })), 'barcodes_missing_area')}>📥 Excel</button>
-                            </div>
-                        </div>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-                            Эти баркоды есть в машинах, но без площади (м²) — пошлина «За м²» не посчитается. Заполните площадь здесь или загрузите в форму ниже.
-                        </div>
-                        <TanStackDataTable
-                            columns={missingColumns}
-                            data={missingArea}
-                            emptyText=""
-                            enableSorting
-                            enablePagination={false}
-                        />
-                    </div>
-                )}
-
-                {/* Paste grid */}
-                <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginBottom: 16 }}>
-                    <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-                        Вставьте из Excel: Баркод, Площадь м²
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '32px 1fr 120px', gap: '4px 8px', alignItems: 'center' }}>
-                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-dim)' }}>#</div>
-                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>БАРКОД</div>
-                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>ПЛОЩАДЬ М²</div>
-
-                        {areaRows.map((row, i) => {
-                            const nom = row.barcode.trim() ? nomMap[row.barcode.trim()] : null;
-                            const isFound = row.barcode.trim() && nom;
-                            const isNotFound = row.barcode.trim() && !nom;
-                            return (
-                                <div key={i} style={{ display: 'contents' }}>
-                                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', textAlign: 'center' }}>{i + 1}</div>
-                                    <div style={{ position: 'relative' }}>
-                                        <input
-                                            className="form-input"
-                                            value={row.barcode}
-                                            onChange={e => updateAreaRow(i, 'barcode', e.target.value)}
-                                            onPaste={e => handleAreaPaste(e, i, 'barcode')}
-                                            placeholder="Баркод"
-                                            style={{
-                                                fontSize: 13, fontFamily: 'monospace', padding: '6px 10px',
-                                                borderColor: isFound ? 'var(--color-success)' : isNotFound ? 'var(--color-danger)' : undefined,
-                                                background: isFound ? 'rgba(16,185,129,0.05)' : isNotFound ? 'rgba(239,68,68,0.05)' : undefined,
-                                            }}
-                                        />
-                                        {isFound && nom && (
-                                            <div style={{ fontSize: 10, color: 'var(--color-text-dim)', marginTop: 1 }}>
-                                                {nom.subject} {nom.article_seller ? `| ${nom.article_seller}` : ''}
-                                            </div>
-                                        )}
-                                    </div>
-                                    <input
-                                        className="form-input"
-                                        value={row.area_m2}
-                                        onChange={e => updateAreaRow(i, 'area_m2', e.target.value)}
-                                        placeholder="0.00"
-                                        style={{ fontSize: 13, fontFamily: 'monospace', textAlign: 'right', padding: '6px 10px' }}
-                                    />
-                                </div>
-                            );
-                        })}
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
-                        <button className="btn btn-primary btn-sm" onClick={saveArea} disabled={areaSaving || !validAreaRows.length}>
-                            {areaSaving ? '⏳' : '💾'} Сохранить ({validAreaRows.length})
-                        </button>
-                        <button className="btn btn-secondary btn-sm" onClick={() => setAreaRows(Array.from({ length: 5 }, EMPTY_AREA_ROW))}>Очистить</button>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(exceptions, 'duty_exceptions')}>📥 Excel</button>
+                        <button className="btn btn-primary btn-sm" onClick={() => setShowExcForm(!showExcForm)}>+ Добавить исключение</button>
                     </div>
                 </div>
 
-                {/* Table of existing area values */}
-                {itemsWithArea.length > 0 && (
-                    <TanStackDataTable
-                        columns={areaColumns}
-                        data={itemsWithArea.map(n => ({ barcode: n.barcode, subject: n.subject, article_seller: n.article_seller, area_m2: n.area_m2 }))}
-                        emptyText=""
-                        enableSorting
-                        enablePagination={false}
-                    />
+                {showExcForm && (
+                    <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginBottom: 16 }}>
+                        <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Исключение пошлины (по артикулу)</h4>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                            <div className="form-group">
+                                <label className="form-label" style={{ fontSize: 11 }}>Артикул продавца*</label>
+                                <input className="form-input" list="exc-article-options" value={excForm.article_seller} onChange={e => setExcForm({ ...excForm, article_seller: e.target.value })} placeholder="Артикул" style={{ fontSize: 13, fontFamily: 'monospace' }} />
+                                <datalist id="exc-article-options">{articleOptions.map(a => <option key={a} value={a} />)}</datalist>
+                            </div>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Базис расчёта</label><select className="form-input" value={excForm.basis} onChange={e => setExcForm({ ...excForm, basis: e.target.value })} style={{ fontSize: 13 }}><option value="INVOICE">От инвойса (%)</option><option value="WEIGHT">От веса (€/кг)</option><option value="AREA">За м² (€/м²)</option></select></div>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Ставка</label><input className="form-input" type="number" step="0.01" value={excForm.rate} onChange={e => setExcForm({ ...excForm, rate: e.target.value })} style={{ fontSize: 13 }} /></div>
+                            <div className="form-group"><label className="form-label" style={{ fontSize: 11 }}>Примечание</label><input className="form-input" value={excForm.note} onChange={e => setExcForm({ ...excForm, note: e.target.value })} style={{ fontSize: 13 }} /></div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                            <button className="btn btn-primary btn-sm" onClick={saveExc}>💾 Сохранить</button>
+                            <button className="btn btn-secondary btn-sm" onClick={() => setShowExcForm(false)}>Отмена</button>
+                        </div>
+                    </div>
                 )}
+
+                <TanStackDataTable
+                    columns={excColumns}
+                    data={exceptions}
+                    emptyText="Нет исключений. Добавьте, если у отдельных артикулов внутри категории своя пошлина."
+                    enableSorting
+                    enablePagination={false}
+                />
             </div>
+
+            {/* Area per Barcode */}
+            <BarcodeMetricManager
+                metricKey="area_m2"
+                title="Площадь по баркодам (м²)"
+                unit="м²"
+                basisLabel="За м²"
+                hint="Для расчёта пошлины по площади (базис «За м²»)."
+                nomenclature={nomenclature}
+                missing={missingArea}
+                onBulkUpdate={(items) => api.bulkUpdateNomenclatureArea(items.map(i => ({ barcode: i.barcode, area_m2: i.value })))}
+                onReload={() => { loadNomenclature(); loadMissingArea(); }}
+                setMsg={setMsg}
+                exportName="barcode_area_m2"
+            />
+
+            {/* Weight per Barcode */}
+            <BarcodeMetricManager
+                metricKey="weight_kg"
+                title="Вес по баркодам (кг)"
+                unit="кг"
+                basisLabel="От веса"
+                hint="Для расчёта пошлины по весу (базис «От веса»)."
+                nomenclature={nomenclature}
+                missing={missingWeight}
+                onBulkUpdate={(items) => api.bulkUpdateNomenclatureWeight(items.map(i => ({ barcode: i.barcode, weight_kg: i.value })))}
+                onReload={() => { loadNomenclature(); loadMissingWeight(); }}
+                setMsg={setMsg}
+                exportName="barcode_weight_kg"
+            />
         </div>
     );
 }

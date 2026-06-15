@@ -19,6 +19,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -40,6 +41,9 @@ class Nomenclature(Base):
     imt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     volume_l: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     area_m2: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    # Reference per-barcode weight (kg) — fallback for WEIGHT-basis duty when the
+    # items Excel has no weight. Mirrors area_m2. Filled via /cost/nomenclature/bulk_weight.
+    weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     first_sale_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     box_qty_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
     use_box_multiplicity: Mapped[bool] = mapped_column(
@@ -151,6 +155,40 @@ class DutyRule(Base, SoftDeleteMixin):
     note: Mapped[str | None] = mapped_column(String(200))
 
     __table_args__ = (UniqueConstraint("project_id", "subject", name="uq_duty_rule_project_subject"),)
+
+
+class DutyException(Base, SoftDeleteMixin):
+    """Article-level duty override.
+
+    For specific seller articles inside a category, apply a different duty
+    basis+rate than the category's :class:`DutyRule`. Matched on
+    ``article_seller``; takes precedence over the subject-keyed rule when
+    computing ``duty_rub`` for an order item.
+
+    Only the *duty* (basis + rate) is overridden — ``util_collect_rub`` still
+    comes from the category rule (matched by subject), by design.
+    """
+
+    __tablename__ = "duty_exceptions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"))
+    article_seller: Mapped[str] = mapped_column(String(100), nullable=False)
+    basis: Mapped[str] = mapped_column(SAEnum(DutyBasis), nullable=False)
+    rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    note: Mapped[str | None] = mapped_column(String(200))
+
+    # Partial unique index (not a plain UniqueConstraint): a soft-deleted row
+    # must not occupy the (project_id, article_seller) slot, else re-adding the
+    # same article 500s with IntegrityError. See learnings.md "SoftDelete mine".
+    __table_args__ = (
+        Index(
+            "uq_duty_exc_project_article",
+            "project_id",
+            "article_seller",
+            unique=True,
+            postgresql_where=text("is_deleted = false"),
+        ),
+    )
 
 
 class CostOrder(Base, SoftDeleteMixin):

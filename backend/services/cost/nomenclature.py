@@ -8,10 +8,11 @@ from decimal import Decimal
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from backend.models import CostOrder, CostOrderItem, DutyBasis, DutyRule, Nomenclature
+from backend.models import CostOrder, CostOrderItem, DutyBasis, DutyException, DutyRule, Nomenclature
 from backend.utils.time import utcnow
 
 
@@ -26,14 +27,46 @@ async def get_nomenclature(db: AsyncSession, project_id: int, limit: int = 1000,
     return list(result.scalars().all())
 
 
-async def get_missing_area_barcodes(db: AsyncSession, project_id: int) -> list[dict]:  # type: ignore[type-arg]
-    """Barcodes in vehicles whose duty is area-based but `area_m2` is not set.
+async def _missing_metric_barcodes(  # type: ignore[type-arg]
+    db: AsyncSession, project_id: int, *, basis: DutyBasis, nom_col: Any, item_col: Any
+) -> list[dict]:
+    """Barcodes/quantity in vehicles whose *effective* duty basis equals `basis`
+    but the metric (area_m2 / weight_kg) is missing **everywhere** the calc looks.
 
-    Площадь нужна для пошлины только у категорий с базисом «За м²» (DutyBasis.AREA),
-    поэтому отбираем баркоды, у которых subject имеет AREA-правило и площадь пустая.
-    Машины (cost_orders) учитываются в любом статусе — лишь бы не удалены.
-    Возвращает одну строку на баркод с суммарным кол-вом и списком машин (order_no).
+    The duty calc takes the metric from the cost item (Excel), then from a sibling
+    source of the same barcode in the same vehicle (one barcode may span several
+    factory-order lines), and finally falls back to the Nomenclature reference. So a
+    quantity is "missing" only when ALL of these are empty: this `item_col`, every
+    sibling `item_col` in the same vehicle, AND `nom_col` (Nomenclature). Flagging on
+    the Nomenclature reference alone over-counts massively — e.g. weight that is
+    always present on items but never maintained as a reference. Ignoring siblings
+    over-counts too — it would nag to fill a weight a sibling source already supplies
+    (duty for that barcode is already correct).
+
+    Effective basis is exception-aware: an article-level DutyException overrides
+    the category DutyRule. Vehicles (cost_orders) count in any status, just not
+    deleted. total_qty is the count of units actually missing the metric.
     """
+    exc = aliased(DutyException)
+    rule = aliased(DutyRule)
+    # A sibling source of the same barcode in the same vehicle that carries the metric
+    # supplies it to this row (see items.recalculate_order_items) → this row is not
+    # really missing the metric. Mirror that fallback so the warning doesn't over-report.
+    sib = aliased(CostOrderItem)
+    sib_metric = getattr(sib, item_col.key)
+    sibling_supplies_metric = (
+        select(sib.id)
+        .where(
+            sib.barcode == CostOrderItem.barcode,
+            sib.order_no == CostOrderItem.order_no,
+            sib.project_id == CostOrderItem.project_id,
+            sib.is_deleted == False,  # noqa: E712
+            sib.id != CostOrderItem.id,
+            sib_metric.isnot(None),
+            sib_metric != 0,
+        )
+        .exists()
+    )
     stmt = (
         select(
             Nomenclature.barcode,
@@ -54,16 +87,28 @@ async def get_missing_area_barcodes(db: AsyncSession, project_id: int) -> list[d
             & (CostOrder.project_id == Nomenclature.project_id)
             & (CostOrder.is_deleted == False),  # noqa: E712
         )
-        .join(
-            DutyRule,
-            (DutyRule.subject == Nomenclature.subject)
-            & (DutyRule.project_id == Nomenclature.project_id)
-            & (DutyRule.is_deleted == False)  # noqa: E712
-            & (DutyRule.basis == DutyBasis.AREA),
+        .outerjoin(
+            exc,
+            (exc.article_seller == Nomenclature.article_seller)
+            & (exc.project_id == Nomenclature.project_id)
+            & (exc.is_deleted == False),  # noqa: E712
+        )
+        .outerjoin(
+            rule,
+            (rule.subject == Nomenclature.subject)
+            & (rule.project_id == Nomenclature.project_id)
+            & (rule.is_deleted == False),  # noqa: E712
         )
         .where(
             Nomenclature.project_id == project_id,
-            or_(Nomenclature.area_m2.is_(None), Nomenclature.area_m2 == 0),
+            # metric missing on the item (Excel) ...
+            or_(item_col.is_(None), item_col == 0),
+            # ... AND no sibling source of the same barcode/vehicle supplies it ...
+            ~sibling_supplies_metric,
+            # ... AND no reference value on Nomenclature to fall back to
+            or_(nom_col.is_(None), nom_col == 0),
+            # effective basis == `basis`: exception wins, else category rule
+            or_(exc.basis == basis, and_(exc.id.is_(None), rule.basis == basis)),
         )
         .group_by(Nomenclature.barcode, Nomenclature.subject, Nomenclature.article_seller)
         .order_by(Nomenclature.subject, Nomenclature.article_seller)
@@ -79,6 +124,20 @@ async def get_missing_area_barcodes(db: AsyncSession, project_id: int) -> list[d
         }
         for row in result.all()
     ]
+
+
+async def get_missing_area_barcodes(db: AsyncSession, project_id: int) -> list[dict]:  # type: ignore[type-arg]
+    """Barcodes in vehicles whose (effective) duty is area-based but area is missing both on the item and the reference."""
+    return await _missing_metric_barcodes(
+        db, project_id, basis=DutyBasis.AREA, nom_col=Nomenclature.area_m2, item_col=CostOrderItem.area_m2
+    )
+
+
+async def get_missing_weight_barcodes(db: AsyncSession, project_id: int) -> list[dict]:  # type: ignore[type-arg]
+    """Barcodes in vehicles whose (effective) duty is weight-based but weight is missing both on the item and the reference."""
+    return await _missing_metric_barcodes(
+        db, project_id, basis=DutyBasis.WEIGHT, nom_col=Nomenclature.weight_kg, item_col=CostOrderItem.weight_kg
+    )
 
 
 async def get_nomenclature_subjects(db: AsyncSession, project_id: int) -> list[str]:

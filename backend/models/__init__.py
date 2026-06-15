@@ -35,6 +35,7 @@ from backend.models.category_rules import (
 from backend.models.cost import (
     CostOrder,
     CostOrderItem,
+    DutyException,
     DutyRule,
     Nomenclature,
 )
@@ -263,6 +264,7 @@ __all__ = [
     # Cost
     "Nomenclature",
     "DutyRule",
+    "DutyException",
     "CostOrder",
     "CostOrderItem",
     # Integrations & Funnel

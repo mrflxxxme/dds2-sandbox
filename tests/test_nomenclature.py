@@ -14,12 +14,15 @@ from backend.models import (
     CostOrder,
     CostOrderItem,
     DutyBasis,
+    DutyException,
     DutyRule,
     Nomenclature,
     VehicleStatus,
 )
+from backend.services.cost.duty import bulk_update_nomenclature_weight
 from backend.services.cost.nomenclature import (
     get_missing_area_barcodes,
+    get_missing_weight_barcodes,
     get_nomenclature,
     get_nomenclature_subjects,
     upload_nomenclature,
@@ -261,6 +264,56 @@ class TestGetMissingAreaBarcodes:
         assert row["vehicles"] == [vno]
 
     @pytest.mark.asyncio
+    async def test_item_area_excludes_barcode(self, db_session, project):
+        """If the cost item already carries area (Excel), it is not missing even with empty reference."""
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.38")))
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-ITEMAR", subject="Ковры"))  # no reference area
+        vno = _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.FORMING))
+        db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode="BC-ITEMAR", qty=10, area_m2=Decimal("1.5")))
+        await db_session.commit()
+
+        result = await get_missing_area_barcodes(db_session, pid)
+        assert all(r["barcode"] != "BC-ITEMAR" for r in result)
+
+    @pytest.mark.asyncio
+    async def test_sibling_source_with_area_excludes_barcode(self, db_session, project):
+        """Same barcode from 2 sources in one vehicle: a sibling carrying area covers the
+        blank row (duty propagates it) — so it must NOT be flagged as missing."""
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.38")))
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-SIB", subject="Ковры"))  # no reference area
+        vno = _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.FORMING))
+        db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode="BC-SIB", qty=10, area_m2=Decimal("2.0")))
+        db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode="BC-SIB", qty=7))  # blank sibling
+        await db_session.commit()
+
+        result = await get_missing_area_barcodes(db_session, pid)
+        assert all(r["barcode"] != "BC-SIB" for r in result)
+
+    @pytest.mark.asyncio
+    async def test_sibling_in_other_vehicle_does_not_exclude(self, db_session, project):
+        """Propagation is per-vehicle: area on the barcode in vehicle A does NOT cover a
+        blank row of the same barcode in vehicle B — B is still missing."""
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.38")))
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-PV", subject="Ковры"))
+        va, vb = _vno(), _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=va, status=VehicleStatus.FORMING))
+        db_session.add(CostOrder(project_id=pid, order_no=vb, status=VehicleStatus.FORMING))
+        db_session.add(CostOrderItem(project_id=pid, order_no=va, barcode="BC-PV", qty=10, area_m2=Decimal("2.0")))
+        db_session.add(CostOrderItem(project_id=pid, order_no=vb, barcode="BC-PV", qty=7))  # blank, other vehicle
+        await db_session.commit()
+
+        result = await get_missing_area_barcodes(db_session, pid)
+        row = next((r for r in result if r["barcode"] == "BC-PV"), None)
+        assert row is not None
+        assert row["total_qty"] == 7
+        assert row["vehicles"] == [vb]
+
+    @pytest.mark.asyncio
     async def test_zero_area_treated_as_missing(self, db_session, project):
         pid = project.id
         db_session.add(DutyRule(project_id=pid, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.61")))
@@ -320,3 +373,163 @@ class TestGetMissingAreaBarcodes:
         res_b = await get_missing_area_barcodes(db_session, other_project.id)
         assert [r["barcode"] for r in res_a] == [f"BC-{project.id}"]
         assert [r["barcode"] for r in res_b] == [f"BC-{other_project.id}"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# get_missing_weight_barcodes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetMissingWeightBarcodes:
+    @pytest.mark.asyncio
+    async def test_empty_for_new_project(self, db_session, project):
+        assert await get_missing_weight_barcodes(db_session, project.id) == []
+
+    @pytest.mark.asyncio
+    async def test_filters_to_weight_basis_missing_in_vehicles(self, db_session, project):
+        """Only WEIGHT-basis barcodes that are in a vehicle and have no weight_kg."""
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Наволочки", basis=DutyBasis.WEIGHT, rate=Decimal("0.61")))
+        db_session.add(DutyRule(project_id=pid, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.38")))
+        db_session.add_all(
+            [
+                Nomenclature(project_id=pid, barcode="BC-NEED", subject="Наволочки", article_seller="A1"),
+                Nomenclature(project_id=pid, barcode="BC-HAS-WEIGHT", subject="Наволочки", weight_kg=Decimal("0.5")),
+                Nomenclature(project_id=pid, barcode="BC-AREA", subject="Ковры"),
+                Nomenclature(project_id=pid, barcode="BC-NO-RULE", subject="Вазы"),
+                Nomenclature(project_id=pid, barcode="BC-NOT-IN-VEHICLE", subject="Наволочки"),
+            ]
+        )
+        vno = _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.FORMING))
+        for bc, qty in [("BC-NEED", 100), ("BC-HAS-WEIGHT", 5), ("BC-AREA", 7), ("BC-NO-RULE", 9)]:
+            db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode=bc, qty=qty))
+        await db_session.commit()
+
+        result = await get_missing_weight_barcodes(db_session, pid)
+        assert [r["barcode"] for r in result] == ["BC-NEED"]
+        row = result[0]
+        assert row["subject"] == "Наволочки"
+        assert row["article_seller"] == "A1"
+        assert row["total_qty"] == 100
+        assert row["vehicles"] == [vno]
+
+    @pytest.mark.asyncio
+    async def test_item_weight_excludes_barcode(self, db_session, project):
+        """If the cost item already carries weight (Excel), the duty computes — not missing,
+        even though the Nomenclature reference weight is empty."""
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Наволочки", basis=DutyBasis.WEIGHT, rate=Decimal("0.61")))
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-ITEMWT", subject="Наволочки"))  # no reference weight
+        vno = _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.FORMING))
+        db_session.add(
+            CostOrderItem(project_id=pid, order_no=vno, barcode="BC-ITEMWT", qty=10, weight_kg=Decimal("1.2"))
+        )
+        await db_session.commit()
+
+        result = await get_missing_weight_barcodes(db_session, pid)
+        assert all(r["barcode"] != "BC-ITEMWT" for r in result)
+
+    @pytest.mark.asyncio
+    async def test_sibling_source_with_weight_excludes_barcode(self, db_session, project):
+        """Same barcode from 2 sources in one vehicle: a sibling carrying weight covers the
+        blank row (duty propagates it) — so it must NOT be flagged as missing. This is the
+        bug-source case (V-0012): one source has weight, the other doesn't."""
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Наволочки", basis=DutyBasis.WEIGHT, rate=Decimal("0.61")))
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-SIBW", subject="Наволочки"))  # no reference weight
+        vno = _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.FORMING))
+        db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode="BC-SIBW", qty=10, weight_kg=Decimal("2.0")))
+        db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode="BC-SIBW", qty=7))  # blank sibling
+        await db_session.commit()
+
+        result = await get_missing_weight_barcodes(db_session, pid)
+        assert all(r["barcode"] != "BC-SIBW" for r in result)
+
+    @pytest.mark.asyncio
+    async def test_zero_weight_treated_as_missing(self, db_session, project):
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Наволочки", basis=DutyBasis.WEIGHT, rate=Decimal("0.61")))
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-ZERO", subject="Наволочки", weight_kg=Decimal("0")))
+        vno = _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.CUSTOMS))
+        db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode="BC-ZERO", qty=12))
+        await db_session.commit()
+
+        result = await get_missing_weight_barcodes(db_session, pid)
+        assert [r["barcode"] for r in result] == ["BC-ZERO"]
+
+    @pytest.mark.asyncio
+    async def test_exception_makes_article_weight_basis(self, db_session, project):
+        """An article with a WEIGHT exception participates even if its category is AREA-based."""
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Ковры", basis=DutyBasis.AREA, rate=Decimal("0.38")))
+        db_session.add(DutyException(project_id=pid, article_seller="EXC-W", basis=DutyBasis.WEIGHT, rate=Decimal("6")))
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-EXC", subject="Ковры", article_seller="EXC-W"))
+        vno = _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.FORMING))
+        db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode="BC-EXC", qty=10))
+        await db_session.commit()
+
+        result = await get_missing_weight_barcodes(db_session, pid)
+        assert [r["barcode"] for r in result] == ["BC-EXC"]
+        # And it must NOT appear in missing-AREA (exception overrode AREA→WEIGHT)
+        area = await get_missing_area_barcodes(db_session, pid)
+        assert all(r["barcode"] != "BC-EXC" for r in area)
+
+    @pytest.mark.asyncio
+    async def test_exception_overrides_weight_category_to_non_weight(self, db_session, project):
+        """An article whose category is WEIGHT but has a non-WEIGHT exception drops out."""
+        pid = project.id
+        db_session.add(DutyRule(project_id=pid, subject="Наволочки", basis=DutyBasis.WEIGHT, rate=Decimal("0.61")))
+        db_session.add(
+            DutyException(project_id=pid, article_seller="EXC-I", basis=DutyBasis.INVOICE, rate=Decimal("6"))
+        )
+        db_session.add(Nomenclature(project_id=pid, barcode="BC-OVR", subject="Наволочки", article_seller="EXC-I"))
+        vno = _vno()
+        db_session.add(CostOrder(project_id=pid, order_no=vno, status=VehicleStatus.FORMING))
+        db_session.add(CostOrderItem(project_id=pid, order_no=vno, barcode="BC-OVR", qty=10))
+        await db_session.commit()
+
+        result = await get_missing_weight_barcodes(db_session, pid)
+        assert all(r["barcode"] != "BC-OVR" for r in result)
+
+    @pytest.mark.asyncio
+    async def test_project_isolation(self, db_session, project, other_project):
+        for p in (project, other_project):
+            db_session.add(DutyRule(project_id=p.id, subject="Наволочки", basis=DutyBasis.WEIGHT, rate=Decimal("0.61")))
+            db_session.add(Nomenclature(project_id=p.id, barcode=f"WBC-{p.id}", subject="Наволочки"))
+            vno = _vno()
+            db_session.add(CostOrder(project_id=p.id, order_no=vno, status=VehicleStatus.FORMING))
+            db_session.add(CostOrderItem(project_id=p.id, order_no=vno, barcode=f"WBC-{p.id}", qty=10))
+        await db_session.commit()
+
+        res_a = await get_missing_weight_barcodes(db_session, project.id)
+        res_b = await get_missing_weight_barcodes(db_session, other_project.id)
+        assert [r["barcode"] for r in res_a] == [f"WBC-{project.id}"]
+        assert [r["barcode"] for r in res_b] == [f"WBC-{other_project.id}"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# bulk_update_nomenclature_weight
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBulkUpdateNomenclatureWeight:
+    @pytest.mark.asyncio
+    async def test_updates_by_barcode_and_reports_not_found(self, db_session, project):
+        pid = project.id
+        db_session.add(Nomenclature(project_id=pid, barcode="WB-1", subject="Наволочки"))
+        await db_session.commit()
+
+        updated, not_found = await bulk_update_nomenclature_weight(
+            db_session, pid, [{"barcode": "WB-1", "weight_kg": 1.25}, {"barcode": "WB-MISSING", "weight_kg": 2}]
+        )
+        assert updated == 1
+        assert not_found == ["WB-MISSING"]
+
+        noms = await get_nomenclature(db_session, pid)
+        nom = next(n for n in noms if n.barcode == "WB-1")
+        assert nom.weight_kg == Decimal("1.25")

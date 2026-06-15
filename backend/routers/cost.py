@@ -10,7 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
-from backend.schemas import BulkAreaUpdate, CostOrderCreate, DutyRuleSchema, VatRateUpdate
+from backend.schemas import (
+    BulkAreaUpdate,
+    BulkWeightUpdate,
+    CostOrderCreate,
+    DutyExceptionSchema,
+    DutyRuleSchema,
+    VatRateUpdate,
+)
 from backend.services import cost as cost_service
 from backend.utils.rate_limit import rate_limit_import, rate_limit_write
 
@@ -68,6 +75,27 @@ async def bulk_update_nomenclature_area(
     db: AsyncSession = Depends(get_db),
 ):
     updated, not_found = await cost_service.bulk_update_nomenclature_area(
+        db, project.id, [i.model_dump() for i in payload.items]
+    )
+    return {"ok": True, "updated": updated, "not_found": not_found}
+
+
+@router.get("/nomenclature/missing_weight")
+async def get_missing_weight_barcodes(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Баркоды в машинах с базисом «От веса» и без заданного веса (для дозаполнения)."""
+    return await cost_service.get_missing_weight_barcodes(db, project.id)
+
+
+@router.put("/nomenclature/bulk_weight", dependencies=[Depends(rate_limit_write)])
+async def bulk_update_nomenclature_weight(
+    payload: BulkWeightUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    updated, not_found = await cost_service.bulk_update_nomenclature_weight(
         db, project.id, [i.model_dump() for i in payload.items]
     )
     return {"ok": True, "updated": updated, "not_found": not_found}
@@ -141,6 +169,53 @@ async def delete_duty_rule(
     db: AsyncSession = Depends(get_db),
 ):
     result = await cost_service.delete_duty_rule(db, project.id, rule_id)
+    if not result:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+# ─── Duty Exceptions (article-level overrides) ────────────────────────────────
+
+
+@router.get("/duty_exceptions")
+async def get_duty_exceptions(
+    limit: int = Query(500),
+    offset: int = Query(0),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    rows = await cost_service.get_duty_exceptions(db, project.id, limit, offset)
+    return [
+        {
+            "id": e.id,
+            "article_seller": e.article_seller,
+            "basis": e.basis,
+            "rate": float(e.rate),
+            "note": e.note,
+        }
+        for e in rows
+    ]
+
+
+@router.post("/duty_exceptions", dependencies=[Depends(rate_limit_write)])
+async def upsert_duty_exception(
+    payload: DutyExceptionSchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result, error = await cost_service.upsert_duty_exception(db, project.id, payload.model_dump(exclude_unset=True))
+    if error:
+        raise HTTPException(400, error)
+    return {"ok": True}
+
+
+@router.delete("/duty_exceptions/{exc_id}", dependencies=[Depends(rate_limit_write)])
+async def delete_duty_exception(
+    exc_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await cost_service.delete_duty_exception(db, project.id, exc_id)
     if not result:
         raise HTTPException(404, "Not found")
     return {"ok": True}
