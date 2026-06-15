@@ -1,5 +1,5 @@
 // DDS2 — сохранённый Workflow «review»: фан-аут профильных ревьюеров по diff.
-// Запуск: Workflow({name:'review'})  — для тяжёлого/ultracode-прогона.
+// Запуск: Workflow({name:'review-deep'})  — для тяжёлого/ultracode-прогона.
 // Повседневный лёгкий аналог без Workflow-tool: команда /review (.claude/commands/review.md).
 //
 // SOTA-приёмы здесь:
@@ -10,7 +10,7 @@
 //  • structured-output по схеме → детерминированная агрегация вердикта в чистом JS.
 
 export const meta = {
-  name: 'review',
+  name: 'review-deep',
   description: 'DDS2 фан-аут ревью по diff: профильные субагенты на Opus 4.8, cache-warmup, единый вердикт APPROVE/WARNING/BLOCK',
   phases: [
     { title: 'Scope', detail: 'git diff → какие ревьюеры нужны', model: 'opus' },
