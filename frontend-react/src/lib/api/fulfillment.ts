@@ -8,6 +8,7 @@ import type {
     FfRequestDetail,
     FfRequestKind,
     FfRequestRow,
+    FfStatusEvent,
     FfStocksResponse,
     FfSyncResult,
     FulfillmentConnectPayload,
@@ -57,6 +58,15 @@ export function addFulfillmentMethods(api: ApiClient) {
         },
         getFfRequestDetail(warehouseId: number, ffRequestId: number) {
             return api.request<FfRequestDetail>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/detail`);
+        },
+
+        // ─── История синхронизации (журнал смены статусов) ───────────
+        getFfStatusHistory(warehouseId: number, params?: { kind?: FfRequestKind; ffRequestId?: number }) {
+            const query = new URLSearchParams();
+            if (params?.kind) query.set('kind', params.kind);
+            if (params?.ffRequestId != null) query.set('ff_request_id', String(params.ffRequestId));
+            const qs = query.toString();
+            return api.request<FfStatusEvent[]>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/status-history${qs ? `?${qs}` : ''}`);
         },
         getFfLinkCandidates(warehouseId: number, ffRequestId: number) {
             return api.request<FfLinkCandidatesResponse>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/link-candidates`);

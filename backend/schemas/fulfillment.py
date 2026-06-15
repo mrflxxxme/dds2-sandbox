@@ -217,6 +217,34 @@ class FfCreateAssemblyResult(BaseModel):
     skipped_barcodes: list[str] = Field(default_factory=list)  # ШК без номенклатуры
 
 
+# ─── История смены статусов заявок ФФ ──────────────────────────────────────
+
+
+class FfStatusEvent(BaseModel):
+    """Событие истории: синк зафиксировал смену стадии/статуса заявки ФФ."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    fulfillment_request_id: int
+    external_id: str
+    number: str | None = None
+    kind: str  # assembly | inbound | other
+    provider: str
+    event_type: str  # created | changed
+    old_status: str | None = None
+    new_status: str | None = None
+    old_stage_code: str | None = None
+    new_stage_code: str | None = None
+    old_stage_title: str | None = None
+    new_stage_title: str | None = None
+    old_is_completed: bool | None = None
+    new_is_completed: bool | None = None
+    old_archived: bool | None = None
+    new_archived: bool | None = None
+    changed_at: datetime
+
+
 # ─── Сводная страница «Заявки ФФ» (все склады с интеграцией) ────────────────
 
 

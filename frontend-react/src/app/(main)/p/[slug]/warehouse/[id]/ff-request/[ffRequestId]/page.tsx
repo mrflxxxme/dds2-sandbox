@@ -2,12 +2,12 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatNumber, formatDate } from '@/lib/utils';
+import { formatNumber, formatDate, formatDateTime } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import Toast from '@/components/Toast';
-import type { FfMatchRow, FfRequestDetail, FfRequestDetailProduct, FfRequestRow } from '@/types/api';
+import type { FfMatchRow, FfRequestDetail, FfRequestDetailProduct, FfRequestRow, FfStatusEvent } from '@/types/api';
 import type { Column } from '@/components/DataTable';
-import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge } from '../../ff-shared';
+import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffEventBadge, ffEventSummary, ffSkippedNotice, ffStageBadge } from '../../ff-shared';
 
 /* ─── Page: деталка заявки ФФ (состав, поля, история стадий) ─────────────── */
 
@@ -21,6 +21,9 @@ export default function FfRequestDetailPage() {
     const [detail, setDetail] = useState<FfRequestDetail | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+
+    // История синхронизации этой заявки (журнал смены статусов; ошибку глушим — секция вторична)
+    const [syncHistory, setSyncHistory] = useState<FfStatusEvent[]>([]);
 
     // Связывание с нашим документом (модал-пикер + отвязка)
     const [linkOpen, setLinkOpen] = useState(false);
@@ -41,6 +44,14 @@ export default function FfRequestDetailPage() {
             .then(r => { if (!controller.signal.aborted) setDetail(r); })
             .catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка'); })
             .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [warehouseId, ffRequestId]);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        api.getFfStatusHistory(warehouseId, { ffRequestId })
+            .then(r => { if (!controller.signal.aborted) setSyncHistory(r); })
+            .catch(() => { if (!controller.signal.aborted) setSyncHistory([]); });
         return () => controller.abort();
     }, [warehouseId, ffRequestId]);
 
@@ -393,6 +404,25 @@ export default function FfRequestDetailPage() {
                                 <span style={{ color: 'var(--color-text-muted)' }}>{l.executor || '—'}</span>
                                 <span style={{ color: 'var(--color-text-muted)' }}>{l.created_at || ''}</span>
                                 <span style={{ color: 'var(--color-text-muted)' }}>{l.spent_time || ''}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* История синхронизации DDS (журнал смены статусов — для всех провайдеров) */}
+            {syncHistory.length > 0 && (
+                <div className="glass-card" style={{ padding: 20, marginTop: 16 }}>
+                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 4px' }}>История синхронизации</h3>
+                    <p style={{ fontSize: 12, color: 'var(--color-text-muted)', margin: '0 0 12px' }}>
+                        Изменения статуса заявки, зафиксированные синхронизацией DDS.
+                    </p>
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        {syncHistory.map(e => (
+                            <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 13, padding: '8px 0', borderBottom: '1px solid var(--color-border)' }}>
+                                <span style={{ color: 'var(--color-text-muted)', whiteSpace: 'nowrap', minWidth: 140 }}>{formatDateTime(e.changed_at)}</span>
+                                {ffEventBadge(e)}
+                                <span style={{ flex: 1 }}>{ffEventSummary(e)}</span>
                             </div>
                         ))}
                     </div>

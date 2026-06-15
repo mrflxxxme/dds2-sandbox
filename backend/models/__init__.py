@@ -69,6 +69,7 @@ from backend.models.fulfillment import (
     FfRequestKind,
     FulfillmentProvider,
     FulfillmentRequest,
+    FulfillmentStatusEvent,
     FulfillmentStock,
 )
 
@@ -281,6 +282,7 @@ __all__ = [
     # Fulfillment
     "FulfillmentProvider",
     "FulfillmentRequest",
+    "FulfillmentStatusEvent",
     "FulfillmentStock",
     "FfRequestKind",
     # Tax

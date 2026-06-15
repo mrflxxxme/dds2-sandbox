@@ -647,3 +647,66 @@ class TestPriceResync:
     async def test_preview_unknown_vehicle_raises(self, db_session, project):
         with pytest.raises(ValueError):
             await preview_price_resync(db_session, project.id, "V-DOES-NOT-EXIST")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# cost_summary excludes soft-deleted items (V-0017 inflated-себестоимость bug)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVehicleCostSummaryExcludesSoftDeleted:
+    @pytest.mark.asyncio
+    async def test_cost_summary_excludes_soft_deleted_items(self, db_session, project):
+        """Page-load cost summary (Товар/Доставка/Пошлина/НДС/Итого) must exclude
+        soft-deleted items. Re-upload/replace soft-deletes old rows but keeps their
+        stored cost_rub/total_rub; counting them inflated Товар/Итого while the ¥ total
+        (active-only) stayed correct — the V-0017 symptom (12.9M ₽ vs 423k ¥)."""
+        from backend.models import CostOrder, CostOrderItem
+
+        order_no = f"V-{_uid()}"
+        db_session.add(
+            CostOrder(
+                order_no=order_no,
+                project_id=project.id,
+                country="CHINA",
+                status=VehicleStatus.CUSTOMS,
+                rate_cny=Decimal("10.8"),
+                rate_usd=Decimal("74"),
+                rate_eur=Decimal("84"),
+                delivery_cost_cny=Decimal("0"),
+                delivery_cost_usd=Decimal("0"),
+            )
+        )
+
+        def _item(barcode, qty, price, cost, total, *, deleted=False):
+            it = CostOrderItem(
+                project_id=project.id,
+                order_no=order_no,
+                barcode=barcode,
+                qty=qty,
+                price_cny=Decimal(price),
+                cost_rub=Decimal(cost),
+                delivery_rub=Decimal("0"),
+                duty_rub=Decimal("0"),
+                vat_rub=Decimal("0"),
+                util_rub=Decimal("0"),
+                total_rub=Decimal(total),
+            )
+            if deleted:
+                it.soft_delete()
+            return it
+
+        # 2 active rows: goods 50¥×2 + 50¥×3 = 250¥ ; cost 540×2 + 540×3 = 2700₽
+        db_session.add(_item("BC-A", 2, "50", "540", "570"))
+        db_session.add(_item("BC-B", 3, "50", "540", "570"))
+        # soft-deleted leftover from an old re-upload at 10× the price — must NOT count
+        db_session.add(_item("BC-A", 2, "500", "5400", "5700", deleted=True))
+        await db_session.commit()
+
+        vehicle = await get_vehicle(db_session, project.id, order_no)
+        assert vehicle.total_cny == Decimal("250")  # ¥ total: active-only (already correct)
+        cs = vehicle.cost_summary
+        assert cs is not None
+        # Active-only: the 5400×2 / 5700×2 dead row must be excluded.
+        assert cs.total_cost_rub == Decimal("2700")
+        assert cs.total_rub == Decimal("2850")

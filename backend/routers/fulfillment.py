@@ -27,6 +27,7 @@ from backend.schemas.fulfillment import (
     FfOverviewResponse,
     FfRequestDetail,
     FfRequestRow,
+    FfStatusEvent,
     FfStocksResponse,
     FfSyncResult,
     FulfillmentConnectPayload,
@@ -142,6 +143,24 @@ async def list_requests(
 ):
     """Зеркало заявок ФФ (kind: assembly | inbound | other; show_archived — вид «Архив»)."""
     return await fulfillment_service.list_requests(db, project.id, warehouse_id, kind, show_archived=show_archived)
+
+
+@wh_router.get("/status-history", response_model=list[FfStatusEvent])
+async def status_history(
+    warehouse_id: int,
+    kind: str | None = None,
+    ff_request_id: int | None = None,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """История синхронизации: журнал смены статусов/стадий заявок ФФ склада.
+
+    kind — фильтр по типу (assembly|inbound|other); ff_request_id — история
+    конкретной заявки (для деталки).
+    """
+    return await fulfillment_service.list_status_events(
+        db, project.id, warehouse_id, kind=kind, ff_request_id=ff_request_id
+    )
 
 
 @wh_router.post(

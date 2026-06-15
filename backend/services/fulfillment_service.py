@@ -45,6 +45,7 @@ from backend.integrations.wmscelicom_client import WmsCelicomClient, normalize_b
 from backend.models import (
     FfRequestKind,
     FulfillmentRequest,
+    FulfillmentStatusEvent,
     FulfillmentStock,
     InboundReceipt,
     InboundReceiptItem,
@@ -1009,6 +1010,61 @@ async def _apply_stocks(
     return len(rows), unmatched
 
 
+# Поля, смену которых журналируем в историю синка (FulfillmentStatusEvent).
+# Обогащение (total_qty/dest_warehouse), даты и raw НЕ считаются сменой статуса.
+def _status_fields_from_row(row: dict) -> dict:
+    return {
+        "status": row["status"],
+        "stage_code": row["stage_code"],
+        "stage_title": row["stage_title"],
+        "is_completed": bool(row["is_completed"]),
+        "archived": bool(row["archived"]),
+    }
+
+
+def _status_fields_from_model(req: FulfillmentRequest) -> dict:
+    return {
+        "status": req.status,
+        "stage_code": req.stage_code,
+        "stage_title": req.stage_title,
+        "is_completed": bool(req.is_completed),
+        "archived": bool(req.archived),
+    }
+
+
+def _build_status_event(
+    project_id: int,
+    warehouse_id: int,
+    provider: str,
+    req: FulfillmentRequest,
+    old: dict | None,
+    new: dict,
+    changed_at: datetime,
+) -> FulfillmentStatusEvent:
+    """Строка журнала: old=None → заявка только появилась (event_type=created)."""
+    return FulfillmentStatusEvent(
+        project_id=project_id,
+        warehouse_id=warehouse_id,
+        provider=provider,
+        fulfillment_request_id=req.id,
+        external_id=req.external_id,
+        number=req.number,
+        kind=req.kind,
+        event_type="created" if old is None else "changed",
+        old_status=old["status"] if old else None,
+        new_status=new["status"],
+        old_stage_code=old["stage_code"] if old else None,
+        new_stage_code=new["stage_code"],
+        old_stage_title=old["stage_title"] if old else None,
+        new_stage_title=new["stage_title"],
+        old_is_completed=old["is_completed"] if old else None,
+        new_is_completed=new["is_completed"],
+        old_archived=old["archived"] if old else None,
+        new_archived=new["archived"],
+        changed_at=changed_at,
+    )
+
+
 async def _apply_requests(
     db: AsyncSession,
     project_id: int,
@@ -1020,6 +1076,8 @@ async def _apply_requests(
 
     Существующие строки: обновляем status/stage/number/type_name/даты/флаги/
     synced_at/raw; ручные связи (assembly_request_id/inbound_receipt_id) НЕ трогаем.
+    Параллельно ведём журнал смены статусов (FulfillmentStatusEvent): новая
+    заявка → событие `created`, изменение стадии/статуса/флагов → `changed`.
     """
     # Дедуп по external_id в рамках батча (защита от пересечения выборок);
     # строки без id (битый ответ провайдера) пропускаем.
@@ -1044,9 +1102,14 @@ async def _apply_requests(
     existing = {r.external_id: r for r in result.scalars().all()}
 
     synced_at = utcnow()
+    # (request, old_fields|None, new_fields) — событие создаём после flush,
+    # чтобы у новых заявок уже был id для FK
+    pending_events: list[tuple[FulfillmentRequest, dict | None, dict]] = []
     for external_id, row in by_external.items():
+        new_fields = _status_fields_from_row(row)
         req = existing.get(external_id)
         if req:
+            old_fields = _status_fields_from_model(req)  # снимок ДО перезаписи
             req.number = row["number"] or req.number
             req.type_name = row["type_name"] or req.type_name
             req.status = row["status"]
@@ -1063,30 +1126,37 @@ async def _apply_requests(
             req.external_created_at = row["external_created_at"] or req.external_created_at
             req.synced_at = synced_at
             req.raw = row["raw"]
+            if old_fields != new_fields:
+                pending_events.append((req, old_fields, new_fields))
         else:
-            db.add(
-                FulfillmentRequest(
-                    project_id=project_id,
-                    warehouse_id=warehouse_id,
-                    provider=provider,
-                    external_id=external_id,
-                    number=row["number"],
-                    kind=row["kind"],
-                    type_id=row["type_id"],
-                    type_name=row["type_name"],
-                    status=row["status"],
-                    stage_code=row["stage_code"],
-                    stage_title=row["stage_title"],
-                    is_completed=row["is_completed"],
-                    archived=row["archived"],
-                    expired=row["expired"],
-                    total_qty=row.get("total_qty"),
-                    dest_warehouse=row.get("dest_warehouse"),
-                    external_created_at=row["external_created_at"],
-                    raw=row["raw"],
-                    synced_at=synced_at,
-                )
+            new_req = FulfillmentRequest(
+                project_id=project_id,
+                warehouse_id=warehouse_id,
+                provider=provider,
+                external_id=external_id,
+                number=row["number"],
+                kind=row["kind"],
+                type_id=row["type_id"],
+                type_name=row["type_name"],
+                status=row["status"],
+                stage_code=row["stage_code"],
+                stage_title=row["stage_title"],
+                is_completed=row["is_completed"],
+                archived=row["archived"],
+                expired=row["expired"],
+                total_qty=row.get("total_qty"),
+                dest_warehouse=row.get("dest_warehouse"),
+                external_created_at=row["external_created_at"],
+                raw=row["raw"],
+                synced_at=synced_at,
             )
+            db.add(new_req)
+            pending_events.append((new_req, None, new_fields))
+
+    if pending_events:
+        await db.flush()  # проставить id новым заявкам до записи событий (FK)
+        for ev_req, ev_old, ev_new in pending_events:
+            db.add(_build_status_event(project_id, warehouse_id, provider, ev_req, ev_old, ev_new, synced_at))
     return len(by_external)
 
 
@@ -1352,6 +1422,62 @@ async def list_requests(
         inbound_map = {row[0]: (row[1], row[2]) for row in result.all()}
 
     return [_request_to_dict(r, assembly_map, inbound_map) for r in requests]
+
+
+# ─── История смены статусов (журнал синка) ──────────────────────────────────
+
+STATUS_EVENTS_LIMIT = 1000
+
+
+def _status_event_to_dict(e: FulfillmentStatusEvent) -> dict:
+    return {
+        "id": e.id,
+        "fulfillment_request_id": e.fulfillment_request_id,
+        "external_id": e.external_id,
+        "number": e.number,
+        "kind": e.kind,
+        "provider": e.provider,
+        "event_type": e.event_type,
+        "old_status": e.old_status,
+        "new_status": e.new_status,
+        "old_stage_code": e.old_stage_code,
+        "new_stage_code": e.new_stage_code,
+        "old_stage_title": e.old_stage_title,
+        "new_stage_title": e.new_stage_title,
+        "old_is_completed": e.old_is_completed,
+        "new_is_completed": e.new_is_completed,
+        "old_archived": e.old_archived,
+        "new_archived": e.new_archived,
+        "changed_at": e.changed_at,
+    }
+
+
+async def list_status_events(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    kind: str | None = None,
+    ff_request_id: int | None = None,
+) -> list[dict]:
+    """Журнал смены статусов заявок ФФ склада, новые сверху (FfStatusEvent shape).
+
+    kind — фильтр по типу заявки (assembly|inbound|other); ff_request_id —
+    история конкретной заявки (для деталки).
+    """
+    q = select(FulfillmentStatusEvent).where(
+        FulfillmentStatusEvent.project_id == project_id,
+        FulfillmentStatusEvent.warehouse_id == warehouse_id,
+    )
+    if kind:
+        q = q.where(FulfillmentStatusEvent.kind == kind)
+    if ff_request_id is not None:
+        q = q.where(FulfillmentStatusEvent.fulfillment_request_id == ff_request_id)
+    q = q.order_by(
+        FulfillmentStatusEvent.changed_at.desc(),
+        FulfillmentStatusEvent.id.desc(),
+    ).limit(STATUS_EVENTS_LIMIT)
+    result = await db.execute(q)
+    return [_status_event_to_dict(e) for e in result.scalars().all()]
 
 
 # ─── Overview: сводка по всем складам с активной ФФ-интеграцией ─────────────
