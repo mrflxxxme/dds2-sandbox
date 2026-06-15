@@ -63,6 +63,28 @@ class Supplier(Base, TimestampMixin, SoftDeleteMixin):
     )
 
 
+class SupplyProject(Base, TimestampMixin, SoftDeleteMixin):
+    """
+    Named grouping for factory orders — a "campaign" / "batch" label.
+
+    Distinct from the multi-tenant ``Project`` (the workspace at /p/[slug]):
+    this is a user-defined tag that groups factory orders **within** one project.
+    Relationship is 1 order → 0..1 supply_project (FactoryOrder.supply_project_id).
+    No unique constraint on name on purpose (avoids the soft-delete+unique re-create
+    mine; names are free-form labels).
+    """
+
+    __tablename__ = "supply_projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    color: Mapped[str | None] = mapped_column(String(20))  # hex token for the UI chip, optional
+    note: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (Index("ix_supply_projects_project_id", "project_id"),)
+
+
 class FactoryOrder(Base, TimestampMixin, SoftDeleteMixin):
     """
     Factory order — one order placed to one factory.
@@ -82,14 +104,21 @@ class FactoryOrder(Base, TimestampMixin, SoftDeleteMixin):
     total_cny: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="FORMING", server_default="FORMING")
     note: Mapped[str | None] = mapped_column(Text)
+    # Grouping into a user-defined SupplyProject (0..1). Independent of order status.
+    supply_project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("supply_projects.id"), nullable=True)
+    # Manual archive flag: archived orders are hidden from the main list (independent
+    # of the FORMING/DISTRIBUTED/CLOSED shipping status).
+    is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     supplier: Mapped["Supplier | None"] = relationship(back_populates="factory_orders")
+    supply_project: Mapped["SupplyProject | None"] = relationship()
     items: Mapped[list["FactoryOrderItem"]] = relationship(back_populates="factory_order", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("project_id", "order_number", name="uq_factory_order_project_number"),
         Index("ix_factory_orders_project_id", "project_id"),
         Index("ix_factory_orders_supplier_id", "supplier_id"),
+        Index("ix_factory_orders_supply_project_id", "supply_project_id"),
     )
 
 

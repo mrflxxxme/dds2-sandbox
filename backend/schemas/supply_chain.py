@@ -100,6 +100,53 @@ class SupplierSchema(BaseModel):
     updated_at: datetime | None = None
 
 
+# --- Supply Project (grouping of factory orders) ---
+
+
+class SupplyProjectCreate(BaseModel):
+    name: str
+    color: str | None = None
+    note: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Название проекта не может быть пустым")
+        return v
+
+
+class SupplyProjectUpdate(BaseModel):
+    name: str | None = None
+    color: str | None = None
+    note: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("Название проекта не может быть пустым")
+        return v
+
+
+class SupplyProjectSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    name: str
+    color: str | None = None
+    note: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    # Optional: number of (non-archived) orders bound to this project — filled by the list endpoint.
+    orders_count: int | None = None
+
+
 # --- FactoryOrderItem ---
 
 
@@ -174,6 +221,7 @@ class FactoryOrderCreate(BaseModel):
     order_number: str
     factory_name: str | None = None
     supplier_id: int | None = None
+    supply_project_id: int | None = None
     order_date: date | None = None
     expected_ready_date: date | None = None
     total_cny: Decimal | None = None
@@ -185,6 +233,7 @@ class FactoryOrderUpdate(BaseModel):
     order_number: str | None = None
     factory_name: str | None = None
     supplier_id: int | None = None
+    supply_project_id: int | None = None
     order_date: date | None = None
     expected_ready_date: date | None = None
     total_cny: Decimal | None = None
@@ -200,14 +249,53 @@ class FactoryOrderSchema(BaseModel):
     factory_name: str | None = None
     supplier_id: int | None = None
     supplier: SupplierSchema | None = None
+    supply_project_id: int | None = None
+    supply_project: SupplyProjectSchema | None = None
     order_date: date | None = None
     expected_ready_date: date | None = None
     total_cny: Decimal | None = None
     status: str = "FORMING"
+    is_archived: bool = False
     note: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     items: list[FactoryOrderItemSchema] | None = None
+
+
+# --- Factory Order: archive + merge ---
+
+
+class FactoryOrderArchiveUpdate(BaseModel):
+    is_archived: bool
+
+
+class MergeOrdersRequest(BaseModel):
+    """Merge several factory orders into one target order.
+
+    Все позиции исходных заказов переносятся в target_id; дубли по barcode
+    сливаются в одну строку (qty/assigned_qty суммируются, связи cost-позиций
+    перепривязываются к выжившей позиции). Исходные заказы soft-deleted.
+    """
+
+    target_id: int
+    source_ids: list[int]
+
+    @model_validator(mode="after")
+    def check(self) -> "MergeOrdersRequest":
+        if not self.source_ids:
+            raise ValueError("source_ids must not be empty")
+        if self.target_id in self.source_ids:
+            raise ValueError("target_id must not be in source_ids")
+        if len(set(self.source_ids)) != len(self.source_ids):
+            raise ValueError("source_ids must be unique")
+        return self
+
+
+class MergeOrdersResult(BaseModel):
+    target_id: int
+    merged_orders: int  # how many source orders were folded in
+    items_moved: int  # items re-parented as new lines (no barcode collision)
+    items_merged: int  # items folded into an existing target line (duplicate barcode)
 
 
 # --- Factory Order Status Update ---

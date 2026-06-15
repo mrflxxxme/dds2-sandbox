@@ -1,5 +1,6 @@
 'use client';
 
+import { useMemo, useState } from 'react';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 
 /**
@@ -118,7 +119,40 @@ export default function DataTable({
         ? Object.keys(data[0]).map(k => ({ key: k, label: k }))
         : columns;
 
-    const displayData = data.slice(0, maxRows);
+    // Opt-in client-side sorting: active only for columns with `sortable: true`.
+    const [sortKey, setSortKey] = useState<string | null>(null);
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+
+    const sortCol = sortKey ? effectiveColumns.find(c => c.key === sortKey && c.sortable) : undefined;
+
+    const sortedData = useMemo(() => {
+        if (!sortCol) return data;
+        const accessor = (row: any) => (sortCol.getValue ? sortCol.getValue(row) : row[sortCol.key]);
+        const dir = sortDir === 'asc' ? 1 : -1;
+        return [...data].sort((a, b) => {
+            const av = accessor(a);
+            const bv = accessor(b);
+            // Nulls/undefined/'' always sort last regardless of direction.
+            const aEmpty = av == null || av === '';
+            const bEmpty = bv == null || bv === '';
+            if (aEmpty && bEmpty) return 0;
+            if (aEmpty) return 1;
+            if (bEmpty) return -1;
+            if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+            return String(av).localeCompare(String(bv), undefined, { numeric: true }) * dir;
+        });
+    }, [data, sortCol, sortDir]);
+
+    const toggleSort = (key: string) => {
+        if (sortKey === key) {
+            setSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+        } else {
+            setSortKey(key);
+            setSortDir('asc');
+        }
+    };
+
+    const displayData = sortedData.slice(0, maxRows);
 
     return (
         <div className="glass-card">
@@ -128,7 +162,7 @@ export default function DataTable({
                     {title && <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>{title}{data.length > 0 ? ` (${data.length})` : ''}</h3>}
                     <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
                         {exportName && data.length > 0 && (
-                            <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, exportName, effectiveColumns)}>
+                            <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(sortedData, exportName, effectiveColumns)}>
                                 📥 Excel
                             </button>
                         )}
@@ -155,15 +189,29 @@ export default function DataTable({
                     <table className="data-table">
                         <thead>
                             <tr>
-                                {effectiveColumns.map(col => (
-                                    <th key={col.key} style={{
-                                        textAlign: col.align || 'left',
-                                        width: col.width,
-                                        fontSize: autoColumns ? 11 : undefined,
-                                    }}>
-                                        {col.label}
-                                    </th>
-                                ))}
+                                {effectiveColumns.map(col => {
+                                    const active = sortKey === col.key && !!col.sortable;
+                                    return (
+                                        <th key={col.key} style={{
+                                            textAlign: col.align || 'left',
+                                            width: col.width,
+                                            fontSize: autoColumns ? 11 : undefined,
+                                            cursor: col.sortable ? 'pointer' : undefined,
+                                            userSelect: col.sortable ? 'none' : undefined,
+                                            whiteSpace: col.sortable ? 'nowrap' : undefined,
+                                        }}
+                                        onClick={col.sortable ? () => toggleSort(col.key) : undefined}
+                                        title={col.sortable ? 'Сортировать' : undefined}
+                                        >
+                                            {col.label}
+                                            {col.sortable && (
+                                                <span style={{ marginLeft: 4, opacity: active ? 1 : 0.35, fontSize: 11 }}>
+                                                    {active ? (sortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                                                </span>
+                                            )}
+                                        </th>
+                                    );
+                                })}
                             </tr>
                         </thead>
                         <tbody>

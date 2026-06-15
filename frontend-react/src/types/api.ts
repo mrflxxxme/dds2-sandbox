@@ -1569,6 +1569,7 @@ export type AssemblyAnomalyKind =
   | 'stuck_assembly'          // IN_PROGRESS дольше порога
   | 'stuck_shipment'          // READY/VEHICLE_ASSIGNED дольше порога от готовности
   | 'wb_accepted_not_shipped' // ВБ уже принял поставку, а заявка не отгружена — забыли отгрузить
+  | 'ff_closed_not_shipped'   // ФФ закрыл/заархивировал заявку, а наша сборка ещё не отгружена
   | 'shipped_not_accepted';   // SHIPPED дольше порога без DELIVERED
 
 export interface AssemblyStageDuration {
@@ -1607,6 +1608,8 @@ export interface AssemblyAnomalyRow {
   /** номер WB-поставки (wb_fbo_supplies.wb_supply_id) */
   wb_supply_number: string | null;
   pallets_count: number;
+  /** номер ФФ-заявки (для ff_closed_not_shipped) */
+  ff_request_number?: string | null;
 }
 
 export interface AssemblyWarehouseFlowStat {
@@ -1981,6 +1984,41 @@ export interface FactoryOrderItem {
 
 export type FactoryOrderStatus = 'FORMING' | 'DISTRIBUTED' | 'CLOSED';
 
+export interface SupplyProject {
+  id: number;
+  project_id: number;
+  name: string;
+  color?: string | null;
+  note?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  orders_count?: number | null;
+}
+
+export interface SupplyProjectCreate {
+  name: string;
+  color?: string | null;
+  note?: string | null;
+}
+
+export interface SupplyProjectUpdate {
+  name?: string;
+  color?: string | null;
+  note?: string | null;
+}
+
+export interface MergeOrdersRequest {
+  target_id: number;
+  source_ids: number[];
+}
+
+export interface MergeOrdersResult {
+  target_id: number;
+  merged_orders: number;
+  items_moved: number;
+  items_merged: number;
+}
+
 export interface FactoryOrder {
   id: number;
   project_id: number;
@@ -1990,9 +2028,12 @@ export interface FactoryOrder {
   expected_ready_date?: string;
   total_cny?: number;
   status: FactoryOrderStatus;
+  is_archived?: boolean;
   note?: string;
   supplier_id?: number;
   supplier?: Supplier;
+  supply_project_id?: number | null;
+  supply_project?: SupplyProject | null;
   created_at?: string;
   updated_at?: string;
   items?: FactoryOrderItem[];
@@ -2034,6 +2075,7 @@ export interface FactoryOrderCreate {
   total_cny?: number;
   note?: string;
   supplier_id?: number;
+  supply_project_id?: number | null;
   items?: { barcode: string; subject?: string; article_seller?: string; qty: number; price_cny: number; note?: string }[];
 }
 

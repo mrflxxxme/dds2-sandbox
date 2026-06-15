@@ -131,6 +131,7 @@ from backend.models.supply_chain import (
     FactoryOrderHistory,
     FactoryOrderItem,
     Supplier,
+    SupplyProject,
     VehicleDocument,
     VehicleStatusHistory,
 )
@@ -331,6 +332,7 @@ __all__ = [
     "FactoryOrderHistory",
     "FactoryOrderItem",
     "Supplier",
+    "SupplyProject",
     "VehicleDocument",
     "VehicleStatusHistory",
     # AI Chat

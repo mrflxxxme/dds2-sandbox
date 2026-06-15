@@ -218,4 +218,6 @@ class CostOrderItem(Base, SoftDeleteMixin):
     __table_args__ = (
         Index("ix_cost_item_project_id", "project_id"),
         Index("ix_cost_item_order", "order_no"),
+        # FK lookup index — used by factory-order merge re-point and check_and_close_order.
+        Index("ix_cost_order_items_factory_item", "factory_order_item_id"),
     )

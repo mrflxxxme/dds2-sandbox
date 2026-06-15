@@ -29,6 +29,10 @@ import type {
     PostShipmentItemsResponse,
     AddUnorderedItemsRequest,
     AddUnorderedItemsResponse,
+    SupplyProject,
+    SupplyProjectCreate,
+    SupplyProjectUpdate,
+    MergeOrdersResult,
 } from '@/types/api';
 import { FactoryQtyExceededError } from '@/types/api';
 
@@ -73,6 +77,29 @@ export function addSupplyChainMethods(api: ApiClient) {
         },
         deleteFactoryOrder(id: number) {
             return api.request<MessageResponse>('DELETE', `/api/v1/supply-chain/factory-orders/${id}`);
+        },
+        archiveFactoryOrder(id: number, archived: boolean) {
+            return api.request<FactoryOrder>('PUT', `/api/v1/supply-chain/factory-orders/${id}/archive`, { is_archived: archived });
+        },
+        setFactoryOrderProject(id: number, supplyProjectId: number | null) {
+            return api.request<FactoryOrder>('PUT', `/api/v1/supply-chain/factory-orders/${id}`, { supply_project_id: supplyProjectId });
+        },
+        mergeFactoryOrders(targetId: number, sourceIds: number[]) {
+            return api.request<MergeOrdersResult>('POST', '/api/v1/supply-chain/factory-orders/merge', { target_id: targetId, source_ids: sourceIds });
+        },
+
+        // ─── Supply Projects (grouping) ─────────────────────────────
+        getSupplyProjects() {
+            return api.request<SupplyProject[]>('GET', '/api/v1/supply-chain/projects');
+        },
+        createSupplyProject(data: SupplyProjectCreate) {
+            return api.request<SupplyProject>('POST', '/api/v1/supply-chain/projects', data);
+        },
+        updateSupplyProject(id: number, data: SupplyProjectUpdate) {
+            return api.request<SupplyProject>('PUT', `/api/v1/supply-chain/projects/${id}`, data);
+        },
+        deleteSupplyProject(id: number) {
+            return api.request<MessageResponse>('DELETE', `/api/v1/supply-chain/projects/${id}`);
         },
 
         // ─── Factory Order Items ────────────────────────────────────

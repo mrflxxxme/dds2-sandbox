@@ -48,6 +48,7 @@ import type {
     SkuOrderHistoryEntry,
     ShipmentMatrixResponse,
     ShipmentMatrixItem,
+    SupplyProject,
 } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
 
@@ -162,6 +163,7 @@ function SupplyChainContent() {
                     { key: 'orders', label: t('tab_orders') },
                     { key: 'vehicles', label: t('tab_vehicles') },
                     { key: 'suppliers', label: t('tab_suppliers') },
+                    { key: 'projects', label: t('tab_projects') },
                 ]}
                 active={tab}
                 onChange={setTab}
@@ -169,6 +171,7 @@ function SupplyChainContent() {
             {tab === 'orders' && <FactoryOrdersTab />}
             {tab === 'vehicles' && <VehiclesTab />}
             {tab === 'suppliers' && <SuppliersTab />}
+            {tab === 'projects' && <SupplyProjectsTab />}
         </div>
     );
 }
@@ -190,12 +193,15 @@ function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDo
         expected_ready_date: undefined,
         note: undefined,
         supplier_id: undefined,
+        supply_project_id: undefined,
     });
     const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+    const [projects, setProjects] = useState<SupplyProject[]>([]);
     const [submitting, setSubmitting] = useState(false);
 
     useEffect(() => {
         api.getSuppliers().then(setSuppliers).catch(() => {});
+        api.getSupplyProjects().then(setProjects).catch(() => {});
     }, []);
 
     const handleSupplierChange = (supplierId: number | undefined) => {
@@ -250,6 +256,19 @@ function CreateFactoryOrderForm({ onClose, onDone }: { onClose: () => void; onDo
                     <input value={form.factory_name || ''} onChange={e => setForm(f => ({ ...f, factory_name: e.target.value || undefined }))} placeholder={t('create_order_supplier_placeholder')} className="sc-form-input" />
                 </div>
                 <div>
+                    <label className="sc-form-label">{t('create_order_project')}</label>
+                    <select
+                        value={form.supply_project_id ?? ''}
+                        onChange={e => setForm(f => ({ ...f, supply_project_id: e.target.value ? Number(e.target.value) : undefined }))}
+                        className="sc-form-input"
+                    >
+                        <option value="">{t('project_none')}</option>
+                        {projects.map(p => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                    </select>
+                </div>
+                <div>
                     <label className="sc-form-label">{t('create_order_ready_date')}</label>
                     <input type="date" value={form.expected_ready_date || ''} onChange={e => setForm(f => ({ ...f, expected_ready_date: e.target.value || undefined }))} className="sc-form-input" />
                 </div>
@@ -279,6 +298,11 @@ function FactoryOrdersTab() {
     const [editOrder, setEditOrder] = useState<FactoryOrder | null>(null);
     const [splitOrderId, setSplitOrderId] = useState<number | null>(null);
     const [filterFactory, setFilterFactory] = useState<string>('');
+    const [projects, setProjects] = useState<SupplyProject[]>([]);
+    const [filterProject, setFilterProject] = useState<string>('');
+    const [statusView, setStatusView] = useState<'active' | 'completed' | 'all'>('active');
+    const [selected, setSelected] = useState<number[]>([]);
+    const [mergeOpen, setMergeOpen] = useState(false);
     const router = useRouter();
     const { slug } = useParams() as { slug: string };
 
@@ -286,8 +310,14 @@ function FactoryOrdersTab() {
         setLoading(true);
         setError('');
         try {
-            const data = await api.getFactoryOrders();
+            const [data, projs] = await Promise.all([
+                api.getFactoryOrders(),
+                api.getSupplyProjects().catch(() => [] as SupplyProject[]),
+            ]);
             setOrders(data);
+            setProjects(projs);
+            // Drop selection entries that no longer exist after reload.
+            setSelected(sel => sel.filter(id => data.some(o => o.id === id)));
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : t('msg_loading_error'));
         }
@@ -318,13 +348,51 @@ function FactoryOrdersTab() {
         }
     };
 
+    const handleArchive = async (row: FactoryOrder) => {
+        try {
+            await api.archiveFactoryOrder(row.id, !row.is_archived);
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_error'));
+        }
+    };
+
+    const handleAssignProject = async (orderId: number, projectId: number | null) => {
+        // Optimistic update so the inline select feels instant, then persist.
+        setOrders(prev => prev.map(o => o.id === orderId
+            ? { ...o, supply_project_id: projectId ?? undefined, supply_project: projectId ? projects.find(p => p.id === projectId) ?? null : null }
+            : o));
+        try {
+            await api.setFactoryOrderProject(orderId, projectId);
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_error'));
+            await load();
+        }
+    };
+
+    const toggleSelect = (id: number) => {
+        setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
+    };
+
     const handleRowClick = (row: FactoryOrder) => {
         router.push(`/p/${slug}/supply-chain/factory-orders/${row.id}`);
     };
 
     // Unique factory names for filter (with supplier info if available)
     const factoryNames = [...new Set(orders.map(o => o.factory_name).filter(Boolean))].sort();
-    const filteredOrders = filterFactory ? orders.filter(o => o.factory_name === filterFactory) : orders;
+    const completedCount = orders.filter(o => o.is_archived).length;
+
+    // Visible set: completion view (active/completed/all) + factory + project filters.
+    const filteredOrders = useMemo(() => orders.filter(o => {
+        if (statusView === 'active' && o.is_archived) return false;
+        if (statusView === 'completed' && !o.is_archived) return false;
+        if (filterFactory && o.factory_name !== filterFactory) return false;
+        if (filterProject === '__none__' && o.supply_project_id) return false;
+        if (filterProject && filterProject !== '__none__' && String(o.supply_project_id ?? '') !== filterProject) return false;
+        return true;
+    }), [orders, statusView, filterFactory, filterProject]);
+
+    const selectedOrders = orders.filter(o => selected.includes(o.id));
 
     // Helper to get supplier label for filter dropdown
     const getFactoryLabel = (name: string) => {
@@ -348,67 +416,124 @@ function FactoryOrdersTab() {
         return acc;
     }, { weight: 0, volume: 0, sumCny: 0, sumRub: 0, qty: 0 });
 
+    const sumQty = (row: FactoryOrder) => (row.items || []).reduce((s, i) => s + i.qty, 0);
+    const orderCost = (row: FactoryOrder) => {
+        let cost = Number(row.total_cny) || 0;
+        if (!cost && row.items?.length) cost = row.items.reduce((sum, i) => sum + (Number(i.price_cny) || 0) * i.qty, 0);
+        return cost;
+    };
+    const orderProgressPct = (row: FactoryOrder) => {
+        const items = row.items || [];
+        const totalQty = items.reduce((s, i) => s + i.qty, 0);
+        const assignedQty = items.reduce((s, i) => s + i.assigned_qty, 0);
+        return totalQty > 0 ? Math.round((assignedQty / totalQty) * 100) : 0;
+    };
+
     const columns: Column[] = [
-        { key: 'order_number', label: t('col_number'), width: '120px' },
-        { key: 'factory_name', label: t('col_supplier') },
         {
-            key: 'items', label: t('col_items_count'), align: 'center',
+            key: '_select', label: '', width: '34px',
+            render: (_v: unknown, row: FactoryOrder) => (
+                <input
+                    type="checkbox"
+                    className="sc-row-checkbox"
+                    checked={selected.includes(row.id)}
+                    onClick={e => e.stopPropagation()}
+                    onChange={e => { e.stopPropagation(); toggleSelect(row.id); }}
+                    aria-label={t('orders_select_row')}
+                />
+            ),
+        },
+        {
+            key: 'order_number', label: t('col_number'), width: '130px', sortable: true,
+            getValue: (row: FactoryOrder) => row.order_number,
+            render: (_v: unknown, row: FactoryOrder) => (
+                <span>
+                    {row.order_number}
+                    {row.is_archived && <span className="badge badge-success sc-archived-tag">{t('orders_archived_tag')}</span>}
+                </span>
+            ),
+        },
+        { key: 'factory_name', label: t('col_supplier'), sortable: true, getValue: (row: FactoryOrder) => row.factory_name || '' },
+        {
+            key: 'supply_project', label: t('col_project'), sortable: true,
+            getValue: (row: FactoryOrder) => row.supply_project?.name || '',
+            render: (_v: unknown, row: FactoryOrder) => (
+                <select
+                    className="sc-project-select"
+                    value={row.supply_project_id ?? ''}
+                    onClick={e => e.stopPropagation()}
+                    onChange={e => { e.stopPropagation(); handleAssignProject(row.id, e.target.value ? Number(e.target.value) : null); }}
+                    style={row.supply_project?.color ? { borderLeft: `3px solid ${row.supply_project.color}` } : undefined}
+                >
+                    <option value="">{t('project_none')}</option>
+                    {projects.map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                </select>
+            ),
+        },
+        {
+            key: 'items', label: t('col_items_count'), align: 'center', sortable: true,
+            getValue: (row: FactoryOrder) => (row.items || []).length,
             render: (_v: unknown, row: FactoryOrder) => {
                 const items = row.items || [];
                 return items.length > 0 ? String(items.length) : '\u2014';
             },
         },
         {
-            key: 'total_qty', label: t('col_qty'), align: 'right',
+            key: 'total_qty', label: t('col_qty'), align: 'right', sortable: true,
+            getValue: sumQty,
             render: (_v: unknown, row: FactoryOrder) => {
-                const items = row.items || [];
-                const total = items.reduce((s, i) => s + i.qty, 0);
+                const total = sumQty(row);
                 return total > 0 ? formatNumber(total, 0) : '\u2014';
             },
         },
         {
-            key: 'boxes', label: t('col_boxes'), align: 'right',
+            key: 'boxes', label: t('col_boxes'), align: 'right', sortable: true,
+            getValue: (row: FactoryOrder) => calcTotalBoxesWithMix(row.items || []),
             render: (_v: unknown, row: FactoryOrder) => {
-                const items = row.items || [];
-                const total = calcTotalBoxesWithMix(items);
+                const total = calcTotalBoxesWithMix(row.items || []);
                 return total > 0 ? formatNumber(total, 0) : '\u2014';
             },
         },
         {
-            key: 'volume', label: t('col_volume_m3'), align: 'right',
+            key: 'volume', label: t('col_volume_m3'), align: 'right', sortable: true,
+            getValue: (row: FactoryOrder) => (row.items || []).reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box ?? null), 0),
             render: (_v: unknown, row: FactoryOrder) => {
-                const items = row.items || [];
-                const total = items.reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box ?? null), 0);
+                const total = (row.items || []).reduce((s, i) => s + calcVolumeM3(i.box_size || '', i.qty, i.pcs_per_box ?? null), 0);
                 return total > 0 ? formatNumber(total, 1) : '\u2014';
             },
         },
         {
-            key: 'weight', label: t('col_weight_kg'), align: 'right',
+            key: 'weight', label: t('col_weight_kg'), align: 'right', sortable: true,
+            getValue: (row: FactoryOrder) => (row.items || []).reduce((s, i) => s + (Number(i.weight_kg) || 0) * i.qty, 0),
             render: (_v: unknown, row: FactoryOrder) => {
-                const items = row.items || [];
-                const total = items.reduce((s, i) => s + (Number(i.weight_kg) || 0) * i.qty, 0);
+                const total = (row.items || []).reduce((s, i) => s + (Number(i.weight_kg) || 0) * i.qty, 0);
                 return total > 0 ? formatNumber(total, 0) : '\u2014';
             },
         },
         {
-            key: 'total_cny', label: t('col_amount'), align: 'right',
+            key: 'total_cny', label: t('col_amount'), align: 'right', sortable: true,
+            getValue: orderCost,
             render: (_v: unknown, row: FactoryOrder) => {
-                // Use total_cny if set, otherwise calculate from items
-                let cost = Number(row.total_cny) || 0;
-                if (!cost && row.items?.length) {
-                    cost = row.items.reduce((sum, i) => sum + (Number(i.price_cny) || 0) * i.qty, 0);
-                }
+                const cost = orderCost(row);
                 if (!cost) return '\u2014';
                 const symbol = row.supplier?.currency === 'RUB' ? '\u20BD' : '\u00A5';
                 return `${formatNumber(cost, 0)} ${symbol}`;
             },
         },
         {
-            key: 'status', label: t('col_status'), align: 'center',
-            render: (_v: unknown, row: FactoryOrder) => <FactoryOrderStatusBadge status={row.status} />,
+            key: 'status', label: t('col_status'), align: 'center', sortable: true,
+            getValue: (row: FactoryOrder) => (row.is_archived ? 'ZZZ_completed' : row.status),
+            render: (_v: unknown, row: FactoryOrder) => (
+                row.is_archived
+                    ? <span className="badge sc-badge-colored" style={{ background: '#16a34a' }}>{t('factory_status_completed')}</span>
+                    : <FactoryOrderStatusBadge status={row.status} />
+            ),
         },
         {
-            key: 'progress', label: t('col_progress'), align: 'center',
+            key: 'progress', label: t('col_progress'), align: 'center', sortable: true,
+            getValue: orderProgressPct,
             render: (_v: unknown, row: FactoryOrder) => {
                 const items = row.items || [];
                 if (items.length === 0) return '\u2014';
@@ -425,10 +550,10 @@ function FactoryOrdersTab() {
                 );
             },
         },
-        { key: 'expected_ready_date', label: t('col_ready_date'), format: 'date' },
-        { key: 'created_at', label: t('col_created_date'), format: 'date' },
+        { key: 'expected_ready_date', label: t('col_ready_date'), format: 'date', sortable: true, getValue: (row: FactoryOrder) => row.expected_ready_date || '' },
+        { key: 'created_at', label: t('col_created_date'), format: 'date', sortable: true, getValue: (row: FactoryOrder) => row.created_at || '' },
         {
-            key: 'actions', label: '', width: '180px',
+            key: 'actions', label: '', width: '240px',
             render: (_v: unknown, row: FactoryOrder) => (
                 <div className="sc-actions-cell" onClick={e => e.stopPropagation()}>
                     <button
@@ -436,6 +561,13 @@ function FactoryOrdersTab() {
                         onClick={() => setEditOrder(row)}
                     >
                         {t('btn_edit')}
+                    </button>
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleArchive(row)}
+                        title={row.is_archived ? t('orders_unarchive_hint') : t('orders_archive_hint')}
+                    >
+                        {row.is_archived ? t('btn_unarchive') : t('btn_archive')}
                     </button>
                     <button
                         className="btn btn-secondary btn-sm sc-color-danger"
@@ -539,6 +671,16 @@ function FactoryOrdersTab() {
                 onRowClick={(row) => handleRowClick(row)}
                 actions={
                     <div className="sc-filter-bar">
+                        {selected.length >= 2 && (
+                            <button className="btn btn-primary btn-sm" onClick={() => setMergeOpen(true)}>
+                                {t('orders_btn_merge')} ({selected.length})
+                            </button>
+                        )}
+                        {selected.length > 0 && (
+                            <button className="btn btn-secondary btn-sm" onClick={() => setSelected([])}>
+                                {t('orders_btn_clear_selection')}
+                            </button>
+                        )}
                         {factoryNames.length > 1 && (
                             <select
                                 value={filterFactory}
@@ -551,6 +693,29 @@ function FactoryOrdersTab() {
                                 ))}
                             </select>
                         )}
+                        {projects.length > 0 && (
+                            <select
+                                value={filterProject}
+                                onChange={e => setFilterProject(e.target.value)}
+                                className="sc-filter-select"
+                            >
+                                <option value="">{t('orders_filter_all_projects')}</option>
+                                <option value="__none__">{t('orders_filter_no_project')}</option>
+                                {projects.map(p => (
+                                    <option key={p.id} value={String(p.id)}>{p.name}</option>
+                                ))}
+                            </select>
+                        )}
+                        <select
+                            value={statusView}
+                            onChange={e => setStatusView(e.target.value as 'active' | 'completed' | 'all')}
+                            className="sc-filter-select"
+                            title={t('col_status')}
+                        >
+                            <option value="active">{t('orders_view_active')}</option>
+                            <option value="completed">{t('orders_view_completed')}{completedCount > 0 ? ` (${completedCount})` : ''}</option>
+                            <option value="all">{t('orders_view_all')}</option>
+                        </select>
                         <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(v => !v)}>
                             {showCreate ? t('btn_close') : t('orders_btn_create')}
                         </button>
@@ -582,6 +747,277 @@ function FactoryOrdersTab() {
                     onDone={() => { setSplitOrderId(null); load(); }}
                 />
             )}
+
+            {/* Merge Modal */}
+            {mergeOpen && selectedOrders.length >= 2 && (
+                <MergeOrdersModal
+                    orders={selectedOrders}
+                    onClose={() => setMergeOpen(false)}
+                    onDone={() => { setMergeOpen(false); setSelected([]); load(); }}
+                />
+            )}
+        </>
+    );
+}
+
+// ─── Merge Orders Modal ─────────────────────────────────────────────────────
+
+function MergeOrdersModal({ orders, onClose, onDone }: { orders: FactoryOrder[]; onClose: () => void; onDone: () => void }) {
+    const { t } = useT();
+    const [targetId, setTargetId] = useState<number>(orders[0]?.id ?? 0);
+    const [submitting, setSubmitting] = useState(false);
+    const [error, setError] = useState('');
+
+    const target = orders.find(o => o.id === targetId);
+    const sources = orders.filter(o => o.id !== targetId);
+    const suppliers = [...new Set(orders.map(o => o.supplier?.name).filter(Boolean))];
+    const crossSupplier = suppliers.length > 1;
+
+    const handleMerge = async () => {
+        if (!target || sources.length === 0) return;
+        setSubmitting(true);
+        setError('');
+        try {
+            await api.mergeFactoryOrders(targetId, sources.map(o => o.id));
+            onDone();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : t('msg_error'));
+            setSubmitting(false);
+        }
+    };
+
+    return (
+        <div className="sc-modal-overlay">
+            <div className="sc-modal-backdrop" onClick={onClose} />
+            <div className="sc-modal-dialog" style={{ maxWidth: 560, padding: 24 }}>
+                <div className="sc-form-header">
+                    <h3 className="sc-form-title">{t('merge_title')} ({orders.length})</h3>
+                    <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
+                </div>
+                <p className="sc-modal-hint">{t('merge_hint')}</p>
+                <div className="sc-form-label" style={{ marginBottom: 6 }}>{t('merge_target_label')}</div>
+                <select className="sc-form-input" value={targetId} onChange={e => setTargetId(Number(e.target.value))}>
+                    {orders.map(o => (
+                        <option key={o.id} value={o.id}>
+                            {o.order_number}{o.factory_name ? ` — ${o.factory_name}` : ''} ({(o.items || []).length} {t('unit_pcs_short')})
+                        </option>
+                    ))}
+                </select>
+                <div className="sc-merge-sources">
+                    <div className="sc-form-label" style={{ marginTop: 12, marginBottom: 6 }}>{t('merge_sources_label')}</div>
+                    <ul className="sc-merge-list">
+                        {sources.map(o => (
+                            <li key={o.id}>{o.order_number}{o.factory_name ? ` — ${o.factory_name}` : ''}</li>
+                        ))}
+                    </ul>
+                </div>
+                {crossSupplier && <div className="sc-merge-warn">{t('merge_warn_cross_supplier')}</div>}
+                {error && <div className="sc-error-card" style={{ marginTop: 8 }}>{error}</div>}
+                <div className="sc-form-footer">
+                    <button className="btn btn-secondary btn-sm" onClick={onClose} disabled={submitting}>{t('btn_cancel')}</button>
+                    <button className="btn btn-primary btn-sm" onClick={handleMerge} disabled={submitting || sources.length === 0}>
+                        {submitting ? t('msg_saving') : t('merge_confirm')}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ─── Tab 4: Supply Projects (grouping management) ───────────────────────────
+
+const PROJECT_COLORS = ['#0071e3', '#34c759', '#ff9f0a', '#af52de', '#ff375f', '#00c7be', '#ff6482', '#5e5ce6'];
+
+function SupplyProjectsTab() {
+    const { t } = useT();
+    const [projects, setProjects] = useState<SupplyProject[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [name, setName] = useState('');
+    const [color, setColor] = useState<string>(PROJECT_COLORS[0]);
+    const [note, setNote] = useState('');
+    const [saving, setSaving] = useState(false);
+    const [editId, setEditId] = useState<number | null>(null);
+    const [editName, setEditName] = useState('');
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            setProjects(await api.getSupplyProjects());
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : t('msg_loading_error'));
+        }
+        setLoading(false);
+    }, [t]);
+
+    useEffect(() => { load(); }, [load]);
+
+    const handleCreate = async () => {
+        if (!name.trim()) return;
+        setSaving(true);
+        try {
+            await api.createSupplyProject({ name: name.trim(), color, note: note.trim() || null });
+            setName(''); setNote('');
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_error'));
+        }
+        setSaving(false);
+    };
+
+    const handleRename = async (id: number) => {
+        if (!editName.trim()) { setEditId(null); return; }
+        try {
+            await api.updateSupplyProject(id, { name: editName.trim() });
+            setEditId(null);
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_error'));
+        }
+    };
+
+    const handleColor = async (id: number, c: string) => {
+        try {
+            await api.updateSupplyProject(id, { color: c });
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_error'));
+        }
+    };
+
+    const handleDelete = async (p: SupplyProject) => {
+        if (!confirm(t('projects_confirm_delete'))) return;
+        try {
+            await api.deleteSupplyProject(p.id);
+            await load();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : t('msg_error'));
+        }
+    };
+
+    return (
+        <>
+            {error && (
+                <div className="glass-card sc-error-card">
+                    {error}
+                    <button className="btn btn-secondary btn-sm sc-retry-btn" onClick={load}>{t('btn_retry')}</button>
+                </div>
+            )}
+
+            <div className="glass-card sc-form-card">
+                <div className="sc-form-header">
+                    <h3 className="sc-form-title">{t('projects_create_title')}</h3>
+                </div>
+                <div className="sc-projects-create-row">
+                    <input
+                        value={name}
+                        onChange={e => setName(e.target.value)}
+                        placeholder={t('projects_name_placeholder')}
+                        className="sc-form-input"
+                        onKeyDown={e => { if (e.key === 'Enter') handleCreate(); }}
+                    />
+                    <div className="sc-color-picker">
+                        {PROJECT_COLORS.map(c => (
+                            <button
+                                key={c}
+                                type="button"
+                                className={`sc-color-dot ${color === c ? 'sc-color-dot-active' : ''}`}
+                                style={{ background: c }}
+                                onClick={() => setColor(c)}
+                                aria-label={c}
+                            />
+                        ))}
+                    </div>
+                    <input
+                        value={note}
+                        onChange={e => setNote(e.target.value)}
+                        placeholder={t('projects_note_placeholder')}
+                        className="sc-form-input"
+                    />
+                    <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={!name.trim() || saving}>
+                        {saving ? t('msg_creating') : t('btn_create')}
+                    </button>
+                </div>
+            </div>
+
+            <div className="glass-card" style={{ marginTop: 16 }}>
+                <h3 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 16px' }}>
+                    {t('projects_list_title')}{projects.length > 0 ? ` (${projects.length})` : ''}
+                </h3>
+                {loading ? (
+                    <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                        <div className="spinner" style={{ margin: '0 auto 12px' }} />
+                        {t('msg_loading')}
+                    </div>
+                ) : projects.length === 0 ? (
+                    <div className="empty-state">
+                        <div className="empty-state-icon">🗂</div>
+                        <div className="empty-state-text">{t('projects_empty')}</div>
+                    </div>
+                ) : (
+                    <table className="data-table">
+                        <thead>
+                            <tr>
+                                <th style={{ width: 90 }}>{t('projects_col_color')}</th>
+                                <th>{t('projects_col_name')}</th>
+                                <th style={{ textAlign: 'center' }}>{t('projects_col_orders')}</th>
+                                <th>{t('projects_col_note')}</th>
+                                <th style={{ width: 160 }}></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {projects.map(p => (
+                                <tr key={p.id}>
+                                    <td>
+                                        <div className="sc-color-picker">
+                                            {PROJECT_COLORS.map(c => (
+                                                <button
+                                                    key={c}
+                                                    type="button"
+                                                    className={`sc-color-dot sc-color-dot-sm ${p.color === c ? 'sc-color-dot-active' : ''}`}
+                                                    style={{ background: c }}
+                                                    onClick={() => handleColor(p.id, c)}
+                                                    aria-label={c}
+                                                />
+                                            ))}
+                                        </div>
+                                    </td>
+                                    <td>
+                                        {editId === p.id ? (
+                                            <input
+                                                value={editName}
+                                                autoFocus
+                                                onChange={e => setEditName(e.target.value)}
+                                                onBlur={() => handleRename(p.id)}
+                                                onKeyDown={e => { if (e.key === 'Enter') handleRename(p.id); if (e.key === 'Escape') setEditId(null); }}
+                                                className="sc-form-input"
+                                            />
+                                        ) : (
+                                            <span className="sc-project-name-cell">
+                                                {p.color && <span className="sc-project-color-dot" style={{ background: p.color }} />}
+                                                {p.name}
+                                            </span>
+                                        )}
+                                    </td>
+                                    <td style={{ textAlign: 'center' }}>{formatNumber(p.orders_count ?? 0, 0)}</td>
+                                    <td style={{ color: 'var(--color-text-muted)' }}>{p.note || '—'}</td>
+                                    <td>
+                                        <div className="sc-actions-cell">
+                                            <button className="btn btn-secondary btn-sm" onClick={() => { setEditId(p.id); setEditName(p.name); }}>
+                                                {t('btn_edit')}
+                                            </button>
+                                            <button className="btn btn-secondary btn-sm sc-color-danger" onClick={() => handleDelete(p)}>
+                                                {t('btn_del')}
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                )}
+            </div>
         </>
     );
 }

@@ -21,6 +21,7 @@ from backend.schemas.supply_chain import (
     BulkPriceUpdateRequest,
     BulkRemoveVehicleItemsRequest,
     BulkUpdateItemSpecs,
+    FactoryOrderArchiveUpdate,
     FactoryOrderCreate,
     FactoryOrderHistorySchema,
     FactoryOrderItemCreate,
@@ -29,6 +30,8 @@ from backend.schemas.supply_chain import (
     FactoryOrderSchema,
     FactoryOrderStatusUpdate,
     FactoryOrderUpdate,
+    MergeOrdersRequest,
+    MergeOrdersResult,
     PostShipmentItemsRequest,
     SetMixGroupRequest,
     SetMixGroupResponse,
@@ -36,6 +39,9 @@ from backend.schemas.supply_chain import (
     SupplierCreate,
     SupplierSchema,
     SupplierUpdate,
+    SupplyProjectCreate,
+    SupplyProjectSchema,
+    SupplyProjectUpdate,
     VehicleCreate,
     VehicleDocumentSchema,
     VehicleItemUpdate,
@@ -43,7 +49,13 @@ from backend.schemas.supply_chain import (
     VehicleStatusUpdate,
     VehicleUpdate,
 )
-from backend.services.supply_chain import factory_orders, supplier_catalog, supplier_service, vehicle_delivery
+from backend.services.supply_chain import (
+    factory_orders,
+    supplier_catalog,
+    supplier_service,
+    supply_projects,
+    vehicle_delivery,
+)
 from backend.services.supply_chain.factory_orders import FactoryQtyExceeded
 from backend.services.supply_chain.vehicle_documents import (
     delete_document,
@@ -94,7 +106,27 @@ async def create_factory_order(
         order = await factory_orders.create_factory_order(db, project.id, payload, user_name=display_name)
     except IntegrityError:
         raise HTTPException(409, f"Заказ с номером «{payload.order_number}» уже существует") from None  # noqa: RUF001
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     return FactoryOrderSchema.model_validate(order)
+
+
+@router.post("/factory-orders/merge", dependencies=[Depends(rate_limit_write)])
+async def merge_factory_orders(
+    payload: MergeOrdersRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Объединить несколько заказов в один (target_id), слив дубли barcode."""
+    try:
+        display_name = user.first_name or user.username or user.email
+        result = await factory_orders.merge_factory_orders(
+            db, project.id, payload.target_id, payload.source_ids, user_name=display_name
+        )
+        return MergeOrdersResult.model_validate(result)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.put("/factory-orders/{order_id}", dependencies=[Depends(rate_limit_write)])
@@ -104,7 +136,28 @@ async def update_factory_order(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    order = await factory_orders.update_factory_order(db, project.id, order_id, payload)
+    try:
+        order = await factory_orders.update_factory_order(db, project.id, order_id, payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if not order:
+        raise HTTPException(404, "Factory order not found")
+    return FactoryOrderSchema.model_validate(order)
+
+
+@router.put("/factory-orders/{order_id}/archive", dependencies=[Depends(rate_limit_write)])
+async def archive_factory_order(
+    order_id: int,
+    payload: FactoryOrderArchiveUpdate,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Закрыть (скрыть из списка) или открыть заказ — ручной флаг is_archived."""
+    display_name = user.first_name or user.username or user.email
+    order = await factory_orders.set_order_archived(
+        db, project.id, order_id, payload.is_archived, user_name=display_name
+    )
     if not order:
         raise HTTPException(404, "Factory order not found")
     return FactoryOrderSchema.model_validate(order)
@@ -788,4 +841,51 @@ async def delete_supplier(
     deleted = await supplier_service.delete_supplier(db, project.id, supplier_id)
     if not deleted:
         raise HTTPException(404, "Supplier not found")
+    return {"ok": True}
+
+
+# ─── Supply Projects (grouping of factory orders) ────────────────────────────
+
+
+@router.get("/projects")
+async def list_supply_projects(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    projects = await supply_projects.list_supply_projects(db, project.id)
+    return [SupplyProjectSchema.model_validate(p) for p in projects]
+
+
+@router.post("/projects", status_code=201, dependencies=[Depends(rate_limit_write)])
+async def create_supply_project(
+    payload: SupplyProjectCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    sp = await supply_projects.create_supply_project(db, project.id, payload)
+    return SupplyProjectSchema.model_validate(sp)
+
+
+@router.put("/projects/{sp_id}", dependencies=[Depends(rate_limit_write)])
+async def update_supply_project(
+    sp_id: int,
+    payload: SupplyProjectUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    sp = await supply_projects.update_supply_project(db, project.id, sp_id, payload)
+    if not sp:
+        raise HTTPException(404, "Supply project not found")
+    return SupplyProjectSchema.model_validate(sp)
+
+
+@router.delete("/projects/{sp_id}", dependencies=[Depends(rate_limit_write)])
+async def delete_supply_project(
+    sp_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    deleted = await supply_projects.delete_supply_project(db, project.id, sp_id)
+    if not deleted:
+        raise HTTPException(404, "Supply project not found")
     return {"ok": True}
