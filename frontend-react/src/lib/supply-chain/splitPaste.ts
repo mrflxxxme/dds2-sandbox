@@ -18,31 +18,29 @@ export interface SplitItem {
 }
 
 export const matchesPasteParams = (foi: AvailableItem, p: PasteParams): boolean => {
+    // Match on PRICE only. price влияет на заказ фабрики (деньги) — поэтому
+    // расхождение цены остаётся осознанным выбором keep/overwrite (инцидент V-0008:
+    // не сплитить молча на FOI с другой ценой). А box/pcs — это ФАКТИЧЕСКАЯ упаковка
+    // именно этой машины: вставленные пользователем значения пишутся как per-vehicle
+    // override ВСЕГДА (см. splitRowAcrossFois) и НЕ должны блокировать бронь/матчинг.
     const fp = parseFloat(foi.price_cny) || 0;
-    if (Math.abs(p.price - fp) > 0.0001) return false;
-    // Empty FOI box/ppb = "unknown", not "different" — paste enriches missing info
-    // without changing the FOI. Different non-empty values still reject
-    // (V-0008 intent: don't silently split onto wrong-box/wrong-ppb FOIs).
-    const pasteBoxNorm = normalizeBox(p.boxRaw);
-    const foiBoxNorm = normalizeBox(foi.box_size || '');
-    if (pasteBoxNorm && foiBoxNorm && pasteBoxNorm !== foiBoxNorm) return false;
-    const fppb = foi.pcs_per_box || 0;
-    if (p.pcsPerBox && fppb && p.pcsPerBox !== fppb) return false;
-    return true;
+    return Math.abs(p.price - fp) <= 0.0001;
 };
 
 /**
  * Split user-entered qty across multiple FactoryOrderItems of the same barcode.
  *
- * `withOverrides=false` (default paste): consume ONLY FOIs whose params
- * (price/box/ppb) match the paste row. If matching FOIs don't cover qty,
- * the remainder is left unbooked and the UI surfaces a mismatch modal so
- * the user explicitly opts into overrides. This prevents silent split onto
- * placeholder FOIs (price=0) or FOIs from older orders with different prices.
+ * Box/ppb из вставки — это ФАКТИЧЕСКАЯ упаковка машины: пишется как per-vehicle
+ * override ВСЕГДА (в обоих режимах), когда отличается от FOI. `withOverrides`
+ * управляет ТОЛЬКО ценой/матчингом:
  *
- * `withOverrides=true` (post-modal "overwrite"): matching first, then FIFO
- * across non-matching FOIs, attaching per-vehicle overrides for box/ppb
- * differences. Used when the user explicitly accepts override semantics.
+ * `withOverrides=false` (default paste): consume ONLY FOIs whose PRICE matches
+ * the paste row. If price-matching FOIs don't cover qty, the remainder is left
+ * unbooked and the UI surfaces a mismatch modal so the user explicitly opts into
+ * price overwrite. Prevents silent split onto placeholder/different-price FOIs (V-0008).
+ *
+ * `withOverrides=true` (post-modal "overwrite"): price-matching first, then FIFO
+ * across other FOIs. Used when the user accepts rewriting the factory-order price.
  *
  * `consumed` (optional, mutable) tracks how much was already booked from
  * each FOI by previous calls in the same submit batch — pass the same map
@@ -73,17 +71,11 @@ export const splitRowAcrossFois = (
         const it: SplitItem = { factory_order_item_id: foi.id, qty: take };
         const foiBoxNorm = normalizeBox(foi.box_size || '');
         const fppb = foi.pcs_per_box || 0;
-        if (withOverrides) {
-            // OVERWRITE: attach override whenever paste value differs from FOI.
-            if (p.boxRaw.trim() && pasteBoxNorm !== foiBoxNorm) it.box_size_override = p.boxRaw.trim();
-            if (p.pcsPerBox && p.pcsPerBox !== fppb) it.pcs_per_box_override = p.pcsPerBox;
-        } else {
-            // KEEP: attach override only to FILL empty FOI specs (FOI has unknown
-            // box/ppb but paste knows them). FOI's real values are never overwritten
-            // in this mode — matchesPasteParams already rejected non-empty mismatches.
-            if (p.boxRaw.trim() && !foiBoxNorm) it.box_size_override = p.boxRaw.trim();
-            if (p.pcsPerBox && !fppb) it.pcs_per_box_override = p.pcsPerBox;
-        }
+        // Упаковка из вставки пишется ВСЕГДА (независимо от keep/overwrite): это
+        // фактические габариты/штук-в-коробке этой машины. «Вставил список → как
+        // написал, так и записано». Цена при этом не трогается (только в overwrite).
+        if (p.boxRaw.trim() && pasteBoxNorm !== foiBoxNorm) it.box_size_override = p.boxRaw.trim();
+        if (p.pcsPerBox && p.pcsPerBox !== fppb) it.pcs_per_box_override = p.pcsPerBox;
         out.push(it);
         consumed[foi.id] = already + take;
         left -= take;

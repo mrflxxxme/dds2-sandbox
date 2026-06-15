@@ -7,13 +7,19 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import FactoryOrderStatus, VehicleStatus
-from backend.models.supply_chain import FactoryOrder, FactoryOrderHistory, FactoryOrderItem, Supplier
+from backend.models.supply_chain import (
+    FactoryOrder,
+    FactoryOrderHistory,
+    FactoryOrderItem,
+    Supplier,
+    SupplyProject,
+)
 from backend.schemas.supply_chain import (
     FactoryOrderCreate,
     FactoryOrderItemCreate,
@@ -358,6 +364,7 @@ async def get_factory_orders(db: AsyncSession, project_id: int) -> list[FactoryO
         .options(
             selectinload(FactoryOrder.items.and_(FactoryOrderItem.is_deleted == False)),  # noqa: E712
             selectinload(FactoryOrder.supplier),
+            selectinload(FactoryOrder.supply_project.and_(SupplyProject.is_deleted == False)),  # noqa: E712
         )
         .where(
             FactoryOrder.project_id == project_id,
@@ -378,6 +385,7 @@ async def get_factory_order(db: AsyncSession, project_id: int, order_id: int) ->
         .options(
             selectinload(FactoryOrder.items.and_(FactoryOrderItem.is_deleted == False)),  # noqa: E712
             selectinload(FactoryOrder.supplier),
+            selectinload(FactoryOrder.supply_project.and_(SupplyProject.is_deleted == False)),  # noqa: E712
         )
         .where(
             FactoryOrder.id == order_id,
@@ -410,11 +418,24 @@ async def create_factory_order(
         if not supplier_result.scalar_one_or_none():
             raise ValueError(f"Supplier {data.supplier_id} not found in project {project_id}")
 
+    # Validate supply project belongs to same tenant project (when set)
+    if data.supply_project_id is not None:
+        sp_result = await db.execute(
+            select(SupplyProject.id).where(
+                SupplyProject.id == data.supply_project_id,
+                SupplyProject.project_id == project_id,
+                SupplyProject.is_deleted == False,  # noqa: E712
+            )
+        )
+        if sp_result.scalar_one_or_none() is None:
+            raise ValueError(f"SupplyProject {data.supply_project_id} not found in project {project_id}")
+
     order = FactoryOrder(
         project_id=project_id,
         order_number=data.order_number,
         factory_name=data.factory_name,
         supplier_id=data.supplier_id,
+        supply_project_id=data.supply_project_id,
         order_date=data.order_date,
         expected_ready_date=data.expected_ready_date,
         total_cny=data.total_cny,
@@ -520,8 +541,27 @@ async def update_factory_order(
         if not supplier_result.scalar_one_or_none():
             raise ValueError(f"Supplier {update_data['supplier_id']} not found in project {project_id}")
 
+    # Validate supply project belongs to same tenant project (when set, not None)
+    new_supply_project: SupplyProject | None = None
+    if update_data.get("supply_project_id") is not None:
+        sp_result = await db.execute(
+            select(SupplyProject).where(
+                SupplyProject.id == update_data["supply_project_id"],
+                SupplyProject.project_id == project_id,
+                SupplyProject.is_deleted == False,  # noqa: E712
+            )
+        )
+        new_supply_project = sp_result.scalar_one_or_none()
+        if new_supply_project is None:
+            raise ValueError(f"SupplyProject {update_data['supply_project_id']} not found in project {project_id}")
+
     for field, value in update_data.items():
         setattr(order, field, value)
+
+    # Keep the supply_project relationship in sync with the FK so the re-fetched
+    # object reflects the change regardless of the session's expire_on_commit config.
+    if "supply_project_id" in update_data:
+        order.supply_project = new_supply_project
 
     await db.commit()
     await _invalidate_supplier_catalog(project_id)
@@ -1115,3 +1155,166 @@ async def check_and_close_order(
     await db.commit()
     logger.info("Factory order %d auto-closed (all vehicles shipped)", factory_order_id)
     return True
+
+
+# ─── Archive (manual hide from list) ─────────────────────────────────────────
+
+
+async def set_order_archived(
+    db: AsyncSession,
+    project_id: int,
+    order_id: int,
+    archived: bool,
+    user_name: str | None = None,
+) -> FactoryOrder | None:
+    """Toggle the manual archive flag (hide from / restore to the main list).
+
+    Independent of the FORMING/DISTRIBUTED/CLOSED shipping status.
+    """
+    order = await get_factory_order(db, project_id, order_id)
+    if not order:
+        return None
+    if order.is_archived == archived:
+        return order
+    order.is_archived = archived
+    await _add_history(
+        db,
+        project_id,
+        order.id,
+        "archived" if archived else "unarchived",
+        details="Заказ завершён (убран из общего списка)" if archived else "Заказ возвращён в работу",
+        changed_by=user_name,
+    )
+    await db.commit()
+    return await get_factory_order(db, project_id, order_id)
+
+
+# ─── Merge orders ────────────────────────────────────────────────────────────
+
+
+async def merge_factory_orders(
+    db: AsyncSession,
+    project_id: int,
+    target_id: int,
+    source_ids: list[int],
+    user_name: str | None = None,
+) -> dict:
+    """Merge ``source_ids`` factory orders into ``target_id``.
+
+    - Items with a barcode that already exists on the target are folded into the
+      existing target line (qty / assigned_qty summed, the source item's
+      CostOrderItems re-pointed to the survivor, source item soft-deleted).
+    - Items whose barcode is new — or where either side belongs to a mix group —
+      are re-parented to the target as a separate line (cost links stay intact,
+      they reference ``factory_order_item_id`` not the order).
+    - Source orders are soft-deleted once emptied.
+
+    Mix-group items are never quantity-merged (shared packaging would break).
+    """
+    target = await get_factory_order(db, project_id, target_id)
+    if not target:
+        raise ValueError("Целевой заказ не найден")
+
+    src_result = await db.execute(
+        select(FactoryOrder)
+        .options(selectinload(FactoryOrder.items.and_(FactoryOrderItem.is_deleted == False)))  # noqa: E712
+        .where(
+            FactoryOrder.id.in_(source_ids),
+            FactoryOrder.project_id == project_id,
+            FactoryOrder.is_deleted == False,  # noqa: E712
+        )
+        .limit(200)
+    )
+    sources = list(src_result.scalars().all())
+    found_ids = {s.id for s in sources}
+    missing = [sid for sid in source_ids if sid not in found_ids]
+    if missing:
+        raise ValueError(f"Заказы не найдены: {missing}")
+
+    # barcode → surviving target line (only non-mix lines are merge candidates)
+    target_by_barcode: dict[str, FactoryOrderItem] = {}
+    for it in target.items:
+        if it.is_deleted or it.mix_group_id is not None:
+            continue
+        target_by_barcode.setdefault(it.barcode, it)
+
+    items_moved = 0
+    items_merged = 0
+    for src in sources:
+        # Snapshot the collection: re-parenting via the relationship mutates
+        # src.items mid-iteration (back_populates), which would skip elements.
+        for it in list(src.items):
+            if it.is_deleted:
+                continue
+            survivor = target_by_barcode.get(it.barcode)
+            # Quantity-merge only when the barcode already exists on the target AND
+            # neither side is in a mix group. Inlining the check (vs a `can_merge`
+            # bool) lets mypy narrow `survivor` to non-None inside this block.
+            if survivor is not None and it.mix_group_id is None and survivor.mix_group_id is None:
+                # Re-point this item's cost-side rows to the survivor.
+                await db.execute(
+                    update(CostOrderItem)
+                    .where(
+                        CostOrderItem.factory_order_item_id == it.id,
+                        CostOrderItem.project_id == project_id,
+                    )
+                    .values(factory_order_item_id=survivor.id)
+                )
+                survivor.qty += it.qty
+                survivor.assigned_qty += it.assigned_qty
+                # box_detail must keep Σ == qty: concat when both set, else drop to auto.
+                if survivor.box_detail and it.box_detail:
+                    survivor.box_detail = list(survivor.box_detail) + list(it.box_detail)
+                elif survivor.box_detail or it.box_detail:
+                    survivor.box_detail = None
+                # Backfill missing specs/price from the source line.
+                if (not survivor.price_cny) and it.price_cny:
+                    survivor.price_cny = it.price_cny
+                if not survivor.box_size and it.box_size:
+                    survivor.box_size = it.box_size
+                if not survivor.pcs_per_box and it.pcs_per_box:
+                    survivor.pcs_per_box = it.pcs_per_box
+                if not survivor.weight_kg and it.weight_kg:
+                    survivor.weight_kg = it.weight_kg
+                if not survivor.subject and it.subject:
+                    survivor.subject = it.subject
+                if not survivor.article_seller and it.article_seller:
+                    survivor.article_seller = it.article_seller
+                it.soft_delete()
+                items_merged += 1
+            else:
+                # Re-parent as a separate line. Move via the relationship so the
+                # bidirectional items↔factory_order link sets the FK correctly
+                # (a raw FK assignment is overridden by the source's in-memory
+                # collection on flush). Cost links reference the item id, so they
+                # follow automatically.
+                it.factory_order = target
+                if it.mix_group_id is None and it.barcode not in target_by_barcode:
+                    target_by_barcode[it.barcode] = it
+                items_moved += 1
+        src.soft_delete()
+
+    src_numbers = ", ".join(sorted(s.order_number for s in sources))
+    await _add_history(
+        db,
+        project_id,
+        target.id,
+        "merged",
+        details=(
+            f"Объединено заказов: {len(sources)} ({src_numbers}); "
+            f"перенесено строк: {items_moved}, слито дублей: {items_merged}"
+        ),
+        changed_by=user_name,
+    )
+
+    # assigned_qty may now meet/exceed qty → recompute distribution status.
+    await _maybe_update_status(db, target, changed_by=user_name)
+
+    await db.commit()
+    await _invalidate_supplier_catalog(project_id)
+    return {
+        "target_id": target.id,
+        "merged_orders": len(sources),
+        "items_moved": items_moved,
+        "items_merged": items_merged,
+    }

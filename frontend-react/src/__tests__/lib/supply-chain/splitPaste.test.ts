@@ -34,32 +34,23 @@ describe('matchesPasteParams', () => {
         expect(matchesPasteParams(f, { qty: 24, price: 58.88, boxRaw: '', pcsPerBox: 0 })).toBe(true);
     });
 
-    it('rejects on price diff > 0.0001', () => {
+    it('rejects on price diff > 0.0001 (V-0008: price is the only gate)', () => {
         expect(matchesPasteParams(f, { qty: 24, price: 58.5, boxRaw: '60x40x50', pcsPerBox: 12 })).toBe(false);
     });
 
-    it('rejects on box diff', () => {
-        expect(matchesPasteParams(f, { qty: 24, price: 58.88, boxRaw: '70×40×50', pcsPerBox: 12 })).toBe(false);
+    // box/pcs — это упаковка машины, не предмет матчинга: при совпадающей цене
+    // расхождение коробки/шт-кор НЕ блокирует (значения пишутся как override).
+    it('matches despite box diff when price coincides (box no longer gates)', () => {
+        expect(matchesPasteParams(f, { qty: 24, price: 58.88, boxRaw: '70×40×50', pcsPerBox: 12 })).toBe(true);
     });
 
-    it('rejects on ppb diff', () => {
-        expect(matchesPasteParams(f, { qty: 24, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 15 })).toBe(false);
+    it('matches despite ppb diff when price coincides (ppb no longer gates)', () => {
+        expect(matchesPasteParams(f, { qty: 24, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 15 })).toBe(true);
     });
 
-    // V-0017 case: FOI box_size/pcs are NULL — paste fills the gap, should match.
-    it('matches when FOI box is empty and paste box is non-empty (FOI box is unknown, not different)', () => {
+    it('matches when FOI box/ppb are empty (price coincides)', () => {
         const fEmpty = foi({ price_cny: '24.10', box_size: null as unknown as string, pcs_per_box: null as unknown as number });
         expect(matchesPasteParams(fEmpty, { qty: 30, price: 24.1, boxRaw: '60x40x50', pcsPerBox: 30 })).toBe(true);
-    });
-
-    it('matches when FOI ppb is empty and paste ppb is non-empty', () => {
-        const fEmpty = foi({ price_cny: '24.10', box_size: '60×40×50', pcs_per_box: 0 });
-        expect(matchesPasteParams(fEmpty, { qty: 30, price: 24.1, boxRaw: '60x40x50', pcsPerBox: 30 })).toBe(true);
-    });
-
-    // V-0008 regression guard: different non-empty box/ppb still rejects.
-    it('still rejects when FOI box is non-empty and differs from paste', () => {
-        expect(matchesPasteParams(f, { qty: 24, price: 58.88, boxRaw: '70×40×50', pcsPerBox: 12 })).toBe(false);
     });
 });
 
@@ -126,6 +117,16 @@ describe('splitRowAcrossFois — the core paste-mode bug fix', () => {
         const out = splitRowAcrossFois(fois, { qty: 30, price: 24.1, boxRaw: '60x40x50', pcsPerBox: 30 }, false);
         // FOI box/ppb match paste exactly → no override needed.
         expect(out).toEqual([{ factory_order_item_id: 1, qty: 30 }]);
+    });
+
+    // V-0026: FOI ppb (20) differs from pasted ppb (22), price matches. KEEP must NOT
+    // silently keep the order's ppb — the user's packing is the vehicle fact → override.
+    it('KEEP: attaches pcs override when paste ppb differs from FOI (price matches)', () => {
+        const fois: AvailableItem[] = [
+            foi({ id: 969, remaining_qty: 22, price_cny: '46.00', box_size: '60×40×50', pcs_per_box: 20 }),
+        ];
+        const out = splitRowAcrossFois(fois, { qty: 22, price: 46, boxRaw: '60x40x50', pcsPerBox: 22 }, false);
+        expect(out).toEqual([{ factory_order_item_id: 969, qty: 22, pcs_per_box_override: 22 }]);
     });
 
     // V-0017 sum-mismatch: 14 barcodes dropped because FOIs had NULL box; with the
@@ -244,20 +245,20 @@ describe('splitRowAcrossFois — the core paste-mode bug fix', () => {
         ]);
     });
 
-    it('emits per-vehicle overrides only when paste params differ AND overrides flag set', () => {
-        // Box/ppb mismatch: withOverrides=false skips this FOI entirely
-        // (mismatch surfaces in UI), withOverrides=true takes it with overrides.
+    it('emits per-vehicle box/ppb overrides in BOTH modes when paste differs (price matches)', () => {
+        // box/ppb — фактическая упаковка машины: пишется как override независимо от
+        // keep/overwrite. Цена совпадает (58.88) → FOI eligible в обоих режимах.
         const fois: AvailableItem[] = [
             foi({ id: 1, remaining_qty: 100, box_size: '60×40×50', pcs_per_box: 12 }),
         ];
         const params = { qty: 10, price: 58.88, boxRaw: '70*40*50', pcsPerBox: 8 };
 
-        const noOverrides = splitRowAcrossFois(fois, params, false);
-        expect(noOverrides).toEqual([]);
-
-        const withOverrides = splitRowAcrossFois(fois, params, true);
-        expect(withOverrides[0].box_size_override).toBe('70*40*50');
-        expect(withOverrides[0].pcs_per_box_override).toBe(8);
+        for (const mode of [false, true]) {
+            const out = splitRowAcrossFois(fois, params, mode);
+            expect(out).toHaveLength(1);
+            expect(out[0].box_size_override).toBe('70*40*50');
+            expect(out[0].pcs_per_box_override).toBe(8);
+        }
     });
 
     it('does NOT emit overrides when paste matches FOI even with withOverrides=true', () => {

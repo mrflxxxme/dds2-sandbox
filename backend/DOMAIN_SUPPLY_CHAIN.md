@@ -5,9 +5,10 @@
 ## Таблицы
 | Модель | Назначение | Ключ / constraint |
 |--------|------------|-------------------|
-| `FactoryOrder` (`factory_orders`) | Заказ на фабрику, 1 заказ = 1 фабрика | `order_number` уникален в проекте; SoftDeleteMixin |
+| `FactoryOrder` (`factory_orders`) | Заказ на фабрику, 1 заказ = 1 фабрика | `order_number` уникален в проекте; SoftDeleteMixin; `is_archived` (ручное скрытие из списка); `supply_project_id` (группировка) |
 | `FactoryOrderItem` | Позиция заказа: barcode, qty, `price_cny`, `assigned_qty` | SoftDeleteMixin |
 | `Supplier` | Поставщик | SoftDeleteMixin |
+| `SupplyProject` (`supply_projects`) | Пользовательская группировка заказов («кампания/партия»), 1 заказ → 0..1 проект | SoftDeleteMixin; БЕЗ unique на name (free-form); отдельно от мультитенантного `Project` |
 | `CostOrder` (`cost_orders`) = «Машина» | НЕ новая таблица — расширенный CostOrder | `order_no` UNIQUE (учитывать `is_deleted`) |
 | `CostOrderItem` | Позиция машины | `factory_order_item_id` — связь с позицией заказа |
 
@@ -27,6 +28,9 @@
 - **Кросс-заказный paste:** при вставке баркодов поиск идёт по всем фабричным заказам проекта (FIFO — первый заказ приоритетнее), не только по выбранному.
 - **Смена склада машины:** `target_warehouse_id` редактируем и после DISPATCHED, но `update_vehicle` синхронизирует связанную приёмку — приёмка `EXPECTED` «переезжает» (её `warehouse_id` обновляется), приёмка `ACCEPTED` → `ValueError` (товар уже в stock_movements).
 - **Отгрузочная карта** (`/suppliers/{id}/shipment-matrix`): `shipped_qty` — qty по машинам любых статусов; `really_shipped_qty` — только по машинам ≥ SHIPPED (реально уехало с фабрики, не «разложено в корзину»).
+- **Группировка в проекты** (`SupplyProject`): CRUD в `services/supply_chain/supply_projects.py`, endpoints `/supply-chain/projects`. Заказ привязывается через `FactoryOrder.supply_project_id` (валидируется в create/update). `delete_supply_project` отвязывает заказы (UPDATE supply_project_id=NULL) перед soft-delete. UI — отдельная вкладка «Проекты».
+- **Завершение заказа** (`set_order_archived`, `PUT /factory-orders/{id}/archive`): ручной флаг `is_archived` = «Завершён», НЕ зависит от статуса отгрузки машин. Список возвращает все заказы (флаг включён) — фронт по умолчанию показывает «Активные», переключатель «Активные / Завершённые / Все»; завершённые рендерятся бейджем «✓ Завершён» в колонке статуса, кнопка «Завершить» ↔ «Вернуть в работу». (Внутреннее имя поля — `is_archived`; в UI — «завершён».)
+- **Объединение заказов** (`merge_factory_orders`, `POST /factory-orders/merge`): позиции `source_ids` сливаются в `target_id`. Дубли barcode суммируют qty/assigned_qty + перепривязка `CostOrderItem.factory_order_item_id` к выжившей позиции (есть индекс `ix_cost_order_items_factory_item`). Микс-группы НЕ сливаются по количеству — переносятся отдельной строкой. Уникальные barcode переносятся через relationship (`it.factory_order = target`) — итерация по `list(src.items)` (мутация коллекции). Исходные заказы soft-deleted.
 
 ## Зависимости
 - `DOMAIN_COST` — CostOrder / CostOrderItem (расширены полями машины).
@@ -46,7 +50,8 @@
 - `models/cost.py` — CostOrder / CostOrderItem (extended для машин).
 - `models/enums.py` — VehicleStatus, FactoryOrderStatus.
 - `schemas/supply_chain.py` — все схемы, включая SupplierCatalog*, ShipmentMatrix*.
-- `services/supply_chain/factory_orders.py` — CRUD заказов, split, `_adjust_assigned_qty`, `refresh_factory_order_statuses`.
+- `services/supply_chain/factory_orders.py` — CRUD заказов, split, `_adjust_assigned_qty`, `refresh_factory_order_statuses`, `merge_factory_orders`, `set_order_archived`.
+- `services/supply_chain/supply_projects.py` — CRUD группировок `SupplyProject` (+ `orders_count`).
 - `services/supply_chain/vehicle_delivery.py` — статусы машин, auto-receipt, ресинк цен.
 - `services/supply_chain/supplier_catalog.py` — агрегация ассортимента и shipment_matrix.
 - `services/supply_chain/supplier_service.py` — CRUD поставщиков.
