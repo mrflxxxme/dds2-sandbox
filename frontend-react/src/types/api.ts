@@ -281,6 +281,7 @@ export interface Nomenclature {
   subject?: string;
   volume_l?: number;
   area_m2?: number | null;
+  weight_kg?: number | null;
   first_sale_date?: string | null;
 }
 
@@ -293,6 +294,16 @@ export interface DutyRule {
   note?: string | null;
 }
 
+/** Исключение пошлины по артикулу — переопределяет базис+ставку правила категории.
+ *  Утиль-сбор не задаётся: берётся из правила категории (по subject). */
+export interface DutyException {
+  id: number;
+  article_seller: string;
+  basis: string;
+  rate: number;
+  note?: string | null;
+}
+
 /** Баркод в машинах с пошлиной «За м²», но без заданной площади. */
 export interface MissingAreaBarcode {
   barcode: string;
@@ -301,6 +312,9 @@ export interface MissingAreaBarcode {
   total_qty: number;
   vehicles: string[];
 }
+
+/** Баркод в машинах с пошлиной «От веса», но без заданного веса (та же форма, что MissingAreaBarcode). */
+export type MissingWeightBarcode = MissingAreaBarcode;
 
 export interface CostOrder {
   id: number;

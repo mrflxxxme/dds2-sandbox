@@ -10,8 +10,12 @@ Usage in routers remains unchanged:
 from backend.etl.cost_parsers import detect_and_normalize_excel
 from backend.services.cost.duty import (
     bulk_update_nomenclature_area,
+    bulk_update_nomenclature_weight,
+    delete_duty_exception,
     delete_duty_rule,
+    get_duty_exceptions,
     get_duty_rules,
+    upsert_duty_exception,
     upsert_duty_rule,
 )
 from backend.services.cost.helpers import (
@@ -28,6 +32,7 @@ from backend.services.cost.items import (
 )
 from backend.services.cost.nomenclature import (
     get_missing_area_barcodes,
+    get_missing_weight_barcodes,
     get_nomenclature,
     get_nomenclature_subjects,
     upload_nomenclature,
@@ -53,12 +58,17 @@ __all__ = [
     "get_nomenclature",
     "get_nomenclature_subjects",
     "get_missing_area_barcodes",
+    "get_missing_weight_barcodes",
     "upload_nomenclature",
     # Duty
     "get_duty_rules",
     "upsert_duty_rule",
     "delete_duty_rule",
+    "get_duty_exceptions",
+    "upsert_duty_exception",
+    "delete_duty_exception",
     "bulk_update_nomenclature_area",
+    "bulk_update_nomenclature_weight",
     # Orders
     "get_cost_orders",
     "create_cost_order",

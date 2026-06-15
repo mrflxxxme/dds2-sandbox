@@ -130,6 +130,37 @@ describe('cost.deleteDutyRule', () => {
     });
 });
 
+describe('cost.getDutyExceptions', () => {
+    it('GETs /api/v1/cost/duty_exceptions', async () => {
+        const spy = mockFetch([{ id: 1, article_seller: 'FLOOR-001', basis: 'INVOICE', rate: 6.5 }]);
+        const api = makeApi();
+        const result = await api.getDutyExceptions();
+        expect(result).toHaveLength(1);
+        expect(spy.mock.calls[0][0]).toContain('/api/v1/cost/duty_exceptions');
+    });
+});
+
+describe('cost.addDutyException', () => {
+    it('POSTs duty exception data', async () => {
+        const spy = mockFetch({ id: 2, article_seller: 'FLOOR-002', basis: 'INVOICE', rate: 6.5 });
+        const api = makeApi();
+        await api.addDutyException({ article_seller: 'FLOOR-002', basis: 'INVOICE', rate: 6.5 });
+        expect((spy.mock.calls[0][1] as RequestInit).method).toBe('POST');
+        expect(spy.mock.calls[0][0]).toContain('/api/v1/cost/duty_exceptions');
+    });
+});
+
+describe('cost.deleteDutyException', () => {
+    it('DELETEs by id', async () => {
+        const spy = mockFetch({ message: 'ok' });
+        const api = makeApi();
+        await api.deleteDutyException(7);
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/cost/duty_exceptions/7');
+        expect((init as RequestInit).method).toBe('DELETE');
+    });
+});
+
 describe('cost.getVatRate / setVatRate', () => {
     it('GETs vat rate', async () => {
         const spy = mockFetch({ vat_rate: 20 });
@@ -161,6 +192,34 @@ describe('cost.bulkUpdateNomenclatureArea', () => {
         const result = await api.bulkUpdateNomenclatureArea(items);
         expect(result.updated).toBe(2);
         const body = JSON.parse((spy.mock.calls[0][1] as RequestInit).body as string);
+        expect(body.items).toEqual(items);
+    });
+});
+
+describe('cost.getMissingWeightBarcodes', () => {
+    it('GETs /api/v1/cost/nomenclature/missing_weight', async () => {
+        const spy = mockFetch([{ barcode: '111', total_qty: 3, vehicles: ['V-1'] }]);
+        const api = makeApi();
+        const result = await api.getMissingWeightBarcodes();
+        expect(result).toHaveLength(1);
+        expect(spy.mock.calls[0][0]).toContain('/api/v1/cost/nomenclature/missing_weight');
+    });
+});
+
+describe('cost.bulkUpdateNomenclatureWeight', () => {
+    it('PUTs bulk weight update', async () => {
+        const spy = mockFetch({ ok: true, updated: 2, not_found: [] });
+        const api = makeApi();
+        const items = [
+            { barcode: '111', weight_kg: 1.5 },
+            { barcode: '222', weight_kg: 2.0 },
+        ];
+        const result = await api.bulkUpdateNomenclatureWeight(items);
+        expect(result.updated).toBe(2);
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/cost/nomenclature/bulk_weight');
+        expect((init as RequestInit).method).toBe('PUT');
+        const body = JSON.parse((init as RequestInit).body as string);
         expect(body.items).toEqual(items);
     });
 });

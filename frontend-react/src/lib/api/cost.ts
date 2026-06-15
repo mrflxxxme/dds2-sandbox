@@ -1,6 +1,6 @@
 /** Cost API methods */
 import { ApiClient } from './client';
-import type { CostOrder, CostOrderItem, Nomenclature, DutyRule, MissingAreaBarcode, MessageResponse } from '@/types/api';
+import type { CostOrder, CostOrderItem, Nomenclature, DutyRule, DutyException, MissingAreaBarcode, MissingWeightBarcode, MessageResponse } from '@/types/api';
 
 export function addCostMethods(api: ApiClient) {
     return {
@@ -15,14 +15,21 @@ export function addCostMethods(api: ApiClient) {
         getNomenclature() { return api.request<Nomenclature[]>('GET', '/api/v1/cost/nomenclature'); },
         getNomenclatureSubjects() { return api.request<string[]>('GET', '/api/v1/cost/nomenclature/subjects'); },
         getMissingAreaBarcodes() { return api.request<MissingAreaBarcode[]>('GET', '/api/v1/cost/nomenclature/missing_area'); },
+        getMissingWeightBarcodes() { return api.request<MissingWeightBarcode[]>('GET', '/api/v1/cost/nomenclature/missing_weight'); },
         syncNomenclature() { return api.request<{ ok: boolean; synced: number; status?: string; error_msg?: string; finished_at?: string }>('POST', '/api/v1/integrations/wb/sync_nomenclature'); },
         getDutyRules() { return api.request<DutyRule[]>('GET', '/api/v1/cost/duty_rules'); },
         addDutyRule(data: Partial<DutyRule>) { return api.request<DutyRule>('POST', '/api/v1/cost/duty_rules', data); },
         deleteDutyRule(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/cost/duty_rules/${id}`); },
+        getDutyExceptions() { return api.request<DutyException[]>('GET', '/api/v1/cost/duty_exceptions'); },
+        addDutyException(data: Partial<DutyException>) { return api.request<DutyException>('POST', '/api/v1/cost/duty_exceptions', data); },
+        deleteDutyException(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/cost/duty_exceptions/${id}`); },
         getVatRate() { return api.request<{ vat_rate: number }>('GET', '/api/v1/cost/vat_rate'); },
         setVatRate(vatRate: number) { return api.request<{ status: string; vat_rate: number }>('PUT', '/api/v1/cost/vat_rate', { vat_rate: vatRate }); },
         bulkUpdateNomenclatureArea(items: { barcode: string; area_m2: number }[]) {
             return api.request<{ ok: boolean; updated: number; not_found: string[] }>('PUT', '/api/v1/cost/nomenclature/bulk_area', { items });
+        },
+        bulkUpdateNomenclatureWeight(items: { barcode: string; weight_kg: number }[]) {
+            return api.request<{ ok: boolean; updated: number; not_found: string[] }>('PUT', '/api/v1/cost/nomenclature/bulk_weight', { items });
         },
         async uploadCostFile(orderNo: string, file: File) {
             const formData = new FormData();

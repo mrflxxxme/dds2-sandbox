@@ -32,6 +32,18 @@ class DutyRuleSchema(BaseModel):
     note: str | None = None
 
 
+class DutyExceptionSchema(BaseModel):
+    """Article-level duty override. Overrides only basis+rate of the category
+    rule; util_collect_rub stays sourced from the category's DutyRule."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: int | None = None
+    article_seller: str
+    basis: str
+    rate: Decimal
+    note: str | None = None
+
+
 class CostOrderItemSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int | None = None
@@ -91,6 +103,15 @@ class BulkAreaItem(BaseModel):
 
 class BulkAreaUpdate(BaseModel):
     items: list[BulkAreaItem]
+
+
+class BulkWeightItem(BaseModel):
+    barcode: str
+    weight_kg: Decimal
+
+
+class BulkWeightUpdate(BaseModel):
+    items: list[BulkWeightItem]
 
 
 class VatRateUpdate(BaseModel):

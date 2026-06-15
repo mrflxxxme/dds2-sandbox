@@ -22,10 +22,12 @@ from backend.schemas.common import (
 # Cost
 from backend.schemas.cost import (
     BulkAreaUpdate,
+    BulkWeightUpdate,
     CostOrderCreate,
     CostOrderItemSchema,
     CostOrderSchema,
     CostUploadResult,
+    DutyExceptionSchema,
     DutyRuleSchema,
     NomenclatureSchema,
     VatRateUpdate,
@@ -229,7 +231,9 @@ __all__ = [
     # Cost
     "NomenclatureSchema",
     "DutyRuleSchema",
+    "DutyExceptionSchema",
     "BulkAreaUpdate",
+    "BulkWeightUpdate",
     "CostOrderItemSchema",
     "CostOrderSchema",
     "CostUploadResult",
