@@ -181,6 +181,60 @@ def _prev_month(year: int, month: int) -> tuple[int, int]:
     return year, month - 1
 
 
+async def _get_unplanned_brand_facts(
+    db: AsyncSession,
+    project_id: int,
+    start: date,
+    end: date,
+    planned_brands: set[str],
+) -> list[tuple[str, Decimal]]:
+    """Выручка по брендам БЕЗ плана за [start, end] — нужна, чтобы итог план-факта
+    совпадал по сумме ОПиУ и прогноз не терял эти продажи.
+
+    Возвращает [(brand_label, fact)] для брендов, которых нет в `planned_brands`
+    (включая бакет «(без бренда)» для пустого brand_name), отсортированных
+    по убыванию факта. `end` ограничивается сверху сегодняшним днём — симметрично
+    `fact_mtd` плановых брендов (будущих строк в WB нет, но для прошедших периодов
+    это не повредит)."""
+    result = await db.execute(
+        text(
+            "SELECT COALESCE(NULLIF(brand_name, ''), '') AS brand, "
+            "  COALESCE(SUM(CASE WHEN doc_type_name = 'Продажа' THEN retail_price_withdisc_rub "
+            "    WHEN doc_type_name = 'Возврат' THEN -retail_price_withdisc_rub ELSE 0 END), 0) AS realization "
+            "FROM wb_finance_rows "
+            "WHERE project_id = :pid AND COALESCE(sale_dt, rr_dt) BETWEEN :start AND :end "
+            "GROUP BY 1"
+        ),
+        {"pid": project_id, "start": start, "end": end},
+    )
+    out: list[tuple[str, Decimal]] = []
+    for row in result:
+        brand = row[0]
+        fact = Decimal(str(row[1]))
+        if fact == ZERO or (brand and brand in planned_brands):
+            continue
+        out.append((brand or "(без бренда)", fact))
+    return sorted(out, key=lambda x: x[1], reverse=True)
+
+
+def _unplanned_row(brand: str, fact: Decimal, days: int, current_day: int) -> dict:
+    """Строка план-факта для бренда без плана: план=0, прогноз по тому же темпу."""
+    forecast = float(fact / current_day * days) if current_day > 0 else 0.0
+    return {
+        "brand": brand,
+        "plan_month": 0.0,
+        "debt_prev": 0.0,
+        "surplus_prev": 0.0,
+        "plan_adjusted": 0.0,
+        "fact_mtd": float(fact),
+        "pct": None,
+        "forecast": round(forecast, 2),
+        "days_in_month": days,
+        "current_day": current_day,
+        "no_plan": True,
+    }
+
+
 @cached(prefix="reports:plan_fact", ttl=300)
 async def get_plan_fact_daily(
     db: AsyncSession,
@@ -287,11 +341,11 @@ async def get_plan_fact_brands(
 
     days_in_month = calendar.monthrange(year, month)[1]
     today = date.today()
+    start = date(year, month, 1)
+    end = date(year, month, days_in_month)
     if today.year == year and today.month == month:
         # Current month: anchor on the last day with actual WB data for the
         # whole project — forecasts must not divide by days that have no facts.
-        start = date(year, month, 1)
-        end = date(year, month, days_in_month)
         last_fact = await _get_last_fact_date(db, project_id, start, end)
         current_day = last_fact.day if last_fact else 0
     elif date(year, month, 1) < today:
@@ -327,6 +381,13 @@ async def get_plan_fact_brands(
                 "current_day": current_day,
             }
         )
+
+    # Бренды, имеющие продажи, но без плана (+ бакет «без бренда») → план=0, чтобы
+    # «Итого Факт» совпадал по сумме ОПиУ и прогноз не терял эти продажи.
+    end_eff = min(end, today)
+    planned = {p.brand for p in plans}
+    for brand, fact in await _get_unplanned_brand_facts(db, project_id, start, end_eff, planned):
+        rows.append(_unplanned_row(brand, fact, days_in_month, current_day))
 
     return rows
 
@@ -528,5 +589,10 @@ async def get_plan_fact_brands_range(
                 "current_day": current_day,
             }
         )
+
+    # Бренды, имеющие продажи, но без плана (+ «без бренда») за весь диапазон → план=0.
+    end_eff = min(last_end, today)
+    for brand, fact in await _get_unplanned_brand_facts(db, project_id, first_start, end_eff, set(brand_plans)):
+        rows.append(_unplanned_row(brand, fact, total_days, current_day))
 
     return rows

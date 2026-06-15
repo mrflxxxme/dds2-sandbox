@@ -45,6 +45,22 @@ describe('matchesPasteParams', () => {
     it('rejects on ppb diff', () => {
         expect(matchesPasteParams(f, { qty: 24, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 15 })).toBe(false);
     });
+
+    // V-0017 case: FOI box_size/pcs are NULL — paste fills the gap, should match.
+    it('matches when FOI box is empty and paste box is non-empty (FOI box is unknown, not different)', () => {
+        const fEmpty = foi({ price_cny: '24.10', box_size: null as unknown as string, pcs_per_box: null as unknown as number });
+        expect(matchesPasteParams(fEmpty, { qty: 30, price: 24.1, boxRaw: '60x40x50', pcsPerBox: 30 })).toBe(true);
+    });
+
+    it('matches when FOI ppb is empty and paste ppb is non-empty', () => {
+        const fEmpty = foi({ price_cny: '24.10', box_size: '60×40×50', pcs_per_box: 0 });
+        expect(matchesPasteParams(fEmpty, { qty: 30, price: 24.1, boxRaw: '60x40x50', pcsPerBox: 30 })).toBe(true);
+    });
+
+    // V-0008 regression guard: different non-empty box/ppb still rejects.
+    it('still rejects when FOI box is non-empty and differs from paste', () => {
+        expect(matchesPasteParams(f, { qty: 24, price: 58.88, boxRaw: '70×40×50', pcsPerBox: 12 })).toBe(false);
+    });
 });
 
 describe('splitRowAcrossFois — the core paste-mode bug fix', () => {
@@ -89,6 +105,42 @@ describe('splitRowAcrossFois — the core paste-mode bug fix', () => {
         ];
         const out = splitRowAcrossFois(fois, { qty: 24, price: 58.88, boxRaw: '60x40x50', pcsPerBox: 12 }, false);
         expect(out).toEqual([]);
+    });
+
+    // V-0017 case: FOIs have NULL box/ppb (price matches). KEEP mode now consumes them
+    // and attaches the paste's box/ppb as a per-vehicle override.
+    it('KEEP: consumes FOI with empty box/ppb and attaches paste values as override', () => {
+        const fois: AvailableItem[] = [
+            foi({ id: 35, remaining_qty: 30, price_cny: '24.10', box_size: null as unknown as string, pcs_per_box: null as unknown as number }),
+        ];
+        const out = splitRowAcrossFois(fois, { qty: 30, price: 24.1, boxRaw: '60x40x50', pcsPerBox: 30 }, false);
+        expect(out).toEqual([
+            { factory_order_item_id: 35, qty: 30, box_size_override: '60x40x50', pcs_per_box_override: 30 },
+        ]);
+    });
+
+    it('KEEP: does NOT attach override when FOI already has its own box/ppb', () => {
+        const fois: AvailableItem[] = [
+            foi({ id: 1, remaining_qty: 30, price_cny: '24.10', box_size: '60×40×50', pcs_per_box: 30 }),
+        ];
+        const out = splitRowAcrossFois(fois, { qty: 30, price: 24.1, boxRaw: '60x40x50', pcsPerBox: 30 }, false);
+        // FOI box/ppb match paste exactly → no override needed.
+        expect(out).toEqual([{ factory_order_item_id: 1, qty: 30 }]);
+    });
+
+    // V-0017 sum-mismatch: 14 barcodes dropped because FOIs had NULL box; with the
+    // fix the same paste row books fully against the FOI with enough avail.
+    it('V-0017: paste row 36@36 books fully from FOI with NULL box (was dropped before fix)', () => {
+        const fois: AvailableItem[] = [
+            // fo19-style FOI with NULL box, price mismatch — still rejected.
+            foi({ id: 399, remaining_qty: 660, price_cny: '20.20', box_size: null as unknown as string, pcs_per_box: null as unknown as number }),
+            // fo35-style FOI with NULL box, price matches — should now book.
+            foi({ id: 707, remaining_qty: 36, price_cny: '20.20', box_size: null as unknown as string, pcs_per_box: null as unknown as number }),
+        ];
+        const out = splitRowAcrossFois(fois, { qty: 36, price: 20.2, boxRaw: '60x40x50', pcsPerBox: 36 }, false);
+        // Both match (price✓, FOI box/ppb empty = unknown). FIFO order — fo19 first, has 660.
+        expect(out.reduce((s, it) => s + it.qty, 0)).toBe(36);
+        expect(out.every(it => it.box_size_override === '60x40x50' && it.pcs_per_box_override === 36)).toBe(true);
     });
 
     it('with overrides: falls back to FIFO when no FOI matches paste params (consumes all needed FOIs)', () => {

@@ -20,11 +20,14 @@ export interface SplitItem {
 export const matchesPasteParams = (foi: AvailableItem, p: PasteParams): boolean => {
     const fp = parseFloat(foi.price_cny) || 0;
     if (Math.abs(p.price - fp) > 0.0001) return false;
+    // Empty FOI box/ppb = "unknown", not "different" — paste enriches missing info
+    // without changing the FOI. Different non-empty values still reject
+    // (V-0008 intent: don't silently split onto wrong-box/wrong-ppb FOIs).
     const pasteBoxNorm = normalizeBox(p.boxRaw);
     const foiBoxNorm = normalizeBox(foi.box_size || '');
-    if (pasteBoxNorm && pasteBoxNorm !== foiBoxNorm) return false;
+    if (pasteBoxNorm && foiBoxNorm && pasteBoxNorm !== foiBoxNorm) return false;
     const fppb = foi.pcs_per_box || 0;
-    if (p.pcsPerBox && p.pcsPerBox !== fppb) return false;
+    if (p.pcsPerBox && fppb && p.pcsPerBox !== fppb) return false;
     return true;
 };
 
@@ -68,11 +71,18 @@ export const splitRowAcrossFois = (
         const take = Math.min(left, availableNow);
         if (take <= 0) continue;
         const it: SplitItem = { factory_order_item_id: foi.id, qty: take };
+        const foiBoxNorm = normalizeBox(foi.box_size || '');
+        const fppb = foi.pcs_per_box || 0;
         if (withOverrides) {
-            const foiBoxNorm = normalizeBox(foi.box_size || '');
+            // OVERWRITE: attach override whenever paste value differs from FOI.
             if (p.boxRaw.trim() && pasteBoxNorm !== foiBoxNorm) it.box_size_override = p.boxRaw.trim();
-            const fppb = foi.pcs_per_box || 0;
             if (p.pcsPerBox && p.pcsPerBox !== fppb) it.pcs_per_box_override = p.pcsPerBox;
+        } else {
+            // KEEP: attach override only to FILL empty FOI specs (FOI has unknown
+            // box/ppb but paste knows them). FOI's real values are never overwritten
+            // in this mode — matchesPasteParams already rejected non-empty mismatches.
+            if (p.boxRaw.trim() && !foiBoxNorm) it.box_size_override = p.boxRaw.trim();
+            if (p.pcsPerBox && !fppb) it.pcs_per_box_override = p.pcsPerBox;
         }
         out.push(it);
         consumed[foi.id] = already + take;

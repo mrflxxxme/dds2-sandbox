@@ -338,12 +338,15 @@ function BrandsTab({ data, pctColor, statusIcon }: {
         <>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16 }}>
                 {data.map(r => (
-                    <div key={r.brand} className="glass-card" style={{ padding: 20 }}>
-                        <h6 style={{ margin: '0 0 16px', fontWeight: 600, fontSize: 16 }}>{r.brand}</h6>
+                    <div key={r.brand} className="glass-card" style={{ padding: 20, opacity: r.no_plan ? 0.85 : 1 }}>
+                        <h6 style={{ margin: '0 0 16px', fontWeight: 600, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+                            {r.brand}
+                            {r.no_plan && <span className="badge badge-secondary" style={{ fontSize: 11 }}>без плана</span>}
+                        </h6>
 
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 14 }}>
                             <span style={{ color: 'var(--color-text-muted)' }}>План</span>
-                            <span style={{ fontFamily: 'monospace', fontWeight: 500 }}>{formatNumber(r.plan_month, 0)}</span>
+                            <span style={{ fontFamily: 'monospace', fontWeight: 500 }}>{r.no_plan ? '—' : formatNumber(r.plan_month, 0)}</span>
                         </div>
                         {r.debt_prev > 0 && (
                             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 14, color: 'var(--color-warning)' }}>

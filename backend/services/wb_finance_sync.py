@@ -252,6 +252,19 @@ async def _upsert_batch(db: AsyncSession, batch: list[dict], project_id: int) ->
         nm_meta = await _load_nm_meta(db, project_id, review_nm_ids)
         enrich_review_rows(batch, nm_meta)
 
+    # Бэкфилл пустого brand_name по nm_id: WB отдаёт бренд НЕПОСТОЯННО для одного
+    # и того же товара (часть строк реализации имеет пустой brand_name) — иначе
+    # эти продажи выпадают из агрегаций «по брендам» (план-факт, ОПиУ-by-brand),
+    # хотя в итог ОПиУ попадают → факт по бренду занижен, прогноз неверный.
+    missing_brand_nm_ids = {r["nm_id"] for r in batch if not r.get("brand_name") and r.get("nm_id")}
+    if missing_brand_nm_ids:
+        brand_meta = await _load_nm_meta(db, project_id, missing_brand_nm_ids)
+        for r in batch:
+            if not r.get("brand_name") and r.get("nm_id"):
+                bn = brand_meta.get(r["nm_id"], {}).get("brand_name")
+                if bn:
+                    r["brand_name"] = bn[:200]
+
     stmt = pg_insert(WbFinanceRow).values(batch)
     update_cols = {k: stmt.excluded[k] for k in batch[0].keys() if k not in ("project_id", "rrd_id")}
     stmt = stmt.on_conflict_do_update(

@@ -19,6 +19,7 @@ from backend.schemas.supply_chain import (
     AddItemsToVehicleRequest,
     AddUnorderedItemsRequest,
     BulkPriceUpdateRequest,
+    BulkRemoveVehicleItemsRequest,
     BulkUpdateItemSpecs,
     FactoryOrderCreate,
     FactoryOrderHistorySchema,
@@ -572,6 +573,30 @@ async def clear_all_vehicle_items(
         return await vehicle_delivery.clear_all_vehicle_items(db, project.id, order_no)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+
+
+@router.post("/vehicles/{order_no}/items/bulk-delete", dependencies=[Depends(rate_limit_write)])
+async def bulk_remove_vehicle_items(
+    order_no: str,
+    payload: BulkRemoveVehicleItemsRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Удалить N позиций машины одним вызовом (вместо N DELETE-запросов).
+
+    DELETE-with-body не везде поддерживается прокси, поэтому POST. rate_limit_write
+    срабатывает один раз на всю партию.
+    """
+    display_name = user.first_name or user.username or user.email
+    try:
+        return await vehicle_delivery.bulk_remove_items_from_vehicle(
+            db, project.id, order_no, payload.item_ids, user_name=display_name
+        )
+    except ValueError as e:
+        if "запрещено" in str(e).lower():
+            raise HTTPException(400, str(e)) from e
+        raise HTTPException(404, str(e)) from e
 
 
 # ─── Vehicle Documents ──────────────────────────────────────────────────────
