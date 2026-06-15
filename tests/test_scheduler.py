@@ -140,6 +140,96 @@ async def test_get_sync_project_ids_without_global_key():
 # ─── get_scheduler_info ──────────────────────────────────────────────────────
 
 
+# ─── Тированные FF-джобы (_add_fulfillment_jobs) ─────────────────────────────
+
+
+def _ff_jobs(monkeypatch, *, include_default, fast="", fast_min=10, slow="", slow_min=30, default_min=60):
+    """Зарегистрировать FF-джобы на mock-scheduler, вернуть {job_id: kwargs}."""
+    import backend.scheduler as sched_mod
+    from backend.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS", fast)
+    monkeypatch.setattr(cfg, "FULFILLMENT_SYNC_FAST_INTERVAL_MINUTES", fast_min)
+    monkeypatch.setattr(cfg, "FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS", slow)
+    monkeypatch.setattr(cfg, "FULFILLMENT_SYNC_SLOW_INTERVAL_MINUTES", slow_min)
+    monkeypatch.setattr(cfg, "FULFILLMENT_SYNC_INTERVAL_MINUTES", default_min)
+
+    mock_sched = MagicMock()
+    sched_mod._add_fulfillment_jobs(mock_sched, include_default=include_default)
+    return {c.kwargs["id"]: c.kwargs for c in mock_sched.add_job.call_args_list}
+
+
+def test_ff_jobs_local_no_default(monkeypatch):
+    """Локалка (include_default=False): FAST+SLOW, без DEFAULT; пересечение
+    SLOW с FAST исключается."""
+    jobs = _ff_jobs(monkeypatch, include_default=False, fast="5, 1", slow="1, 2")
+    assert set(jobs) == {"fulfillment_sync_fast", "fulfillment_sync_slow"}
+    assert jobs["fulfillment_sync_fast"]["kwargs"] == {"warehouse_ids": [5, 1]}
+    assert jobs["fulfillment_sync_fast"]["trigger"].interval == timedelta(minutes=10)
+    # 1 уже в FAST → SLOW остаётся [2]
+    assert jobs["fulfillment_sync_slow"]["kwargs"] == {"warehouse_ids": [2]}
+    assert jobs["fulfillment_sync_slow"]["trigger"].interval == timedelta(minutes=30)
+
+
+def test_ff_jobs_prod_with_default(monkeypatch):
+    """Прод (include_default=True): FAST+SLOW+DEFAULT; DEFAULT исключает
+    приоритетные склады (чтобы не синкать дважды)."""
+    jobs = _ff_jobs(monkeypatch, include_default=True, fast="5,1", slow="2", default_min=60)
+    assert set(jobs) == {"fulfillment_sync_fast", "fulfillment_sync_slow", "fulfillment_sync"}
+    assert jobs["fulfillment_sync"]["kwargs"] == {"exclude_warehouse_ids": [5, 1, 2]}
+    assert jobs["fulfillment_sync"]["trigger"].interval == timedelta(minutes=60)
+
+
+def test_ff_jobs_prod_empty_syncs_all(monkeypatch):
+    """Пустые FAST/SLOW + include_default=True → один DEFAULT для ВСЕХ
+    (exclude=None) = прежнее «раз в час»."""
+    jobs = _ff_jobs(monkeypatch, include_default=True, fast="", slow="")
+    assert set(jobs) == {"fulfillment_sync"}
+    assert jobs["fulfillment_sync"]["kwargs"] == {"exclude_warehouse_ids": None}
+
+
+def test_start_scheduler_ff_only_path(monkeypatch):
+    """SCHEDULER_ENABLED=false + FULFILLMENT_SYNC_ENABLED=true → FF-only
+    scheduler стартует, регистрирует FAST-джобу, БЕЗ DEFAULT-контура."""
+    import backend.scheduler as sched_mod
+    from backend.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "SCHEDULER_ENABLED", False)
+    monkeypatch.setattr(cfg, "FULFILLMENT_SYNC_ENABLED", True)
+    monkeypatch.setattr(cfg, "FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS", "5,1")
+    monkeypatch.setattr(cfg, "FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS", "")
+
+    mock_sched = MagicMock()
+    original = sched_mod._scheduler
+    try:
+        with patch.object(sched_mod, "AsyncIOScheduler", return_value=mock_sched):
+            sched_mod.start_scheduler()
+        ids = {c.kwargs["id"] for c in mock_sched.add_job.call_args_list}
+        assert ids == {"fulfillment_sync_fast"}  # без DEFAULT и без SLOW
+        mock_sched.start.assert_called_once()
+    finally:
+        sched_mod._scheduler = original
+
+
+def test_start_scheduler_disabled_without_ff_starts_nothing(monkeypatch):
+    """SCHEDULER_ENABLED=false + FULFILLMENT_SYNC_ENABLED=false → ничего не стартует."""
+    import backend.scheduler as sched_mod
+    from backend.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "SCHEDULER_ENABLED", False)
+    monkeypatch.setattr(cfg, "FULFILLMENT_SYNC_ENABLED", False)
+
+    original = sched_mod._scheduler
+    try:
+        sched_mod._scheduler = None
+        with patch.object(sched_mod, "AsyncIOScheduler") as mock_cls:
+            sched_mod.start_scheduler()
+        mock_cls.assert_not_called()
+        assert sched_mod._scheduler is None
+    finally:
+        sched_mod._scheduler = original
+
+
 def test_get_scheduler_info_when_not_running():
     """get_scheduler_info returns running=False when scheduler is None."""
     import backend.scheduler as sched_mod

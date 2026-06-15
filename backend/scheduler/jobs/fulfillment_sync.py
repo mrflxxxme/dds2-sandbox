@@ -1,7 +1,9 @@
+# ruff: noqa: RUF001, RUF002, RUF003
 """
 Scheduler job: sync fulfillment stocks/requests for all warehouses with
-active fulfillment integrations (skladbot, wmscelicom, migfull). Runs every
-hour (worker container only).
+active fulfillment integrations (skladbot, wmscelicom, migfull). Worker
+container only; interval — settings.FULFILLMENT_SYNC_INTERVAL_MINUTES
+(default 60). Локально может крутиться в fulfillment-only scheduler.
 """
 
 import asyncio
@@ -18,30 +20,49 @@ logger = logging.getLogger("dds.scheduler")
 SYNC_TIMEOUT = 600  # seconds per warehouse
 
 
-async def sync_all_fulfillment_warehouses():
-    """Iterate all active fulfillment keys bound to warehouses and sync each.
+async def sync_all_fulfillment_warehouses(
+    warehouse_ids: list[int] | None = None,
+    exclude_warehouse_ids: list[int] | None = None,
+):
+    """Iterate active fulfillment keys bound to warehouses and sync each.
 
-    Called by APScheduler every hour.
-    SyncLog обновляется отдельной сессией в finally — никогда не остаётся
-    RUNNING, даже если сессия синка умерла в rolled-back состоянии.
+    Тированное расписание (см. scheduler `_add_fulfillment_jobs`):
+    - `warehouse_ids` (None = не фильтруем) — синкать ТОЛЬКО эти склады
+      (FAST/SLOW контуры).
+    - `exclude_warehouse_ids` — синкать все КРОМЕ этих (DEFAULT-контур: исключает
+      приоритетные склады, которые уже синкают FAST/SLOW, чтобы не дублировать).
+    Оба пусты → синкаются все (прежнее «раз в час»). SyncLog обновляется
+    отдельной сессией в finally — никогда не остаётся RUNNING, даже если сессия
+    синка умерла в rolled-back состоянии.
     """
-    logger.info("Fulfillment sync: starting for all warehouses")
+    if warehouse_ids:
+        scope = f"warehouses {warehouse_ids}"
+    elif exclude_warehouse_ids:
+        scope = f"all except {exclude_warehouse_ids}"
+    else:
+        scope = "all warehouses"
+    logger.info("Fulfillment sync: starting for %s", scope)
 
     from backend.services.fulfillment_service import SYNCABLE_FF_SERVICES, sync_warehouse
 
     async with AsyncSessionLocal() as db:
+        conditions = [
+            IntegrationKey.service.in_(SYNCABLE_FF_SERVICES),
+            IntegrationKey.warehouse_id.isnot(None),
+            IntegrationKey.is_active.is_(True),
+            IntegrationKey.is_deleted == False,  # noqa: E712
+        ]
+        if warehouse_ids:
+            conditions.append(IntegrationKey.warehouse_id.in_(warehouse_ids))
+        if exclude_warehouse_ids:
+            conditions.append(IntegrationKey.warehouse_id.notin_(exclude_warehouse_ids))
         result = await db.execute(
             select(
                 IntegrationKey.id,
                 IntegrationKey.project_id,
                 IntegrationKey.warehouse_id,
                 IntegrationKey.service,
-            ).where(
-                IntegrationKey.service.in_(SYNCABLE_FF_SERVICES),
-                IntegrationKey.warehouse_id.isnot(None),
-                IntegrationKey.is_active.is_(True),
-                IntegrationKey.is_deleted == False,  # noqa: E712
-            )
+            ).where(*conditions)
         )
         targets = result.all()
 

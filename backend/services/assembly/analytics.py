@@ -22,6 +22,7 @@ from backend.models.assembly import (
     AssemblyStatusHistory,
 )
 from backend.models.cost import Nomenclature
+from backend.models.fulfillment import FfRequestKind, FulfillmentRequest
 from backend.models.warehouse import Warehouse
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem
 from backend.schemas.assembly import AssemblyItemResponse, RefreshFromFboResponse
@@ -305,9 +306,10 @@ _FLOW_ACTIVE_STATUSES: tuple[AssemblyStatus, ...] = (
 _FLOW_LIMIT = 5000
 _ANOMALY_PRIORITY = {
     "wb_accepted_not_shipped": 0,
-    "stuck_shipment": 1,
-    "stuck_assembly": 2,
-    "shipped_not_accepted": 3,
+    "ff_closed_not_shipped": 1,
+    "stuck_shipment": 2,
+    "stuck_assembly": 3,
+    "shipped_not_accepted": 4,
 }
 
 
@@ -779,6 +781,32 @@ async def get_assembly_flow_analytics(
         ).all()
         supply_map = {row.id: (row.wb_status, row.warehouse_name, row.wb_supply_id) for row in supply_rows}
 
+    # --- ФФ-заявки, закрытые/в архиве у провайдера, для активных сборок ---
+    # Сигнал «ФФ отгрузил/закрыл, а наша сборка ещё не отгружена» → аномалия
+    # ff_closed_not_shipped (статус НЕ меняем — отгрузка двигает сток вручную).
+    # Только пред-SHIPPED статусы: для SHIPPED закрытие ФФ ожидаемо. Локально
+    # заархивированные строки зеркала исключаем. {assembly_request_id: ff_number}.
+    ff_closed_map: dict[int, str | None] = {}
+    pre_ship_ids = [r.id for r in active_reqs if r.status != AssemblyStatus.SHIPPED]
+    if pre_ship_ids:
+        ff_rows = (
+            await db.execute(
+                select(FulfillmentRequest.assembly_request_id, FulfillmentRequest.number).where(
+                    FulfillmentRequest.project_id == project_id,
+                    FulfillmentRequest.assembly_request_id.in_(pre_ship_ids),
+                    FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+                    or_(
+                        FulfillmentRequest.is_completed.is_(True),
+                        FulfillmentRequest.archived.is_(True),
+                    ),
+                    FulfillmentRequest.local_archived.is_(False),
+                )
+            )
+        ).all()
+        for aid, num in ff_rows:
+            if aid is not None:
+                ff_closed_map.setdefault(aid, num)
+
     # --- Anomalies (текущее состояние, максимум одна категория на заявку) ---
     anomalies_raw: list[tuple[AssemblyRequest, str, datetime | None]] = []
     for req in active_reqs:
@@ -819,6 +847,10 @@ async def get_assembly_flow_analytics(
             # ВБ уже принял поставку, а заявка не отгружена — «забыли отгрузить».
             # Любой активный статус до SHIPPED. Без порога: критично сразу.
             kind = "wb_accepted_not_shipped"
+        elif req.status != AssemblyStatus.SHIPPED and req.id in ff_closed_map:
+            # ФФ закрыл/заархивировал заявку (= собрал и отгрузил), а наша сборка
+            # ещё не отгружена. Без порога: сигнал «отгрузите вручную».
+            kind = "ff_closed_not_shipped"
         elif req.status in (AssemblyStatus.READY, AssemblyStatus.VEHICLE_ASSIGNED):
             if since is not None and _days_between(since, now) > ship_threshold_days:
                 kind = "stuck_shipment"
@@ -887,6 +919,7 @@ async def get_assembly_flow_analytics(
                 "wb_fbo_status": supply[0] if supply else None,
                 "wb_supply_number": supply[2] if supply else None,
                 "pallets_count": req.pallets_count,
+                "ff_request_number": ff_closed_map.get(req.id),
             }
         )
     anomalies.sort(key=lambda a: (_ANOMALY_PRIORITY[a["kind"]], -a["days_stuck"]))
