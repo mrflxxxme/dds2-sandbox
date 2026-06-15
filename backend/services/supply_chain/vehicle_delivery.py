@@ -1689,7 +1689,12 @@ async def _enrich_vehicle(
         tv = Decimal("0")
         tr = Decimal("0")
         has_costs = False
-        for ci in vehicle.items:
+        # active_items only — vehicle.items (selectinload) is NOT is_deleted-filtered,
+        # and soft-deleted rows keep their stored cost_rub/total_rub (re-upload/replace
+        # soft-deletes the old rows). Summing them inflates Товар/Пошлина/НДС/Итого while
+        # the ¥ total (total_cny, active-only above) stays correct. Recalc doesn't touch
+        # deleted rows, so the only fix is to exclude them here.
+        for ci in active_items:
             if ci.total_rub is not None:
                 has_costs = True
                 qty = Decimal(str(ci.qty))
