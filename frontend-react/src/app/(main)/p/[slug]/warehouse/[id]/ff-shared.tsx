@@ -40,6 +40,23 @@ export function ffStageBadge(row: FfRequestRow) {
     return null;
 }
 
+// Высокоуровневый статус заявки ФФ — отдельная колонка «Статус ФФ»
+// (для приёмок завершённость = «принято на остатки»).
+export function ffStatusLabel(row: FfRequestRow): string {
+    if (row.is_completed) return row.kind === 'inbound' ? 'Принято на остатки' : 'Завершена';
+    if (row.archived) return 'Архив';
+    if (row.expired) return 'Просрочена';
+    return 'В работе';
+}
+
+export function ffStatusBadge(row: FfRequestRow) {
+    const cls = row.is_completed ? 'badge-success'
+        : row.expired ? 'badge-warning'
+            : row.archived ? 'badge-secondary'
+                : 'badge-info';
+    return <span className={`badge ${cls}`} style={{ fontSize: 11, padding: '2px 8px' }}>{ffStatusLabel(row)}</span>;
+}
+
 /* ─── История синхронизации: помощники отображения событий ───────────────── */
 
 // Человекочитаемая стадия из снимка события (title → status → прочерк)

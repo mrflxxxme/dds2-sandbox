@@ -243,6 +243,10 @@ class FfStatusEvent(BaseModel):
     old_archived: bool | None = None
     new_archived: bool | None = None
     changed_at: datetime
+    # Обогащение из текущей заявки ФФ (для колонок истории)
+    dest_warehouse: str | None = None  # склад сдачи (для сборки)
+    total_qty: int | None = None  # заявленное кол-во
+    linked_number: str | None = None  # наша заявка/приёмка, если сматчена
 
 
 # ─── Сводная страница «Заявки ФФ» (все склады с интеграцией) ────────────────

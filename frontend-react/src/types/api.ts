@@ -3495,6 +3495,10 @@ export interface FfStatusEvent {
   old_archived: boolean | null;
   new_archived: boolean | null;
   changed_at: string;
+  /** Обогащение из текущей заявки ФФ */
+  dest_warehouse?: string | null;
+  total_qty?: number | null;
+  linked_number?: string | null;
 }
 
 /** Наша заявка сборки (ASM-xxx) без привязанной ФФ-заявки — для реверс-линка из заявки ФФ. */

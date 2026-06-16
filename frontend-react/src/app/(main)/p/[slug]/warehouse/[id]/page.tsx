@@ -13,7 +13,7 @@ import type {
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
-import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge, ffEventBadge, ffEventSummary } from './ff-shared';
+import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge, ffStatusBadge, ffStatusLabel, ffEventBadge, ffEventSummary } from './ff-shared';
 
 /* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
 
@@ -2015,6 +2015,23 @@ function FfHistoryTab({ warehouseId, slug }: { warehouseId: number; slug: string
             render: (v: string) => FF_EVENT_KIND_LABELS[v] || v,
         },
         {
+            key: 'dest_warehouse', label: 'Склад сдачи',
+            render: (v: string | null) => v || '—',
+            exportValue: (row: FfStatusEvent) => row.dest_warehouse || '',
+        },
+        {
+            key: 'total_qty', label: 'Кол-во', align: 'right',
+            render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
+            exportValue: (row: FfStatusEvent) => row.total_qty ?? '',
+        },
+        {
+            key: 'linked_number', label: 'Наша заявка',
+            render: (v: string | null) => v
+                ? <span style={{ fontWeight: 600 }}>{v}</span>
+                : <span style={{ color: 'var(--color-text-muted)' }}>—</span>,
+            exportValue: (row: FfStatusEvent) => row.linked_number || '',
+        },
+        {
             key: 'event', label: 'Что изменилось',
             render: (_: unknown, row: FfStatusEvent) => (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
@@ -2282,6 +2299,11 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 </span>
             ),
             exportValue: (row: FfRequestRow) => row.stage_title || row.status || '',
+        },
+        {
+            key: 'ff_status', label: 'Статус ФФ',
+            render: (_: unknown, row: FfRequestRow) => ffStatusBadge(row),
+            exportValue: (row: FfRequestRow) => ffStatusLabel(row),
         },
         {
             key: 'linked_number', label: 'Связь',
