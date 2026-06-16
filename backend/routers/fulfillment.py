@@ -1,4 +1,4 @@
-# ruff: noqa: RUF002
+# ruff: noqa: RUF001, RUF002, RUF003
 """
 Router: интеграция с фулфилментом (skladbot, wmscelicom).
 
@@ -21,9 +21,12 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.fulfillment import (
+    FfBoxOverridePayload,
+    FfBoxPack,
     FfCreateAssemblyResult,
     FfLinkCandidatesResponse,
     FfLinkPayload,
+    FfNomenclatureOption,
     FfOverviewResponse,
     FfRequestDetail,
     FfRequestRow,
@@ -133,6 +136,60 @@ async def list_stocks(
 ):
     """Сверка остатков: ФФ vs наш склад (UNION по barcode)."""
     return await fulfillment_service.list_stocks(db, project.id, warehouse_id)
+
+
+@wh_router.get("/box-packs", response_model=list[FfBoxPack])
+async def list_box_packs(
+    warehouse_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сопоставление короб→россыпь: ШК короба → ШК россыпи → штук → номенклатура (auto/manual/unmapped)."""
+    return await fulfillment_service.list_box_packs(db, project.id, warehouse_id)
+
+
+@wh_router.get("/box-packs/nomenclature-search", response_model=list[FfNomenclatureOption])
+async def box_pack_nomenclature_search(
+    warehouse_id: int,
+    q: str = "",
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Поиск нашей номенклатуры с ШК для ручной привязки короба (по артикулу/ШК)."""
+    return await fulfillment_service.search_nomenclature(db, project.id, q)
+
+
+@wh_router.put("/box-packs/{box_barcode}/override", response_model=FfBoxPack, dependencies=[Depends(rate_limit_write)])
+async def set_box_override(
+    warehouse_id: int,
+    box_barcode: str,
+    payload: FfBoxOverridePayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ручное сопоставление короба: привязать нашу номенклатуру + штук в коробе."""
+    try:
+        result = await fulfillment_service.set_box_override(
+            db, project.id, warehouse_id, box_barcode, payload.nomenclature_id, payload.units_per_box
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if result is None:
+        raise HTTPException(404, "Короб с таким ШК не найден в остатках склада")
+    return result
+
+
+@wh_router.delete(
+    "/box-packs/{box_barcode}/override", response_model=FfBoxPack | None, dependencies=[Depends(rate_limit_write)]
+)
+async def delete_box_override(
+    warehouse_id: int,
+    box_barcode: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Снять ручное сопоставление короба — вернуть к авто-выводу."""
+    return await fulfillment_service.delete_box_override(db, project.id, warehouse_id, box_barcode)
 
 
 @wh_router.get("/requests", response_model=list[FfRequestRow])

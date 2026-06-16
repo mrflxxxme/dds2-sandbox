@@ -20,6 +20,7 @@ dest_warehouse — списочный метод их не отдаёт) и ав
 """
 
 import logging
+import re
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -44,6 +45,7 @@ from backend.integrations.skladbot_client import (
 from backend.integrations.wmscelicom_client import WmsCelicomClient, normalize_base_url
 from backend.models import (
     FfRequestKind,
+    FulfillmentBoxOverride,
     FulfillmentRequest,
     FulfillmentStatusEvent,
     FulfillmentStock,
@@ -85,6 +87,8 @@ _MIRROR_SELECT_LIMIT = 10_000
 _MIGFULL_BARCODE_CAP = 300
 # Служебные позиции migfull (учёт грузомест склада) — не товары
 _MIGFULL_SERVICE_ITEM_MARKER = "фф грузовое место"
+# Короб → россыпь: кол-во штук в коробе из названия товара («… короб 20 шт.»)
+_MIGFULL_BOX_UNITS_RE = re.compile(r"короб\s+(\d+)\s*шт", re.IGNORECASE)
 _QTY_MAX = 2**31 - 1  # Integer-колонка: мусорная сумма провайдера не должна валить flush
 _DEST_WAREHOUSE_MAX = 300  # String(300): значение длиннее уронит транзакцию синка
 
@@ -104,6 +108,11 @@ def _coerce_dest(value: object) -> str | None:
     if not value:
         return None
     return str(value).strip()[:_DEST_WAREHOUSE_MAX] or None
+
+
+def _escape_like(value: str) -> str:
+    """Экранировать спецсимволы LIKE/ILIKE в пользовательском вводе."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 # Эвристика подбора кандидатов для несвязанных ФФ-заявок (overview):
@@ -476,6 +485,11 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             .limit(_MIRROR_SELECT_LIMIT)
         )
         barcode_by_guid = {guid: barcode for guid, barcode in bc_result.all() if guid and barcode}
+
+    # migfull: ручные сопоставления короб→россыпь (override побеждает авто-вывод)
+    box_overrides: dict[str, tuple[str, int]] = {}
+    if provider == "migfull":
+        box_overrides = await _load_box_overrides(db, project_id, warehouse_id)
     await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
 
     human = _provider_human(provider)
@@ -492,7 +506,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             mig_client = MigfullClient(tenant_guid, token, project_id=project_id)
             products = [p for p in await mig_client.fetch_all_products() if not _is_migfull_service_item(p)]
             await _resolve_migfull_barcodes(mig_client, products, barcode_by_guid)
-            stock_items = [_normalize_migfull_stock(p, barcode_by_guid) for p in products]
+            stock_items = [_normalize_migfull_stock(p, barcode_by_guid, box_overrides) for p in products]
             request_rows = [_normalize_migfull_shipment(r) for r in await mig_client.fetch_shipments()]
             request_rows += [_normalize_migfull_submission(r) for r in await mig_client.fetch_submissions()]
             await _enrich_migfull_submissions(mig_client, request_rows, mirror_enrichment)
@@ -533,7 +547,8 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         )
         .limit(_MIRROR_SELECT_LIMIT)
     )
-    assemblies_marked_ready = await _mark_linked_assemblies_ready(db, project_id, list(linked_result.scalars().all()))
+    marked_ready = await _mark_linked_assemblies_ready(db, project_id, list(linked_result.scalars().all()))
+    assemblies_marked_ready = len(marked_ready)
 
     # Кандидаты на авто-ACCEPT приёмок собираем ПОД синк-транзакцией (нужны
     # свежие is_completed после UPSERT), но сам приём — после commit (ниже):
@@ -553,7 +568,15 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         )
         .limit(_MIRROR_SELECT_LIMIT)
     )
-    inbound_accept_ids = await _collect_inbound_accept_candidates(db, project_id, list(inbound_linked.scalars().all()))
+    inbound_reqs = list(inbound_linked.scalars().all())
+    # Детали для Telegram-уведомления о принятой приёмке (по нашему receipt_id):
+    # номер ФФ-заявки, склад сдачи, кол-во — те же поля, что в «Истории».
+    accept_info = {
+        r.inbound_receipt_id: (r.number or r.external_id, r.dest_warehouse, r.total_qty)
+        for r in inbound_reqs
+        if r.inbound_receipt_id is not None
+    }
+    inbound_accept_ids = await _collect_inbound_accept_candidates(db, project_id, inbound_reqs)
 
     synced_at = utcnow()
     key = await db.get(IntegrationKey, key_id)
@@ -565,6 +588,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     # транзакцией. accept_receipt идемпотентен (row-lock + guard «сток уже
     # применён»), повторный синк не задвоит. Ошибку приёмки не даём свалить синк.
     inbound_receipts_accepted = 0
+    accept_msgs: list[str] = []
     if inbound_accept_ids:
         from backend.database import AsyncSessionLocal
         from backend.services.warehouse_inbound import accept_receipt
@@ -577,11 +601,29 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
                 async with AsyncSessionLocal() as accept_db:
                     await accept_receipt(accept_db, project_id, receipt_id)
                 inbound_receipts_accepted += 1
+                info = accept_info.get(receipt_id)
+                if info:
+                    ff_no, dest, qty = info
+                    accept_msgs.append(
+                        f"📦 Приёмка принята: ФФ {ff_no} · {dest or '—'}" + (f" · {qty} шт" if qty else "")
+                    )
             except Exception as e:  # — best-effort, синк уже зафиксирован
                 logger.warning("FF auto-accept: приёмка %s пропущена (%s)", receipt_id, e)
 
     if assemblies_marked_ready:
         await invalidate_cache("reports:assembly_flow")
+
+    # Telegram-уведомления о смене статуса (best-effort, синк уже зафиксирован;
+    # шлём только в чаты проекта с ff_notify_enabled; no-op если бот не поднят).
+    ready_msgs = [
+        f"✅ Сборка {d['assembly_number']} готова к отгрузке: ФФ {d['ff_number']} · {d['dest'] or '—'}"
+        + (f" · {d['qty']} шт" if d["qty"] else "")
+        for d in marked_ready
+    ]
+    if ready_msgs or accept_msgs:
+        from backend.services.fulfillment_notify import notify_ff_events
+
+        await notify_ff_events(db, project_id, ready_msgs + accept_msgs)
 
     logger.info(
         "Fulfillment sync: project=%s warehouse=%s stocks=%d requests=%d unmatched=%d "
@@ -863,16 +905,75 @@ async def _resolve_migfull_barcodes(
             barcode_by_guid[guid] = barcode
 
 
-def _normalize_migfull_stock(item: dict, barcode_by_guid: dict[str, str]) -> dict:
+def _ean13_check_digit(body12: str) -> str:
+    """Контрольная цифра EAN13 по первым 12 цифрам."""
+    total = sum((3 if i % 2 else 1) * int(c) for i, c in enumerate(body12))
+    return str((10 - total % 10) % 10)
+
+
+def _itf14_to_ean13(barcode: str) -> str | None:
+    """ШК короба (ITF14, 14 цифр) → ШК россыпи (EAN13).
+
+    GTIN-14 = индикатор-цифра упаковки + общее 12-значное тело + контрольная.
+    Россыпь — тот же товар на уровне единицы: тело то же, индикатор отброшен,
+    контрольная цифра EAN13 пересчитана. Не ITF14 (длина ≠ 14 / не цифры) → None.
+    """
+    if len(barcode) != 14 or not barcode.isdigit():
+        return None
+    body = barcode[1:13]
+    return body + _ean13_check_digit(body)
+
+
+def _migfull_box_pack(barcode: str, name: str | None) -> tuple[str, int] | None:
+    """Короб migfull → (base_barcode россыпи, units_per_box) или None.
+
+    Короб распознаём по ШК-короба (ITF14) и наличию «короб N шт.» в названии.
+    base_barcode выводим по GTIN-14, кол-во в коробе — из названия. Проверено
+    на живых данных: 151/151 коробов дают EAN13, совпадающий с номенклатурой,
+    и кол-во парсится у всех. Не короб / кол-во не выводимо → None (строка
+    остаётся как есть, без свода к россыпи).
+    """
+    base = _itf14_to_ean13(barcode)
+    if base is None:
+        return None
+    match = _MIGFULL_BOX_UNITS_RE.search(name or "")
+    if not match:
+        return None
+    units = int(match.group(1))
+    if units <= 1:
+        return None
+    return base, units
+
+
+def _normalize_migfull_stock(
+    item: dict,
+    barcode_by_guid: dict[str, str],
+    box_overrides: dict[str, tuple[str, int]] | None = None,
+) -> dict:
     """migfull /products item → нормализованный остаток.
 
     barcode — из кэша guid→barcode (нерезолвленные строки отсеет _apply_stocks
     по пустому barcode). stock_actual → good, stock_locked → reserve,
-    stock_available → nominal; брака в остатках API не отдаёт.
+    stock_available → nominal; брака в остатках API не отдаёт. Если barcode —
+    ШК короба, проставляем base_barcode (россыпь) и units_per_box — остатки
+    короба сведутся к россыпи в list_stocks. Приоритет: ручной override
+    (box_overrides) → авто-вывод (ITF14→EAN13 по GTIN-14 + «короб N шт.»).
     """
     guid = str(item.get("guid") or "")
+    barcode = barcode_by_guid.get(guid, "")
+    base_barcode: str | None = None
+    units_per_box = 1
+    override = (box_overrides or {}).get(barcode) if barcode else None
+    if override:
+        base_barcode, units_per_box = override
+    else:
+        pack = _migfull_box_pack(barcode, item.get("name")) if barcode else None
+        if pack:
+            base_barcode, units_per_box = pack
     return {
-        "barcode": barcode_by_guid.get(guid, ""),
+        "barcode": barcode,
+        "base_barcode": base_barcode,
+        "units_per_box": units_per_box,
         "name": item.get("name"),
         "vendor_code": item.get("sku"),
         "external_product_id": guid or None,
@@ -1082,6 +1183,11 @@ async def _apply_stocks(
                 "name": item.get("name"),
                 "vendor_code": item.get("vendor_code"),
                 "external_product_id": item.get("external_product_id"),
+                # Короб → россыпь: base_barcode (россыпь) и штук в коробе;
+                # для россыпи base_barcode=None, units_per_box=1 (один товар
+                # на barcode — берём от первого item'а).
+                "base_barcode": item.get("base_barcode"),
+                "units_per_box": int(item.get("units_per_box") or 1),
                 "qty_good": 0,
                 "qty_reserve": 0,
                 "qty_defect": 0,
@@ -1092,13 +1198,18 @@ async def _apply_stocks(
         agg["qty_defect"] += int(item.get("qty_defect") or 0)
         agg["qty_nominal"] += int(item.get("qty_nominal") or 0)
 
-    # Резолв номенклатуры одним запросом по всем barcode
+    # Резолв номенклатуры одним запросом по эффективному ШК (россыпь для
+    # коробов: base_barcode, иначе сам barcode) — короб матчится к нашему товару.
+    def _effective_barcode(barcode: str, agg: dict) -> str:
+        return agg.get("base_barcode") or barcode
+
     nom_by_barcode: dict[str, int] = {}
     if aggregated:
+        effective = {_effective_barcode(bc, agg) for bc, agg in aggregated.items()}
         result = await db.execute(
             select(Nomenclature.id, Nomenclature.barcode).where(
                 Nomenclature.project_id == project_id,
-                Nomenclature.barcode.in_(list(aggregated)),
+                Nomenclature.barcode.in_(list(effective)),
             )
         )
         nom_by_barcode = {barcode: nom_id for nom_id, barcode in result.all()}
@@ -1119,7 +1230,9 @@ async def _apply_stocks(
             warehouse_id=warehouse_id,
             provider=provider,
             barcode=barcode,
-            nomenclature_id=nom_by_barcode.get(barcode),
+            base_barcode=agg["base_barcode"],
+            units_per_box=agg["units_per_box"],
+            nomenclature_id=nom_by_barcode.get(_effective_barcode(barcode, agg)),
             name=agg["name"],
             vendor_code=agg["vendor_code"],
             qty_good=agg["qty_good"],
@@ -1133,7 +1246,7 @@ async def _apply_stocks(
     ]
     db.add_all(rows)
 
-    unmatched = sum(1 for barcode in aggregated if barcode not in nom_by_barcode)
+    unmatched = sum(1 for barcode, agg in aggregated.items() if _effective_barcode(barcode, agg) not in nom_by_barcode)
     return len(rows), unmatched
 
 
@@ -1291,15 +1404,16 @@ async def _mark_linked_assemblies_ready(
     db: AsyncSession,
     project_id: int,
     ff_requests: list[FulfillmentRequest],
-) -> int:
+) -> list[dict[str, object]]:
     """Перевести связанные сборки IN_PROGRESS → READY по сигналу стадии ФФ.
 
     Берём живые связанные assembly-строки (не archived/local_archived;
     expired/просрочена — всё ещё активна, не исключаем) с
     _assembly_ready_signal() == True; наши заявки выбираются одним запросом
     (project_id + is_deleted + только IN_PROGRESS — прочие статусы не трогаем,
-    переход выполняем напрямую, история changed_by=ff_sync). Возвращает число
-    переходов. Commit — на стороне вызывающего.
+    переход выполняем напрямую, история changed_by=ff_sync). Возвращает список
+    словарей по каждому переходу (assembly_number/ff_number/dest/qty) для
+    Telegram-уведомлений. Commit — на стороне вызывающего.
     """
     ff_by_assembly: dict[int, FulfillmentRequest] = {}
     for req in ff_requests:
@@ -1311,7 +1425,7 @@ async def _mark_linked_assemblies_ready(
             continue
         ff_by_assembly[req.assembly_request_id] = req
     if not ff_by_assembly:
-        return 0
+        return []
 
     result = await db.execute(
         select(AssemblyRequest)
@@ -1326,9 +1440,19 @@ async def _mark_linked_assemblies_ready(
         .with_for_update()
     )
     docs = list(result.scalars().all())
+    transitioned: list[dict[str, object]] = []
     for doc in docs:
-        _transition_assembly_to_ready(db, project_id, doc, ff_by_assembly[doc.id])
-    return len(docs)
+        ff = ff_by_assembly[doc.id]
+        _transition_assembly_to_ready(db, project_id, doc, ff)
+        transitioned.append(
+            {
+                "assembly_number": doc.number,
+                "ff_number": ff.number or ff.external_id,
+                "dest": ff.dest_warehouse,
+                "qty": ff.total_qty,
+            }
+        )
+    return transitioned
 
 
 async def _collect_inbound_accept_candidates(
@@ -1422,63 +1546,78 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     def _nom_fields(nom_id: int | None) -> tuple[str | None, str | None, str | None]:
         return nom_by_id.get(nom_id, (None, None, None)) if nom_id else (None, None, None)
 
-    rows: dict[str, dict] = {}
-    for r in ff_rows:
-        article, subject, brand = _nom_fields(r.nomenclature_id)
-        rows[r.barcode] = {
-            "barcode": r.barcode,
-            "name": r.name,
-            "vendor_code": r.vendor_code,
-            "nomenclature_id": r.nomenclature_id,
+    def _new_row(barcode: str, nom_id: int | None) -> dict:
+        article, subject, brand = _nom_fields(nom_id)
+        return {
+            "barcode": barcode,
+            "name": None,
+            "vendor_code": None,
+            "nomenclature_id": nom_id,
             "article_seller": article,
             "subject": subject,
             "brand": brand,
-            "ff_good": r.qty_good,
-            "ff_reserve": r.qty_reserve,
-            "ff_defect": r.qty_defect,
-            "ff_nominal": r.qty_nominal,
+            "ff_good": 0,
+            "ff_reserve": 0,
+            "ff_defect": 0,
+            "ff_nominal": 0,
+            "ff_box_units": 0,  # из них пришло коробами (в штуках россыпи)
+            "ff_box_count": 0,  # сколько коробов годного
             "our_quantity": 0,
             "our_defect": 0,
-            "diff": r.qty_good,
+            "diff": 0,
         }
+
+    # Свод по эффективному ШК: остаток короба (ITF14) пересчитываем в россыпь
+    # (qty × units_per_box) и складываем со строкой россыпи под её ШК (EAN13).
+    rows: dict[str, dict] = {}
+    ff_keys: set[str] = set()  # ключи со стоком ФФ — для подсчёта unmatched
+    for r in ff_rows:
+        units = r.units_per_box or 1
+        is_box = bool(r.base_barcode)
+        key = r.base_barcode or r.barcode
+        ff_keys.add(key)
+        row = rows.get(key) or rows.setdefault(key, _new_row(key, r.nomenclature_id))
+        row["ff_good"] += r.qty_good * units
+        row["ff_reserve"] += r.qty_reserve * units
+        row["ff_defect"] += r.qty_defect * units
+        row["ff_nominal"] += r.qty_nominal * units
+        if is_box:
+            row["ff_box_units"] += r.qty_good * units
+            row["ff_box_count"] += r.qty_good
+        # Номенклатура: дозаполняем, если короб появился раньше россыпи
+        if row["nomenclature_id"] is None and r.nomenclature_id is not None:
+            row["nomenclature_id"] = r.nomenclature_id
+            row["article_seller"], row["subject"], row["brand"] = _nom_fields(r.nomenclature_id)
+        # Имя/vendor_code: россыпная строка — авторитет, короб лишь заполняет пустое
+        if not is_box:
+            row["name"] = r.name or row["name"]
+            row["vendor_code"] = r.vendor_code or row["vendor_code"]
+        else:
+            row["name"] = row["name"] or r.name
+            row["vendor_code"] = row["vendor_code"] or r.vendor_code
+
     for wr in our_rows:
-        row = rows.get(wr.barcode)
-        if row is None:
-            article, subject, brand = _nom_fields(wr.nomenclature_id)
-            row = rows[wr.barcode] = {
-                "barcode": wr.barcode,
-                "name": None,
-                "vendor_code": None,
-                "nomenclature_id": wr.nomenclature_id,
-                "article_seller": article,
-                "subject": subject,
-                "brand": brand,
-                "ff_good": 0,
-                "ff_reserve": 0,
-                "ff_defect": 0,
-                "ff_nominal": 0,
-                "our_quantity": 0,
-                "our_defect": 0,
-                "diff": 0,
-            }
-        elif row["nomenclature_id"] is None:
-            article, subject, brand = _nom_fields(wr.nomenclature_id)
-            row["nomenclature_id"] = wr.nomenclature_id
-            row["article_seller"] = article
-            row["subject"] = subject
-            row["brand"] = brand
-        row["our_quantity"] = wr.quantity
-        row["our_defect"] = wr.defect_quantity
-        row["diff"] = row["ff_good"] - wr.quantity
+        ws_row = rows.get(wr.barcode)
+        if ws_row is None:
+            ws_row = rows[wr.barcode] = _new_row(wr.barcode, wr.nomenclature_id)
+        elif ws_row["nomenclature_id"] is None:
+            ws_row["nomenclature_id"] = wr.nomenclature_id
+            ws_row["article_seller"], ws_row["subject"], ws_row["brand"] = _nom_fields(wr.nomenclature_id)
+        ws_row["our_quantity"] = wr.quantity
+        ws_row["our_defect"] = wr.defect_quantity
+
+    for row in rows.values():
+        row["diff"] = row["ff_good"] - row["our_quantity"]
 
     out_rows = sorted(rows.values(), key=lambda x: (-x["diff"], x["barcode"]))
     totals = {
         "ff_good": sum(r["ff_good"] for r in out_rows),
         "ff_reserve": sum(r["ff_reserve"] for r in out_rows),
         "ff_defect": sum(r["ff_defect"] for r in out_rows),
+        "ff_box_units": sum(r["ff_box_units"] for r in out_rows),
         "our_quantity": sum(r["our_quantity"] for r in out_rows),
         "diff": sum(r["diff"] for r in out_rows),
-        "unmatched": sum(1 for r in ff_rows if r.nomenclature_id is None),
+        "unmatched": sum(1 for k in ff_keys if rows[k]["nomenclature_id"] is None),
     }
     synced_at = max((r.synced_at for r in ff_rows), default=None)
     return {
@@ -1488,6 +1627,216 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         "subjects": sorted({r["subject"] for r in out_rows if r["subject"]}),
         "brands": sorted({r["brand"] for r in out_rows if r["brand"]}),
     }
+
+
+def _is_itf14(barcode: str | None) -> bool:
+    """ШК короба: 14-значный ITF14 (по нему ловим коробá, не выведенные авто)."""
+    return barcode is not None and len(barcode) == 14 and barcode.isdigit()
+
+
+async def _load_box_overrides(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[str, tuple[str, int]]:
+    """{box_barcode: (base_barcode, units_per_box)} ручных сопоставлений склада."""
+    result = await db.execute(
+        select(
+            FulfillmentBoxOverride.box_barcode,
+            FulfillmentBoxOverride.base_barcode,
+            FulfillmentBoxOverride.units_per_box,
+        ).where(
+            FulfillmentBoxOverride.project_id == project_id,
+            FulfillmentBoxOverride.warehouse_id == warehouse_id,
+        )
+    )
+    return {bc: (base, units) for bc, base, units in result.all()}
+
+
+async def list_box_packs(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
+    """Сопоставление короб→россыпь: все коробá склада (ITF14 или с base_barcode).
+
+    Read-only вид: ШК короба → ШК россыпи → штук в коробе → наша номенклатура.
+    source: auto — выведено автоматически; manual — ручной override; unmapped —
+    короб (ITF14) без сопоставления (надо указать вручную). По убыванию остатка
+    в штуках. Прочие провайдеры — пусто (нет коробов).
+    """
+    result = await db.execute(
+        select(FulfillmentStock)
+        .where(
+            FulfillmentStock.project_id == project_id,
+            FulfillmentStock.warehouse_id == warehouse_id,
+        )
+        .limit(STOCKS_LIMIT)
+    )
+    rows = [r for r in result.scalars().all() if r.base_barcode or _is_itf14(r.barcode)]
+
+    overrides = await _load_box_overrides(db, project_id, warehouse_id)
+
+    nom_ids = {r.nomenclature_id for r in rows if r.nomenclature_id}
+    nom_by_id: dict[int, tuple[str | None, str | None]] = {}
+    if nom_ids:
+        nom_result = await db.execute(
+            select(Nomenclature.id, Nomenclature.article_seller, Nomenclature.subject).where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.id.in_(nom_ids),
+            )
+        )
+        nom_by_id = {row.id: (row.article_seller, row.subject) for row in nom_result.all()}
+
+    out: list[dict] = []
+    for r in rows:
+        article, subject = nom_by_id.get(r.nomenclature_id, (None, None)) if r.nomenclature_id else (None, None)
+        if r.barcode in overrides:
+            source = "manual"
+        elif r.base_barcode:
+            source = "auto"
+        else:
+            source = "unmapped"
+        out.append(
+            {
+                "box_barcode": r.barcode,
+                "base_barcode": r.base_barcode,
+                "units_per_box": r.units_per_box,
+                "name": r.name,
+                "nomenclature_id": r.nomenclature_id,
+                "article_seller": article,
+                "subject": subject,
+                "box_qty": r.qty_good,
+                "units_qty": r.qty_good * r.units_per_box if r.base_barcode else 0,
+                "matched": r.nomenclature_id is not None,
+                "source": source,
+            }
+        )
+    out.sort(key=lambda x: (-x["units_qty"], -x["box_qty"], x["box_barcode"]))
+    return out
+
+
+async def search_nomenclature(db: AsyncSession, project_id: int, query: str, limit: int = 20) -> list[dict]:
+    """Поиск нашей номенклатуры с ШК (для ручной привязки короба). Только с barcode."""
+    q = (query or "").strip()
+    stmt = select(Nomenclature.id, Nomenclature.barcode, Nomenclature.article_seller, Nomenclature.subject).where(
+        Nomenclature.project_id == project_id,
+        Nomenclature.barcode.is_not(None),
+        Nomenclature.barcode != "",
+    )
+    if q:
+        like = f"%{_escape_like(q)}%"
+        stmt = stmt.where(Nomenclature.article_seller.ilike(like) | Nomenclature.barcode.ilike(like))
+    stmt = stmt.order_by(Nomenclature.article_seller).limit(min(limit, 50))
+    result = await db.execute(stmt)
+    return [{"id": nid, "barcode": bc, "article_seller": art, "subject": subj} for nid, bc, art, subj in result.all()]
+
+
+async def set_box_override(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    box_barcode: str,
+    nomenclature_id: int,
+    units_per_box: int,
+) -> dict | None:
+    """Ручное сопоставление короба с нашей номенклатурой (+ штук в коробе).
+
+    Привязка только к существующей номенклатуре с ШК (россыпь). Применяется
+    сразу к текущему остатку (пересинк не нужен) и побеждает авто-вывод при
+    следующих синках. Возвращает обновлённую строку box-pack (или None — короб
+    не найден в остатках, но override сохранён для будущих синков).
+    """
+    box_barcode = (box_barcode or "").strip()
+    if not box_barcode:
+        raise ValueError("Не указан ШК короба")
+    if units_per_box < 1:
+        raise ValueError("Кол-во в коробе должно быть ≥ 1")
+
+    nom = await db.execute(
+        select(Nomenclature.id, Nomenclature.barcode).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.id == nomenclature_id,
+        )
+    )
+    nom_row = nom.first()
+    if nom_row is None:
+        raise ValueError("Номенклатура не найдена")
+    base_barcode = (nom_row.barcode or "").strip()
+    if not base_barcode:
+        raise ValueError("У выбранной номенклатуры нет ШК (россыпи) — заполните его сначала")
+
+    existing = await db.execute(
+        select(FulfillmentBoxOverride).where(
+            FulfillmentBoxOverride.project_id == project_id,
+            FulfillmentBoxOverride.warehouse_id == warehouse_id,
+            FulfillmentBoxOverride.box_barcode == box_barcode,
+        )
+    )
+    override = existing.scalar_one_or_none()
+    if override is None:
+        override = FulfillmentBoxOverride(
+            project_id=project_id,
+            warehouse_id=warehouse_id,
+            box_barcode=box_barcode,
+            nomenclature_id=nomenclature_id,
+            base_barcode=base_barcode,
+            units_per_box=units_per_box,
+        )
+        db.add(override)
+    else:
+        override.nomenclature_id = nomenclature_id
+        override.base_barcode = base_barcode
+        override.units_per_box = units_per_box
+
+    # Применить сразу к текущему остатку короба (если он есть в снапшоте)
+    await db.execute(
+        update(FulfillmentStock)
+        .where(
+            FulfillmentStock.project_id == project_id,
+            FulfillmentStock.warehouse_id == warehouse_id,
+            FulfillmentStock.barcode == box_barcode,
+        )
+        .values(base_barcode=base_barcode, units_per_box=units_per_box, nomenclature_id=nomenclature_id)
+    )
+    await db.commit()
+    return await _box_pack_row(db, project_id, warehouse_id, box_barcode)
+
+
+async def delete_box_override(db: AsyncSession, project_id: int, warehouse_id: int, box_barcode: str) -> dict | None:
+    """Снять ручное сопоставление — короб вернётся к авто-выводу."""
+    box_barcode = (box_barcode or "").strip()
+    await db.execute(
+        delete(FulfillmentBoxOverride).where(
+            FulfillmentBoxOverride.project_id == project_id,
+            FulfillmentBoxOverride.warehouse_id == warehouse_id,
+            FulfillmentBoxOverride.box_barcode == box_barcode,
+        )
+    )
+    # Вернуть текущий остаток к авто-выводу (по ШК короба + названию)
+    stock = await db.execute(
+        select(FulfillmentStock).where(
+            FulfillmentStock.project_id == project_id,
+            FulfillmentStock.warehouse_id == warehouse_id,
+            FulfillmentStock.barcode == box_barcode,
+        )
+    )
+    row = stock.scalar_one_or_none()
+    if row is not None:
+        pack = _migfull_box_pack(row.barcode, row.name)
+        base_barcode = pack[0] if pack else None
+        units = pack[1] if pack else 1
+        nom_id = None
+        if base_barcode:
+            nom = await db.execute(
+                select(Nomenclature.id).where(
+                    Nomenclature.project_id == project_id, Nomenclature.barcode == base_barcode
+                )
+            )
+            nom_id = nom.scalar_one_or_none()
+        row.base_barcode = base_barcode
+        row.units_per_box = units
+        row.nomenclature_id = nom_id
+    await db.commit()
+    return await _box_pack_row(db, project_id, warehouse_id, box_barcode)
+
+
+async def _box_pack_row(db: AsyncSession, project_id: int, warehouse_id: int, box_barcode: str) -> dict | None:
+    """Одна строка сопоставления (после мутации) или None — короба нет в остатках."""
+    packs = await list_box_packs(db, project_id, warehouse_id)
+    return next((p for p in packs if p["box_barcode"] == box_barcode), None)
 
 
 # ─── Requests view + linking ─────────────────────────────────────────────────
@@ -2330,20 +2679,35 @@ async def _migfull_guid_barcodes(
     project_id: int,
     warehouse_id: int,
     guids: set[str],
-) -> dict[str, str]:
-    """{product_guid: barcode} из зеркала остатков (штрихкоды только в карточке
-    товара — при синке они оседают в fulfillment_stocks.external_product_id)."""
+) -> dict[str, tuple[str, int]]:
+    """{product_guid: (barcode, units_per_box)} из зеркала остатков.
+
+    Штрихкоды только в карточке товара — при синке оседают в
+    fulfillment_stocks.external_product_id. Для короба отдаём ШК россыпи
+    (base_barcode) и штук в коробе → состав заявки сводится к россыпи так же,
+    как остатки; для россыпи — сам barcode и units=1.
+    """
     guids.discard("")
     if not guids:
         return {}
     result = await db.execute(
-        select(FulfillmentStock.external_product_id, FulfillmentStock.barcode).where(
+        select(
+            FulfillmentStock.external_product_id,
+            FulfillmentStock.barcode,
+            FulfillmentStock.base_barcode,
+            FulfillmentStock.units_per_box,
+        ).where(
             FulfillmentStock.project_id == project_id,
             FulfillmentStock.warehouse_id == warehouse_id,
             FulfillmentStock.external_product_id.in_(list(guids)),
         )
     )
-    return {guid: barcode for guid, barcode in result.all() if guid and barcode}
+    out: dict[str, tuple[str, int]] = {}
+    for guid, barcode, base_barcode, units in result.all():
+        effective = base_barcode or barcode
+        if guid and effective:
+            out[guid] = (effective, int(units or 1))
+    return out
 
 
 async def _resolve_noms(db: AsyncSession, project_id: int, barcodes: set[str]) -> dict[str, tuple[int, str | None]]:
@@ -2603,13 +2967,14 @@ async def get_request_detail(
                 raise ValueError(f"migfull.app вернул ошибку сервера, попробуйте позже ({str(e)[:100]})") from e
             mig_products = _migfull_products_from_lines(incoming, received, fact_field="accepted_qty")
 
-        # Штрихкоды только в карточке товара → guid→barcode из зеркала остатков
+        # ШК только в карточке товара → guid→(ШК россыпи, штук в коробе) из зеркала
+        # остатков. Короб сводится к россыпи: ШК россыпи для матча, qty × units_per_box.
         guid_barcodes = await _migfull_guid_barcodes(db, project_id, warehouse_id, {p["guid"] for p in mig_products})
-        match_barcodes = {guid_barcodes.get(p["guid"], "") for p in mig_products} | set(our_by_barcode or {})
+        match_barcodes = {bc for bc, _ in guid_barcodes.values()} | set(our_by_barcode or {})
         nom_by_barcode = await _resolve_noms(db, project_id, match_barcodes)
         products = []
         for p in mig_products:
-            barcode = guid_barcodes.get(p["guid"])
+            barcode, units = guid_barcodes.get(p["guid"], (None, 1))
             nom_id, article = nom_by_barcode.get(barcode, (None, None)) if barcode else (None, None)
             products.append(
                 {
@@ -2618,10 +2983,12 @@ async def get_request_detail(
                     "name": p.get("name"),
                     "nomenclature_id": nom_id,
                     "article_seller": article,
-                    "qty": p["qty"],
-                    "accepted_qty": p["accepted_qty"],
-                    "delivery_qty": p["delivery_qty"],
-                    "defect_qty": p["defect_qty"],
+                    "qty": p["qty"] * units,
+                    "accepted_qty": p["accepted_qty"] * units,
+                    "delivery_qty": p["delivery_qty"] * units,
+                    "defect_qty": p["defect_qty"] * units,
+                    "units_per_box": units,
+                    "box_qty": p["qty"] if units > 1 else 0,
                     "color": p.get("color"),
                     "size": p.get("size"),
                     "comment": None,
@@ -2977,9 +3344,10 @@ async def _fetch_ff_composition(
         guid_barcodes = await _migfull_guid_barcodes(db, project_id, warehouse_id, set(guid_qty))
         mig_comp: dict[str, int] = {}
         for guid, qty in guid_qty.items():
-            mig_barcode = guid_barcodes.get(guid)
-            if mig_barcode:
-                mig_comp[mig_barcode] = mig_comp.get(mig_barcode, 0) + qty
+            resolved = guid_barcodes.get(guid)
+            if resolved:
+                mig_barcode, units = resolved
+                mig_comp[mig_barcode] = mig_comp.get(mig_barcode, 0) + qty * units
         return mig_comp or None
 
     if req.provider != "skladbot":

@@ -14,6 +14,7 @@ class TelegramChatBindingSchema(BaseModel):
     project_id: int
     brand: str | None = None
     notify_enabled: bool = True
+    ff_notify_enabled: bool = False
     created_by_id: int
     created_at: datetime
 

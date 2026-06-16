@@ -172,7 +172,20 @@ export default function FfRequestDetailPage() {
             ),
             exportValue: (p: FfRequestDetailProduct) => p.article_seller ?? p.vendor_code ?? '',
         },
-        { key: 'qty', label: 'Заявлено', align: 'right', render: (v: number) => formatNumber(v, 0) },
+        {
+            key: 'qty', label: 'Заявлено', align: 'right',
+            render: (v: number, p: FfRequestDetailProduct) => (
+                <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                    <span>{formatNumber(v, 0)}</span>
+                    {p.box_qty > 0 && (
+                        <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                            {formatNumber(p.box_qty, 0)} кор × {formatNumber(p.units_per_box, 0)}
+                        </span>
+                    )}
+                </span>
+            ),
+            exportValue: (p: FfRequestDetailProduct) => p.qty,
+        },
         ...(hasMatch ? [
             {
                 key: 'our_qty', label: 'В нашей заявке', align: 'right',

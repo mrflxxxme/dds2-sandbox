@@ -9,7 +9,7 @@ import type {
     Warehouse, InboundReceipt, OutboundShipment,
     WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
     DefectMarkOperation, VehicleStatus,
-    FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfRequestRow, FfRequestKind, FfStatusEvent, FfSyncRun, FfUnlinkedAssembly,
+    FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfBoxPack, FfNomenclatureOption, FfRequestRow, FfRequestKind, FfStatusEvent, FfSyncRun, FfUnlinkedAssembly,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
@@ -37,9 +37,11 @@ type WarehouseTab = 'all' | 'receipts' | 'shipments' | 'transfers' | 'stock' | '
 const WAREHOUSE_TABS: WarehouseTab[] = ['all', 'receipts', 'shipments', 'transfers', 'stock', 'defects', 'delivery', 'requisites', 'fulfillment'];
 
 // Под-вкладки раздела «Фулфилмент» — вложенная навигация внутри одной вкладки.
-type FfSubTab = 'stocks' | 'assembly' | 'inbound' | 'history' | 'sync';
-const FF_SUB_TABS: { key: FfSubTab; label: string }[] = [
+type FfSubTab = 'stocks' | 'boxes' | 'assembly' | 'inbound' | 'history' | 'sync';
+// boxes (сопоставление короб→россыпь) — только для migfull («Натали»); фильтруется по провайдеру.
+const FF_SUB_TABS: { key: FfSubTab; label: string; migfullOnly?: boolean }[] = [
     { key: 'stocks', label: 'Остатки' },
+    { key: 'boxes', label: 'Сопоставление', migfullOnly: true },
     { key: 'assembly', label: 'Сборка' },
     { key: 'inbound', label: 'Приёмки' },
     { key: 'history', label: 'История' },
@@ -47,7 +49,7 @@ const FF_SUB_TABS: { key: FfSubTab; label: string }[] = [
 ];
 // Старые deep-ссылки ?tab=ff-* → раздел «Фулфилмент» + нужная под-вкладка (back-compat).
 const FF_TAB_ALIASES: Record<string, FfSubTab> = {
-    'ff-stocks': 'stocks', 'ff-assembly': 'assembly', 'ff-inbound': 'inbound',
+    'ff-stocks': 'stocks', 'ff-boxes': 'boxes', 'ff-assembly': 'assembly', 'ff-inbound': 'inbound',
     'ff-history': 'history', 'ff-sync': 'sync',
 };
 
@@ -234,7 +236,7 @@ export default function WarehouseDetailPage() {
             {tab === 'defects' && <DefectsTab warehouseId={warehouseId} onCountChange={setDefectCount} />}
             {tab === 'delivery' && <DeliveryTab warehouseId={warehouseId} />}
             {tab === 'fulfillment' && ffConnected && (
-                <FulfillmentTabs warehouseId={warehouseId} slug={slug} sub={ffSub} onSubChange={setFfSub} />
+                <FulfillmentTabs warehouseId={warehouseId} slug={slug} sub={ffSub} onSubChange={setFfSub} provider={ffStatus?.provider ?? null} />
             )}
             {tab === 'requisites' && (
                 <>
@@ -1735,31 +1737,36 @@ function DeliveryTab({ warehouseId }: { warehouseId: number }) {
 /* ─── Раздел «Фулфилмент»: одна вкладка с вложенными под-вкладками ───────── */
 
 function FulfillmentTabs({
-    warehouseId, slug, sub, onSubChange,
+    warehouseId, slug, sub, onSubChange, provider,
 }: {
     warehouseId: number;
     slug: string;
     sub: FfSubTab;
     onSubChange: (s: FfSubTab) => void;
+    provider: string | null;
 }) {
+    // Вкладка «Сопоставление» (короба) — только для migfull; на других провайдерах прячем.
+    const tabs = FF_SUB_TABS.filter(t => !t.migfullOnly || provider === 'migfull');
+    const activeSub = tabs.some(t => t.key === sub) ? sub : 'stocks';
     return (
         <>
             <div style={{ display: 'flex', gap: 4, marginBottom: 16, flexWrap: 'wrap' }}>
-                {FF_SUB_TABS.map(t => (
+                {tabs.map(t => (
                     <button
                         key={t.key}
                         onClick={() => onSubChange(t.key)}
-                        className={`btn btn-sm ${sub === t.key ? 'btn-primary' : 'btn-secondary'}`}
+                        className={`btn btn-sm ${activeSub === t.key ? 'btn-primary' : 'btn-secondary'}`}
                     >
                         {t.label}
                     </button>
                 ))}
             </div>
-            {sub === 'stocks' && <FfStocksTab warehouseId={warehouseId} />}
-            {sub === 'assembly' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="assembly" />}
-            {sub === 'inbound' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="inbound" />}
-            {sub === 'history' && <FfHistoryTab warehouseId={warehouseId} slug={slug} />}
-            {sub === 'sync' && <FfSyncTab warehouseId={warehouseId} />}
+            {activeSub === 'stocks' && <FfStocksTab warehouseId={warehouseId} />}
+            {activeSub === 'boxes' && <FfBoxPacksTab warehouseId={warehouseId} />}
+            {activeSub === 'assembly' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="assembly" />}
+            {activeSub === 'inbound' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="inbound" />}
+            {activeSub === 'history' && <FfHistoryTab warehouseId={warehouseId} slug={slug} />}
+            {activeSub === 'sync' && <FfSyncTab warehouseId={warehouseId} />}
         </>
     );
 }
@@ -1836,7 +1843,23 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
         },
         { key: 'subject', label: 'Предмет', render: (v: string | null) => v || '—' },
         { key: 'brand', label: 'Бренд', render: (v: string | null) => v || '—' },
-        { key: 'ff_good', label: 'ФФ годный', align: 'right', format: 'number' },
+        {
+            key: 'ff_good', label: 'ФФ годный', align: 'right',
+            render: (v: number, row: FfStockRow) => (
+                <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                    <span>{formatNumber(v, 0)}</span>
+                    {row.ff_box_units > 0 && (
+                        <span
+                            style={{ fontSize: 11, color: 'var(--color-text-muted)' }}
+                            title={`${formatNumber(row.ff_box_count, 0)} коробов сведено в россыпь`}
+                        >
+                            в коробах: {formatNumber(row.ff_box_units, 0)}
+                        </span>
+                    )}
+                </span>
+            ),
+            exportValue: (row: FfStockRow) => row.ff_good,
+        },
         { key: 'ff_reserve', label: 'ФФ резерв', align: 'right', format: 'number' },
         {
             key: 'ff_defect', label: 'ФФ брак', align: 'right',
@@ -1862,6 +1885,7 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
         { label: 'Годный ФФ', value: totals.ff_good },
         { label: 'Резерв', value: totals.ff_reserve },
         { label: 'Брак ФФ', value: totals.ff_defect, color: totals.ff_defect > 0 ? 'var(--color-warning)' : undefined },
+        ...(totals.ff_box_units > 0 ? [{ label: 'В коробах', value: totals.ff_box_units, color: 'var(--color-accent)' }] : []),
         { label: 'У нас', value: totals.our_quantity },
         { label: 'Расхождение', value: totals.diff, color: totals.diff > 0 ? 'var(--color-success)' : totals.diff < 0 ? 'var(--color-danger)' : undefined, filter: 'diff' },
         { label: 'Несматчено', value: totals.unmatched, color: totals.unmatched > 0 ? 'var(--color-warning)' : undefined, filter: 'unmatched' },
@@ -1870,7 +1894,7 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
     return (
         <>
             {totals && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12, marginBottom: 16 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: `repeat(${summary.length}, 1fr)`, gap: 12, marginBottom: 16 }}>
                     {summary.map(s => {
                         const filter = s.filter ?? null;
                         const active = filter !== null && quickFilter === filter;
@@ -1942,6 +1966,285 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
                 exportName="ff_stocks"
             />
         </>
+    );
+}
+
+/* ─── Tab: ФФ сопоставление (короб → россыпь) ───────────────────────────── */
+
+function FfBoxPacksTab({ warehouseId }: { warehouseId: number }) {
+    const [data, setData] = useState<FfBoxPack[] | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [search, setSearch] = useState('');
+    const [onlyUnmapped, setOnlyUnmapped] = useState(false);
+    const [editing, setEditing] = useState<FfBoxPack | null>(null);
+    const [notice, setNotice] = useState('');
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            setData(await api.getFulfillmentBoxPacks(warehouseId));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        } finally {
+            setLoading(false);
+        }
+    }, [warehouseId]);
+
+    useEffect(() => { void load(); }, [load]);
+
+    const rows = useMemo(() => {
+        let result = data ?? [];
+        const q = search.trim().toLowerCase();
+        if (q) {
+            result = result.filter(r =>
+                r.box_barcode.toLowerCase().includes(q)
+                || (r.base_barcode ?? '').toLowerCase().includes(q)
+                || (r.article_seller ?? '').toLowerCase().includes(q)
+                || (r.name ?? '').toLowerCase().includes(q)
+            );
+        }
+        if (onlyUnmapped) result = result.filter(r => r.source === 'unmapped');
+        return result;
+    }, [data, search, onlyUnmapped]);
+
+    if (loading) return <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>;
+    if (error) return <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div>;
+
+    const all = data ?? [];
+    const manual = all.filter(r => r.source === 'manual').length;
+    const unmapped = all.filter(r => r.source === 'unmapped').length;
+    const totalUnits = all.reduce((s, r) => s + r.units_qty, 0);
+
+    const sourceBadge = (s: FfBoxPack['source']) => {
+        if (s === 'manual') return <span className="badge badge-info" style={{ fontSize: 11, padding: '2px 8px' }}>вручную</span>;
+        if (s === 'unmapped') return <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>не сопоставлен</span>;
+        return <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>авто</span>;
+    };
+
+    const cols: Column[] = [
+        { key: 'box_barcode', label: 'ШК короба' },
+        { key: 'source', label: 'Тип', render: (v: FfBoxPack['source']) => sourceBadge(v), exportValue: (r: FfBoxPack) => r.source },
+        {
+            key: 'article_seller', label: 'Наш товар',
+            render: (_: unknown, row: FfBoxPack) => row.article_seller ?? '—',
+            exportValue: (row: FfBoxPack) => row.article_seller ?? '',
+        },
+        { key: 'subject', label: 'Предмет', render: (v: string | null) => v || '—' },
+        {
+            key: 'units_per_box', label: 'В коробе, шт', align: 'right',
+            render: (v: number, r: FfBoxPack) => (r.source === 'unmapped' ? '—' : formatNumber(v, 0)),
+            exportValue: (r: FfBoxPack) => (r.source === 'unmapped' ? '' : r.units_per_box),
+        },
+        { key: 'box_qty', label: 'Коробов', align: 'right', format: 'number' },
+        {
+            key: 'units_qty', label: '= штук', align: 'right',
+            render: (v: number, r: FfBoxPack) => (r.source === 'unmapped' ? '—' : <strong>{formatNumber(v, 0)}</strong>),
+            exportValue: (r: FfBoxPack) => (r.source === 'unmapped' ? '' : r.units_qty),
+        },
+        { key: 'base_barcode', label: 'ШК россыпи', render: (v: string | null) => v || '—' },
+        {
+            key: 'actions', label: '', sortable: false,
+            render: (_: unknown, row: FfBoxPack) => (
+                <button className="btn btn-sm btn-secondary" onClick={() => setEditing(row)}>
+                    {row.source === 'unmapped' ? 'Указать' : 'Изменить'}
+                </button>
+            ),
+            exportValue: () => '',
+        },
+    ];
+
+    const summary = [
+        { label: 'Коробных SKU', value: all.length },
+        { label: 'Вручную', value: manual, color: manual > 0 ? 'var(--color-accent)' : undefined },
+        { label: 'Не сопоставлено', value: unmapped, color: unmapped > 0 ? 'var(--color-warning)' : undefined },
+        { label: 'Всего в штуках', value: totalUnits },
+    ];
+
+    return (
+        <>
+            <div className="glass-card" style={{ padding: 16, marginBottom: 16, fontSize: 13, color: 'var(--color-text-muted)' }}>
+                Сопоставление выводится автоматически при синхронизации: ШК короба (ITF14) → ШК россыпи (EAN13) по GTIN-14, кол-во в коробе — из названия «короб N шт.». Если короб не сопоставился — нажмите «Указать» и выберите наш товар. Остатки коробов сводятся к россыпи на вкладке «Остатки».
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
+                {summary.map(s => (
+                    <div key={s.label} className="glass-card" style={{ padding: 16, textAlign: 'center' }}>
+                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{s.label}</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color: s.color }}>{formatNumber(s.value, 0)}</div>
+                    </div>
+                ))}
+            </div>
+            {notice && (
+                <div className="badge badge-success" style={{ marginBottom: 12, fontSize: 13, padding: '6px 12px' }}>{notice}</div>
+            )}
+            <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                <input
+                    className="form-input"
+                    style={{ maxWidth: 280, fontSize: 13 }}
+                    placeholder="🔍 ШК короба / россыпи / артикул"
+                    value={search}
+                    onChange={e => setSearch(e.target.value)}
+                />
+                <button
+                    className={`btn btn-sm ${onlyUnmapped ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setOnlyUnmapped(v => !v)}
+                >
+                    Только не сопоставленные
+                </button>
+                <span style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--color-text-muted)' }}>
+                    Показано: {formatNumber(rows.length, 0)} из {formatNumber(all.length, 0)}
+                </span>
+            </div>
+            <TanStackDataTable
+                columns={cols}
+                data={rows}
+                emptyText="Короба не обнаружены — склад учитывает товар только россыпью (или ещё не было синхронизации)"
+                emptyIcon="📦"
+                exportName="ff_box_packs"
+            />
+            {editing && (
+                <FfBoxOverrideModal
+                    warehouseId={warehouseId}
+                    pack={editing}
+                    onClose={() => setEditing(null)}
+                    onSaved={(msg) => { setEditing(null); setNotice(msg); void load(); }}
+                />
+            )}
+        </>
+    );
+}
+
+/* ─── Модалка: ручное сопоставление короба ──────────────────────────────── */
+
+function FfBoxOverrideModal({ warehouseId, pack, onClose, onSaved }: {
+    warehouseId: number;
+    pack: FfBoxPack;
+    onClose: () => void;
+    onSaved: (notice: string) => void;
+}) {
+    const [query, setQuery] = useState('');
+    const [options, setOptions] = useState<FfNomenclatureOption[]>([]);
+    const [searching, setSearching] = useState(false);
+    const [selected, setSelected] = useState<FfNomenclatureOption | null>(null);
+    const [units, setUnits] = useState<string>(pack.units_per_box > 1 ? String(pack.units_per_box) : '');
+    const [error, setError] = useState('');
+    const [saving, setSaving] = useState(false);
+
+    useEffect(() => {
+        const q = query.trim();
+        if (!q) { setOptions([]); return; }
+        const controller = new AbortController();
+        setSearching(true);
+        api.searchFulfillmentNomenclature(warehouseId, q)
+            .then(r => { if (!controller.signal.aborted) setOptions(r); })
+            .catch(() => { if (!controller.signal.aborted) setOptions([]); })
+            .finally(() => { if (!controller.signal.aborted) setSearching(false); });
+        return () => controller.abort();
+    }, [warehouseId, query]);
+
+    const unitsNum = parseInt(units, 10);
+    const canSave = selected !== null && Number.isFinite(unitsNum) && unitsNum >= 1 && !saving;
+
+    const handleSave = async () => {
+        if (!selected || !Number.isFinite(unitsNum) || unitsNum < 1) return;
+        setSaving(true);
+        setError('');
+        try {
+            await api.setFulfillmentBoxOverride(warehouseId, pack.box_barcode, {
+                nomenclature_id: selected.id,
+                units_per_box: unitsNum,
+            });
+            onSaved(`Короб ${pack.box_barcode} → ${selected.article_seller ?? selected.barcode}, ${unitsNum} шт/короб`);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка сохранения');
+            setSaving(false);
+        }
+    };
+
+    const handleReset = async () => {
+        setSaving(true);
+        setError('');
+        try {
+            await api.deleteFulfillmentBoxOverride(warehouseId, pack.box_barcode);
+            onSaved(`Короб ${pack.box_barcode} — ручная привязка снята (вернулся к авто)`);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка сброса');
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card modal-card-solid" onClick={e => e.stopPropagation()}>
+                <h2 className="modal-title" style={{ marginBottom: 4 }}>Что лежит в коробе?</h2>
+                <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                    ШК короба: <strong>{pack.box_barcode}</strong>
+                    {pack.name ? ` · ${pack.name}` : ''} · остаток {formatNumber(pack.box_qty, 0)} кор.
+                </p>
+
+                {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-muted)' }}>Наш товар (россыпь)</label>
+                {selected ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0 12px' }}>
+                        <span className="badge badge-info" style={{ fontSize: 13, padding: '4px 10px' }}>
+                            {selected.article_seller ?? '—'} · {selected.barcode}
+                        </span>
+                        <button className="btn btn-sm btn-secondary" onClick={() => { setSelected(null); }}>Изменить</button>
+                    </div>
+                ) : (
+                    <>
+                        <input
+                            className="form-input"
+                            style={{ width: '100%', fontSize: 13, margin: '6px 0 8px' }}
+                            placeholder="🔍 Поиск по артикулу или ШК россыпи"
+                            value={query}
+                            onChange={e => setQuery(e.target.value)}
+                            autoFocus
+                        />
+                        <div style={{ maxHeight: 240, overflowY: 'auto', marginBottom: 12 }}>
+                            {searching && <div style={{ padding: 12, color: 'var(--color-text-muted)', fontSize: 13 }}>Поиск...</div>}
+                            {!searching && query.trim() && options.length === 0 && (
+                                <div style={{ padding: 12, color: 'var(--color-text-muted)', fontSize: 13 }}>Ничего не найдено (товар должен быть в номенклатуре с ШК)</div>
+                            )}
+                            {options.map(o => (
+                                <div
+                                    key={o.id}
+                                    onClick={() => setSelected(o)}
+                                    style={{ padding: '8px 10px', borderRadius: 8, cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: 8 }}
+                                    className="hover-row"
+                                >
+                                    <span style={{ fontWeight: 500 }}>{o.article_seller ?? '—'}</span>
+                                    <span style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>{o.subject || ''} · {o.barcode}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </>
+                )}
+
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-muted)' }}>Штук в коробе</label>
+                <input
+                    className="form-input"
+                    type="number"
+                    min={1}
+                    style={{ width: 140, fontSize: 13, margin: '6px 0 16px', display: 'block' }}
+                    placeholder="напр. 20"
+                    value={units}
+                    onChange={e => setUnits(e.target.value)}
+                />
+
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    {pack.source === 'manual' && (
+                        <button className="btn btn-sm btn-danger" onClick={handleReset} disabled={saving} style={{ marginRight: 'auto' }}>
+                            Сбросить привязку
+                        </button>
+                    )}
+                    <button className="btn btn-sm btn-secondary" onClick={onClose} disabled={saving}>Отмена</button>
+                    <button className="btn btn-sm btn-primary" onClick={handleSave} disabled={!canSave}>Сохранить</button>
+                </div>
+            </div>
+        </div>
     );
 }
 
@@ -2177,6 +2480,9 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
 
     // Вид «Активные | Архив» (local_archived)
     const [showArchived, setShowArchived] = useState(false);
+    // Фильтры по статусам (клиентские, из загруженных строк)
+    const [stageFilter, setStageFilter] = useState('');
+    const [statusFilter, setStatusFilter] = useState('');
     // Toast успеха + несмахиваемое предупреждение (пропущенные ШК при создании заявки)
     const [toast, setToast] = useState('');
     const [notice, setNotice] = useState('');
@@ -2363,23 +2669,60 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
         },
     ];
 
-    // Переключатель вида — виден и во время загрузки/ошибки
+    // Распознаваемые значения для фильтров: стадия провайдера + статус ФФ (бейдж)
+    const stageOptions = useMemo(
+        () => Array.from(new Set(rows.map(r => r.stage_title || r.status || '').filter(Boolean))).sort(),
+        [rows],
+    );
+    const statusOptions = useMemo(
+        () => Array.from(new Set(rows.map(r => ffStatusLabel(r)).filter(Boolean))).sort(),
+        [rows],
+    );
+    const filteredRows = useMemo(
+        () => rows.filter(r =>
+            (!stageFilter || (r.stage_title || r.status || '') === stageFilter)
+            && (!statusFilter || ffStatusLabel(r) === statusFilter),
+        ),
+        [rows, stageFilter, statusFilter],
+    );
+
+    // Переключатель вида — виден и во время загрузки/ошибки; смена вида сбрасывает фильтры
+    const switchView = (archived: boolean) => { setShowArchived(archived); setStageFilter(''); setStatusFilter(''); };
     const viewToggle = (
         <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
             <button
                 className={`btn btn-sm ${!showArchived ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setShowArchived(false)}
+                onClick={() => switchView(false)}
             >
                 Активные
             </button>
             <button
                 className={`btn btn-sm ${showArchived ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setShowArchived(true)}
+                onClick={() => switchView(true)}
             >
                 Архив
             </button>
         </div>
     );
+
+    const statusFilters = (stageOptions.length > 1 || statusOptions.length > 1) ? (
+        <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+            <select className="form-input" style={{ maxWidth: 240, fontSize: 13 }} value={stageFilter} onChange={e => setStageFilter(e.target.value)}>
+                <option value="">Стадия: все</option>
+                {stageOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select className="form-input" style={{ maxWidth: 240, fontSize: 13 }} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+                <option value="">Статус ФФ: все</option>
+                {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            {(stageFilter || statusFilter) && (
+                <button className="btn btn-sm btn-secondary" onClick={() => { setStageFilter(''); setStatusFilter(''); }}>Сбросить</button>
+            )}
+            <span style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--color-text-muted)' }}>
+                Показано: {formatNumber(filteredRows.length, 0)} из {formatNumber(rows.length, 0)}
+            </span>
+        </div>
+    ) : null;
 
     if (loading) return <>{viewToggle}<div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div></>;
     if (error && rows.length === 0) return <>{viewToggle}<div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>{error}</div></>;
@@ -2396,14 +2739,18 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 </div>
             )}
 
+            {statusFilters}
+
             <TanStackDataTable
                 columns={cols}
-                data={rows}
-                emptyText={showArchived
-                    ? 'Архив пуст'
-                    : (kind === 'assembly'
-                        ? 'Нет заявок на сборку — выполните синхронизацию во вкладке «Реквизиты»'
-                        : 'Нет заявок на приёмку — выполните синхронизацию во вкладке «Реквизиты»')}
+                data={filteredRows}
+                emptyText={(stageFilter || statusFilter)
+                    ? 'Нет заявок с выбранным статусом'
+                    : (showArchived
+                        ? 'Архив пуст'
+                        : (kind === 'assembly'
+                            ? 'Нет заявок на сборку — выполните синхронизацию во вкладке «Реквизиты»'
+                            : 'Нет заявок на приёмку — выполните синхронизацию во вкладке «Реквизиты»'))}
                 emptyIcon={showArchived ? '🗄️' : (kind === 'assembly' ? '🧰' : '📥')}
                 exportName={kind === 'assembly' ? 'ff_assembly_requests' : 'ff_inbound_requests'}
             />

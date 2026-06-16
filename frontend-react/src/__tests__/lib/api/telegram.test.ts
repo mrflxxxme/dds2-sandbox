@@ -83,3 +83,24 @@ describe('telegram.toggleTelegramNotify', () => {
         expect(body.enabled).toBe(false);
     });
 });
+
+describe('telegram.toggleTelegramFfNotify', () => {
+    it('PATCHes ff-notify setting to enabled=true', async () => {
+        const spy = mockFetch({ message: 'ok' });
+        const api = makeApi();
+        await api.toggleTelegramFfNotify(3, true);
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/telegram/chats/3/ff-notify');
+        expect((init as RequestInit).method).toBe('PATCH');
+        const body = JSON.parse((init as RequestInit).body as string);
+        expect(body.enabled).toBe(true);
+    });
+
+    it('PATCHes ff-notify setting to enabled=false', async () => {
+        const spy = mockFetch({ message: 'ok' });
+        const api = makeApi();
+        await api.toggleTelegramFfNotify(3, false);
+        const body = JSON.parse((spy.mock.calls[0][1] as RequestInit).body as string);
+        expect(body.enabled).toBe(false);
+    });
+});

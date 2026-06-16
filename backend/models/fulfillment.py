@@ -58,12 +58,46 @@ class FulfillmentStock(Base):
     qty_defect: Mapped[int] = mapped_column(Integer, default=0)
     qty_nominal: Mapped[int] = mapped_column(Integer, default=0)
     external_product_id: Mapped[str | None] = mapped_column(String(100))
+    # Короб → россыпь. base_barcode — ШК россыпи (EAN13), к которому относится
+    # строка-короб (её собственный barcode — ШК короба, ITF14); units_per_box —
+    # штук россыпи в одном коробе. Для россыпных строк base_barcode=NULL,
+    # units_per_box=1. Остатки короба сводятся к россыпи (qty × units_per_box)
+    # в list_stocks. migfull-специфика (авто-вывод: ITF14→EAN13 по GTIN-14 +
+    # «короб N шт.» из названия); прочие провайдеры — дефолты.
+    base_barcode: Mapped[str | None] = mapped_column(String(100))
+    units_per_box: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     synced_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
     __table_args__ = (
         UniqueConstraint("project_id", "warehouse_id", "barcode", name="uq_ff_stock_wh_barcode"),
         Index("ix_fulfillment_stocks_project_wh", "project_id", "warehouse_id"),
         Index("ix_fulfillment_stocks_nomenclature_id", "nomenclature_id"),
+    )
+
+
+class FulfillmentBoxOverride(Base):
+    """Ручное сопоставление короб→россыпь — когда авто-вывод не справился.
+
+    Побеждает авто-вывод при синке (см. _normalize_migfull_stock): по ШК короба
+    привязываем нашу номенклатуру (base_barcode = её ШК россыпи) и штук в коробе.
+    Привязка только к существующей номенклатуре (nomenclature_id).
+    """
+
+    __tablename__ = "fulfillment_box_overrides"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
+    box_barcode: Mapped[str] = mapped_column(String(100), nullable=False)  # ШК короба у ФФ
+    nomenclature_id: Mapped[int] = mapped_column(Integer, ForeignKey("nomenclature.id"), nullable=False)
+    base_barcode: Mapped[str] = mapped_column(String(100), nullable=False)  # ШК россыпи (= nomenclature.barcode)
+    units_per_box: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "warehouse_id", "box_barcode", name="uq_ff_box_override_wh_barcode"),
+        Index("ix_ff_box_overrides_project_wh", "project_id", "warehouse_id"),
     )
 
 

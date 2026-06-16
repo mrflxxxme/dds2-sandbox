@@ -64,3 +64,18 @@ async def toggle_notify(
         raise HTTPException(status_code=404, detail="Привязка не найдена")
     status = "включён" if body.enabled else "выключен"
     return {"message": f"Дайджест {status}"}
+
+
+@router.patch("/chats/{binding_id}/ff-notify")
+async def toggle_ff_notify(
+    binding_id: int,
+    body: ToggleNotifyRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle fulfillment status notifications (assembly READY + inbound acceptance) for a chat binding."""
+    ok = await telegram_service.toggle_ff_notify(db, binding_id, project.id, body.enabled)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Привязка не найдена")
+    status = "включены" if body.enabled else "выключены"
+    return {"message": f"Уведомления ФФ {status}"}

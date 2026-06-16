@@ -599,6 +599,7 @@ export interface TelegramChatBinding {
   project_id: number;
   brand: string | null;
   notify_enabled: boolean;
+  ff_notify_enabled: boolean;
   created_by_id: number;
   created_at: string;
 }
@@ -3418,6 +3419,10 @@ export interface FfStockRow {
   ff_reserve: number;
   ff_defect: number;
   ff_nominal: number;
+  /** из ff_good пришло коробами (в штуках россыпи) */
+  ff_box_units: number;
+  /** сколько коробов годного сведено в этот товар */
+  ff_box_count: number;
   our_quantity: number;
   our_defect: number;
   /** ff_good - our_quantity */
@@ -3428,6 +3433,8 @@ export interface FfStockTotals {
   ff_good: number;
   ff_reserve: number;
   ff_defect: number;
+  /** сколько штук годного пришло коробами */
+  ff_box_units: number;
   our_quantity: number;
   diff: number;
   /** строк ФФ без нашей номенклатуры */
@@ -3442,6 +3449,43 @@ export interface FfStocksResponse {
   subjects: string[];
   /** distinct бренды для фильтра */
   brands: string[];
+}
+
+/** Строка сопоставления короб→россыпь (авто-вывод при синке) */
+export interface FfBoxPack {
+  /** ШК короба (ITF14) */
+  box_barcode: string;
+  /** ШК россыпи (EAN13), выведенный по GTIN-14 */
+  base_barcode: string;
+  /** штук россыпи в коробе («короб N шт.» из названия) */
+  units_per_box: number;
+  /** название коробной карточки у ФФ */
+  name: string | null;
+  nomenclature_id: number | null;
+  /** наш артикул (если сматчен) */
+  article_seller: string | null;
+  subject: string | null;
+  /** остаток в коробах */
+  box_qty: number;
+  /** = box_qty × units_per_box (в штуках россыпи) */
+  units_qty: number;
+  /** сматчен ли короб с нашей номенклатурой */
+  matched: boolean;
+  /** auto — авто-вывод | manual — ручной override | unmapped — не сопоставлен */
+  source: 'auto' | 'manual' | 'unmapped';
+}
+
+export interface FfBoxOverridePayload {
+  nomenclature_id: number;
+  units_per_box: number;
+}
+
+/** Кандидат номенклатуры для ручной привязки короба */
+export interface FfNomenclatureOption {
+  id: number;
+  barcode: string;
+  article_seller: string | null;
+  subject: string | null;
 }
 
 export type FfRequestKind = 'assembly' | 'inbound';
@@ -3538,10 +3582,15 @@ export interface FfRequestDetailProduct {
   nomenclature_id: number | null;
   /** наш артикул (если товар сматчен) */
   article_seller: string | null;
+  /** заявлено; для короба — уже в штуках россыпи (×units_per_box) */
   qty: number;
   accepted_qty: number;
   delivery_qty: number;
   defect_qty: number;
+  /** штук россыпи в коробе (1 — позиция россыпью) */
+  units_per_box: number;
+  /** сколько коробов (если позиция коробом), иначе 0 */
+  box_qty: number;
   /** кол-во в связанном нашем документе; null — связи нет */
   our_qty: number | null;
   color: string | null;

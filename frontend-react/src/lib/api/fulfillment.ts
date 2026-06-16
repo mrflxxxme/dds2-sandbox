@@ -1,9 +1,12 @@
 /** Fulfillment integration API methods (skladbot.ru, wmscelicom, migfull.app) */
 import { ApiClient } from './client';
 import type {
+    FfBoxOverridePayload,
+    FfBoxPack,
     FfCreateAssemblyResult,
     FfLinkCandidatesResponse,
     FfLinkPayload,
+    FfNomenclatureOption,
     FfOverviewResponse,
     FfRequestDetail,
     FfRequestKind,
@@ -38,6 +41,23 @@ export function addFulfillmentMethods(api: ApiClient) {
         // ─── Stocks ──────────────────────────────────────────────────
         getFulfillmentStocks(warehouseId: number) {
             return api.request<FfStocksResponse>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/stocks`);
+        },
+
+        // ─── Сопоставление короб→россыпь ─────────────────────────────
+        getFulfillmentBoxPacks(warehouseId: number) {
+            return api.request<FfBoxPack[]>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/box-packs`);
+        },
+        searchFulfillmentNomenclature(warehouseId: number, q: string) {
+            const params = new URLSearchParams();
+            if (q) params.set('q', q);
+            const qs = params.toString();
+            return api.request<FfNomenclatureOption[]>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/box-packs/nomenclature-search${qs ? `?${qs}` : ''}`);
+        },
+        setFulfillmentBoxOverride(warehouseId: number, boxBarcode: string, payload: FfBoxOverridePayload) {
+            return api.request<FfBoxPack>('PUT', `/api/v1/warehouse/${warehouseId}/fulfillment/box-packs/${encodeURIComponent(boxBarcode)}/override`, payload);
+        },
+        deleteFulfillmentBoxOverride(warehouseId: number, boxBarcode: string) {
+            return api.request<FfBoxPack | null>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/box-packs/${encodeURIComponent(boxBarcode)}/override`);
         },
 
         // ─── Overview (сводная «Заявки ФФ» по всем складам) ─────────

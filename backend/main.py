@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001, RUF002, RUF003
 """
 DDS Financial Management System - FastAPI Backend
 
@@ -176,14 +177,13 @@ async def lifespan(app: FastAPI):
 
                 tg_bot_ref, tg_dp = create_bot()
 
+                # Бот стартует ТОЛЬКО в одном worker-контейнере (DDS_ROLE-гейт
+                # выше), поэтому long-polling не конфликтует (единственный
+                # getUpdates-консьюмер). На прод-хосте в РФ Telegram блокирует
+                # ВХОДЯЩИЙ webhook (RKN), поэтому polling через TELEGRAM_PROXY —
+                # единственный рабочий режим. Честно уважаем TELEGRAM_USE_POLLING
+                # во всех окружениях.
                 use_polling = settings.TELEGRAM_USE_POLLING
-                if use_polling and settings.DDS_ENV != "development":
-                    logger.warning(
-                        "TELEGRAM_USE_POLLING=True ignored (DDS_ENV=%s) — "
-                        "forcing webhook mode to avoid bot conflicts",
-                        settings.DDS_ENV,
-                    )
-                    use_polling = False
 
                 if use_polling:
                     import asyncio
@@ -196,7 +196,7 @@ async def lifespan(app: FastAPI):
                         logger.warning("Telegram bot: failed to delete webhook: %s — polling may fail", e)
                     # Start polling in background task (non-blocking)
                     _polling_task = asyncio.create_task(tg_dp.start_polling(tg_bot_ref))
-                    logger.info("Telegram bot: polling started (local dev)")
+                    logger.info("Telegram bot: polling started (mode=polling, DDS_ENV=%s)", settings.DDS_ENV)
                 else:
                     webhook_url = "https://app.vyatkin-wb.ru/api/v1/bot/webhook"
                     await tg_bot_ref.set_webhook(
@@ -224,7 +224,7 @@ async def lifespan(app: FastAPI):
     try:
         from backend.integrations.telegram_bot import bot as tg_bot_shutdown, dp as tg_dp_shutdown
 
-        _shutdown_polling = settings.TELEGRAM_USE_POLLING and settings.DDS_ENV == "development"
+        _shutdown_polling = settings.TELEGRAM_USE_POLLING
         if tg_dp_shutdown and _shutdown_polling:
             await tg_dp_shutdown.stop_polling()
         if tg_bot_shutdown:
