@@ -78,7 +78,7 @@ class FfBoxPack(BaseModel):
     """Строка сопоставления короб→россыпь (авто-вывод при синке)."""
 
     box_barcode: str  # ШК короба (ITF14)
-    base_barcode: str  # ШК россыпи (EAN13), выведенный по GTIN-14
+    base_barcode: str | None = None  # ШК россыпи (EAN13); None — короб ещё не сопоставлен
     units_per_box: int  # штук россыпи в коробе («короб N шт.» из названия)
     name: str | None = None  # название коробной карточки у ФФ
     nomenclature_id: int | None = None
