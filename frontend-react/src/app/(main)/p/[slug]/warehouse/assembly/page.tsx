@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber, pluralRu } from '@/lib/utils';
 import { Toast } from '@/components';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
 import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, Warehouse } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
@@ -350,8 +352,13 @@ export default function AssemblyListPage() {
     const [searchInput, setSearchInput] = useState('');
     const [search, setSearch] = useState('');
     const [brandFilter, setBrandFilter] = useState('');
-    const [page, setPage] = useState(0);
-    const PAGE_SIZE = 50;
+    const [ffLinkFilter, setFfLinkFilter] = useState<'' | 'none' | 'linked'>('');
+    // Пагинация/сортировка/экспорт — клиентские, через TanStackDataTable: грузим весь
+    // отфильтрованный набор. Потолок = серверный кап эндпоинта (limit ≤ 500; _build_response
+    // делает per-row запросы, потому кап и стоит). Если набор больше — показываем подсказку
+    // «показаны первые N» (см. page-subtitle), чтобы не было тихой обрезки сортировки/экспорта.
+    const LOAD_LIMIT = 500;
+    const CLIENT_PAGE_SIZE = 50;
 
     // Warehouse options (FULFILLMENT only)
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
@@ -390,8 +397,8 @@ export default function AssemblyListPage() {
                 date_from: dateFrom || undefined,
                 date_to: dateTo || undefined,
                 brand: brandFilter || undefined,
-                limit: PAGE_SIZE,
-                offset: page * PAGE_SIZE,
+                ff_link: ffLinkFilter || undefined,
+                limit: LOAD_LIMIT,
             });
             setItems(resp.items);
             setTotal(resp.total);
@@ -399,18 +406,15 @@ export default function AssemblyListPage() {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
         setLoading(false);
-    }, [warehouseId, statusFilter, search, dateFrom, dateTo, brandFilter, page]);
+    }, [warehouseId, statusFilter, search, dateFrom, dateTo, brandFilter, ffLinkFilter]);
 
     useEffect(() => { load(); }, [load]);
 
     const handleSearchKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
             setSearch(searchInput);
-            setPage(0);
         }
     };
-
-    const totalPages = Math.ceil(total / PAGE_SIZE);
 
     // ─── Inline actions ─────────────────────────────────────────────────
 
@@ -530,6 +534,113 @@ export default function AssemblyListPage() {
         }
     };
 
+    // ─── Columns (TanStackDataTable: сортировка + Excel) ────────────────────
+    // Inline-редактирование (палеты/вес/дата/статус) и кнопки-действия живут
+    // внутри render-ячеек; getValue даёт сортировку по вычисляемым колонкам,
+    // exportValue — корректную выгрузку JSX-ячеек.
+    const itemsQty = (row: AssemblyRequest) => row.items ? row.items.reduce((s, i) => s + (i.quantity || 0), 0) : 0;
+    const cols: Column[] = [
+        {
+            key: 'number', label: '№',
+            render: (_v, row: AssemblyRequest) => <span style={{ fontWeight: 500 }}>{row.number}</span>,
+            exportValue: (row: AssemblyRequest) => row.number,
+        },
+        {
+            key: 'status', label: 'Статус',
+            getValue: (row: AssemblyRequest) => STATUS_MAP[row.status]?.label || row.status,
+            render: (_v, row: AssemblyRequest) => (
+                <StatusBadge item={row} onStatusChange={handleStatusChange} onShip={handleShipFromList} onDelete={handleDeleteAssembly} />
+            ),
+            exportValue: (row: AssemblyRequest) => STATUS_MAP[row.status]?.label || row.status,
+        },
+        {
+            key: 'ff', label: 'Заявка ФФ',
+            getValue: (row: AssemblyRequest) => row.ff_request_number || '',
+            render: (_v, row: AssemblyRequest) => row.ff_request_id ? (
+                <Link
+                    href={`/p/${slug}/warehouse/${row.ff_warehouse_id ?? row.warehouse_id}/ff-request/${row.ff_request_id}`}
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ color: 'var(--color-accent)', fontWeight: 500, fontSize: 13 }}
+                >
+                    {row.ff_request_number || `#${row.ff_request_id}`}{row.ff_stage_title ? ` (${row.ff_stage_title})` : ''}
+                </Link>
+            ) : '—',
+            exportValue: (row: AssemblyRequest) => row.ff_request_number || '',
+        },
+        {
+            key: 'brands', label: 'Бренд',
+            render: (_v, row: AssemblyRequest) => <span style={{ fontSize: 13 }}>{row.brands || '—'}</span>,
+            exportValue: (row: AssemblyRequest) => row.brands || '',
+        },
+        {
+            key: 'warehouse_name', label: 'Склад',
+            render: (_v, row: AssemblyRequest) => <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{row.warehouse_name || '—'}</span>,
+            exportValue: (row: AssemblyRequest) => row.warehouse_name || '',
+        },
+        {
+            key: 'wb_supply_name', label: 'FBO поставка',
+            render: (_v, row: AssemblyRequest) => (
+                <span style={{ fontSize: 13 }}>
+                    {row.wb_supply_name || '—'}
+                    {row.wb_warehouse_name && (
+                        <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>{row.wb_warehouse_name}</span>
+                    )}
+                </span>
+            ),
+            exportValue: (row: AssemblyRequest) => row.wb_supply_name || '',
+        },
+        {
+            key: 'items_qty', label: 'Товары', align: 'right',
+            getValue: itemsQty,
+            render: (_v, row: AssemblyRequest) => row.items ? formatNumber(itemsQty(row), 0) : '—',
+            exportValue: itemsQty,
+        },
+        {
+            key: 'pallets_count', label: 'Палеты', align: 'right',
+            render: (_v, row: AssemblyRequest) => (
+                <EditableCell
+                    value={row.pallets_count}
+                    editable={EDITABLE_STATUSES.includes(row.status)}
+                    highlight={row.status === 'IN_PROGRESS' && (!row.pallets_count || row.pallets_count <= 0)}
+                    onSave={(val) => handlePalletsChange(row, val)}
+                />
+            ),
+            exportValue: (row: AssemblyRequest) => row.pallets_count,
+        },
+        {
+            key: 'total_weight_kg', label: 'Общий вес', align: 'right',
+            getValue: (row: AssemblyRequest) => row.total_weight_kg || 0,
+            render: (_v, row: AssemblyRequest) => (
+                <EditableCell
+                    value={row.total_weight_kg || 0}
+                    suffix="кг"
+                    editable={EDITABLE_STATUSES.includes(row.status)}
+                    highlight={row.status === 'IN_PROGRESS' && (!row.total_weight_kg || row.total_weight_kg <= 0)}
+                    step={0.1}
+                    onSave={(val) => handleWeightChange(row, val)}
+                />
+            ),
+            exportValue: (row: AssemblyRequest) => row.total_weight_kg || 0,
+        },
+        {
+            key: 'estimated_ready_date', label: 'Дата готовности',
+            getValue: (row: AssemblyRequest) => row.estimated_ready_date || '',
+            render: (_v, row: AssemblyRequest) => (
+                <EditableDateCell
+                    value={row.estimated_ready_date}
+                    editable={EDITABLE_STATUSES.includes(row.status)}
+                    onSave={(val) => handleDateChange(row, val)}
+                />
+            ),
+            exportValue: (row: AssemblyRequest) => row.estimated_ready_date ? formatDate(row.estimated_ready_date) : '',
+        },
+        {
+            key: 'created_at', label: 'Создана',
+            render: (_v, row: AssemblyRequest) => formatDate(row.created_at),
+            exportValue: (row: AssemblyRequest) => row.created_at,
+        },
+    ];
+
     // ─── Render ───────────────────────────────────────────────────────────
 
     return (
@@ -543,7 +654,10 @@ export default function AssemblyListPage() {
             <div className="page-header">
                 <div>
                     <h1 className="page-title">Заявки на сборку</h1>
-                    <p className="page-subtitle">Всего: {total}</p>
+                    <p className="page-subtitle">
+                        Всего: {total}
+                        {items.length < total && ` · показаны первые ${formatNumber(items.length, 0)} — уточните фильтры`}
+                    </p>
                 </div>
                 {canEdit() && (
                     <Link href={`/p/${slug}/warehouse/assembly/new`}>
@@ -598,7 +712,7 @@ export default function AssemblyListPage() {
                         <select
                             className="form-input"
                             value={warehouseId}
-                            onChange={e => { setWarehouseId(e.target.value ? Number(e.target.value) : ''); setPage(0); }}
+                            onChange={e => { setWarehouseId(e.target.value ? Number(e.target.value) : ''); }}
                         >
                             <option value="">Все склады</option>
                             {warehouses.map(w => (
@@ -610,7 +724,7 @@ export default function AssemblyListPage() {
                         <select
                             className="form-input"
                             value={statusFilter}
-                            onChange={e => { setStatusFilter(e.target.value); setPage(0); }}
+                            onChange={e => { setStatusFilter(e.target.value); }}
                         >
                             {STATUS_OPTIONS_FILTER.map(o => (
                                 <option key={o.value} value={o.value}>{o.label}</option>
@@ -621,7 +735,7 @@ export default function AssemblyListPage() {
                         <select
                             className="form-input"
                             value={brandFilter}
-                            onChange={e => { setBrandFilter(e.target.value); setPage(0); }}
+                            onChange={e => { setBrandFilter(e.target.value); }}
                         >
                             <option value="">Все бренды</option>
                             {brandOptions.map(b => (
@@ -630,11 +744,22 @@ export default function AssemblyListPage() {
                         </select>
                     </div>
                     <div className="form-group">
+                        <select
+                            className="form-input"
+                            value={ffLinkFilter}
+                            onChange={e => { setFfLinkFilter(e.target.value as '' | 'none' | 'linked'); }}
+                        >
+                            <option value="">ФФ-связь: все</option>
+                            <option value="none">Без связи</option>
+                            <option value="linked">Со связью</option>
+                        </select>
+                    </div>
+                    <div className="form-group">
                         <input
                             className="form-input"
                             type="date"
                             value={dateFrom}
-                            onChange={e => { setDateFrom(e.target.value); setPage(0); }}
+                            onChange={e => { setDateFrom(e.target.value); }}
                             placeholder="Дата от"
                         />
                     </div>
@@ -643,7 +768,7 @@ export default function AssemblyListPage() {
                             className="form-input"
                             type="date"
                             value={dateTo}
-                            onChange={e => { setDateTo(e.target.value); setPage(0); }}
+                            onChange={e => { setDateTo(e.target.value); }}
                             placeholder="Дата до"
                         />
                     </div>
@@ -672,119 +797,14 @@ export default function AssemblyListPage() {
                     </div>
                 </div>
             ) : (
-                <div className="glass-card" style={{ overflow: 'auto' }}>
-                    {/* TODO: migrate to TanStackDataTable — has inline editing (EditableCell, EditableDateCell, StatusBadge select) */}
-                    <table className="data-table">
-                        <thead>
-                            <tr>
-                                <th>№</th>
-                                <th>Статус</th>
-                                <th>Бренд</th>
-                                <th>Склад</th>
-                                <th>FBO поставка</th>
-                                <th style={{ textAlign: 'right' }}>Товары</th>
-                                <th style={{ textAlign: 'right' }}>Палеты</th>
-                                <th style={{ textAlign: 'right' }}>Общий вес</th>
-                                <th>Дата готовности</th>
-                                <th>Создана</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {items.map(item => {
-                                const canEdit = EDITABLE_STATUSES.includes(item.status);
-                                const needsHighlight = item.status === 'IN_PROGRESS';
-                                const isJustCreated = highlightActive && justCreatedIds.has(item.id);
-                                return (
-                                    <tr
-                                        key={item.id}
-                                        style={{
-                                            cursor: 'pointer',
-                                            background: isJustCreated ? 'rgba(52,199,89,0.15)' : undefined,
-                                            transition: 'background 0.5s ease',
-                                        }}
-                                        onClick={() => router.push(`/p/${slug}/warehouse/assembly/${item.id}`)}
-                                    >
-                                        <td style={{ fontWeight: 500 }}>{item.number}</td>
-                                        <td>
-                                            <StatusBadge item={item} onStatusChange={handleStatusChange} onShip={handleShipFromList} onDelete={handleDeleteAssembly} />
-                                        </td>
-                                        <td style={{ fontSize: 13 }}>
-                                            {item.brands || '\u2014'}
-                                        </td>
-                                        <td style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-                                            {item.warehouse_name || '\u2014'}
-                                        </td>
-                                        <td style={{ fontSize: 13 }}>
-                                            {item.wb_supply_name || '\u2014'}
-                                            {item.wb_warehouse_name && (
-                                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                                    {item.wb_warehouse_name}
-                                                </div>
-                                            )}
-                                        </td>
-                                        <td style={{ textAlign: 'right', fontSize: 13 }}>
-                                            {item.items ? item.items.reduce((sum, i) => sum + (i.quantity || 0), 0) : '\u2014'}
-                                        </td>
-                                        <td style={{ textAlign: 'right' }}>
-                                            <EditableCell
-                                                value={item.pallets_count}
-                                                editable={canEdit}
-                                                highlight={needsHighlight && (!item.pallets_count || item.pallets_count <= 0)}
-                                                onSave={(val) => handlePalletsChange(item, val)}
-                                            />
-                                        </td>
-                                        <td style={{ textAlign: 'right' }}>
-                                            <EditableCell
-                                                value={item.total_weight_kg || 0}
-                                                suffix="кг"
-                                                editable={canEdit}
-                                                highlight={needsHighlight && (!item.total_weight_kg || item.total_weight_kg <= 0)}
-                                                step={0.1}
-                                                onSave={(val) => handleWeightChange(item, val)}
-                                            />
-                                        </td>
-                                        <td>
-                                            <EditableDateCell
-                                                value={item.estimated_ready_date}
-                                                editable={canEdit}
-                                                onSave={(val) => handleDateChange(item, val)}
-                                            />
-                                        </td>
-                                        <td>{formatDate(item.created_at)}</td>
-                                    </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
-
-                    {/* Pagination */}
-                    {totalPages > 1 && (
-                        <div style={{
-                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                            padding: '12px 16px', borderTop: '1px solid var(--color-border)',
-                        }}>
-                            <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
-                                Показано {page * PAGE_SIZE + 1}&ndash;{Math.min((page + 1) * PAGE_SIZE, total)} из {total}
-                            </span>
-                            <div style={{ display: 'flex', gap: 4 }}>
-                                <button
-                                    className="btn btn-secondary btn-sm"
-                                    disabled={page === 0}
-                                    onClick={() => setPage(p => p - 1)}
-                                >
-                                    &larr;
-                                </button>
-                                <button
-                                    className="btn btn-secondary btn-sm"
-                                    disabled={page >= totalPages - 1}
-                                    onClick={() => setPage(p => p + 1)}
-                                >
-                                    &rarr;
-                                </button>
-                            </div>
-                        </div>
-                    )}
-                </div>
+                <TanStackDataTable
+                    columns={cols}
+                    data={items}
+                    onRowClick={(row: AssemblyRequest) => router.push(`/p/${slug}/warehouse/assembly/${row.id}`)}
+                    rowClassName={(row: AssemblyRequest) => highlightActive && justCreatedIds.has(row.id) ? 'assembly-row-just-created' : ''}
+                    pageSize={CLIENT_PAGE_SIZE}
+                    exportName="assembly_requests"
+                />
             )}
         </div>
     );

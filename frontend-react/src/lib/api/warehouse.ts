@@ -322,6 +322,7 @@ export function addWarehouseMethods(api: ApiClient) {
         getAssemblyRequests(params?: {
             warehouse_id?: number; counterparty_id?: number; draft_id?: number; status?: string; search?: string;
             date_from?: string; date_to?: string; brand?: string;
+            ff_link?: 'none' | 'linked';
             limit?: number; offset?: number;
         }) {
             const query = new URLSearchParams();

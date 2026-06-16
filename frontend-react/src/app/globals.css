@@ -2745,3 +2745,7 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
     margin-top: 4px;
 }
 .sc-tr-border { border-top: 1px solid var(--color-border); }
+
+/* Подсветка только что созданных заявок на сборку (флеш ~3с после создания
+   из распределения). Применяется к строке TanStackDataTable через rowClassName. */
+.assembly-row-just-created { background: rgba(52, 199, 89, 0.15); transition: background 0.5s ease; }
