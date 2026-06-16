@@ -3398,6 +3398,8 @@ export interface FfSyncResult {
   stocks_synced: number;
   requests_synced: number;
   unmatched_barcodes: number;
+  assemblies_marked_ready?: number;
+  inbound_receipts_accepted?: number;
   synced_at: string;
 }
 

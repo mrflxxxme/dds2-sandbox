@@ -49,6 +49,7 @@ from backend.models import (
     FulfillmentStock,
     InboundReceipt,
     InboundReceiptItem,
+    InboundStatus,
     IntegrationKey,
     Nomenclature,
     SyncLog,
@@ -201,6 +202,20 @@ def _transition_assembly_to_ready(
             comment=f"ФФ {ff_req.number or ff_req.external_id}: стадия «{ff_req.stage_title or 'завершена'}»",
         )
     )
+
+
+def _inbound_accept_signal(is_completed: bool) -> bool:
+    """ФФ принял приёмку на остатки → нашу приёмку EXPECTED/DRAFT можно ACCEPT.
+
+    Сигнал прихода на остатки у всех провайдеров — is_completed: skladbot
+    (тип 852/2644) при завершении приёмки очищает стадию «Приемка» и ставит
+    is_completed; wmscelicom (терминальный статус разгрузки) и migfull
+    (submission closed) — так же. Строгий сигнал (в отличие от сборки,
+    _assembly_ready_signal): accept_receipt ПОСТИТ сток на склад, ложный приём
+    дороже ложного READY (откат — лишь ACCEPTED→CANCELLED со встречными
+    движениями). Отменённые приёмки приходят archived=True и отсекаются синком.
+    """
+    return bool(is_completed)
 
 
 # Advisory lock namespace для синка (pg_advisory_xact_lock(ns, project_id)).
@@ -520,29 +535,71 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     )
     assemblies_marked_ready = await _mark_linked_assemblies_ready(db, project_id, list(linked_result.scalars().all()))
 
+    # Кандидаты на авто-ACCEPT приёмок собираем ПОД синк-транзакцией (нужны
+    # свежие is_completed после UPSERT), но сам приём — после commit (ниже):
+    # accept_receipt постит сток, лочит строку и коммитит сам, внутри открытой
+    # синк-транзакции его звать нельзя. expired не исключаем (приёмка активна).
+    inbound_linked = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.provider == provider,
+            FulfillmentRequest.kind == FfRequestKind.INBOUND.value,
+            FulfillmentRequest.inbound_receipt_id.is_not(None),
+            FulfillmentRequest.is_completed == True,
+            FulfillmentRequest.archived == False,
+            FulfillmentRequest.local_archived == False,
+        )
+        .limit(_MIRROR_SELECT_LIMIT)
+    )
+    inbound_accept_ids = await _collect_inbound_accept_candidates(db, project_id, list(inbound_linked.scalars().all()))
+
     synced_at = utcnow()
     key = await db.get(IntegrationKey, key_id)
     if key:
         key.last_sync_at = synced_at
     await db.commit()
 
+    # Авто-ACCEPT приёмок (постинг стока) — ПОСЛЕ commit синка, каждая своей
+    # транзакцией. accept_receipt идемпотентен (row-lock + guard «сток уже
+    # применён»), повторный синк не задвоит. Ошибку приёмки не даём свалить синк.
+    inbound_receipts_accepted = 0
+    if inbound_accept_ids:
+        from backend.database import AsyncSessionLocal
+        from backend.services.warehouse_inbound import accept_receipt
+
+        # Каждый приём — в СВОЕЙ сессии: accept_receipt сам коммитит/рефрешит,
+        # а на ошибке (напр. приёмка без позиций) откат не должен затрагивать
+        # сессию синка/вызывающего — иначе ловим expired-attribute на их объектах.
+        for receipt_id in inbound_accept_ids:
+            try:
+                async with AsyncSessionLocal() as accept_db:
+                    await accept_receipt(accept_db, project_id, receipt_id)
+                inbound_receipts_accepted += 1
+            except Exception as e:  # — best-effort, синк уже зафиксирован
+                logger.warning("FF auto-accept: приёмка %s пропущена (%s)", receipt_id, e)
+
     if assemblies_marked_ready:
         await invalidate_cache("reports:assembly_flow")
 
     logger.info(
-        "Fulfillment sync: project=%s warehouse=%s stocks=%d requests=%d unmatched=%d marked_ready=%d",
+        "Fulfillment sync: project=%s warehouse=%s stocks=%d requests=%d unmatched=%d "
+        "marked_ready=%d inbound_accepted=%d",
         project_id,
         warehouse_id,
         stocks_synced,
         requests_synced,
         unmatched,
         assemblies_marked_ready,
+        inbound_receipts_accepted,
     )
     return {
         "stocks_synced": stocks_synced,
         "requests_synced": requests_synced,
         "unmatched_barcodes": unmatched,
         "assemblies_marked_ready": assemblies_marked_ready,
+        "inbound_receipts_accepted": inbound_receipts_accepted,
         "synced_at": synced_at,
     }
 
@@ -1272,6 +1329,37 @@ async def _mark_linked_assemblies_ready(
     for doc in docs:
         _transition_assembly_to_ready(db, project_id, doc, ff_by_assembly[doc.id])
     return len(docs)
+
+
+async def _collect_inbound_accept_candidates(
+    db: AsyncSession,
+    project_id: int,
+    ff_requests: list[FulfillmentRequest],
+) -> list[int]:
+    """receipt_id'ы наших EXPECTED/DRAFT приёмок, чьи ФФ-заявки приняты на остатки.
+
+    Только СБОР id под синк-транзакцией; сам приём (accept_receipt — постит
+    сток, лочит строку, коммитит) делается ПОСЛЕ commit синка, отдельными
+    транзакциями. expired/просрочена не исключаем (как и в авто-READY сборок —
+    приёмка активна). ACCEPTED/CANCELLED приёмки отфильтровываем здесь, чтобы
+    зря не дёргать accept_receipt (он на них бросит ValueError).
+    """
+    receipt_ids = {
+        req.inbound_receipt_id
+        for req in ff_requests
+        if req.inbound_receipt_id is not None and _inbound_accept_signal(req.is_completed)
+    }
+    if not receipt_ids:
+        return []
+    result = await db.execute(
+        select(InboundReceipt.id).where(
+            InboundReceipt.project_id == project_id,
+            InboundReceipt.id.in_(receipt_ids),
+            InboundReceipt.is_deleted == False,
+            InboundReceipt.status.in_((InboundStatus.DRAFT.value, InboundStatus.EXPECTED.value)),
+        )
+    )
+    return [row[0] for row in result.all()]
 
 
 def _parse_date(value: object) -> date | None:

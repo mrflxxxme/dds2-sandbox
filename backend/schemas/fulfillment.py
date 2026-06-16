@@ -310,6 +310,7 @@ class FfSyncResult(BaseModel):
     requests_synced: int = 0
     unmatched_barcodes: int = 0
     assemblies_marked_ready: int = 0  # наших заявок переведено в READY по стадии ФФ
+    inbound_receipts_accepted: int = 0  # наших приёмок принято (сток запостен) по сигналу ФФ
     synced_at: datetime
 
 
