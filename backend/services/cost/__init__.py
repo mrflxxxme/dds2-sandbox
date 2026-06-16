@@ -46,6 +46,12 @@ from backend.services.cost.orders import (
 from backend.services.cost.plan_gen import (
     generate_payment_plan,
 )
+from backend.services.cost.recalc import (
+    find_orders_by_articles,
+    find_orders_by_barcodes,
+    find_orders_by_subjects,
+    recalc_orders,
+)
 
 __all__ = [
     # Helpers
@@ -74,6 +80,11 @@ __all__ = [
     "create_cost_order",
     "update_cost_order",
     "delete_cost_order",
+    # Recalc (auto cost)
+    "recalc_orders",
+    "find_orders_by_barcodes",
+    "find_orders_by_subjects",
+    "find_orders_by_articles",
     # Items
     "get_cost_order_items",
     "upload_order_items",
