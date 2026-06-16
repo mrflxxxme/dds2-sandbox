@@ -25,6 +25,7 @@ from backend.models import (
     FulfillmentStock,
     InboundReceipt,
     InboundReceiptItem,
+    InboundStatus,
     IntegrationKey,
     Nomenclature,
     SyncLog,
@@ -1723,6 +1724,99 @@ async def test_link_request_wip_stage_keeps_in_progress(db_session, project, war
     await db_session.refresh(doc)
     assert doc.status == AssemblyStatus.IN_PROGRESS.value
     assert await _history_rows(db_session, project.id, doc.id) == []
+
+
+# ─── Авто-ACCEPT приёмок по сигналу ФФ (is_completed) ───────────────────────
+
+
+def test_inbound_accept_signal():
+    sig = fulfillment_service._inbound_accept_signal
+    assert sig(True) is True  # ФФ принял на остатки
+    assert sig(False) is False  # ещё в стадии «Приемка»
+
+
+@pytest.mark.asyncio
+async def test_sync_accepts_linked_inbound_receipt(db_session, project, warehouse, connected_key, monkeypatch):
+    """ФФ принял приёмку на остатки (is_completed) → наша EXPECTED приёмка ACCEPT + сток.
+
+    Прод-сценарий WH-R-196798 → IN-150: пока ФФ в стадии «Приемка» — приёмка
+    остаётся EXPECTED; как только is_completed — авто-ACCEPT (постит сток).
+    Проверяем и просроченную (expired) заявку, и идемпотентность повторного синка.
+    """
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+
+    # Приёмка ФФ ещё идёт (стадия «Приемка») — появляется в зеркале
+    _mock_requests(monkeypatch, {852: [_req(8801, stage_title="Приемка", stage_code="acceptance")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    # Наша приёмка EXPECTED + позиция; линкуем к ФФ-заявке
+    receipt = InboundReceipt(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        number=f"IN-{_uid()[:6]}",
+        status=InboundStatus.EXPECTED,
+    )
+    db_session.add(receipt)
+    await db_session.flush()
+    db_session.add(
+        InboundReceiptItem(
+            project_id=project.id,
+            receipt_id=receipt.id,
+            nomenclature_id=nom.id,
+            barcode=bc,
+            expected_qty=10,
+            actual_qty=0,
+        )
+    )
+    await db_session.commit()
+    mirror = await _mirror_row(db_session, project.id, "8801")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, inbound_receipt_id=receipt.id)
+
+    # Пока ФФ не принял — приёмка остаётся EXPECTED, стока нет
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["inbound_receipts_accepted"] == 0
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.EXPECTED
+
+    # ФФ завершил приёмку (is_completed) + ПРОСРОЧЕНА → наша приёмка ACCEPT + сток
+    _mock_requests(
+        monkeypatch,
+        {852: [_req(8801, status="new", completed=1, stage_title=None, stage_code=None, expired=1)]},
+    )
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["inbound_receipts_accepted"] == 1
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.ACCEPTED
+    assert receipt.actual_date == date.today()
+
+    # Сток запостен: actual_qty (auto-fill из expected) = 10
+    stock = (
+        await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.project_id == project.id,
+                WarehouseStock.warehouse_id == warehouse.id,
+                WarehouseStock.barcode == bc,
+            )
+        )
+    ).scalar_one()
+    assert stock.quantity == 10
+
+    # Идемпотентность: повторный синк не задвоит сток
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["inbound_receipts_accepted"] == 0
+    await db_session.refresh(stock)
+    assert stock.quantity == 10
+
+
+@pytest.mark.asyncio
+async def test_sync_inbound_no_accept_without_link(db_session, project, warehouse, connected_key, monkeypatch):
+    """Завершённая приёмка ФФ без связи с нашей приёмкой ничего не постит."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {852: [_req(8802, status="new", completed=1, stage_title=None)]})
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["inbound_receipts_accepted"] == 0
 
 
 # ─── wmscelicom: total_qty / dest_warehouse из списочных методов ─────────────
