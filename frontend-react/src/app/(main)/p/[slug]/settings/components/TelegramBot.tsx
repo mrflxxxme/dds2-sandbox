@@ -52,6 +52,15 @@ export function TelegramBot() {
         }
     };
 
+    const handleToggleFf = async (id: number, current: boolean) => {
+        try {
+            await api.toggleTelegramFfNotify(id, !current);
+            setChats(prev => prev.map(c => c.id === id ? { ...c, ff_notify_enabled: !current } : c));
+        } catch (e: any) {
+            setMsg(e.message);
+        }
+    };
+
     const columns: Column[] = useMemo(() => [
         {
             key: 'chat_id', label: 'Chat ID',
@@ -69,6 +78,18 @@ export function TelegramBot() {
                     onClick={() => handleToggle(row.id, row.notify_enabled)}
                 >
                     {row.notify_enabled ? '🔔 Вкл' : '🔕 Выкл'}
+                </button>
+            ),
+        },
+        {
+            key: 'ff_notify_enabled', label: 'Уведомления ФФ',
+            render: (_v: any, row: any) => (
+                <button
+                    className={`btn btn-sm ${row.ff_notify_enabled ? 'btn-success' : 'btn-secondary'}`}
+                    onClick={() => handleToggleFf(row.id, row.ff_notify_enabled)}
+                    title="о готовности сборки и принятой приёмке"
+                >
+                    {row.ff_notify_enabled ? '📦 Вкл' : '📦 Выкл'}
                 </button>
             ),
         },

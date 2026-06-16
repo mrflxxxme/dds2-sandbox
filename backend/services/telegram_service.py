@@ -158,6 +158,33 @@ async def toggle_notify(db: AsyncSession, binding_id: int, project_id: int, enab
     return True
 
 
+async def toggle_ff_notify(db: AsyncSession, binding_id: int, project_id: int, enabled: bool) -> bool:
+    """Toggle ff_notify_enabled (fulfillment status notifications) for a chat binding."""
+    result = await db.execute(
+        select(TelegramChatBinding).where(
+            TelegramChatBinding.id == binding_id,
+            TelegramChatBinding.project_id == project_id,
+        )
+    )
+    binding = result.scalar_one_or_none()
+    if not binding:
+        return False
+    binding.ff_notify_enabled = enabled
+    await db.commit()
+    return True
+
+
+async def list_ff_notify_chats(db: AsyncSession, project_id: int) -> list[TelegramChatBinding]:
+    """Chat bindings of a project that opted into fulfillment status notifications."""
+    result = await db.execute(
+        select(TelegramChatBinding).where(
+            TelegramChatBinding.project_id == project_id,
+            TelegramChatBinding.ff_notify_enabled == True,
+        )
+    )
+    return list(result.scalars().all())
+
+
 # ─── TMA Authentication ─────────────────────────────────────────────────────
 
 

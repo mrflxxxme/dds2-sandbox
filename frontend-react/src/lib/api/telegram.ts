@@ -16,5 +16,8 @@ export function addTelegramMethods(api: ApiClient) {
         toggleTelegramNotify(bindingId: number, enabled: boolean) {
             return api.request<MessageResponse>('PATCH', `/api/v1/telegram/chats/${bindingId}/notify`, { enabled });
         },
+        toggleTelegramFfNotify(bindingId: number, enabled: boolean) {
+            return api.request<MessageResponse>('PATCH', `/api/v1/telegram/chats/${bindingId}/ff-notify`, { enabled });
+        },
     };
 }

@@ -67,6 +67,7 @@ from backend.models.enums import (
 # Fulfillment (external FF providers: skladbot, migfull)
 from backend.models.fulfillment import (
     FfRequestKind,
+    FulfillmentBoxOverride,
     FulfillmentProvider,
     FulfillmentRequest,
     FulfillmentStatusEvent,
@@ -281,6 +282,7 @@ __all__ = [
     "FxRate",
     # Fulfillment
     "FulfillmentProvider",
+    "FulfillmentBoxOverride",
     "FulfillmentRequest",
     "FulfillmentStatusEvent",
     "FulfillmentStock",

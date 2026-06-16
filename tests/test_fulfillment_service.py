@@ -598,6 +598,502 @@ async def test_list_stocks_union_and_diff(db_session, project, warehouse, connec
     assert diffs == sorted(diffs, reverse=True)
 
 
+# ─── migfull короб → россыпь (box → loose) ──────────────────────────────────
+
+
+def test_ean13_check_digit():
+    assert fulfillment_service._ean13_check_digit("204316033057") == "8"
+    assert fulfillment_service._ean13_check_digit("204346565776") == "9"
+
+
+def test_itf14_to_ean13_gtin14():
+    # ШК короба (ITF14) → ШК россыпи (EAN13): индикатор отброшен, чек пересчитан
+    assert fulfillment_service._itf14_to_ean13("12043160330575") == "2043160330578"
+    assert fulfillment_service._itf14_to_ean13("12043465657766") == "2043465657769"
+    # EAN13 (13 цифр) / нецифры / пусто — не короб
+    assert fulfillment_service._itf14_to_ean13("2043160330578") is None
+    assert fulfillment_service._itf14_to_ean13("1204316033057X") is None
+    assert fulfillment_service._itf14_to_ean13("") is None
+
+
+def test_migfull_box_pack():
+    # Короб: ITF14 + «короб N шт.» в названии → (россыпь EAN13, N)
+    assert fulfillment_service._migfull_box_pack(
+        "12043160330575", "KOSIHKA_210x90_160x90_светло-серый короб 20 шт., 210х90"
+    ) == ("2043160330578", 20)
+    # Россыпь (EAN13) — не короб
+    assert fulfillment_service._migfull_box_pack("2043160330578", "KOSIHKA россыпь") is None
+    # ITF14 без «короб N шт.» в названии — не сводим (кол-во неизвестно)
+    assert fulfillment_service._migfull_box_pack("12043160330575", "KOSIHKA без указания") is None
+    # «короб 1 шт» — не короб (units<=1)
+    assert fulfillment_service._migfull_box_pack("12043160330575", "X короб 1 шт.") is None
+
+
+def test_normalize_migfull_stock_box_vs_loose():
+    box = fulfillment_service._normalize_migfull_stock(
+        {"guid": "g-box", "name": "ELKA короб 10 шт., бежевый", "stock_actual": 5, "stock_locked": 1},
+        {"g-box": "12043160330575"},
+    )
+    assert box["barcode"] == "12043160330575"
+    assert box["base_barcode"] == "2043160330578"
+    assert box["units_per_box"] == 10
+    assert box["qty_good"] == 5
+
+    loose = fulfillment_service._normalize_migfull_stock(
+        {"guid": "g-loose", "name": "ELKA россыпь", "stock_actual": 3},
+        {"g-loose": "2043160330578"},
+    )
+    assert loose["base_barcode"] is None
+    assert loose["units_per_box"] == 1
+
+
+@pytest.mark.asyncio
+async def test_apply_stocks_box_matches_nomenclature_via_base(db_session, project, warehouse):
+    """Короб (ITF14) матчится к номенклатуре по base_barcode (россыпь EAN13)."""
+    base_bc = "2043160330578"
+    box_bc = "12043160330575"
+    nom = await _make_nomenclature(db_session, project.id, base_bc, article="ART-BOX")
+
+    items = [
+        {
+            "barcode": box_bc,
+            "base_barcode": base_bc,
+            "units_per_box": 20,
+            "name": "X короб 20 шт.",
+            "vendor_code": None,
+            "external_product_id": "g-box",
+            "qty_good": 5,
+            "qty_reserve": 0,
+            "qty_defect": 0,
+            "qty_nominal": 5,
+        },
+        {
+            "barcode": base_bc,
+            "base_barcode": None,
+            "units_per_box": 1,
+            "name": "X россыпь",
+            "vendor_code": None,
+            "external_product_id": "g-loose",
+            "qty_good": 3,
+            "qty_reserve": 0,
+            "qty_defect": 0,
+            "qty_nominal": 3,
+        },
+    ]
+    written, unmatched = await fulfillment_service._apply_stocks(db_session, project.id, warehouse.id, "migfull", items)
+    await db_session.commit()
+    assert written == 2
+    assert unmatched == 0  # обе строки сматчены по эффективному ШК
+
+    rows = {r.barcode: r for r in await _ff_stocks(db_session, project.id, warehouse.id)}
+    assert rows[box_bc].nomenclature_id == nom.id
+    assert rows[box_bc].base_barcode == base_bc
+    assert rows[box_bc].units_per_box == 20
+    assert rows[base_bc].nomenclature_id == nom.id
+    assert rows[base_bc].units_per_box == 1
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_merges_box_into_loose(db_session, project, warehouse):
+    """list_stocks сводит короб (qty×units) к россыпи: одна строка на товар."""
+    base_bc = "2043160330578"  # есть короб + россыпь + наш сток
+    box_bc = "12043160330575"
+    only_box_base = "2043465657769"  # только короб, без россыпи и нашего стока
+    only_box_bc = "12043465657766"
+
+    nom = await _make_nomenclature(db_session, project.id, base_bc, article="ART-DUAL", subject="Накидки")
+    nom2 = await _make_nomenclature(db_session, project.id, only_box_base, article="ART-ONLYBOX")
+
+    db_session.add_all(
+        [
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode=box_bc,
+                base_barcode=base_bc,
+                units_per_box=20,
+                nomenclature_id=nom.id,
+                name="DUAL короб 20 шт.",
+                qty_good=5,
+                qty_reserve=1,
+            ),
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode=base_bc,
+                base_barcode=None,
+                units_per_box=1,
+                nomenclature_id=nom.id,
+                name="DUAL россыпь",
+                qty_good=3,
+            ),
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode=only_box_bc,
+                base_barcode=only_box_base,
+                units_per_box=12,
+                nomenclature_id=nom2.id,
+                name="ONLYBOX короб 12 шт.",
+                qty_good=10,
+            ),
+            WarehouseStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                nomenclature_id=nom.id,
+                barcode=base_bc,
+                quantity=100,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    rows = {r["barcode"]: r for r in data["rows"]}
+    # Короб + россыпь сведены в ОДНУ строку под ШК россыпи
+    assert set(rows) == {base_bc, only_box_base}
+
+    dual = rows[base_bc]
+    assert dual["ff_good"] == 5 * 20 + 3  # короб в штуках + россыпь = 103
+    assert dual["ff_reserve"] == 1 * 20  # резерв короба тоже ×units
+    assert dual["ff_box_units"] == 100  # из них коробами
+    assert dual["ff_box_count"] == 5  # 5 физических коробов
+    assert dual["our_quantity"] == 100
+    assert dual["diff"] == 103 - 100
+    assert dual["nomenclature_id"] == nom.id
+    assert dual["article_seller"] == "ART-DUAL"
+
+    only = rows[only_box_base]
+    assert only["ff_good"] == 10 * 12  # 120, только короб
+    assert only["ff_box_units"] == 120
+    assert only["our_quantity"] == 0
+    assert only["nomenclature_id"] == nom2.id  # короб сматчен к номенклатуре
+
+    assert data["totals"]["ff_box_units"] == 100 + 120
+    assert data["totals"]["unmatched"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_box_packs(db_session, project, warehouse):
+    """Видимая таблица сопоставления: только коробные строки + наша номенклатура."""
+    base_bc = "2043160330578"
+    box_bc = "12043160330575"
+    nom = await _make_nomenclature(db_session, project.id, base_bc, article="ART-BOX", subject="Накидки")
+    db_session.add_all(
+        [
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode=box_bc,
+                base_barcode=base_bc,
+                units_per_box=20,
+                nomenclature_id=nom.id,
+                name="X короб 20 шт.",
+                qty_good=5,
+            ),
+            # россыпь — НЕ короб, в сопоставление не попадает
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode=base_bc,
+                base_barcode=None,
+                units_per_box=1,
+                nomenclature_id=nom.id,
+                name="X россыпь",
+                qty_good=3,
+            ),
+            # короб без номенклатуры (unmatched)
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode="12043465657766",
+                base_barcode="2043465657769",
+                units_per_box=12,
+                name="Y короб 12 шт.",
+                qty_good=2,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    packs = await fulfillment_service.list_box_packs(db_session, project.id, warehouse.id)
+    assert len(packs) == 2  # только коробные строки (россыпь исключена)
+    by_box = {p["box_barcode"]: p for p in packs}
+    p = by_box[box_bc]
+    assert p["base_barcode"] == base_bc
+    assert p["units_per_box"] == 20
+    assert p["box_qty"] == 5
+    assert p["units_qty"] == 100
+    assert p["matched"] is True
+    assert p["article_seller"] == "ART-BOX"
+    assert by_box["12043465657766"]["matched"] is False
+    # сортировка по units_qty desc
+    units = [p["units_qty"] for p in packs]
+    assert units == sorted(units, reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_fetch_ff_composition_migfull_box_converts(db_session, project, warehouse):
+    """Состав сборки migfull: короб (5 шт) сводится к россыпи в штуках (5×20=100)."""
+    base_bc = "2043160330578"
+    db_session.add(
+        FulfillmentStock(
+            project_id=project.id,
+            warehouse_id=warehouse.id,
+            provider="migfull",
+            barcode="12043160330575",
+            base_barcode=base_bc,
+            units_per_box=20,
+            external_product_id="g-box",
+            name="X короб 20 шт.",
+            qty_good=5,
+        )
+    )
+    await db_session.commit()
+    req = FulfillmentRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        provider="migfull",
+        external_id="ship-1",
+        kind="assembly",
+        raw={
+            "planned_lines": [
+                {"product_guid": "g-box", "quantity": 5, "product": {"guid": "g-box", "name": "X короб 20 шт."}}
+            ]
+        },
+    )
+    comp = await fulfillment_service._fetch_ff_composition(db_session, project.id, warehouse.id, req)
+    assert comp == {base_bc: 100}
+
+
+@pytest.mark.asyncio
+async def test_request_detail_migfull_box_converts(db_session, project, warehouse, connected_mig_key):
+    """Деталка сборки migfull: коробная позиция матчится к номенклатуре и считается в штуках."""
+    base_bc = "2043160330578"
+    nom = await _make_nomenclature(db_session, project.id, base_bc, article="ART-BOXDET")
+    db_session.add(
+        FulfillmentStock(
+            project_id=project.id,
+            warehouse_id=warehouse.id,
+            provider="migfull",
+            barcode="12043160330575",
+            base_barcode=base_bc,
+            units_per_box=20,
+            external_product_id="g-box",
+            nomenclature_id=nom.id,
+            name="X короб 20 шт.",
+            qty_good=5,
+        )
+    )
+    req = FulfillmentRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        provider="migfull",
+        external_id="ship-det-1",
+        number="PVB-1",
+        kind="assembly",
+        status="uploaded",
+        raw={
+            "planned_lines": [
+                {"product_guid": "g-box", "quantity": 5, "product": {"guid": "g-box", "name": "X короб 20 шт."}}
+            ],
+            "shipped_lines": [],
+        },
+    )
+    db_session.add(req)
+    await db_session.commit()
+    await db_session.refresh(req)
+
+    detail = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, req.id)
+    assert detail is not None
+    prods = detail["products"]
+    assert len(prods) == 1
+    p = prods[0]
+    assert p["barcode"] == base_bc  # ШК россыпи, не короба
+    assert p["nomenclature_id"] == nom.id
+    assert p["article_seller"] == "ART-BOXDET"
+    assert p["qty"] == 100  # 5 коробов × 20
+    assert p["units_per_box"] == 20
+    assert p["box_qty"] == 5
+    assert detail["total_qty"] == 100
+
+
+# ─── Ручное сопоставление короба (override) ─────────────────────────────────
+
+
+def test_normalize_migfull_stock_override_wins():
+    """Ручной override побеждает авто-вывод в нормализации остатка."""
+    out = fulfillment_service._normalize_migfull_stock(
+        {"guid": "g1", "name": "X короб 20 шт.", "stock_actual": 2},
+        {"g1": "12043160330575"},
+        {"12043160330575": ("2049999999999", 7)},
+    )
+    assert out["base_barcode"] == "2049999999999"  # не авто 2043160330578
+    assert out["units_per_box"] == 7
+
+
+@pytest.mark.asyncio
+async def test_set_box_override_applies_and_persists(db_session, project, warehouse):
+    box_bc = "99999999999994"  # ITF14, авто не сработает (нет «короб N шт.»)
+    nom = await _make_nomenclature(db_session, project.id, "2040000000017", article="ART-OVR")
+    db_session.add(
+        FulfillmentStock(
+            project_id=project.id,
+            warehouse_id=warehouse.id,
+            provider="migfull",
+            barcode=box_bc,
+            base_barcode=None,
+            units_per_box=1,
+            name="Странный короб без шаблона",
+            qty_good=4,
+        )
+    )
+    await db_session.commit()
+
+    pack = await fulfillment_service.set_box_override(db_session, project.id, warehouse.id, box_bc, nom.id, 6)
+    assert pack is not None
+    assert pack["base_barcode"] == "2040000000017"
+    assert pack["units_per_box"] == 6
+    assert pack["units_qty"] == 24  # 4 кор × 6
+    assert pack["matched"] is True
+    assert pack["source"] == "manual"
+    assert pack["article_seller"] == "ART-OVR"
+
+    # применилось к текущему остатку (без пересинка)
+    rows = {r.barcode: r for r in await _ff_stocks(db_session, project.id, warehouse.id)}
+    assert rows[box_bc].base_barcode == "2040000000017"
+    assert rows[box_bc].units_per_box == 6
+    assert rows[box_bc].nomenclature_id == nom.id
+    # override персистентен (применится и на будущих синках)
+    ov = await fulfillment_service._load_box_overrides(db_session, project.id, warehouse.id)
+    assert ov[box_bc] == ("2040000000017", 6)
+
+
+@pytest.mark.asyncio
+async def test_set_box_override_validation(db_session, project, warehouse):
+    nom_no_bc = await _make_nomenclature(db_session, project.id, "", article="ART-NOBC")
+    nom_ok = await _make_nomenclature(db_session, project.id, "2040000000024", article="ART-OK")
+    with pytest.raises(ValueError):  # units < 1
+        await fulfillment_service.set_box_override(db_session, project.id, warehouse.id, "12340000000000", nom_ok.id, 0)
+    with pytest.raises(ValueError):  # номенклатуры нет
+        await fulfillment_service.set_box_override(db_session, project.id, warehouse.id, "12340000000000", 99999999, 5)
+    with pytest.raises(ValueError):  # у номенклатуры нет ШК
+        await fulfillment_service.set_box_override(
+            db_session, project.id, warehouse.id, "12340000000000", nom_no_bc.id, 5
+        )
+
+
+@pytest.mark.asyncio
+async def test_delete_box_override_reverts_to_auto(db_session, project, warehouse):
+    box_bc = "12043160330575"
+    base_bc = "2043160330578"
+    nom_auto = await _make_nomenclature(db_session, project.id, base_bc, article="ART-AUTO")
+    nom_manual = await _make_nomenclature(db_session, project.id, "2040000000031", article="ART-MAN")
+    db_session.add(
+        FulfillmentStock(
+            project_id=project.id,
+            warehouse_id=warehouse.id,
+            provider="migfull",
+            barcode=box_bc,
+            base_barcode=None,
+            units_per_box=1,
+            name="X короб 20 шт.",
+            qty_good=3,
+        )
+    )
+    await db_session.commit()
+
+    # ручной override на другой товар/кол-во
+    await fulfillment_service.set_box_override(db_session, project.id, warehouse.id, box_bc, nom_manual.id, 7)
+    rows = {r.barcode: r for r in await _ff_stocks(db_session, project.id, warehouse.id)}
+    assert rows[box_bc].nomenclature_id == nom_manual.id
+    assert rows[box_bc].units_per_box == 7
+
+    # снять override → возврат к авто-выводу (GTIN-14 + «короб 20 шт.»)
+    pack = await fulfillment_service.delete_box_override(db_session, project.id, warehouse.id, box_bc)
+    assert pack["source"] == "auto"
+    assert pack["base_barcode"] == base_bc
+    assert pack["units_per_box"] == 20
+    assert pack["nomenclature_id"] == nom_auto.id
+    ov = await fulfillment_service._load_box_overrides(db_session, project.id, warehouse.id)
+    assert box_bc not in ov
+
+
+@pytest.mark.asyncio
+async def test_list_box_packs_source_classification(db_session, project, warehouse):
+    base_bc = "2043160330578"
+    nom = await _make_nomenclature(db_session, project.id, base_bc, article="ART-A")
+    db_session.add_all(
+        [
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode="12043160330575",
+                base_barcode=base_bc,
+                units_per_box=20,
+                nomenclature_id=nom.id,
+                name="X короб 20 шт.",
+                qty_good=5,
+            ),
+            # ITF14 без base_barcode — авто не справился, надо вручную
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode="99999999999994",
+                base_barcode=None,
+                units_per_box=1,
+                name="Непонятный короб",
+                qty_good=2,
+            ),
+            # россыпь (EAN13) — НЕ короб, в список не попадает
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode=base_bc,
+                base_barcode=None,
+                units_per_box=1,
+                nomenclature_id=nom.id,
+                name="россыпь",
+                qty_good=9,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    packs = {
+        p["box_barcode"]: p for p in await fulfillment_service.list_box_packs(db_session, project.id, warehouse.id)
+    }
+    assert set(packs) == {"12043160330575", "99999999999994"}  # россыпь исключена
+    assert packs["12043160330575"]["source"] == "auto"
+    assert packs["99999999999994"]["source"] == "unmapped"
+    assert packs["99999999999994"]["matched"] is False
+
+
+@pytest.mark.asyncio
+async def test_search_nomenclature_only_with_barcode(db_session, project, warehouse):
+    await _make_nomenclature(db_session, project.id, "2041111111111", article="KOVER-RED")
+    await _make_nomenclature(db_session, project.id, "2042222222222", article="KOVER-BLUE")
+    await _make_nomenclature(db_session, project.id, "", article="KOVER-NOBC")  # без ШК — не вернётся
+
+    res = await fulfillment_service.search_nomenclature(db_session, project.id, "kover")
+    arts = {r["article_seller"] for r in res}
+    assert "KOVER-RED" in arts
+    assert "KOVER-BLUE" in arts
+    assert "KOVER-NOBC" not in arts  # без ШК россыпи привязать нельзя
+
+    res2 = await fulfillment_service.search_nomenclature(db_session, project.id, "2041111")
+    assert [r["article_seller"] for r in res2] == ["KOVER-RED"]
+
+
 # ─── Project isolation ───────────────────────────────────────────────────────
 
 

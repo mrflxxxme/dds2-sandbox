@@ -49,6 +49,8 @@ class FfStockRow(BaseModel):
     ff_reserve: int = 0
     ff_defect: int = 0
     ff_nominal: int = 0
+    ff_box_units: int = 0  # из ff_good пришло коробами (в штуках россыпи)
+    ff_box_count: int = 0  # сколько коробов годного сведено в этот товар
     our_quantity: int = 0
     our_defect: int = 0
     diff: int = 0  # ff_good - our_quantity
@@ -58,6 +60,7 @@ class FfStockTotals(BaseModel):
     ff_good: int = 0
     ff_reserve: int = 0
     ff_defect: int = 0
+    ff_box_units: int = 0  # сколько штук годного пришло коробами
     our_quantity: int = 0
     diff: int = 0
     unmatched: int = 0  # строк ФФ без нашей номенклатуры
@@ -69,6 +72,38 @@ class FfStocksResponse(BaseModel):
     synced_at: datetime | None = None
     subjects: list[str] = Field(default_factory=list)  # distinct предметы для фильтра
     brands: list[str] = Field(default_factory=list)  # distinct бренды для фильтра
+
+
+class FfBoxPack(BaseModel):
+    """Строка сопоставления короб→россыпь (авто-вывод при синке)."""
+
+    box_barcode: str  # ШК короба (ITF14)
+    base_barcode: str  # ШК россыпи (EAN13), выведенный по GTIN-14
+    units_per_box: int  # штук россыпи в коробе («короб N шт.» из названия)
+    name: str | None = None  # название коробной карточки у ФФ
+    nomenclature_id: int | None = None
+    article_seller: str | None = None  # наш артикул (если сматчен)
+    subject: str | None = None
+    box_qty: int = 0  # остаток в коробах
+    units_qty: int = 0  # = box_qty × units_per_box (в штуках россыпи)
+    matched: bool = False  # сматчен ли короб с нашей номенклатурой
+    source: str = "auto"  # auto — авто-вывод | manual — ручной override | unmapped — не сопоставлен
+
+
+class FfBoxOverridePayload(BaseModel):
+    """Ручная привязка короба: наша номенклатура + штук в коробе."""
+
+    nomenclature_id: int
+    units_per_box: int = Field(ge=1)
+
+
+class FfNomenclatureOption(BaseModel):
+    """Кандидат номенклатуры для ручной привязки короба (поиск по артикулу/ШК)."""
+
+    id: int
+    barcode: str
+    article_seller: str | None = None
+    subject: str | None = None
 
 
 # ─── Requests ────────────────────────────────────────────────────────────────
@@ -109,10 +144,12 @@ class FfRequestDetailProduct(BaseModel):
     name: str | None = None
     nomenclature_id: int | None = None
     article_seller: str | None = None  # наш артикул (если товар сматчен)
-    qty: int = 0  # заявлено (amount)
+    qty: int = 0  # заявлено (amount); для короба — уже в штуках россыпи (×units_per_box)
     accepted_qty: int = 0  # принято (acceptedAmount)
     delivery_qty: int = 0  # отгружено (delivery_amount)
     defect_qty: int = 0  # брак (repairAmount)
+    units_per_box: int = 1  # штук россыпи в коробе (1 — позиция россыпью)
+    box_qty: int = 0  # сколько коробов (если позиция коробом), иначе 0
     our_qty: int | None = None  # кол-во в связанном нашем документе; None — связи нет
     color: str | None = None
     size: str | None = None

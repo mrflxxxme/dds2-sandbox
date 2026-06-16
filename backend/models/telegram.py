@@ -4,7 +4,7 @@ Telegram bot models: user linking, chat bindings, brand notes.
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -32,6 +32,7 @@ class TelegramChatBinding(Base):
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
     brand: Mapped[str | None] = mapped_column(String(200), nullable=True)
     notify_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    ff_notify_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     created_by_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
