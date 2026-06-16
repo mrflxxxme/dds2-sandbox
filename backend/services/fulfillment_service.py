@@ -1588,7 +1588,8 @@ async def list_requests(
 STATUS_EVENTS_LIMIT = 1000
 
 
-def _status_event_to_dict(e: FulfillmentStatusEvent) -> dict:
+def _status_event_to_dict(e: FulfillmentStatusEvent, req_info: dict | None = None) -> dict:
+    info = req_info or {}
     return {
         "id": e.id,
         "fulfillment_request_id": e.fulfillment_request_id,
@@ -1608,6 +1609,10 @@ def _status_event_to_dict(e: FulfillmentStatusEvent) -> dict:
         "old_archived": e.old_archived,
         "new_archived": e.new_archived,
         "changed_at": e.changed_at,
+        # Обогащение из текущей заявки ФФ (склад сдачи / кол-во / наша заявка)
+        "dest_warehouse": info.get("dest_warehouse"),
+        "total_qty": info.get("total_qty"),
+        "linked_number": info.get("linked_number"),
     }
 
 
@@ -1636,7 +1641,68 @@ async def list_status_events(
         FulfillmentStatusEvent.id.desc(),
     ).limit(STATUS_EVENTS_LIMIT)
     result = await db.execute(q)
-    return [_status_event_to_dict(e) for e in result.scalars().all()]
+    events = list(result.scalars().all())
+
+    # Обогащение колонок истории (склад сдачи / кол-во / наша заявка) из ТЕКУЩЕЙ
+    # заявки ФФ — событие хранит лишь снимок стадии. Линк резолвим как в
+    # list_requests (один запрос на тип, без N+1).
+    req_info = await _events_request_info(db, project_id, {e.fulfillment_request_id for e in events})
+    return [_status_event_to_dict(e, req_info.get(e.fulfillment_request_id)) for e in events]
+
+
+async def _events_request_info(db: AsyncSession, project_id: int, req_ids: set[int]) -> dict[int, dict]:
+    """{ff_request_id: {dest_warehouse, total_qty, linked_number}} для строк истории."""
+    if not req_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(
+                FulfillmentRequest.id,
+                FulfillmentRequest.dest_warehouse,
+                FulfillmentRequest.total_qty,
+                FulfillmentRequest.assembly_request_id,
+                FulfillmentRequest.inbound_receipt_id,
+            ).where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.id.in_(req_ids),
+            )
+        )
+    ).all()
+
+    assembly_ids = {r.assembly_request_id for r in rows if r.assembly_request_id}
+    inbound_ids = {r.inbound_receipt_id for r in rows if r.inbound_receipt_id}
+    assembly_map: dict[int, str] = {}
+    if assembly_ids:
+        ares = await db.execute(
+            select(AssemblyRequest.id, AssemblyRequest.number).where(
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.id.in_(assembly_ids),
+                AssemblyRequest.is_deleted == False,
+            )
+        )
+        assembly_map = {row[0]: row[1] for row in ares.all()}
+    inbound_map: dict[int, str] = {}
+    if inbound_ids:
+        ires = await db.execute(
+            select(InboundReceipt.id, InboundReceipt.number).where(
+                InboundReceipt.project_id == project_id,
+                InboundReceipt.id.in_(inbound_ids),
+                InboundReceipt.is_deleted == False,
+            )
+        )
+        inbound_map = {row[0]: row[1] for row in ires.all()}
+
+    info: dict[int, dict] = {}
+    for r in rows:
+        linked = assembly_map.get(r.assembly_request_id) if r.assembly_request_id else None
+        if linked is None and r.inbound_receipt_id:
+            linked = inbound_map.get(r.inbound_receipt_id)
+        info[r.id] = {
+            "dest_warehouse": r.dest_warehouse,
+            "total_qty": r.total_qty,
+            "linked_number": linked,
+        }
+    return info
 
 
 SYNC_RUNS_LIMIT = 100

@@ -2436,6 +2436,40 @@ async def test_status_history_no_event_on_unchanged_resync(db_session, project, 
 
 
 @pytest.mark.asyncio
+async def test_status_events_enriched_with_dest_qty_and_link(
+    db_session, project, warehouse, connected_key, monkeypatch
+):
+    """list_status_events обогащает строки складом сдачи, кол-вом и нашей заявкой."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(8901, stage_title="Забор груза", stage_code="cargo_pickup")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_assembly_doc(db_session, project, warehouse)
+    mirror = await _mirror_row(db_session, project.id, "8901")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    # Склад сдачи / кол-во проставляем на зеркале (как enrich из деталки skladbot)
+    mirror = await _mirror_row(db_session, project.id, "8901")
+    mirror.dest_warehouse = "Казань"
+    mirror.total_qty = 777
+    await db_session.commit()
+
+    events = await fulfillment_service.list_status_events(db_session, project.id, warehouse.id, kind="assembly")
+    ev = next(e for e in events if e["external_id"] == "8901")
+    assert ev["dest_warehouse"] == "Казань"
+    assert ev["total_qty"] == 777
+    assert ev["linked_number"] == doc.number
+
+    # Несвязанная заявка без склада/кол-ва — поля пустые
+    _mock_requests(monkeypatch, {851: [_req(8902, stage_title="Забор груза", stage_code="cargo_pickup")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    events = await fulfillment_service.list_status_events(db_session, project.id, warehouse.id, kind="assembly")
+    ev2 = next(e for e in events if e["external_id"] == "8902")
+    assert ev2["dest_warehouse"] is None
+    assert ev2["linked_number"] is None
+
+
+@pytest.mark.asyncio
 async def test_status_history_completed_flag_transition(db_session, project, warehouse, connected_key, monkeypatch):
     """Завершение заявки фиксируется сменой флага is_completed."""
     _mock_products(monkeypatch, [])
