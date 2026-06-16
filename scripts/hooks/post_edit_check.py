@@ -60,7 +60,7 @@ def _soft_delete_classes(path: Path) -> set[str]:
 
 QUERY_PATTERN = re.compile(r"(\.select\(|\.query\(|\.filter|\.where\(|text\(|execute\()")
 DATETIME_PATTERN = re.compile(r"datetime\.(utcnow|now)\(\)")
-SQL_INJECTION_PATTERN = re.compile(r'text\(f["\']')
+SQL_INJECTION_PATTERN = re.compile(r'text\(\s*f["\']')
 DB_DELETE_PATTERN = re.compile(r"(db|session)\.(delete)\(")
 FLOAT_COL_PATTERN = re.compile(r"(Column|mapped_column)\(.*Float")
 ROUTER_DB_PATTERN = re.compile(r"(await\s+db\.|async_session|\.execute\()")

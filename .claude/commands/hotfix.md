@@ -21,7 +21,7 @@ git log --oneline -10 main
 2. Минимальный diff — только строки, вызывающие ошибку.
 3. Тест, воспроизводящий баг (если успеваешь).
 4. `git commit -m "fix(prod): ..."` → push → PR `hotfix → main` (минуя `dev`), label `hotfix`.
-5. После green CI → squash merge → `cd-production.yml` деплоит автоматически.
+5. После green CI → merge PR в `main` (merge-commit, как в остальном CI) → `cd-production.yml` деплоит автоматически.
 
 ## 3. Верификация
 ```bash

@@ -12,10 +12,7 @@ paths:
 
 ## JS/TS ловушки
 - `formatNumber()` по умолчанию 2 знака — для счётчиков/штук всегда `formatNumber(x, 0)`, иначе UI показывает «3,00 черновика» (поймано сразу на двух новых страницах)
-- `?? null` вместо `|| null` для API body — `||` теряет `[]`/`0`/`''` (falsy)
-- `URLSearchParams` для query, НИКОГДА template literals — `H&M` ломает `&`
 - `\b` regex НЕ матчит кириллицу — использовать `includes()` для русских маркеров
-- DOMPurify (`sanitizeAIHtml()`) для HTML из AI, не regex-allowlist
 - React StrictMode (dev) монтирует `useEffect` дважды: catch/finally первого (abort-нутого) запроса перезаписывает загруженные данные ложной ошибкой → `AbortController` + `if (controller.signal.aborted) return` в then/catch/finally
 - `useSearchParams` пуст на первом рендере до гидратации — не редиректь, пока сырая строка пуста (`const raw = sp.get('x') ?? ''; if (raw && cond) router.replace(...)`)
 - Convert по множеству: проверяй строгую однотипность цели (`onlyBox`/`onlyMono`), не отрицание присутствия (`!hasBox`) — иначе СМЕШАННАЯ цель ложно триггерит конвертацию
@@ -46,8 +43,4 @@ paths:
 - Idempotent seed: `SELECT ... GROUP BY project_id` → INSERT только для новых
 - TanStack sort + pagination: ≤5k строк → без пагинации; >5k → server-side sort
 
-## Антипаттерны
-- `SELECT *` — всегда указывай колонки
-- `.scalars().all()` без `.limit()` на больших таблицах
-- `except Exception` без `asyncio.CancelledError` в scheduler jobs
-- ilike без экранирования `%`/`_` в пользовательском вводе
+<!-- Антипаттерны (SELECT *, .scalars().all() без .limit(), except Exception без CancelledError, ilike-экранирование) — в CLAUDE.md и backend.md, не дублируем здесь. -->

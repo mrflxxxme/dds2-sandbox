@@ -115,7 +115,7 @@ grep -rn "@router\." backend/routers/ | grep -v "response_model" # отсутс�
 ## Критерии
 - **OK**: нет BREAKING, REST/Schema < 3
 - **WARNING**: REST/Schema issues, BREAKING отсутствует
-- **BLOCK**: BREAKING change без версионирования → нужен `/api/v1/` bump или deprecation period
+- **BLOCK**: BREAKING change на существующем `/api/v1/` endpoint → нужен `/api/v2/` bump или deprecation period
 
 ## DDS контекст версионирования
-Сейчас все endpoints на `/api/*` без версии. Из плана улучшений — переход на `/api/v1/*`. Для новых endpoints сразу использовать `/api/v1/` префикс.
+Все endpoints уже на `/api/v1/*` (26 роутеров, `backend/main.py`; bare `/api` не осталось). Новые endpoint'ы — тоже `/api/v1/`. BREAKING change ломает существующих клиентов v1 → нужен `/api/v2/` или deprecation-период, а НЕ «введение версионирования» (оно уже есть).

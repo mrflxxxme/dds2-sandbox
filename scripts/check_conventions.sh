@@ -89,8 +89,8 @@ echo ""
 
 # ─── 5. f-string in SQL text() — potential injection ─────────────────
 echo "── Check 5: f-string in SQL text() — potential injection ──"
-FOUND=$(grep -rn 'text(f"' backend/ --include="*.py" 2>/dev/null || true)
-FOUND2=$(grep -rn "text(f'" backend/ --include="*.py" 2>/dev/null || true)
+FOUND=$(grep -rnE 'text\([[:space:]]*f"' backend/ --include="*.py" 2>/dev/null || true)
+FOUND2=$(grep -rnE "text\([[:space:]]*f'" backend/ --include="*.py" 2>/dev/null || true)
 if [ -n "$FOUND" ] || [ -n "$FOUND2" ]; then
     error "f-string in text() — SQL injection risk! Use :param binding"
     echo "$FOUND"
