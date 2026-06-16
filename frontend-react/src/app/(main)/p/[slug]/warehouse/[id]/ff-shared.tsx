@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import { filterFfLinkCandidates, splitFfLinkCandidates } from '@/lib/utils/ffLinkCandidates';
-import type { FfLinkCandidate, FfLinkCandidatesResponse, FfRequestKind, FfRequestRow, FfStatusEvent } from '@/types/api';
+import type { FfLinkCandidate, FfLinkCandidatesResponse, FfRequestKind, FfRequestRow, FfStatusCode, FfStatusEvent } from '@/types/api';
 
 // Статусы наших документов (заявки на сборку + приёмки) — для колонки/строки «Связь»
 export const FF_LINKED_STATUS_LABELS: Record<string, string> = {
@@ -40,20 +40,25 @@ export function ffStageBadge(row: FfRequestRow) {
     return null;
 }
 
-// Высокоуровневый статус заявки ФФ — отдельная колонка «Статус ФФ»
-// (для приёмок завершённость = «принято на остатки»).
+// Высокоуровневый статус заявки ФФ — отдельная колонка «Статус ФФ».
+// Нормализуется на бэкенде (_ff_status_code, единый словарь поверх стадий
+// провайдеров); «готово» = тот же сигнал, что и авто-READY связанной сборки.
+const FF_STATUS_META: Record<FfStatusCode, { label: string; cls: string }> = {
+    assembling: { label: 'В сборке ФФ',        cls: 'badge-info' },
+    ready:      { label: 'Готово',             cls: 'badge-warning' },
+    shipped:    { label: 'Отгружена',          cls: 'badge-success' },
+    expected:   { label: 'Ожидает приёмки',    cls: 'badge-info' },
+    accepted:   { label: 'Принято на остатки', cls: 'badge-success' },
+    archived:   { label: 'Архив',              cls: 'badge-secondary' },
+    expired:    { label: 'Просрочена',         cls: 'badge-warning' },
+};
+
 export function ffStatusLabel(row: FfRequestRow): string {
-    if (row.is_completed) return row.kind === 'inbound' ? 'Принято на остатки' : 'Завершена';
-    if (row.archived) return 'Архив';
-    if (row.expired) return 'Просрочена';
-    return 'В работе';
+    return FF_STATUS_META[row.ff_status]?.label ?? row.ff_status;
 }
 
 export function ffStatusBadge(row: FfRequestRow) {
-    const cls = row.is_completed ? 'badge-success'
-        : row.expired ? 'badge-warning'
-            : row.archived ? 'badge-secondary'
-                : 'badge-info';
+    const cls = FF_STATUS_META[row.ff_status]?.cls ?? 'badge-info';
     return <span className={`badge ${cls}`} style={{ fontSize: 11, padding: '2px 8px' }}>{ffStatusLabel(row)}</span>;
 }
 

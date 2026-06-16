@@ -2837,6 +2837,7 @@ function FfUnlinkedAssembliesBlock({ warehouseId, slug, reloadTick, onReverseLin
             exportValue: (row: FfUnlinkedAssembly) => statusLabel(row.status),
         },
         { key: 'brands', label: 'Бренд', render: (v: string | null) => v || '—' },
+        { key: 'dest_warehouse', label: 'Склад сдачи', render: (v: string | null) => v || '—' },
         {
             key: 'total_qty', label: 'Товары', align: 'right',
             render: (v: number) => formatNumber(v, 0),

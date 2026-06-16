@@ -25,7 +25,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 import httpx
-from sqlalchemy import delete, exists, func, select, text, tuple_, update
+from sqlalchemy import and_, delete, exists, func, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -64,6 +64,7 @@ from backend.models.assembly import (
     AssemblyStatus,
     AssemblyStatusHistory,
 )
+from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import AssemblyItemCreate, AssemblyRequestCreate
 from backend.services.assembly.crud import create_assembly_request
 from backend.utils.crypto import decrypt as _decrypt, encrypt as _encrypt
@@ -150,6 +151,12 @@ def _provider_human(provider: str) -> str:
     return _PROVIDER_LABELS.get(provider, provider)
 
 
+# wmscelicom: стадий нет, статус отгрузки FBO кладётся в stage_title. «Ожидает
+# отгрузки» = короб собран и ждёт машину = наш READY (терминальные статусы
+# отгрузки → is_completed). «Новая»/«На сборке» — ещё WIP.
+WMS_ASSEMBLY_READY_TITLES = frozenset({"Ожидает отгрузки"})
+
+
 def _assembly_ready_signal(
     provider: str,
     stage_code: str | None,
@@ -164,14 +171,16 @@ def _assembly_ready_signal(
     неизвестен, allowlist не собрать). Осознанный риск: новая РАННЯЯ стадия
     провайдера даст ложный READY (обратимо: READY → IN_PROGRESS разрешён) —
     при появлении пополнить ASSEMBLY_WIP_STAGE_CODES/MARKERS. Пустая стадия —
-    НЕ сигнал. wmscelicom: стадий нет — только is_completed (терминальные
-    статусы отгрузки FBO). migfull: stage_code = слаг статуса отгрузки
-    (uploaded → ready → closed) — ready («Собран») и есть сигнал готовности.
+    НЕ сигнал. wmscelicom: «Ожидает отгрузки» (короб собран) или терминальный
+    статус отгрузки FBO (is_completed). migfull: stage_code = слаг статуса
+    отгрузки (uploaded → ready → closed) — ready («Собран») и есть сигнал.
     """
     if is_completed:
         return True
     if provider == "migfull":
         return (stage_code or "").strip().lower() == "ready"
+    if provider == "wmscelicom":
+        return (stage_title or "").strip() in WMS_ASSEMBLY_READY_TITLES
     if provider != "skladbot":
         return False
     code = (stage_code or "").strip()
@@ -225,6 +234,42 @@ def _inbound_accept_signal(is_completed: bool) -> bool:
     движениями). Отменённые приёмки приходят archived=True и отсекаются синком.
     """
     return bool(is_completed)
+
+
+def _ff_status_code(
+    provider: str,
+    kind: str,
+    stage_code: str | None,
+    stage_title: str | None,
+    is_completed: bool,
+    archived: bool,
+    expired: bool,
+) -> str:
+    """Нормализованный высокоуровневый статус ФФ-заявки для колонки «Статус ФФ».
+
+    Единый словарь поверх стадий разных провайдеров (см. _assembly_ready_signal —
+    «готово» определяется тем же сигналом, что и авто-READY связанной сборки):
+      assembling — сборка идёт (wms «Новая»/«На сборке», migfull «Новый», skladbot WIP)
+      ready      — собрано, ждёт отгрузки (wms «Ожидает отгрузки», migfull «Собран», skladbot пост-WIP)
+      shipped    — отгружено/завершено (терминальные статусы)
+      expected   — приёмка ожидается (inbound не завершён)
+      accepted   — приёмка принята на остатки (inbound завершён)
+      archived   — архив у провайдера; expired — просрочена (оверлей-предупреждение)
+    """
+    if archived:
+        return "archived"
+    if kind == FfRequestKind.INBOUND.value:
+        if is_completed:
+            return "accepted"
+        return "expired" if expired else "expected"
+    # assembly
+    if is_completed:
+        return "shipped"
+    if expired:
+        return "expired"
+    if _assembly_ready_signal(provider, stage_code, stage_title, is_completed):
+        return "ready"
+    return "assembling"
 
 
 # Advisory lock namespace для синка (pg_advisory_xact_lock(ns, project_id)).
@@ -796,8 +841,8 @@ def _wms_shipment_completed(status: str) -> bool:
 def _normalize_wms_shipment(row: dict) -> dict:
     """wmscelicom shipmentsfbo/list row → нормализованная заявка kind=assembly."""
     status = str(row.get("status") or "")
-    # Состав уже в списочном методе (packages → items); часть инстансов отдаёт
-    # packages.items пустыми (ограничение провайдера) → None («нет данных»), не 0
+    # Состав уже в списочном методе (Packages → items, см. _wms_packages); пока
+    # короб не собран (статус «Новая») состава нет → total None («нет данных»), не 0
     total = min(sum(_raw_assembly_composition("wmscelicom", row).values()), _QTY_MAX)
     target = row.get("shipped_target")  # PHP-API: бывает false/"" вместо null
     return {
@@ -1865,6 +1910,15 @@ def _request_to_dict(
         "is_completed": req.is_completed,
         "archived": req.archived,
         "expired": req.expired,
+        "ff_status": _ff_status_code(
+            req.provider,
+            req.kind,
+            req.stage_code,
+            req.stage_title,
+            bool(req.is_completed),
+            bool(req.archived),
+            bool(req.expired),
+        ),
         "local_archived": req.local_archived,
         "local_archived_at": req.local_archived_at,
         "total_qty": req.total_qty,
@@ -2108,24 +2162,42 @@ async def list_sync_runs(
 # ─── Overview: сводка по всем складам с активной ФФ-интеграцией ─────────────
 
 
+def _wms_packages(raw: dict | None) -> list[dict]:
+    """Короба wms-отгрузки FBO из зеркального raw.
+
+    Состав приходит в `Packages` (заглавная: один товар-dict на короб в `items`);
+    lowercase `packages` провайдер отдаёт с пустыми `items` (служебная мета) —
+    оставлен fallback'ом на случай дрейфа формата.
+    """
+    if not raw:
+        return []
+    packages = raw.get("Packages") or raw.get("packages") or {}
+    rows = packages.values() if isinstance(packages, dict) else packages
+    return [p for p in rows if isinstance(p, dict)]
+
+
+def _wms_package_items(pkg: dict) -> list[dict]:
+    """Позиции короба: `items` — один dict (Packages) либо список (fallback)."""
+    items = pkg.get("items")
+    if isinstance(items, dict):
+        return [items]
+    if isinstance(items, list):
+        return [i for i in items if isinstance(i, dict)]
+    return []
+
+
 def _raw_assembly_composition(provider: str, raw: dict | None) -> dict[str, int]:
     """{barcode: qty} из raw зеркала assembly-заявки.
 
     Только wmscelicom: состав приходит в списочном методе внутри коробов
-    (packages → items, см. _wms_detail_parts). У skladbot состава в списке
+    (Packages → items, см. _wms_packages). У skladbot состава в списке
     нет (только в живой деталке) → пустой dict.
     """
     if provider != "wmscelicom" or not raw:
         return {}
-    packages = raw.get("packages") or {}
-    pkg_rows = packages.values() if isinstance(packages, dict) else packages
     out: dict[str, int] = {}
-    for pkg in pkg_rows:
-        if not isinstance(pkg, dict):
-            continue
-        for item in pkg.get("items") or []:
-            if not isinstance(item, dict):
-                continue
+    for pkg in _wms_packages(raw):
+        for item in _wms_package_items(pkg):
             barcode = str(item.get("barcode") or "").strip()
             if not barcode:
                 continue
@@ -2458,6 +2530,16 @@ async def list_unlinked_assemblies(
             AssemblyRequest.status,
             AssemblyRequest.estimated_ready_date,
             AssemblyRequest.created_at,
+            # Склад сдачи МП: warehouse_name связанной FBO-поставки, иначе ручной
+            WbFboSupply.warehouse_name,
+            AssemblyRequest.wb_warehouse_name_manual,
+        )
+        .outerjoin(
+            WbFboSupply,
+            and_(
+                WbFboSupply.id == AssemblyRequest.wb_fbo_supply_id,
+                WbFboSupply.project_id == project_id,
+            ),
         )
         .where(
             AssemblyRequest.project_id == project_id,
@@ -2515,6 +2597,7 @@ async def list_unlinked_assemblies(
             "status": d.status,
             "brands": ", ".join(sorted(brands_by_doc.get(d.id, set()))) or None,
             "total_qty": qty_by_doc.get(d.id, 0),
+            "dest_warehouse": d.warehouse_name or d.wb_warehouse_name_manual,
             "estimated_ready_date": d.estimated_ready_date,
             "created_at": d.created_at,
         }
@@ -2543,16 +2626,15 @@ def _wms_detail_parts(req: FulfillmentRequest) -> tuple[list[dict], list[dict], 
     fields: list[tuple[str, object]] = []
 
     if req.kind == FfRequestKind.ASSEMBLY.value:
-        packages = raw.get("packages") or {}
-        pkg_rows = [p for p in (packages.values() if isinstance(packages, dict) else packages) if isinstance(p, dict)]
+        pkg_rows = _wms_packages(raw)
         by_barcode: dict[str, dict] = {}
         for pkg in pkg_rows:
-            for item in pkg.get("items") or []:
+            for item in _wms_package_items(pkg):
                 barcode = str(item.get("barcode") or "").strip()
                 agg = by_barcode.get(barcode)
                 if agg is None:
                     agg = by_barcode[barcode] = {"barcode": barcode or None, "name": item.get("name"), "qty": 0}
-                agg["qty"] += int(item.get("count") or 0)
+                agg["qty"] += _safe_int(item.get("count"))
         products = list(by_barcode.values())
         fields = [
             ("Площадка", raw.get("shipped_target")),

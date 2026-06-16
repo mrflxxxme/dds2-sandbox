@@ -123,6 +123,9 @@ class FfRequestRow(BaseModel):
     is_completed: bool = False
     archived: bool = False
     expired: bool = False
+    # Нормализованный статус ФФ для колонки «Статус ФФ» (см. _ff_status_code):
+    # assembling | ready | shipped | expected | accepted | archived | expired
+    ff_status: str = "assembling"
     local_archived: bool = False  # локальный архив DDS (синк не трогает)
     local_archived_at: datetime | None = None
     total_qty: int | None = None  # заявлено всего, шт (skladbot — из деталки)
@@ -339,6 +342,7 @@ class FfUnlinkedAssembly(BaseModel):
     status: str  # AssemblyStatus
     brands: str | None = None  # бренды позиций через запятую (или None)
     total_qty: int = 0  # суммарное кол-во позиций, шт
+    dest_warehouse: str | None = None  # склад сдачи МП (FBO warehouse_name или ручной)
     estimated_ready_date: date | None = None
     created_at: datetime
 
