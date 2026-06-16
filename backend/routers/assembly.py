@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002, RUF003
 """
 Router: /warehouse/assembly — Assembly request CRUD + workflow transitions.
 """
@@ -5,10 +6,13 @@ Router: /warehouse/assembly — Assembly request CRUD + workflow transitions.
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models import Project
+from backend.models.fulfillment import FulfillmentRequest
+from backend.models.integrations import IntegrationKey
 from backend.project_context import get_current_project
 from backend.schemas.assembly import (
     AssemblyFlowAnalyticsResponse,
@@ -54,6 +58,7 @@ async def list_assembly_requests(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     brand: str | None = Query(None),
+    ff_link: str | None = Query(None, description='Фильтр привязки ФФ: "none" | "linked"'),
     limit: int = Query(50, le=500),
     offset: int = Query(0, ge=0),
     project: Project = Depends(get_current_project),
@@ -71,6 +76,7 @@ async def list_assembly_requests(
         date_from=date_from,
         date_to=date_to,
         brand=brand,
+        ff_link=ff_link,
         limit=limit,
         offset=offset,
     )
@@ -78,7 +84,83 @@ async def list_assembly_requests(
     for req in items:
         resp = await assembly_service._build_response(db, req)
         response_items.append(AssemblyRequestResponse.model_validate(resp))
+
+    await _enrich_ff_links(db, project.id, items, response_items)
     return AssemblyListResponse(items=response_items, total=total)
+
+
+async def _enrich_ff_links(
+    db: AsyncSession,
+    project_id: int,
+    items: list,
+    response_items: list[AssemblyRequestResponse],
+) -> None:
+    """BATCH-обогащение списка полями привязанной ФФ-заявки.
+
+    Без per-row запросов: максимум две выборки —
+    (1) какие из складов страницы имеют активную интеграцию ФФ;
+    (2) ФФ-заявки, привязанные к нашим заявкам этих складов.
+    Деталочный эндпоинт делает то же per-row через
+    fulfillment_service.get_ff_link_for_assembly — его НЕ трогаем.
+    """
+    if not items:
+        return
+
+    warehouse_ids = {req.warehouse_id for req in items}
+
+    # (1) Склады страницы с активной ФФ-интеграцией.
+    ff_wh_rows = await db.execute(
+        select(IntegrationKey.warehouse_id)
+        .where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.warehouse_id.in_(warehouse_ids),
+            IntegrationKey.service.in_(fulfillment_service.FF_SERVICES),
+            IntegrationKey.is_active.is_(True),
+            IntegrationKey.is_deleted == False,  # noqa: E712
+        )
+        .distinct()
+    )
+    ff_warehouse_ids = {row[0] for row in ff_wh_rows.all()}
+    if not ff_warehouse_ids:
+        return
+
+    # (2) ФФ-заявки, привязанные к нашим заявкам ФФ-складов (один запрос).
+    assembly_ids = [req.id for req in items if req.warehouse_id in ff_warehouse_ids]
+    if not assembly_ids:
+        return
+
+    link_rows = await db.execute(
+        select(
+            FulfillmentRequest.assembly_request_id,
+            FulfillmentRequest.id,
+            FulfillmentRequest.number,
+            FulfillmentRequest.external_id,
+            FulfillmentRequest.stage_title,
+            FulfillmentRequest.warehouse_id,
+        ).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.assembly_request_id.in_(assembly_ids),
+        )
+    )
+    links = {
+        row.assembly_request_id: {
+            "ff_request_id": row.id,
+            "ff_request_number": row.number or row.external_id,
+            "ff_stage_title": row.stage_title,
+            "ff_warehouse_id": row.warehouse_id,
+        }
+        for row in link_rows.all()
+    }
+    if not links:
+        return
+
+    for resp in response_items:
+        link = links.get(resp.id)
+        if link is not None:
+            resp.ff_request_id = link["ff_request_id"]
+            resp.ff_request_number = link["ff_request_number"]
+            resp.ff_stage_title = link["ff_stage_title"]
+            resp.ff_warehouse_id = link["ff_warehouse_id"]
 
 
 # --- Created groups (Предпросмотр созданных заявок) -------------------------

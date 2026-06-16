@@ -30,10 +30,12 @@ from backend.models.wb_fbo import WbFboSupply, WbSupplyStatus
 from backend.schemas.assembly import (
     AssemblyItemCreate,
     AssemblyRequestCreate,
+    AssemblyRequestResponse,
     AssemblyRequestUpdate,
     AssignVehicle,
 )
 from backend.services.assembly_service import (
+    _build_response,
     assign_vehicle,
     assign_vehicle_bulk,
     cancel_request,
@@ -1297,3 +1299,173 @@ class TestAvailableStockValidation:
                     items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=50)],
                 ),
             )
+
+
+# --- FF link: ff_link filter + batch enrichment (R2) ------------------------
+
+
+async def _link_ff_request(db_session, *, assembly_request_id: int, warehouse_id: int):
+    """Helper: создать зеркало ФФ-заявки, привязанное к нашей заявке на сборку."""
+    from backend.models.fulfillment import FulfillmentRequest
+
+    ff = FulfillmentRequest(
+        project_id=PROJECT_ID,
+        warehouse_id=warehouse_id,
+        provider="skladbot",
+        external_id=f"FF-EXT-{assembly_request_id}",
+        number=f"WH-R-{assembly_request_id}",
+        kind="assembly",
+        stage_title="Приёмка",
+        assembly_request_id=assembly_request_id,
+    )
+    db_session.add(ff)
+    await db_session.commit()
+    return ff
+
+
+async def _connect_ff_integration(db_session, warehouse_id: int) -> None:
+    """Helper: активная ФФ-интеграция (skladbot), привязанная к складу."""
+    from backend.models.integrations import IntegrationKey
+
+    db_session.add(
+        IntegrationKey(
+            project_id=PROJECT_ID,
+            service="skladbot",
+            label=f"FF test {warehouse_id}",
+            encrypted_key="placeholder-encrypted",
+            is_active=True,
+            warehouse_id=warehouse_id,
+        )
+    )
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+class TestFfLinkFilter:
+    """ff_link фильтр в list_assembly_requests: none / linked / unset."""
+
+    async def test_ff_link_none_excludes_linked(self, db_session):
+        """ff_link='none' возвращает только заявки БЕЗ привязанной ФФ-заявки."""
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        linked = await _create_test_request(db_session)
+        unlinked = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                wb_fbo_supply_id=None,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=3)],
+            ),
+        )
+        await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
+
+        items, _total = await list_assembly_requests(db_session, PROJECT_ID, ff_link="none")
+        ids = {r.id for r in items}
+        assert unlinked.id in ids
+        assert linked.id not in ids
+
+    async def test_ff_link_linked_only_linked(self, db_session):
+        """ff_link='linked' возвращает только заявки С привязанной ФФ-заявкой."""
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        linked = await _create_test_request(db_session)
+        unlinked = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                wb_fbo_supply_id=None,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=3)],
+            ),
+        )
+        await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
+
+        items, _total = await list_assembly_requests(db_session, PROJECT_ID, ff_link="linked")
+        ids = {r.id for r in items}
+        assert linked.id in ids
+        assert unlinked.id not in ids
+
+    async def test_ff_link_unset_returns_all(self, db_session):
+        """ff_link=None — без фильтра, возвращает и привязанные, и нет."""
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        linked = await _create_test_request(db_session)
+        unlinked = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                wb_fbo_supply_id=None,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=3)],
+            ),
+        )
+        await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
+
+        items, _total = await list_assembly_requests(db_session, PROJECT_ID)
+        ids = {r.id for r in items}
+        assert linked.id in ids
+        assert unlinked.id in ids
+
+
+@pytest.mark.asyncio
+class TestFfLinkEnrichment:
+    """Batch-обогащение списка полями ФФ-заявки (router._enrich_ff_links)."""
+
+    async def test_enrich_populates_ff_fields_when_linked(self, db_session):
+        """Заявка ФФ-интегрированного склада c привязкой получает ff_request_number;
+        непривязанная остаётся null."""
+        from backend.routers.assembly import _enrich_ff_links
+
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        await _connect_ff_integration(db_session, wh_id)
+
+        linked = await _create_test_request(db_session)
+        unlinked = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                wb_fbo_supply_id=None,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=3)],
+            ),
+        )
+        ff = await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
+
+        items, _total = await list_assembly_requests(db_session, PROJECT_ID)
+        responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
+        await _enrich_ff_links(db_session, PROJECT_ID, items, responses)
+
+        by_id = {r.id: r for r in responses}
+        assert by_id[linked.id].ff_request_id == ff.id
+        assert by_id[linked.id].ff_request_number == ff.number
+        assert by_id[linked.id].ff_stage_title == "Приёмка"
+        assert by_id[linked.id].ff_warehouse_id == wh_id
+        # Непривязанная заявка того же склада — поля остаются null
+        assert by_id[unlinked.id].ff_request_id is None
+        assert by_id[unlinked.id].ff_request_number is None
+
+    async def test_enrich_skips_non_ff_warehouse(self, db_session):
+        """Заявки склада БЕЗ активной ФФ-интеграции остаются с ff_* = null,
+        даже если зеркало ФФ-заявки физически существует."""
+        from backend.routers.assembly import _enrich_ff_links
+
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        # ФФ-интеграцию НЕ подключаем для этого склада.
+        linked = await _create_test_request(db_session)
+        await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
+
+        items, _total = await list_assembly_requests(db_session, PROJECT_ID)
+        responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
+        await _enrich_ff_links(db_session, PROJECT_ID, items, responses)
+
+        by_id = {r.id: r for r in responses}
+        assert by_id[linked.id].ff_request_id is None
+        assert by_id[linked.id].ff_request_number is None
+        assert by_id[linked.id].ff_stage_title is None
+        assert by_id[linked.id].ff_warehouse_id is None

@@ -17,7 +17,7 @@ bcrypt==4.3.0
 redis==5.3.1
 miniopy-async==1.23.5
 httpx==0.28.1
-cryptography==46.0.7
+cryptography==48.0.1
 pytest==8.4.2
 pytest-asyncio==1.4.0
 pytest-xdist==3.8.0

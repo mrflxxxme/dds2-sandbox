@@ -30,6 +30,8 @@ from backend.schemas.fulfillment import (
     FfStatusEvent,
     FfStocksResponse,
     FfSyncResult,
+    FfSyncRun,
+    FfUnlinkedAssembly,
     FulfillmentConnectPayload,
     FulfillmentStatus,
 )
@@ -116,9 +118,9 @@ async def sync(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Ручной синк остатков и заявок с фулфилмента."""
+    """Ручной синк остатков и заявок с фулфилмента (с записью в журнал sync_log)."""
     try:
-        return await fulfillment_service.sync_warehouse(db, project.id, warehouse_id)
+        return await fulfillment_service.sync_warehouse_logged(db, project.id, warehouse_id)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
@@ -145,6 +147,16 @@ async def list_requests(
     return await fulfillment_service.list_requests(db, project.id, warehouse_id, kind, show_archived=show_archived)
 
 
+@wh_router.get("/unlinked-assemblies", response_model=list[FfUnlinkedAssembly])
+async def unlinked_assemblies(
+    warehouse_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Наши активные заявки на сборку склада без связанной ФФ-заявки (обратный линк)."""
+    return await fulfillment_service.list_unlinked_assemblies(db, project.id, warehouse_id)
+
+
 @wh_router.get("/status-history", response_model=list[FfStatusEvent])
 async def status_history(
     warehouse_id: int,
@@ -161,6 +173,19 @@ async def status_history(
     return await fulfillment_service.list_status_events(
         db, project.id, warehouse_id, kind=kind, ff_request_id=ff_request_id
     )
+
+
+@wh_router.get("/sync-runs", response_model=list[FfSyncRun])
+async def sync_runs(
+    warehouse_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Журнал прогонов синхронизации ФФ-склада: когда синкали, статус, объём.
+
+    Питает вкладку «ФФ синхронизация» — авто-синк по расписанию + ручной запуск.
+    """
+    return await fulfillment_service.list_sync_runs(db, project.id, warehouse_id)
 
 
 @wh_router.post(

@@ -24,7 +24,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 import httpx
-from sqlalchemy import delete, func, select, text, tuple_
+from sqlalchemy import delete, exists, func, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -51,6 +51,7 @@ from backend.models import (
     InboundReceiptItem,
     IntegrationKey,
     Nomenclature,
+    SyncLog,
     Warehouse,
     WarehouseStock,
 )
@@ -543,6 +544,74 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         "assemblies_marked_ready": assemblies_marked_ready,
         "synced_at": synced_at,
     }
+
+
+async def _finalize_sync_log(
+    db: AsyncSession,
+    log_id: int,
+    status: str,
+    *,
+    rows_fetched: int = 0,
+    rows_inserted: int = 0,
+    error_msg: str | None = None,
+) -> None:
+    """Закрыть строку sync_log (OK/ERROR). Сбой записи лога не должен валить синк."""
+    try:
+        await db.execute(
+            update(SyncLog)
+            .where(SyncLog.id == log_id)
+            .values(
+                status=status,
+                rows_fetched=rows_fetched,
+                rows_inserted=rows_inserted,
+                finished_at=utcnow(),
+                error_msg=error_msg,
+            )
+        )
+        await db.commit()
+    except Exception as e:  # — лог второстепенен, синк уже отработал
+        logger.warning("Fulfillment sync: failed to finalize sync_log %s — %s", log_id, e)
+
+
+async def sync_warehouse_logged(db: AsyncSession, project_id: int, warehouse_id: int) -> dict:
+    """sync_warehouse + журналируем прогон в sync_log (вкладка «ФФ синхронизация»).
+
+    Ручной синк — единичная операция в рамках запроса, поэтому лог ведём в той же
+    сессии (scheduler-job крутит цикл по складам и пишет лог отдельными сессиями,
+    чтобы строка не зависала RUNNING при падении одного склада). sync_warehouse
+    делает commit ДО внешних HTTP-вызовов, так что строка RUNNING фиксируется
+    рано, а провайдер-ошибки (ValueError) приходят на чистой сессии → ERROR
+    дописывается штатно.
+    """
+    key = await get_integration(db, project_id, warehouse_id)
+    if not key:
+        raise ValueError("Фулфилмент не подключён к этому складу")
+
+    sync_log = SyncLog(
+        integration_id=key.id,
+        service=key.service,
+        sync_type="fulfillment",
+        started_at=utcnow(),
+        status="RUNNING",
+    )
+    db.add(sync_log)
+    await db.flush()
+    log_id = sync_log.id
+
+    try:
+        result = await sync_warehouse(db, project_id, warehouse_id)
+    except Exception as e:
+        await _finalize_sync_log(db, log_id, "ERROR", error_msg=str(e)[:1000])
+        raise
+
+    await _finalize_sync_log(
+        db,
+        log_id,
+        "OK",
+        rows_fetched=result["stocks_synced"] + result["requests_synced"],
+        rows_inserted=result["stocks_synced"],
+    )
+    return result
 
 
 # ─── Нормализация провайдер → общий вид ─────────────────────────────────────
@@ -1480,6 +1549,57 @@ async def list_status_events(
     return [_status_event_to_dict(e) for e in result.scalars().all()]
 
 
+SYNC_RUNS_LIMIT = 100
+
+
+def _sync_run_to_dict(log: SyncLog) -> dict:
+    duration = None
+    if log.finished_at and log.started_at:
+        duration = (log.finished_at - log.started_at).total_seconds()
+    stocks = log.rows_inserted or 0
+    total = log.rows_fetched or 0
+    return {
+        "id": log.id,
+        "service": log.service,
+        "status": log.status,
+        "started_at": log.started_at,
+        "finished_at": log.finished_at,
+        "stocks_synced": stocks,
+        "requests_synced": max(total - stocks, 0),
+        "duration_seconds": duration,
+        "error_msg": log.error_msg,
+    }
+
+
+async def list_sync_runs(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    limit: int = SYNC_RUNS_LIMIT,
+) -> list[dict]:
+    """Журнал прогонов ФФ-синка склада (sync_log), новые сверху (FfSyncRun shape).
+
+    sync_log без своего project_id — изоляция арендатора через родительский
+    integration_keys (Iron rule #1: JOIN по integration_id, фильтр project_id).
+    is_deleted ключа НЕ фильтруем намеренно: переподключение восстанавливает ту
+    же строку ключа (integration_id стабилен), и историю прогонов показываем
+    целиком, даже если интеграцию когда-то отключали.
+    """
+    q = (
+        select(SyncLog)
+        .join(IntegrationKey, SyncLog.integration_id == IntegrationKey.id)
+        .where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.warehouse_id == warehouse_id,
+            SyncLog.sync_type == "fulfillment",
+        )
+        .order_by(SyncLog.started_at.desc(), SyncLog.id.desc())
+        .limit(limit)
+    )
+    result = await db.execute(q)
+    return [_sync_run_to_dict(log) for log in result.scalars().all()]
+
+
 # ─── Overview: сводка по всем складам с активной ФФ-интеграцией ─────────────
 
 
@@ -1796,6 +1916,105 @@ async def get_overview(
         out_requests.append(row_dict)
 
     return {"warehouses": warehouses, "requests": out_requests}
+
+
+# ─── Несвязанные наши заявки на сборку (обратный линк ФФ → ASM) ──────────────
+
+UNLINKED_ASSEMBLIES_LIMIT = 500
+_UNLINKED_ASSEMBLY_STATUSES = (
+    AssemblyStatus.IN_PROGRESS.value,
+    AssemblyStatus.READY.value,
+    AssemblyStatus.VEHICLE_ASSIGNED.value,
+)
+
+
+async def list_unlinked_assemblies(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    limit: int = UNLINKED_ASSEMBLIES_LIMIT,
+) -> list[dict]:
+    """Активные сборки склада без связанной ФФ-заявки (FfUnlinkedAssembly shape).
+
+    Статусы IN_PROGRESS/READY/VEHICLE_ASSIGNED, у которых НЕ существует
+    FulfillmentRequest с assembly_request_id == ar.id (project-scoped,
+    коррелированный ~exists). total_qty/brands — двумя batch-агрегатами по
+    выбранным id (без N+1); brand берётся из Nomenclature позиций, как в
+    assembly._build_items_with_stock. Сортировка created_at desc, limit.
+    """
+    linked = exists().where(
+        FulfillmentRequest.project_id == project_id,
+        FulfillmentRequest.assembly_request_id == AssemblyRequest.id,
+    )
+    result = await db.execute(
+        select(
+            AssemblyRequest.id,
+            AssemblyRequest.number,
+            AssemblyRequest.status,
+            AssemblyRequest.estimated_ready_date,
+            AssemblyRequest.created_at,
+        )
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.warehouse_id == warehouse_id,
+            AssemblyRequest.is_deleted == False,
+            AssemblyRequest.status.in_(_UNLINKED_ASSEMBLY_STATUSES),
+            ~linked,
+        )
+        .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
+        .limit(limit)
+    )
+    docs = result.all()
+    if not docs:
+        return []
+
+    doc_ids = [d.id for d in docs]
+
+    # total_qty: сумма quantity позиций по заявке — одним агрегатом
+    qty_result = await db.execute(
+        select(
+            AssemblyRequestItem.assembly_request_id,
+            func.sum(AssemblyRequestItem.quantity),
+        )
+        .where(
+            AssemblyRequestItem.project_id == project_id,
+            AssemblyRequestItem.assembly_request_id.in_(doc_ids),
+        )
+        .group_by(AssemblyRequestItem.assembly_request_id)
+    )
+    qty_by_doc = {doc_id: int(qty or 0) for doc_id, qty in qty_result.all()}
+
+    # brands: distinct бренд номенклатуры позиций по заявке — одним JOIN-агрегатом
+    brand_result = await db.execute(
+        select(
+            AssemblyRequestItem.assembly_request_id,
+            Nomenclature.brand,
+        )
+        .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+        .where(
+            AssemblyRequestItem.project_id == project_id,
+            AssemblyRequestItem.assembly_request_id.in_(doc_ids),
+            Nomenclature.brand.is_not(None),
+        )
+        .distinct()
+    )
+    brands_by_doc: dict[int, set[str]] = {}
+    for doc_id, brand in brand_result.all():
+        if brand:
+            brands_by_doc.setdefault(doc_id, set()).add(brand)
+
+    return [
+        {
+            "id": d.id,
+            "number": d.number,
+            "status": d.status,
+            "brands": ", ".join(sorted(brands_by_doc.get(d.id, set()))) or None,
+            "total_qty": qty_by_doc.get(d.id, 0),
+            "estimated_ready_date": d.estimated_ready_date,
+            "created_at": d.created_at,
+        }
+        for d in docs
+    ]
 
 
 def _coerce_name(value: object) -> str | None:

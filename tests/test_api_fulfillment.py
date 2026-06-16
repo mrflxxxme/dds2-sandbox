@@ -73,6 +73,9 @@ async def test_endpoints_require_auth(client):
     resp = await client.get("/api/v1/warehouse/1/fulfillment/requests")
     assert resp.status_code in (401, 403, 422)
 
+    resp = await client.get("/api/v1/warehouse/1/fulfillment/unlinked-assemblies")
+    assert resp.status_code in (401, 403, 422)
+
 
 # ─── Connect ─────────────────────────────────────────────────────────────────
 
@@ -400,3 +403,54 @@ async def test_status_history_after_sync(client, auth_headers, monkeypatch):
     resp = await client.get(f"/api/v1/warehouse/{wh_id}/fulfillment/status-history?kind=inbound", headers=headers)
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+# ─── Sync runs (журнал прогонов синхронизации) ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_runs_requires_auth(client):
+    resp = await client.get("/api/v1/warehouse/1/fulfillment/sync-runs")
+    assert resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_sync_runs_after_sync(client, auth_headers, monkeypatch):
+    """connect + ручной sync → endpoint sync-runs отдаёт прогон со статусом OK."""
+
+    async def fake_test_connection(self):
+        return {"id": 6282, "name": "ООО ТЕСТ ФФ"}
+
+    async def fake_fetch_all_products(self, customer_id):
+        return []
+
+    async def fake_fetch_requests(self, type_id):
+        return []
+
+    async def fake_fetch_request_detail(self, external_id):
+        return {}
+
+    monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "fetch_all_products", fake_fetch_all_products)
+    monkeypatch.setattr(SkladbotClient, "fetch_requests", fake_fetch_requests)
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_fetch_request_detail)
+
+    headers = await _project_headers(client, auth_headers)
+    wh_id = await _create_warehouse(client, headers)
+
+    resp = await client.post(
+        f"/api/v1/warehouse/{wh_id}/fulfillment/connect",
+        json={"provider": "skladbot", "token": FAKE_TOKEN},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    resp = await client.post(f"/api/v1/warehouse/{wh_id}/fulfillment/sync", headers=headers)
+    assert resp.status_code == 200, resp.text
+
+    resp = await client.get(f"/api/v1/warehouse/{wh_id}/fulfillment/sync-runs", headers=headers)
+    assert resp.status_code == 200, resp.text
+    runs = resp.json()
+    assert isinstance(runs, list)
+    assert len(runs) >= 1
+    assert any(run["status"] == "OK" for run in runs)

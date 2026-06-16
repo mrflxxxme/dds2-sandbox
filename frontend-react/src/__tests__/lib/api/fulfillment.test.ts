@@ -91,6 +91,19 @@ describe('fulfillment.getFfStatusHistory', () => {
     });
 });
 
+// ─── Sync runs (журнал прогонов синхронизации) ────────────────────────────
+
+describe('fulfillment.getFfSyncRuns', () => {
+    it('GETs sync-runs for the warehouse', async () => {
+        const spy = mockFetch([]);
+        const api = makeApi();
+        await api.getFfSyncRuns(5);
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/warehouse/5/fulfillment/sync-runs');
+        expect((init as RequestInit).method).toBe('GET');
+    });
+});
+
 // ─── Link candidates ──────────────────────────────────────────────────────
 
 describe('fulfillment.getFfLinkCandidates', () => {

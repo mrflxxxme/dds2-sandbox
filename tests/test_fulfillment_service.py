@@ -7,9 +7,10 @@ SkladbotClient полностью мокается через monkeypatch — н
 import base64
 import json
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -26,11 +27,13 @@ from backend.models import (
     InboundReceiptItem,
     IntegrationKey,
     Nomenclature,
+    SyncLog,
     Warehouse,
     WarehouseStock,
 )
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus, AssemblyStatusHistory
 from backend.services import fulfillment_service
+from backend.utils.time import utcnow
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -2391,3 +2394,367 @@ async def test_list_status_events_project_isolation(
 
     assert await fulfillment_service.list_status_events(db_session, project.id, warehouse.id)  # есть
     assert await fulfillment_service.list_status_events(db_session, other_project.id, warehouse.id) == []
+
+
+# ─── Журнал прогонов синка (sync_log → FfSyncRun) ────────────────────────────
+
+
+async def _add_sync_log(
+    db_session,
+    integration_id,
+    *,
+    service="skladbot",
+    sync_type="fulfillment",
+    status="OK",
+    started_at,
+    finished_at=None,
+    rows_fetched=0,
+    rows_inserted=0,
+    error_msg=None,
+) -> SyncLog:
+    """Прямая вставка строки sync_log (минуя сервис) для проверки маппинга/порядка."""
+    log = SyncLog(
+        integration_id=integration_id,
+        service=service,
+        sync_type=sync_type,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+        rows_fetched=rows_fetched,
+        rows_inserted=rows_inserted,
+        error_msg=error_msg,
+    )
+    db_session.add(log)
+    await db_session.commit()
+    await db_session.refresh(log)
+    return log
+
+
+@pytest.mark.asyncio
+async def test_list_sync_runs_maps_and_orders(db_session, project, warehouse, connected_key):
+    """list_sync_runs: новые сверху, корректный маппинг полей, чужой sync_type исключён."""
+    base = datetime(2026, 6, 15, 12, 0, 0)
+
+    # Самый старый OK-прогон (stocks=5, requests=8-5=3, длительность 30с)
+    await _add_sync_log(
+        db_session,
+        connected_key.id,
+        status="OK",
+        started_at=base,
+        finished_at=base + timedelta(seconds=30),
+        rows_fetched=8,
+        rows_inserted=5,
+    )
+    # Средний — ERROR с текстом, ещё не закрыт (finished_at IS NULL)
+    await _add_sync_log(
+        db_session,
+        connected_key.id,
+        status="ERROR",
+        started_at=base + timedelta(minutes=10),
+        finished_at=None,
+        rows_fetched=0,
+        rows_inserted=0,
+        error_msg="boom upstream",
+    )
+    # Самый новый OK-прогон (rows_fetched < rows_inserted → requests кламп в 0)
+    await _add_sync_log(
+        db_session,
+        connected_key.id,
+        status="OK",
+        started_at=base + timedelta(minutes=20),
+        finished_at=base + timedelta(minutes=20, seconds=12),
+        rows_fetched=4,
+        rows_inserted=4,
+    )
+    # Чужой sync_type под тем же ключом — в журнал ФФ попадать не должен
+    await _add_sync_log(
+        db_session,
+        connected_key.id,
+        sync_type="stocks",
+        status="OK",
+        started_at=base + timedelta(minutes=30),
+        finished_at=base + timedelta(minutes=30, seconds=5),
+        rows_fetched=99,
+        rows_inserted=99,
+    )
+
+    runs = await fulfillment_service.list_sync_runs(db_session, project.id, warehouse.id)
+    assert len(runs) == 3  # «stocks» исключён фильтром sync_type
+
+    # Новые сверху: 20мин → 10мин → 0мин
+    newest, middle, oldest = runs
+    assert newest["status"] == "OK"
+    assert newest["stocks_synced"] == 4
+    assert newest["requests_synced"] == 0  # max(4 - 4, 0)
+    assert newest["duration_seconds"] == 12
+    assert newest["error_msg"] is None
+
+    assert middle["status"] == "ERROR"
+    assert middle["error_msg"] == "boom upstream"
+    assert middle["duration_seconds"] is None  # finished_at IS NULL
+    assert middle["stocks_synced"] == 0
+    assert middle["requests_synced"] == 0
+
+    assert oldest["status"] == "OK"
+    assert oldest["stocks_synced"] == 5
+    assert oldest["requests_synced"] == 3  # 8 - 5
+    assert oldest["duration_seconds"] is not None and oldest["duration_seconds"] > 0
+    assert oldest["service"] == "skladbot"
+
+
+@pytest.mark.asyncio
+async def test_list_sync_runs_project_isolation(db_session, project, other_project, warehouse, connected_key):
+    """Прогон под ключом проекта A не виден из проекта B (изоляция через integration_keys)."""
+    await _add_sync_log(
+        db_session,
+        connected_key.id,
+        status="OK",
+        started_at=datetime(2026, 6, 15, 9, 0, 0),
+        finished_at=datetime(2026, 6, 15, 9, 0, 10),
+        rows_fetched=2,
+        rows_inserted=1,
+    )
+
+    mine = await fulfillment_service.list_sync_runs(db_session, project.id, warehouse.id)
+    assert len(mine) == 1
+
+    theirs = await fulfillment_service.list_sync_runs(db_session, other_project.id, warehouse.id)
+    assert theirs == []
+
+
+@pytest.mark.asyncio
+async def test_sync_warehouse_logged_writes_ok_log(db_session, project, warehouse, connected_key, monkeypatch):
+    """Успешный логируемый синк пишет ровно одну OK-строку sync_log, видимую в журнале."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(6001)]})
+
+    result = await fulfillment_service.sync_warehouse_logged(db_session, project.id, warehouse.id)
+    assert result["requests_synced"] == 1
+
+    logs = (
+        (
+            await db_session.execute(
+                select(SyncLog).where(
+                    SyncLog.integration_id == connected_key.id,
+                    SyncLog.sync_type == "fulfillment",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(logs) == 1
+    log = logs[0]
+    assert log.status == "OK"
+    assert log.finished_at is not None
+    assert log.rows_inserted == result["stocks_synced"]
+    assert log.rows_fetched == result["stocks_synced"] + result["requests_synced"]
+
+    runs = await fulfillment_service.list_sync_runs(db_session, project.id, warehouse.id)
+    assert len(runs) == 1
+    assert runs[0]["status"] == "OK"
+    assert runs[0]["stocks_synced"] == result["stocks_synced"]
+    assert runs[0]["requests_synced"] == result["requests_synced"]
+
+
+@pytest.mark.asyncio
+async def test_sync_warehouse_logged_records_error_and_reraises(
+    db_session, project, warehouse, connected_key, monkeypatch
+):
+    """Без подключения — ValueError ДО лога (строк нет); провайдер-ошибка → ERROR-строка + re-raise."""
+    # 1) Несвязанный склад: путь падает до записи лога
+    other_wh = Warehouse(project_id=project.id, name=f"FF-{_uid()}", warehouse_type="FULFILLMENT")
+    db_session.add(other_wh)
+    await db_session.commit()
+    await db_session.refresh(other_wh)
+
+    with pytest.raises(ValueError):
+        await fulfillment_service.sync_warehouse_logged(db_session, project.id, other_wh.id)
+
+    no_logs = (
+        (
+            await db_session.execute(
+                select(SyncLog)
+                .join(IntegrationKey, SyncLog.integration_id == IntegrationKey.id)
+                .where(
+                    IntegrationKey.warehouse_id == other_wh.id,
+                    SyncLog.sync_type == "fulfillment",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert no_logs == []
+
+    # 2) Подключённый ключ, но провайдер падает HTTP-ошибкой → ERROR-строка + re-raise
+    async def boom_products(self, customer_id):
+        raise httpx.HTTPError("upstream 500")
+
+    _mock_requests(monkeypatch, {})
+    monkeypatch.setattr(SkladbotClient, "fetch_all_products", boom_products)
+
+    with pytest.raises(ValueError):
+        await fulfillment_service.sync_warehouse_logged(db_session, project.id, warehouse.id)
+
+    err_logs = (
+        (
+            await db_session.execute(
+                select(SyncLog).where(
+                    SyncLog.integration_id == connected_key.id,
+                    SyncLog.sync_type == "fulfillment",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(err_logs) == 1
+    assert err_logs[0].status == "ERROR"
+    assert err_logs[0].error_msg
+    assert err_logs[0].finished_at is not None
+
+
+# ─── list_unlinked_assemblies: наши сборки без связанной ФФ-заявки ───────────
+
+
+async def _make_assembly_with_items(
+    db_session,
+    project,
+    warehouse,
+    items,
+    status=AssemblyStatus.IN_PROGRESS.value,
+    estimated_ready_date=None,
+):
+    """Сборка с позициями [(barcode, nomenclature_id, qty)] и заданным статусом."""
+    doc = AssemblyRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        number=f"A-{_uid()[:6]}",
+        status=status,
+        estimated_ready_date=estimated_ready_date,
+        pallets_count=1,
+        pallet_weight_kg=Decimal("10.00"),
+    )
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+    if items:
+        db_session.add_all(
+            [
+                AssemblyRequestItem(
+                    project_id=project.id,
+                    assembly_request_id=doc.id,
+                    nomenclature_id=nom_id,
+                    barcode=barcode,
+                    quantity=qty,
+                )
+                for barcode, nom_id, qty in items
+            ]
+        )
+        await db_session.commit()
+    return doc
+
+
+async def _make_ff_mirror(db_session, project, warehouse, external_id, assembly_request_id=None):
+    """Прямая вставка строки зеркала FulfillmentRequest (assembly), опционально связанной."""
+    req = FulfillmentRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        provider="skladbot",
+        external_id=str(external_id),
+        kind="assembly",
+        status="new",
+        is_completed=False,
+        archived=False,
+        expired=False,
+        assembly_request_id=assembly_request_id,
+        synced_at=utcnow(),
+    )
+    db_session.add(req)
+    await db_session.commit()
+    await db_session.refresh(req)
+    return req
+
+
+@pytest.mark.asyncio
+async def test_unlinked_assemblies_returns_active_with_qty_brands_order(db_session, project, warehouse):
+    """Активные сборки в 3 статусах без линка: total_qty/brands и порядок created_at desc."""
+    bc_a, bc_b = f"30{_uid()}", f"31{_uid()}"
+    nom_a = await _make_nomenclature(db_session, project.id, bc_a, article="ART-A", brand="BrandA")
+    nom_b = await _make_nomenclature(db_session, project.id, bc_b, article="ART-B", brand="BrandB")
+
+    older = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc_a, nom_a.id, 5)], status=AssemblyStatus.IN_PROGRESS.value
+    )
+    newer = await _make_assembly_with_items(
+        db_session,
+        project,
+        warehouse,
+        [(bc_a, nom_a.id, 3), (bc_b, nom_b.id, 4)],
+        status=AssemblyStatus.READY.value,
+    )
+    # Гарантируем порядок created_at: newer создан позже older (commit-порядок)
+    rows = await fulfillment_service.list_unlinked_assemblies(db_session, project.id, warehouse.id)
+
+    by_id = {r["id"]: r for r in rows}
+    assert older.id in by_id and newer.id in by_id
+    assert by_id[older.id]["total_qty"] == 5
+    assert by_id[older.id]["brands"] == "BrandA"
+    assert by_id[newer.id]["total_qty"] == 7
+    assert by_id[newer.id]["brands"] == "BrandA, BrandB"  # distinct, по алфавиту
+    # Порядок: newer (created позже) раньше older в списке
+    ids_order = [r["id"] for r in rows if r["id"] in {older.id, newer.id}]
+    assert ids_order == [newer.id, older.id]
+
+
+@pytest.mark.asyncio
+async def test_unlinked_assemblies_excludes_linked(db_session, project, warehouse):
+    """Сборка со связанной ФФ-заявкой (assembly_request_id) не попадает в выдачу."""
+    bc = f"32{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-L", brand="BrandL")
+    linked_doc = await _make_assembly_with_items(db_session, project, warehouse, [(bc, nom.id, 2)])
+    unlinked_doc = await _make_assembly_with_items(db_session, project, warehouse, [(bc, nom.id, 9)])
+    await _make_ff_mirror(db_session, project, warehouse, _uid(), assembly_request_id=linked_doc.id)
+
+    rows = await fulfillment_service.list_unlinked_assemblies(db_session, project.id, warehouse.id)
+    ids = {r["id"] for r in rows}
+    assert linked_doc.id not in ids
+    assert unlinked_doc.id in ids
+
+
+@pytest.mark.asyncio
+async def test_unlinked_assemblies_excludes_wrong_statuses(db_session, project, warehouse):
+    """SHIPPED/PENDING и прочие статусы вне IN_PROGRESS/READY/VEHICLE_ASSIGNED исключены."""
+    bc = f"33{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-S")
+    in_progress = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 1)], status=AssemblyStatus.IN_PROGRESS.value
+    )
+    vehicle = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 1)], status=AssemblyStatus.VEHICLE_ASSIGNED.value
+    )
+    shipped = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 1)], status=AssemblyStatus.SHIPPED.value
+    )
+    pending = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 1)], status=AssemblyStatus.PENDING.value
+    )
+
+    rows = await fulfillment_service.list_unlinked_assemblies(db_session, project.id, warehouse.id)
+    ids = {r["id"] for r in rows}
+    assert in_progress.id in ids
+    assert vehicle.id in ids
+    assert shipped.id not in ids
+    assert pending.id not in ids
+
+
+@pytest.mark.asyncio
+async def test_unlinked_assemblies_project_isolation(db_session, project, warehouse, other_project, other_warehouse):
+    """Чужой проект не видит наши несвязанные сборки (и наоборот)."""
+    bc = f"34{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-ISO")
+    await _make_assembly_with_items(db_session, project, warehouse, [(bc, nom.id, 4)])
+
+    rows = await fulfillment_service.list_unlinked_assemblies(db_session, other_project.id, other_warehouse.id)
+    assert rows == []

@@ -11,6 +11,8 @@ import type {
     FfStatusEvent,
     FfStocksResponse,
     FfSyncResult,
+    FfSyncRun,
+    FfUnlinkedAssembly,
     FulfillmentConnectPayload,
     FulfillmentStatus,
 } from '@/types/api';
@@ -67,6 +69,14 @@ export function addFulfillmentMethods(api: ApiClient) {
             if (params?.ffRequestId != null) query.set('ff_request_id', String(params.ffRequestId));
             const qs = query.toString();
             return api.request<FfStatusEvent[]>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/status-history${qs ? `?${qs}` : ''}`);
+        },
+        // ─── Журнал синхронизаций (когда были последние обновления зеркала) ──
+        getFfSyncRuns(warehouseId: number) {
+            return api.request<FfSyncRun[]>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/sync-runs`);
+        },
+        // ─── Наши заявки сборки без привязки ФФ (реверс-линк из заявки ФФ) ──
+        getFfUnlinkedAssemblies(warehouseId: number) {
+            return api.request<FfUnlinkedAssembly[]>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/unlinked-assemblies`);
         },
         getFfLinkCandidates(warehouseId: number, ffRequestId: number) {
             return api.request<FfLinkCandidatesResponse>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/link-candidates`);

@@ -21,6 +21,7 @@ from backend.models.assembly import (
     AssemblyStatus,
 )
 from backend.models.cost import Nomenclature
+from backend.models.fulfillment import FulfillmentRequest
 from backend.models.warehouse import (
     WarehouseStock,
     WarehouseType,
@@ -432,11 +433,16 @@ async def list_assembly_requests(
     date_from: date | None = None,
     date_to: date | None = None,
     brand: str | None = None,
+    ff_link: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[AssemblyRequest], int]:
     """
     List assembly requests with filters, pagination.
+
+    ff_link: "none" — только заявки БЕЗ привязанной ФФ-заявки; "linked" — только
+    с привязанной; None — без фильтра. Привязка живёт в
+    FulfillmentRequest.assembly_request_id (project-scoped).
     """
     base = select(AssemblyRequest).where(
         AssemblyRequest.project_id == project_id,
@@ -488,6 +494,17 @@ async def list_assembly_requests(
             .distinct()
         )
         base = base.where(AssemblyRequest.id.in_(brand_requests))
+
+    if ff_link in ("none", "linked"):
+        ff_exists = (
+            select(FulfillmentRequest.id)
+            .where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.assembly_request_id == AssemblyRequest.id,
+            )
+            .exists()
+        )
+        base = base.where(ff_exists if ff_link == "linked" else ~ff_exists)
 
     # Total count
     count_q = select(func.count()).select_from(base.subquery())

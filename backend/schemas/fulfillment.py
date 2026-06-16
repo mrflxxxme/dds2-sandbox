@@ -283,6 +283,25 @@ class FfOverviewResponse(BaseModel):
     requests: list[FfOverviewRequestRow]
 
 
+# ─── Несвязанные наши заявки на сборку (обратный линк ФФ → ASM) ──────────────
+
+
+class FfUnlinkedAssembly(BaseModel):
+    """Наша заявка на сборку без связанной заявки ФФ (для модалки обратного линка).
+
+    Активные сборки склада (IN_PROGRESS/READY/VEHICLE_ASSIGNED), которым ещё не
+    сопоставлена ни одна ФФ-заявка зеркала.
+    """
+
+    id: int
+    number: str
+    status: str  # AssemblyStatus
+    brands: str | None = None  # бренды позиций через запятую (или None)
+    total_qty: int = 0  # суммарное кол-во позиций, шт
+    estimated_ready_date: date | None = None
+    created_at: datetime
+
+
 # ─── Sync ────────────────────────────────────────────────────────────────────
 
 
@@ -292,3 +311,21 @@ class FfSyncResult(BaseModel):
     unmatched_barcodes: int = 0
     assemblies_marked_ready: int = 0  # наших заявок переведено в READY по стадии ФФ
     synced_at: datetime
+
+
+class FfSyncRun(BaseModel):
+    """Один прогон синхронизации ФФ-склада (строка журнала sync_log).
+
+    Питает вкладку «ФФ синхронизация» — видно, когда были последние обновления
+    зеркала (авто-синк по расписанию + ручной «Синхронизировать сейчас»).
+    """
+
+    id: int
+    service: str  # skladbot | wmscelicom | migfull
+    status: str  # RUNNING | OK | ERROR
+    started_at: datetime
+    finished_at: datetime | None = None
+    stocks_synced: int = 0  # позиций остатков (rows_inserted)
+    requests_synced: int = 0  # заявок (rows_fetched − rows_inserted)
+    duration_seconds: float | None = None
+    error_msg: str | None = None

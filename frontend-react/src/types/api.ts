@@ -3495,6 +3495,36 @@ export interface FfStatusEvent {
   changed_at: string;
 }
 
+/** Наша заявка сборки (ASM-xxx) без привязанной ФФ-заявки — для реверс-линка из заявки ФФ. */
+export interface FfUnlinkedAssembly {
+  id: number;
+  number: string;
+  status: string;
+  /** распознанные бренды позиций через запятую (или null) */
+  brands: string | null;
+  /** сумма количеств позиций, шт */
+  total_qty: number;
+  estimated_ready_date: string | null;
+  created_at: string;
+}
+
+/** Один прогон синхронизации ФФ-склада (журнал sync_log) — вкладка «ФФ синхронизация». */
+export interface FfSyncRun {
+  id: number;
+  /** skladbot | wmscelicom | migfull */
+  service: string;
+  /** RUNNING | OK | ERROR */
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  /** позиций остатков */
+  stocks_synced: number;
+  /** заявок */
+  requests_synced: number;
+  duration_seconds: number | null;
+  error_msg: string | null;
+}
+
 export interface FfRequestDetailProduct {
   barcode: string | null;
   vendor_code: string | null;
