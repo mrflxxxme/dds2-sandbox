@@ -512,7 +512,8 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
             FulfillmentRequest.assembly_request_id.is_not(None),
             FulfillmentRequest.archived == False,
-            FulfillmentRequest.expired == False,
+            # expired (просрочена) НЕ исключаем: заявка с истёкшим сроком всё
+            # ещё активна и проходит стадии — её сборку тоже надо авто-READY
             FulfillmentRequest.local_archived == False,
         )
         .limit(_MIRROR_SELECT_LIMIT)
@@ -1236,7 +1237,8 @@ async def _mark_linked_assemblies_ready(
 ) -> int:
     """Перевести связанные сборки IN_PROGRESS → READY по сигналу стадии ФФ.
 
-    Берём живые связанные assembly-строки (не archived/expired) с
+    Берём живые связанные assembly-строки (не archived/local_archived;
+    expired/просрочена — всё ещё активна, не исключаем) с
     _assembly_ready_signal() == True; наши заявки выбираются одним запросом
     (project_id + is_deleted + только IN_PROGRESS — прочие статусы не трогаем,
     переход выполняем напрямую, история changed_by=ff_sync). Возвращает число
@@ -1246,7 +1248,7 @@ async def _mark_linked_assemblies_ready(
     for req in ff_requests:
         if req.kind != FfRequestKind.ASSEMBLY.value or req.assembly_request_id is None:
             continue
-        if req.archived or req.expired:
+        if req.archived:  # expired (просрочена) — активна, не исключаем
             continue
         if not _assembly_ready_signal(req.provider, req.stage_code, req.stage_title, req.is_completed):
             continue
@@ -2645,7 +2647,7 @@ async def link_request(
         # IN_PROGRESS → переводим сразу (та же логика, что при синке)
         if (
             not req.archived
-            and not req.expired
+            # expired (просрочена) — активна, авто-READY как при синке
             and doc.status == AssemblyStatus.IN_PROGRESS.value
             and _assembly_ready_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
         ):

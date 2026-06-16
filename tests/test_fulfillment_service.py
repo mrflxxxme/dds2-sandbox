@@ -82,6 +82,7 @@ def _req(
     completed=0,
     stage_title="Новая",
     stage_code=None,
+    expired=0,
 ):
     """skladbot /v1/requests row."""
     return {
@@ -97,7 +98,7 @@ def _req(
         "stage_code": stage_code,
         "can_be_executed": True,
         "time_to_process": None,
-        "expired": False,
+        "expired": expired,
         "is_completed": completed,
     }
 
@@ -1619,6 +1620,39 @@ async def test_sync_marks_linked_assembly_ready(db_session, project, warehouse, 
     assert result["assemblies_marked_ready"] == 0
     history = await _history_rows(db_session, project.id, doc.id)
     assert len(history) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_marks_expired_linked_assembly_ready(db_session, project, warehouse, connected_key, monkeypatch):
+    """Просроченная (expired) ФФ-заявка на готовой стадии всё равно авто-READY сборки.
+
+    Регрессия (прод-инцидент 2026-06-16): expired=True ошибочно исключал заявку
+    из авто-READY, и сборка, чья ФФ-заявка дошла до «Указание виды работ
+    логистики» (stage_code=logistics_works) будучи просроченной, навсегда
+    зависала в IN_PROGRESS (WH-R-196281 → ASM-455). expired = «просрочена» —
+    заявка ещё активна, не dead.
+    """
+    _mock_products(monkeypatch, [])
+    # WIP-стадия, ещё не просрочена — линкуем сборку, статус не меняется
+    _mock_requests(monkeypatch, {851: [_req(9401, stage_title="Указание обьема груза v2")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_assembly_doc(db_session, project, warehouse)
+    mirror = await _mirror_row(db_session, project.id, "9401")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.IN_PROGRESS.value
+
+    # Стадия логистики + ПРОСРОЧЕНА → сборка всё равно переходит в READY
+    _mock_requests(
+        monkeypatch,
+        {851: [_req(9401, stage_title="Указание виды работ логистики", stage_code="logistics_works", expired=1)]},
+    )
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_marked_ready"] == 1
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.READY.value
+    assert doc.actual_ready_date == date.today()
 
 
 @pytest.mark.asyncio
