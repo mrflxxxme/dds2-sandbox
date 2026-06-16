@@ -3490,6 +3490,9 @@ export interface FfNomenclatureOption {
 
 export type FfRequestKind = 'assembly' | 'inbound';
 
+/** Нормализованный высокоуровневый статус ФФ-заявки (бэкенд: _ff_status_code) */
+export type FfStatusCode = 'assembling' | 'ready' | 'shipped' | 'expected' | 'accepted' | 'archived' | 'expired';
+
 export interface FfRequestRow {
   id: number;
   external_id: string;
@@ -3502,6 +3505,8 @@ export interface FfRequestRow {
   is_completed: boolean;
   archived: boolean;
   expired: boolean;
+  /** Нормализованный статус ФФ: assembling | ready | shipped | expected | accepted | archived | expired */
+  ff_status: FfStatusCode;
   /** заявлено всего, шт (skladbot — из деталки) */
   total_qty: number | null;
   /** склад отгрузки МП («Склад МП» / shipped_target) */
@@ -3554,6 +3559,8 @@ export interface FfUnlinkedAssembly {
   brands: string | null;
   /** сумма количеств позиций, шт */
   total_qty: number;
+  /** склад сдачи МП (FBO warehouse_name или ручной) */
+  dest_warehouse: string | null;
   estimated_ready_date: string | null;
   created_at: string;
 }

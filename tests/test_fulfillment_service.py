@@ -1462,8 +1462,15 @@ def _wms_item(item_id, barcode, count=0, virtual=0, name="Товар WMS", artic
     }
 
 
-def _wms_shipment(sid, status="Новая", external_order=None, date_time="2026-06-01 10:00:00", packages=None):
-    """wmscelicom shipmentsfbo/list row (packages — dict {номер: короб})."""
+def _wms_shipment(
+    sid, status="Новая", external_order=None, date_time="2026-06-01 10:00:00", packages=None, low_packages=None
+):
+    """wmscelicom shipmentsfbo/list row (Packages — dict {номер: короб}).
+
+    Боевой API кладёт состав в `Packages` (заглавная: items — один товар-dict
+    на короб); lowercase `packages` приходит с пустыми items — `low_packages`
+    моделирует этот fallback-формат.
+    """
     row = {
         "shipment_fbo_id": sid,
         "date_time": date_time,
@@ -1475,7 +1482,9 @@ def _wms_shipment(sid, status="Новая", external_order=None, date_time="2026
         "user": {"first_name": "Иван", "last_name": "Петров"},
     }
     if packages is not None:
-        row["packages"] = packages
+        row["Packages"] = packages
+    if low_packages is not None:
+        row["packages"] = low_packages
     return row
 
 
@@ -1708,22 +1717,12 @@ async def test_wms_request_detail_assembly_from_raw(db_session, project, warehou
     bc_unknown = f"BC-{_uid()}"
     nom = await _make_nomenclature(db_session, project.id, bc_known, article="ART-WMS-D")
 
+    # Боевой формат: items — один товар-dict на короб, состав в `Packages`
+    # (заглавная). Тот же ШК в двух коробах агрегируется.
     packages = {
-        "1": {
-            "number": 1,
-            "barcode": "WB_1",
-            "items": [
-                {"name": "Товар А", "barcode": bc_known, "count": 3},
-                {"name": "Товар Б", "barcode": bc_unknown, "count": 2},
-            ],
-        },
-        "2": {
-            "number": 2,
-            "barcode": "WB_2",
-            "items": [
-                {"name": "Товар А", "barcode": bc_known, "count": 4},
-            ],
-        },
+        "1": {"number": 1, "barcode": "WB_1", "items": {"name": "Товар А", "barcode": bc_known, "count": 3}},
+        "2": {"number": 2, "barcode": "WB_2", "items": {"name": "Товар Б", "barcode": bc_unknown, "count": 2}},
+        "3": {"number": 3, "barcode": "WB_3", "items": {"name": "Товар А", "barcode": bc_known, "count": 4}},
     }
     _mock_wms_fetches(monkeypatch, shipments=[_wms_shipment(401, status="На сборке", packages=packages)])
     await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
@@ -1803,11 +1802,40 @@ def test_assembly_ready_signal_skladbot_codes_and_titles():
     assert sig("skladbot", "", "  ", False) is False
 
 
-def test_assembly_ready_signal_wmscelicom_only_completed():
+def test_assembly_ready_signal_wmscelicom():
     sig = fulfillment_service._assembly_ready_signal
+    # Сборка идёт — не готово
+    assert sig("wmscelicom", None, "Новая", False) is False
     assert sig("wmscelicom", None, "На сборке", False) is False
     assert sig("wmscelicom", None, "Передана в доставку", False) is False
+    # «Ожидает отгрузки» — короб собран, ждёт машину = наш READY (как Газпром)
+    assert sig("wmscelicom", None, "Ожидает отгрузки", False) is True
+    # Терминальные статусы отгрузки FBO → готово (is_completed)
     assert sig("wmscelicom", None, "Отгружена", True) is True
+    assert sig("wmscelicom", None, "Принята в СЦ/Складе", True) is True
+
+
+def test_ff_status_code():
+    code = fulfillment_service._ff_status_code
+    ASM, INB = "assembly", "inbound"
+    # wmscelicom assembly: Новая/На сборке → в сборке, Ожидает отгрузки → готово, терминальные → отгружена
+    assert code("wmscelicom", ASM, None, "Новая", False, False, False) == "assembling"
+    assert code("wmscelicom", ASM, None, "На сборке", False, False, False) == "assembling"
+    assert code("wmscelicom", ASM, None, "Ожидает отгрузки", False, False, False) == "ready"
+    assert code("wmscelicom", ASM, None, "Отгружена", True, False, False) == "shipped"
+    assert code("wmscelicom", ASM, None, "Принята в СЦ/Складе", True, False, False) == "shipped"
+    # Оверлеи: архив и просрочка
+    assert code("wmscelicom", ASM, None, "Новая", False, True, False) == "archived"
+    assert code("wmscelicom", ASM, None, "На сборке", False, False, True) == "expired"
+    # skladbot/migfull сборка — «готово» по тому же сигналу, что и авто-READY
+    assert code("skladbot", ASM, "cargo_pickup", "Забор груза", False, False, False) == "assembling"
+    assert code("skladbot", ASM, "driver_assignment", "Назначение водителя", False, False, False) == "ready"
+    assert code("migfull", ASM, "ready", "Собран", False, False, False) == "ready"
+    assert code("migfull", ASM, "closed", "Закрыт", True, False, False) == "shipped"
+    # inbound: ожидается → принято на остатки
+    assert code("wmscelicom", INB, None, "Ожидает приемки", False, False, False) == "expected"
+    assert code("wmscelicom", INB, None, "Принята", True, False, False) == "accepted"
+    assert code("migfull", INB, None, "Отменен", False, True, False) == "archived"
 
 
 # ─── total_qty / dest_warehouse: merge-семантика _apply_requests ─────────────
@@ -2159,6 +2187,37 @@ async def test_sync_marks_expired_linked_assembly_ready(db_session, project, war
 
 
 @pytest.mark.asyncio
+async def test_sync_marks_linked_wms_assembly_ready(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """wmscelicom: «Ожидает отгрузки» переводит связанную сборку IN_PROGRESS → READY (как Газпром)."""
+    _mock_wms_fetches(monkeypatch, shipments=[_wms_shipment(950, status="На сборке")])
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_assembly_doc(db_session, project, warehouse)
+    mirror = await _mirror_row(db_session, project.id, "950")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    # «На сборке» — сборка ещё идёт, статус ФФ = assembling
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_marked_ready"] == 0
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.IN_PROGRESS.value
+    assembling_rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    assert next(r for r in assembling_rows if r["external_id"] == "950")["ff_status"] == "assembling"
+
+    # «Ожидает отгрузки» → авто-READY + статус ФФ = ready
+    _mock_wms_fetches(monkeypatch, shipments=[_wms_shipment(950, status="Ожидает отгрузки")])
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_marked_ready"] == 1
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.READY.value
+    assert doc.actual_ready_date == date.today()
+
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    ff_row = next(r for r in rows if r["external_id"] == "950")
+    assert ff_row["ff_status"] == "ready"
+
+
+@pytest.mark.asyncio
 async def test_sync_auto_ready_negative_cases(db_session, project, warehouse, connected_key, monkeypatch):
     """VEHICLE_ASSIGNED и несвязанные не трогаются; archived ФФ не триггерит."""
     _mock_products(monkeypatch, [])
@@ -2326,16 +2385,21 @@ async def test_sync_inbound_no_accept_without_link(db_session, project, warehous
 
 @pytest.mark.asyncio
 async def test_sync_wms_enrichment_fields(db_session, project, warehouse, connected_wms_key, monkeypatch):
-    """total_qty из packages.items / items (PHP-коэрсия), dest_warehouse из shipped_target."""
+    """total_qty из Packages.items / items (PHP-коэрсия), dest_warehouse из shipped_target."""
+    # Боевой формат: Packages (заглавная), один товар-dict на короб, count строкой
     packages = {
-        "1": {"number": 1, "items": [{"barcode": "BC-1", "count": 3}, {"barcode": "BC-2", "count": 2}]},
-        "2": {"number": 2, "items": [{"barcode": "BC-1", "count": 4}]},
+        "1": {"number": 1, "items": {"barcode": "BC-1", "count": 3}},
+        "2": {"number": 2, "items": {"barcode": "BC-2", "count": 2}},
+        "3": {"number": 3, "items": {"barcode": "BC-1", "count": "4"}},
     }
+    # Fallback: lowercase packages с items-списком (дрейф формата) тоже суммируется
+    low_packages = {"1": {"number": 1, "items": [{"barcode": "BC-5", "count": 5}, {"barcode": "BC-6", "count": 2}]}}
     _mock_wms_fetches(
         monkeypatch,
         shipments=[
             _wms_shipment(701, packages=packages),
-            _wms_shipment(702),  # packages нет (ограничение провайдера) → нет данных
+            _wms_shipment(702),  # ни Packages, ни packages (статус «Новая») → нет данных
+            _wms_shipment(703, low_packages=low_packages),
         ],
         unloadings=[
             _wms_unloading(801, items=[{"barcode": "BC-3", "count": 6}, None, {"barcode": "BC-4", "count": "2"}]),
@@ -2349,6 +2413,8 @@ async def test_sync_wms_enrichment_fields(db_session, project, warehouse, connec
     empty = await _mirror_row(db_session, project.id, "702")
     assert empty.total_qty is None  # пустой состав = нет данных, не 0
     assert empty.dest_warehouse == "Маркетплейс Склад"
+    fallback = await _mirror_row(db_session, project.id, "703")
+    assert fallback.total_qty == 7  # lowercase packages с items-списком — fallback
     unloading = await _mirror_row(db_session, project.id, "801")
     assert unloading.total_qty == 8  # null-элемент пропущен, "2" скоэрсирован
     assert unloading.dest_warehouse is None
@@ -3289,6 +3355,7 @@ async def _make_assembly_with_items(
     items,
     status=AssemblyStatus.IN_PROGRESS.value,
     estimated_ready_date=None,
+    wb_warehouse_name_manual=None,
 ):
     """Сборка с позициями [(barcode, nomenclature_id, qty)] и заданным статусом."""
     doc = AssemblyRequest(
@@ -3297,6 +3364,7 @@ async def _make_assembly_with_items(
         number=f"A-{_uid()[:6]}",
         status=status,
         estimated_ready_date=estimated_ready_date,
+        wb_warehouse_name_manual=wb_warehouse_name_manual,
         pallets_count=1,
         pallet_weight_kg=Decimal("10.00"),
     )
@@ -3349,7 +3417,12 @@ async def test_unlinked_assemblies_returns_active_with_qty_brands_order(db_sessi
     nom_b = await _make_nomenclature(db_session, project.id, bc_b, article="ART-B", brand="BrandB")
 
     older = await _make_assembly_with_items(
-        db_session, project, warehouse, [(bc_a, nom_a.id, 5)], status=AssemblyStatus.IN_PROGRESS.value
+        db_session,
+        project,
+        warehouse,
+        [(bc_a, nom_a.id, 5)],
+        status=AssemblyStatus.IN_PROGRESS.value,
+        wb_warehouse_name_manual="Коледино",
     )
     newer = await _make_assembly_with_items(
         db_session,
@@ -3365,8 +3438,10 @@ async def test_unlinked_assemblies_returns_active_with_qty_brands_order(db_sessi
     assert older.id in by_id and newer.id in by_id
     assert by_id[older.id]["total_qty"] == 5
     assert by_id[older.id]["brands"] == "BrandA"
+    assert by_id[older.id]["dest_warehouse"] == "Коледино"  # ручной склад сдачи
     assert by_id[newer.id]["total_qty"] == 7
     assert by_id[newer.id]["brands"] == "BrandA, BrandB"  # distinct, по алфавиту
+    assert by_id[newer.id]["dest_warehouse"] is None  # ни FBO, ни ручного
     # Порядок: newer (created позже) раньше older в списке
     ids_order = [r["id"] for r in rows if r["id"] in {older.id, newer.id}]
     assert ids_order == [newer.id, older.id]
