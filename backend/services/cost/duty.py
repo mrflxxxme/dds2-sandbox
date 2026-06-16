@@ -1,3 +1,4 @@
+# ruff: noqa: RUF002, RUF003
 """
 Cost — Duty Rules CRUD + Nomenclature area_m2.
 """
@@ -7,9 +8,14 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.cache import invalidate_cache, invalidate_project_reports
 from backend.models import DutyException, DutyRule
 from backend.models.cost import Nomenclature
+from backend.services.cost.recalc import (
+    find_orders_by_articles,
+    find_orders_by_barcodes,
+    find_orders_by_subjects,
+    recalc_orders,
+)
 
 
 async def get_duty_rules(db: AsyncSession, project_id: int, limit: int = 500, offset: int = 0):
@@ -49,6 +55,8 @@ async def upsert_duty_rule(db: AsyncSession, project_id: int, payload: dict):
         )
         db.add(rule)
     await db.commit()
+    # Auto-recalc себес of orders in this category (basis/rate/util changed).
+    await recalc_orders(db, project_id, await find_orders_by_subjects(db, project_id, [subject]))
     return True, None
 
 
@@ -59,8 +67,11 @@ async def delete_duty_rule(db: AsyncSession, project_id: int, rule_id: int):
     rule = result.scalar_one_or_none()
     if not rule:
         return None
+    subject = rule.subject
     rule.soft_delete()
     await db.commit()
+    # Removing a rule drops duty for that category → recalc affected orders.
+    await recalc_orders(db, project_id, await find_orders_by_subjects(db, project_id, [subject]))
     return True
 
 
@@ -106,8 +117,8 @@ async def upsert_duty_exception(db: AsyncSession, project_id: int, payload: dict
         )
         db.add(exc)
     await db.commit()
-    # Cost-item reports (reports:cost_dna) derive duty/vat from these rules.
-    await invalidate_project_reports(project_id)
+    # Auto-recalc себес of orders containing this article (its duty basis/rate changed).
+    await recalc_orders(db, project_id, await find_orders_by_articles(db, project_id, [article]))
     return True, None
 
 
@@ -122,9 +133,11 @@ async def delete_duty_exception(db: AsyncSession, project_id: int, exc_id: int):
     exc = result.scalar_one_or_none()
     if not exc:
         return None
+    article = exc.article_seller
     exc.soft_delete()
     await db.commit()
-    await invalidate_project_reports(project_id)
+    # Removing the exception reverts this article to its category rule → recalc.
+    await recalc_orders(db, project_id, await find_orders_by_articles(db, project_id, [article]))
     return True
 
 
@@ -139,17 +152,20 @@ async def bulk_update_nomenclature_area(
 
     updated = 0
     not_found: list[str] = []
+    changed: list[str] = []
     for item in items:
         bc = str(item["barcode"]).strip()
         nom = nom_map.get(bc)
         if nom:
             nom.area_m2 = Decimal(str(item["area_m2"]))
             updated += 1
+            changed.append(bc)
         else:
             not_found.append(bc)
 
     await db.commit()
-    await invalidate_cache(f"cost:project_id={project_id}")
+    # Auto-recalc себес of orders containing these barcodes (AREA-basis duty depends on area).
+    await recalc_orders(db, project_id, await find_orders_by_barcodes(db, project_id, changed))
     return updated, not_found
 
 
@@ -164,16 +180,18 @@ async def bulk_update_nomenclature_weight(
 
     updated = 0
     not_found: list[str] = []
+    changed: list[str] = []
     for item in items:
         bc = str(item["barcode"]).strip()
         nom = nom_map.get(bc)
         if nom:
             nom.weight_kg = Decimal(str(item["weight_kg"]))
             updated += 1
+            changed.append(bc)
         else:
             not_found.append(bc)
 
     await db.commit()
-    # Cost-item reports (reports:cost_dna) derive WEIGHT-basis duty from this value.
-    await invalidate_project_reports(project_id)
+    # Auto-recalc себес of orders containing these barcodes (WEIGHT-basis duty depends on weight).
+    await recalc_orders(db, project_id, await find_orders_by_barcodes(db, project_id, changed))
     return updated, not_found
