@@ -3455,8 +3455,8 @@ export interface FfStocksResponse {
 export interface FfBoxPack {
   /** ШК короба (ITF14) */
   box_barcode: string;
-  /** ШК россыпи (EAN13), выведенный по GTIN-14 */
-  base_barcode: string;
+  /** ШК россыпи (EAN13); null — короб ещё не сопоставлен */
+  base_barcode: string | null;
   /** штук россыпи в коробе («короб N шт.» из названия) */
   units_per_box: number;
   /** название коробной карточки у ФФ */

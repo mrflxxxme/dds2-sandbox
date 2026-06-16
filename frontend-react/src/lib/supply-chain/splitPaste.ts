@@ -17,6 +17,32 @@ export interface SplitItem {
     pcs_per_box_override?: number;
 }
 
+/**
+ * Per-vehicle box/ppb override for a single FOI given the paste row's packing.
+ *
+ * Box/ppb из вставки — это ФАКТИЧЕСКАЯ упаковка машины. «Вставил список → как
+ * написал, так и записано». Пишется как override ВСЕГДА, когда отличается от
+ * FOI (в т.ч. когда у FOI-заглушки нет своих габаритов — тогда '' ≠ '60×40×50'
+ * → override пишется). Цена при этом не трогается.
+ *
+ * SINGLE SOURCE OF TRUTH — used by splitRowAcrossFois AND the «exceeded»/extend
+ * branch of the vehicle paste-add. The exceeded branch собирал items вручную и
+ * РОНЯЛ эти override'ы → строки на FOI-заглушках (дозаказ/новые, price 0, без
+ * box/ppb) сохранялись без габаритов: пустой «Размер короба» и 0 в «Мест»
+ * (прод-инцидент V-0027).
+ */
+export const buildBoxOverrides = (
+    foi: AvailableItem,
+    boxRaw: string,
+    pcsPerBox: number,
+): { box_size_override?: string; pcs_per_box_override?: number } => {
+    const out: { box_size_override?: string; pcs_per_box_override?: number } = {};
+    const box = (boxRaw || '').trim();
+    if (box && normalizeBox(box) !== normalizeBox(foi.box_size || '')) out.box_size_override = box;
+    if (pcsPerBox && pcsPerBox !== (foi.pcs_per_box || 0)) out.pcs_per_box_override = pcsPerBox;
+    return out;
+};
+
 export const matchesPasteParams = (foi: AvailableItem, p: PasteParams): boolean => {
     // Match on PRICE only. price влияет на заказ фабрики (деньги) — поэтому
     // расхождение цены остаётся осознанным выбором keep/overwrite (инцидент V-0008:
@@ -60,7 +86,6 @@ export const splitRowAcrossFois = (
         : fois.filter(f => matchesPasteParams(f, p));
     const out: SplitItem[] = [];
     let left = p.qty;
-    const pasteBoxNorm = normalizeBox(p.boxRaw);
     for (const foi of eligible) {
         if (left <= 0) break;
         const already = consumed[foi.id] || 0;
@@ -68,14 +93,13 @@ export const splitRowAcrossFois = (
         if (availableNow <= 0) continue;
         const take = Math.min(left, availableNow);
         if (take <= 0) continue;
-        const it: SplitItem = { factory_order_item_id: foi.id, qty: take };
-        const foiBoxNorm = normalizeBox(foi.box_size || '');
-        const fppb = foi.pcs_per_box || 0;
         // Упаковка из вставки пишется ВСЕГДА (независимо от keep/overwrite): это
-        // фактические габариты/штук-в-коробке этой машины. «Вставил список → как
-        // написал, так и записано». Цена при этом не трогается (только в overwrite).
-        if (p.boxRaw.trim() && pasteBoxNorm !== foiBoxNorm) it.box_size_override = p.boxRaw.trim();
-        if (p.pcsPerBox && p.pcsPerBox !== fppb) it.pcs_per_box_override = p.pcsPerBox;
+        // фактические габариты/штук-в-коробке этой машины. Цена не трогается.
+        const it: SplitItem = {
+            factory_order_item_id: foi.id,
+            qty: take,
+            ...buildBoxOverrides(foi, p.boxRaw, p.pcsPerBox),
+        };
         out.push(it);
         consumed[foi.id] = already + take;
         left -= take;

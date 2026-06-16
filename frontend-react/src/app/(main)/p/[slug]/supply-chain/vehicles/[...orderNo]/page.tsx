@@ -23,7 +23,7 @@ import type {
 } from '@/types/api';
 import { FactoryQtyExceededError } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
-import { buildPriceOverwrites, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
+import { buildBoxOverrides, buildPriceOverwrites, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
 import { LanguageProvider, useT, LanguageToggle } from '../../i18n';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -2092,14 +2092,19 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                 const fois = foisByBarcode[bc] || [];
                 let left = parseInt(r.qty) || 0;
                 if (fois.length === 0 || left <= 0) continue;
+                // Габариты/штук-в-коробке из вставки — фактическая упаковка машины:
+                // пишем override и на exceeded/extend-строках тоже (иначе они
+                // садятся на FOI-заглушки без box/ppb → пустой размер + 0 «Мест», V-0027).
+                const boxRaw = r.box_size || '';
+                const ppb = parseInt(r.pcs_per_box) || 0;
                 for (const foi of fois) {
                     if (left <= 0) break;
                     const already = consumed[foi.id] || 0;
                     const avail = Math.max(0, foi.remaining_qty - already);
                     const take = Math.min(left, avail);
-                    if (take > 0) { items.push({ factory_order_item_id: foi.id, qty: take }); consumed[foi.id] = already + take; left -= take; }
+                    if (take > 0) { items.push({ factory_order_item_id: foi.id, qty: take, ...buildBoxOverrides(foi, boxRaw, ppb) }); consumed[foi.id] = already + take; left -= take; }
                 }
-                if (left > 0) { items.push({ factory_order_item_id: fois[0].id, qty: left, mode: 'extend_plan' }); consumed[fois[0].id] = (consumed[fois[0].id] || 0) + left; }
+                if (left > 0) { items.push({ factory_order_item_id: fois[0].id, qty: left, mode: 'extend_plan', ...buildBoxOverrides(fois[0], boxRaw, ppb) }); consumed[fois[0].id] = (consumed[fois[0].id] || 0) + left; }
             }
         }
         return { items, bookedByValidRow };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AvailableItem } from '@/types/api';
-import { buildPriceOverwrites, matchesPasteParams, normalizeBox, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
+import { buildBoxOverrides, buildPriceOverwrites, matchesPasteParams, normalizeBox, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
 
 const foi = (over: Partial<AvailableItem>): AvailableItem => ({
     id: 1,
@@ -269,6 +269,41 @@ describe('splitRowAcrossFois — the core paste-mode bug fix', () => {
         const withOverrides = splitRowAcrossFois(fois, params, true);
         expect(withOverrides[0].box_size_override).toBeUndefined();
         expect(withOverrides[0].pcs_per_box_override).toBeUndefined();
+    });
+});
+
+describe('buildBoxOverrides — single source of truth for per-vehicle box/ppb', () => {
+    // V-0027 prod incident: «exceeded»/extend rows landed on placeholder FOIs
+    // (дозаказ/новые, price 0, no box/ppb) WITHOUT carrying the paste's packing →
+    // blank «Размер короба» + 0 in «Мест». The override MUST be emitted here.
+    it('emits both overrides for a placeholder FOI with empty box/ppb', () => {
+        const f = foi({ box_size: null as unknown as string, pcs_per_box: null as unknown as number });
+        expect(buildBoxOverrides(f, '60x40x50', 8)).toEqual({ box_size_override: '60x40x50', pcs_per_box_override: 8 });
+    });
+
+    it('emits nothing when the FOI already matches the pasted packing', () => {
+        const f = foi({ box_size: '60×40×50', pcs_per_box: 8 });
+        expect(buildBoxOverrides(f, '60x40x50', 8)).toEqual({});
+    });
+
+    it('emits only box override when ppb matches but box differs', () => {
+        const f = foi({ box_size: '70×40×50', pcs_per_box: 8 });
+        expect(buildBoxOverrides(f, '60x40x50', 8)).toEqual({ box_size_override: '60x40x50' });
+    });
+
+    it('emits only ppb override when box matches but ppb differs', () => {
+        const f = foi({ box_size: '60×40×50', pcs_per_box: 20 });
+        expect(buildBoxOverrides(f, '60x40x50', 22)).toEqual({ pcs_per_box_override: 22 });
+    });
+
+    it('emits nothing when paste leaves box/ppb empty', () => {
+        const f = foi({ box_size: null as unknown as string, pcs_per_box: null as unknown as number });
+        expect(buildBoxOverrides(f, '', 0)).toEqual({});
+    });
+
+    it('normalizes separators before comparing (no spurious override on x vs ×)', () => {
+        const f = foi({ box_size: '60x40x50', pcs_per_box: 8 });
+        expect(buildBoxOverrides(f, '60×40×50', 8)).toEqual({});
     });
 });
 

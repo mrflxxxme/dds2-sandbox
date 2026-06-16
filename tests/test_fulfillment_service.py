@@ -1069,13 +1069,19 @@ async def test_list_box_packs_source_classification(db_session, project, warehou
     )
     await db_session.commit()
 
-    packs = {
-        p["box_barcode"]: p for p in await fulfillment_service.list_box_packs(db_session, project.id, warehouse.id)
-    }
+    raw_packs = await fulfillment_service.list_box_packs(db_session, project.id, warehouse.id)
+    packs = {p["box_barcode"]: p for p in raw_packs}
     assert set(packs) == {"12043160330575", "99999999999994"}  # россыпь исключена
     assert packs["12043160330575"]["source"] == "auto"
     assert packs["99999999999994"]["source"] == "unmapped"
     assert packs["99999999999994"]["matched"] is False
+    assert packs["99999999999994"]["base_barcode"] is None  # unmapped — без россыпи
+    # Регресс: каждая строка проходит response-валидацию FfBoxPack (у unmapped
+    # base_barcode=None — схема обязана это допускать, иначе endpoint падает 500)
+    from backend.schemas.fulfillment import FfBoxPack
+
+    for p in raw_packs:
+        FfBoxPack.model_validate(p)
 
 
 @pytest.mark.asyncio
