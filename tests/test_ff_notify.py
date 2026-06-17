@@ -6,20 +6,27 @@ Covers:
   send error swallowed)
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from backend.models.telegram import TelegramChatBinding
 from backend.services import telegram_service
-from backend.services.fulfillment_notify import build_accept_item, build_ready_item, notify_ff_events
+from backend.services.fulfillment_notify import (
+    build_accept_item,
+    build_ready_item,
+    notify_ff_events,
+    refresh_ff_board,
+)
 
 
-async def _make_binding(db, project_id, owner_id, chat_id, *, ff=False, brand=None):
+async def _make_binding(db, project_id, owner_id, chat_id, *, ff=False, board=False, brand=None):
     binding = TelegramChatBinding(
         chat_id=chat_id,
         project_id=project_id,
         brand=brand,
         notify_enabled=True,
         ff_notify_enabled=ff,
+        ff_board_enabled=board,
         created_by_id=owner_id,
     )
     db.add(binding)
@@ -178,3 +185,117 @@ class TestBuildItems:
     def test_qty_omitted_when_falsy(self):
         item = build_ready_item("default", 5, 1, "A", "F", "D", None)
         assert "шт" not in item["text"]
+
+
+class TestFfBoardToggle:
+    async def test_toggle_on_off_clears_message_id(self, db_session, project):
+        b = await _make_binding(db_session, project.id, project.owner_id, chat_id=-4001)
+        assert b.ff_board_enabled is False
+
+        assert await telegram_service.toggle_ff_board(db_session, b.id, project.id, True) is True
+        await db_session.refresh(b)
+        assert b.ff_board_enabled is True
+
+        b.ff_board_message_id = 555  # как будто табло уже закреплено
+        await db_session.commit()
+
+        assert await telegram_service.toggle_ff_board(db_session, b.id, project.id, False) is True
+        await db_session.refresh(b)
+        assert b.ff_board_enabled is False
+        assert b.ff_board_message_id is None  # на выключении id забывается
+
+    async def test_project_isolation(self, db_session, project, other_project):
+        b = await _make_binding(db_session, project.id, project.owner_id, chat_id=-4002)
+        assert await telegram_service.toggle_ff_board(db_session, b.id, other_project.id, True) is False
+        await db_session.refresh(b)
+        assert b.ff_board_enabled is False
+
+    async def test_list_board_chats_scoped(self, db_session, project, other_project):
+        await _make_binding(db_session, project.id, project.owner_id, chat_id=-4003, board=True)
+        await _make_binding(db_session, project.id, project.owner_id, chat_id=-4004, board=False)
+        await _make_binding(db_session, other_project.id, other_project.owner_id, chat_id=-4005, board=True)
+
+        chats = await telegram_service.list_ff_board_chats(db_session, project.id)
+        assert {c.chat_id for c in chats} == {-4003}
+
+
+class TestRefreshFfBoard:
+    async def test_creates_and_pins_first_time(self, db_session, project):
+        b = await _make_binding(db_session, project.id, project.owner_id, chat_id=-4101, board=True)
+        fake_bot = AsyncMock()
+        fake_bot.send_message.return_value = SimpleNamespace(message_id=777)
+        with (
+            patch("backend.integrations.telegram_bot.bot", new=fake_bot),
+            patch("backend.services.fulfillment_service.build_ff_board_text", new=AsyncMock(return_value="BOARD")),
+        ):
+            await refresh_ff_board(db_session, project.id)
+        fake_bot.send_message.assert_awaited_once()
+        fake_bot.pin_chat_message.assert_awaited_once()
+        await db_session.refresh(b)
+        assert b.ff_board_message_id == 777
+
+    async def test_edits_when_message_exists(self, db_session, project):
+        b = await _make_binding(db_session, project.id, project.owner_id, chat_id=-4102, board=True)
+        b.ff_board_message_id = 123
+        await db_session.commit()
+        fake_bot = AsyncMock()
+        with (
+            patch("backend.integrations.telegram_bot.bot", new=fake_bot),
+            patch("backend.services.fulfillment_service.build_ff_board_text", new=AsyncMock(return_value="BOARD")),
+        ):
+            await refresh_ff_board(db_session, project.id)
+        fake_bot.edit_message_text.assert_awaited_once()
+        fake_bot.send_message.assert_not_awaited()
+
+    async def test_not_modified_is_swallowed(self, db_session, project):
+        from aiogram.exceptions import TelegramBadRequest
+
+        b = await _make_binding(db_session, project.id, project.owner_id, chat_id=-4103, board=True)
+        b.ff_board_message_id = 123
+        await db_session.commit()
+        fake_bot = AsyncMock()
+        fake_bot.edit_message_text.side_effect = TelegramBadRequest(
+            method=AsyncMock(), message="Bad Request: message is not modified"
+        )
+        with (
+            patch("backend.integrations.telegram_bot.bot", new=fake_bot),
+            patch("backend.services.fulfillment_service.build_ff_board_text", new=AsyncMock(return_value="BOARD")),
+        ):
+            await refresh_ff_board(db_session, project.id)  # must not raise, must not recreate
+        fake_bot.send_message.assert_not_awaited()
+
+    async def test_pin_failure_swallowed_message_still_stored(self, db_session, project):
+        b = await _make_binding(db_session, project.id, project.owner_id, chat_id=-4104, board=True)
+        fake_bot = AsyncMock()
+        fake_bot.send_message.return_value = SimpleNamespace(message_id=888)
+        fake_bot.pin_chat_message.side_effect = RuntimeError("not enough rights to pin")
+        with (
+            patch("backend.integrations.telegram_bot.bot", new=fake_bot),
+            patch("backend.services.fulfillment_service.build_ff_board_text", new=AsyncMock(return_value="BOARD")),
+        ):
+            await refresh_ff_board(db_session, project.id)  # pin fails, but message_id persists
+        await db_session.refresh(b)
+        assert b.ff_board_message_id == 888
+
+    async def test_noop_when_no_board_chats(self, db_session, project):
+        await _make_binding(db_session, project.id, project.owner_id, chat_id=-4105, board=False)
+        fake_bot = AsyncMock()
+        with patch("backend.integrations.telegram_bot.bot", new=fake_bot):
+            await refresh_ff_board(db_session, project.id)
+        fake_bot.send_message.assert_not_awaited()
+        fake_bot.edit_message_text.assert_not_awaited()
+
+    async def test_noop_when_bot_none(self, db_session, project):
+        await _make_binding(db_session, project.id, project.owner_id, chat_id=-4106, board=True)
+        with patch("backend.integrations.telegram_bot.bot", new=None):
+            await refresh_ff_board(db_session, project.id)  # must not raise
+
+    async def test_no_board_text_no_send(self, db_session, project):
+        await _make_binding(db_session, project.id, project.owner_id, chat_id=-4107, board=True)
+        fake_bot = AsyncMock()
+        with (
+            patch("backend.integrations.telegram_bot.bot", new=fake_bot),
+            patch("backend.services.fulfillment_service.build_ff_board_text", new=AsyncMock(return_value=None)),
+        ):
+            await refresh_ff_board(db_session, project.id)
+        fake_bot.send_message.assert_not_awaited()

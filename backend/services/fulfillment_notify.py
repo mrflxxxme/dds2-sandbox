@@ -16,10 +16,17 @@ request card in DDS) and "Состав" (callback that lists line items in-chat)
 import asyncio
 import html
 import logging
+from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services import telegram_service
+
+if TYPE_CHECKING:
+    from aiogram import Bot
+    from aiogram.types import LinkPreviewOptions
+
+    from backend.models.telegram import TelegramChatBinding
 
 logger = logging.getLogger(__name__)
 
@@ -141,3 +148,86 @@ async def notify_ff_events(db: AsyncSession, project_id: int, items: list[dict[s
         raise
     except Exception as exc:
         logger.warning("FF notify error (project=%s): %s", project_id, exc)
+
+
+async def _send_or_edit_board(
+    bot: "Bot",
+    binding: "TelegramChatBinding",
+    text: str,
+    no_preview: "LinkPreviewOptions",
+    bad_request_exc: type[BaseException],
+) -> None:
+    """Edit the existing pinned board, or create + pin a new one and store its id.
+
+    Mutates binding.ff_board_message_id when a new message is created (caller
+    commits). Falls through to re-create when the stored message was deleted or
+    can no longer be edited.
+    """
+    if binding.ff_board_message_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=binding.chat_id,
+                message_id=binding.ff_board_message_id,
+                text=text,
+                parse_mode="HTML",
+                link_preview_options=no_preview,
+            )
+            return
+        except bad_request_exc as exc:
+            msg = str(exc).lower()
+            if "not modified" in msg:
+                return  # состояние не изменилось — нормальный no-op
+            if not ("not found" in msg or "can't be edited" in msg or "message to edit" in msg):
+                raise
+            # сообщение удалили/устарело — создаём и закрепляем заново ниже
+
+    sent = await bot.send_message(
+        chat_id=binding.chat_id,
+        text=text,
+        parse_mode="HTML",
+        link_preview_options=no_preview,
+    )
+    binding.ff_board_message_id = sent.message_id
+    try:
+        await bot.pin_chat_message(chat_id=binding.chat_id, message_id=sent.message_id, disable_notification=True)
+    except Exception as exc:  # боту не дали прав админа — табло работает и без закрепа
+        logger.info("FF board pin skipped (chat=%s): %s", binding.chat_id, exc)
+
+
+async def refresh_ff_board(db: AsyncSession, project_id: int) -> None:
+    """Best-effort: пересобрать и обновить закреплённое табло заявок ФФ в каждом
+    чате проекта, где включён ff_board_enabled. Редактирует уже закреплённое
+    сообщение (создаёт + пинит при первом запуске). Никогда не бросает в синк.
+    """
+    try:
+        from backend.integrations.telegram_bot import bot
+
+        if bot is None:
+            return
+
+        chats = await telegram_service.list_ff_board_chats(db, project_id)
+        if not chats:
+            return
+
+        from backend.services.fulfillment_service import build_ff_board_text
+
+        text = await build_ff_board_text(db, project_id)
+        if not text:
+            return
+
+        from aiogram.exceptions import TelegramBadRequest
+        from aiogram.types import LinkPreviewOptions
+
+        no_preview = LinkPreviewOptions(is_disabled=True)
+        for binding in chats:
+            try:
+                await _send_or_edit_board(bot, binding, text, no_preview, TelegramBadRequest)
+                await db.commit()  # сохранить ff_board_message_id, если создали новое
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("FF board update failed (chat=%s): %s", binding.chat_id, exc)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("FF board error (project=%s): %s", project_id, exc)

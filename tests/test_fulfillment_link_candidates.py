@@ -828,3 +828,51 @@ class TestGetFfRequestGoods:
         asm = await _make_assembly(db_session, project.id, warehouse.id, items=[])
         ff = await _add(db_session, _mirror(project.id, warehouse.id, kind="assembly", assembly_request_id=asm.id))
         assert await fulfillment_service.get_ff_request_goods(db_session, project.id, ff.id) is None
+
+
+# ─── build_ff_board_text (закреплённое авто-табло) ───────────────────────────
+
+
+class TestBuildFfBoard:
+    @pytest.mark.asyncio
+    async def test_groups_active_by_status(self, db_session, project, warehouse):
+        bc = f"40{_uid()}"
+        nom = await _make_nomenclature(db_session, project.id, bc)
+        await _make_assembly(
+            db_session, project.id, warehouse.id, status=AssemblyStatus.IN_PROGRESS.value, items=[(bc, nom.id, 100)]
+        )
+        await _make_assembly(
+            db_session, project.id, warehouse.id, status=AssemblyStatus.READY.value, items=[(bc, nom.id, 50)]
+        )
+        text = await fulfillment_service.build_ff_board_text(db_session, project.id)
+        assert text is not None
+        assert "Заявки ФФ" in text
+        assert "В работе" in text and "Готово к отгрузке" in text
+        assert warehouse.name in text
+        assert "100 шт" in text and "50 шт" in text
+        assert "<blockquote expandable>" in text
+
+    @pytest.mark.asyncio
+    async def test_excludes_non_active_statuses(self, db_session, project, warehouse):
+        bc = f"41{_uid()}"
+        nom = await _make_nomenclature(db_session, project.id, bc)
+        await _make_assembly(
+            db_session, project.id, warehouse.id, status=AssemblyStatus.SHIPPED.value, items=[(bc, nom.id, 10)]
+        )
+        await _make_assembly(
+            db_session, project.id, warehouse.id, status=AssemblyStatus.CANCELLED.value, items=[(bc, nom.id, 10)]
+        )
+        assert await fulfillment_service.build_ff_board_text(db_session, project.id) is None
+
+    @pytest.mark.asyncio
+    async def test_empty_returns_none(self, db_session, project):
+        assert await fulfillment_service.build_ff_board_text(db_session, project.id) is None
+
+    @pytest.mark.asyncio
+    async def test_project_scoped(self, db_session, project, other_project, warehouse):
+        bc = f"42{_uid()}"
+        nom = await _make_nomenclature(db_session, project.id, bc)
+        await _make_assembly(
+            db_session, project.id, warehouse.id, status=AssemblyStatus.READY.value, items=[(bc, nom.id, 7)]
+        )
+        assert await fulfillment_service.build_ff_board_text(db_session, other_project.id) is None

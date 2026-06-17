@@ -33,6 +33,10 @@ class TelegramChatBinding(Base):
     brand: Mapped[str | None] = mapped_column(String(200), nullable=True)
     notify_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     ff_notify_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # Закреплённое авто-табло заявок ФФ: отдельный opt-in (/board on) + id
+    # закреплённого сообщения, которое правим на каждом синке (не шлём новое).
+    ff_board_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    ff_board_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_by_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
