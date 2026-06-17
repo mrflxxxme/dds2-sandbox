@@ -3782,17 +3782,19 @@ export interface FfCreateFormResponse {
   delivery_type: string;
 }
 
-/** Создание заявки «Доставка на склад МП» (851) из нашей заявки на сборку. */
+/** Создание заявки ФФ из нашей сборки (provider-agnostic).
+ *  skladbot («Доставка на склад МП», 851): склад МП + даты обязательны.
+ *  wmscelicom («Целиком»): самовывоз — склад/даты не нужны, шлём только comment. */
 export interface FfCreateRequestPayload {
-  /** id склада МП (utils.marketplaceWarehouses[].value) */
-  marketplace_warehouse_id: number;
-  /** Дата забора груза (YYYY-MM-DD) */
-  collection_date: string;
-  /** Дата выгрузки на склад МП (YYYY-MM-DD) */
-  unloading_date: string;
-  /** id маркетплейса (utils.marketplaces[].value); Wildberries=1 */
+  /** skladbot: id склада МП (utils.marketplaceWarehouses[].value); wms — не нужен */
+  marketplace_warehouse_id?: number | null;
+  /** skladbot: дата забора груза (YYYY-MM-DD) */
+  collection_date?: string | null;
+  /** skladbot: дата выгрузки на склад МП (YYYY-MM-DD) */
+  unloading_date?: string | null;
+  /** skladbot: id маркетплейса (utils.marketplaces[].value); Wildberries=1 */
   marketplace_id?: number;
-  /** straight — прямая, cross_dock — транзит */
+  /** skladbot: straight — прямая, cross_dock — транзит */
   delivery_type?: 'straight' | 'cross_dock';
   comment?: string | null;
   notify?: boolean;
