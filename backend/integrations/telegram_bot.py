@@ -22,7 +22,7 @@ from aiogram.types import (
 
 from backend.config import settings
 from backend.database import AsyncSessionLocal
-from backend.services import telegram_service
+from backend.services import fulfillment_service, telegram_service
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +194,36 @@ async def cb_setup_brand(callback: CallbackQuery):
     brand_text = brand or "все бренды"
     msg = "Чат привязан к проекту. Бренд: " + brand_text + "."
     await callback.message.edit_text(msg)
+    await callback.answer()
+
+
+# ─── ff_items — показать состав ФФ-заявки ────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("ff_items:"))
+async def cb_ff_items(callback: CallbackQuery):
+    """Показать позиции ФФ-заявки (ШК · артикул · кол-во) по кнопке «Состав».
+
+    project_id берём из привязки чата (iron-rule scope) — не доверяем ничему из
+    callback_data, кроме id заявки. Telegram требует ответить на callback всегда.
+    """
+    try:
+        ff_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректная заявка.", show_alert=True)
+        return
+
+    async with AsyncSessionLocal() as db:
+        binding = await telegram_service.get_chat_binding(db, callback.message.chat.id)
+        if not binding:
+            await callback.answer("Чат не привязан. Используйте /setup.", show_alert=True)
+            return
+        text = await fulfillment_service.get_ff_request_goods(db, binding.project_id, ff_id)
+
+    if not text:
+        await callback.answer("Состав недоступен.", show_alert=True)
+        return
+    await callback.message.answer(text, parse_mode="HTML")
     await callback.answer()
 
 

@@ -611,6 +611,83 @@ class TestCallbacks:
             assert call_args[0][3] is None  # brand arg
             assert "все бренды" in cb.message.edit_text.call_args[0][0]
 
+    @pytest.mark.asyncio
+    async def test_cb_ff_items_shows_goods(self):
+        from backend.integrations.telegram_bot import cb_ff_items
+
+        cb = _make_callback("ff_items:42")
+        binding = MagicMock()
+        binding.project_id = 4
+
+        with (
+            patch("backend.integrations.telegram_bot.AsyncSessionLocal") as session_cls,
+            patch("backend.integrations.telegram_bot.telegram_service") as svc,
+            patch("backend.integrations.telegram_bot.fulfillment_service") as ff,
+        ):
+            session_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+            session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            svc.get_chat_binding = AsyncMock(return_value=binding)
+            ff.get_ff_request_goods = AsyncMock(return_value="📦 <b>Состав</b>")
+
+            await cb_ff_items(cb)
+            ff.get_ff_request_goods.assert_awaited_once()
+            _, pid, fid = ff.get_ff_request_goods.call_args.args
+            assert (pid, fid) == (4, 42)
+            cb.message.answer.assert_called_once()
+            assert cb.message.answer.call_args.kwargs.get("parse_mode") == "HTML"
+            cb.answer.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cb_ff_items_bad_id_alerts(self):
+        from backend.integrations.telegram_bot import cb_ff_items
+
+        cb = _make_callback("ff_items:not-an-int")
+        await cb_ff_items(cb)
+        cb.answer.assert_called_once()
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
+        cb.message.answer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cb_ff_items_unbound_alerts(self):
+        from backend.integrations.telegram_bot import cb_ff_items
+
+        cb = _make_callback("ff_items:42")
+        with (
+            patch("backend.integrations.telegram_bot.AsyncSessionLocal") as session_cls,
+            patch("backend.integrations.telegram_bot.telegram_service") as svc,
+        ):
+            session_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+            session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            svc.get_chat_binding = AsyncMock(return_value=None)
+
+            await cb_ff_items(cb)
+            cb.answer.assert_called_once()
+            assert cb.answer.call_args.kwargs.get("show_alert") is True
+            cb.message.answer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cb_ff_items_no_goods_alerts(self):
+        from backend.integrations.telegram_bot import cb_ff_items
+
+        cb = _make_callback("ff_items:42")
+        binding = MagicMock()
+        binding.project_id = 4
+
+        with (
+            patch("backend.integrations.telegram_bot.AsyncSessionLocal") as session_cls,
+            patch("backend.integrations.telegram_bot.telegram_service") as svc,
+            patch("backend.integrations.telegram_bot.fulfillment_service") as ff,
+        ):
+            session_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+            session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            svc.get_chat_binding = AsyncMock(return_value=binding)
+            ff.get_ff_request_goods = AsyncMock(return_value=None)
+
+            await cb_ff_items(cb)
+            cb.message.answer.assert_not_called()
+            cb.answer.assert_called_once()
+            assert cb.answer.call_args.kwargs.get("show_alert") is True
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Text handler (AI routing)

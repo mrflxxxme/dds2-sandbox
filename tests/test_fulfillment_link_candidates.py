@@ -770,3 +770,61 @@ async def test_api_candidates_require_auth(client):
     assert resp.status_code in (401, 403, 422)
     resp = await client.post("/api/v1/warehouse/1/fulfillment/requests/1/create-assembly")
     assert resp.status_code in (401, 403, 422)
+
+
+# ─── get_ff_request_goods (кнопка «Состав» в Telegram) ───────────────────────
+
+
+class TestGetFfRequestGoods:
+    @pytest.mark.asyncio
+    async def test_assembly_goods(self, db_session, project, warehouse):
+        bc_a, bc_b = f"30{_uid()}", f"31{_uid()}"
+        nom_a = await _make_nomenclature(db_session, project.id, bc_a)
+        nom_b = await _make_nomenclature(db_session, project.id, bc_b)
+        asm = await _make_assembly(
+            db_session, project.id, warehouse.id, items=[(bc_a, nom_a.id, 5), (bc_b, nom_b.id, 3)]
+        )
+        ff = await _add(
+            db_session,
+            _mirror(project.id, warehouse.id, kind="assembly", number="ORD-9", assembly_request_id=asm.id),
+        )
+        text = await fulfillment_service.get_ff_request_goods(db_session, project.id, ff.id)
+        assert text is not None
+        assert "Состав заявки" in text
+        assert bc_a in text and bc_b in text
+        assert nom_a.article_seller in text and nom_b.article_seller in text
+        assert "5 шт" in text and "3 шт" in text
+
+    @pytest.mark.asyncio
+    async def test_inbound_goods_uses_expected_qty(self, db_session, project, warehouse):
+        bc = f"32{_uid()}"
+        nom = await _make_nomenclature(db_session, project.id, bc)
+        rcpt = await _make_receipt(db_session, project.id, warehouse.id, items=[(bc, nom.id, 12)])
+        ff = await _add(db_session, _mirror(project.id, warehouse.id, kind="inbound", inbound_receipt_id=rcpt.id))
+        text = await fulfillment_service.get_ff_request_goods(db_session, project.id, ff.id)
+        assert text is not None
+        assert bc in text and "12 шт" in text
+
+    @pytest.mark.asyncio
+    async def test_wrong_project_returns_none(self, db_session, project, other_project, warehouse):
+        bc = f"33{_uid()}"
+        nom = await _make_nomenclature(db_session, project.id, bc)
+        asm = await _make_assembly(db_session, project.id, warehouse.id, items=[(bc, nom.id, 1)])
+        ff = await _add(db_session, _mirror(project.id, warehouse.id, kind="assembly", assembly_request_id=asm.id))
+        # запрос под чужим проектом не должен раскрыть состав
+        assert await fulfillment_service.get_ff_request_goods(db_session, other_project.id, ff.id) is None
+
+    @pytest.mark.asyncio
+    async def test_not_found_returns_none(self, db_session, project):
+        assert await fulfillment_service.get_ff_request_goods(db_session, project.id, 99_999_999) is None
+
+    @pytest.mark.asyncio
+    async def test_unlinked_request_returns_none(self, db_session, project, warehouse):
+        ff = await _add(db_session, _mirror(project.id, warehouse.id, kind="other"))
+        assert await fulfillment_service.get_ff_request_goods(db_session, project.id, ff.id) is None
+
+    @pytest.mark.asyncio
+    async def test_empty_composition_returns_none(self, db_session, project, warehouse):
+        asm = await _make_assembly(db_session, project.id, warehouse.id, items=[])
+        ff = await _add(db_session, _mirror(project.id, warehouse.id, kind="assembly", assembly_request_id=asm.id))
+        assert await fulfillment_service.get_ff_request_goods(db_session, project.id, ff.id) is None
