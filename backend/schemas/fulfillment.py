@@ -302,22 +302,24 @@ class FfCreateFormResponse(BaseModel):
 
 
 class FfCreateRequestPayload(BaseModel):
-    """Параметры создания заявки «Доставка на склад МП» (851) из нашей сборки.
+    """Параметры создания заявки ФФ из нашей сборки (provider-agnostic).
 
-    marketplace_warehouse_id (id склада МП), даты забора/выгрузки и тип поставки
-    не хранятся в нашей AssemblyRequest — выбираются в диалоге из справочников
-    `GET .../assembly/{id}/create-form` (предзаполняются из заявки на фронте).
-    Состав берётся из позиций сборки автоматически. ВАЖНО: skladbot принимает по
-    полям `marketplace`/`marketplace_warehouse` integer id из form-data, не имя.
+    skladbot («Доставка на склад МП», 851): склад МП, даты забора/выгрузки и тип
+    поставки выбираются в диалоге из `GET .../assembly/{id}/create-form` (skladbot
+    принимает integer id из form-data, не имя) — поэтому для skladbot поля склада
+    и дат ОБЯЗАТЕЛЬНЫ (валидируются в сервисе). wmscelicom («Целиком»): отгрузка
+    создаётся самовывозом (delivery=2, fbo=1), склад WB берётся из WB-привязки на
+    стороне «Целиком» — этих полей нет, шлём только comment/notify.
+    Состав в обоих случаях берётся из позиций сборки автоматически.
     """
 
-    marketplace_warehouse_id: int = Field(gt=0)  # id склада МП (utils.marketplaceWarehouses[].value)
-    collection_date: date  # дата забора груза
-    unloading_date: date  # дата выгрузки на склад МП
-    marketplace_id: int = Field(1, gt=0)  # id маркетплейса (utils.marketplaces[].value); Wildberries=1
-    delivery_type: Literal["straight", "cross_dock"] = "straight"  # прямая / транзит
+    marketplace_warehouse_id: int | None = Field(None, gt=0)  # skladbot: id склада МП (form-data); wms — не нужен
+    collection_date: date | None = None  # skladbot: дата забора груза
+    unloading_date: date | None = None  # skladbot: дата выгрузки на склад МП
+    marketplace_id: int = Field(1, gt=0)  # skladbot: id маркетплейса (Wildberries=1)
+    delivery_type: Literal["straight", "cross_dock"] = "straight"  # skladbot: прямая / транзит
     comment: str | None = Field(None, max_length=1000)
-    notify: bool = False  # уведомление на стороне ФФ
+    notify: bool = False  # уведомление на стороне ФФ (skladbot)
 
 
 class FfPushAssemblyResult(BaseModel):

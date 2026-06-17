@@ -44,7 +44,7 @@ from backend.integrations.skladbot_client import (
     SkladbotClient,
     decode_jwt_exp,
 )
-from backend.integrations.wmscelicom_client import WmsCelicomClient, normalize_base_url
+from backend.integrations.wmscelicom_client import WmsCelicomApiError, WmsCelicomClient, normalize_base_url
 from backend.models import (
     FfRequestKind,
     FulfillmentBoxOverride,
@@ -936,6 +936,9 @@ def _wms_shipment_completed(status: str) -> bool:
 # shipment_status пуст) → русский ярлык для колонки статуса. «Ожидает сборки»
 # (waitforcombine) — это до-сборочный WIP, НЕ сигнал готовности (см.
 # WMS_ASSEMBLY_READY_TITLES — туда входят «Собрана»/«Ожидает отгрузки»).
+# Имя типа заявки на отгрузку wmscelicom (зОГ) — общее для синка и push-создания.
+_WMS_DISPATCH_TYPE_NAME = "Заявка на отгрузку"
+
 _WMS_DISPATCH_STATUS_RU = {
     "new": "Новая",
     "combinig": "На сборке",
@@ -977,7 +980,7 @@ def _normalize_wms_dispatch(row: dict) -> dict:
         "kind": FfRequestKind.ASSEMBLY.value,
         "number": None,
         "type_id": None,
-        "type_name": "Заявка на отгрузку",
+        "type_name": _WMS_DISPATCH_TYPE_NAME,
         "status": status,
         "stage_code": None,
         "stage_title": status,
@@ -4548,22 +4551,164 @@ def _wh_names_match(a: str | None, b: str | None) -> bool:
     return bool(nb) and (na in nb or nb in na)
 
 
-async def _require_skladbot_push(db: AsyncSession, project_id: int, warehouse_id: int) -> tuple[int, str]:
-    """Проверить подключение склада к skladbot с customer_id → (customer_id, token).
+async def _load_assembly_composition(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    assembly_request_id: int,
+) -> tuple[AssemblyRequest | None, dict[str, int], dict | None]:
+    """Загрузить сборку с позициями, проверить guard'ы, агрегировать состав по ШК.
 
-    ValueError — не подключён / не skladbot / нет customer_id.
+    Общая «голова» одиночного и массового push (skladbot и wmscelicom) — только
+    чтения, без commit/HTTP. Возвращает (assembly, qty_by_barcode, early_result):
+    early_result не None → ранний выход (not_found / error «чужой склад» /
+    error «отменена» / already_linked / empty), его и возвращает вызывающий.
     """
-    key = await get_integration(db, project_id, warehouse_id)
-    if not key:
-        raise ValueError("Фулфилмент не подключён к этому складу")
-    if key.service != "skladbot":
-        raise ValueError(
-            f"Создание заявки на ФФ поддерживается только для skladbot (подключён {_provider_human(key.service)})"
+    asm_result = await db.execute(
+        select(AssemblyRequest)
+        .options(selectinload(AssemblyRequest.items))
+        .where(
+            AssemblyRequest.id == assembly_request_id,
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,
         )
-    customer_id = (key.config or {}).get("customer_id")
-    if not customer_id:
-        raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
-    return customer_id, _decrypt(key.encrypted_key)
+    )
+    assembly = asm_result.scalar_one_or_none()
+    if assembly is None:
+        return None, {}, {"status": "not_found", "assembly_request_id": assembly_request_id, "assembly_number": "—"}
+
+    def _err(status: str, **extra: object) -> dict:
+        return {"status": status, "assembly_request_id": assembly.id, "assembly_number": assembly.number, **extra}
+
+    if assembly.warehouse_id != warehouse_id:
+        return assembly, {}, _err("error", message="Заявка на сборку принадлежит другому складу")
+    if assembly.status == AssemblyStatus.CANCELLED.value:
+        return assembly, {}, _err("error", message="Нельзя отправить на ФФ отменённую заявку")
+
+    existing = await db.execute(
+        select(FulfillmentRequest.number, FulfillmentRequest.external_id)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.assembly_request_id == assembly_request_id,
+        )
+        .limit(1)
+    )
+    ex = existing.first()
+    if ex is not None:
+        return (
+            assembly,
+            {},
+            _err(
+                "already_linked",
+                message=f"Заявка уже отправлена на ФФ ({ex.number or ex.external_id}) — повторное создание запрещено",
+            ),
+        )
+
+    qty_by_barcode: dict[str, int] = {}
+    for it in assembly.items:
+        bc = (it.barcode or "").strip()
+        if bc:
+            qty_by_barcode[bc] = qty_by_barcode.get(bc, 0) + int(it.quantity or 0)
+    qty_by_barcode = {bc: q for bc, q in qty_by_barcode.items() if q > 0}
+    if not qty_by_barcode:
+        return assembly, {}, _err("empty", message="В заявке на сборку нет позиций для отправки")
+
+    return assembly, qty_by_barcode, None
+
+
+async def _finalize_ff_push(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    assembly_request_id: int,
+    *,
+    provider: str,
+    created_row: dict,
+    items_sent: int,
+    total_qty: int,
+    dest_warehouse: str | None,
+    asm_id: int,
+    asm_number: str,
+    asm_status: str,
+) -> dict:
+    """Зеркало + связь созданной ФФ-заявки со сборкой под advisory-локом.
+
+    Общий «хвост» одиночного и массового push (skladbot и wmscelicom): created_row
+    уже нормализован (ключи как у `_apply_requests`). Сериализуется с конкурентным
+    синком advisory-локом (uq заявок = project_id+provider+external_id). Возвращает
+    результат-словарь со `status`: error (зеркало не сохранилось / гонка связывания)
+    или created (с success-пейлоадом). Уведомление чата — на стороне вызывающего.
+    """
+    external_id = created_row["external_id"]
+
+    def _result(status: str, **extra: object) -> dict:
+        return {"status": status, "assembly_request_id": asm_id, "assembly_number": asm_number, **extra}
+
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :project_id)"),
+        {"ns": _FF_SYNC_LOCK_NS, "project_id": project_id},
+    )
+    await _apply_requests(db, project_id, warehouse_id, provider, [created_row])
+    await db.flush()
+    new_result = await db.execute(
+        select(FulfillmentRequest).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.provider == provider,
+            FulfillmentRequest.external_id == external_id,
+        )
+    )
+    ff_req = new_result.scalar_one_or_none()
+    if ff_req is None:
+        await db.rollback()
+        return _result(
+            "error",
+            message=(
+                f"Заявка создана у ФФ ({created_row.get('number') or external_id}), но зеркало сохранить не удалось — "
+                "обновите страницу после синхронизации"
+            ),
+        )
+
+    # Гонка связывания: сборку успели связать с другой ФФ-заявкой между проверкой и сейчас
+    conflict = await db.execute(
+        select(FulfillmentRequest.id)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.assembly_request_id == assembly_request_id,
+            FulfillmentRequest.id != ff_req.id,
+        )
+        .limit(1)
+    )
+    if conflict.scalar_one_or_none() is not None:
+        await db.commit()  # зеркало сохранено, но НЕсвязанным
+        return _result(
+            "error",
+            message=(
+                f"Заявка создана у ФФ ({ff_req.number or external_id}), но сборка уже связана с другой "
+                "ФФ-заявкой — свяжите вручную на вкладке «ФФ сборка»"
+            ),
+        )
+    ff_req.assembly_request_id = assembly_request_id
+    await db.commit()
+
+    return {
+        "status": "created",
+        "assembly_request_id": asm_id,
+        "assembly_number": asm_number,
+        "ff_number": ff_req.number,
+        "external_id": external_id,
+        "items_sent": items_sent,
+        "total_qty": total_qty,
+        "dest_warehouse": dest_warehouse,
+        "deficit": [],
+        "success": {
+            "request": _request_to_dict(ff_req, {asm_id: (asm_number, asm_status)}),
+            "external_id": external_id,
+            "ff_number": ff_req.number,
+            "items_sent": items_sent,
+            "total_qty": total_qty,
+            "skipped_barcodes": [],
+        },
+    }
 
 
 async def _fetch_push_form_options(client: SkladbotClient, customer_id: int) -> tuple[int, str, list[dict], list[dict]]:
@@ -4595,44 +4740,70 @@ async def create_ff_request_from_assembly(
     assembly_request_id: int,
     payload: FfCreateRequestPayload,
 ) -> dict | None:
-    """Создать заявку «Доставка на склад МП» (851) у skladbot из нашей сборки.
+    """Создать заявку ФФ из нашей сборки — диспетчеризация по провайдеру.
 
-    Тонкая обёртка над ядром `_push_assembly_to_ff` (общим с массовым push): тут
-    — проверка подключения, живой form-data и валидация типа поставки (общие
-    шаги), склад МП и даты берутся из payload.
+    skladbot — «Доставка на склад МП» (851): склад МП/даты/тип из payload (живой
+    form-data + валидация типа поставки). wmscelicom «Целиком» — заявка на отгрузку
+    самовывозом (delivery=2, fbo=1): payload-поля склада/дат не нужны (склад WB из
+    WB-привязки), берём только comment.
 
     Идемпотентность: сборка уже связана с заявкой ФФ — ValueError. None — сборка
-    не найдена в проекте. ValueError — не skladbot / чужой склад / отменена / нет
-    позиций / недостаточно остатков у ФФ (дефицит блокирует создание) / ошибки
-    провайдера. Только skladbot (wmscelicom/migfull push не поддержан).
+    не найдена в проекте. ValueError — не подключён / неподдерживаемый провайдер /
+    чужой склад / отменена / нет позиций / дефицит (skladbot) / ошибки провайдера.
 
     НЕ полностью атомарно: заказ у ФФ создаётся ДО записи зеркала. При сбое после
     POST (или гонке связывания) заказ у провайдера уже существует — текст ошибки
     это поясняет, заявку видно после следующего синка.
     """
-    customer_id, token = await _require_skladbot_push(db, project_id, warehouse_id)
-    await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
+    key = await get_integration(db, project_id, warehouse_id)
+    if not key:
+        raise ValueError("Фулфилмент не подключён к этому складу")
+    provider = key.service
 
-    client = SkladbotClient(token, project_id=project_id)
-    _, _, wh_options, dt_options = await _fetch_push_form_options(client, customer_id)
-    _validate_delivery_type(payload.delivery_type, dt_options)
+    if provider == "skladbot":
+        customer_id = (key.config or {}).get("customer_id")
+        if not customer_id:
+            raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
+        if (
+            payload.marketplace_warehouse_id is None
+            or payload.collection_date is None
+            or payload.unloading_date is None
+        ):
+            raise ValueError("Для skladbot укажите склад МП и даты забора/выгрузки")
+        token = _decrypt(key.encrypted_key)
+        await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
+        sk_client = SkladbotClient(token, project_id=project_id)
+        _, _, wh_options, dt_options = await _fetch_push_form_options(sk_client, customer_id)
+        _validate_delivery_type(payload.delivery_type, dt_options)
+        res = await _push_assembly_to_ff(
+            db,
+            project_id,
+            warehouse_id,
+            assembly_request_id,
+            client=sk_client,
+            customer_id=customer_id,
+            mp_id=payload.marketplace_id,
+            wh_options=wh_options,
+            delivery_type=payload.delivery_type,
+            collection_date=payload.collection_date,
+            unloading_date=payload.unloading_date,
+            marketplace_warehouse_id=payload.marketplace_warehouse_id,
+            comment=payload.comment,
+            notify=payload.notify,
+        )
+    elif provider == "wmscelicom":
+        token = _decrypt(key.encrypted_key)
+        api_base = str((key.config or {}).get("api_base_url") or "")
+        if not api_base:
+            raise ValueError("В конфигурации ключа нет адреса инстанса — переподключите фулфилмент")
+        await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
+        wms_client = WmsCelicomClient(api_base, token, project_id=project_id)
+        res = await _push_assembly_to_wms(
+            db, project_id, warehouse_id, assembly_request_id, client=wms_client, comment=payload.comment
+        )
+    else:
+        raise ValueError(f"Создание заявки на ФФ не поддерживается для провайдера {_provider_human(provider)}")
 
-    res = await _push_assembly_to_ff(
-        db,
-        project_id,
-        warehouse_id,
-        assembly_request_id,
-        client=client,
-        customer_id=customer_id,
-        mp_id=payload.marketplace_id,
-        wh_options=wh_options,
-        delivery_type=payload.delivery_type,
-        collection_date=payload.collection_date,
-        unloading_date=payload.unloading_date,
-        marketplace_warehouse_id=payload.marketplace_warehouse_id,
-        comment=payload.comment,
-        notify=payload.notify,
-    )
     if res["status"] == "not_found":
         return None
     if res["status"] != "created":
@@ -4675,18 +4846,12 @@ async def _push_assembly_to_ff(
     Транзакции: read сборки закрывается до HTTP; зеркало+связь — отдельный commit
     под advisory-локом. form-data и тип поставки валидирует вызывающий.
     """
-    asm_result = await db.execute(
-        select(AssemblyRequest)
-        .options(selectinload(AssemblyRequest.items))
-        .where(
-            AssemblyRequest.id == assembly_request_id,
-            AssemblyRequest.project_id == project_id,
-            AssemblyRequest.is_deleted == False,
-        )
+    assembly, qty_by_barcode, early = await _load_assembly_composition(
+        db, project_id, warehouse_id, assembly_request_id
     )
-    assembly = asm_result.scalar_one_or_none()
-    if assembly is None:
-        return {"status": "not_found", "assembly_request_id": assembly_request_id, "assembly_number": "—"}
+    if early is not None:
+        return early
+    assert assembly is not None  # early is None ⇒ сборка загружена и прошла guard'ы
 
     asm_id = assembly.id
     asm_number = assembly.number
@@ -4694,36 +4859,6 @@ async def _push_assembly_to_ff(
 
     def _result(status: str, **extra: object) -> dict:
         return {"status": status, "assembly_request_id": asm_id, "assembly_number": asm_number, **extra}
-
-    if assembly.warehouse_id != warehouse_id:
-        return _result("error", message="Заявка на сборку принадлежит другому складу")
-    if asm_status == AssemblyStatus.CANCELLED.value:
-        return _result("error", message="Нельзя отправить на ФФ отменённую заявку")
-
-    existing = await db.execute(
-        select(FulfillmentRequest.number, FulfillmentRequest.external_id)
-        .where(
-            FulfillmentRequest.project_id == project_id,
-            FulfillmentRequest.assembly_request_id == assembly_request_id,
-        )
-        .limit(1)
-    )
-    ex = existing.first()
-    if ex is not None:
-        return _result(
-            "already_linked",
-            message=f"Заявка уже отправлена на ФФ ({ex.number or ex.external_id}) — повторное создание запрещено",
-        )
-
-    # Состав: агрегируем позиции сборки по ШК
-    qty_by_barcode: dict[str, int] = {}
-    for it in assembly.items:
-        bc = (it.barcode or "").strip()
-        if bc:
-            qty_by_barcode[bc] = qty_by_barcode.get(bc, 0) + int(it.quantity or 0)
-    qty_by_barcode = {bc: q for bc, q in qty_by_barcode.items() if q > 0}
-    if not qty_by_barcode:
-        return _result("empty", message="В заявке на сборку нет позиций для отправки")
 
     # Склад МП + дата выгрузки: явные (одиночный) либо авто по складу WB / поставке FBW (массовый)
     if marketplace_warehouse_id is not None:
@@ -4834,54 +4969,150 @@ async def _push_assembly_to_ff(
         "raw": created,
     }
 
-    # Зеркало + связь — под advisory-локом (сериализация с конкурентным синком,
-    # uq заявок = project_id+provider+external_id)
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(:ns, :project_id)"),
-        {"ns": _FF_SYNC_LOCK_NS, "project_id": project_id},
+    res = await _finalize_ff_push(
+        db,
+        project_id,
+        warehouse_id,
+        assembly_request_id,
+        provider="skladbot",
+        created_row=created_row,
+        items_sent=len(products),
+        total_qty=total_qty,
+        dest_warehouse=wh_name,
+        asm_id=asm_id,
+        asm_number=asm_number,
+        asm_status=asm_status,
     )
-    await _apply_requests(db, project_id, warehouse_id, "skladbot", [created_row])
-    await db.flush()
-    new_result = await db.execute(
-        select(FulfillmentRequest).where(
-            FulfillmentRequest.project_id == project_id,
-            FulfillmentRequest.provider == "skladbot",
-            FulfillmentRequest.external_id == external_id,
-        )
-    )
-    ff_req = new_result.scalar_one_or_none()
-    if ff_req is None:
-        await db.rollback()
-        return _result(
-            "error",
-            message=(
-                f"Заявка создана у ФФ ({created_row['number'] or external_id}), но зеркало сохранить не удалось — "
-                "обновите страницу после синхронизации"
-            ),
-        )
+    if res["status"] == "created":
+        # Best-effort: уведомить чат склада ФФ об отправленной заявке (никогда не бросает).
+        from backend.services.fulfillment_notify import notify_ff_request_pushed
 
-    # Гонка связывания: сборку успели связать с другой ФФ-заявкой между проверкой и сейчас
-    conflict = await db.execute(
-        select(FulfillmentRequest.id)
-        .where(
-            FulfillmentRequest.project_id == project_id,
-            FulfillmentRequest.assembly_request_id == assembly_request_id,
-            FulfillmentRequest.id != ff_req.id,
+        await notify_ff_request_pushed(
+            db,
+            project_id,
+            warehouse_id,
+            ff_number=res["ff_number"] or external_id,
+            items_sent=len(products),
+            total_qty=total_qty,
+            dest=wh_name,
+            collection_date=collection_date,
+            unloading_date=unloading_date,
         )
-        .limit(1)
+    return res
+
+
+async def _push_assembly_to_wms(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    assembly_request_id: int,
+    *,
+    client: WmsCelicomClient,
+    comment: str | None,
+) -> dict:
+    """Создать заявку на отгрузку (зОГ) у wmscelicom «Целиком» из нашей сборки.
+
+    Контракт FBO «Целиком»: dispatchorders/add (delivery=2 самовывоз, fbo=1, состав
+    [{barcode, count}]) → dispatchorders/send (перевод в сборку, создаётся Shipment).
+    Склад WB в payload НЕ задаётся — определяется привязкой к WB-поставке на стороне
+    «Целиком». Дефицит заранее не проверяем (нет stock-резолва; «Целиком» резервирует
+    на add). Возвращает результат-словарь как ядро skladbot (status: not_found /
+    error / already_linked / empty / created).
+
+    Авто-send: после add сразу подтверждаем в сборку. Если add прошёл, а send упал
+    — заявка УЖЕ создана («Новая»): зеркалим и связываем со сборкой (идемпотентность),
+    но возвращаем error с пояснением «подтвердите в ЛК». НЕ полностью атомарно: заказ
+    у ФФ создаётся ДО записи зеркала.
+    """
+    assembly, qty_by_barcode, early = await _load_assembly_composition(
+        db, project_id, warehouse_id, assembly_request_id
     )
-    if conflict.scalar_one_or_none() is not None:
-        await db.commit()  # зеркало сохранено, но НЕсвязанным
+    if early is not None:
+        return early
+    assert assembly is not None  # early is None ⇒ сборка загружена и прошла guard'ы
+
+    asm_id = assembly.id
+    asm_number = assembly.number
+    asm_status = assembly.status
+
+    def _result(status: str, **extra: object) -> dict:
+        return {"status": status, "assembly_request_id": asm_id, "assembly_number": asm_number, **extra}
+
+    items = [{"barcode": bc, "count": qty} for bc, qty in qty_by_barcode.items()]
+    total_qty = sum(qty_by_barcode.values())
+
+    await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
+
+    # 1) Создать заявку на отгрузку (реальный заказ у «Целиком»), БЕЗ retry
+    try:
+        created = await client.create_dispatch(items, comment=comment or f"Заявка на сборку {asm_number} (DDS)")
+    except CircuitOpenError as e:
+        return _result("error", message=f"«Целиком» временно недоступен, попробуйте позже ({e})")
+    except RateLimitError:
+        return _result("error", message="«Целиком» ограничил частоту запросов — повторите через минуту")
+    except WmsCelicomApiError as e:
+        return _result("error", message=f"«Целиком» отклонил создание заявки (HTTP {e.status_code}): {e}")
+    except httpx.HTTPError as e:
+        return _result("error", message=f"Сетевая ошибка при создании заявки в «Целиком»: {e}")
+
+    external_id = str(created.get("id") or "").strip()
+    if not external_id or external_id == "None":
+        return _result("error", message="«Целиком» не вернул id созданной заявки — проверьте кабинет ФФ вручную")
+
+    # 2) Авто-подтверждение в сборку (send). Ошибку не теряем: заявка уже создана.
+    send_error: str | None = None
+    shipment_id: object = None
+    try:
+        sent = await client.send_dispatch(external_id)
+        shipment_id = sent.get("shipment_id")
+    except RateLimitError:
+        send_error = "«Целиком» ограничил частоту запросов на подтверждении"
+    except WmsCelicomApiError as e:
+        send_error = f"автоподтверждение в сборку отклонено (HTTP {e.status_code}): {e}"
+    except (CircuitOpenError, httpx.HTTPError) as e:
+        send_error = f"автоподтверждение в сборку не прошло: {e}"
+
+    # Зеркало (статус уточнится следующим синком; склад WB подтянется из WB-привязки)
+    created_row = {
+        "external_id": external_id,
+        "kind": FfRequestKind.ASSEMBLY.value,
+        "number": None,  # зОГ-номер API не отдаёт (ярлык UI «Целиком»)
+        "type_id": None,
+        "type_name": _WMS_DISPATCH_TYPE_NAME,
+        "status": "Новая" if send_error else "На сборке",
+        "stage_code": None,
+        "stage_title": "Новая" if send_error else "На сборке",
+        "is_completed": False,
+        "archived": False,
+        "expired": False,
+        "total_qty": total_qty,
+        "dest_warehouse": None,  # склад WB подтянется из привязки на синке
+        "external_created_at": date.today(),
+        "raw": {"orderid": external_id, "shipmentid": shipment_id, "items": items, "_dds_created": True},
+    }
+
+    res = await _finalize_ff_push(
+        db,
+        project_id,
+        warehouse_id,
+        assembly_request_id,
+        provider="wmscelicom",
+        created_row=created_row,
+        items_sent=len(items),
+        total_qty=total_qty,
+        dest_warehouse=None,
+        asm_id=asm_id,
+        asm_number=asm_number,
+        asm_status=asm_status,
+    )
+    if res["status"] != "created":
+        return res
+    if send_error:
+        # Зеркало + связь сохранены, но заявка осталась «Новая» — пользователь подтвердит сам.
         return _result(
             "error",
-            message=(
-                f"Заявка создана у ФФ ({ff_req.number or external_id}), но сборка уже связана с другой "
-                "ФФ-заявкой — свяжите вручную на вкладке «ФФ сборка»"
-            ),
+            message=f"Заявка {external_id} создана у «Целиком», но {send_error} — подтвердите в ЛК «Целиком»",
         )
-    ff_req.assembly_request_id = assembly_request_id
-    await db.commit()
-    ff_number = ff_req.number or external_id
 
     # Best-effort: уведомить чат склада ФФ об отправленной заявке (никогда не бросает).
     from backend.services.fulfillment_notify import notify_ff_request_pushed
@@ -4890,33 +5121,12 @@ async def _push_assembly_to_ff(
         db,
         project_id,
         warehouse_id,
-        ff_number=ff_number,
-        items_sent=len(products),
+        ff_number=res["ff_number"] or external_id,
+        items_sent=len(items),
         total_qty=total_qty,
-        dest=wh_name,
-        collection_date=collection_date,
-        unloading_date=unloading_date,
+        dest=None,
     )
-
-    return {
-        "status": "created",
-        "assembly_request_id": asm_id,
-        "assembly_number": asm_number,
-        "ff_number": ff_req.number,
-        "external_id": external_id,
-        "items_sent": len(products),
-        "total_qty": total_qty,
-        "dest_warehouse": wh_name,
-        "deficit": [],
-        "success": {
-            "request": _request_to_dict(ff_req, {asm_id: (asm_number, asm_status)}),
-            "external_id": external_id,
-            "ff_number": ff_req.number,
-            "items_sent": len(products),
-            "total_qty": total_qty,
-            "skipped_barcodes": [],
-        },
-    }
+    return res
 
 
 async def bulk_create_ff_requests(
@@ -4925,41 +5135,71 @@ async def bulk_create_ff_requests(
     warehouse_id: int,
     payload: FfBulkCreateRequestPayload,
 ) -> dict:
-    """Массовый push: создать заявку ФФ (851) из каждой выбранной сборки.
+    """Массовый push: создать заявку ФФ из каждой выбранной сборки (по провайдеру).
 
-    Склад МП и дата выгрузки подбираются по КАЖДОЙ сборке (склад МП — по её
-    складу WB, дата выгрузки = дата сдачи её поставки FBW); тип поставки, дата
-    забора, комментарий — общие на батч. Каждая сборка обрабатывается независимо
-    (ошибка/дефицит одной не валит остальные) → отчёт. form-data тянется один раз.
+    skladbot: склад МП и дата выгрузки подбираются по КАЖДОЙ сборке (склад МП — по
+    её складу WB, дата выгрузки = дата сдачи её поставки FBW); тип поставки, дата
+    забора, комментарий — общие; form-data тянется один раз. wmscelicom «Целиком»:
+    заявка на отгрузку самовывозом (delivery=2, fbo=1) из состава каждой сборки;
+    склад/даты не нужны. Каждая сборка обрабатывается независимо (ошибка одной не
+    валит остальные) → отчёт.
 
-    ValueError — склад не подключён к skladbot / нет customer_id / ошибки формы /
-    неверный тип поставки (валится ДО создания реальных заказов).
+    ValueError — склад не подключён / неподдерживаемый провайдер / нет customer_id /
+    нет адреса инстанса / ошибки формы / неверный тип поставки (валится ДО создания
+    реальных заказов).
     """
-    customer_id, token = await _require_skladbot_push(db, project_id, warehouse_id)
-    await db.commit()
+    key = await get_integration(db, project_id, warehouse_id)
+    if not key:
+        raise ValueError("Фулфилмент не подключён к этому складу")
+    provider = key.service
+    token = _decrypt(key.encrypted_key)
 
-    client = SkladbotClient(token, project_id=project_id)
-    _, _, wh_options, dt_options = await _fetch_push_form_options(client, customer_id)
-    _validate_delivery_type(payload.delivery_type, dt_options)
+    # Подготовка клиента/справочников ДО создания реальных заказов (валидация валится тут)
+    sk_client: SkladbotClient | None = None
+    wms_client: WmsCelicomClient | None = None
+    customer_id_val: int | None = None
+    wh_options: list[dict] = []
+    if provider == "skladbot":
+        customer_id_val = (key.config or {}).get("customer_id")
+        if not customer_id_val:
+            raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
+        await db.commit()
+        sk_client = SkladbotClient(token, project_id=project_id)
+        _, _, wh_options, dt_options = await _fetch_push_form_options(sk_client, customer_id_val)
+        _validate_delivery_type(payload.delivery_type, dt_options)
+    elif provider == "wmscelicom":
+        api_base = str((key.config or {}).get("api_base_url") or "")
+        if not api_base:
+            raise ValueError("В конфигурации ключа нет адреса инстанса — переподключите фулфилмент")
+        await db.commit()
+        wms_client = WmsCelicomClient(api_base, token, project_id=project_id)
+    else:
+        raise ValueError(f"Создание заявки на ФФ не поддерживается для провайдера {_provider_human(provider)}")
 
     results: list[dict] = []
     for aid in payload.assembly_request_ids:
-        res = await _push_assembly_to_ff(
-            db,
-            project_id,
-            warehouse_id,
-            aid,
-            client=client,
-            customer_id=customer_id,
-            mp_id=payload.marketplace_id,
-            wh_options=wh_options,
-            delivery_type=payload.delivery_type,
-            collection_date=payload.collection_date,
-            unloading_date=None,  # авто = дата сдачи поставки FBW
-            marketplace_warehouse_id=None,  # авто-подбор по складу WB
-            comment=payload.comment,
-            notify=payload.notify,
-        )
+        if sk_client is not None and customer_id_val is not None:
+            res = await _push_assembly_to_ff(
+                db,
+                project_id,
+                warehouse_id,
+                aid,
+                client=sk_client,
+                customer_id=customer_id_val,
+                mp_id=payload.marketplace_id,
+                wh_options=wh_options,
+                delivery_type=payload.delivery_type,
+                collection_date=payload.collection_date,
+                unloading_date=None,  # авто = дата сдачи поставки FBW
+                marketplace_warehouse_id=None,  # авто-подбор по складу WB
+                comment=payload.comment,
+                notify=payload.notify,
+            )
+        else:
+            assert wms_client is not None  # provider == wmscelicom
+            res = await _push_assembly_to_wms(
+                db, project_id, warehouse_id, aid, client=wms_client, comment=payload.comment
+            )
         if res["status"] == "not_found":
             res = {
                 "status": "error",

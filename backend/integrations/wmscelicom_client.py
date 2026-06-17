@@ -13,6 +13,9 @@ Endpoints used (https://api-doc.wmscelicom.ru/):
   отгрузки (город МП) + состав (items[]); data — dict {orderid: row}. Это РОДИТЕЛЬ
   отгрузки FBO; shipmentsfbo (где shipped_target — лишь площадка) больше не тянем.
 - GET /api/{t}/unloadingorders/list/ — заявки на приёмку; data — dict {id: row}
+- POST /api/{t}/dispatchorders/add/  — создать заявку на отгрузку (PUSH из сборки):
+  delivery=2 (самовывоз) + fbo=1 + items[{barcode,count}]; → {status:OK, id}
+- POST /api/{t}/dispatchorders/send/ — подтвердить заявку (перевод в сборку, Shipment)
 
 Ограничения API: 150 req/min на всё; max 30 элементов на страницу. Список заявок
 на отгрузку тяжёлый при широкой выборке (сервер материализует весь набор до
@@ -110,11 +113,38 @@ class WmsCelicomClient:
         """Убрать токен из произвольного текста (URL в httpx-ошибках, echo в body)."""
         return text.replace(self.token, "***")
 
-    async def _request(self, path: str, params: dict | None = None) -> dict | list:
-        """GET `{base}/api/{token}/{path}`; raise on errors.
+    def _check(self, response: httpx.Response, path: str) -> dict | list:
+        """Единая обработка ответа GET/POST: 429/4xx/5xx/{status:ERROR} → исключения.
 
-        В логи и тексты ошибок попадает только `path` (после токена) — сам URL
-        содержит секрет; httpx-ошибки дополнительно редактируются (_redact).
+        В тексты ошибок попадает только `path` (после токена) и _redact: сам URL
+        содержит секрет. 200 + {status: ERROR, message} (спека oneOf) — тоже ошибка.
+        """
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", "60"))
+            raise RateLimitError("WMS Celicom API rate limited (429)", retry_after=retry_after)
+        if 400 <= response.status_code < 500:
+            raise WmsCelicomApiError(
+                self._redact(f"WMS Celicom API error ({response.status_code}) at {path}: {response.text[:200]}"),
+                status_code=response.status_code,
+            )
+        if response.status_code != 200:
+            # 5xx — деградация сервиса: считается circuit breaker'ом и ретраится
+            raise ValueError(
+                self._redact(f"WMS Celicom API error ({response.status_code}) at {path}: {response.text[:200]}")
+            )
+
+        data = response.json()
+        if isinstance(data, dict) and str(data.get("status", "")).upper() == "ERROR":
+            raise WmsCelicomApiError(
+                self._redact(f"WMS Celicom API error at {path}: {str(data.get('message'))[:200]}"),
+                status_code=response.status_code,
+            )
+        return data
+
+    async def _request(self, path: str, params: dict | None = None) -> dict | list:
+        """GET `{base}/api/{token}/{path}`; raise on errors (общий _check).
+
+        В логи попадает только `path` (после токена); httpx-ошибки редактируются.
         """
         url = f"{self.base_url}/api/{self.token}/{path.lstrip('/')}"
         async with self._circuit, httpx.AsyncClient(timeout=TIMEOUT) as client:
@@ -124,29 +154,22 @@ class WmsCelicomClient:
             except httpx.HTTPError as e:
                 # str(httpx-ошибки) может содержать полный URL — а в нём токен
                 raise httpx.ConnectError(self._redact(f"{type(e).__name__}: {e}")) from None
+            return self._check(response, path)
 
-            if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", "60"))
-                raise RateLimitError("WMS Celicom API rate limited (429)", retry_after=retry_after)
-            if 400 <= response.status_code < 500:
-                raise WmsCelicomApiError(
-                    self._redact(f"WMS Celicom API error ({response.status_code}) at {path}: {response.text[:200]}"),
-                    status_code=response.status_code,
-                )
-            if response.status_code != 200:
-                # 5xx — деградация сервиса: считается circuit breaker'ом и ретраится
-                raise ValueError(
-                    self._redact(f"WMS Celicom API error ({response.status_code}) at {path}: {response.text[:200]}")
-                )
+    async def _post(self, path: str, payload: dict) -> dict | list:
+        """POST JSON `{base}/api/{token}/{path}`; обработка как у _request.
 
-            data = response.json()
-            # API может вернуть 200 + {status: ERROR, message} (см. спеку oneOf)
-            if isinstance(data, dict) and str(data.get("status", "")).upper() == "ERROR":
-                raise WmsCelicomApiError(
-                    self._redact(f"WMS Celicom API error at {path}: {str(data.get('message'))[:200]}"),
-                    status_code=response.status_code,
-                )
-            return data
+        Тело НЕ логируем (состав/доп.инфо). Вызывающие НЕ оборачивают в retry:
+        повторный POST на создание = дубликат реального заказа у ФФ.
+        """
+        url = f"{self.base_url}/api/{self.token}/{path.lstrip('/')}"
+        async with self._circuit, httpx.AsyncClient(timeout=TIMEOUT) as client:
+            logger.info("wmscelicom_api.post", path=path)
+            try:
+                response = await client.post(url, json=payload, headers={"Accept": "application/json"})
+            except httpx.HTTPError as e:
+                raise httpx.ConnectError(self._redact(f"{type(e).__name__}: {e}")) from None
+            return self._check(response, path)
 
     async def test_connection(self) -> bool:
         """Validate the token: items/get с limit=1 отвечает без ошибки.
@@ -221,3 +244,38 @@ class WmsCelicomClient:
     async def fetch_unloading_orders(self) -> list[dict]:
         """Все заявки на приёмку (items включены в ответ списка)."""
         return await self._fetch_paginated("unloadingorders/list/")
+
+    async def create_dispatch(
+        self,
+        items: list[dict],
+        *,
+        delivery: int = 2,
+        fbo: int = 1,
+        comment: str | None = None,
+    ) -> dict:
+        """Создать заявку на отгрузку (POST dispatchorders/add/) в статусе «Новая».
+
+        Контракт FBO-отгрузки на склад МП у «Целиком»: `delivery`=2 (самовывоз —
+        WB/транспорт забирает со склада ФФ; склад WB определяется привязкой к
+        WB-поставке на стороне «Целиком», в payload НЕ задаётся), `fbo`=1 (списание
+        FBO), состав — `items` = [{barcode, count}]. БЕЗ retry: повторный POST =
+        дубликат реального заказа. Ответ — {status: OK, id: <orderId>, ...}.
+        """
+        payload: dict = {"delivery": delivery, "fbo": fbo, "items": items}
+        if comment:
+            payload["comment"] = comment
+        data = await self._post("dispatchorders/add/", payload)
+        if not isinstance(data, dict):
+            raise WmsCelicomApiError("WMS Celicom вернул неожиданный ответ на dispatchorders/add", status_code=200)
+        return data
+
+    async def send_dispatch(self, order_id: int | str) -> dict:
+        """Подтвердить заявку (POST dispatchorders/send/): перевод в сборку + Shipment.
+
+        После add/ заявка в статусе «Новая»; send/ создаёт запись об отгрузке и
+        переводит в сборку. БЕЗ retry. Ответ — {status: OK, order_id, shipment_id}.
+        """
+        data = await self._post("dispatchorders/send/", {"id": order_id})
+        if not isinstance(data, dict):
+            raise WmsCelicomApiError("WMS Celicom вернул неожиданный ответ на dispatchorders/send", status_code=200)
+        return data

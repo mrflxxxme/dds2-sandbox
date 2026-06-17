@@ -18,7 +18,9 @@ from sqlalchemy import select
 
 from backend.integrations.resilience import RateLimitError
 from backend.integrations.skladbot_client import SkladbotApiError, SkladbotClient
+from backend.integrations.wmscelicom_client import WmsCelicomApiError, WmsCelicomClient
 from backend.models import (
+    FulfillmentRequest,
     FulfillmentStatusEvent,
     IntegrationKey,
     Nomenclature,
@@ -347,7 +349,7 @@ async def test_push_not_connected_raises(db_session, project, warehouse, monkeyp
 
 @pytest.mark.asyncio
 async def test_push_wrong_provider_raises(db_session, project, warehouse, monkeypatch):
-    """Склад подключён к migfull — push отклоняется (только skladbot)."""
+    """Склад подключён к migfull — push отклоняется (поддержаны skladbot/wmscelicom)."""
     bc = f"20{_uid()}"
     nom = await _make_nomenclature(db_session, project.id, bc)
     doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 2)])
@@ -363,7 +365,7 @@ async def test_push_wrong_provider_raises(db_session, project, warehouse, monkey
         )
     )
     await db_session.commit()
-    with pytest.raises(ValueError, match="только для skladbot"):
+    with pytest.raises(ValueError, match="не поддерживается для провайдера"):
         await fulfillment_service.create_ff_request_from_assembly(
             db_session, project.id, warehouse.id, doc.id, _payload()
         )
@@ -726,3 +728,195 @@ async def test_push_resolve_rate_limited_surfaced(db_session, project, warehouse
         await fulfillment_service.create_ff_request_from_assembly(
             db_session, project.id, warehouse.id, doc.id, _payload()
         )
+
+
+# ─── wmscelicom «Целиком» push (dispatchorders/add + send) ───────────────────
+
+WMS_TOKEN = "fake-wms-token-for-tests"  # noqa: S105 — фейковый токен теста  # gitleaks:allow
+WMS_BASE_INPUT = "test-client.wmscelicom.ru"
+
+
+def _wms_payload(**over) -> FfCreateRequestPayload:
+    """payload для wms: склад МП и даты не нужны (всё опционально)."""
+    return FfCreateRequestPayload(**over)
+
+
+@pytest_asyncio.fixture
+async def connected_wms_key(db_session, project, warehouse, monkeypatch):
+    """Подключённый wmscelicom-ключ (test_connection замокан)."""
+
+    async def fake_test_connection(self):
+        return True
+
+    monkeypatch.setattr(WmsCelicomClient, "test_connection", fake_test_connection)
+    await fulfillment_service.connect(
+        db_session, project.id, warehouse.id, "wmscelicom", WMS_TOKEN, base_url=WMS_BASE_INPUT
+    )
+    return await fulfillment_service.get_integration(db_session, project.id, warehouse.id)
+
+
+def _mock_wms_create(
+    monkeypatch,
+    holder: dict,
+    *,
+    order_id: int = 515151,
+    shipment_id: int = 901,
+    create_exc: Exception | None = None,
+    send_exc: Exception | None = None,
+):
+    """Мок dispatchorders/add + send (никаких реальных HTTP)."""
+
+    async def fake_create(self, items, *, delivery=2, fbo=1, comment=None):
+        holder["create"] = {"items": items, "delivery": delivery, "fbo": fbo, "comment": comment}
+        if create_exc is not None:
+            raise create_exc
+        return {"status": "OK", "id": order_id, "delivery_info": {}}
+
+    async def fake_send(self, oid):
+        holder["send"] = oid
+        if send_exc is not None:
+            raise send_exc
+        return {"status": "OK", "order_id": oid, "shipment_id": shipment_id}
+
+    monkeypatch.setattr(WmsCelicomClient, "create_dispatch", fake_create)
+    monkeypatch.setattr(WmsCelicomClient, "send_dispatch", fake_send)
+
+
+async def _get_wms_request(db_session, project_id, external_id):
+    return (
+        await db_session.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.provider == "wmscelicom",
+                FulfillmentRequest.external_id == external_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+@pytest.mark.asyncio
+async def test_wms_push_happy_path(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """Целиком: add (delivery=2, fbo=1, состав по barcode) + авто-send → created + связь."""
+    bc_a, bc_b = f"20{_uid()}", f"21{_uid()}"
+    nom_a = await _make_nomenclature(db_session, project.id, bc_a)
+    nom_b = await _make_nomenclature(db_session, project.id, bc_b)
+    doc = await _make_assembly(db_session, project, warehouse, [(bc_a, nom_a.id, 3), (bc_b, nom_b.id, 7)])
+    holder: dict = {}
+    _mock_wms_create(monkeypatch, holder, order_id=515151, shipment_id=901)
+
+    result = await fulfillment_service.create_ff_request_from_assembly(
+        db_session, project.id, warehouse.id, doc.id, _wms_payload()
+    )
+
+    assert result["external_id"] == "515151"
+    assert result["items_sent"] == 2
+    assert result["total_qty"] == 10
+    assert result["request"]["assembly_request_id"] == doc.id
+    assert result["request"]["kind"] == "assembly"
+    # контракт create_dispatch: delivery=2, fbo=1, состав barcode+count агрегирован
+    assert holder["create"]["delivery"] == 2
+    assert holder["create"]["fbo"] == 1
+    assert {i["barcode"]: i["count"] for i in holder["create"]["items"]} == {bc_a: 3, bc_b: 7}
+    # авто-send вызван с тем же order_id
+    assert str(holder["send"]) == "515151"
+    # зеркало provider=wmscelicom связано со сборкой, статус «На сборке»
+    row = await _get_wms_request(db_session, project.id, "515151")
+    assert row is not None and row.assembly_request_id == doc.id
+    assert row.total_qty == 10
+    assert row.status == "На сборке"
+
+
+@pytest.mark.asyncio
+async def test_wms_push_send_failure_links_but_errors(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """add прошёл, send упал — заявка создана («Новая»), зеркало+связь есть, но ValueError."""
+    bc = f"22{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 4)])
+    holder: dict = {}
+    _mock_wms_create(
+        monkeypatch, holder, order_id=515152, send_exc=WmsCelicomApiError("Поле обязательно", status_code=400)
+    )
+    with pytest.raises(ValueError, match="подтвердите в ЛК"):
+        await fulfillment_service.create_ff_request_from_assembly(
+            db_session, project.id, warehouse.id, doc.id, _wms_payload()
+        )
+    row = await _get_wms_request(db_session, project.id, "515152")
+    assert row is not None and row.assembly_request_id == doc.id
+    assert row.status == "Новая"
+
+
+@pytest.mark.asyncio
+async def test_wms_push_create_error_no_mirror(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """add отклонён — ValueError, ничего не зеркалируется/не связывается."""
+    bc = f"23{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 4)])
+    holder: dict = {}
+    _mock_wms_create(monkeypatch, holder, create_exc=WmsCelicomApiError("нет товара", status_code=422))
+    with pytest.raises(ValueError, match="отклонил создание"):
+        await fulfillment_service.create_ff_request_from_assembly(
+            db_session, project.id, warehouse.id, doc.id, _wms_payload()
+        )
+    linked = (
+        (
+            await db_session.execute(
+                select(FulfillmentRequest).where(
+                    FulfillmentRequest.project_id == project.id,
+                    FulfillmentRequest.provider == "wmscelicom",
+                    FulfillmentRequest.assembly_request_id == doc.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert linked == []
+
+
+@pytest.mark.asyncio
+async def test_wms_push_idempotent_already_linked(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """Повторный push той же сборки запрещён (уже связана)."""
+    bc = f"24{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 4)])
+    holder: dict = {}
+    _mock_wms_create(monkeypatch, holder, order_id=515153)
+    await fulfillment_service.create_ff_request_from_assembly(
+        db_session, project.id, warehouse.id, doc.id, _wms_payload()
+    )
+    with pytest.raises(ValueError, match="уже отправлена"):
+        await fulfillment_service.create_ff_request_from_assembly(
+            db_session, project.id, warehouse.id, doc.id, _wms_payload()
+        )
+
+
+@pytest.mark.asyncio
+async def test_wms_bulk_push_creates(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """Массовый push к wmscelicom: каждая сборка → отдельная заявка на отгрузку."""
+    bc1, bc2 = f"25{_uid()}", f"26{_uid()}"
+    n1 = await _make_nomenclature(db_session, project.id, bc1)
+    n2 = await _make_nomenclature(db_session, project.id, bc2)
+    d1 = await _make_assembly(db_session, project, warehouse, [(bc1, n1.id, 2)])
+    d2 = await _make_assembly(db_session, project, warehouse, [(bc2, n2.id, 5)])
+
+    counter = {"n": 0}
+
+    async def fake_create(self, items, *, delivery=2, fbo=1, comment=None):
+        counter["n"] += 1
+        return {"status": "OK", "id": 515200 + counter["n"]}
+
+    async def fake_send(self, oid):
+        return {"status": "OK", "order_id": oid, "shipment_id": 900 + counter["n"]}
+
+    monkeypatch.setattr(WmsCelicomClient, "create_dispatch", fake_create)
+    monkeypatch.setattr(WmsCelicomClient, "send_dispatch", fake_send)
+
+    res = await fulfillment_service.bulk_create_ff_requests(
+        db_session,
+        project.id,
+        warehouse.id,
+        FfBulkCreateRequestPayload(assembly_request_ids=[d1.id, d2.id], collection_date=date(2026, 6, 28)),
+    )
+    assert res["created_count"] == 2
+    assert res["failed_count"] == 0
+    assert {r["status"] for r in res["results"]} == {"created"}

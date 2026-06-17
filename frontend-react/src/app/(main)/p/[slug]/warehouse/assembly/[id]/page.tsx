@@ -275,8 +275,11 @@ export default function AssemblyDetailPage() {
     };
 
     // ─── ФФ push (создать заявку на ФФ из нашей сборки) ────────────────────
+    // wmscelicom («Целиком») — самовывоз: склад WB и даты не задаются (берутся из
+    // WB-привязки на стороне ФФ), диалог упрощён до подтверждения + комментария.
+    const isWmsPush = ffStatus?.provider === 'wmscelicom';
     const canPushToFf = !!assembly && !assembly.ff_request_id
-        && ffStatus?.connected === true && ffStatus.provider === 'skladbot'
+        && ffStatus?.connected === true && (ffStatus.provider === 'skladbot' || ffStatus.provider === 'wmscelicom')
         && FF_PUSH_STATUSES.has(assembly.status);
 
     const openPushModal = async () => {
@@ -291,6 +294,7 @@ export default function AssemblyDetailPage() {
         setPushResult(null);
         setError('');
         setShowPushModal(true);
+        if (isWmsPush) return;  // «Целиком» — без form-data (склад/даты не нужны)
         // Склад МП у skladbot — select по id из живого form-data, не свободный текст
         setPushFormLoading(true);
         try {
@@ -306,21 +310,25 @@ export default function AssemblyDetailPage() {
         setPushFormLoading(false);
     };
 
-    const pushFormValid = pushWarehouseId !== '' && !!pushCollectionDate && !!pushUnloadingDate;
+    // «Целиком» не требует склада/дат; skladbot — обязательны
+    const pushFormValid = isWmsPush || (pushWarehouseId !== '' && !!pushCollectionDate && !!pushUnloadingDate);
 
     const handlePush = async () => {
         if (!assembly || !pushFormValid) return;
         setActionLoading(true);
         setError('');
         try {
-            const res = await api.createFfRequestFromAssembly(assembly.warehouse_id, assembly.id, {
-                marketplace_warehouse_id: pushWarehouseId,
-                marketplace_id: pushForm?.marketplace_id,
-                collection_date: pushCollectionDate,
-                unloading_date: pushUnloadingDate,
-                delivery_type: pushDeliveryType,
-                comment: pushComment.trim() || null,
-            });
+            const payload = isWmsPush
+                ? { comment: pushComment.trim() || null }
+                : {
+                    marketplace_warehouse_id: pushWarehouseId === '' ? undefined : pushWarehouseId,
+                    marketplace_id: pushForm?.marketplace_id,
+                    collection_date: pushCollectionDate,
+                    unloading_date: pushUnloadingDate,
+                    delivery_type: pushDeliveryType,
+                    comment: pushComment.trim() || null,
+                };
+            const res = await api.createFfRequestFromAssembly(assembly.warehouse_id, assembly.id, payload);
             setPushResult(res);
             await load();  // подтянуть ff_request_* в шапку
         } catch (e: unknown) {
@@ -976,62 +984,77 @@ export default function AssemblyDetailPage() {
                         {!pushResult ? (
                             <>
                                 <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 16 }}>
-                                    Создаст заявку «Доставка на склад МП» у фулфилмента ({ffStatus?.customer_name || 'skladbot'}) из
-                                    {' '}{assembly.items.length} позиц. ({formatNumber(assembly.items.reduce((s, it) => s + it.quantity, 0), 0)} шт).
-                                    Это <b>реальный заказ</b> у ФФ.
+                                    {isWmsPush ? (
+                                        <>
+                                            Создаст заявку на отгрузку у фулфилмента «Целиком» ({ffStatus?.customer_name || 'wmscelicom'}) из
+                                            {' '}{assembly.items.length} позиц. ({formatNumber(assembly.items.reduce((s, it) => s + it.quantity, 0), 0)} шт)
+                                            и сразу переведёт её в сборку. Склад WB определяется привязкой к поставке на стороне ФФ.
+                                            Это <b>реальный заказ</b> у ФФ.
+                                        </>
+                                    ) : (
+                                        <>
+                                            Создаст заявку «Доставка на склад МП» у фулфилмента ({ffStatus?.customer_name || 'skladbot'}) из
+                                            {' '}{assembly.items.length} позиц. ({formatNumber(assembly.items.reduce((s, it) => s + it.quantity, 0), 0)} шт).
+                                            Это <b>реальный заказ</b> у ФФ.
+                                        </>
+                                    )}
                                 </div>
                                 <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 12 }}>
-                                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                                        <label className="form-label">Склад МП ({pushForm?.marketplace_name || 'WB'}) *</label>
-                                        <select
-                                            className="form-input"
-                                            value={pushWarehouseId}
-                                            onChange={e => setPushWarehouseId(e.target.value ? Number(e.target.value) : '')}
-                                            disabled={pushFormLoading || !pushForm}
-                                            autoFocus
-                                        >
-                                            <option value="">{pushFormLoading ? 'Загрузка складов…' : '— выберите склад МП —'}</option>
-                                            {pushForm?.warehouses.map(w => (
-                                                <option key={w.id} value={w.id}>{w.name}</option>
-                                            ))}
-                                        </select>
-                                        {pushForm?.suggested_warehouse_hint && pushWarehouseId === '' && !pushFormLoading && (
-                                            <div style={{ fontSize: 12, color: 'var(--color-warning)', marginTop: 4 }}>
-                                                Склад заявки «{pushForm.suggested_warehouse_hint}» не найден в списке ФФ — выберите вручную.
+                                    {!isWmsPush && (
+                                        <>
+                                            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                                <label className="form-label">Склад МП ({pushForm?.marketplace_name || 'WB'}) *</label>
+                                                <select
+                                                    className="form-input"
+                                                    value={pushWarehouseId}
+                                                    onChange={e => setPushWarehouseId(e.target.value ? Number(e.target.value) : '')}
+                                                    disabled={pushFormLoading || !pushForm}
+                                                    autoFocus
+                                                >
+                                                    <option value="">{pushFormLoading ? 'Загрузка складов…' : '— выберите склад МП —'}</option>
+                                                    {pushForm?.warehouses.map(w => (
+                                                        <option key={w.id} value={w.id}>{w.name}</option>
+                                                    ))}
+                                                </select>
+                                                {pushForm?.suggested_warehouse_hint && pushWarehouseId === '' && !pushFormLoading && (
+                                                    <div style={{ fontSize: 12, color: 'var(--color-warning)', marginTop: 4 }}>
+                                                        Склад заявки «{pushForm.suggested_warehouse_hint}» не найден в списке ФФ — выберите вручную.
+                                                    </div>
+                                                )}
                                             </div>
-                                        )}
-                                    </div>
-                                    <div className="form-group">
-                                        <label className="form-label">Тип поставки *</label>
-                                        <select className="form-input" value={pushDeliveryType} onChange={e => setPushDeliveryType(e.target.value as 'straight' | 'cross_dock')}>
-                                            {(pushForm?.delivery_types?.length
-                                                ? pushForm.delivery_types
-                                                : [{ value: 'straight', name: 'Прямая' }, { value: 'cross_dock', name: 'Транзит (кросс-док)' }]
-                                            ).map(d => (
-                                                <option key={d.value} value={d.value}>{d.name}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    <div className="form-group" />
-                                    <div className="form-group">
-                                        <label className="form-label">Дата забора *</label>
-                                        <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
-                                            <input className="form-input" type="date" style={{ flex: 1, minWidth: 0 }} value={pushCollectionDate} onChange={e => setPushCollectionDate(e.target.value)} />
-                                            <button
-                                                type="button"
-                                                className="btn btn-secondary"
-                                                style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
-                                                title="Сегодня + 3 дня"
-                                                onClick={() => { const d = new Date(); d.setDate(d.getDate() + 3); setPushCollectionDate(d.toISOString().slice(0, 10)); }}
-                                            >
-                                                +3 дня
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div className="form-group">
-                                        <label className="form-label">Дата выгрузки *</label>
-                                        <input className="form-input" type="date" value={pushUnloadingDate} onChange={e => setPushUnloadingDate(e.target.value)} />
-                                    </div>
+                                            <div className="form-group">
+                                                <label className="form-label">Тип поставки *</label>
+                                                <select className="form-input" value={pushDeliveryType} onChange={e => setPushDeliveryType(e.target.value as 'straight' | 'cross_dock')}>
+                                                    {(pushForm?.delivery_types?.length
+                                                        ? pushForm.delivery_types
+                                                        : [{ value: 'straight', name: 'Прямая' }, { value: 'cross_dock', name: 'Транзит (кросс-док)' }]
+                                                    ).map(d => (
+                                                        <option key={d.value} value={d.value}>{d.name}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                            <div className="form-group" />
+                                            <div className="form-group">
+                                                <label className="form-label">Дата забора *</label>
+                                                <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+                                                    <input className="form-input" type="date" style={{ flex: 1, minWidth: 0 }} value={pushCollectionDate} onChange={e => setPushCollectionDate(e.target.value)} />
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-secondary"
+                                                        style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+                                                        title="Сегодня + 3 дня"
+                                                        onClick={() => { const d = new Date(); d.setDate(d.getDate() + 3); setPushCollectionDate(d.toISOString().slice(0, 10)); }}
+                                                    >
+                                                        +3 дня
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="form-group">
+                                                <label className="form-label">Дата выгрузки *</label>
+                                                <input className="form-input" type="date" value={pushUnloadingDate} onChange={e => setPushUnloadingDate(e.target.value)} />
+                                            </div>
+                                        </>
+                                    )}
                                     <div className="form-group" style={{ gridColumn: '1 / -1' }}>
                                         <label className="form-label">Комментарий</label>
                                         <input className="form-input" value={pushComment} onChange={e => setPushComment(e.target.value)} placeholder={`Заявка на сборку ${assembly.number} (DDS)`} />
