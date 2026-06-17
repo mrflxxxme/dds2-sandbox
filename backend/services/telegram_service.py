@@ -14,6 +14,7 @@ from backend.cache import get_redis
 from backend.models.auth import Project, ProjectMember, User
 from backend.models.integrations import WbFunnelDaily
 from backend.models.telegram import BrandNote, TelegramBotUser, TelegramChatBinding
+from backend.models.warehouse import Warehouse
 from backend.utils.telegram_auth import validate_telegram_webapp_data
 from backend.utils.time import utcnow
 
@@ -213,6 +214,47 @@ async def list_ff_board_chats(db: AsyncSession, project_id: int) -> list[Telegra
         )
     )
     return list(result.scalars().all())
+
+
+async def set_ff_board_config(
+    db: AsyncSession,
+    binding_id: int,
+    project_id: int,
+    enabled: bool,
+    warehouse_id: int | None,
+) -> bool:
+    """Configure the pinned FF-board for a chat: on/off + optional warehouse scope.
+
+    warehouse_id=None → board over all warehouses; a non-null id scopes it to that
+    single fulfillment warehouse (must belong to the project). Disabling forgets the
+    pinned message id so a fresh board is created on re-enable. Returns False if the
+    binding is not found; raises ValueError if the warehouse is invalid for the project.
+    """
+    result = await db.execute(
+        select(TelegramChatBinding).where(
+            TelegramChatBinding.id == binding_id,
+            TelegramChatBinding.project_id == project_id,
+        )
+    )
+    binding = result.scalar_one_or_none()
+    if not binding:
+        return False
+    if warehouse_id is not None:
+        wh = await db.execute(
+            select(Warehouse.id).where(
+                Warehouse.id == warehouse_id,
+                Warehouse.project_id == project_id,
+                Warehouse.is_deleted == False,
+            )
+        )
+        if wh.scalar_one_or_none() is None:
+            raise ValueError("Склад не найден в этом проекте")
+    binding.ff_board_enabled = enabled
+    binding.ff_board_warehouse_id = warehouse_id if enabled else None
+    if not enabled:
+        binding.ff_board_message_id = None
+    await db.commit()
+    return True
 
 
 # ─── TMA Authentication ─────────────────────────────────────────────────────

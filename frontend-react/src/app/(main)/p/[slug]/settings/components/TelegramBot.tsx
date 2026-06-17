@@ -1,12 +1,13 @@
 'use client';
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '@/lib/api';
-import type { TelegramChatBinding } from '@/types/api';
+import type { TelegramChatBinding, Warehouse } from '@/types/api';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
 
 export function TelegramBot() {
     const [chats, setChats] = useState<TelegramChatBinding[]>([]);
+    const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
     const [loading, setLoading] = useState(true);
     const [deepLink, setDeepLink] = useState('');
     const [msg, setMsg] = useState('');
@@ -14,8 +15,10 @@ export function TelegramBot() {
 
     const loadChats = useCallback(async () => {
         try {
-            const data = await api.getTelegramChats();
-            setChats(data);
+            const [chatData, whData] = await Promise.all([api.getTelegramChats(), api.getWarehouses()]);
+            setChats(chatData);
+            // Только FF-склады: сборки бывают только на них, иначе табло молча пустует.
+            setWarehouses(whData.filter(w => w.is_active && w.warehouse_type === 'FULFILLMENT'));
         } catch { /* ignore */ }
         setLoading(false);
     }, []);
@@ -61,6 +64,17 @@ export function TelegramBot() {
         }
     };
 
+    const handleSetBoard = async (id: number, enabled: boolean, warehouseId: number | null) => {
+        try {
+            await api.setTelegramFfBoard(id, enabled, warehouseId);
+            setChats(prev => prev.map(c => c.id === id
+                ? { ...c, ff_board_enabled: enabled, ff_board_warehouse_id: enabled ? warehouseId : null }
+                : c));
+        } catch (e: any) {
+            setMsg(e.message);
+        }
+    };
+
     const columns: Column[] = useMemo(() => [
         {
             key: 'chat_id', label: 'Chat ID',
@@ -94,13 +108,45 @@ export function TelegramBot() {
             ),
         },
         {
+            key: '_ff_board', label: 'Табло ФФ', sortable: false,
+            render: (_v: any, row: any) => (
+                <select
+                    style={{
+                        fontSize: 13, padding: '6px 8px', borderRadius: 8,
+                        background: 'var(--color-bg-input)', color: 'var(--color-text)',
+                        border: '1px solid var(--color-border)', maxWidth: 180,
+                    }}
+                    value={row.ff_board_enabled ? String(row.ff_board_warehouse_id ?? 'all') : 'off'}
+                    onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === 'off') handleSetBoard(row.id, false, null);
+                        else if (v === 'all') handleSetBoard(row.id, true, null);
+                        else handleSetBoard(row.id, true, Number(v));
+                    }}
+                    title="Закреплённое авто-табло заявок ФФ в этом чате"
+                >
+                    <option value="off">Выключено</option>
+                    <option value="all">🌐 Все склады</option>
+                    {warehouses.map(w => (
+                        <option key={w.id} value={String(w.id)}>{w.name}</option>
+                    ))}
+                    {row.ff_board_enabled && row.ff_board_warehouse_id != null
+                        && !warehouses.some(w => w.id === row.ff_board_warehouse_id) && (
+                        <option value={String(row.ff_board_warehouse_id)}>
+                            Склад #{row.ff_board_warehouse_id} (недоступен)
+                        </option>
+                    )}
+                </select>
+            ),
+        },
+        {
             key: '_actions', label: '', width: '100',
             sortable: false,
             render: (_v: any, row: any) => (
                 <button className="btn btn-danger btn-sm" onClick={() => handleDelete(row.id)}>✕</button>
             ),
         },
-    ], []);
+    ], [warehouses]);
 
     if (loading) return <div style={{ padding: 40, color: 'var(--color-text-muted)' }}>Загрузка...</div>;
 
@@ -124,6 +170,9 @@ export function TelegramBot() {
                 <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 16 }}>
                     Привяжите аккаунт Telegram через бота <strong>@dds_analytics_bot</strong>.
                     После привязки добавьте бота в групповой чат и выполните команду <code>/setup</code> для привязки чата к проекту.
+                    В колонке <strong>«Табло ФФ»</strong> выберите склад — в чат добавится закреплённое авто-табло
+                    заявок только этого склада (или <em>«Все склады»</em> для общего табло). Бот должен быть админом чата,
+                    чтобы закрепить сообщение; табло появится при ближайшей синхронизации.
                 </p>
 
                 {deepLink && (

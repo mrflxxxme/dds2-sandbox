@@ -104,11 +104,19 @@ def _req(
     }
 
 
-def _mock_connection(monkeypatch, customer=FAKE_CUSTOMER):
+def _mock_connection(monkeypatch, customer=FAKE_CUSTOMER, total=1):
     async def fake_test_connection(self):
         return customer
 
+    async def fake_count_customers(self):
+        return total
+
+    async def fake_find_customer(self, customer_id):
+        return customer if customer and customer.get("id") == customer_id else None
+
     monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "count_customers", fake_count_customers)
+    monkeypatch.setattr(SkladbotClient, "find_customer", fake_find_customer)
 
 
 def _mock_products(monkeypatch, items):
@@ -1508,18 +1516,45 @@ def _mock_wms_connection(monkeypatch, ok=True):
     monkeypatch.setattr(WmsCelicomClient, "test_connection", fake_test_connection)
 
 
-def _mock_wms_fetches(monkeypatch, items=(), shipments=(), unloadings=()):
+def _wms_dispatch(
+    orderid,
+    status="new",
+    shipment_status=None,
+    warehouse="Казань",
+    items=None,
+    date_time="2026-06-01 10:00:00",
+):
+    """wmscelicom dispatchorders/list row (заявка на отгрузку, зОГ).
+
+    `status` — английский статус заявки; `shipment_status` — русский статус
+    связанной FBO-отгрузки (None пока её нет); `warehouse` — склад отгрузки
+    (город МП); `items` — состав ([{barcode, count, name}]).
+    """
+    return {
+        "orderid": orderid,
+        "date_time": date_time,
+        "externalid": None,
+        "shipmentid": "",
+        "status": status,
+        "shipment_status": shipment_status,
+        "warehouse": warehouse,
+        "user": {"first_name": "Иван", "last_name": "Петров"},
+        "items": items if items is not None else [],
+    }
+
+
+def _mock_wms_fetches(monkeypatch, items=(), dispatches=(), unloadings=()):
     async def fake_items(self):
         return list(items)
 
-    async def fake_shipments(self):
-        return list(shipments)
+    async def fake_dispatch(self, terminal_from, terminal_to):
+        return list(dispatches)
 
     async def fake_unloadings(self):
         return list(unloadings)
 
     monkeypatch.setattr(WmsCelicomClient, "fetch_all_items", fake_items)
-    monkeypatch.setattr(WmsCelicomClient, "fetch_shipments_fbo", fake_shipments)
+    monkeypatch.setattr(WmsCelicomClient, "fetch_dispatch_orders", fake_dispatch)
     monkeypatch.setattr(WmsCelicomClient, "fetch_unloading_orders", fake_unloadings)
 
 
@@ -1644,11 +1679,11 @@ async def test_sync_wms_stocks_mapping(db_session, project, warehouse, connected
 async def test_sync_wms_requests_kinds_and_statuses(db_session, project, warehouse, connected_wms_key, monkeypatch):
     _mock_wms_fetches(
         monkeypatch,
-        shipments=[
-            _wms_shipment(101, status="Новая"),
-            _wms_shipment(102, status="Отгружена", external_order="ORD-9921"),
-            _wms_shipment(103, status="Принята в СЦ c разногласиями"),
-            _wms_shipment(104, status="Аннулирована"),
+        dispatches=[
+            _wms_dispatch(101, status="new", warehouse="Казань"),
+            _wms_dispatch(102, status="ondelivery", shipment_status="Отгружена", warehouse="Тула"),
+            _wms_dispatch(103, status="ondelivery", shipment_status="Принята в СЦ c разногласиями"),
+            _wms_dispatch(104, status="annuled"),
         ],
         unloadings=[
             _wms_unloading(201, status="Новая"),
@@ -1662,11 +1697,15 @@ async def test_sync_wms_requests_kinds_and_statuses(db_session, project, warehou
     rows = {r["external_id"]: r for r in await fulfillment_service.list_requests(db_session, project.id, warehouse.id)}
     assert rows["101"]["kind"] == "assembly"
     assert rows["101"]["is_completed"] is False
-    assert rows["101"]["type_name"] == "Отгрузка FBO"
+    assert rows["101"]["type_name"] == "Заявка на отгрузку"
+    assert rows["101"]["status"] == "Новая"  # english «new» → русский ярлык
+    assert rows["101"]["dest_warehouse"] == "Казань"  # склад отгрузки = город МП
+    assert rows["101"]["number"] is None  # зОГ-номер API не отдаёт
     assert rows["101"]["external_created_at"] is not None
 
     assert rows["102"]["is_completed"] is True
-    assert rows["102"]["number"] == "ORD-9921"
+    assert rows["102"]["status"] == "Отгружена"  # shipment_status приоритетнее english
+    assert rows["102"]["dest_warehouse"] == "Тула"
     assert rows["103"]["is_completed"] is True
     assert rows["104"]["archived"] is True
 
@@ -1712,19 +1751,23 @@ async def test_sync_wms_upsert_preserves_links(db_session, project, warehouse, c
 
 @pytest.mark.asyncio
 async def test_wms_request_detail_assembly_from_raw(db_session, project, warehouse, connected_wms_key, monkeypatch):
-    """Деталка отгрузки FBO: товары агрегируются из коробов, без HTTP-вызова."""
+    """Деталка заявки на отгрузку: товары агрегируются из items[], без HTTP-вызова."""
     bc_known = f"BC-{_uid()}"
     bc_unknown = f"BC-{_uid()}"
     nom = await _make_nomenclature(db_session, project.id, bc_known, article="ART-WMS-D")
 
-    # Боевой формат: items — один товар-dict на короб, состав в `Packages`
-    # (заглавная). Тот же ШК в двух коробах агрегируется.
-    packages = {
-        "1": {"number": 1, "barcode": "WB_1", "items": {"name": "Товар А", "barcode": bc_known, "count": 3}},
-        "2": {"number": 2, "barcode": "WB_2", "items": {"name": "Товар Б", "barcode": bc_unknown, "count": 2}},
-        "3": {"number": 3, "barcode": "WB_3", "items": {"name": "Товар А", "barcode": bc_known, "count": 4}},
-    }
-    _mock_wms_fetches(monkeypatch, shipments=[_wms_shipment(401, status="На сборке", packages=packages)])
+    # Состав заявки на отгрузку — top-level items[]; тот же ШК в двух позициях агрегируется.
+    items = [
+        {"id": 1, "name": "Товар А", "barcode": bc_known, "count": 3},
+        {"id": 2, "name": "Товар Б", "barcode": bc_unknown, "count": 2},
+        {"id": 3, "name": "Товар А", "barcode": bc_known, "count": 4},
+    ]
+    _mock_wms_fetches(
+        monkeypatch,
+        dispatches=[
+            _wms_dispatch(401, status="combinig", shipment_status="На сборке", warehouse="Казань", items=items)
+        ],
+    )
     await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
 
     rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
@@ -1735,14 +1778,13 @@ async def test_wms_request_detail_assembly_from_raw(db_session, project, warehou
     assert row["total_qty"] == 9
     assert row["creator"] == "Иван Петров"
     by_bc = {p["barcode"]: p for p in row["products"]}
-    assert by_bc[bc_known]["qty"] == 7  # 3 + 4 из двух коробов
+    assert by_bc[bc_known]["qty"] == 7  # 3 + 4 из двух позиций
     assert by_bc[bc_known]["nomenclature_id"] == nom.id
     assert by_bc[bc_known]["article_seller"] == "ART-WMS-D"
     assert by_bc[bc_unknown]["qty"] == 2
     assert by_bc[bc_unknown]["nomenclature_id"] is None
     field_names = {f["name"] for f in row["fields"]}
-    assert "Площадка" in field_names
-    assert "Коробов" in field_names
+    assert "Склад отгрузки" in field_names
 
 
 @pytest.mark.asyncio
@@ -2189,7 +2231,7 @@ async def test_sync_marks_expired_linked_assembly_ready(db_session, project, war
 @pytest.mark.asyncio
 async def test_sync_marks_linked_wms_assembly_ready(db_session, project, warehouse, connected_wms_key, monkeypatch):
     """wmscelicom: «Ожидает отгрузки» переводит связанную сборку IN_PROGRESS → READY (как Газпром)."""
-    _mock_wms_fetches(monkeypatch, shipments=[_wms_shipment(950, status="На сборке")])
+    _mock_wms_fetches(monkeypatch, dispatches=[_wms_dispatch(950, status="combinig", shipment_status="На сборке")])
     await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
 
     doc = await _make_assembly_doc(db_session, project, warehouse)
@@ -2205,7 +2247,9 @@ async def test_sync_marks_linked_wms_assembly_ready(db_session, project, warehou
     assert next(r for r in assembling_rows if r["external_id"] == "950")["ff_status"] == "assembling"
 
     # «Ожидает отгрузки» → авто-READY + статус ФФ = ready
-    _mock_wms_fetches(monkeypatch, shipments=[_wms_shipment(950, status="Ожидает отгрузки")])
+    _mock_wms_fetches(
+        monkeypatch, dispatches=[_wms_dispatch(950, status="waitingdelivery", shipment_status="Ожидает отгрузки")]
+    )
     result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
     assert result["assemblies_marked_ready"] == 1
     await db_session.refresh(doc)
@@ -2385,21 +2429,16 @@ async def test_sync_inbound_no_accept_without_link(db_session, project, warehous
 
 @pytest.mark.asyncio
 async def test_sync_wms_enrichment_fields(db_session, project, warehouse, connected_wms_key, monkeypatch):
-    """total_qty из Packages.items / items (PHP-коэрсия), dest_warehouse из shipped_target."""
-    # Боевой формат: Packages (заглавная), один товар-dict на короб, count строкой
-    packages = {
-        "1": {"number": 1, "items": {"barcode": "BC-1", "count": 3}},
-        "2": {"number": 2, "items": {"barcode": "BC-2", "count": 2}},
-        "3": {"number": 3, "items": {"barcode": "BC-1", "count": "4"}},
-    }
-    # Fallback: lowercase packages с items-списком (дрейф формата) тоже суммируется
-    low_packages = {"1": {"number": 1, "items": [{"barcode": "BC-5", "count": 5}, {"barcode": "BC-6", "count": 2}]}}
+    """total_qty из items[] (PHP-коэрсия count, null-элементы), dest_warehouse из warehouse (город, false→None)."""
     _mock_wms_fetches(
         monkeypatch,
-        shipments=[
-            _wms_shipment(701, packages=packages),
-            _wms_shipment(702),  # ни Packages, ни packages (статус «Новая») → нет данных
-            _wms_shipment(703, low_packages=low_packages),
+        dispatches=[
+            _wms_dispatch(
+                701,
+                warehouse="Казань",
+                items=[{"barcode": "BC-1", "count": 3}, None, {"barcode": "BC-2", "count": "4"}],
+            ),
+            _wms_dispatch(702, warehouse=False, items=[]),  # пусто → нет данных; PHP false-warehouse → None
         ],
         unloadings=[
             _wms_unloading(801, items=[{"barcode": "BC-3", "count": 6}, None, {"barcode": "BC-4", "count": "2"}]),
@@ -2407,17 +2446,103 @@ async def test_sync_wms_enrichment_fields(db_session, project, warehouse, connec
     )
     await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
 
-    shipment = await _mirror_row(db_session, project.id, "701")
-    assert shipment.total_qty == 9
-    assert shipment.dest_warehouse == "Маркетплейс Склад"
-    empty = await _mirror_row(db_session, project.id, "702")
-    assert empty.total_qty is None  # пустой состав = нет данных, не 0
-    assert empty.dest_warehouse == "Маркетплейс Склад"
-    fallback = await _mirror_row(db_session, project.id, "703")
-    assert fallback.total_qty == 7  # lowercase packages с items-списком — fallback
+    d1 = await _mirror_row(db_session, project.id, "701")
+    assert d1.total_qty == 7  # 3 + "4" (PHP-строка), null-элемент пропущен
+    assert d1.dest_warehouse == "Казань"
+    d2 = await _mirror_row(db_session, project.id, "702")
+    assert d2.total_qty is None  # пустой состав = нет данных, не 0
+    assert d2.dest_warehouse is None  # PHP false → None
     unloading = await _mirror_row(db_session, project.id, "801")
     assert unloading.total_qty == 8  # null-элемент пропущен, "2" скоэрсирован
     assert unloading.dest_warehouse is None
+
+
+def test_normalize_wms_dispatch():
+    """dispatchorders row → assembly: ключ orderid, склад=город, состав из items[]."""
+    norm = fulfillment_service._normalize_wms_dispatch
+    # Активная (FBO-отгрузки нет): русский ярлык из english-статуса, агрегат состава по ШК
+    r = norm(
+        _wms_dispatch(
+            3757,
+            status="waitforcombine",
+            warehouse="Тула ",
+            items=[{"barcode": "BC-1", "count": 10}, {"barcode": "BC-1", "count": 5}],
+        )
+    )
+    assert r["external_id"] == "3757"
+    assert r["kind"] == "assembly"
+    assert r["number"] is None  # зОГ-номер API не отдаёт
+    assert r["type_name"] == "Заявка на отгрузку"
+    assert r["status"] == "Ожидает сборки"
+    assert r["dest_warehouse"] == "Тула"  # _coerce_dest триммит хвостовой пробел
+    assert r["total_qty"] == 15
+    assert r["is_completed"] is False
+    assert r["archived"] is False
+    # Отгружена: shipment_status приоритетнее english, is_completed
+    r2 = norm(_wms_dispatch(3758, status="ondelivery", shipment_status="Отгружена", warehouse="Казань"))
+    assert r2["status"] == "Отгружена"
+    assert r2["is_completed"] is True
+    assert r2["total_qty"] is None  # пустой состав = нет данных
+    # Аннулирована
+    assert norm(_wms_dispatch(3759, status="annuled"))["archived"] is True
+    # PHP-гочи: warehouse=false → None, shipment_status="" → english fallback
+    r4 = norm(_wms_dispatch(3760, status="new", shipment_status="", warehouse=False))
+    assert r4["dest_warehouse"] is None
+    assert r4["status"] == "Новая"
+
+
+def test_raw_assembly_composition_dispatch_and_legacy():
+    """Состав wms: top-level items[] (dispatchorders) + fallback Packages (легаси shipmentsfbo)."""
+    comp = fulfillment_service._raw_assembly_composition
+    disp = {
+        "orderid": 1,
+        "items": [{"barcode": "A", "count": 3}, None, {"barcode": "A", "count": "2"}, {"barcode": "B", "count": 1}],
+    }
+    assert comp("wmscelicom", disp) == {"A": 5, "B": 1}
+    legacy = {"shipment_fbo_id": 99, "Packages": {"1": {"items": {"barcode": "C", "count": 4}}}}
+    assert comp("wmscelicom", legacy) == {"C": 4}
+    assert comp("skladbot", disp) == {}
+    assert comp("wmscelicom", None) == {}
+
+
+@pytest.mark.asyncio
+async def test_sync_wms_purges_legacy_shipmentsfbo(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """Переход на dispatchorders: несвязанные легаси-строки (raw с shipment_fbo_id) сносятся, связанные — нет."""
+    doc = await _make_assembly_doc(db_session, project, warehouse)
+    orphan = FulfillmentRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        provider="wmscelicom",
+        external_id="6983",
+        kind="assembly",
+        status="Отгружена",
+        is_completed=True,
+        raw={"shipment_fbo_id": 6983, "shipped_target": "Wildberries"},
+    )
+    linked = FulfillmentRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        provider="wmscelicom",
+        external_id="6984",
+        kind="assembly",
+        status="Отгружена",
+        is_completed=True,
+        assembly_request_id=doc.id,
+        raw={"shipment_fbo_id": 6984, "shipped_target": "Wildberries"},
+    )
+    db_session.add_all([orphan, linked])
+    await db_session.commit()
+
+    _mock_wms_fetches(monkeypatch, dispatches=[_wms_dispatch(3757, status="new", warehouse="Казань")])
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    rows = {
+        r["external_id"]
+        for r in await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    }
+    assert "6983" not in rows  # несвязанная легаси-строка снесена
+    assert "6984" in rows  # связанная со сборкой — сохранена
+    assert "3757" in rows  # новая заявка на отгрузку
 
 
 # ─── migfull («Натали», migfull.app) ─────────────────────────────────────────

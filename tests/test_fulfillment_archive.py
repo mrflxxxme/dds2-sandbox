@@ -63,7 +63,11 @@ async def _connect_skladbot(db_session, project_id, warehouse_id, monkeypatch):
     async def fake_test_connection(self):
         return {"id": 6282, "name": "ООО ТЕСТ ФФ"}
 
+    async def fake_count_customers(self):
+        return 1
+
     monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "count_customers", fake_count_customers)
     await fulfillment_service.connect(db_session, project_id, warehouse_id, "skladbot", FAKE_TOKEN)
 
 
@@ -255,7 +259,11 @@ async def test_api_archive_roundtrip(client, auth_headers, monkeypatch):
     async def fake_test_connection(self):
         return {"id": 6282, "name": "ООО ТЕСТ ФФ"}
 
+    async def fake_count_customers(self):
+        return 1
+
     monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "count_customers", fake_count_customers)
     _mock_sync(monkeypatch, {851: [_req_row(7701)]})
 
     headers = await _api_project_headers(client, auth_headers)

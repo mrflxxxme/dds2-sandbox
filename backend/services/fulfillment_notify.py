@@ -209,17 +209,22 @@ async def refresh_ff_board(db: AsyncSession, project_id: int) -> None:
         if not chats:
             return
 
-        from backend.services.fulfillment_service import build_ff_board_text
-
-        text = await build_ff_board_text(db, project_id)
-        if not text:
-            return
-
         from aiogram.exceptions import TelegramBadRequest
         from aiogram.types import LinkPreviewOptions
 
+        from backend.services.fulfillment_service import build_ff_board_text
+
         no_preview = LinkPreviewOptions(is_disabled=True)
+        # Текст зависит от привязанного склада (None = все склады). Кэшируем по
+        # warehouse_id, чтобы несколько чатов одного склада не пересобирали табло.
+        texts: dict[int | None, str | None] = {}
         for binding in chats:
+            wh_id = binding.ff_board_warehouse_id
+            if wh_id not in texts:
+                texts[wh_id] = await build_ff_board_text(db, project_id, wh_id)
+            text = texts[wh_id]
+            if not text:
+                continue  # для этого склада активных сборок нет — табло не трогаем
             try:
                 await _send_or_edit_board(bot, binding, text, no_preview, TelegramBadRequest)
                 await db.commit()  # сохранить ff_board_message_id, если создали новое

@@ -389,7 +389,11 @@ async def connected_key(db_session, project, warehouse, monkeypatch):
     async def fake_test_connection(self):
         return {"id": 6282, "name": "ООО ТЕСТ ФФ"}
 
+    async def fake_count_customers(self):
+        return 1
+
     monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "count_customers", fake_count_customers)
     await fulfillment_service.connect(db_session, project.id, warehouse.id, "skladbot", FAKE_TOKEN)
     return await fulfillment_service.get_integration(db_session, project.id, warehouse.id)
 
@@ -663,34 +667,34 @@ async def test_create_assembly_from_ff_stock_deficit(db_session, project, wareho
 # ─── API endpoints ───────────────────────────────────────────────────────────
 
 
-def _mock_wms(monkeypatch, shipments=(), unloadings=()):
+def _mock_wms(monkeypatch, dispatches=(), unloadings=()):
     async def fake_conn(self):
         return True
 
     async def fake_items(self):
         return []
 
-    async def fake_shipments(self):
-        return list(shipments)
+    async def fake_dispatch(self, terminal_from, terminal_to):
+        return list(dispatches)
 
     async def fake_unloadings(self):
         return list(unloadings)
 
     monkeypatch.setattr(WmsCelicomClient, "test_connection", fake_conn)
     monkeypatch.setattr(WmsCelicomClient, "fetch_all_items", fake_items)
-    monkeypatch.setattr(WmsCelicomClient, "fetch_shipments_fbo", fake_shipments)
+    monkeypatch.setattr(WmsCelicomClient, "fetch_dispatch_orders", fake_dispatch)
     monkeypatch.setattr(WmsCelicomClient, "fetch_unloading_orders", fake_unloadings)
 
 
 @pytest.mark.asyncio
 async def test_api_link_candidates_and_create_assembly(client, auth_headers, monkeypatch):
-    shipment = {
-        "shipment_fbo_id": 9001,
+    dispatch = {
+        "orderid": 9001,
         "date_time": "2026-06-08 10:00:00",
-        "status": "Новая",
-        "external_order": "ORD-API",
-        "shipped_target": "Склад МП",
-        "packages": {"1": {"number": 1, "items": [{"barcode": "API-BC-1", "count": 2}]}},
+        "status": "new",
+        "shipment_status": None,
+        "warehouse": "Казань",
+        "items": [{"barcode": "API-BC-1", "count": 2, "name": "Товар API"}],
     }
     unloading = {
         "unloading_order_id": 9002,
@@ -699,7 +703,7 @@ async def test_api_link_candidates_and_create_assembly(client, auth_headers, mon
         "unloading_close_date": None,
         "items": [{"barcode": "API-BC-1", "count": 2}],
     }
-    _mock_wms(monkeypatch, shipments=[shipment], unloadings=[unloading])
+    _mock_wms(monkeypatch, dispatches=[dispatch], unloadings=[unloading])
 
     resp = await client.post("/api/v1/projects", json={"name": "FF Candidates API"}, headers=auth_headers)
     headers = {**auth_headers, "X-Project-Id": str(resp.json()["id"])}
@@ -731,7 +735,7 @@ async def test_api_link_candidates_and_create_assembly(client, auth_headers, mon
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert data["kind"] == "assembly"
-    assert data["ff_number"] == "ORD-API"
+    assert data["ff_number"] == "9001"  # зОГ-номер API не отдаёт → external_id (orderid)
     assert data["ff_total_qty"] == 2
     assert data["composition_available"] is True
     assert data["candidates"] == []

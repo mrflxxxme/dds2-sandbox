@@ -38,6 +38,7 @@ from backend.integrations.skladbot_client import (
     ASSEMBLY_TYPE_IDS,
     ASSEMBLY_WIP_STAGE_CODES,
     ASSEMBLY_WIP_TITLE_MARKERS,
+    DELIVERY_REQUEST_TYPE_ID,
     INBOUND_TYPE_IDS,
     SkladbotApiError,
     SkladbotClient,
@@ -67,6 +68,7 @@ from backend.models.assembly import (
 )
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import AssemblyItemCreate, AssemblyRequestCreate
+from backend.schemas.fulfillment import FfCreateRequestPayload
 from backend.services.assembly.crud import create_assembly_request
 from backend.utils.crypto import decrypt as _decrypt, encrypt as _encrypt
 from backend.utils.time import utcnow
@@ -83,6 +85,9 @@ REQUESTS_LIMIT = 500
 # (rate limit /v1/requests/* — 120 req/min) и потолок чтения зеркала.
 _ENRICH_DETAIL_CAP = 100
 _MIRROR_SELECT_LIMIT = 10_000
+# wmscelicom: терминальные заявки на отгрузку зеркалим за это окно (активные —
+# всегда). Шире = сервер материализует больший набор до пагинации → медленно.
+_WMS_DISPATCH_TERMINAL_DAYS = 90
 # migfull: штрихкоды отдаются только карточкой товара — cap detail-вызовов
 # guid→barcode за один синк (~1050 товаров, из них ~300 с остатком; хвост
 # дотягивается следующими синками). Кэш — снапшот fulfillment_stocks.
@@ -143,12 +148,13 @@ _CAND_COMP_DATE_SCORES = {0: 20, 1: 15, 2: 10}
 # «…и ещё позиции», если строк больше.
 _FF_GOODS_LIMIT = 50
 
-# Закреплённое авто-табло заявок ФФ (build_ff_board_text). Активные статусы
-# сборок в порядке вывода; топ-N строк на статус (+ «…ещё M»), потолок выборки.
+# Закреплённое авто-табло заявок ФФ (build_ff_board_text). Порядок вывода секций
+# — от срочного: машина назначена → готово → в работе. Топ-N строк на статус
+# (+ «…ещё M»), бюджет символов держим под лимит Telegram (4096).
 _BOARD_STATUSES = (
-    AssemblyStatus.IN_PROGRESS.value,
-    AssemblyStatus.READY.value,
     AssemblyStatus.VEHICLE_ASSIGNED.value,
+    AssemblyStatus.READY.value,
+    AssemblyStatus.IN_PROGRESS.value,
 )
 _BOARD_STATUS_LABEL = {
     AssemblyStatus.IN_PROGRESS.value: "🔧 В работе",
@@ -157,6 +163,9 @@ _BOARD_STATUS_LABEL = {
 }
 _BOARD_FETCH_LIMIT = 500
 _BOARD_ROWS_PER_STATUS = 15
+_BOARD_CHAR_BUDGET = 3800  # запас под Telegram-лимит 4096 (теги + заголовки)
+_BOARD_AGE_ORANGE = 3  # 🟠 стареет, дней
+_BOARD_AGE_RED = 5  # 🔴 давно висит (для готовых/с машиной без просрочки плана)
 _MSK_OFFSET = timedelta(hours=3)
 _CAND_COMP_MIN_SCORE = 40
 
@@ -176,7 +185,7 @@ def _provider_human(provider: str) -> str:
 # wmscelicom: стадий нет, статус отгрузки FBO кладётся в stage_title. «Ожидает
 # отгрузки» = короб собран и ждёт машину = наш READY (терминальные статусы
 # отгрузки → is_completed). «Новая»/«На сборке» — ещё WIP.
-WMS_ASSEMBLY_READY_TITLES = frozenset({"Ожидает отгрузки"})
+WMS_ASSEMBLY_READY_TITLES = frozenset({"Собрана", "Ожидает отгрузки"})
 
 
 def _assembly_ready_signal(
@@ -345,14 +354,18 @@ async def connect(
     token: str,
     base_url: str | None = None,
     tenant_guid: str | None = None,
+    customer_id: int | None = None,
 ) -> dict:
     """Validate the token and bind a fulfillment key to the warehouse.
 
     Для wmscelicom обязателен base_url — адрес клиентского инстанса
     ({client}.wmscelicom.ru), API живёт на нём. Для migfull обязателен
-    tenant_guid — GUID кабинета клиента (хост фиксированный). Возвращает
-    статус (FulfillmentStatus shape). Raises ValueError при невалидном
-    токене, провайдере или отсутствующем складе.
+    tenant_guid — GUID кабинета клиента (хост фиксированный). Для skladbot
+    customer_id обязателен, когда токен видит несколько клиентов (FF-operator
+    токен видит весь tenant) — иначе остатки/заявки уйдут не тому кабинету;
+    для селлер-токена (1 клиент) можно не указывать. Возвращает статус
+    (FulfillmentStatus shape). Raises ValueError при невалидном токене,
+    провайдере, отсутствующем складе или неоднозначном/неверном customer_id.
     """
     result = await db.execute(
         select(Warehouse.id).where(
@@ -378,10 +391,33 @@ async def connect(
         if customer is None:
             raise ValueError("Токен невалидный: skladbot.ru не вернул данные customer. Проверьте токен.")
 
+        # Выбор кабинета. Если задан customer_id — пинним именно его (валидируя,
+        # что токен его видит); это обязательно для FF-operator токена, который
+        # видит весь tenant и чей customers[0] — произвольный клиент. Без
+        # customer_id допускаем только токен с единственным клиентом (селлер).
+        chosen: dict | None
+        try:
+            if customer_id is not None:
+                if customer.get("id") == customer_id:
+                    chosen = customer
+                else:
+                    chosen = await skl_client.find_customer(customer_id)
+                if chosen is None:
+                    raise ValueError(f"Клиент {customer_id} не найден среди кабинетов этого токена")
+            else:
+                total = await skl_client.count_customers()
+                if total > 1:
+                    raise ValueError(
+                        f"Токен видит {total} кабинетов (FF-оператор) — укажите customer_id вашего кабинета"
+                    )
+                chosen = customer
+        except CircuitOpenError as e:
+            raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+
         expires_at = decode_jwt_exp(token)
         config = {
-            "customer_id": customer.get("id"),
-            "customer_name": customer.get("name"),
+            "customer_id": chosen.get("id"),
+            "customer_name": chosen.get("name"),
             "token_expires_at": expires_at.isoformat() if expires_at else None,
         }
     elif provider == "wmscelicom":
@@ -580,7 +616,13 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         else:
             wms_client = WmsCelicomClient(api_base, token, project_id=project_id)
             stock_items = [_normalize_wms_stock(i) for i in await wms_client.fetch_all_items()]
-            request_rows = [_normalize_wms_shipment(r) for r in await wms_client.fetch_shipments_fbo()]
+            # Сборка = заявки на отгрузку (dispatchorders): склад отгрузки + состав.
+            # Терминальные тянем за окно _WMS_DISPATCH_TERMINAL_DAYS (старее — не
+            # зеркалим осознанно, иначе сервер материализует весь архив → таймаут).
+            today = utcnow().date()
+            dispatch_from = (today - timedelta(days=_WMS_DISPATCH_TERMINAL_DAYS)).isoformat()
+            dispatch_rows = await wms_client.fetch_dispatch_orders(dispatch_from, today.isoformat())
+            request_rows = [_normalize_wms_dispatch(r) for r in dispatch_rows]
             request_rows += [_normalize_wms_unloading(r) for r in await wms_client.fetch_unloading_orders()]
     except CircuitOpenError as e:
         raise ValueError(f"{human} временно недоступен, попробуйте позже ({e})") from e
@@ -594,6 +636,8 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         {"ns": _FF_SYNC_LOCK_NS, "project_id": project_id},
     )
     stocks_synced, unmatched = await _apply_stocks(db, project_id, warehouse_id, provider, stock_items)
+    if provider == "wmscelicom":
+        await _purge_legacy_wms_shipments(db, project_id, warehouse_id)
     requests_synced = await _apply_requests(db, project_id, warehouse_id, provider, request_rows)
 
     # Авто-READY связанных сборок: flush, чтобы пере-SELECT зеркала видел
@@ -888,27 +932,60 @@ def _wms_shipment_completed(status: str) -> bool:
     return status in {"Отгружена", "Вручена получателю"} or status.startswith("Принята в СЦ")
 
 
-def _normalize_wms_shipment(row: dict) -> dict:
-    """wmscelicom shipmentsfbo/list row → нормализованная заявка kind=assembly."""
-    status = str(row.get("status") or "")
-    # Состав уже в списочном методе (Packages → items, см. _wms_packages); пока
-    # короб не собран (статус «Новая») состава нет → total None («нет данных»), не 0
-    total = min(sum(_raw_assembly_composition("wmscelicom", row).values()), _QTY_MAX)
-    target = row.get("shipped_target")  # PHP-API: бывает false/"" вместо null
+# Английский статус заявки на отгрузку (когда FBO-отгрузки ещё нет, и
+# shipment_status пуст) → русский ярлык для колонки статуса. «Ожидает сборки»
+# (waitforcombine) — это до-сборочный WIP, НЕ сигнал готовности (см.
+# WMS_ASSEMBLY_READY_TITLES — туда входят «Собрана»/«Ожидает отгрузки»).
+_WMS_DISPATCH_STATUS_RU = {
+    "new": "Новая",
+    "combinig": "На сборке",
+    "waitforcombine": "Ожидает сборки",
+    "waitingdelivery": "Ожидает отгрузки",
+    "combined": "Собрана",
+    "ondelivery": "В доставке",
+    "waitclientapproval": "На проверке клиентом",
+    "delivered": "Доставлена",
+    "annuled": "Аннулирована",
+    "unknown": None,
+}
+
+
+def _normalize_wms_dispatch(row: dict) -> dict:
+    """wmscelicom dispatchorders/list row → нормализованная заявка kind=assembly.
+
+    DispatchOrder («заявка на отгрузку», зОГ) — родитель отгрузки FBO; именно
+    здесь живут склад отгрузки (город МП, поле `warehouse`) и состав (`items[]`),
+    тогда как в shipmentsfbo `shipped_target` — лишь площадка (Wildberries).
+    external_id = orderid (стабилен весь жизненный цикл, в отличие от shipmentid,
+    появляющегося лишь при отгрузке). Статус — русский shipment_status (если
+    отгрузка уже создана), иначе ярлык из английского статуса заявки. зОГ-номер
+    API не отдаёт (ярлык UI Целиком) → number=None.
+    """
+    eng_status = str(row.get("status") or "").strip()
+    ship_status = str(row.get("shipment_status") or "").strip()  # PHP-API: бывает false/""
+    status = ship_status or _WMS_DISPATCH_STATUS_RU.get(eng_status) or eng_status or None
+    total = 0
+    for item in row.get("items") or []:  # PHP-API: в массиве бывают null-элементы
+        if isinstance(item, dict):
+            total += _safe_int(item.get("count"))
+    total = min(total, _QTY_MAX)
+    # Завершённость: статус отгрузки FBO (если есть) приоритетнее, иначе по
+    # английскому статусу заявки (ondelivery/delivered — уже уехало со склада ФФ)
+    is_completed = _wms_shipment_completed(ship_status) if ship_status else eng_status in {"ondelivery", "delivered"}
     return {
-        "external_id": str(row.get("shipment_fbo_id") or ""),
+        "external_id": str(row.get("orderid") or ""),
         "kind": FfRequestKind.ASSEMBLY.value,
-        "number": row.get("external_order") or None,
+        "number": None,
         "type_id": None,
-        "type_name": "Отгрузка FBO",
-        "status": status or None,
+        "type_name": "Заявка на отгрузку",
+        "status": status,
         "stage_code": None,
-        "stage_title": status or None,
-        "is_completed": _wms_shipment_completed(status),
-        "archived": status == "Аннулирована",
+        "stage_title": status,
+        "is_completed": is_completed,
+        "archived": eng_status == "annuled" or ship_status == "Аннулирована",
         "expired": False,
         "total_qty": total or None,
-        "dest_warehouse": _coerce_dest(target),
+        "dest_warehouse": _coerce_dest(row.get("warehouse")),  # ГОРОД МП (PHP false → None)
         "external_created_at": _parse_date(row.get("date_time")),
         "raw": row,
     }
@@ -1400,6 +1477,32 @@ def _build_status_event(
     )
 
 
+async def _purge_legacy_wms_shipments(db: AsyncSession, project_id: int, warehouse_id: int) -> None:
+    """Снести легаси-зеркало склада wmscelicom (бывшие отгрузки FBO).
+
+    До перехода на dispatchorders «ФФ сборка» строилась из shipmentsfbo
+    (external_id = shipment_fbo_id, raw с ключом `shipment_fbo_id`, без `orderid`)
+    — иной площадки/города/состава, чем заявки на отгрузку. Теперь источник —
+    dispatchorders (external_id = orderid), поэтому старые строки стали дублями.
+    Удаляем ТОЛЬКО несвязанные (без нашего assembly/inbound): связанные единичны,
+    их связь дороже дубля — оставляем. Hard delete (модель без soft-delete, как
+    FulfillmentStock); журнал статусов уходит каскадом (ondelete=CASCADE).
+    Идемпотентно: после первого синка таких строк не остаётся.
+    """
+    await db.execute(
+        delete(FulfillmentRequest).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.provider == "wmscelicom",
+            FulfillmentRequest.assembly_request_id.is_(None),
+            FulfillmentRequest.inbound_receipt_id.is_(None),
+            # JSONB «ключ существует» (SQLAlchemy сам экранирует ?): легаси-raw
+            # отгрузки FBO содержит shipment_fbo_id, у dispatchorder его нет.
+            FulfillmentRequest.raw.has_key("shipment_fbo_id"),
+        )
+    )
+
+
 async def _apply_requests(
     db: AsyncSession,
     project_id: int,
@@ -1629,64 +1732,220 @@ async def get_ff_request_goods(db: AsyncSession, project_id: int, ff_request_id:
     return "\n".join(lines)
 
 
-async def build_ff_board_text(db: AsyncSession, project_id: int) -> str | None:
-    """HTML-табло активных сборок проекта для закреплённого сообщения в Telegram.
+def _board_fmt_qty(n: int) -> str:
+    """1416 → «1 416» (пробел-разделитель тысяч для читаемости)."""
+    return f"{n:,}".replace(",", " ")
 
-    Группировка статус (в работе/готово/машина назначена) → склад ФФ, строки
-    «номер · кол-во · дата» (кол-во — сумма позиций сборки). Топ-N строк на
-    статус (+ «…ещё M»), детали в сворачиваемом <blockquote expandable>
-    (Telegram-лимит 4096). Только наши документы, без HTTP. None — нет активных
-    сборок (вызывающий тогда табло не трогает).
+
+def _board_city(fbo_city: str | None, manual_city: str | None, ff_wh: str | None) -> str | None:
+    """Склад назначения МП: поставка ВБ → ручной → склад ФФ (как в list_unlinked)."""
+    return fbo_city or manual_city or ff_wh or None
+
+
+def _board_age_days(today: date, status: str, created_at: datetime | None, act_date: date | None) -> int:
+    """Возраст в днях. Для готовых считаем от факт-готовности (сколько стоит без
+    машины = деньги), иначе от создания. created_at — UTC, переводим в МСК-дату."""
+    if status == AssemblyStatus.READY.value and act_date is not None:
+        base = act_date
+    elif created_at is not None:
+        base = (created_at + _MSK_OFFSET).date()
+    else:
+        return 0
+    return max(0, (today - base).days)
+
+
+def _board_pickup_line(it: dict, today: date) -> str:
+    """Вторая строка заявки с машиной: когда забор · слот · цена · бренд."""
+    pickup_date = it["pickup_date"]
+    if pickup_date is None:
+        return "└ <i>дата забора не задана</i>"
+    if pickup_date == today:
+        when = "<b>сегодня</b>"
+    elif pickup_date == today + timedelta(days=1):
+        when = "завтра"
+    else:
+        when = f"{pickup_date:%d.%m}"
+    parts = [when, html.escape(str(it["pickup_slot"])) if it["pickup_slot"] else "<i>слот не задан</i>"]
+    if it["pickup_cost"] is not None:
+        parts.append(f"<b>{_board_fmt_qty(int(it['pickup_cost']))} ₽</b>")
+    if it["vehicle_brand"]:
+        parts.append(html.escape(str(it["vehicle_brand"])))
+    return "└ " + " · ".join(parts)
+
+
+def _board_render_item(it: dict, today: date, scoped: bool) -> str:
+    """Одна заявка табло: 2 строки для «машины», иначе компактная однострочная."""
+    code = f"<code>{html.escape(it['number'])}</code>"
+    city = f" · <b>{html.escape(it['city'])}</b>" if it["city"] else ""
+    qty = f" · {_board_fmt_qty(it['qty'])} шт"
+    if it["status"] == AssemblyStatus.VEHICLE_ASSIGNED.value:
+        return f"{code}{city}{qty}\n{_board_pickup_line(it, today)}"
+    marker = {"red": "🔴 ", "orange": "🟠 "}.get(it["severity"], "")
+    if it["overdue"] and it["est_date"] is not None:
+        age = f" · <s>план {it['est_date']:%d.%m}</s>"
+    else:
+        age = f" · {it['age']}д"
+    hint = f" · <i>{html.escape(it['ff_hint'])}</i>" if (not scoped and it["ff_hint"]) else ""
+    return f"{marker}{code}{city}{qty}{age}{hint}"
+
+
+def _board_sort(status: str, items: list[dict], today: date) -> list[dict]:
+    """Внутри секции — самое срочное наверх."""
+    if status == AssemblyStatus.VEHICLE_ASSIGNED.value:
+        # ближайший забор выше; без даты — в конец
+        return sorted(items, key=lambda it: (it["pickup_date"] is None, it["pickup_date"] or today))
+    rank = {"red": 0, "orange": 1, "": 2}
+    return sorted(items, key=lambda it: (rank[it["severity"]], -it["age"]))
+
+
+async def build_ff_board_text(db: AsyncSession, project_id: int, warehouse_id: int | None = None) -> str | None:
+    """HTML-табло активных сборок для закреплённого сообщения в Telegram.
+
+    Шапка-сводка (тоталы + сплит статусов) → строка-светофор (🔴 просрочено /
+    🟠 стареет / 🚚 забор сегодня · Σ₽) → секции «машина → готово → в работе»,
+    срочное наверх, тело каждой в сворачиваемом <blockquote expandable>. Строка:
+    «[маркер] номер · город · кол-во · возраст/план · склад ФФ». Только наши
+    документы, без HTTP. None — активных сборок нет (вызывающий табло не трогает).
+
+    warehouse_id=None — все склады проекта (общее табло); иначе только заявки
+    этого склада ФФ (чат конкретного ФФ, напр. Газпром) — без хвоста-склада,
+    с именем склада в заголовке.
     """
+    conditions = [
+        AssemblyRequest.project_id == project_id,
+        AssemblyRequest.is_deleted == False,
+        Warehouse.is_deleted == False,
+        AssemblyRequest.status.in_(_BOARD_STATUSES),
+    ]
+    if warehouse_id is not None:
+        conditions.append(AssemblyRequest.warehouse_id == warehouse_id)
     result = await db.execute(
         select(
             AssemblyRequest.status,
             Warehouse.name,
             AssemblyRequest.number,
             AssemblyRequest.created_at,
+            AssemblyRequest.estimated_ready_date,
+            AssemblyRequest.actual_ready_date,
+            AssemblyRequest.pickup_date,
+            AssemblyRequest.pickup_time_slot,
+            AssemblyRequest.pickup_cost,
+            AssemblyRequest.vehicle_brand,
+            WbFboSupply.warehouse_name,
+            AssemblyRequest.wb_warehouse_name_manual,
             func.coalesce(func.sum(AssemblyRequestItem.quantity), 0),
         )
         .join(Warehouse, Warehouse.id == AssemblyRequest.warehouse_id)
-        .outerjoin(AssemblyRequestItem, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
-        .where(
-            AssemblyRequest.project_id == project_id,
-            AssemblyRequest.is_deleted == False,
-            AssemblyRequest.status.in_(_BOARD_STATUSES),
+        .outerjoin(
+            WbFboSupply,
+            and_(
+                WbFboSupply.id == AssemblyRequest.wb_fbo_supply_id,
+                WbFboSupply.project_id == project_id,
+            ),
         )
-        .group_by(AssemblyRequest.id, Warehouse.name)
-        .order_by(AssemblyRequest.created_at.desc())
+        .outerjoin(AssemblyRequestItem, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .where(*conditions)
+        .group_by(AssemblyRequest.id, Warehouse.name, WbFboSupply.warehouse_name)
+        .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
         .limit(_BOARD_FETCH_LIMIT)
     )
     rows = result.all()
     if not rows:
         return None
 
-    e = html.escape
-    by_status: dict[str, list[tuple]] = {s: [] for s in _BOARD_STATUSES}
-    for status, wh_name, number, created_at, qty in rows:
-        by_status.setdefault(status, []).append((wh_name, number, created_at, int(qty or 0)))
-
     now_msk = utcnow() + _MSK_OFFSET
-    lines = ["📋 <b>Заявки ФФ</b>", f"<i>обновлено {now_msk:%d.%m %H:%M} МСК</i>", ""]
+    today = now_msk.date()
+    scoped = warehouse_id is not None
+    board_wh_name: str | None = None
+
+    by_status: dict[str, list[dict]] = {s: [] for s in _BOARD_STATUSES}
+    for (
+        status,
+        ff_wh,
+        number,
+        created_at,
+        est_date,
+        act_date,
+        pickup_date,
+        pickup_slot,
+        pickup_cost,
+        vehicle_brand,
+        fbo_city,
+        manual_city,
+        qty,
+    ) in rows:
+        if board_wh_name is None:
+            board_wh_name = ff_wh
+        age = _board_age_days(today, status, created_at, act_date)
+        overdue = status == AssemblyStatus.IN_PROGRESS.value and est_date is not None and est_date < today
+        severity = "red" if (overdue or age >= _BOARD_AGE_RED) else ("orange" if age >= _BOARD_AGE_ORANGE else "")
+        city = _board_city(fbo_city, manual_city, ff_wh)
+        by_status.setdefault(status, []).append(
+            {
+                "status": status,
+                "number": str(number),
+                "qty": int(qty or 0),
+                "age": age,
+                "overdue": overdue,
+                "severity": severity,
+                "est_date": est_date,
+                "city": city,
+                "ff_hint": ff_wh if (ff_wh and ff_wh != city) else None,
+                "pickup_date": pickup_date,
+                "pickup_slot": pickup_slot,
+                "pickup_cost": pickup_cost,
+                "vehicle_brand": vehicle_brand,
+            }
+        )
+
+    all_items = [it for items in by_status.values() for it in items]
+    total_qty = sum(it["qty"] for it in all_items)
+    n_prog = len(by_status.get(AssemblyStatus.IN_PROGRESS.value, []))
+    n_ready = len(by_status.get(AssemblyStatus.READY.value, []))
+    veh_items = by_status.get(AssemblyStatus.VEHICLE_ASSIGNED.value, [])
+    n_overdue = sum(1 for it in all_items if it["overdue"])
+    n_aging = sum(1 for it in all_items if it["severity"] and not it["overdue"])
+    pickup_today = [it for it in veh_items if it["pickup_date"] == today]
+    sum_pickup_today = sum(int(it["pickup_cost"]) for it in pickup_today if it["pickup_cost"] is not None)
+
+    title = "📋 <b>Заявки ФФ</b>"
+    if scoped and board_wh_name:
+        title = f"📋 <b>Заявки ФФ — {html.escape(board_wh_name)}</b>"
+    lines = [
+        f"{title} · {len(all_items)} · {_board_fmt_qty(total_qty)} шт",
+        f"🔧 {n_prog} · ✅ {n_ready} · 🚚 {len(veh_items)} · <i>обновлено {now_msk:%d.%m %H:%M} МСК</i>",
+        "",
+    ]
+    sig: list[str] = []
+    if n_overdue:
+        sig.append(f"🔴 <b>Просрочено {n_overdue}</b>")
+    if n_aging:
+        sig.append(f"🟠 стареет {n_aging}")
+    if pickup_today:
+        seg = f"🚚 забор сегодня {len(pickup_today)}"
+        if sum_pickup_today:
+            seg += f" · <b>{_board_fmt_qty(sum_pickup_today)} ₽</b>"
+        sig.append(seg)
+    lines.append("<blockquote>" + (" · ".join(sig) if sig else "✅ всё по графику") + "</blockquote>")
+    lines.append("")
+
     for status in _BOARD_STATUSES:
         items = by_status.get(status, [])
         if not items:
             continue
-        total_qty = sum(q for *_, q in items)
-        lines.append(f"{_BOARD_STATUS_LABEL[status]} — {len(items)} · {total_qty} шт")
-        shown = items[:_BOARD_ROWS_PER_STATUS]
-        by_wh: dict[str, list[tuple]] = {}
-        for wh_name, number, created_at, qty in shown:
-            by_wh.setdefault(wh_name or "—", []).append((number, created_at, qty))
-        block: list[str] = []
-        for wh_name, wh_rows in by_wh.items():
-            block.append(f"<b>{e(wh_name)}</b>")
-            for number, created_at, qty in wh_rows:
-                d = f"{created_at:%d.%m}" if created_at else "—"
-                block.append(f"<code>{e(str(number))}</code> · {qty} шт · {d}")
-        if len(items) > _BOARD_ROWS_PER_STATUS:
-            block.append(f"…ещё {len(items) - _BOARD_ROWS_PER_STATUS}")
-        lines.append("<blockquote expandable>" + "\n".join(block) + "</blockquote>")
+        items = _board_sort(status, items, today)
+        header = f"{_BOARD_STATUS_LABEL[status]} · {len(items)} · {_board_fmt_qty(sum(it['qty'] for it in items))} шт"
+        used = len("\n".join(lines))
+        body: list[str] = []
+        for it in items:
+            rendered = _board_render_item(it, today, scoped)
+            projected = used + len(header) + len("\n".join([*body, rendered])) + 40
+            if len(body) >= _BOARD_ROWS_PER_STATUS or projected > _BOARD_CHAR_BUDGET:
+                break
+            body.append(rendered)
+        if len(body) < len(items):
+            body.append(f"…ещё {len(items) - len(body)}")
+        lines.append(f"{header}\n<blockquote expandable>" + "\n".join(body) + "</blockquote>")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -2380,14 +2639,24 @@ def _wms_package_items(pkg: dict) -> list[dict]:
 def _raw_assembly_composition(provider: str, raw: dict | None) -> dict[str, int]:
     """{barcode: qty} из raw зеркала assembly-заявки.
 
-    Только wmscelicom: состав приходит в списочном методе внутри коробов
-    (Packages → items, см. _wms_packages). У skladbot состава в списке
-    нет (только в живой деталке) → пустой dict.
+    Только wmscelicom: dispatchorders отдают состав в top-level `items[]`. Если
+    его нет — fallback на легаси-формат shipmentsfbo (`Packages` → items), на
+    случай ещё не вычищенных старых строк. У skladbot состава в списке нет
+    (только в живой деталке) → пустой dict.
     """
     if provider != "wmscelicom" or not raw:
         return {}
     out: dict[str, int] = {}
-    for pkg in _wms_packages(raw):
+    items = raw.get("items")
+    if isinstance(items, list):  # DispatchOrder
+        for item in items:
+            if not isinstance(item, dict):  # PHP-API: бывают null-элементы
+                continue
+            barcode = str(item.get("barcode") or "").strip()
+            if barcode:
+                out[barcode] = out.get(barcode, 0) + _safe_int(item.get("count"))
+        return out
+    for pkg in _wms_packages(raw):  # legacy shipmentsfbo
         for item in _wms_package_items(pkg):
             barcode = str(item.get("barcode") or "").strip()
             if not barcode:
@@ -2817,24 +3086,43 @@ def _wms_detail_parts(req: FulfillmentRequest) -> tuple[list[dict], list[dict], 
     fields: list[tuple[str, object]] = []
 
     if req.kind == FfRequestKind.ASSEMBLY.value:
-        pkg_rows = _wms_packages(raw)
         by_barcode: dict[str, dict] = {}
-        for pkg in pkg_rows:
-            for item in _wms_package_items(pkg):
+        items = raw.get("items")
+        if isinstance(items, list):  # DispatchOrder: состав в top-level items[]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
                 barcode = str(item.get("barcode") or "").strip()
                 agg = by_barcode.get(barcode)
                 if agg is None:
                     agg = by_barcode[barcode] = {"barcode": barcode or None, "name": item.get("name"), "qty": 0}
                 agg["qty"] += _safe_int(item.get("count"))
+            fields = [
+                ("Склад отгрузки", raw.get("warehouse")),
+                ("Статус заявки", raw.get("status")),
+                ("Статус отгрузки", raw.get("shipment_status")),
+                ("Отгрузка создана", raw.get("shipment_create_date")),
+                ("Передана", raw.get("shipment_shipped_datetime")),
+                ("Внешний ID (СДЭК/Яндекс)", raw.get("externalid")),
+            ]
+        else:  # legacy shipmentsfbo: состав в коробах (Packages → items)
+            pkg_rows = _wms_packages(raw)
+            for pkg in pkg_rows:
+                for item in _wms_package_items(pkg):
+                    barcode = str(item.get("barcode") or "").strip()
+                    agg = by_barcode.get(barcode)
+                    if agg is None:
+                        agg = by_barcode[barcode] = {"barcode": barcode or None, "name": item.get("name"), "qty": 0}
+                    agg["qty"] += _safe_int(item.get("count"))
+            fields = [
+                ("Площадка", raw.get("shipped_target")),
+                ("Внешний заказ", raw.get("external_order")),
+                ("План отгрузки", raw.get("dispatch_date")),
+                ("Передана", raw.get("shipped_datetime")),
+                ("Вручена", raw.get("delivered_date_time")),
+                ("Коробов", len(pkg_rows) or None),
+            ]
         products = list(by_barcode.values())
-        fields = [
-            ("Площадка", raw.get("shipped_target")),
-            ("Внешний заказ", raw.get("external_order")),
-            ("План отгрузки", raw.get("dispatch_date")),
-            ("Передана", raw.get("shipped_datetime")),
-            ("Вручена", raw.get("delivered_date_time")),
-            ("Коробов", len(pkg_rows) or None),
-        ]
     else:
         for item in raw.get("items") or []:
             if not isinstance(item, dict):
@@ -3981,5 +4269,221 @@ async def create_assembly_from_ff(
         "assembly_request_id": doc.id,
         "assembly_number": doc.number,
         "items_created": len(items),
+        "skipped_barcodes": skipped_barcodes,
+    }
+
+
+# ─── PUSH: наша заявка на сборку → заявка ФФ (skladbot тип 851) ───────────────
+
+
+async def create_ff_request_from_assembly(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    assembly_request_id: int,
+    payload: FfCreateRequestPayload,
+) -> dict | None:
+    """Создать заявку «Доставка на склад МП» (851) у skladbot из нашей сборки.
+
+    Состав берётся из позиций AssemblyRequest (агрегация по ШК), резолвится в
+    product_data_id через живой GET /v1/requests/products (только товары с
+    остатком под этот тип заявки; нерезолвленные → skipped_barcodes), затем
+    POST /v1/requests создаёт РЕАЛЬНЫЙ заказ у ФФ. Созданную заявку зеркалим в
+    FulfillmentRequest и связываем с нашей сборкой (assembly_request_id).
+
+    Идемпотентность: если сборка уже связана с заявкой ФФ — ValueError (повторно
+    не создаём). None — сборка не найдена в проекте. ValueError — не skladbot /
+    чужой склад / отменена / нет позиций / ни один ШК не доступен у ФФ / ошибки
+    провайдера. Только skladbot (wmscelicom/migfull push не поддержан).
+
+    НЕ полностью атомарно: заказ у ФФ создаётся ДО записи зеркала. При сбое после
+    POST (или гонке связывания) заказ у провайдера уже существует — текст ошибки
+    это поясняет, заявку видно после следующего синка.
+    """
+    key = await get_integration(db, project_id, warehouse_id)
+    if not key:
+        raise ValueError("Фулфилмент не подключён к этому складу")
+    if key.service != "skladbot":
+        raise ValueError(
+            f"Создание заявки на ФФ поддерживается только для skladbot (подключён {_provider_human(key.service)})"
+        )
+    config = key.config or {}
+    customer_id = config.get("customer_id")
+    if not customer_id:
+        raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
+
+    asm_result = await db.execute(
+        select(AssemblyRequest)
+        .options(selectinload(AssemblyRequest.items))
+        .where(
+            AssemblyRequest.id == assembly_request_id,
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,
+        )
+    )
+    assembly = asm_result.scalar_one_or_none()
+    if assembly is None:
+        return None
+    if assembly.warehouse_id != warehouse_id:
+        raise ValueError("Заявка на сборку принадлежит другому складу")
+    if assembly.status == AssemblyStatus.CANCELLED.value:
+        raise ValueError("Нельзя отправить на ФФ отменённую заявку")
+
+    # Идемпотентность: сборка уже связана с заявкой ФФ
+    existing = await db.execute(
+        select(FulfillmentRequest.number, FulfillmentRequest.external_id)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.assembly_request_id == assembly_request_id,
+        )
+        .limit(1)
+    )
+    ex = existing.first()
+    if ex is not None:
+        raise ValueError(f"Заявка уже отправлена на ФФ ({ex.number or ex.external_id}) — повторное создание запрещено")
+
+    # Состав: агрегируем позиции сборки по ШК
+    qty_by_barcode: dict[str, int] = {}
+    for it in assembly.items:
+        bc = (it.barcode or "").strip()
+        if bc:
+            qty_by_barcode[bc] = qty_by_barcode.get(bc, 0) + int(it.quantity or 0)
+    qty_by_barcode = {bc: q for bc, q in qty_by_barcode.items() if q > 0}
+    if not qty_by_barcode:
+        raise ValueError("В заявке на сборку нет позиций для отправки")
+
+    # Локальные снимки до commit (объект assembly после commit истекает)
+    asm_id = assembly.id
+    asm_number = assembly.number
+    asm_status = assembly.status
+    token = _decrypt(key.encrypted_key)
+    await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
+
+    client = SkladbotClient(token, project_id=project_id)
+    try:
+        resolved = await client.resolve_products(customer_id, DELIVERY_REQUEST_TYPE_ID, list(qty_by_barcode))
+    except CircuitOpenError as e:
+        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+    except RateLimitError as e:
+        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+    except SkladbotApiError as e:
+        raise ValueError(f"skladbot.ru не отдал товары для заявки (HTTP {e.status_code})") from e
+    except httpx.HTTPError as e:
+        raise ValueError(f"Сетевая ошибка при обращении к skladbot.ru: {e}") from e
+
+    skipped_barcodes = sorted(bc for bc in qty_by_barcode if bc not in resolved)
+    products = [
+        {
+            "product_data_id": resolved[bc]["product_data_id"],
+            "amount": qty,
+            "barcode": bc,
+            "services": [],
+            "packages": [],
+        }
+        for bc, qty in qty_by_barcode.items()
+        if bc in resolved
+    ]
+    if not products:
+        raise ValueError(
+            "Ни один ШК заявки не найден в доступных остатках ФФ — отправлять нечего "
+            "(проверьте остатки склада у ФФ и синхронизацию)"
+        )
+
+    create_payload = {
+        "customer_id": customer_id,
+        "request_type_id": DELIVERY_REQUEST_TYPE_ID,
+        "products": products,
+        "fields": {
+            "marketplace": {"value": payload.marketplace},
+            "marketplace_delivery_type": {"value": payload.delivery_type},
+            "marketplace_warehouse": {"value": payload.marketplace_warehouse},
+            "collection_date": {"value": payload.collection_date.isoformat()},
+            "unloading_date": {"value": payload.unloading_date.isoformat()},
+        },
+        "comment": payload.comment or f"Заявка на сборку {asm_number} (DDS)",
+        "notify": bool(payload.notify),
+    }
+    try:
+        created = await client.create_request(create_payload)
+    except CircuitOpenError as e:
+        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+    except RateLimitError as e:
+        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+    except SkladbotApiError as e:
+        raise ValueError(f"skladbot.ru отклонил создание заявки (HTTP {e.status_code}): {e}") from e
+    except httpx.HTTPError as e:
+        raise ValueError(f"Сетевая ошибка при создании заявки в skladbot.ru: {e}") from e
+
+    external_id = str(created.get("id") or created.get("request_id") or "").strip()
+    if not external_id or external_id == "None":
+        raise ValueError("skladbot.ru не вернул id созданной заявки — проверьте кабинет ФФ вручную")
+
+    total_qty = sum(qty for bc, qty in qty_by_barcode.items() if bc in resolved)
+    created_row = {
+        "external_id": external_id,
+        "kind": FfRequestKind.ASSEMBLY.value,
+        "number": created.get("delivery_number") or created.get("number"),
+        "type_id": DELIVERY_REQUEST_TYPE_ID,
+        "type_name": created.get("type") or "3. Доставка на склад МП",
+        "status": created.get("status"),
+        "stage_code": created.get("stage_code"),
+        "stage_title": created.get("stage_title"),
+        "is_completed": bool(created.get("is_completed")),
+        "archived": bool(created.get("archived")),
+        "expired": bool(created.get("expired")),
+        "total_qty": total_qty,
+        "dest_warehouse": payload.marketplace_warehouse,
+        "external_created_at": _parse_date(created.get("created_at")) or date.today(),
+        "raw": created,
+    }
+
+    # Зеркало + связь — под advisory-локом (сериализация с конкурентным синком,
+    # uq заявок = project_id+provider+external_id)
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :project_id)"),
+        {"ns": _FF_SYNC_LOCK_NS, "project_id": project_id},
+    )
+    await _apply_requests(db, project_id, warehouse_id, "skladbot", [created_row])
+    await db.flush()
+    new_result = await db.execute(
+        select(FulfillmentRequest).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.provider == "skladbot",
+            FulfillmentRequest.external_id == external_id,
+        )
+    )
+    ff_req = new_result.scalar_one_or_none()
+    if ff_req is None:
+        await db.rollback()
+        raise ValueError(
+            f"Заявка создана у ФФ ({created_row['number'] or external_id}), но зеркало сохранить не удалось — "
+            "обновите страницу после синхронизации"
+        )
+
+    # Гонка связывания: сборку успели связать с другой ФФ-заявкой между проверкой и сейчас
+    conflict = await db.execute(
+        select(FulfillmentRequest.id)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.assembly_request_id == assembly_request_id,
+            FulfillmentRequest.id != ff_req.id,
+        )
+        .limit(1)
+    )
+    if conflict.scalar_one_or_none() is not None:
+        await db.commit()  # зеркало сохранено, но НЕсвязанным
+        raise ValueError(
+            f"Заявка создана у ФФ ({ff_req.number or external_id}), но сборка уже связана с другой "
+            "ФФ-заявкой — свяжите вручную на вкладке «ФФ сборка»"
+        )
+    ff_req.assembly_request_id = assembly_request_id
+    await db.commit()
+
+    return {
+        "request": _request_to_dict(ff_req, {asm_id: (asm_number, asm_status)}),
+        "external_id": external_id,
+        "ff_number": ff_req.number,
+        "items_sent": len(products),
+        "total_qty": total_qty,
         "skipped_barcodes": skipped_barcodes,
     }

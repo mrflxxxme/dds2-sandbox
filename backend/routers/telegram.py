@@ -11,6 +11,7 @@ from backend.database import get_db
 from backend.models.auth import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.telegram import (
+    FfBoardConfigRequest,
     TelegramChatBindingSchema,
     TelegramLinkResponse,
     ToggleNotifyRequest,
@@ -79,3 +80,25 @@ async def toggle_ff_notify(
         raise HTTPException(status_code=404, detail="Привязка не найдена")
     status = "включены" if body.enabled else "выключены"
     return {"message": f"Уведомления ФФ {status}"}
+
+
+@router.patch("/chats/{binding_id}/ff-board")
+async def set_ff_board(
+    binding_id: int,
+    body: FfBoardConfigRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Configure the pinned FF-board for a chat: on/off + optional warehouse scope.
+
+    Appears in the chat at the next FF sync (the bot lives in the worker process,
+    so the web request only persists the setting — it does not push immediately).
+    """
+    try:
+        ok = await telegram_service.set_ff_board_config(db, binding_id, project.id, body.enabled, body.warehouse_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not ok:
+        raise HTTPException(status_code=404, detail="Привязка не найдена")
+    status = "включено" if body.enabled else "выключено"
+    return {"message": f"Табло заявок ФФ {status}"}

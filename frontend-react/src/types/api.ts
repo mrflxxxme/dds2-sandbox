@@ -600,6 +600,9 @@ export interface TelegramChatBinding {
   brand: string | null;
   notify_enabled: boolean;
   ff_notify_enabled: boolean;
+  ff_board_enabled: boolean;
+  /** NULL = табло по всем складам; иначе — заявки только этого склада ФФ. */
+  ff_board_warehouse_id: number | null;
   created_by_id: number;
   created_at: string;
 }
@@ -3393,6 +3396,8 @@ export interface FulfillmentConnectPayload {
   base_url?: string | null;
   /** migfull: GUID кабинета */
   tenant_guid?: string | null;
+  /** skladbot: id кабинета. Обязателен для FF-operator токена (видит >1 клиента) */
+  customer_id?: number | null;
 }
 
 export interface FfSyncResult {
@@ -3740,5 +3745,32 @@ export interface FfCreateAssemblyResult {
   assembly_number: string;
   items_created: number;
   /** ШК из состава ФФ, не найденные в номенклатуре (пропущены) */
+  skipped_barcodes: string[];
+}
+
+/** Создание заявки «Доставка на склад МП» (851) из нашей заявки на сборку. */
+export interface FfCreateRequestPayload {
+  /** Склад МП (город сдачи WB) */
+  marketplace_warehouse: string;
+  /** Дата забора груза (YYYY-MM-DD) */
+  collection_date: string;
+  /** Дата выгрузки на склад МП (YYYY-MM-DD) */
+  unloading_date: string;
+  marketplace?: string;
+  /** straight — прямая, cross_dock — транзит */
+  delivery_type?: 'straight' | 'cross_dock';
+  comment?: string | null;
+  notify?: boolean;
+}
+
+/** Итог отправки нашей заявки на сборку в ФФ (создан реальный заказ у skladbot). */
+export interface FfPushAssemblyResult {
+  /** Зеркало созданной ФФ-заявки (уже связано со сборкой) */
+  request: FfRequestRow;
+  external_id: string;
+  ff_number: string | null;
+  items_sent: number;
+  total_qty: number;
+  /** ШК без остатка/карточки у ФФ — не отправлены */
   skipped_barcodes: string[];
 }

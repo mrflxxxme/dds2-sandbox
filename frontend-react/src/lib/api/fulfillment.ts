@@ -4,10 +4,12 @@ import type {
     FfBoxOverridePayload,
     FfBoxPack,
     FfCreateAssemblyResult,
+    FfCreateRequestPayload,
     FfLinkCandidatesResponse,
     FfLinkPayload,
     FfNomenclatureOption,
     FfOverviewResponse,
+    FfPushAssemblyResult,
     FfRequestDetail,
     FfRequestKind,
     FfRequestRow,
@@ -115,6 +117,10 @@ export function addFulfillmentMethods(api: ApiClient) {
         },
         createAssemblyFromFf(warehouseId: number, ffRequestId: number) {
             return api.request<FfCreateAssemblyResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/create-assembly`);
+        },
+        /** Создать заявку на ФФ (skladbot тип 851) из нашей заявки на сборку. */
+        createFfRequestFromAssembly(warehouseId: number, assemblyRequestId: number, payload: FfCreateRequestPayload) {
+            return api.request<FfPushAssemblyResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/assembly/${assemblyRequestId}/create-request`, payload);
         },
     };
 }

@@ -37,6 +37,11 @@ class TelegramChatBinding(Base):
     # закреплённого сообщения, которое правим на каждом синке (не шлём новое).
     ff_board_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     ff_board_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Привязка табло к одному складу ФФ: NULL = общее табло (все склады проекта),
+    # иначе показываем только заявки этого склада (чат конкретного ФФ, напр. Газпром).
+    ff_board_warehouse_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("warehouses.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_by_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

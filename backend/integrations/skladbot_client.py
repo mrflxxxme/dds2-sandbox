@@ -44,8 +44,13 @@ TIMEOUT = 30
 # Защита от бесконечной пагинации (битый last_page и т.п.)
 MAX_PAGES = 200
 
+# Cap страниц при поиске клиента по id (FF-operator токен видит сотни клиентов)
+MAX_CUSTOMER_PAGES = 30
+
 # Типы заявок (см. GET /v1/requests/filter/fields)
 ASSEMBLY_TYPE_IDS: set[int] = {851}  # «3. Доставка на склад МП»
+# Тип заявки для PUSH-создания «Доставка на склад МП» (наша сборка → ФФ)
+DELIVERY_REQUEST_TYPE_ID: int = 851
 INBOUND_TYPE_IDS: set[int] = {
     852,
     2644,
@@ -145,8 +150,9 @@ class SkladbotClient:
                     f"Skladbot API error ({response.status_code}): {response.text[:200]}",
                     status_code=response.status_code,
                 )
-            if response.status_code != 200:
-                # 5xx — деградация сервиса: считается circuit breaker'ом и ретраится
+            if not (200 <= response.status_code < 300):
+                # 3xx (редирект) / 5xx (деградация) — циркуит-брейкер и ретрай.
+                # POST /v1/requests отвечает 201 Created — любой 2xx считаем успехом.
                 raise ValueError(f"Skladbot API error ({response.status_code}): {response.text[:200]}")
 
             return response.json()
@@ -163,6 +169,40 @@ class SkladbotClient:
             return None
         customers = data.get("data") or []
         return customers[0] if customers else None
+
+    @retry_with_backoff(max_retries=3)
+    async def count_customers(self) -> int:
+        """Сколько клиентов видит токен (meta.total первой страницы /v1/customers).
+
+        Селлер-токен видит 1 клиента; FF-operator токен — весь tenant (десятки/сотни).
+        По этому числу connect решает, нужен ли явный выбор customer_id.
+        """
+        data = await self._request("GET", "/v1/customers", params={"page": 1})
+        meta = data.get("meta") or {}
+        total = meta.get("total")
+        if total is not None:
+            return int(total)
+        return len(data.get("data") or [])
+
+    async def find_customer(self, customer_id: int) -> dict | None:
+        """Найти клиента по id среди видимых токену (пролистывая /v1/customers).
+
+        Прямого lookup по id у API нет (search фильтрует по имени), поэтому
+        листаем страницы до совпадения; cap MAX_CUSTOMER_PAGES страниц.
+        None — не найден (id не принадлежит этому токену) или превышен cap.
+        """
+        page = 1
+        while page <= MAX_CUSTOMER_PAGES:
+            data = await self._request("GET", "/v1/customers", params={"page": page})
+            rows = data.get("data") or []
+            for c in rows:
+                if isinstance(c, dict) and c.get("id") == customer_id:
+                    return c
+            last_page = int((data.get("meta") or {}).get("last_page") or 1)
+            if page >= last_page or not rows:
+                break
+            page += 1
+        return None
 
     @retry_with_backoff(max_retries=3)
     async def fetch_all_products(self, customer_id: int) -> list[dict]:
@@ -213,6 +253,76 @@ class SkladbotClient:
         """
         data = await self._request("GET", f"/v1/requests/show/{external_id}")
         return data.get("data") or {}
+
+    @retry_with_backoff(max_retries=3)
+    async def resolve_products(
+        self,
+        customer_id: int,
+        request_type_id: int,
+        barcodes: list[str],
+    ) -> dict[str, dict]:
+        """Резолв ШК → product_data_id для формы создания заявки (read-only).
+
+        GET /v1/requests/products?customer=&request_type_id=&value=<ШК[,ШК...]>
+        отдаёт ≤25 товаров на запрос (строгий whereIn по ШК) с остатком,
+        доступным под заявку этого типа. ШК бьём на чанки по 20. Возвращает
+        {barcode: {product_data_id, amount, counts, name, vendor_code}} — только
+        для разрезолвленных ШК (товар есть в кабинете и доступен под тип заявки);
+        нерезолвленные просто отсутствуют в словаре. При нескольких карточках на
+        один ШК предпочитаем is_main_barcode.
+        """
+        resolved: dict[str, dict] = {}
+        unique = [bc for bc in dict.fromkeys(b.strip() for b in barcodes) if bc]
+        for start in range(0, len(unique), 20):
+            chunk = unique[start : start + 20]
+            data = await self._request(
+                "GET",
+                "/v1/requests/products",
+                params={
+                    "customer": customer_id,
+                    "request_type_id": request_type_id,
+                    "value": ",".join(chunk),
+                },
+            )
+            rows = data if isinstance(data, list) else (data.get("data") or [])
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                barcode = str(row.get("barcode") or "").strip()
+                pdid = row.get("product_data_id")
+                if not barcode or pdid is None:
+                    continue
+                # is_main_barcode=1 побеждает; первый встреченный — иначе
+                if barcode in resolved and not row.get("is_main_barcode"):
+                    continue
+                resolved[barcode] = {
+                    "product_data_id": pdid,
+                    "amount": int(row.get("amount") or 0),
+                    "counts": int(row.get("counts") or 0),  # доступный остаток под заявку
+                    "name": row.get("name"),
+                    "vendor_code": row.get("vendor_code"),
+                }
+        logger.info(
+            "skladbot_api.products_resolved",
+            requested=len(unique),
+            resolved=len(resolved),
+            customer_id=customer_id,
+        )
+        return resolved
+
+    async def create_request(self, payload: dict) -> dict:
+        """Создать заявку у ФФ: POST /v1/requests (БЕЗ retry — это реальный заказ).
+
+        Идемпотентность не на стороне клиента: повторный POST создаст вторую
+        заявку, поэтому ретраев нет — ошибку (4xx/5xx/сеть) пробрасываем выше,
+        вызывающий решает. Тело: {customer_id, request_type_id, products[],
+        fields{...}, comment, notify}. Возвращает созданную заявку (Laravel
+        иногда заворачивает в {data}: разворачиваем).
+        """
+        data = await self._request("POST", "/v1/requests", json_body=payload)
+        if isinstance(data, dict) and isinstance(data.get("data"), dict):
+            return data["data"]
+        return data if isinstance(data, dict) else {}
 
     @retry_with_backoff(max_retries=3)
     async def fetch_requests(self, type_id: int) -> list[dict]:
