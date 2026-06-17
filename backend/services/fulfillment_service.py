@@ -4666,22 +4666,6 @@ async def create_ff_request_from_assembly(
         )
     ff_req.assembly_request_id = assembly_request_id
     await db.commit()
-    ff_number = ff_req.number or external_id
-
-    # Best-effort: уведомить чат склада ФФ об отправленной заявке (никогда не бросает).
-    from backend.services.fulfillment_notify import notify_ff_request_pushed
-
-    await notify_ff_request_pushed(
-        db,
-        project_id,
-        warehouse_id,
-        ff_number=ff_number,
-        items_sent=len(products),
-        total_qty=total_qty,
-        dest=wh_name,
-        collection_date=payload.collection_date,
-        unloading_date=payload.unloading_date,
-    )
 
     return {
         "request": _request_to_dict(ff_req, {asm_id: (asm_number, asm_status)}),
