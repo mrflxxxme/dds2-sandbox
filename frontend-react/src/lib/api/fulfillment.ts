@@ -3,6 +3,10 @@ import { ApiClient } from './client';
 import type {
     FfBoxOverridePayload,
     FfBoxPack,
+    FfBulkArchivePayload,
+    FfBulkArchiveResult,
+    FfBulkCreateRequestPayload,
+    FfBulkCreateResult,
     FfCreateAssemblyResult,
     FfCreateFormResponse,
     FfCreateRequestPayload,
@@ -125,6 +129,14 @@ export function addFulfillmentMethods(api: ApiClient) {
         },
         createFfRequestFromAssembly(warehouseId: number, assemblyRequestId: number, payload: FfCreateRequestPayload) {
             return api.request<FfPushAssemblyResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/assembly/${assemblyRequestId}/create-request`, payload);
+        },
+        /** Массово создать заявки на ФФ из выбранных сборок (склад МП/дата выгрузки — по каждой). */
+        bulkCreateFfRequests(warehouseId: number, payload: FfBulkCreateRequestPayload) {
+            return api.request<FfBulkCreateResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/assembly/bulk-create-requests`, payload);
+        },
+        /** Массово убрать/вернуть заявки ФФ в локальный архив. */
+        bulkArchiveFulfillmentRequests(warehouseId: number, payload: FfBulkArchivePayload) {
+            return api.request<FfBulkArchiveResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/bulk-archive`, payload);
         },
     };
 }

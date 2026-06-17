@@ -980,7 +980,7 @@ export default function AssemblyDetailPage() {
                                     {' '}{assembly.items.length} позиц. ({formatNumber(assembly.items.reduce((s, it) => s + it.quantity, 0), 0)} шт).
                                     Это <b>реальный заказ</b> у ФФ.
                                 </div>
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 12 }}>
                                     <div className="form-group" style={{ gridColumn: '1 / -1' }}>
                                         <label className="form-label">Склад МП ({pushForm?.marketplace_name || 'WB'}) *</label>
                                         <select
@@ -1015,7 +1015,18 @@ export default function AssemblyDetailPage() {
                                     <div className="form-group" />
                                     <div className="form-group">
                                         <label className="form-label">Дата забора *</label>
-                                        <input className="form-input" type="date" value={pushCollectionDate} onChange={e => setPushCollectionDate(e.target.value)} />
+                                        <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+                                            <input className="form-input" type="date" style={{ flex: 1, minWidth: 0 }} value={pushCollectionDate} onChange={e => setPushCollectionDate(e.target.value)} />
+                                            <button
+                                                type="button"
+                                                className="btn btn-secondary"
+                                                style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+                                                title="Сегодня + 3 дня"
+                                                onClick={() => { const d = new Date(); d.setDate(d.getDate() + 3); setPushCollectionDate(d.toISOString().slice(0, 10)); }}
+                                            >
+                                                +3 дня
+                                            </button>
+                                        </div>
                                     </div>
                                     <div className="form-group">
                                         <label className="form-label">Дата выгрузки *</label>

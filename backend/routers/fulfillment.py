@@ -23,6 +23,10 @@ from backend.project_context import get_current_project
 from backend.schemas.fulfillment import (
     FfBoxOverridePayload,
     FfBoxPack,
+    FfBulkArchivePayload,
+    FfBulkArchiveResult,
+    FfBulkCreateRequestPayload,
+    FfBulkCreateResult,
     FfCreateAssemblyResult,
     FfCreateFormResponse,
     FfCreateRequestPayload,
@@ -374,6 +378,46 @@ async def create_ff_request_from_assembly(
     if data is None:
         raise HTTPException(404, "Заявка на сборку не найдена")
     return data
+
+
+@wh_router.post(
+    "/assembly/bulk-create-requests",
+    response_model=FfBulkCreateResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def bulk_create_ff_requests(
+    warehouse_id: int,
+    payload: FfBulkCreateRequestPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Массово создать заявки «Доставка на склад МП» (851) из выбранных сборок.
+
+    Склад МП и дата выгрузки подбираются по каждой сборке (склад WB / поставка
+    FBW); тип поставки, дата забора, комментарий — общие. Реальные заказы у ФФ;
+    каждая сборка независима — отчёт по итогу (создано / дефицит / пропущено).
+    """
+    try:
+        return await fulfillment_service.bulk_create_ff_requests(db, project.id, warehouse_id, payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@wh_router.post(
+    "/requests/bulk-archive",
+    response_model=FfBulkArchiveResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def bulk_archive_requests(
+    warehouse_id: int,
+    payload: FfBulkArchivePayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Массово убрать/вернуть заявки ФФ в локальный архив DDS (синк не трогает)."""
+    return await fulfillment_service.bulk_archive_requests(
+        db, project.id, warehouse_id, payload.ff_request_ids, payload.archived
+    )
 
 
 @wh_router.get("/requests/{ff_request_id}/detail", response_model=FfRequestDetail)
