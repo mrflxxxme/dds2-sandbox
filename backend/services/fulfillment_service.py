@@ -22,7 +22,7 @@ dest_warehouse — списочный метод их не отдаёт) и ав
 import html
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -142,6 +142,22 @@ _CAND_COMP_DATE_SCORES = {0: 20, 1: 15, 2: 10}
 # Telegram-лимит сообщения 4096 символов; берём +1, чтобы честно показать
 # «…и ещё позиции», если строк больше.
 _FF_GOODS_LIMIT = 50
+
+# Закреплённое авто-табло заявок ФФ (build_ff_board_text). Активные статусы
+# сборок в порядке вывода; топ-N строк на статус (+ «…ещё M»), потолок выборки.
+_BOARD_STATUSES = (
+    AssemblyStatus.IN_PROGRESS.value,
+    AssemblyStatus.READY.value,
+    AssemblyStatus.VEHICLE_ASSIGNED.value,
+)
+_BOARD_STATUS_LABEL = {
+    AssemblyStatus.IN_PROGRESS.value: "🔧 В работе",
+    AssemblyStatus.READY.value: "✅ Готово к отгрузке",
+    AssemblyStatus.VEHICLE_ASSIGNED.value: "🚚 Машина назначена",
+}
+_BOARD_FETCH_LIMIT = 500
+_BOARD_ROWS_PER_STATUS = 15
+_MSK_OFFSET = timedelta(hours=3)
 _CAND_COMP_MIN_SCORE = 40
 
 
@@ -681,7 +697,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
 
     # Telegram-уведомления о смене статуса (HTML + кнопка «Открыть заявку»),
     # best-effort, синк уже зафиксирован; только в чаты проекта с ff_notify_enabled.
-    from backend.services.fulfillment_notify import build_ready_item, notify_ff_events
+    from backend.services.fulfillment_notify import build_ready_item, notify_ff_events, refresh_ff_board
 
     ready_items = [
         build_ready_item(
@@ -699,6 +715,10 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     ]
     if ready_items or accept_items:
         await notify_ff_events(db, project_id, ready_items + accept_items)
+
+    # Закреплённое авто-табло (если включено в чате проекта) — обновляем на
+    # каждом синке: оно отражает ТЕКУЩЕЕ состояние всех сборок, не только дельту.
+    await refresh_ff_board(db, project_id)
 
     logger.info(
         "Fulfillment sync: project=%s warehouse=%s stocks=%d requests=%d unmatched=%d "
@@ -1607,6 +1627,68 @@ async def get_ff_request_goods(db: AsyncSession, project_id: int, ff_request_id:
     else:
         lines.append(f"\n<b>Итого:</b> {len(shown)} поз. · {sum(q for _, _, q in shown)} шт")
     return "\n".join(lines)
+
+
+async def build_ff_board_text(db: AsyncSession, project_id: int) -> str | None:
+    """HTML-табло активных сборок проекта для закреплённого сообщения в Telegram.
+
+    Группировка статус (в работе/готово/машина назначена) → склад ФФ, строки
+    «номер · кол-во · дата» (кол-во — сумма позиций сборки). Топ-N строк на
+    статус (+ «…ещё M»), детали в сворачиваемом <blockquote expandable>
+    (Telegram-лимит 4096). Только наши документы, без HTTP. None — нет активных
+    сборок (вызывающий тогда табло не трогает).
+    """
+    result = await db.execute(
+        select(
+            AssemblyRequest.status,
+            Warehouse.name,
+            AssemblyRequest.number,
+            AssemblyRequest.created_at,
+            func.coalesce(func.sum(AssemblyRequestItem.quantity), 0),
+        )
+        .join(Warehouse, Warehouse.id == AssemblyRequest.warehouse_id)
+        .outerjoin(AssemblyRequestItem, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,
+            AssemblyRequest.status.in_(_BOARD_STATUSES),
+        )
+        .group_by(AssemblyRequest.id, Warehouse.name)
+        .order_by(AssemblyRequest.created_at.desc())
+        .limit(_BOARD_FETCH_LIMIT)
+    )
+    rows = result.all()
+    if not rows:
+        return None
+
+    e = html.escape
+    by_status: dict[str, list[tuple]] = {s: [] for s in _BOARD_STATUSES}
+    for status, wh_name, number, created_at, qty in rows:
+        by_status.setdefault(status, []).append((wh_name, number, created_at, int(qty or 0)))
+
+    now_msk = utcnow() + _MSK_OFFSET
+    lines = ["📋 <b>Заявки ФФ</b>", f"<i>обновлено {now_msk:%d.%m %H:%M} МСК</i>", ""]
+    for status in _BOARD_STATUSES:
+        items = by_status.get(status, [])
+        if not items:
+            continue
+        total_qty = sum(q for *_, q in items)
+        lines.append(f"{_BOARD_STATUS_LABEL[status]} — {len(items)} · {total_qty} шт")
+        shown = items[:_BOARD_ROWS_PER_STATUS]
+        by_wh: dict[str, list[tuple]] = {}
+        for wh_name, number, created_at, qty in shown:
+            by_wh.setdefault(wh_name or "—", []).append((number, created_at, qty))
+        block: list[str] = []
+        for wh_name, wh_rows in by_wh.items():
+            block.append(f"<b>{e(wh_name)}</b>")
+            for number, created_at, qty in wh_rows:
+                d = f"{created_at:%d.%m}" if created_at else "—"
+                block.append(f"<code>{e(str(number))}</code> · {qty} шт · {d}")
+        if len(items) > _BOARD_ROWS_PER_STATUS:
+            block.append(f"…ещё {len(items) - _BOARD_ROWS_PER_STATUS}")
+        lines.append("<blockquote expandable>" + "\n".join(block) + "</blockquote>")
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 async def _collect_inbound_accept_candidates(

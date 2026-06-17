@@ -59,6 +59,7 @@ async def set_bot_commands():
             BotCommand(command="setup", description="Привязать чат к проекту"),
             BotCommand(command="brand", description="Сменить бренд"),
             BotCommand(command="notify", description="Вкл/выкл дайджест"),
+            BotCommand(command="board", description="Вкл/выкл табло заявок ФФ"),
             BotCommand(command="note", description="Добавить заметку по бренду"),
             BotCommand(command="notes", description="Показать заметки"),
             BotCommand(command="delnote", description="Удалить заметку"),
@@ -126,6 +127,7 @@ async def cmd_help(message: Message):
         "/setup — привязать чат к проекту + бренду\n"
         "/brand — сменить бренд\n"
         "/notify on|off — вкл/выкл утренний дайджест\n"
+        "/board on|off — вкл/выкл закреплённое табло заявок ФФ\n"
         "/note текст — добавить заметку по бренду\n"
         "/notes — показать заметки\n"
         "/delnote N — удалить заметку #N\n"
@@ -279,6 +281,50 @@ async def cmd_notify(message: Message):
 
     status = "включён" if enabled else "выключен"
     await message.reply(f"Утренний дайджест {status}.")
+
+
+# ─── /board on|off — закреплённое авто-табло заявок ФФ ────────────────────────
+
+
+@router.message(Command("board"))
+async def cmd_board(message: Message):
+    """Toggle the pinned FF-board — auto-updating list of all active FF requests."""
+    if message.chat.type == "private":
+        await message.reply("Команда /board работает только в групповых чатах.")
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2 or args[1].lower() not in ("on", "off"):
+        await message.reply("Использование: /board on или /board off")
+        return
+
+    enabled = args[1].lower() == "on"
+
+    async with AsyncSessionLocal() as db:
+        binding = await telegram_service.get_chat_binding(db, message.chat.id)
+        if not binding:
+            await message.reply("Чат не привязан. Используйте /setup.")
+            return
+        project_id, binding_id = binding.project_id, binding.id
+        await telegram_service.toggle_ff_board(db, binding_id, project_id, enabled)
+        if not enabled:
+            await message.reply("Табло заявок ФФ выключено.")
+            return
+
+        # Сразу собрать и закрепить табло (или сообщить, что заявок пока нет).
+        from backend.services.fulfillment_notify import refresh_ff_board
+
+        await refresh_ff_board(db, project_id)
+        await db.refresh(binding)
+        if binding.ff_board_message_id:
+            await message.reply(
+                "Табло заявок ФФ включено. Если бот — админ чата, оно закреплено "
+                "сверху; обновляется на каждом синке."
+            )
+        else:
+            await message.reply(
+                "Табло заявок ФФ включено — появится при ближайшем синке " "(сейчас активных сборок нет)."
+            )
 
 
 # ─── /note, /notes, /delnote ─────────────────────────────────────────────────

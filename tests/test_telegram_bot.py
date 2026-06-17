@@ -835,3 +835,103 @@ class TestSendHtml:
         long_text = "line\n" * 1000  # ~5000 chars
         await _send_html(msg, long_text)
         assert msg.reply.call_count >= 2
+
+
+class TestCmdBoard:
+    @pytest.mark.asyncio
+    async def test_board_private_rejected(self):
+        from backend.integrations.telegram_bot import cmd_board
+
+        msg = _make_message("/board on", chat_type="private")
+        await cmd_board(msg)
+        assert "групповых" in msg.reply.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_board_bad_arg_usage(self):
+        from backend.integrations.telegram_bot import cmd_board
+
+        msg = _make_message("/board maybe", chat_type="group")
+        await cmd_board(msg)
+        assert "Использование" in msg.reply.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_board_unbound(self):
+        from backend.integrations.telegram_bot import cmd_board
+
+        msg = _make_message("/board on", chat_type="group")
+        db = MagicMock()
+        db.refresh = AsyncMock()
+        with (
+            patch("backend.integrations.telegram_bot.AsyncSessionLocal") as session_cls,
+            patch("backend.integrations.telegram_bot.telegram_service") as svc,
+        ):
+            session_cls.return_value.__aenter__ = AsyncMock(return_value=db)
+            session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            svc.get_chat_binding = AsyncMock(return_value=None)
+            await cmd_board(msg)
+            assert "/setup" in msg.reply.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_board_on_pinned(self):
+        from backend.integrations.telegram_bot import cmd_board
+
+        msg = _make_message("/board on", chat_type="group")
+        binding = MagicMock()
+        binding.project_id, binding.id, binding.ff_board_message_id = 4, 9, 777
+        db = MagicMock()
+        db.refresh = AsyncMock()
+        with (
+            patch("backend.integrations.telegram_bot.AsyncSessionLocal") as session_cls,
+            patch("backend.integrations.telegram_bot.telegram_service") as svc,
+            patch("backend.services.fulfillment_notify.refresh_ff_board", new=AsyncMock()) as refresh,
+        ):
+            session_cls.return_value.__aenter__ = AsyncMock(return_value=db)
+            session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            svc.get_chat_binding = AsyncMock(return_value=binding)
+            svc.toggle_ff_board = AsyncMock(return_value=True)
+            await cmd_board(msg)
+            svc.toggle_ff_board.assert_awaited_once_with(db, 9, 4, True)
+            refresh.assert_awaited_once()
+            assert "закреплено" in msg.reply.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_board_on_no_assemblies(self):
+        from backend.integrations.telegram_bot import cmd_board
+
+        msg = _make_message("/board on", chat_type="group")
+        binding = MagicMock()
+        binding.project_id, binding.id, binding.ff_board_message_id = 4, 9, None
+        db = MagicMock()
+        db.refresh = AsyncMock()
+        with (
+            patch("backend.integrations.telegram_bot.AsyncSessionLocal") as session_cls,
+            patch("backend.integrations.telegram_bot.telegram_service") as svc,
+            patch("backend.services.fulfillment_notify.refresh_ff_board", new=AsyncMock()),
+        ):
+            session_cls.return_value.__aenter__ = AsyncMock(return_value=db)
+            session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            svc.get_chat_binding = AsyncMock(return_value=binding)
+            svc.toggle_ff_board = AsyncMock(return_value=True)
+            await cmd_board(msg)
+            assert "ближайшем синке" in msg.reply.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_board_off(self):
+        from backend.integrations.telegram_bot import cmd_board
+
+        msg = _make_message("/board off", chat_type="group")
+        binding = MagicMock()
+        binding.project_id, binding.id = 4, 9
+        db = MagicMock()
+        db.refresh = AsyncMock()
+        with (
+            patch("backend.integrations.telegram_bot.AsyncSessionLocal") as session_cls,
+            patch("backend.integrations.telegram_bot.telegram_service") as svc,
+        ):
+            session_cls.return_value.__aenter__ = AsyncMock(return_value=db)
+            session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            svc.get_chat_binding = AsyncMock(return_value=binding)
+            svc.toggle_ff_board = AsyncMock(return_value=True)
+            await cmd_board(msg)
+            svc.toggle_ff_board.assert_awaited_once_with(db, 9, 4, False)
+            assert "выключено" in msg.reply.call_args[0][0]

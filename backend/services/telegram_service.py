@@ -185,6 +185,36 @@ async def list_ff_notify_chats(db: AsyncSession, project_id: int) -> list[Telegr
     return list(result.scalars().all())
 
 
+async def toggle_ff_board(db: AsyncSession, binding_id: int, project_id: int, enabled: bool) -> bool:
+    """Toggle the pinned FF-board for a chat binding. Disabling also forgets the
+    pinned message id so a fresh board is created on re-enable."""
+    result = await db.execute(
+        select(TelegramChatBinding).where(
+            TelegramChatBinding.id == binding_id,
+            TelegramChatBinding.project_id == project_id,
+        )
+    )
+    binding = result.scalar_one_or_none()
+    if not binding:
+        return False
+    binding.ff_board_enabled = enabled
+    if not enabled:
+        binding.ff_board_message_id = None
+    await db.commit()
+    return True
+
+
+async def list_ff_board_chats(db: AsyncSession, project_id: int) -> list[TelegramChatBinding]:
+    """Chat bindings of a project that opted into the pinned FF-board."""
+    result = await db.execute(
+        select(TelegramChatBinding).where(
+            TelegramChatBinding.project_id == project_id,
+            TelegramChatBinding.ff_board_enabled == True,
+        )
+    )
+    return list(result.scalars().all())
+
+
 # ─── TMA Authentication ─────────────────────────────────────────────────────
 
 
