@@ -7,7 +7,10 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, RefreshFromFboResponse, WbFboSupply } from '@/types/api';
+import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, FfPushAssemblyResult, FulfillmentStatus, RefreshFromFboResponse, WbFboSupply } from '@/types/api';
+
+// Статусы, в которых заявку имеет смысл отправлять на ФФ (до отгрузки нашей стороной).
+const FF_PUSH_STATUSES: ReadonlySet<AssemblyStatus> = new Set<AssemblyStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED']);
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -51,6 +54,16 @@ export default function AssemblyDetailPage() {
     const [showCancelModal, setShowCancelModal] = useState(false);
     const [showReturnModal, setShowReturnModal] = useState(false);
 
+    // ФФ push (создать заявку на ФФ из нашей сборки)
+    const [ffStatus, setFfStatus] = useState<FulfillmentStatus | null>(null);
+    const [showPushModal, setShowPushModal] = useState(false);
+    const [pushWarehouse, setPushWarehouse] = useState('');
+    const [pushCollectionDate, setPushCollectionDate] = useState('');
+    const [pushUnloadingDate, setPushUnloadingDate] = useState('');
+    const [pushDeliveryType, setPushDeliveryType] = useState<'straight' | 'cross_dock'>('straight');
+    const [pushComment, setPushComment] = useState('');
+    const [pushResult, setPushResult] = useState<FfPushAssemblyResult | null>(null);
+
     // Refresh from FBO result
     const [refreshResult, setRefreshResult] = useState<RefreshFromFboResponse | null>(null);
 
@@ -84,6 +97,17 @@ export default function AssemblyDetailPage() {
     }, [id]);
 
     useEffect(() => { load(); }, [load]);
+
+    // Статус ФФ-подключения склада — нужен для кнопки «Создать заявку на ФФ».
+    const warehouseId = assembly?.warehouse_id;
+    useEffect(() => {
+        if (!warehouseId) return;
+        let cancelled = false;
+        api.getFulfillmentStatus(warehouseId)
+            .then(s => { if (!cancelled) setFfStatus(s); })
+            .catch(() => { if (!cancelled) setFfStatus(null); });
+        return () => { cancelled = true; };
+    }, [warehouseId]);
 
     // Кратность короба per-баркод (override > минимальный per-warehouse box_qty).
     useEffect(() => {
@@ -244,6 +268,46 @@ export default function AssemblyDetailPage() {
             setShowReturnModal(false);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setActionLoading(false);
+    };
+
+    // ─── ФФ push (создать заявку на ФФ из нашей сборки) ────────────────────
+    const canPushToFf = !!assembly && !assembly.ff_request_id
+        && ffStatus?.connected === true && ffStatus.provider === 'skladbot'
+        && FF_PUSH_STATUSES.has(assembly.status);
+
+    const openPushModal = () => {
+        if (!assembly) return;
+        const today = new Date().toISOString().slice(0, 10);
+        setPushWarehouse(assembly.effective_wb_warehouse || assembly.wb_warehouse_name || assembly.wb_warehouse_name_manual || '');
+        setPushCollectionDate(assembly.estimated_ready_date || today);
+        setPushUnloadingDate(assembly.estimated_ready_date || today);
+        setPushDeliveryType('straight');
+        setPushComment('');
+        setPushResult(null);
+        setError('');
+        setShowPushModal(true);
+    };
+
+    const pushFormValid = !!pushWarehouse.trim() && !!pushCollectionDate && !!pushUnloadingDate;
+
+    const handlePush = async () => {
+        if (!assembly || !pushFormValid) return;
+        setActionLoading(true);
+        setError('');
+        try {
+            const res = await api.createFfRequestFromAssembly(assembly.warehouse_id, assembly.id, {
+                marketplace_warehouse: pushWarehouse.trim(),
+                collection_date: pushCollectionDate,
+                unloading_date: pushUnloadingDate,
+                delivery_type: pushDeliveryType,
+                comment: pushComment.trim() || null,
+            });
+            setPushResult(res);
+            await load();  // подтянуть ff_request_* в шапку
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка создания заявки на ФФ');
         }
         setActionLoading(false);
     };
@@ -437,6 +501,15 @@ export default function AssemblyDetailPage() {
                 break;
             case 'CANCELLED':
                 break;
+        }
+
+        if (canPushToFf) {
+            buttons.push(
+                <button key="push-ff" className="btn btn-secondary" onClick={openPushModal} disabled={actionLoading}
+                    title="Создать заявку «Доставка на склад МП» у фулфилмента из состава этой сборки">
+                    📦 Создать заявку на ФФ
+                </button>,
+            );
         }
 
         return buttons;
@@ -874,6 +947,77 @@ export default function AssemblyDetailPage() {
                                 {actionLoading ? 'Назначение...' : 'Назначить'}
                             </button>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Push to FF modal */}
+            {showPushModal && assembly && (
+                <div className="modal-overlay" onClick={() => { setShowPushModal(false); setPushResult(null); }}>
+                    <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
+                        <h2 className="modal-title">Создать заявку на ФФ</h2>
+                        {!pushResult ? (
+                            <>
+                                <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 16 }}>
+                                    Создаст заявку «Доставка на склад МП» у фулфилмента ({ffStatus?.customer_name || 'skladbot'}) из
+                                    {' '}{assembly.items.length} позиц. ({formatNumber(assembly.items.reduce((s, it) => s + it.quantity, 0), 0)} шт).
+                                    Это <b>реальный заказ</b> у ФФ.
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                        <label className="form-label">Склад МП (город сдачи WB) *</label>
+                                        <input className="form-input" value={pushWarehouse} onChange={e => setPushWarehouse(e.target.value)} placeholder="Казань, Коледино..." autoFocus />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Тип поставки *</label>
+                                        <select className="form-input" value={pushDeliveryType} onChange={e => setPushDeliveryType(e.target.value as 'straight' | 'cross_dock')}>
+                                            <option value="straight">Прямая</option>
+                                            <option value="cross_dock">Транзит (кросс-док)</option>
+                                        </select>
+                                    </div>
+                                    <div className="form-group" />
+                                    <div className="form-group">
+                                        <label className="form-label">Дата забора *</label>
+                                        <input className="form-input" type="date" value={pushCollectionDate} onChange={e => setPushCollectionDate(e.target.value)} />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Дата выгрузки *</label>
+                                        <input className="form-input" type="date" value={pushUnloadingDate} onChange={e => setPushUnloadingDate(e.target.value)} />
+                                    </div>
+                                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                        <label className="form-label">Комментарий</label>
+                                        <input className="form-input" value={pushComment} onChange={e => setPushComment(e.target.value)} placeholder={`Заявка на сборку ${assembly.number} (DDS)`} />
+                                    </div>
+                                </div>
+                                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+                                    <button className="btn btn-secondary" onClick={() => setShowPushModal(false)}>Отмена</button>
+                                    <button className="btn btn-primary" onClick={handlePush} disabled={actionLoading || !pushFormValid}>
+                                        {actionLoading ? 'Создание...' : 'Создать заявку у ФФ'}
+                                    </button>
+                                </div>
+                            </>
+                        ) : (
+                            <>
+                                <div style={{ color: 'var(--color-success)', fontWeight: 600, marginBottom: 8 }}>
+                                    ✓ Заявка создана: {pushResult.ff_number || pushResult.external_id}
+                                </div>
+                                <div style={{ fontSize: 14, marginBottom: 8 }}>
+                                    Отправлено позиций: {pushResult.items_sent} ({formatNumber(pushResult.total_qty, 0)} шт).
+                                </div>
+                                {pushResult.skipped_barcodes.length > 0 && (
+                                    <div style={{ fontSize: 13, color: 'var(--color-warning)', marginBottom: 8 }}>
+                                        Не отправлено (нет остатка/карточки у ФФ): {pushResult.skipped_barcodes.length} ШК —
+                                        {' '}{pushResult.skipped_barcodes.slice(0, 10).join(', ')}{pushResult.skipped_barcodes.length > 10 ? '…' : ''}
+                                    </div>
+                                )}
+                                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+                                    <Link href={`/p/${slug}/warehouse/${assembly.warehouse_id}/ff-request/${pushResult.request.id}`}>
+                                        <button className="btn btn-secondary">Открыть ФФ-заявку</button>
+                                    </Link>
+                                    <button className="btn btn-primary" onClick={() => { setShowPushModal(false); setPushResult(null); }}>Готово</button>
+                                </div>
+                            </>
+                        )}
                     </div>
                 </div>
             )}

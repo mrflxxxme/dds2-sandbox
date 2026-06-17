@@ -375,6 +375,7 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
     const [token, setToken] = useState('');
     const [baseUrl, setBaseUrl] = useState('');
     const [tenantGuid, setTenantGuid] = useState('');
+    const [customerId, setCustomerId] = useState('');  // skladbot: id кабинета (для FF-operator токена)
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [syncMsg, setSyncMsg] = useState('');
@@ -403,10 +404,12 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
                 token: token.trim(),
                 base_url: provider === 'wmscelicom' ? baseUrl.trim() : null,
                 tenant_guid: provider === 'migfull' ? tenantGuid.trim() : null,
+                customer_id: provider === 'skladbot' && customerId.trim() ? Number(customerId.trim()) : null,
             });
             setToken('');
             setBaseUrl('');
             setTenantGuid('');
+            setCustomerId('');
             onChanged();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка подключения');
@@ -504,6 +507,19 @@ function FulfillmentSection({ warehouseId, status, onChanged }: {
                                     value={tenantGuid}
                                     onChange={e => setTenantGuid(e.target.value)}
                                     placeholder="123e4567-e89b-…"
+                                    autoComplete="off"
+                                />
+                            </div>
+                        )}
+                        {provider === 'skladbot' && (
+                            <div className="form-group" style={{ width: 200, marginBottom: 0 }}>
+                                <label className="form-label" title="Для FF-operator токена (видит несколько кабинетов) укажите id вашего кабинета. Для селлер-токена можно оставить пустым.">ID кабинета</label>
+                                <input
+                                    className="form-input"
+                                    type="number"
+                                    value={customerId}
+                                    onChange={e => setCustomerId(e.target.value)}
+                                    placeholder="напр. 6282"
                                     autoComplete="off"
                                 />
                             </div>

@@ -24,10 +24,12 @@ from backend.schemas.fulfillment import (
     FfBoxOverridePayload,
     FfBoxPack,
     FfCreateAssemblyResult,
+    FfCreateRequestPayload,
     FfLinkCandidatesResponse,
     FfLinkPayload,
     FfNomenclatureOption,
     FfOverviewResponse,
+    FfPushAssemblyResult,
     FfRequestDetail,
     FfRequestRow,
     FfStatusEvent,
@@ -97,6 +99,7 @@ async def connect(
             payload.token,
             base_url=payload.base_url,
             tenant_guid=payload.tenant_guid,
+            customer_id=payload.customer_id,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
@@ -316,6 +319,35 @@ async def create_assembly_from_ff(
         raise HTTPException(400, str(e)) from e
     if data is None:
         raise HTTPException(404, "ФФ-заявка не найдена")
+    return data
+
+
+@wh_router.post(
+    "/assembly/{assembly_request_id}/create-request",
+    response_model=FfPushAssemblyResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_ff_request_from_assembly(
+    warehouse_id: int,
+    assembly_request_id: int,
+    payload: FfCreateRequestPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Создать заявку «Доставка на склад МП» (851) у skladbot из нашей заявки на сборку.
+
+    Реальный заказ у ФФ: состав = позиции сборки, склад МП/даты/тип поставки — из payload.
+    Созданная заявка зеркалится и связывается со сборкой. Идемпотентно: если сборка
+    уже связана с ФФ-заявкой — 400.
+    """
+    try:
+        data = await fulfillment_service.create_ff_request_from_assembly(
+            db, project.id, warehouse_id, assembly_request_id, payload
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if data is None:
+        raise HTTPException(404, "Заявка на сборку не найдена")
     return data
 
 

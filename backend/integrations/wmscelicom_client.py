@@ -9,17 +9,21 @@ Base: клиентский инстанс `https://{client}.wmscelicom.ru` (wild
 
 Endpoints used (https://api-doc.wmscelicom.ru/):
 - GET /api/{t}/items/get/           — товары + остатки (bare JSON array)
-- GET /api/{t}/shipmentsfbo/list/   — отгрузки FBO («ФФ сборка»); with_packages=1
-  + with_items=1 кладут состав коробов внутрь; data — dict {id: row}
+- GET /api/{t}/dispatchorders/list/ — заявки на отгрузку («ФФ сборка», зОГ): склад
+  отгрузки (город МП) + состав (items[]); data — dict {orderid: row}. Это РОДИТЕЛЬ
+  отгрузки FBO; shipmentsfbo (где shipped_target — лишь площадка) больше не тянем.
 - GET /api/{t}/unloadingorders/list/ — заявки на приёмку; data — dict {id: row}
 
-Ограничения API: 150 req/min на всё; max 30 элементов на страницу.
+Ограничения API: 150 req/min на всё; max 30 элементов на страницу. Список заявок
+на отгрузку тяжёлый при широкой выборке (сервер материализует весь набор до
+пагинации) — тянем двумя ограниченными запросами (активные / терминальные+окно).
 
 Resilience:
 - Per-project circuit breaker (5 failures → 120s cooldown), 4xx исключены
 - Exponential backoff retry на fetch-методах (429/5xx)
 """
 
+import json
 from urllib.parse import urlparse
 
 import httpx
@@ -44,6 +48,12 @@ PAGE_LIMIT = 30
 
 # Защита от бесконечной пагинации (30/стр × 400 = 12k записей максимум)
 MAX_PAGES = 400
+
+# Английские статусы заявки на отгрузку (dispatchorders), см. openapi.
+# Активные ещё не отгружены (FBO-отгрузки нет) → date-фильтр (он по дате отгрузки)
+# их бы отсёк, поэтому тянем без даты — их немного. Терминальные тянем за окно.
+DISPATCH_ACTIVE_STATUSES = ("new", "combinig", "waitforcombine", "waitingdelivery", "combined", "waitclientapproval")
+DISPATCH_TERMINAL_STATUSES = ("ondelivery", "delivered", "annuled")
 
 
 class WmsCelicomApiError(ValueError):
@@ -186,9 +196,26 @@ class WmsCelicomClient:
         return await self._fetch_paginated("items/get/")
 
     @retry_with_backoff(max_retries=3)
-    async def fetch_shipments_fbo(self) -> list[dict]:
-        """Все отгрузки FBO с коробами и составом (with_packages=1 + with_items=1)."""
-        return await self._fetch_paginated("shipmentsfbo/list/", params={"with_packages": 1, "with_items": 1})
+    async def fetch_dispatch_orders(self, terminal_from: str, terminal_to: str) -> list[dict]:
+        """Заявки на отгрузку (DispatchOrders) со складом отгрузки и составом.
+
+        Состав уже внутри (items[]), отдельной деталки нет. Чтобы не материализовать
+        весь архив (медленно/таймаут), тянем двумя ограниченными выборками:
+        активные статусы целиком (их немного, без date-фильтра — он по дате FBO,
+        которой у них ещё нет) + терминальные за окно [terminal_from, terminal_to]
+        (YYYY-MM-DD). Статус-фильтр — JSON-массив английских статусов.
+        """
+        rows = await self._fetch_paginated(
+            "dispatchorders/list/", params={"status": json.dumps(DISPATCH_ACTIVE_STATUSES)}
+        )
+        rows += await self._fetch_paginated(
+            "dispatchorders/list/",
+            params={
+                "status": json.dumps(DISPATCH_TERMINAL_STATUSES),
+                "date": json.dumps([terminal_from, terminal_to]),
+            },
+        )
+        return rows
 
     @retry_with_backoff(max_retries=3)
     async def fetch_unloading_orders(self) -> list[dict]:

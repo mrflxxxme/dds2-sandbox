@@ -37,7 +37,11 @@ async def _connect_skladbot(db_session, project_id, warehouse_id, monkeypatch):
     async def fake_test_connection(self):
         return {"id": 6282, "name": "ООО ТЕСТ ФФ"}
 
+    async def fake_count_customers(self):
+        return 1
+
     monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "count_customers", fake_count_customers)
     await fulfillment_service.connect(db_session, project_id, warehouse_id, "skladbot", FAKE_SKLADBOT_TOKEN)
 
 

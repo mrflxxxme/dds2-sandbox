@@ -20,6 +20,10 @@ class FulfillmentConnectPayload(BaseModel):
     base_url: str | None = Field(None, max_length=200)
     # migfull («Натали»): GUID кабинета клиента (хост фиксированный — migfull.app)
     tenant_guid: str | None = Field(None, max_length=64)
+    # skladbot: id кабинета клиента. Обязателен, когда токен видит >1 клиента
+    # (FF-operator токен видит весь tenant) — иначе заявки/остатки уйдут не тому.
+    # Для селлер-токена (1 клиент) можно не указывать.
+    customer_id: int | None = None
 
 
 class FulfillmentStatus(BaseModel):
@@ -255,6 +259,37 @@ class FfCreateAssemblyResult(BaseModel):
     assembly_number: str
     items_created: int = 0
     skipped_barcodes: list[str] = Field(default_factory=list)  # ШК без номенклатуры
+
+
+# ─── Push: наша заявка на сборку → заявка ФФ (skladbot тип 851) ──────────────
+
+
+class FfCreateRequestPayload(BaseModel):
+    """Параметры создания заявки «Доставка на склад МП» (851) из нашей сборки.
+
+    marketplace_warehouse (город/склад МП), даты забора/выгрузки и тип поставки
+    не хранятся в нашей AssemblyRequest — задаются в диалоге (предзаполняются из
+    заявки на фронте). Состав берётся из позиций сборки автоматически.
+    """
+
+    marketplace_warehouse: str = Field(min_length=1, max_length=200)  # склад МП (город сдачи WB)
+    collection_date: date  # дата забора груза
+    unloading_date: date  # дата выгрузки на склад МП
+    marketplace: str = Field("Wildberries", max_length=50)
+    delivery_type: Literal["straight", "cross_dock"] = "straight"  # прямая / транзит
+    comment: str | None = Field(None, max_length=1000)
+    notify: bool = False  # уведомление на стороне ФФ
+
+
+class FfPushAssemblyResult(BaseModel):
+    """Итог отправки нашей заявки на сборку в ФФ (создан реальный заказ у skladbot)."""
+
+    request: FfRequestRow  # зеркало созданной ФФ-заявки (уже связано со сборкой)
+    external_id: str  # id заявки у ФФ
+    ff_number: str | None = None  # WH-R-...
+    items_sent: int = 0  # позиций отправлено
+    total_qty: int = 0  # суммарно штук отправлено
+    skipped_barcodes: list[str] = Field(default_factory=list)  # ШК без остатка/карточки у ФФ
 
 
 # ─── История смены статусов заявок ФФ ──────────────────────────────────────

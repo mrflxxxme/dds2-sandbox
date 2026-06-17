@@ -11,6 +11,11 @@ from backend.integrations.skladbot_client import SkladbotClient
 FAKE_TOKEN = "fake_skladbot_token_1234567890_abcdef"  # noqa: S105 — фейковый токен для тестов
 
 
+async def _fake_count_one(self):
+    """connect проверяет число кабинетов токена — для тестов это всегда 1 (селлер)."""
+    return 1
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -121,7 +126,11 @@ async def test_connect_and_status_roundtrip(client, auth_headers, monkeypatch):
     async def fake_test_connection(self):
         return {"id": 6282, "name": "ООО ТЕСТ ФФ"}
 
+    async def fake_count_customers(self):
+        return 1
+
     monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "count_customers", fake_count_customers)
 
     headers = await _project_headers(client, auth_headers)
     wh_id = await _create_warehouse(client, headers)
@@ -269,6 +278,7 @@ async def test_request_detail_not_connected_400(client, auth_headers, monkeypatc
         return {}
 
     monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "count_customers", _fake_count_one)
     monkeypatch.setattr(SkladbotClient, "fetch_all_products", fake_fetch_all_products)
     monkeypatch.setattr(SkladbotClient, "fetch_requests", fake_fetch_requests)
     monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_fetch_request_detail)
@@ -377,6 +387,7 @@ async def test_status_history_after_sync(client, auth_headers, monkeypatch):
         return {}
 
     monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "count_customers", _fake_count_one)
     monkeypatch.setattr(SkladbotClient, "fetch_all_products", fake_fetch_all_products)
     monkeypatch.setattr(SkladbotClient, "fetch_requests", fake_fetch_requests)
     monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_fetch_request_detail)
@@ -431,6 +442,7 @@ async def test_sync_runs_after_sync(client, auth_headers, monkeypatch):
         return {}
 
     monkeypatch.setattr(SkladbotClient, "test_connection", fake_test_connection)
+    monkeypatch.setattr(SkladbotClient, "count_customers", _fake_count_one)
     monkeypatch.setattr(SkladbotClient, "fetch_all_products", fake_fetch_all_products)
     monkeypatch.setattr(SkladbotClient, "fetch_requests", fake_fetch_requests)
     monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_fetch_request_detail)
