@@ -765,6 +765,11 @@ async def create_assembly_request(
     await db.commit()
     await db.refresh(assembly_req)
     await invalidate_cache("reports:assembly_flow")
+
+    # Best-effort: уведомить чат склада ФФ о новой заявке (никогда не бросает).
+    from backend.services.fulfillment_notify import notify_assembly_created
+
+    await notify_assembly_created(db, project_id, [assembly_req.id])
     return assembly_req
 
 

@@ -16,10 +16,14 @@ request card in DDS) and "Состав" (callback that lists line items in-chat)
 import asyncio
 import html
 import logging
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING
 
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem
+from backend.models.wb_fbo import WbFboSupply
 from backend.services import telegram_service
 
 if TYPE_CHECKING:
@@ -236,3 +240,119 @@ async def refresh_ff_board(db: AsyncSession, project_id: int) -> None:
         raise
     except Exception as exc:
         logger.warning("FF board error (project=%s): %s", project_id, exc)
+
+
+# ─── Уведомление в чат склада о новых заявках на сборку ──────────────────────
+
+_ASM_CREATED_ROWS_LIMIT = 20  # строк в сводном bulk-сообщении (+ «…ещё M»)
+
+
+def _fmt_qty_n(n: int) -> str:
+    """1416 → «1 416» (пробел-разделитель тысяч для читаемости)."""
+    return f"{n:,}".replace(",", " ")
+
+
+def build_assembly_created_text(items: list[dict]) -> str:
+    """HTML-сообщение «новая заявка(и) на сборку» для одного склада ФФ.
+
+    items — [{number, qty, dest, eta}] заявок ЭТОГО склада. Один элемент —
+    карточка заявки; несколько (bulk-распределение) — сводка со списком и итогом,
+    чтобы не спамить чат отдельными сообщениями.
+    """
+    e = html.escape
+    total = sum(it["qty"] for it in items)
+    if len(items) == 1:
+        it = items[0]
+        lines = ["🆕 <b>Новая заявка на сборку</b>", "", f"🏷 <code>{e(it['number'])}</code>"]
+        if it["dest"]:
+            lines.append(f"🏬 Назначение: <b>{e(str(it['dest']))}</b>")
+        lines.append(f"📦 Кол-во: <b>{_fmt_qty_n(it['qty'])} шт</b>")
+        if it["eta"]:
+            lines.append(f"🗓 План готовности: {it['eta']:%d.%m}")
+        return "\n".join(lines)
+
+    lines = [f"🆕 <b>{len(items)} новых заявок на сборку</b>", ""]
+    shown = items[:_ASM_CREATED_ROWS_LIMIT]
+    body = []
+    for it in shown:
+        dest = f" · <b>{e(str(it['dest']))}</b>" if it["dest"] else ""
+        body.append(f"<code>{e(it['number'])}</code>{dest} · {_fmt_qty_n(it['qty'])} шт")
+    if len(items) > _ASM_CREATED_ROWS_LIMIT:
+        body.append(f"…ещё {len(items) - _ASM_CREATED_ROWS_LIMIT}")
+    lines.append("<blockquote expandable>" + "\n".join(body) + "</blockquote>")
+    lines.append(f"📦 Итого: <b>{_fmt_qty_n(total)} шт</b>")
+    return "\n".join(lines)
+
+
+async def notify_assembly_created(db: AsyncSession, project_id: int, request_ids: list[int]) -> None:
+    """Best-effort: уведомить чат склада ФФ о новых заявках на сборку.
+
+    Заявки группируются по складу — одно сводное сообщение на склад (без спама при
+    bulk-распределении). Шлём только в чаты, привязанные к этому складу
+    (ff_board_warehouse_id). Работает из web-процесса (httpx через analytics-бота).
+    Никогда не бросает в создающую транзакцию — вызывать ПОСЛЕ commit.
+    """
+    if not request_ids:
+        return
+    try:
+        # Дешёвый guard: без чатов, привязанных к складам, тяжёлый select не нужен
+        # (горячий путь — фича включена не у всех проектов). Таблица крошечная.
+        bindings = await telegram_service.list_warehouse_linked_bindings(db, project_id)
+        if not bindings:
+            return
+        wh_to_chats: dict[int, list[int]] = {}
+        for b in bindings:
+            if b.ff_board_warehouse_id is None:  # отфильтровано в запросе, но сужаем тип
+                continue
+            wh_to_chats.setdefault(b.ff_board_warehouse_id, []).append(b.chat_id)
+
+        result = await db.execute(
+            select(
+                AssemblyRequest.warehouse_id,
+                AssemblyRequest.number,
+                AssemblyRequest.estimated_ready_date,
+                AssemblyRequest.wb_warehouse_name_manual,
+                WbFboSupply.warehouse_name,
+                func.coalesce(func.sum(AssemblyRequestItem.quantity), 0),
+            )
+            .outerjoin(
+                WbFboSupply,
+                and_(
+                    WbFboSupply.id == AssemblyRequest.wb_fbo_supply_id,
+                    WbFboSupply.project_id == project_id,
+                ),
+            )
+            .outerjoin(AssemblyRequestItem, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+            .where(
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.id.in_(request_ids),
+                AssemblyRequest.warehouse_id.in_(list(wh_to_chats)),
+                AssemblyRequest.is_deleted == False,
+            )
+            .group_by(AssemblyRequest.id, WbFboSupply.warehouse_name)
+        )
+        by_wh: dict[int, list[dict]] = {}
+        for wh_id, number, eta, manual_dest, fbo_dest, qty in result.all():
+            by_wh.setdefault(wh_id, []).append(
+                {
+                    "number": str(number),
+                    "eta": eta,
+                    "dest": fbo_dest or manual_dest or None,
+                    "qty": int(qty or 0),
+                }
+            )
+
+        # Шлём ПАРАЛЛЕЛЬНО — латенси ответа ограничена одним таймаутом, а не суммой
+        # по складам/чатам (важно при bulk-распределении; отправка best-effort).
+        sends: list[Awaitable[bool]] = []
+        for wh_id, items in by_wh.items():
+            text = build_assembly_created_text(items)
+            sends.extend(
+                telegram_service.send_analytics_message(chat_id, text) for chat_id in wh_to_chats.get(wh_id, [])
+            )
+        if sends:
+            await asyncio.gather(*sends, return_exceptions=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("assembly-created notify error (project=%s): %s", project_id, exc)
