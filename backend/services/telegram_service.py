@@ -5,12 +5,14 @@ Telegram bot service — deep link auth, chat binding, brand notes, TMA auth.
 import logging
 import secrets
 
+import httpx
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.auth import create_access_token, create_refresh_token
 from backend.cache import get_redis
+from backend.config import settings
 from backend.models.auth import Project, ProjectMember, User
 from backend.models.integrations import WbFunnelDaily
 from backend.models.telegram import BrandNote, TelegramBotUser, TelegramChatBinding
@@ -255,6 +257,51 @@ async def set_ff_board_config(
         binding.ff_board_message_id = None
     await db.commit()
     return True
+
+
+async def list_warehouse_linked_bindings(db: AsyncSession, project_id: int) -> list[TelegramChatBinding]:
+    """Все привязки проекта к складам ФФ (ff_board_warehouse_id задан) — «чаты
+    складов». Туда шлём уведомления о новых заявках на сборку соответствующего
+    склада. Пустой список → ранний выход у вызывающих, без тяжёлых запросов на
+    горячем пути создания заявки.
+    """
+    result = await db.execute(
+        select(TelegramChatBinding).where(
+            TelegramChatBinding.project_id == project_id,
+            TelegramChatBinding.ff_board_warehouse_id.is_not(None),
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def send_analytics_message(chat_id: int, text: str, *, reply_markup: dict | None = None) -> bool:
+    """Best-effort: послать HTML-сообщение в чат через analytics-бота из ЛЮБОГО
+    процесса (httpx → Telegram API), не завися от aiogram-синглтона воркера
+    (в web-процессе `bot` is None). True — отправлено. Никогда не бросает.
+
+    Токен не настроен (локалка/маскированные ключи) → no-op, False.
+    """
+    token = settings.TELEGRAM_BOT_TOKEN_ANALYTICS
+    if not token:
+        return False
+    payload: dict = {
+        "chat_id": chat_id,
+        "text": text[:4096],  # Telegram-лимит
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    try:
+        async with httpx.AsyncClient(timeout=8, proxy=settings.TELEGRAM_PROXY or None) as client:
+            resp = await client.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
+        if resp.status_code != 200:
+            logger.warning("analytics-bot send failed (chat=%s): %s", chat_id, resp.text[:200])
+            return False
+        return True
+    except Exception as exc:  # сеть/прокси/таймаут — best-effort
+        logger.warning("analytics-bot send error (chat=%s): %s", chat_id, exc)
+        return False
 
 
 # ─── TMA Authentication ─────────────────────────────────────────────────────
