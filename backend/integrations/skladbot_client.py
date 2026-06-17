@@ -255,6 +255,22 @@ class SkladbotClient:
         return data.get("data") or {}
 
     @retry_with_backoff(max_retries=3)
+    async def fetch_form_data(self) -> dict:
+        """Справочники формы создания заявки: GET /v1/requests/form-data.
+
+        Возвращает `requestTypes[]` (типы с активными полями), `customers[]` и
+        `utils{}` — справочники select-полей: `marketplaces`, `marketplaceWarehouses`
+        (text/value/marketplace/customer/is_active), `marketplaceDeliveryTypes` и др.
+        Нужно, потому что поля `marketplace` / `marketplace_warehouse` заявки типа
+        851 принимают НЕ имя, а integer `value` (id) из этих справочников.
+        """
+        data = await self._request("GET", "/v1/requests/form-data")
+        # Laravel иногда заворачивает в {data}; справочники могут лежать и на верхнем уровне
+        if isinstance(data, dict) and isinstance(data.get("data"), dict):
+            return data["data"]
+        return data if isinstance(data, dict) else {}
+
+    @retry_with_backoff(max_retries=3)
     async def resolve_products(
         self,
         customer_id: int,

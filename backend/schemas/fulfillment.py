@@ -264,18 +264,53 @@ class FfCreateAssemblyResult(BaseModel):
 # ─── Push: наша заявка на сборку → заявка ФФ (skladbot тип 851) ──────────────
 
 
+class FfFormOption(BaseModel):
+    """Опция select-поля формы создания заявки ФФ (skladbot form-data → utils)."""
+
+    id: int  # value справочника — отправляется в fields.*.value
+    name: str  # text для отображения в выпадающем списке
+
+
+class FfDeliveryTypeOption(BaseModel):
+    """Тип поставки: его value — строковый ключ (straight/cross_dock), не id."""
+
+    value: str
+    name: str
+
+
+class FfCreateFormResponse(BaseModel):
+    """Справочники для диалога создания заявки 851 (живой GET /v1/requests/form-data).
+
+    Поля `marketplace` / `marketplace_warehouse` у skladbot — select по integer id,
+    а НЕ по имени; поэтому диалог обязан выбирать из этих списков и слать id.
+    Даты/тип/склад предзаполняются: `suggested_*` — лучшее совпадение по заявке.
+    """
+
+    marketplace_id: int  # выбранный по умолчанию маркетплейс (Wildberries)
+    marketplace_name: str
+    warehouses: list[FfFormOption]  # склады МП для marketplace_id (активные, видимые клиенту)
+    delivery_types: list[FfDeliveryTypeOption]
+    suggested_warehouse_id: int | None = None  # совпадение со складом WB заявки, иначе None
+    suggested_warehouse_hint: str | None = None  # склад WB заявки (для подсказки в UI)
+    collection_date: date
+    unloading_date: date
+    delivery_type: str = "straight"
+
+
 class FfCreateRequestPayload(BaseModel):
     """Параметры создания заявки «Доставка на склад МП» (851) из нашей сборки.
 
-    marketplace_warehouse (город/склад МП), даты забора/выгрузки и тип поставки
-    не хранятся в нашей AssemblyRequest — задаются в диалоге (предзаполняются из
-    заявки на фронте). Состав берётся из позиций сборки автоматически.
+    marketplace_warehouse_id (id склада МП), даты забора/выгрузки и тип поставки
+    не хранятся в нашей AssemblyRequest — выбираются в диалоге из справочников
+    `GET .../assembly/{id}/create-form` (предзаполняются из заявки на фронте).
+    Состав берётся из позиций сборки автоматически. ВАЖНО: skladbot принимает по
+    полям `marketplace`/`marketplace_warehouse` integer id из form-data, не имя.
     """
 
-    marketplace_warehouse: str = Field(min_length=1, max_length=200)  # склад МП (город сдачи WB)
+    marketplace_warehouse_id: int = Field(gt=0)  # id склада МП (utils.marketplaceWarehouses[].value)
     collection_date: date  # дата забора груза
     unloading_date: date  # дата выгрузки на склад МП
-    marketplace: str = Field("Wildberries", max_length=50)
+    marketplace_id: int = Field(1, gt=0)  # id маркетплейса (utils.marketplaces[].value); Wildberries=1
     delivery_type: Literal["straight", "cross_dock"] = "straight"  # прямая / транзит
     comment: str | None = Field(None, max_length=1000)
     notify: bool = False  # уведомление на стороне ФФ

@@ -7,7 +7,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, FfPushAssemblyResult, FulfillmentStatus, RefreshFromFboResponse, WbFboSupply } from '@/types/api';
+import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, RefreshFromFboResponse, WbFboSupply } from '@/types/api';
 
 // Статусы, в которых заявку имеет смысл отправлять на ФФ (до отгрузки нашей стороной).
 const FF_PUSH_STATUSES: ReadonlySet<AssemblyStatus> = new Set<AssemblyStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED']);
@@ -57,7 +57,9 @@ export default function AssemblyDetailPage() {
     // ФФ push (создать заявку на ФФ из нашей сборки)
     const [ffStatus, setFfStatus] = useState<FulfillmentStatus | null>(null);
     const [showPushModal, setShowPushModal] = useState(false);
-    const [pushWarehouse, setPushWarehouse] = useState('');
+    const [pushForm, setPushForm] = useState<FfCreateFormResponse | null>(null);
+    const [pushFormLoading, setPushFormLoading] = useState(false);
+    const [pushWarehouseId, setPushWarehouseId] = useState<number | ''>('');
     const [pushCollectionDate, setPushCollectionDate] = useState('');
     const [pushUnloadingDate, setPushUnloadingDate] = useState('');
     const [pushDeliveryType, setPushDeliveryType] = useState<'straight' | 'cross_dock'>('straight');
@@ -277,10 +279,11 @@ export default function AssemblyDetailPage() {
         && ffStatus?.connected === true && ffStatus.provider === 'skladbot'
         && FF_PUSH_STATUSES.has(assembly.status);
 
-    const openPushModal = () => {
+    const openPushModal = async () => {
         if (!assembly) return;
         const today = new Date().toISOString().slice(0, 10);
-        setPushWarehouse(assembly.effective_wb_warehouse || assembly.wb_warehouse_name || assembly.wb_warehouse_name_manual || '');
+        setPushForm(null);
+        setPushWarehouseId('');
         setPushCollectionDate(assembly.estimated_ready_date || today);
         setPushUnloadingDate(assembly.estimated_ready_date || today);
         setPushDeliveryType('straight');
@@ -288,9 +291,22 @@ export default function AssemblyDetailPage() {
         setPushResult(null);
         setError('');
         setShowPushModal(true);
+        // Склад МП у skladbot — select по id из живого form-data, не свободный текст
+        setPushFormLoading(true);
+        try {
+            const form = await api.getFfCreateForm(assembly.warehouse_id, assembly.id);
+            setPushForm(form);
+            setPushWarehouseId(form.suggested_warehouse_id ?? '');
+            setPushCollectionDate(form.collection_date || assembly.estimated_ready_date || today);
+            setPushUnloadingDate(form.unloading_date || assembly.estimated_ready_date || today);
+            if (form.delivery_type === 'straight' || form.delivery_type === 'cross_dock') setPushDeliveryType(form.delivery_type);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Не удалось загрузить склады МП');
+        }
+        setPushFormLoading(false);
     };
 
-    const pushFormValid = !!pushWarehouse.trim() && !!pushCollectionDate && !!pushUnloadingDate;
+    const pushFormValid = pushWarehouseId !== '' && !!pushCollectionDate && !!pushUnloadingDate;
 
     const handlePush = async () => {
         if (!assembly || !pushFormValid) return;
@@ -298,7 +314,8 @@ export default function AssemblyDetailPage() {
         setError('');
         try {
             const res = await api.createFfRequestFromAssembly(assembly.warehouse_id, assembly.id, {
-                marketplace_warehouse: pushWarehouse.trim(),
+                marketplace_warehouse_id: pushWarehouseId,
+                marketplace_id: pushForm?.marketplace_id,
                 collection_date: pushCollectionDate,
                 unloading_date: pushUnloadingDate,
                 delivery_type: pushDeliveryType,
@@ -965,14 +982,34 @@ export default function AssemblyDetailPage() {
                                 </div>
                                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                                     <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                                        <label className="form-label">Склад МП (город сдачи WB) *</label>
-                                        <input className="form-input" value={pushWarehouse} onChange={e => setPushWarehouse(e.target.value)} placeholder="Казань, Коледино..." autoFocus />
+                                        <label className="form-label">Склад МП ({pushForm?.marketplace_name || 'WB'}) *</label>
+                                        <select
+                                            className="form-input"
+                                            value={pushWarehouseId}
+                                            onChange={e => setPushWarehouseId(e.target.value ? Number(e.target.value) : '')}
+                                            disabled={pushFormLoading || !pushForm}
+                                            autoFocus
+                                        >
+                                            <option value="">{pushFormLoading ? 'Загрузка складов…' : '— выберите склад МП —'}</option>
+                                            {pushForm?.warehouses.map(w => (
+                                                <option key={w.id} value={w.id}>{w.name}</option>
+                                            ))}
+                                        </select>
+                                        {pushForm?.suggested_warehouse_hint && pushWarehouseId === '' && !pushFormLoading && (
+                                            <div style={{ fontSize: 12, color: 'var(--color-warning)', marginTop: 4 }}>
+                                                Склад заявки «{pushForm.suggested_warehouse_hint}» не найден в списке ФФ — выберите вручную.
+                                            </div>
+                                        )}
                                     </div>
                                     <div className="form-group">
                                         <label className="form-label">Тип поставки *</label>
                                         <select className="form-input" value={pushDeliveryType} onChange={e => setPushDeliveryType(e.target.value as 'straight' | 'cross_dock')}>
-                                            <option value="straight">Прямая</option>
-                                            <option value="cross_dock">Транзит (кросс-док)</option>
+                                            {(pushForm?.delivery_types?.length
+                                                ? pushForm.delivery_types
+                                                : [{ value: 'straight', name: 'Прямая' }, { value: 'cross_dock', name: 'Транзит (кросс-док)' }]
+                                            ).map(d => (
+                                                <option key={d.value} value={d.value}>{d.name}</option>
+                                            ))}
                                         </select>
                                     </div>
                                     <div className="form-group" />
