@@ -3514,6 +3514,8 @@ export interface FfRequestRow {
   ff_status: FfStatusCode;
   /** заявлено всего, шт (skladbot — из деталки) */
   total_qty: number | null;
+  /** кол-во в штуках россыпи (пересчёт коробов, migfull); null — без коробов/не разрезолвлено */
+  total_qty_units: number | null;
   /** склад отгрузки МП («Склад МП» / shipped_target) */
   dest_warehouse: string | null;
   external_created_at: string | null;
@@ -3726,12 +3728,16 @@ export interface FfLinkCandidate {
   score: number | null;
   /** объяснение score: «ШК 75%, кол-во ±10%, дата ±1 дн» */
   reason: string | null;
+  /** склад сдачи кандидата совпал со складом сдачи ФФ-заявки (нормализованно) */
+  warehouse_match: boolean;
 }
 
 export interface FfLinkCandidatesResponse {
   kind: FfRequestKind;
   ff_number: string | null;
   ff_total_qty: number | null;
+  /** склад сдачи самой ФФ-заявки (для фильтра кандидатов по складу) */
+  ff_dest_warehouse: string | null;
   /** false — состав ФФ-заявки недоступен, score не рассчитан */
   composition_available: boolean;
   candidates: FfLinkCandidate[];
@@ -3802,4 +3808,54 @@ export interface FfPushAssemblyResult {
   total_qty: number;
   /** ШК без остатка/карточки у ФФ — не отправлены */
   skipped_barcodes: string[];
+}
+
+/** ШК, по которому у ФФ доступно меньше, чем нужно по сборке. */
+export interface FfDeficitItem {
+  barcode: string;
+  needed: number;
+  available: number;
+}
+
+/** Массовое создание заявок ФФ из нескольких сборок (склад МП/дата выгрузки — по каждой). */
+export interface FfBulkCreateRequestPayload {
+  assembly_request_ids: number[];
+  /** Дата забора груза — общая для всех (YYYY-MM-DD) */
+  collection_date: string;
+  marketplace_id?: number;
+  delivery_type?: 'straight' | 'cross_dock';
+  comment?: string | null;
+  notify?: boolean;
+}
+
+/** Итог push одной сборки в батче. */
+export interface FfBulkCreateAssemblyResult {
+  assembly_request_id: number;
+  assembly_number: string;
+  status: 'created' | 'deficit' | 'no_warehouse' | 'already_linked' | 'empty' | 'error';
+  ff_number: string | null;
+  external_id: string | null;
+  items_sent: number;
+  total_qty: number;
+  /** подобранный склад МП (для созданных) */
+  dest_warehouse: string | null;
+  deficit: FfDeficitItem[];
+  message: string | null;
+}
+
+export interface FfBulkCreateResult {
+  results: FfBulkCreateAssemblyResult[];
+  created_count: number;
+  /** всё, что не created */
+  failed_count: number;
+}
+
+export interface FfBulkArchivePayload {
+  ff_request_ids: number[];
+  /** true — в архив, false — вернуть из архива */
+  archived: boolean;
+}
+
+export interface FfBulkArchiveResult {
+  updated: number;
 }

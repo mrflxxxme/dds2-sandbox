@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filterFfLinkCandidates, splitFfLinkCandidates } from '@/lib/utils/ffLinkCandidates';
+import { filterFfLinkCandidates, splitFfLinkCandidates, normWhName, whNamesMatch } from '@/lib/utils/ffLinkCandidates';
 import type { FfLinkCandidate } from '@/types/api';
 
 function makeCandidate(overrides: Partial<FfLinkCandidate> & { doc_id: number }): FfLinkCandidate {
@@ -12,6 +12,7 @@ function makeCandidate(overrides: Partial<FfLinkCandidate> & { doc_id: number })
         dest_warehouse: null,
         score: null,
         reason: null,
+        warehouse_match: true,
         ...overrides,
     };
 }

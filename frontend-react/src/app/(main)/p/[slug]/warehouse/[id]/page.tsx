@@ -10,10 +10,12 @@ import type {
     WarehouseStockRow, StockMovement, StockTransfer, DeliveryTimesResponse,
     DefectMarkOperation, VehicleStatus,
     FulfillmentStatus, FulfillmentProviderId, FfStocksResponse, FfStockRow, FfBoxPack, FfNomenclatureOption, FfRequestRow, FfRequestKind, FfStatusEvent, FfSyncRun, FfUnlinkedAssembly,
+    FfBulkCreateResult, FfBulkCreateAssemblyResult,
 } from '@/types/api';
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
 import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge, ffStatusBadge, ffStatusLabel, ffEventBadge, ffEventSummary } from './ff-shared';
+import { whNamesMatch } from '@/lib/utils/ffLinkCandidates';
 
 /* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
 
@@ -2506,15 +2508,29 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
     // Модал «Связать» (общий пикер — ff-shared)
     const [linkFor, setLinkFor] = useState<FfRequestRow | null>(null);
 
+    // Массовый выбор строк (для архива/возврата) — id видимых заявок
+    const [selected, setSelected] = useState<Set<number>>(new Set());
+    const [bulkActing, setBulkActing] = useState(false);
+
     // Тик-счётчики для ручного перезапуска загрузки заявок и блока «без связи» (после реверс-линка)
     const [reloadTick, setReloadTick] = useState(0);
     const [unlinkedReloadTick, setUnlinkedReloadTick] = useState(0);
+
+    // Смена вида/фильтра/перезагрузка — сбросить выбор (id устаревают)
+    useEffect(() => { setSelected(new Set()); }, [warehouseId, kind, showArchived, stageFilter, statusFilter, reloadTick]);
 
     // Реверс-линк связал ФФ-заявку с нашей сборкой → обновляем обе таблицы
     const handleReverseLinked = useCallback((ffNumber: string, assemblyNumber: string) => {
         setReloadTick(t => t + 1);
         setUnlinkedReloadTick(t => t + 1);
         setToast(`Заявка ФФ ${ffNumber} связана со сборкой № ${assemblyNumber}`);
+    }, []);
+
+    // Массово создали заявки ФФ из блока «без связи» → обновляем обе таблицы
+    const handleBulkCreated = useCallback((createdCount: number) => {
+        setReloadTick(t => t + 1);
+        setUnlinkedReloadTick(t => t + 1);
+        if (createdCount > 0) setToast(`Создано заявок на ФФ: ${formatNumber(createdCount, 0)}`);
     }, []);
 
     useEffect(() => {
@@ -2580,7 +2596,30 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
 
     const linkedStatusLabel = (s: string | null) => (s ? (FF_LINKED_STATUS_LABELS[s] || s) : '');
 
+    const toggleOne = (id: number, checked: boolean) => {
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (checked) next.add(id); else next.delete(id);
+            return next;
+        });
+    };
+
+    // Колонка «Кол-во (шт)» (пересчёт коробов) видна, когда у заявок есть это число (migfull)
+    const hasUnits = rows.some(r => r.total_qty_units != null);
+
     const cols: Column[] = [
+        {
+            key: '_select', label: '', sortable: false, align: 'center',
+            exportValue: () => '',
+            render: (_: unknown, row: FfRequestRow) => (
+                <input
+                    type="checkbox"
+                    checked={selected.has(row.id)}
+                    onChange={e => toggleOne(row.id, e.target.checked)}
+                    aria-label={`Выбрать заявку ${row.number || row.external_id}`}
+                />
+            ),
+        },
         {
             key: 'number', label: 'Номер',
             render: (v: string | null, row: FfRequestRow) => (
@@ -2611,6 +2650,12 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
                 exportValue: (row: FfRequestRow) => row.total_qty ?? '',
             } as Column,
+            // Кол-во в штуках россыпи (пересчёт коробов) — только когда есть (Натали/migfull)
+            ...(hasUnits ? [{
+                key: 'total_qty_units', label: 'Кол-во (шт)', align: 'right',
+                render: (v: number | null) => (v == null ? '—' : formatNumber(v, 0)),
+                exportValue: (row: FfRequestRow) => row.total_qty_units ?? '',
+            } as Column] : []),
         ] : []),
         {
             key: 'stage_title', label: 'Стадия',
@@ -2702,6 +2747,52 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
         [rows, stageFilter, statusFilter],
     );
 
+    // Массовый выбор/архив видимых заявок
+    const selectedCount = useMemo(() => filteredRows.filter(r => selected.has(r.id)).length, [filteredRows, selected]);
+    const allVisibleSelected = filteredRows.length > 0 && selectedCount === filteredRows.length;
+    const toggleAll = (checked: boolean) => setSelected(checked ? new Set(filteredRows.map(r => r.id)) : new Set());
+    const handleBulkArchive = async () => {
+        const ids = filteredRows.filter(r => selected.has(r.id)).map(r => r.id);
+        if (ids.length === 0) return;
+        setBulkActing(true);
+        setError('');
+        try {
+            await api.bulkArchiveFulfillmentRequests(warehouseId, { ff_request_ids: ids, archived: !showArchived });
+            const idSet = new Set(ids);
+            setRows(prev => prev.filter(r => !idSet.has(r.id)));  // строки покидают текущий вид
+            setSelected(new Set());
+            setToast(showArchived
+                ? `Возвращено из архива: ${formatNumber(ids.length, 0)}`
+                : `В архив: ${formatNumber(ids.length, 0)}`);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка массового архивирования');
+        } finally {
+            setBulkActing(false);
+        }
+    };
+
+    const bulkBar = (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                <input type="checkbox" checked={allVisibleSelected} onChange={e => toggleAll(e.target.checked)} />
+                Выбрать все
+            </label>
+            {selectedCount > 0 && (
+                <>
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedCount, 0)}</span>
+                    <button className="btn btn-sm btn-primary" onClick={handleBulkArchive} disabled={bulkActing}>
+                        {bulkActing
+                            ? '...'
+                            : (showArchived
+                                ? `Вернуть из архива (${formatNumber(selectedCount, 0)})`
+                                : `В архив (${formatNumber(selectedCount, 0)})`)}
+                    </button>
+                    <button className="btn btn-sm btn-secondary" onClick={() => setSelected(new Set())} disabled={bulkActing}>Сбросить</button>
+                </>
+            )}
+        </div>
+    );
+
     // Переключатель вида — виден и во время загрузки/ошибки; смена вида сбрасывает фильтры
     const switchView = (archived: boolean) => { setShowArchived(archived); setStageFilter(''); setStatusFilter(''); };
     const viewToggle = (
@@ -2757,6 +2848,8 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
 
             {statusFilters}
 
+            {filteredRows.length > 0 && bulkBar}
+
             <TanStackDataTable
                 columns={cols}
                 data={filteredRows}
@@ -2795,6 +2888,7 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                     slug={slug}
                     reloadTick={unlinkedReloadTick}
                     onReverseLinked={handleReverseLinked}
+                    onBulkCreated={handleBulkCreated}
                 />
             )}
         </>
@@ -2803,13 +2897,15 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
 
 /* ─── Блок: наши заявки на сборку без связи с ФФ + реверс-линк-модал ─────── */
 
-function FfUnlinkedAssembliesBlock({ warehouseId, slug, reloadTick, onReverseLinked }: {
+function FfUnlinkedAssembliesBlock({ warehouseId, slug, reloadTick, onReverseLinked, onBulkCreated }: {
     warehouseId: number;
     slug: string;
     /** меняется → перезагрузить список (после связывания из любой из двух таблиц) */
     reloadTick: number;
     /** реверс-линк выполнен: (ffNumber, assemblyNumber) — родитель обновляет обе таблицы и тост */
     onReverseLinked: (ffNumber: string, assemblyNumber: string) => void;
+    /** массово создали заявки ФФ: createdCount — родитель обновляет обе таблицы */
+    onBulkCreated: (createdCount: number) => void;
 }) {
     const [rows, setRows] = useState<FfUnlinkedAssembly[]>([]);
     const [loading, setLoading] = useState(true);
@@ -2817,6 +2913,9 @@ function FfUnlinkedAssembliesBlock({ warehouseId, slug, reloadTick, onReverseLin
 
     // Реверс-линк-модал: выбранная наша заявка сборки, для которой ищем ФФ-заявку
     const [linkForAssembly, setLinkForAssembly] = useState<FfUnlinkedAssembly | null>(null);
+    // Массовый выбор сборок + модал массового создания заявок ФФ
+    const [selected, setSelected] = useState<Set<number>>(new Set());
+    const [bulkOpen, setBulkOpen] = useState(false);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -2829,9 +2928,35 @@ function FfUnlinkedAssembliesBlock({ warehouseId, slug, reloadTick, onReverseLin
         return () => controller.abort();
     }, [warehouseId, reloadTick]);
 
+    // Перезагрузка списка — сбросить выбор (id устаревают)
+    useEffect(() => { setSelected(new Set()); }, [warehouseId, reloadTick]);
+
     const statusLabel = (s: string) => FF_LINKED_STATUS_LABELS[s] || s;
 
+    const toggleOne = (id: number, checked: boolean) => {
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (checked) next.add(id); else next.delete(id);
+            return next;
+        });
+    };
+    const allSelected = rows.length > 0 && rows.every(r => selected.has(r.id));
+    const toggleAll = (checked: boolean) => setSelected(checked ? new Set(rows.map(r => r.id)) : new Set());
+    const selectedAssemblies = rows.filter(r => selected.has(r.id));
+
     const cols: Column[] = [
+        {
+            key: '_select', label: '', sortable: false, align: 'center',
+            exportValue: () => '',
+            render: (_: unknown, row: FfUnlinkedAssembly) => (
+                <input
+                    type="checkbox"
+                    checked={selected.has(row.id)}
+                    onChange={e => toggleOne(row.id, e.target.checked)}
+                    aria-label={`Выбрать сборку ${row.number}`}
+                />
+            ),
+        },
         {
             key: 'number', label: '№',
             render: (v: string, row: FfUnlinkedAssembly) => (
@@ -2896,13 +3021,30 @@ function FfUnlinkedAssembliesBlock({ warehouseId, slug, reloadTick, onReverseLin
                     Все активные сборки этого склада уже связаны с ФФ
                 </div>
             ) : (
-                <TanStackDataTable
-                    columns={cols}
-                    data={rows}
-                    emptyText="Все активные сборки этого склада уже связаны с ФФ"
-                    emptyIcon="🔗"
-                    exportName="ff_unlinked_assemblies"
-                />
+                <>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                            <input type="checkbox" checked={allSelected} onChange={e => toggleAll(e.target.checked)} />
+                            Выбрать все
+                        </label>
+                        {selectedAssemblies.length > 0 && (
+                            <>
+                                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedAssemblies.length, 0)}</span>
+                                <button className="btn btn-sm btn-primary" onClick={() => setBulkOpen(true)}>
+                                    📦 Создать заявки на ФФ ({formatNumber(selectedAssemblies.length, 0)})
+                                </button>
+                                <button className="btn btn-sm btn-secondary" onClick={() => setSelected(new Set())}>Сбросить</button>
+                            </>
+                        )}
+                    </div>
+                    <TanStackDataTable
+                        columns={cols}
+                        data={rows}
+                        emptyText="Все активные сборки этого склада уже связаны с ФФ"
+                        emptyIcon="🔗"
+                        exportName="ff_unlinked_assemblies"
+                    />
+                </>
             )}
 
             {linkForAssembly && (
@@ -2916,6 +3058,148 @@ function FfUnlinkedAssembliesBlock({ warehouseId, slug, reloadTick, onReverseLin
                     }}
                 />
             )}
+
+            {bulkOpen && (
+                <FfBulkCreateModal
+                    warehouseId={warehouseId}
+                    assemblies={selectedAssemblies}
+                    onClose={() => setBulkOpen(false)}
+                    onDone={createdCount => {
+                        setBulkOpen(false);
+                        setSelected(new Set());
+                        onBulkCreated(createdCount);
+                    }}
+                />
+            )}
+        </div>
+    );
+}
+
+/* ─── Модал: массовое создание заявок ФФ из выбранных сборок (push) ──────── */
+
+function FfBulkCreateModal({ warehouseId, assemblies, onClose, onDone }: {
+    warehouseId: number;
+    assemblies: FfUnlinkedAssembly[];
+    onClose: () => void;
+    /** закрытие после создания: createdCount → родитель обновляет таблицы */
+    onDone: (createdCount: number) => void;
+}) {
+    const plus3 = () => {
+        const d = new Date();
+        d.setDate(d.getDate() + 3);
+        return d.toISOString().slice(0, 10);
+    };
+    const [deliveryType, setDeliveryType] = useState<'straight' | 'cross_dock'>('straight');
+    const [collectionDate, setCollectionDate] = useState(plus3());
+    const [comment, setComment] = useState('');
+    const [submitting, setSubmitting] = useState(false);
+    const [error, setError] = useState('');
+    const [result, setResult] = useState<FfBulkCreateResult | null>(null);
+
+    const totalQty = assemblies.reduce((s, a) => s + a.total_qty, 0);
+
+    const submit = async () => {
+        if (!collectionDate) return;
+        setSubmitting(true);
+        setError('');
+        try {
+            const res = await api.bulkCreateFfRequests(warehouseId, {
+                assembly_request_ids: assemblies.map(a => a.id),
+                collection_date: collectionDate,
+                delivery_type: deliveryType,
+                comment: comment.trim() || null,
+            });
+            setResult(res);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка массового создания заявок');
+        }
+        setSubmitting(false);
+    };
+
+    const STATUS_META: Record<FfBulkCreateAssemblyResult['status'], { label: string; cls: string }> = {
+        created: { label: 'Создана', cls: 'badge-success' },
+        deficit: { label: 'Нехватка остатков', cls: 'badge-warning' },
+        no_warehouse: { label: 'Склад не подобран', cls: 'badge-warning' },
+        already_linked: { label: 'Уже связана', cls: 'badge-secondary' },
+        empty: { label: 'Нет позиций', cls: 'badge-secondary' },
+        error: { label: 'Ошибка', cls: 'badge-danger' },
+    };
+
+    const lineDetail = (r: FfBulkCreateAssemblyResult): string => {
+        if (r.status === 'created') return r.ff_number || r.external_id || '';
+        if (r.status === 'deficit') {
+            const head = r.deficit
+                .slice(0, 3)
+                .map(d => `${d.barcode}: ${formatNumber(d.needed, 0)}/${formatNumber(d.available, 0)}`)
+                .join(', ');
+            const rest = r.deficit.length - 3;
+            return `дефицит (нужно/есть) — ${head}${rest > 0 ? ` и ещё ${formatNumber(rest, 0)}` : ''}`;
+        }
+        return r.message || '';
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-card modal-card-solid" onClick={e => e.stopPropagation()} style={{ width: 'min(480px, 92vw)' }}>
+                <h2 className="modal-title">Создать заявки на ФФ ({formatNumber(assemblies.length, 0)})</h2>
+                {!result ? (
+                    <>
+                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 20, lineHeight: 1.5 }}>
+                            Создаст <b>реальные заказы</b> «Доставка на склад МП» у фулфилмента для {formatNumber(assemblies.length, 0)} сборок ({formatNumber(totalQty, 0)} шт).
+                            {' '}Склад МП и дата выгрузки подбираются <b>по каждой</b> сборке (склад WB / поставка FBW).
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                            <div className="form-group">
+                                <label className="form-label">Тип поставки *</label>
+                                <select className="form-input" value={deliveryType} onChange={e => setDeliveryType(e.target.value as 'straight' | 'cross_dock')}>
+                                    <option value="straight">Прямая</option>
+                                    <option value="cross_dock">Транзит (кросс-док)</option>
+                                </select>
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Дата забора *</label>
+                                <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+                                    <input className="form-input" type="date" style={{ flex: 1, minWidth: 0 }} value={collectionDate} onChange={e => setCollectionDate(e.target.value)} />
+                                    <button type="button" className="btn btn-secondary" style={{ flexShrink: 0, whiteSpace: 'nowrap' }} title="Сегодня + 3 дня" onClick={() => setCollectionDate(plus3())}>+3 дня</button>
+                                </div>
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Комментарий</label>
+                                <input className="form-input" value={comment} onChange={e => setComment(e.target.value)} placeholder="Заявка на сборку … (DDS)" />
+                            </div>
+                        </div>
+                        {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 12 }}>{error}</div>}
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+                            <button className="btn btn-secondary" onClick={onClose} disabled={submitting}>Отмена</button>
+                            <button className="btn btn-primary" onClick={submit} disabled={submitting || !collectionDate}>
+                                {submitting ? 'Создание…' : `Создать заявки (${formatNumber(assemblies.length, 0)})`}
+                            </button>
+                        </div>
+                    </>
+                ) : (
+                    <>
+                        <div style={{ fontSize: 14, marginBottom: 12 }}>
+                            Создано: <b style={{ color: 'var(--color-success)' }}>{formatNumber(result.created_count, 0)}</b>
+                            {result.failed_count > 0 && <> · не создано: <b style={{ color: 'var(--color-warning)' }}>{formatNumber(result.failed_count, 0)}</b></>}
+                        </div>
+                        <div style={{ maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {result.results.map(r => {
+                                const meta = STATUS_META[r.status];
+                                return (
+                                    <div key={r.assembly_request_id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 13, flexWrap: 'wrap' }}>
+                                        <span style={{ fontWeight: 600, minWidth: 90 }}>{r.assembly_number}</span>
+                                        <span className={`badge ${meta.cls}`} style={{ fontSize: 11, padding: '2px 8px' }}>{meta.label}</span>
+                                        <span style={{ color: 'var(--color-text-muted)' }}>{lineDetail(r)}</span>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+                            <button className="btn btn-primary" onClick={() => onDone(result.created_count)}>Готово</button>
+                        </div>
+                    </>
+                )}
+            </div>
         </div>
     );
 }
@@ -2935,6 +3219,8 @@ function FfReverseLinkModal({ warehouseId, assembly, onClose, onLinked }: {
     const [error, setError] = useState('');
     const [acting, setActing] = useState(false);
     const [search, setSearch] = useState('');
+    // По умолчанию — только заявки ФФ с тем же складом сдачи, что у сборки
+    const [showAllWh, setShowAllWh] = useState(false);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -2951,16 +3237,21 @@ function FfReverseLinkModal({ warehouseId, assembly, onClose, onLinked }: {
         return () => controller.abort();
     }, [warehouseId]);
 
+    const otherWhCount = useMemo(
+        () => candidates.filter(c => !whNamesMatch(assembly.dest_warehouse, c.dest_warehouse)).length,
+        [candidates, assembly.dest_warehouse],
+    );
     const filtered = useMemo(() => {
+        const byWh = showAllWh ? candidates : candidates.filter(c => whNamesMatch(assembly.dest_warehouse, c.dest_warehouse));
         const q = search.trim().toLowerCase();
-        if (!q) return candidates;
-        return candidates.filter(c =>
+        if (!q) return byWh;
+        return byWh.filter(c =>
             (c.number ?? '').toLowerCase().includes(q)
             || c.external_id.toLowerCase().includes(q)
             || (c.stage_title ?? '').toLowerCase().includes(q)
             || (c.dest_warehouse ?? '').toLowerCase().includes(q)
         );
-    }, [candidates, search]);
+    }, [candidates, search, showAllWh, assembly.dest_warehouse]);
 
     const handleLink = async (ff: FfRequestRow) => {
         setActing(true);
@@ -2982,7 +3273,10 @@ function FfReverseLinkModal({ warehouseId, assembly, onClose, onLinked }: {
                     <span style={{ fontWeight: 500, color: 'var(--color-text-muted)' }}> · {formatNumber(assembly.total_qty, 0)} шт</span>
                 </h2>
                 <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-                    Выберите несвязанную заявку фулфилмента этого склада:
+                    Выберите несвязанную заявку фулфилмента этого склада
+                    {assembly.dest_warehouse
+                        ? <> со складом сдачи <b style={{ color: 'var(--color-text)' }}>{assembly.dest_warehouse}</b>:</>
+                        : ':'}
                 </p>
 
                 {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
@@ -2995,6 +3289,12 @@ function FfReverseLinkModal({ warehouseId, assembly, onClose, onLinked }: {
                     </div>
                 ) : (
                     <>
+                        {otherWhCount > 0 && (
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, marginBottom: 12, cursor: 'pointer' }}>
+                                <input type="checkbox" checked={showAllWh} onChange={e => setShowAllWh(e.target.checked)} />
+                                Показать все склады (ещё {formatNumber(otherWhCount, 0)})
+                            </label>
+                        )}
                         <input
                             type="text"
                             className="form-input ff-link-search"
@@ -3004,7 +3304,14 @@ function FfReverseLinkModal({ warehouseId, assembly, onClose, onLinked }: {
                         />
                         {filtered.length === 0 ? (
                             <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                                Ничего не найдено по запросу
+                                {!showAllWh && !search.trim() && otherWhCount > 0 ? (
+                                    <>
+                                        Нет заявок ФФ с этим складом сдачи.{' '}
+                                        <button className="btn btn-sm btn-secondary" onClick={() => setShowAllWh(true)} style={{ marginTop: 8 }}>
+                                            Показать все склады ({formatNumber(otherWhCount, 0)})
+                                        </button>
+                                    </>
+                                ) : 'Ничего не найдено по запросу'}
                             </div>
                         ) : (
                             <div className="ff-link-list">

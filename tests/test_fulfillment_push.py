@@ -9,7 +9,7 @@ POST /v1/requests (мок create_request), зеркалирование + свя
 import base64
 import json
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
@@ -23,9 +23,10 @@ from backend.models import (
     IntegrationKey,
     Nomenclature,
     Warehouse,
+    WbFboSupply,
 )
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
-from backend.schemas.fulfillment import FfCreateRequestPayload
+from backend.schemas.fulfillment import FfBulkCreateRequestPayload, FfCreateRequestPayload
 from backend.services import fulfillment_service
 from backend.utils.crypto import encrypt as _encrypt
 
@@ -105,6 +106,27 @@ def _mock_create(monkeypatch, holder: dict, response: dict | None = None, exc: E
         return response or {
             "id": 990001,
             "delivery_number": "WH-R-990001",
+            "type": "3. Доставка на склад МП",
+            "status": "new",
+            "stage_code": "cargo_pickup",
+            "stage_title": "Забор груза",
+            "created_at": "2026-06-17 10:00:00",
+        }
+
+    monkeypatch.setattr(SkladbotClient, "create_request", fake_create)
+
+
+def _mock_create_seq(monkeypatch, payloads: list, base_id: int = 990100):
+    """create_request с уникальным id на каждый вызов (для массового push)."""
+    counter = {"n": 0}
+
+    async def fake_create(self, payload):
+        payloads.append(payload)
+        counter["n"] += 1
+        rid = base_id + counter["n"]
+        return {
+            "id": rid,
+            "delivery_number": f"WH-R-{rid}",
             "type": "3. Доставка на склад МП",
             "status": "new",
             "stage_code": "cargo_pickup",
@@ -243,7 +265,8 @@ async def test_push_happy_path(db_session, project, warehouse, connected_key, mo
 
 
 @pytest.mark.asyncio
-async def test_push_skips_unresolved_barcodes(db_session, project, warehouse, connected_key, monkeypatch):
+async def test_push_blocks_on_unresolved_barcode(db_session, project, warehouse, connected_key, monkeypatch):
+    """ШК без остатка у ФФ (доступно 0 < нужно) → блок создания, заказ не уходит."""
     bc_ok, bc_no = f"20{_uid()}", f"21{_uid()}"
     nom_ok = await _make_nomenclature(db_session, project.id, bc_ok)
     nom_no = await _make_nomenclature(db_session, project.id, bc_no)
@@ -253,13 +276,31 @@ async def test_push_skips_unresolved_barcodes(db_session, project, warehouse, co
     holder: dict = {}
     _mock_create(monkeypatch, holder)
 
-    result = await fulfillment_service.create_ff_request_from_assembly(
-        db_session, project.id, warehouse.id, doc.id, _payload()
-    )
-    assert result["items_sent"] == 1
-    assert result["total_qty"] == 4
-    assert result["skipped_barcodes"] == [bc_no]
-    assert [p["barcode"] for p in holder["payload"]["products"]] == [bc_ok]
+    with pytest.raises(ValueError, match="Недостаточно остатков"):
+        await fulfillment_service.create_ff_request_from_assembly(
+            db_session, project.id, warehouse.id, doc.id, _payload()
+        )
+    # Дефицит блокирует ДО создания заказа — POST не вызывался, зеркала нет
+    assert "payload" not in holder
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_push_blocks_on_partial_shortfall(db_session, project, warehouse, connected_key, monkeypatch):
+    """Карточка у ФФ есть, но доступного меньше, чем нужно → блок + дефицит."""
+    bc = f"20{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 10)])
+    _mock_resolve(monkeypatch, {bc: 6001}, available=3)  # доступно 3 < нужно 10
+    holder: dict = {}
+    _mock_create(monkeypatch, holder)
+
+    with pytest.raises(ValueError, match="нужно 10, доступно 3"):
+        await fulfillment_service.create_ff_request_from_assembly(
+            db_session, project.id, warehouse.id, doc.id, _payload()
+        )
+    assert "payload" not in holder
 
 
 @pytest.mark.asyncio
@@ -270,7 +311,7 @@ async def test_push_none_resolved_raises(db_session, project, warehouse, connect
     _mock_resolve(monkeypatch, {})  # ничего не доступно
     _mock_create(monkeypatch, {})
 
-    with pytest.raises(ValueError, match="Ни один ШК"):
+    with pytest.raises(ValueError, match="Недостаточно остатков"):
         await fulfillment_service.create_ff_request_from_assembly(
             db_session, project.id, warehouse.id, doc.id, _payload()
         )
@@ -424,6 +465,142 @@ async def test_create_form_options_and_suggestion(db_session, project, warehouse
     assert names == {"Казань", "МСК Коледино"}  # Ozon-склад отфильтрован
     assert form.suggested_warehouse_id == 10
     assert {d.value for d in form.delivery_types} == {"straight", "cross_dock"}
+
+
+@pytest.mark.asyncio
+async def test_create_form_unloading_date_from_fbo(db_session, project, warehouse, connected_key):
+    """Дата выгрузки в форме = дата сдачи поставки FBW; дата забора = плановая готовность."""
+    bc = f"20{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    supply = WbFboSupply(
+        project_id=project.id,
+        wb_supply_id=f"WB-{_uid()}",
+        created_at_wb=datetime(2026, 6, 1, 12, 0, 0),
+        planned_date=date(2026, 7, 5),
+        warehouse_name="Коледино",
+    )
+    db_session.add(supply)
+    await db_session.commit()
+    await db_session.refresh(supply)
+    doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 2)])
+    doc.wb_fbo_supply_id = supply.id
+    doc.estimated_ready_date = date(2026, 6, 20)
+    await db_session.commit()
+
+    form = await fulfillment_service.get_ff_create_form(db_session, project.id, warehouse.id, doc.id)
+    assert form.unloading_date == date(2026, 7, 5)  # дата сдачи поставки WB
+    assert form.collection_date == date(2026, 6, 20)  # плановая готовность
+    assert form.suggested_warehouse_id == 10  # Коледино → «МСК Коледино»
+
+
+# ─── Массовый push (bulk): авто-склад по сборке, дефицит/без-склада пропускаются ──
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_happy_auto_warehouse(db_session, project, warehouse, connected_key, monkeypatch):
+    """Две сборки на разные склады WB → склад МП подбирается по каждой автоматически."""
+    bc1, bc2 = f"20{_uid()}", f"21{_uid()}"
+    nom1 = await _make_nomenclature(db_session, project.id, bc1)
+    nom2 = await _make_nomenclature(db_session, project.id, bc2)
+    a1 = await _make_assembly(db_session, project, warehouse, [(bc1, nom1.id, 3)])
+    a2 = await _make_assembly(db_session, project, warehouse, [(bc2, nom2.id, 5)])
+    a1.wb_warehouse_name_manual = "Казань"  # → id 77
+    a2.wb_warehouse_name_manual = "Коледино"  # → «МСК Коледино» id 10
+    await db_session.commit()
+
+    _mock_resolve(monkeypatch, {bc1: 5001, bc2: 5002})
+    payloads: list = []
+    _mock_create_seq(monkeypatch, payloads)
+
+    result = await fulfillment_service.bulk_create_ff_requests(
+        db_session,
+        project.id,
+        warehouse.id,
+        FfBulkCreateRequestPayload(assembly_request_ids=[a1.id, a2.id], collection_date=date(2026, 6, 28)),
+    )
+    assert result["created_count"] == 2
+    assert result["failed_count"] == 0
+    statuses = {r["assembly_request_id"]: r["status"] for r in result["results"]}
+    assert statuses == {a1.id: "created", a2.id: "created"}
+    # склад МП подобран по складу WB каждой сборки (id из form-data)
+    assert {p["fields"]["marketplace_warehouse"]["value"] for p in payloads} == {77, 10}
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    assert {r["assembly_request_id"] for r in rows} == {a1.id, a2.id}
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_skips_no_warehouse(db_session, project, warehouse, connected_key, monkeypatch):
+    """Склад WB сборки не матчится со списком ФФ → no_warehouse, заказ не создаётся."""
+    bc = f"20{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    a = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 3)])
+    a.wb_warehouse_name_manual = "Тьмутаракань"  # нет в form-data
+    await db_session.commit()
+    _mock_resolve(monkeypatch, {bc: 5001})
+    payloads: list = []
+    _mock_create_seq(monkeypatch, payloads)
+
+    result = await fulfillment_service.bulk_create_ff_requests(
+        db_session,
+        project.id,
+        warehouse.id,
+        FfBulkCreateRequestPayload(assembly_request_ids=[a.id], collection_date=date(2026, 6, 28)),
+    )
+    assert result["created_count"] == 0
+    assert result["results"][0]["status"] == "no_warehouse"
+    assert payloads == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_create_skips_deficit(db_session, project, warehouse, connected_key, monkeypatch):
+    """Нехватка остатков у ФФ → deficit с разбивкой, реальный заказ не создаётся."""
+    bc = f"20{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    a = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 50)])
+    a.wb_warehouse_name_manual = "Казань"
+    await db_session.commit()
+    _mock_resolve(monkeypatch, {bc: 5001}, available=10)  # 10 < 50
+    payloads: list = []
+    _mock_create_seq(monkeypatch, payloads)
+
+    result = await fulfillment_service.bulk_create_ff_requests(
+        db_session,
+        project.id,
+        warehouse.id,
+        FfBulkCreateRequestPayload(assembly_request_ids=[a.id], collection_date=date(2026, 6, 28)),
+    )
+    r = result["results"][0]
+    assert r["status"] == "deficit"
+    assert r["deficit"][0] == {"barcode": bc, "needed": 50, "available": 10}
+    assert payloads == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_archive_requests(db_session, project, warehouse, connected_key, monkeypatch):
+    """Массовый локальный архив: заявки уходят из активных, идемпотентно."""
+    ids = []
+    for q in (2, 3):
+        bc = f"20{_uid()}"
+        nom = await _make_nomenclature(db_session, project.id, bc)
+        a = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, q)])
+        _mock_resolve(monkeypatch, {bc: 5000 + q})
+        _mock_create_seq(monkeypatch, [], base_id=991000 + q * 10)
+        res = await fulfillment_service.create_ff_request_from_assembly(
+            db_session, project.id, warehouse.id, a.id, _payload()
+        )
+        ids.append(res["request"]["id"])
+
+    out = await fulfillment_service.bulk_archive_requests(db_session, project.id, warehouse.id, ids, True)
+    assert out["updated"] == 2
+    active = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    assert all(r["id"] not in ids for r in active)
+    archived = await fulfillment_service.list_requests(
+        db_session, project.id, warehouse.id, "assembly", show_archived=True
+    )
+    assert set(ids) <= {r["id"] for r in archived}
+    # повторный архив — ничего не меняет
+    out2 = await fulfillment_service.bulk_archive_requests(db_session, project.id, warehouse.id, ids, True)
+    assert out2["updated"] == 0
 
 
 # ─── connect: выбор кабинета (пиннинг customer_id для FF-operator токена) ────

@@ -4,6 +4,23 @@
  */
 import type { FfLinkCandidate } from '@/types/api';
 
+/**
+ * Нормализация имени склада для сопоставления (зеркало `_norm_wh_name` бэкенда):
+ * lower-case + только буквы/цифры. «Коледино» ↔ «МСК Коледино» матчатся по вхождению.
+ */
+export function normWhName(value: string | null | undefined): string {
+    return (value ?? '').toLowerCase().replace(/[^0-9a-zа-яё]+/g, '');
+}
+
+/** Совпадение складов сдачи по нормализованным именам (вхождение в обе стороны).
+ *  Пустой `a` (склад неизвестен) → true: фильтровать не по чему. */
+export function whNamesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
+    const na = normWhName(a);
+    if (!na) return true;
+    const nb = normWhName(b);
+    return !!nb && (na.includes(nb) || nb.includes(na));
+}
+
 /** Поиск по номеру / ФБО-поставке / складу назначения (case-insensitive) */
 export function filterFfLinkCandidates(candidates: FfLinkCandidate[], query: string): FfLinkCandidate[] {
     const q = query.trim().toLowerCase();

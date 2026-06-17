@@ -240,12 +240,16 @@ class FfLinkCandidate(BaseModel):
     dest_warehouse: str | None = None  # склад назначения WB (assembly)
     score: int | None = None  # 0..100, None — эвристика кандидата не выделила
     reason: str | None = None  # «дата совпадает, ШК 80%»
+    # Склад сдачи кандидата совпал со складом сдачи ФФ-заявки (нормализованное
+    # сравнение имён). True, когда у ФФ-заявки склад неизвестен (фильтровать нечем).
+    warehouse_match: bool = True
 
 
 class FfLinkCandidatesResponse(BaseModel):
     kind: str  # assembly | inbound
     ff_number: str | None = None
     ff_total_qty: int | None = None
+    ff_dest_warehouse: str | None = None  # склад сдачи самой ФФ-заявки (для фильтра по складу)
     # Состав ФФ-заявки удалось получить → скоринг учитывает пересечение ШК
     composition_available: bool = False
     candidates: list[FfLinkCandidate] = Field(default_factory=list)
@@ -325,6 +329,69 @@ class FfPushAssemblyResult(BaseModel):
     items_sent: int = 0  # позиций отправлено
     total_qty: int = 0  # суммарно штук отправлено
     skipped_barcodes: list[str] = Field(default_factory=list)  # ШК без остатка/карточки у ФФ
+
+
+class FfDeficitItem(BaseModel):
+    """ШК, по которому доступного у ФФ остатка меньше, чем нужно по сборке."""
+
+    barcode: str
+    needed: int  # нужно по заявке на сборку
+    available: int  # доступно у ФФ под этот тип заявки (0 — карточки/остатка нет)
+
+
+# ─── Массовое создание заявок ФФ из нескольких сборок (bulk push) ────────────
+
+
+class FfBulkCreateRequestPayload(BaseModel):
+    """Параметры массового создания заявок ФФ из выбранных заявок на сборку.
+
+    Склад МП и дата выгрузки подбираются ПО КАЖДОЙ сборке автоматически (склад
+    МП — по её складу WB, дата выгрузки = дата сдачи её поставки FBW), поэтому в
+    payload их нет. Общие на весь батч: тип поставки, дата забора и комментарий.
+    """
+
+    assembly_request_ids: list[int] = Field(min_length=1, max_length=50)
+    collection_date: date  # дата забора груза — общая для всех сборок батча
+    marketplace_id: int = Field(1, gt=0)  # id маркетплейса (Wildberries=1)
+    delivery_type: Literal["straight", "cross_dock"] = "straight"
+    comment: str | None = Field(None, max_length=1000)
+    notify: bool = False
+
+
+class FfBulkCreateAssemblyResult(BaseModel):
+    """Итог push одной сборки в батче (создано / пропущено с причиной)."""
+
+    assembly_request_id: int
+    assembly_number: str
+    # created — заявка создана; deficit — нехватка остатков у ФФ; no_warehouse —
+    # склад МП не подобран; already_linked — уже связана; empty — нет позиций;
+    # error — ошибка провайдера/сети (текст в message)
+    status: Literal["created", "deficit", "no_warehouse", "already_linked", "empty", "error"]
+    ff_number: str | None = None
+    external_id: str | None = None
+    items_sent: int = 0
+    total_qty: int = 0
+    dest_warehouse: str | None = None  # подобранный склад МП (для созданных)
+    deficit: list[FfDeficitItem] = Field(default_factory=list)
+    message: str | None = None  # человекочитаемая причина для не-created статусов
+
+
+class FfBulkCreateResult(BaseModel):
+    results: list[FfBulkCreateAssemblyResult] = Field(default_factory=list)
+    created_count: int = 0
+    failed_count: int = 0  # всё, что не created
+
+
+# ─── Массовый локальный архив заявок ФФ ──────────────────────────────────────
+
+
+class FfBulkArchivePayload(BaseModel):
+    ff_request_ids: list[int] = Field(min_length=1, max_length=500)
+    archived: bool = True  # True — в архив, False — вернуть из архива
+
+
+class FfBulkArchiveResult(BaseModel):
+    updated: int = 0  # сколько строк реально сменили признак
 
 
 # ─── История смены статусов заявок ФФ ──────────────────────────────────────

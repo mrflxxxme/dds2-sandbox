@@ -68,7 +68,7 @@ from backend.models.assembly import (
 )
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import AssemblyItemCreate, AssemblyRequestCreate
-from backend.schemas.fulfillment import FfCreateFormResponse, FfCreateRequestPayload
+from backend.schemas.fulfillment import FfBulkCreateRequestPayload, FfCreateFormResponse, FfCreateRequestPayload
 from backend.services.assembly.crud import create_assembly_request
 from backend.utils.crypto import decrypt as _decrypt, encrypt as _encrypt
 from backend.utils.time import utcnow
@@ -2341,8 +2341,13 @@ def _request_to_dict(
     req: FulfillmentRequest,
     assembly_map: dict | None = None,
     inbound_map: dict | None = None,
+    units_map: dict | None = None,
 ) -> dict:
-    """FulfillmentRequest → FfRequestRow-shaped dict с обогащением связи."""
+    """FulfillmentRequest → FfRequestRow-shaped dict с обогащением связи.
+
+    units_map[req.id] — кол-во в штуках россыпи (пересчёт коробов, migfull);
+    None — провайдер без коробов / состав не разрезолвлен (колонка «Кол-во (шт)»).
+    """
     linked_number = linked_status = None
     if req.assembly_request_id and assembly_map and req.assembly_request_id in assembly_map:
         linked_number, linked_status = assembly_map[req.assembly_request_id]
@@ -2372,6 +2377,7 @@ def _request_to_dict(
         "local_archived": req.local_archived,
         "local_archived_at": req.local_archived_at,
         "total_qty": req.total_qty,
+        "total_qty_units": (units_map or {}).get(req.id),
         "dest_warehouse": req.dest_warehouse,
         "external_created_at": req.external_created_at,
         "synced_at": req.synced_at,
@@ -2433,7 +2439,56 @@ async def list_requests(
         )
         inbound_map = {row[0]: (row[1], row[2]) for row in result.all()}
 
-    return [_request_to_dict(r, assembly_map, inbound_map) for r in requests]
+    units_map = await _migfull_units_by_request(db, project_id, warehouse_id, requests)
+
+    return [_request_to_dict(r, assembly_map, inbound_map, units_map) for r in requests]
+
+
+async def _migfull_units_by_request(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    requests: list[FulfillmentRequest],
+) -> dict[int, int]:
+    """{ff_request_id: кол-во в штуках россыпи} для migfull-сборок (колонка «Кол-во (шт)»).
+
+    Пересчитывает короба в штуки так же, как деталка: из raw `planned_lines`
+    (guid→qty) + сопоставление `guid→(ШК, штук в коробе)` ОДНИМ запросом по всем
+    guid списка (без HTTP, без N+1). Заявки без разрезолвленных guid (короба не
+    сопоставлены / остатки не синканы) в карту не попадают → колонка «—».
+    Не-migfull и приёмки игнорируются (короба только у migfull).
+    """
+    migfull_assembly = [r for r in requests if r.provider == "migfull" and r.kind == FfRequestKind.ASSEMBLY.value]
+    if not migfull_assembly:
+        return {}
+    req_guid_qty: dict[int, dict[str, int]] = {}
+    all_guids: set[str] = set()
+    for r in migfull_assembly:
+        gq: dict[str, int] = {}
+        for p in _migfull_products_from_lines(
+            _migfull_line_rows((r.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
+        ):
+            guid = p["guid"]
+            if p["qty"] > 0 and guid:
+                gq[guid] = gq.get(guid, 0) + p["qty"]
+        if gq:
+            req_guid_qty[r.id] = gq
+            all_guids.update(gq)
+    if not all_guids:
+        return {}
+    guid_barcodes = await _migfull_guid_barcodes(db, project_id, warehouse_id, all_guids)
+    units_map: dict[int, int] = {}
+    for rid, gq in req_guid_qty.items():
+        total_units = 0
+        resolved_any = False
+        for guid, qty in gq.items():
+            resolved = guid_barcodes.get(guid)
+            if resolved:
+                total_units += qty * resolved[1]  # qty коробов/россыпи × штук в коробе
+                resolved_any = True
+        if resolved_any:
+            units_map[rid] = total_units
+    return units_map
 
 
 # ─── История смены статусов (журнал синка) ──────────────────────────────────
@@ -4117,6 +4172,8 @@ async def get_link_candidates(
     ff_number = req.number or req.external_id
     ff_created = req.external_created_at
     mirror_total = req.total_qty
+    ff_dest = req.dest_warehouse  # склад сдачи самой ФФ-заявки — для фильтра кандидатов по складу
+    is_assembly = kind == FfRequestKind.ASSEMBLY.value
 
     # skladbot: внутри — живой HTTP (транзакция закрывается до вызова)
     comp = await _fetch_ff_composition(db, project_id, warehouse_id, req)
@@ -4155,6 +4212,8 @@ async def get_link_candidates(
                 "dest_warehouse": dest_warehouse,
                 "score": score,
                 "reason": reason,
+                # Совпадение склада сдачи — только для сборок (у приёмок склада сдачи нет → не фильтруем)
+                "warehouse_match": _wh_names_match(ff_dest, dest_warehouse) if is_assembly else True,
             }
         )
 
@@ -4162,6 +4221,7 @@ async def get_link_candidates(
         "kind": kind,
         "ff_number": ff_number,
         "ff_total_qty": sum(comp.values()) if comp else mirror_total,
+        "ff_dest_warehouse": ff_dest if is_assembly else None,
         "composition_available": composition_available,
         "candidates": candidates,
     }
@@ -4387,6 +4447,7 @@ async def get_ff_create_form(
             AssemblyRequest.estimated_ready_date,
             AssemblyRequest.wb_warehouse_name_manual,
             WbFboSupply.warehouse_name.label("fbo_warehouse_name"),
+            WbFboSupply.planned_date.label("fbo_planned_date"),
         )
         .outerjoin(WbFboSupply, AssemblyRequest.wb_fbo_supply_id == WbFboSupply.id)
         .where(
@@ -4417,16 +4478,14 @@ async def get_ff_create_form(
     mp_id, mp_name, warehouses, delivery_types = _parse_ff_form_options(form_data, customer_id)
 
     hint = row.fbo_warehouse_name or row.wb_warehouse_name_manual
-    suggested_id: int | None = None
-    norm_hint = _norm_wh_name(hint)
-    if norm_hint:
-        for w in warehouses:
-            norm_w = _norm_wh_name(w["name"])
-            if norm_w and (norm_hint in norm_w or norm_w in norm_hint):
-                suggested_id = w["id"]
-                break
+    matched = _match_wh_option(warehouses, hint)
+    suggested_id: int | None = matched["id"] if matched else None
 
     default_date = row.estimated_ready_date or date.today()
+    # Дата выгрузки (сдачи на склад МП) = дата сдачи поставки WB (FBW), если она
+    # известна; иначе плановая готовность сборки. Дату забора пользователь ставит
+    # сам (кнопка «сегодня +3 дня» на фронте).
+    unloading_default = row.fbo_planned_date or default_date
     return FfCreateFormResponse(
         marketplace_id=mp_id,
         marketplace_name=mp_name,
@@ -4435,9 +4494,98 @@ async def get_ff_create_form(
         suggested_warehouse_id=suggested_id,
         suggested_warehouse_hint=hint,
         collection_date=default_date,
-        unloading_date=default_date,
+        unloading_date=unloading_default,
         delivery_type="straight",
     )
+
+
+def _compute_ff_deficit(qty_by_barcode: dict[str, int], resolved: dict[str, dict]) -> list[dict]:
+    """ШК, по которым доступного у ФФ остатка меньше, чем нужно по сборке.
+
+    available = `counts` разрезолвленного товара (доступно под этот тип заявки),
+    0 — ШК не разрезолвлен (нет карточки/остатка у ФФ). Возвращает
+    отсортированный по ШК список {barcode, needed, available} только дефицитных.
+    """
+    deficit: list[dict] = []
+    for bc, needed in qty_by_barcode.items():
+        available = int(resolved.get(bc, {}).get("counts") or 0)
+        if needed > available:
+            deficit.append({"barcode": bc, "needed": int(needed), "available": available})
+    deficit.sort(key=lambda d: d["barcode"])
+    return deficit
+
+
+def _format_deficit_message(deficit: list[dict]) -> str:
+    """Текст дефицита для ошибки/отчёта (усечён до 5 ШК)."""
+    shown = deficit[:5]
+    parts = "; ".join(f"{d['barcode']} нужно {d['needed']}, доступно {d['available']}" for d in shown)
+    rest = len(deficit) - len(shown)
+    tail = f"; и ещё {rest}" if rest > 0 else ""
+    return f"Недостаточно остатков у ФФ для {len(deficit)} ШК — заявку не создаём: {parts}{tail}"
+
+
+def _match_wh_option(wh_options: list[dict], hint: str | None) -> dict | None:
+    """Подобрать склад МП по имени склада WB заявки (вхождение нормализованных имён)."""
+    norm_hint = _norm_wh_name(hint)
+    if not norm_hint:
+        return None
+    for w in wh_options:
+        nw = _norm_wh_name(w["name"])
+        if nw and (norm_hint in nw or nw in norm_hint):
+            return w
+    return None
+
+
+def _wh_names_match(a: str | None, b: str | None) -> bool:
+    """Совпадение складов сдачи по нормализованным именам (вхождение в обе стороны).
+
+    Пустой `a` (склад сдачи ФФ-заявки неизвестен) → True: фильтровать не по чему.
+    """
+    na = _norm_wh_name(a)
+    if not na:
+        return True
+    nb = _norm_wh_name(b)
+    return bool(nb) and (na in nb or nb in na)
+
+
+async def _require_skladbot_push(db: AsyncSession, project_id: int, warehouse_id: int) -> tuple[int, str]:
+    """Проверить подключение склада к skladbot с customer_id → (customer_id, token).
+
+    ValueError — не подключён / не skladbot / нет customer_id.
+    """
+    key = await get_integration(db, project_id, warehouse_id)
+    if not key:
+        raise ValueError("Фулфилмент не подключён к этому складу")
+    if key.service != "skladbot":
+        raise ValueError(
+            f"Создание заявки на ФФ поддерживается только для skladbot (подключён {_provider_human(key.service)})"
+        )
+    customer_id = (key.config or {}).get("customer_id")
+    if not customer_id:
+        raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
+    return customer_id, _decrypt(key.encrypted_key)
+
+
+async def _fetch_push_form_options(client: SkladbotClient, customer_id: int) -> tuple[int, str, list[dict], list[dict]]:
+    """Живой form-data → (mp_id, mp_name, wh_options, dt_options). ValueError — ошибки провайдера."""
+    try:
+        form_data = await client.fetch_form_data()
+    except CircuitOpenError as e:
+        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+    except RateLimitError as e:
+        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+    except SkladbotApiError as e:
+        raise ValueError(f"skladbot.ru не отдал справочники формы (HTTP {e.status_code})") from e
+    except httpx.HTTPError as e:
+        raise ValueError(f"Сетевая ошибка при обращении к skladbot.ru: {e}") from e
+    return _parse_ff_form_options(form_data, customer_id)
+
+
+def _validate_delivery_type(delivery_type: str, dt_options: list[dict]) -> None:
+    """ValueError — тип поставки не из справочника формы."""
+    valid = {d["value"] for d in dt_options} or {"straight", "cross_dock"}
+    if delivery_type not in valid:
+        raise ValueError("Недопустимый тип поставки — выберите из списка формы")
 
 
 async def create_ff_request_from_assembly(
@@ -4449,33 +4597,84 @@ async def create_ff_request_from_assembly(
 ) -> dict | None:
     """Создать заявку «Доставка на склад МП» (851) у skladbot из нашей сборки.
 
-    Состав берётся из позиций AssemblyRequest (агрегация по ШК), резолвится в
-    product_data_id через живой GET /v1/requests/products (только товары с
-    остатком под этот тип заявки; нерезолвленные → skipped_barcodes), затем
-    POST /v1/requests создаёт РЕАЛЬНЫЙ заказ у ФФ. Созданную заявку зеркалим в
-    FulfillmentRequest и связываем с нашей сборкой (assembly_request_id).
+    Тонкая обёртка над ядром `_push_assembly_to_ff` (общим с массовым push): тут
+    — проверка подключения, живой form-data и валидация типа поставки (общие
+    шаги), склад МП и даты берутся из payload.
 
-    Идемпотентность: если сборка уже связана с заявкой ФФ — ValueError (повторно
-    не создаём). None — сборка не найдена в проекте. ValueError — не skladbot /
-    чужой склад / отменена / нет позиций / ни один ШК не доступен у ФФ / ошибки
+    Идемпотентность: сборка уже связана с заявкой ФФ — ValueError. None — сборка
+    не найдена в проекте. ValueError — не skladbot / чужой склад / отменена / нет
+    позиций / недостаточно остатков у ФФ (дефицит блокирует создание) / ошибки
     провайдера. Только skladbot (wmscelicom/migfull push не поддержан).
 
     НЕ полностью атомарно: заказ у ФФ создаётся ДО записи зеркала. При сбое после
     POST (или гонке связывания) заказ у провайдера уже существует — текст ошибки
     это поясняет, заявку видно после следующего синка.
     """
-    key = await get_integration(db, project_id, warehouse_id)
-    if not key:
-        raise ValueError("Фулфилмент не подключён к этому складу")
-    if key.service != "skladbot":
-        raise ValueError(
-            f"Создание заявки на ФФ поддерживается только для skladbot (подключён {_provider_human(key.service)})"
-        )
-    config = key.config or {}
-    customer_id = config.get("customer_id")
-    if not customer_id:
-        raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
+    customer_id, token = await _require_skladbot_push(db, project_id, warehouse_id)
+    await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
 
+    client = SkladbotClient(token, project_id=project_id)
+    _, _, wh_options, dt_options = await _fetch_push_form_options(client, customer_id)
+    _validate_delivery_type(payload.delivery_type, dt_options)
+
+    res = await _push_assembly_to_ff(
+        db,
+        project_id,
+        warehouse_id,
+        assembly_request_id,
+        client=client,
+        customer_id=customer_id,
+        mp_id=payload.marketplace_id,
+        wh_options=wh_options,
+        delivery_type=payload.delivery_type,
+        collection_date=payload.collection_date,
+        unloading_date=payload.unloading_date,
+        marketplace_warehouse_id=payload.marketplace_warehouse_id,
+        comment=payload.comment,
+        notify=payload.notify,
+    )
+    if res["status"] == "not_found":
+        return None
+    if res["status"] != "created":
+        raise ValueError(res["message"])
+    success: dict = res["success"]
+    return success
+
+
+async def _push_assembly_to_ff(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    assembly_request_id: int,
+    *,
+    client: SkladbotClient,
+    customer_id: int,
+    mp_id: int,
+    wh_options: list[dict],
+    delivery_type: str,
+    collection_date: date,
+    unloading_date: date | None,
+    marketplace_warehouse_id: int | None,
+    comment: str | None,
+    notify: bool,
+) -> dict:
+    """Создать одну заявку ФФ (851) из нашей сборки — ядро одиночного и массового push.
+
+    Возвращает результат-словарь со `status`: not_found / wrong_warehouse /
+    cancelled / already_linked / empty / no_warehouse / deficit / error /
+    created. Бизнес-причины И ошибки провайдера НЕ бросаются — упакованы в
+    результат (массовый push обрабатывает каждую сборку независимо; одиночная
+    обёртка превращает не-created в ValueError).
+
+    Подбор склада/дат: `marketplace_warehouse_id` задан (одиночный) → валидируем
+    по `wh_options`; None (массовый) → подбираем по складу WB сборки, нет
+    совпадения → no_warehouse. `unloading_date` задан → как есть; None
+    (массовый) → дата сдачи поставки FBW сборки, иначе дата забора / плановая
+    готовность / сегодня.
+
+    Транзакции: read сборки закрывается до HTTP; зеркало+связь — отдельный commit
+    под advisory-локом. form-data и тип поставки валидирует вызывающий.
+    """
     asm_result = await db.execute(
         select(AssemblyRequest)
         .options(selectinload(AssemblyRequest.items))
@@ -4487,13 +4686,20 @@ async def create_ff_request_from_assembly(
     )
     assembly = asm_result.scalar_one_or_none()
     if assembly is None:
-        return None
-    if assembly.warehouse_id != warehouse_id:
-        raise ValueError("Заявка на сборку принадлежит другому складу")
-    if assembly.status == AssemblyStatus.CANCELLED.value:
-        raise ValueError("Нельзя отправить на ФФ отменённую заявку")
+        return {"status": "not_found", "assembly_request_id": assembly_request_id, "assembly_number": "—"}
 
-    # Идемпотентность: сборка уже связана с заявкой ФФ
+    asm_id = assembly.id
+    asm_number = assembly.number
+    asm_status = assembly.status
+
+    def _result(status: str, **extra: object) -> dict:
+        return {"status": status, "assembly_request_id": asm_id, "assembly_number": asm_number, **extra}
+
+    if assembly.warehouse_id != warehouse_id:
+        return _result("error", message="Заявка на сборку принадлежит другому складу")
+    if asm_status == AssemblyStatus.CANCELLED.value:
+        return _result("error", message="Нельзя отправить на ФФ отменённую заявку")
+
     existing = await db.execute(
         select(FulfillmentRequest.number, FulfillmentRequest.external_id)
         .where(
@@ -4504,7 +4710,10 @@ async def create_ff_request_from_assembly(
     )
     ex = existing.first()
     if ex is not None:
-        raise ValueError(f"Заявка уже отправлена на ФФ ({ex.number or ex.external_id}) — повторное создание запрещено")
+        return _result(
+            "already_linked",
+            message=f"Заявка уже отправлена на ФФ ({ex.number or ex.external_id}) — повторное создание запрещено",
+        )
 
     # Состав: агрегируем позиции сборки по ШК
     qty_by_barcode: dict[str, int] = {}
@@ -4514,50 +4723,56 @@ async def create_ff_request_from_assembly(
             qty_by_barcode[bc] = qty_by_barcode.get(bc, 0) + int(it.quantity or 0)
     qty_by_barcode = {bc: q for bc, q in qty_by_barcode.items() if q > 0}
     if not qty_by_barcode:
-        raise ValueError("В заявке на сборку нет позиций для отправки")
+        return _result("empty", message="В заявке на сборку нет позиций для отправки")
 
-    # Локальные снимки до commit (объект assembly после commit истекает)
-    asm_id = assembly.id
-    asm_number = assembly.number
-    asm_status = assembly.status
-    token = _decrypt(key.encrypted_key)
+    # Склад МП + дата выгрузки: явные (одиночный) либо авто по складу WB / поставке FBW (массовый)
+    if marketplace_warehouse_id is not None:
+        wh_name = next((w["name"] for w in wh_options if w["id"] == marketplace_warehouse_id), None)
+        if wh_name is None:
+            return _result(
+                "no_warehouse",
+                message="Выбранный склад МП недоступен у ФФ — обновите форму создания заявки и выберите склад заново",
+            )
+        wh_id = marketplace_warehouse_id
+    else:
+        hint = assembly.wb_warehouse_name_manual
+        supply_planned: date | None = None
+        if assembly.wb_fbo_supply_id is not None:
+            supply = await db.get(WbFboSupply, assembly.wb_fbo_supply_id)
+            if supply is not None and supply.project_id == project_id:
+                hint = supply.warehouse_name or hint
+                supply_planned = supply.planned_date
+        match = _match_wh_option(wh_options, hint)
+        if match is None:
+            return _result(
+                "no_warehouse",
+                message=f"Склад МП для «{hint or '—'}» не подобран автоматически — создайте заявку вручную и выберите склад",
+            )
+        wh_id, wh_name = match["id"], match["name"]
+        if unloading_date is None:
+            unloading_date = supply_planned or collection_date or assembly.estimated_ready_date or date.today()
+
+    if unloading_date is None:  # одиночный всегда передаёт дату; страховка
+        unloading_date = collection_date
+
     await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
-
-    client = SkladbotClient(token, project_id=project_id)
-    # Валидируем склад МП/маркетплейс по живым справочникам ДО создания реального
-    # заказа: поля 851 у skladbot — select по integer id, имя не принимается
-    # (иначе «Склад МП» уезжает в заявку пустым). Заодно получаем имя для зеркала.
-    try:
-        form_data = await client.fetch_form_data()
-    except CircuitOpenError as e:
-        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
-    except RateLimitError as e:
-        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
-    except SkladbotApiError as e:
-        raise ValueError(f"skladbot.ru не отдал справочники формы (HTTP {e.status_code})") from e
-    except httpx.HTTPError as e:
-        raise ValueError(f"Сетевая ошибка при обращении к skladbot.ru: {e}") from e
-
-    _, _, wh_options, dt_options = _parse_ff_form_options(form_data, customer_id)
-    wh_name = next((w["name"] for w in wh_options if w["id"] == payload.marketplace_warehouse_id), None)
-    if wh_name is None:
-        raise ValueError("Выбранный склад МП недоступен у ФФ — обновите форму создания заявки и выберите склад заново")
-    valid_delivery = {d["value"] for d in dt_options} or {"straight", "cross_dock"}
-    if payload.delivery_type not in valid_delivery:
-        raise ValueError("Недопустимый тип поставки — выберите из списка формы")
 
     try:
         resolved = await client.resolve_products(customer_id, DELIVERY_REQUEST_TYPE_ID, list(qty_by_barcode))
     except CircuitOpenError as e:
-        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
-    except RateLimitError as e:
-        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+        return _result("error", message=f"skladbot.ru временно недоступен, попробуйте позже ({e})")
+    except RateLimitError:
+        return _result("error", message="skladbot.ru ограничил частоту запросов — повторите через минуту")
     except SkladbotApiError as e:
-        raise ValueError(f"skladbot.ru не отдал товары для заявки (HTTP {e.status_code})") from e
+        return _result("error", message=f"skladbot.ru не отдал товары для заявки (HTTP {e.status_code})")
     except httpx.HTTPError as e:
-        raise ValueError(f"Сетевая ошибка при обращении к skladbot.ru: {e}") from e
+        return _result("error", message=f"Сетевая ошибка при обращении к skladbot.ru: {e}")
 
-    skipped_barcodes = sorted(bc for bc in qty_by_barcode if bc not in resolved)
+    # Дефицит: блокируем создание, если доступного у ФФ меньше, чем нужно (по любому ШК)
+    deficit = _compute_ff_deficit(qty_by_barcode, resolved)
+    if deficit:
+        return _result("deficit", deficit=deficit, message=_format_deficit_message(deficit))
+
     products = [
         {
             "product_data_id": resolved[bc]["product_data_id"],
@@ -4567,13 +4782,8 @@ async def create_ff_request_from_assembly(
             "packages": [],
         }
         for bc, qty in qty_by_barcode.items()
-        if bc in resolved
     ]
-    if not products:
-        raise ValueError(
-            "Ни один ШК заявки не найден в доступных остатках ФФ — отправлять нечего "
-            "(проверьте остатки склада у ФФ и синхронизацию)"
-        )
+    total_qty = sum(qty_by_barcode.values())
 
     create_payload = {
         "customer_id": customer_id,
@@ -4582,31 +4792,30 @@ async def create_ff_request_from_assembly(
         # marketplace / marketplace_warehouse — integer id из form-data (НЕ имя!);
         # marketplace_delivery_type — строковый ключ; даты — Y-m-d.
         "fields": {
-            "marketplace": {"value": payload.marketplace_id},
-            "marketplace_delivery_type": {"value": payload.delivery_type},
-            "marketplace_warehouse": {"value": payload.marketplace_warehouse_id},
-            "collection_date": {"value": payload.collection_date.isoformat()},
-            "unloading_date": {"value": payload.unloading_date.isoformat()},
+            "marketplace": {"value": mp_id},
+            "marketplace_delivery_type": {"value": delivery_type},
+            "marketplace_warehouse": {"value": wh_id},
+            "collection_date": {"value": collection_date.isoformat()},
+            "unloading_date": {"value": unloading_date.isoformat()},
         },
-        "comment": payload.comment or f"Заявка на сборку {asm_number} (DDS)",
-        "notify": bool(payload.notify),
+        "comment": comment or f"Заявка на сборку {asm_number} (DDS)",
+        "notify": bool(notify),
     }
     try:
         created = await client.create_request(create_payload)
     except CircuitOpenError as e:
-        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
-    except RateLimitError as e:
-        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+        return _result("error", message=f"skladbot.ru временно недоступен, попробуйте позже ({e})")
+    except RateLimitError:
+        return _result("error", message="skladbot.ru ограничил частоту запросов — повторите через минуту")
     except SkladbotApiError as e:
-        raise ValueError(f"skladbot.ru отклонил создание заявки (HTTP {e.status_code}): {e}") from e
+        return _result("error", message=f"skladbot.ru отклонил создание заявки (HTTP {e.status_code}): {e}")
     except httpx.HTTPError as e:
-        raise ValueError(f"Сетевая ошибка при создании заявки в skladbot.ru: {e}") from e
+        return _result("error", message=f"Сетевая ошибка при создании заявки в skladbot.ru: {e}")
 
     external_id = str(created.get("id") or created.get("request_id") or "").strip()
     if not external_id or external_id == "None":
-        raise ValueError("skladbot.ru не вернул id созданной заявки — проверьте кабинет ФФ вручную")
+        return _result("error", message="skladbot.ru не вернул id созданной заявки — проверьте кабинет ФФ вручную")
 
-    total_qty = sum(qty for bc, qty in qty_by_barcode.items() if bc in resolved)
     created_row = {
         "external_id": external_id,
         "kind": FfRequestKind.ASSEMBLY.value,
@@ -4643,9 +4852,12 @@ async def create_ff_request_from_assembly(
     ff_req = new_result.scalar_one_or_none()
     if ff_req is None:
         await db.rollback()
-        raise ValueError(
-            f"Заявка создана у ФФ ({created_row['number'] or external_id}), но зеркало сохранить не удалось — "
-            "обновите страницу после синхронизации"
+        return _result(
+            "error",
+            message=(
+                f"Заявка создана у ФФ ({created_row['number'] or external_id}), но зеркало сохранить не удалось — "
+                "обновите страницу после синхронизации"
+            ),
         )
 
     # Гонка связывания: сборку успели связать с другой ФФ-заявкой между проверкой и сейчас
@@ -4660,9 +4872,12 @@ async def create_ff_request_from_assembly(
     )
     if conflict.scalar_one_or_none() is not None:
         await db.commit()  # зеркало сохранено, но НЕсвязанным
-        raise ValueError(
-            f"Заявка создана у ФФ ({ff_req.number or external_id}), но сборка уже связана с другой "
-            "ФФ-заявкой — свяжите вручную на вкладке «ФФ сборка»"
+        return _result(
+            "error",
+            message=(
+                f"Заявка создана у ФФ ({ff_req.number or external_id}), но сборка уже связана с другой "
+                "ФФ-заявкой — свяжите вручную на вкладке «ФФ сборка»"
+            ),
         )
     ff_req.assembly_request_id = assembly_request_id
     await db.commit()
@@ -4679,15 +4894,119 @@ async def create_ff_request_from_assembly(
         items_sent=len(products),
         total_qty=total_qty,
         dest=wh_name,
-        collection_date=payload.collection_date,
-        unloading_date=payload.unloading_date,
+        collection_date=collection_date,
+        unloading_date=unloading_date,
     )
 
     return {
-        "request": _request_to_dict(ff_req, {asm_id: (asm_number, asm_status)}),
-        "external_id": external_id,
+        "status": "created",
+        "assembly_request_id": asm_id,
+        "assembly_number": asm_number,
         "ff_number": ff_req.number,
+        "external_id": external_id,
         "items_sent": len(products),
         "total_qty": total_qty,
-        "skipped_barcodes": skipped_barcodes,
+        "dest_warehouse": wh_name,
+        "deficit": [],
+        "success": {
+            "request": _request_to_dict(ff_req, {asm_id: (asm_number, asm_status)}),
+            "external_id": external_id,
+            "ff_number": ff_req.number,
+            "items_sent": len(products),
+            "total_qty": total_qty,
+            "skipped_barcodes": [],
+        },
     }
+
+
+async def bulk_create_ff_requests(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    payload: FfBulkCreateRequestPayload,
+) -> dict:
+    """Массовый push: создать заявку ФФ (851) из каждой выбранной сборки.
+
+    Склад МП и дата выгрузки подбираются по КАЖДОЙ сборке (склад МП — по её
+    складу WB, дата выгрузки = дата сдачи её поставки FBW); тип поставки, дата
+    забора, комментарий — общие на батч. Каждая сборка обрабатывается независимо
+    (ошибка/дефицит одной не валит остальные) → отчёт. form-data тянется один раз.
+
+    ValueError — склад не подключён к skladbot / нет customer_id / ошибки формы /
+    неверный тип поставки (валится ДО создания реальных заказов).
+    """
+    customer_id, token = await _require_skladbot_push(db, project_id, warehouse_id)
+    await db.commit()
+
+    client = SkladbotClient(token, project_id=project_id)
+    _, _, wh_options, dt_options = await _fetch_push_form_options(client, customer_id)
+    _validate_delivery_type(payload.delivery_type, dt_options)
+
+    results: list[dict] = []
+    for aid in payload.assembly_request_ids:
+        res = await _push_assembly_to_ff(
+            db,
+            project_id,
+            warehouse_id,
+            aid,
+            client=client,
+            customer_id=customer_id,
+            mp_id=payload.marketplace_id,
+            wh_options=wh_options,
+            delivery_type=payload.delivery_type,
+            collection_date=payload.collection_date,
+            unloading_date=None,  # авто = дата сдачи поставки FBW
+            marketplace_warehouse_id=None,  # авто-подбор по складу WB
+            comment=payload.comment,
+            notify=payload.notify,
+        )
+        if res["status"] == "not_found":
+            res = {
+                "status": "error",
+                "assembly_request_id": aid,
+                "assembly_number": "—",
+                "message": "Заявка на сборку не найдена",
+            }
+        results.append(res)
+
+    created_count = sum(1 for r in results if r["status"] == "created")
+    return {
+        "results": results,
+        "created_count": created_count,
+        "failed_count": len(results) - created_count,
+    }
+
+
+async def bulk_archive_requests(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    ff_request_ids: list[int],
+    archived: bool,
+) -> dict:
+    """Массовый локальный архив/возврат заявок ФФ склада → {updated: N}.
+
+    Только заявки этого склада в проекте; идемпотентно (строки уже в нужном
+    состоянии не считаются). Локальная пометка — зеркальный archived не трогаем.
+    """
+    if not ff_request_ids:
+        return {"updated": 0}
+    result = await db.execute(
+        select(FulfillmentRequest)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.id.in_(ff_request_ids),
+        )
+        .limit(len(ff_request_ids))
+    )
+    now = utcnow()
+    updated = 0
+    for req in result.scalars().all():
+        if req.local_archived != archived:
+            req.local_archived = archived
+            req.local_archived_at = now if archived else None
+            updated += 1
+    if updated:
+        await db.commit()
+    return {"updated": updated}

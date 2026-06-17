@@ -114,6 +114,8 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
     const [error, setError] = useState('');
     const [acting, setActing] = useState(false);
     const [search, setSearch] = useState('');
+    // По умолчанию показываем только документы того же склада сдачи, что и заявка ФФ
+    const [showAllWh, setShowAllWh] = useState(false);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -141,11 +143,17 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
         }
     };
 
-    // Клиентский поиск + разбивка: «похожие по наполнению» / «все документы»
-    const { scored, others } = useMemo(
-        () => splitFfLinkCandidates(filterFfLinkCandidates(data?.candidates ?? [], search)),
-        [data, search],
+    // Фильтр по складу сдачи (только для сборок) → клиентский поиск → разбивка.
+    // Для приёмок warehouse_match всегда true (склада сдачи нет), фильтр прозрачен.
+    const otherWhCount = useMemo(
+        () => (data?.candidates ?? []).filter(c => !c.warehouse_match).length,
+        [data],
     );
+    const { scored, others } = useMemo(() => {
+        const base = data?.candidates ?? [];
+        const byWh = showAllWh ? base : base.filter(c => c.warehouse_match);
+        return splitFfLinkCandidates(filterFfLinkCandidates(byWh, search));
+    }, [data, search, showAllWh]);
     const hasCandidates = (data?.candidates.length ?? 0) > 0;
 
     const candidateRow = (c: FfLinkCandidate, withScore: boolean) => (
@@ -185,8 +193,18 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
                     )}
                 </h2>
                 <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-                    Выберите {kind === 'assembly' ? 'заявку на сборку' : 'приёмку'} этого склада:
+                    Выберите {kind === 'assembly' ? 'заявку на сборку' : 'приёмку'} этого склада
+                    {kind === 'assembly' && data?.ff_dest_warehouse
+                        ? <> со складом сдачи <b style={{ color: 'var(--color-text)' }}>{data.ff_dest_warehouse}</b></>
+                        : ':'}
+                    {kind === 'assembly' && data?.ff_dest_warehouse ? ':' : ''}
                 </p>
+                {kind === 'assembly' && otherWhCount > 0 && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, marginBottom: 12, cursor: 'pointer' }}>
+                        <input type="checkbox" checked={showAllWh} onChange={e => setShowAllWh(e.target.checked)} />
+                        Показать все склады (ещё {formatNumber(otherWhCount, 0)})
+                    </label>
+                )}
 
                 {error && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
 
@@ -212,7 +230,14 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
                         )}
                         {scored.length === 0 && others.length === 0 ? (
                             <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                                Ничего не найдено по запросу
+                                {!showAllWh && !search.trim() && otherWhCount > 0 ? (
+                                    <>
+                                        Нет документов с этим складом сдачи.{' '}
+                                        <button className="btn btn-sm btn-secondary" onClick={() => setShowAllWh(true)} style={{ marginTop: 8 }}>
+                                            Показать все склады ({formatNumber(otherWhCount, 0)})
+                                        </button>
+                                    </>
+                                ) : 'Ничего не найдено по запросу'}
                             </div>
                         ) : (
                             <div className="ff-link-list">
