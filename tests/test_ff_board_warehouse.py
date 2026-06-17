@@ -186,7 +186,7 @@ class TestWarehouseScopedBoard:
         text = await fulfillment_service.build_ff_board_text(db_session, project.id, warehouse_id=wh.id)
         assert text is not None
         assert "забор сегодня" in text
-        assert "14 400 ₽" in text
+        assert f"{fulfillment_service._board_fmt_qty(14400)} ₽" in text
         assert "сегодня" in text
 
     async def test_calm_day_on_schedule(self, db_session, project):
@@ -195,3 +195,13 @@ class TestWarehouseScopedBoard:
         text = await fulfillment_service.build_ff_board_text(db_session, project.id, warehouse_id=wh.id)
         assert text is not None
         assert "всё по графику" in text
+
+    async def test_excludes_soft_deleted_warehouse(self, db_session, project):
+        # Soft-delete склада не триггерит FK ON DELETE SET NULL — заявка остаётся
+        # активной; табло (общее и scoped) не должно её показывать (Iron Rule #2).
+        wh = await _wh(db_session, project.id, "Газпром")
+        await _asm(db_session, project.id, wh.id, status=AssemblyStatus.READY.value)
+        wh.soft_delete()
+        await db_session.commit()
+        assert await fulfillment_service.build_ff_board_text(db_session, project.id) is None
+        assert await fulfillment_service.build_ff_board_text(db_session, project.id, warehouse_id=wh.id) is None

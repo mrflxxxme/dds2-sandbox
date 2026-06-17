@@ -17,7 +17,8 @@ export function TelegramBot() {
         try {
             const [chatData, whData] = await Promise.all([api.getTelegramChats(), api.getWarehouses()]);
             setChats(chatData);
-            setWarehouses(whData.filter(w => w.is_active));
+            // Только FF-склады: сборки бывают только на них, иначе табло молча пустует.
+            setWarehouses(whData.filter(w => w.is_active && w.warehouse_type === 'FULFILLMENT'));
         } catch { /* ignore */ }
         setLoading(false);
     }, []);
@@ -129,6 +130,12 @@ export function TelegramBot() {
                     {warehouses.map(w => (
                         <option key={w.id} value={String(w.id)}>{w.name}</option>
                     ))}
+                    {row.ff_board_enabled && row.ff_board_warehouse_id != null
+                        && !warehouses.some(w => w.id === row.ff_board_warehouse_id) && (
+                        <option value={String(row.ff_board_warehouse_id)}>
+                            Склад #{row.ff_board_warehouse_id} (недоступен)
+                        </option>
+                    )}
                 </select>
             ),
         },

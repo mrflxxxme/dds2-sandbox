@@ -1814,6 +1814,7 @@ async def build_ff_board_text(db: AsyncSession, project_id: int, warehouse_id: i
     conditions = [
         AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,
+        Warehouse.is_deleted == False,
         AssemblyRequest.status.in_(_BOARD_STATUSES),
     ]
     if warehouse_id is not None:
@@ -1845,7 +1846,7 @@ async def build_ff_board_text(db: AsyncSession, project_id: int, warehouse_id: i
         .outerjoin(AssemblyRequestItem, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
         .where(*conditions)
         .group_by(AssemblyRequest.id, Warehouse.name, WbFboSupply.warehouse_name)
-        .order_by(AssemblyRequest.created_at.desc())
+        .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
         .limit(_BOARD_FETCH_LIMIT)
     )
     rows = result.all()
