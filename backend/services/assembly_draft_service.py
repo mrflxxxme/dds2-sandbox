@@ -611,11 +611,6 @@ async def commit_draft(
 
     await invalidate_cache("reports:assembly_flow")
 
-    # Best-effort: уведомить чаты складов ФФ о новых заявках (сводно по складу).
-    from backend.services.fulfillment_notify import notify_assembly_created
-
-    await notify_assembly_created(db, project_id, created_ids)
-
     return AssemblyDraftCommitResponse(
         created_request_ids=created_ids,
         draft_id=draft_id,
@@ -999,11 +994,6 @@ async def commit_unit(
         raise HTTPException(status_code=400, detail=f"Failed to commit unit: {e}") from None
 
     await invalidate_cache("reports:assembly_flow")
-
-    # Best-effort: уведомить чат склада ФФ о новой заявке (передан юнит → в сборке).
-    from backend.services.fulfillment_notify import notify_assembly_created
-
-    await notify_assembly_created(db, project_id, created_ids)
 
     return AssemblyDraftCommitResponse(created_request_ids=created_ids, draft_id=draft_id)
 
