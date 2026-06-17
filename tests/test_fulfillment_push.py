@@ -46,10 +46,37 @@ def _fake_jwt(payload: dict) -> str:
 FAKE_TOKEN = _fake_jwt({"sub": "6282", "exp": 1893456000.0})  # exp = 2030-01-01 UTC
 FAKE_CUSTOMER = {"id": 6282, "name": "ООО ТЕСТ ФФ"}
 
+# Справочники GET /v1/requests/form-data: поля marketplace/marketplace_warehouse —
+# select по integer id (НЕ имя). Казань=77, Коледино=10, Wildberries=1.
+FAKE_FORM_DATA = {
+    "utils": {
+        "marketplaces": [{"text": "Wildberries", "value": 1}, {"text": "Ozon", "value": 2}],
+        "marketplaceWarehouses": [
+            {"text": "Казань", "value": 77, "marketplace": 1, "customer": None, "is_active": 1},
+            {"text": "МСК Коледино", "value": 10, "marketplace": 1, "customer": None, "is_active": 1},
+            {"text": "Ozon Хоругвино", "value": 30, "marketplace": 2, "customer": None, "is_active": 1},
+        ],
+        "marketplaceDeliveryTypes": [
+            {"text": "Прямая", "value": "straight"},
+            {"text": "Cross dock", "value": "cross_dock"},
+        ],
+    }
+}
+
+
+@pytest.fixture(autouse=True)
+def _mock_form_data(monkeypatch):
+    """form-data замокан во всех тестах — create валидирует склад/маркетплейс по нему."""
+
+    async def fake_form_data(self):
+        return FAKE_FORM_DATA
+
+    monkeypatch.setattr(SkladbotClient, "fetch_form_data", fake_form_data)
+
 
 def _payload(**over) -> FfCreateRequestPayload:
     base = {
-        "marketplace_warehouse": "Казань",
+        "marketplace_warehouse_id": 77,  # Казань
         "collection_date": date(2026, 6, 28),
         "unloading_date": date(2026, 6, 28),
     }
@@ -186,9 +213,9 @@ async def test_push_happy_path(db_session, project, warehouse, connected_key, mo
     payload = holder["payload"]
     assert payload["customer_id"] == 6282
     assert payload["request_type_id"] == 851
-    assert payload["fields"]["marketplace"]["value"] == "Wildberries"
+    assert payload["fields"]["marketplace"]["value"] == 1
     assert payload["fields"]["marketplace_delivery_type"]["value"] == "straight"
-    assert payload["fields"]["marketplace_warehouse"]["value"] == "Казань"
+    assert payload["fields"]["marketplace_warehouse"]["value"] == 77
     assert payload["fields"]["collection_date"]["value"] == "2026-06-28"
     assert payload["fields"]["unloading_date"]["value"] == "2026-06-28"
     prods = {p["barcode"]: p for p in payload["products"]}
@@ -202,7 +229,14 @@ async def test_push_happy_path(db_session, project, warehouse, connected_key, mo
     assert len(rows) == 1
     assert rows[0]["external_id"] == "990001"
     assert rows[0]["assembly_request_id"] == doc.id
-    ev = await db_session.execute(select(FulfillmentStatusEvent).where(FulfillmentStatusEvent.external_id == "990001"))
+    # project_id-скоуп обязателен: external_id "990001" хардкожен в нескольких тестах,
+    # под xdist -n 2 на общей БД иначе ловим чужие события (iron rule #1).
+    ev = await db_session.execute(
+        select(FulfillmentStatusEvent).where(
+            FulfillmentStatusEvent.project_id == project.id,
+            FulfillmentStatusEvent.external_id == "990001",
+        )
+    )
     events = list(ev.scalars().all())
     assert len(events) == 1
     assert events[0].event_type == "created"
@@ -352,6 +386,44 @@ async def test_push_provider_error_surfaced(db_session, project, warehouse, conn
     # Заявка у ФФ не создалась → зеркала нет
     rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
     assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_push_unknown_warehouse_id_raises(db_session, project, warehouse, connected_key, monkeypatch):
+    """id склада МП, которого нет в form-data → отказ ДО создания реального заказа."""
+    bc = f"20{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 2)])
+    _mock_resolve(monkeypatch, {bc: 8001})
+    holder: dict = {}
+    _mock_create(monkeypatch, holder)
+
+    with pytest.raises(ValueError, match="склад МП недоступен"):
+        await fulfillment_service.create_ff_request_from_assembly(
+            db_session, project.id, warehouse.id, doc.id, _payload(marketplace_warehouse_id=999999)
+        )
+    # create_request не вызывался — заказа у ФФ нет
+    assert "payload" not in holder
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_create_form_options_and_suggestion(db_session, project, warehouse, connected_key):
+    """Форма создания: склады МП Wildberries (id), типы поставки, подбор по складу WB заявки."""
+    bc = f"20{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 2)])
+    doc.wb_warehouse_name_manual = "Коледино"  # → должно матчить «МСК Коледино» (id 10)
+    await db_session.commit()
+
+    form = await fulfillment_service.get_ff_create_form(db_session, project.id, warehouse.id, doc.id)
+    assert form.marketplace_id == 1
+    assert form.marketplace_name == "Wildberries"
+    names = {w.name for w in form.warehouses}
+    assert names == {"Казань", "МСК Коледино"}  # Ozon-склад отфильтрован
+    assert form.suggested_warehouse_id == 10
+    assert {d.value for d in form.delivery_types} == {"straight", "cross_dock"}
 
 
 # ─── connect: выбор кабинета (пиннинг customer_id для FF-operator токена) ────

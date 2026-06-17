@@ -68,7 +68,7 @@ from backend.models.assembly import (
 )
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import AssemblyItemCreate, AssemblyRequestCreate
-from backend.schemas.fulfillment import FfCreateRequestPayload
+from backend.schemas.fulfillment import FfCreateFormResponse, FfCreateRequestPayload
 from backend.services.assembly.crud import create_assembly_request
 from backend.utils.crypto import decrypt as _decrypt, encrypt as _encrypt
 from backend.utils.time import utcnow
@@ -4275,6 +4275,170 @@ async def create_assembly_from_ff(
 
 # ─── PUSH: наша заявка на сборку → заявка ФФ (skladbot тип 851) ───────────────
 
+_DEFAULT_MARKETPLACE_NAME = "Wildberries"
+
+
+def _norm_wh_name(value: str | None) -> str:
+    """Нормализация имени склада для сопоставления (наш WB-склад vs склад МП ФФ).
+
+    Имя WB-склада в заявке («Коледино») и в справочнике skladbot («МСК Коледино»,
+    «Москва (Коледино)») не совпадают буквально — приводим к lower и оставляем
+    только буквы/цифры, чтобы матчить по вхождению.
+    """
+    return re.sub(r"[^0-9a-zа-яё]+", "", (value or "").lower())
+
+
+def _parse_ff_form_options(
+    form_data: dict,
+    customer_id: int,
+    marketplace_name: str = _DEFAULT_MARKETPLACE_NAME,
+) -> tuple[int, str, list[dict], list[dict]]:
+    """Из ответа GET /v1/requests/form-data вытащить справочники для диалога 851.
+
+    Возвращает (marketplace_id, marketplace_name, warehouses, delivery_types):
+    marketplace — выбранный по имени (Wildberries) с фолбэком на id=1; warehouses
+    — активные склады МП этого маркетплейса, видимые клиенту (customer null/свой);
+    delivery_types — типы поставки. skladbot принимает по этим полям integer id /
+    строковый ключ из `value`, поэтому отдаём именно value (не text).
+    """
+    utils_raw = form_data.get("utils")
+    utils: dict = utils_raw if isinstance(utils_raw, dict) else form_data
+
+    marketplaces = utils.get("marketplaces") or []
+    mp_id = 1
+    mp_name = marketplace_name
+    for m in marketplaces:
+        if not isinstance(m, dict):
+            continue
+        if marketplace_name.lower() in str(m.get("text") or "").lower():
+            mp_id = _safe_int(m.get("value")) or mp_id
+            mp_name = str(m.get("text") or marketplace_name)
+            break
+
+    warehouses: list[dict] = []
+    for w in utils.get("marketplaceWarehouses") or []:
+        if not isinstance(w, dict):
+            continue
+        wid = _safe_int(w.get("value"))
+        if not wid:
+            continue
+        if not _truthy(w.get("is_active", 1)):
+            continue
+        w_mp = w.get("marketplace")
+        if w_mp is not None and _safe_int(w_mp) != mp_id:
+            continue
+        w_cust = w.get("customer")
+        if w_cust is not None and _safe_int(w_cust) != int(customer_id):
+            continue
+        warehouses.append({"id": wid, "name": str(w.get("text") or f"Склад #{wid}")})
+
+    delivery_types: list[dict] = []
+    for d in utils.get("marketplaceDeliveryTypes") or []:
+        if not isinstance(d, dict):
+            continue
+        val = str(d.get("value") or "").strip()
+        if not val:
+            continue
+        d_mp = d.get("marketplace")
+        if d_mp is not None and _safe_int(d_mp) != mp_id:
+            continue
+        delivery_types.append({"value": val, "name": str(d.get("text") or val)})
+    if not delivery_types:
+        delivery_types = [{"value": "straight", "name": "Прямая"}, {"value": "cross_dock", "name": "Cross dock"}]
+
+    return mp_id, mp_name, warehouses, delivery_types
+
+
+def _truthy(value: object) -> bool:
+    """1/'1'/True/'true' → True; 0/''/None/'false' → False (PHP-API отдаёт по-разному)."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value)
+
+
+async def get_ff_create_form(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    assembly_request_id: int,
+) -> FfCreateFormResponse | None:
+    """Справочники для диалога создания заявки 851 из сборки (живой form-data).
+
+    None — сборка не найдена в проекте. ValueError — не skladbot / чужой склад /
+    нет customer_id / ошибки провайдера. Подбирает склад МП по имени WB-склада
+    заявки и предзаполняет даты плановой готовностью.
+    """
+    key = await get_integration(db, project_id, warehouse_id)
+    if not key:
+        raise ValueError("Фулфилмент не подключён к этому складу")
+    if key.service != "skladbot":
+        raise ValueError(
+            f"Создание заявки на ФФ поддерживается только для skladbot (подключён {_provider_human(key.service)})"
+        )
+    config = key.config or {}
+    customer_id = config.get("customer_id")
+    if not customer_id:
+        raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
+
+    asm = await db.execute(
+        select(
+            AssemblyRequest.id,
+            AssemblyRequest.warehouse_id,
+            AssemblyRequest.estimated_ready_date,
+            AssemblyRequest.wb_warehouse_name_manual,
+            WbFboSupply.warehouse_name.label("fbo_warehouse_name"),
+        )
+        .outerjoin(WbFboSupply, AssemblyRequest.wb_fbo_supply_id == WbFboSupply.id)
+        .where(
+            AssemblyRequest.id == assembly_request_id,
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,
+        )
+    )
+    row = asm.first()
+    if row is None:
+        return None
+    if row.warehouse_id != warehouse_id:
+        raise ValueError("Заявка на сборку принадлежит другому складу")
+
+    token = _decrypt(key.encrypted_key)
+    client = SkladbotClient(token, project_id=project_id)
+    try:
+        form_data = await client.fetch_form_data()
+    except CircuitOpenError as e:
+        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+    except RateLimitError as e:
+        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+    except SkladbotApiError as e:
+        raise ValueError(f"skladbot.ru не отдал справочники формы (HTTP {e.status_code})") from e
+    except httpx.HTTPError as e:
+        raise ValueError(f"Сетевая ошибка при обращении к skladbot.ru: {e}") from e
+
+    mp_id, mp_name, warehouses, delivery_types = _parse_ff_form_options(form_data, customer_id)
+
+    hint = row.fbo_warehouse_name or row.wb_warehouse_name_manual
+    suggested_id: int | None = None
+    norm_hint = _norm_wh_name(hint)
+    if norm_hint:
+        for w in warehouses:
+            norm_w = _norm_wh_name(w["name"])
+            if norm_w and (norm_hint in norm_w or norm_w in norm_hint):
+                suggested_id = w["id"]
+                break
+
+    default_date = row.estimated_ready_date or date.today()
+    return FfCreateFormResponse(
+        marketplace_id=mp_id,
+        marketplace_name=mp_name,
+        warehouses=warehouses,  # type: ignore[arg-type]
+        delivery_types=delivery_types,  # type: ignore[arg-type]
+        suggested_warehouse_id=suggested_id,
+        suggested_warehouse_hint=hint,
+        collection_date=default_date,
+        unloading_date=default_date,
+        delivery_type="straight",
+    )
+
 
 async def create_ff_request_from_assembly(
     db: AsyncSession,
@@ -4360,6 +4524,28 @@ async def create_ff_request_from_assembly(
     await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
 
     client = SkladbotClient(token, project_id=project_id)
+    # Валидируем склад МП/маркетплейс по живым справочникам ДО создания реального
+    # заказа: поля 851 у skladbot — select по integer id, имя не принимается
+    # (иначе «Склад МП» уезжает в заявку пустым). Заодно получаем имя для зеркала.
+    try:
+        form_data = await client.fetch_form_data()
+    except CircuitOpenError as e:
+        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+    except RateLimitError as e:
+        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+    except SkladbotApiError as e:
+        raise ValueError(f"skladbot.ru не отдал справочники формы (HTTP {e.status_code})") from e
+    except httpx.HTTPError as e:
+        raise ValueError(f"Сетевая ошибка при обращении к skladbot.ru: {e}") from e
+
+    _, _, wh_options, dt_options = _parse_ff_form_options(form_data, customer_id)
+    wh_name = next((w["name"] for w in wh_options if w["id"] == payload.marketplace_warehouse_id), None)
+    if wh_name is None:
+        raise ValueError("Выбранный склад МП недоступен у ФФ — обновите форму создания заявки и выберите склад заново")
+    valid_delivery = {d["value"] for d in dt_options} or {"straight", "cross_dock"}
+    if payload.delivery_type not in valid_delivery:
+        raise ValueError("Недопустимый тип поставки — выберите из списка формы")
+
     try:
         resolved = await client.resolve_products(customer_id, DELIVERY_REQUEST_TYPE_ID, list(qty_by_barcode))
     except CircuitOpenError as e:
@@ -4393,10 +4579,12 @@ async def create_ff_request_from_assembly(
         "customer_id": customer_id,
         "request_type_id": DELIVERY_REQUEST_TYPE_ID,
         "products": products,
+        # marketplace / marketplace_warehouse — integer id из form-data (НЕ имя!);
+        # marketplace_delivery_type — строковый ключ; даты — Y-m-d.
         "fields": {
-            "marketplace": {"value": payload.marketplace},
+            "marketplace": {"value": payload.marketplace_id},
             "marketplace_delivery_type": {"value": payload.delivery_type},
-            "marketplace_warehouse": {"value": payload.marketplace_warehouse},
+            "marketplace_warehouse": {"value": payload.marketplace_warehouse_id},
             "collection_date": {"value": payload.collection_date.isoformat()},
             "unloading_date": {"value": payload.unloading_date.isoformat()},
         },
@@ -4432,7 +4620,7 @@ async def create_ff_request_from_assembly(
         "archived": bool(created.get("archived")),
         "expired": bool(created.get("expired")),
         "total_qty": total_qty,
-        "dest_warehouse": payload.marketplace_warehouse,
+        "dest_warehouse": wh_name,
         "external_created_at": _parse_date(created.get("created_at")) or date.today(),
         "raw": created,
     }
@@ -4478,6 +4666,22 @@ async def create_ff_request_from_assembly(
         )
     ff_req.assembly_request_id = assembly_request_id
     await db.commit()
+    ff_number = ff_req.number or external_id
+
+    # Best-effort: уведомить чат склада ФФ об отправленной заявке (никогда не бросает).
+    from backend.services.fulfillment_notify import notify_ff_request_pushed
+
+    await notify_ff_request_pushed(
+        db,
+        project_id,
+        warehouse_id,
+        ff_number=ff_number,
+        items_sent=len(products),
+        total_qty=total_qty,
+        dest=wh_name,
+        collection_date=payload.collection_date,
+        unloading_date=payload.unloading_date,
+    )
 
     return {
         "request": _request_to_dict(ff_req, {asm_id: (asm_number, asm_status)}),

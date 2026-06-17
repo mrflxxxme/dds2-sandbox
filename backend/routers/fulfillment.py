@@ -24,6 +24,7 @@ from backend.schemas.fulfillment import (
     FfBoxOverridePayload,
     FfBoxPack,
     FfCreateAssemblyResult,
+    FfCreateFormResponse,
     FfCreateRequestPayload,
     FfLinkCandidatesResponse,
     FfLinkPayload,
@@ -319,6 +320,30 @@ async def create_assembly_from_ff(
         raise HTTPException(400, str(e)) from e
     if data is None:
         raise HTTPException(404, "ФФ-заявка не найдена")
+    return data
+
+
+@wh_router.get(
+    "/assembly/{assembly_request_id}/create-form",
+    response_model=FfCreateFormResponse,
+)
+async def ff_create_form(
+    warehouse_id: int,
+    assembly_request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Справочники для диалога создания заявки ФФ: склады МП (id), типы поставки, дефолты.
+
+    Поля `marketplace`/`marketplace_warehouse` у skladbot — select по integer id из
+    `GET /v1/requests/form-data`, поэтому диалог обязан выбирать склад из этого списка.
+    """
+    try:
+        data = await fulfillment_service.get_ff_create_form(db, project.id, warehouse_id, assembly_request_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if data is None:
+        raise HTTPException(404, "Заявка на сборку не найдена")
     return data
 
 

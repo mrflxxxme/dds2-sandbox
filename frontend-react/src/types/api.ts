@@ -3748,15 +3748,44 @@ export interface FfCreateAssemblyResult {
   skipped_barcodes: string[];
 }
 
+/** Опция select-поля формы создания заявки ФФ (id + имя). */
+export interface FfFormOption {
+  id: number;
+  name: string;
+}
+
+/** Тип поставки: value — строковый ключ (straight/cross_dock). */
+export interface FfDeliveryTypeOption {
+  value: string;
+  name: string;
+}
+
+/** Справочники для диалога создания заявки 851 (живой GET /v1/requests/form-data). */
+export interface FfCreateFormResponse {
+  marketplace_id: number;
+  marketplace_name: string;
+  /** Склады МП для marketplace_id (id отправляется в payload) */
+  warehouses: FfFormOption[];
+  delivery_types: FfDeliveryTypeOption[];
+  /** Совпадение со складом WB заявки, иначе null */
+  suggested_warehouse_id?: number | null;
+  /** Склад WB заявки (для подсказки в UI) */
+  suggested_warehouse_hint?: string | null;
+  collection_date: string;
+  unloading_date: string;
+  delivery_type: string;
+}
+
 /** Создание заявки «Доставка на склад МП» (851) из нашей заявки на сборку. */
 export interface FfCreateRequestPayload {
-  /** Склад МП (город сдачи WB) */
-  marketplace_warehouse: string;
+  /** id склада МП (utils.marketplaceWarehouses[].value) */
+  marketplace_warehouse_id: number;
   /** Дата забора груза (YYYY-MM-DD) */
   collection_date: string;
   /** Дата выгрузки на склад МП (YYYY-MM-DD) */
   unloading_date: string;
-  marketplace?: string;
+  /** id маркетплейса (utils.marketplaces[].value); Wildberries=1 */
+  marketplace_id?: number;
   /** straight — прямая, cross_dock — транзит */
   delivery_type?: 'straight' | 'cross_dock';
   comment?: string | null;

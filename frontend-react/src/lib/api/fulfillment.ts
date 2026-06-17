@@ -4,6 +4,7 @@ import type {
     FfBoxOverridePayload,
     FfBoxPack,
     FfCreateAssemblyResult,
+    FfCreateFormResponse,
     FfCreateRequestPayload,
     FfLinkCandidatesResponse,
     FfLinkPayload,
@@ -119,6 +120,9 @@ export function addFulfillmentMethods(api: ApiClient) {
             return api.request<FfCreateAssemblyResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/requests/${ffRequestId}/create-assembly`);
         },
         /** Создать заявку на ФФ (skladbot тип 851) из нашей заявки на сборку. */
+        getFfCreateForm(warehouseId: number, assemblyRequestId: number) {
+            return api.request<FfCreateFormResponse>('GET', `/api/v1/warehouse/${warehouseId}/fulfillment/assembly/${assemblyRequestId}/create-form`);
+        },
         createFfRequestFromAssembly(warehouseId: number, assemblyRequestId: number, payload: FfCreateRequestPayload) {
             return api.request<FfPushAssemblyResult>('POST', `/api/v1/warehouse/${warehouseId}/fulfillment/assembly/${assemblyRequestId}/create-request`, payload);
         },
