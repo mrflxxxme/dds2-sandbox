@@ -5,7 +5,7 @@ paths:
 ---
 # Дизайн-система DDS2
 
-Apple-inspired glassmorphism. Все стили в `globals.css` — НИКОГДА inline.
+Apple-inspired glassmorphism. Все стили — в `globals.css` (основное) / `(tma)/tma/tma.css` (Telegram Mini App) — НИКОГДА inline.
 
 ## Цвета — ТОЛЬКО `var(--color-*)`
 `--color-accent` (Apple Blue), `--color-success/warning/danger`, `--color-bg-card` (glass), `--color-text/muted/dim`, `--color-border`.

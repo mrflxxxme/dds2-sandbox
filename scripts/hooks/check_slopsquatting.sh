@@ -23,8 +23,20 @@ LOCAL_PREFIXES="backend tests scripts migrations frontend"
 
 NEW_FAILURES=0
 
-# 1. Python imports — искать в staged/diff vs origin/main
-PY_DIFF=$(git diff --cached --diff-filter=AM -- '*.py' 2>/dev/null | grep -E '^\+(import |from )' | sed 's/^+//' || true)
+# Диапазон проверки: на pre-push — коммиты к пушу (@{push}/@{upstream}..HEAD),
+# иначе (ручной/pre-commit запуск) — staged. На push индекс пуст → --cached был no-op.
+if git rev-parse --abbrev-ref --symbolic-full-name '@{push}' >/dev/null 2>&1; then
+  RANGE="@{push}..HEAD"
+elif git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
+  RANGE="@{upstream}..HEAD"
+else
+  RANGE=""
+fi
+if [ -n "$RANGE" ] && [ -z "$(git rev-list "$RANGE" 2>/dev/null)" ]; then RANGE=""; fi
+if [ -n "$RANGE" ]; then DIFF_ARGS="$RANGE"; else DIFF_ARGS="--cached"; fi
+
+# 1. Python imports — новые import'ы в пушимом диапазоне (fallback: staged)
+PY_DIFF=$(git diff $DIFF_ARGS --diff-filter=AM -- '*.py' 2>/dev/null | grep -E '^\+(import |from )' | sed 's/^+//' || true)
 
 if [ -n "$PY_DIFF" ]; then
   # Извлечь top-level package name
@@ -36,8 +48,10 @@ if [ -n "$PY_DIFF" ]; then
   for pkg in $PY_PKGS; do
     [ -z "$pkg" ] && continue
 
-    # Skip stdlib
+    # Skip stdlib — быстрый whitelist + надёжная проверка интерпретатором.
+    # (whitelist неполон: иначе новый import sqlite3/socket/ssl/gzip ложно блокировал push)
     if echo " $STD_PY " | grep -q " $pkg "; then continue; fi
+    if python3 -c "import sys; sys.exit(0 if sys.argv[1] in sys.stdlib_module_names else 1)" "$pkg" 2>/dev/null; then continue; fi
 
     # Skip локальные модули (backend.*, tests.*, etc.)
     skip=false
@@ -66,9 +80,9 @@ if [ -n "$PY_DIFF" ]; then
 fi
 
 # 2. TypeScript/JS imports — только новые в package.json
-if git diff --cached --name-only | grep -q 'package.json$'; then
+if git diff $DIFF_ARGS --name-only | grep -q 'package.json$'; then
   # Новые зависимости — грубый diff
-  NEW_DEPS=$(git diff --cached -- '*/package.json' 2>/dev/null | \
+  NEW_DEPS=$(git diff $DIFF_ARGS -- '*/package.json' 2>/dev/null | \
     grep -E '^\+\s*"[^"]+":\s*"[\^~]?[0-9]' | \
     sed -E 's/^\+\s*"([^"]+)".*/\1/' | sort -u || true)
 

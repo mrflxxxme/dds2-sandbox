@@ -46,7 +46,7 @@ make sync-prod                                  # локалка = копия п
 | перед коммитом / после фичи | `/verify` · `/learn` |
 | баг, вопрос, мелкая правка | без skill — сразу |
 
-После написания кода вызывай субагента `code-reviewer`. Субагенты `security-reviewer`, `database-reviewer`, `performance-optimizer`, `api-designer` — по запросу или когда задача в их зоне.
+После написания кода запускай `/review` (фан-аут профильных субагентов по diff-путям, единый вердикт APPROVE/WARNING/BLOCK; обычно — шагом `/verify`). Субагенты `code-reviewer`, `security-reviewer`, `database-reviewer`, `performance-optimizer`, `api-designer` — по запросу или когда задача в их зоне.
 
 ## Workflow
 - Миграции Alembic — sequential, делает только lead. Перед коммитом прогнать `alembic upgrade head && downgrade -1 && upgrade head`.

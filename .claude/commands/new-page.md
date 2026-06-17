@@ -15,6 +15,6 @@ description: "Новая страница Next.js DDS2: types → api → page �
 5. **Тесты** — `cd frontend-react && npx vitest run`; smoke `npx playwright test tests/e2e/smoke.spec.ts`.
 
 ## Frontend в Docker
-Production-сборка standalone, HMR нет. Локальный dev: `npm run dev`. В docker: `docker compose build frontend && docker compose up -d frontend`.
+Локальный dev идёт в Docker: `docker compose up -d` авто-подхватывает `docker-compose.override.yml` (`next dev --turbopack`, volume-mount `./frontend-react`). HMR на Docker-on-mac правки НЕ всегда ловит → после правок `frontend-react/src/*` делай `docker compose restart frontend-react`. Полная пересборка (после изменения `package.json`): `make build-frontend`. Сервис везде — `frontend-react`, не `frontend`.
 
 Детали правил фронта — `.claude/rules/frontend.md` и `design.md`.

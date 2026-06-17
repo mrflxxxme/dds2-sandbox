@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from backend.models.telegram import TelegramChatBinding
 from backend.services import telegram_service
-from backend.services.fulfillment_notify import notify_ff_events
+from backend.services.fulfillment_notify import build_accept_item, build_ready_item, notify_ff_events
 
 
 async def _make_binding(db, project_id, owner_id, chat_id, *, ff=False, brand=None):
@@ -63,22 +63,59 @@ class TestListFfNotifyChats:
 
 
 class TestNotifyFfEvents:
-    async def test_sends_only_to_opted_in(self, db_session, project):
+    async def test_sends_only_to_opted_in_as_html(self, db_session, project):
         await _make_binding(db_session, project.id, project.owner_id, chat_id=-3001, ff=True)
         await _make_binding(db_session, project.id, project.owner_id, chat_id=-3002, ff=False)
 
         fake_bot = AsyncMock()
+        items = [{"text": "msg-a", "url": None}, {"text": "msg-b", "url": None}]
         with patch("backend.integrations.telegram_bot.bot", new=fake_bot):
-            await notify_ff_events(db_session, project.id, ["msg-a", "msg-b"])
+            await notify_ff_events(db_session, project.id, items)
 
-        sent_chats = {call.kwargs["chat_id"] for call in fake_bot.send_message.call_args_list}
-        assert sent_chats == {-3001}
+        calls = fake_bot.send_message.call_args_list
+        assert {c.kwargs["chat_id"] for c in calls} == {-3001}
         assert fake_bot.send_message.call_count == 2  # 1 chat × 2 messages
+        assert all(c.kwargs.get("parse_mode") == "HTML" for c in calls)
+
+    async def test_url_attaches_inline_button(self, db_session, project):
+        await _make_binding(db_session, project.id, project.owner_id, chat_id=-3010, ff=True)
+        url = "https://app.vyatkin-wb.ru/p/default/warehouse/5/ff-request/42"
+        fake_bot = AsyncMock()
+        with patch("backend.integrations.telegram_bot.bot", new=fake_bot):
+            await notify_ff_events(db_session, project.id, [{"text": "t", "url": url}])
+        markup = fake_bot.send_message.call_args.kwargs["reply_markup"]
+        assert markup is not None
+        assert markup.inline_keyboard[0][0].url == url
+
+    async def test_ff_id_attaches_sostav_button(self, db_session, project):
+        await _make_binding(db_session, project.id, project.owner_id, chat_id=-3012, ff=True)
+        fake_bot = AsyncMock()
+        with patch("backend.integrations.telegram_bot.bot", new=fake_bot):
+            await notify_ff_events(db_session, project.id, [{"text": "t", "url": None, "ff_id": 99}])
+        row = fake_bot.send_message.call_args.kwargs["reply_markup"].inline_keyboard[0]
+        assert row[0].callback_data == "ff_items:99"
+
+    async def test_url_and_ff_id_give_two_buttons(self, db_session, project):
+        await _make_binding(db_session, project.id, project.owner_id, chat_id=-3013, ff=True)
+        url = "https://app.vyatkin-wb.ru/p/default/warehouse/5/ff-request/42"
+        fake_bot = AsyncMock()
+        with patch("backend.integrations.telegram_bot.bot", new=fake_bot):
+            await notify_ff_events(db_session, project.id, [{"text": "t", "url": url, "ff_id": 42}])
+        row = fake_bot.send_message.call_args.kwargs["reply_markup"].inline_keyboard[0]
+        assert row[0].url == url
+        assert row[1].callback_data == "ff_items:42"
+
+    async def test_no_url_no_button(self, db_session, project):
+        await _make_binding(db_session, project.id, project.owner_id, chat_id=-3011, ff=True)
+        fake_bot = AsyncMock()
+        with patch("backend.integrations.telegram_bot.bot", new=fake_bot):
+            await notify_ff_events(db_session, project.id, [{"text": "t", "url": None}])
+        assert fake_bot.send_message.call_args.kwargs["reply_markup"] is None
 
     async def test_noop_when_bot_none(self, db_session, project):
         await _make_binding(db_session, project.id, project.owner_id, chat_id=-3003, ff=True)
         with patch("backend.integrations.telegram_bot.bot", new=None):
-            await notify_ff_events(db_session, project.id, ["x"])  # must not raise
+            await notify_ff_events(db_session, project.id, [{"text": "x", "url": None}])  # must not raise
 
     async def test_noop_empty_messages(self, db_session, project):
         await notify_ff_events(db_session, project.id, [])  # short-circuits, no bot access
@@ -88,4 +125,56 @@ class TestNotifyFfEvents:
         fake_bot = AsyncMock()
         fake_bot.send_message.side_effect = RuntimeError("telegram down")
         with patch("backend.integrations.telegram_bot.bot", new=fake_bot):
-            await notify_ff_events(db_session, project.id, ["x"])  # best-effort: swallowed
+            await notify_ff_events(db_session, project.id, [{"text": "x", "url": None}])  # swallowed
+
+
+class TestBuildItems:
+    def test_ready_item_html_and_url(self):
+        item = build_ready_item(
+            "default",
+            5,
+            42,
+            "ASM-455",
+            "WH-R-1",
+            "Владимир",
+            97,
+            warehouse_name="Газпром",
+            wb_number="WB-998877",
+        )
+        assert "<b>Сборка готова к отгрузке</b>" in item["text"]
+        assert "<b>ASM-455</b>" in item["text"]
+        assert "<code>WH-R-1</code>" in item["text"]
+        assert "Склад ФФ: Газпром" in item["text"]
+        assert "<code>WB-998877</code>" in item["text"]
+        assert "97 шт" in item["text"]
+        assert item["url"] == "https://app.vyatkin-wb.ru/p/default/warehouse/5/ff-request/42"
+        assert item["ff_id"] == 42
+
+    def test_ready_item_omits_optional_lines_when_absent(self):
+        item = build_ready_item("default", 5, 42, "ASM-455", "WH-R-1", "Владимир", 97)
+        assert "Склад ФФ" not in item["text"]
+        assert "Поставка ВБ" not in item["text"]
+
+    def test_accept_item_html_and_url(self):
+        item = build_accept_item("default", 5, 7, "WH-R-2", "WB Шушары", 339, warehouse_name="Натали")
+        assert "<b>Приёмка принята</b>" in item["text"]
+        assert "<code>WH-R-2</code>" in item["text"]
+        assert "Склад ФФ: Натали" in item["text"]
+        assert "339 шт" in item["text"]
+        assert item["url"].endswith("/ff-request/7")
+        assert item["ff_id"] == 7
+
+    def test_escapes_html_special_chars(self):
+        # склад «H&M» не должен ломать HTML-разметку
+        item = build_ready_item("default", 5, 1, "ASM-1", "FF-1", "H&M", 10)
+        assert "H&amp;M" in item["text"]
+        assert "H&M" not in item["text"]
+
+    def test_no_url_when_missing_ids(self):
+        assert build_ready_item(None, 5, 42, "A", "F", "D", 1)["url"] is None
+        assert build_ready_item("default", None, 42, "A", "F", "D", 1)["url"] is None
+        assert build_ready_item("default", 5, None, "A", "F", "D", 1)["url"] is None
+
+    def test_qty_omitted_when_falsy(self):
+        item = build_ready_item("default", 5, 1, "A", "F", "D", None)
+        assert "шт" not in item["text"]

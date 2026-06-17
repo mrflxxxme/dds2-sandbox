@@ -63,11 +63,13 @@ model: opus
 ## Команды замера
 
 ```bash
-# N+1: поставить SQLALCHEMY_ECHO в логах + запустить endpoint через curl
-docker compose exec backend python -c "import os; os.environ['SQLALCHEMY_ECHO']='1'" && curl -X GET ...
+# N+1: статический поиск — execute/scalars в сервис-слое (смотри, не внутри ли for/while)
+grep -rnE "await (db|session)\.execute|\.scalars\(\)\.all\(\)" backend/services/
+# (одноразовый `python -c os.environ[...]` НЕ включает echo в живом uvicorn — не использовать;
+#  для динамического эха: echo=settings.SQLALCHEMY_ECHO в database.py + перезапуск backend, затем curl + docker compose logs backend)
 
-# EXPLAIN ANALYZE конкретного запроса
-docker compose exec postgres psql -U dds -d dds -c "EXPLAIN ANALYZE SELECT ..."
+# EXPLAIN ANALYZE конкретного запроса (сервис БД называется `db`, база `dds_db`)
+docker compose exec db psql -U dds -d dds_db -c "EXPLAIN ANALYZE SELECT ..."
 
 # Bundle analyzer (уже установлен)
 cd frontend-react && ANALYZE=true npm run build

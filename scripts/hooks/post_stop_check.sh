@@ -20,8 +20,9 @@ done
 # --- Docs reminder (lightweight) ---
 all_changed=$(git diff --name-only HEAD 2>/dev/null)
 if [ -n "$all_changed" ]; then
-  svc_changes=$(echo "$all_changed" | grep -c "backend/services/" 2>/dev/null || echo 0)
-  docs_updated=$(echo "$all_changed" | grep -cE "(MAP\.md|DOMAIN_|CLAUDE\.md)" 2>/dev/null || echo 0)
+  # grep -c сам печатает 0 при отсутствии совпадений; '|| echo 0' давал "0\n0" → ломал -gt/-eq
+  svc_changes=$(echo "$all_changed" | grep -c "backend/services/" 2>/dev/null); svc_changes=${svc_changes:-0}
+  docs_updated=$(echo "$all_changed" | grep -cE "(MAP\.md|DOMAIN_|CLAUDE\.md)" 2>/dev/null); docs_updated=${docs_updated:-0}
   if [ "${svc_changes:-0}" -gt 3 ] && [ "${docs_updated:-0}" -eq 0 ]; then
     echo "[DOCS] $svc_changes файлов в services/ изменено — обнови документацию" >&2
   fi

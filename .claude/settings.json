@@ -74,7 +74,7 @@
             "timeout": 3
           }
         ],
-        "description": "Напоминание [DOCS] при pending docs-коммитах + счётчик /compact"
+        "description": "[PUSH] при фейле авто-пуша dev + счётчик /compact"
       }
     ],
     "SessionStart": [
@@ -87,7 +87,7 @@
             "timeout": 5
           }
         ],
-        "description": "Auto-context: recent commits, branch sync, uncommitted, pending /learn, open CI issues, docker health"
+        "description": "Auto-context: recent commits, branch sync, uncommitted, pending /learn"
       },
       {
         "matcher": "compact|clear",

@@ -19,6 +19,7 @@ dest_warehouse — списочный метод их не отдаёт) и ав
 «груз собран» (см. _assembly_ready_signal).
 """
 
+import html
 import logging
 import re
 from datetime import date, datetime
@@ -136,6 +137,11 @@ _SUGGEST_CANDIDATE_STATUSES = (
 # фолбэк на эвристику дат (_SUGGEST_DATE_SCORES, qty-бонус 10, порог 30).
 _LINK_CANDIDATES_LIMIT = 300
 _CAND_COMP_DATE_SCORES = {0: 20, 1: 15, 2: 10}
+
+# Состав ФФ-заявки для кнопки «Состав» в Telegram (get_ff_request_goods).
+# Telegram-лимит сообщения 4096 символов; берём +1, чтобы честно показать
+# «…и ещё позиции», если строк больше.
+_FF_GOODS_LIMIT = 50
 _CAND_COMP_MIN_SCORE = 40
 
 
@@ -617,7 +623,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     # Детали для Telegram-уведомления о принятой приёмке (по нашему receipt_id):
     # номер ФФ-заявки, склад сдачи, кол-во — те же поля, что в «Истории».
     accept_info = {
-        r.inbound_receipt_id: (r.number or r.external_id, r.dest_warehouse, r.total_qty)
+        r.inbound_receipt_id: (r.number or r.external_id, r.dest_warehouse, r.total_qty, r.id)
         for r in inbound_reqs
         if r.inbound_receipt_id is not None
     }
@@ -632,10 +638,23 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     # Авто-ACCEPT приёмок (постинг стока) — ПОСЛЕ commit синка, каждая своей
     # транзакцией. accept_receipt идемпотентен (row-lock + guard «сток уже
     # применён»), повторный синк не задвоит. Ошибку приёмки не даём свалить синк.
+    # slug проекта (deep-link) + имя ФФ-склада (строка «Склад ФФ» в уведомлении):
+    # по одному get, только если есть что слать.
+    notify_slug: str | None = None
+    notify_wh_name: str | None = None
+    if marked_ready or inbound_accept_ids:
+        from backend.models.auth import Project
+
+        _proj = await db.get(Project, project_id)
+        notify_slug = _proj.slug if _proj else None
+        _wh = await db.get(Warehouse, warehouse_id)
+        notify_wh_name = _wh.name if _wh else None
+
     inbound_receipts_accepted = 0
-    accept_msgs: list[str] = []
+    accept_items: list[dict[str, object]] = []
     if inbound_accept_ids:
         from backend.database import AsyncSessionLocal
+        from backend.services.fulfillment_notify import build_accept_item
         from backend.services.warehouse_inbound import accept_receipt
 
         # Каждый приём — в СВОЕЙ сессии: accept_receipt сам коммитит/рефрешит,
@@ -648,9 +667,11 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
                 inbound_receipts_accepted += 1
                 info = accept_info.get(receipt_id)
                 if info:
-                    ff_no, dest, qty = info
-                    accept_msgs.append(
-                        f"📦 Приёмка принята: ФФ {ff_no} · {dest or '—'}" + (f" · {qty} шт" if qty else "")
+                    ff_no, dest, qty, ff_id = info
+                    accept_items.append(
+                        build_accept_item(
+                            notify_slug, warehouse_id, ff_id, ff_no, dest, qty, warehouse_name=notify_wh_name
+                        )
                     )
             except Exception as e:  # — best-effort, синк уже зафиксирован
                 logger.warning("FF auto-accept: приёмка %s пропущена (%s)", receipt_id, e)
@@ -658,17 +679,26 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     if assemblies_marked_ready:
         await invalidate_cache("reports:assembly_flow")
 
-    # Telegram-уведомления о смене статуса (best-effort, синк уже зафиксирован;
-    # шлём только в чаты проекта с ff_notify_enabled; no-op если бот не поднят).
-    ready_msgs = [
-        f"✅ Сборка {d['assembly_number']} готова к отгрузке: ФФ {d['ff_number']} · {d['dest'] or '—'}"
-        + (f" · {d['qty']} шт" if d["qty"] else "")
+    # Telegram-уведомления о смене статуса (HTML + кнопка «Открыть заявку»),
+    # best-effort, синк уже зафиксирован; только в чаты проекта с ff_notify_enabled.
+    from backend.services.fulfillment_notify import build_ready_item, notify_ff_events
+
+    ready_items = [
+        build_ready_item(
+            notify_slug,
+            warehouse_id,
+            d["ff_id"],
+            d["assembly_number"],
+            d["ff_number"],
+            d["dest"],
+            d["qty"],
+            warehouse_name=notify_wh_name,
+            wb_number=d.get("wb_number"),
+        )
         for d in marked_ready
     ]
-    if ready_msgs or accept_msgs:
-        from backend.services.fulfillment_notify import notify_ff_events
-
-        await notify_ff_events(db, project_id, ready_msgs + accept_msgs)
+    if ready_items or accept_items:
+        await notify_ff_events(db, project_id, ready_items + accept_items)
 
     logger.info(
         "Fulfillment sync: project=%s warehouse=%s stocks=%d requests=%d unmatched=%d "
@@ -1474,6 +1504,10 @@ async def _mark_linked_assemblies_ready(
 
     result = await db.execute(
         select(AssemblyRequest)
+        # wb_fbo_supply — для номера поставки ВБ в Telegram-уведомлении (nullable).
+        # selectinload шлёт отдельный SELECT, FOR UPDATE на нём не вешается — ок,
+        # лочим только строку сборки.
+        .options(selectinload(AssemblyRequest.wb_fbo_supply))
         .where(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.id.in_(list(ff_by_assembly)),
@@ -1482,22 +1516,97 @@ async def _mark_linked_assemblies_ready(
         )
         # row-lock: ручной переход/линк в параллельной транзакции не должен
         # дать lost update или дубль строки истории
-        .with_for_update()
+        .with_for_update(of=AssemblyRequest)
     )
     docs = list(result.scalars().all())
     transitioned: list[dict[str, object]] = []
     for doc in docs:
         ff = ff_by_assembly[doc.id]
         _transition_assembly_to_ready(db, project_id, doc, ff)
+        supply = doc.wb_fbo_supply
         transitioned.append(
             {
                 "assembly_number": doc.number,
                 "ff_number": ff.number or ff.external_id,
                 "dest": ff.dest_warehouse,
                 "qty": ff.total_qty,
+                "ff_id": ff.id,
+                "wb_number": supply.wb_supply_id if supply else None,
             }
         )
     return transitioned
+
+
+async def get_ff_request_goods(db: AsyncSession, project_id: int, ff_request_id: int) -> str | None:
+    """HTML-список позиций ФФ-заявки (ШК · артикул продавца · кол-во) для кнопки «Состав».
+
+    Читает из НАШИХ зеркал-документов (сборка/приёмка) — без HTTP к провайдеру
+    (в отличие от get_request_detail). Скоуп по project_id (заявка чужого проекта
+    → None). Возвращает None, если заявки нет, она не связана с документом или
+    состав пуст. Кол-во: для сборки — quantity, для приёмки — expected_qty. Лимит
+    _FF_GOODS_LIMIT позиций (+ строка «…и ещё», если строк больше).
+    """
+    result = await db.execute(
+        select(FulfillmentRequest).where(
+            FulfillmentRequest.id == ff_request_id,
+            FulfillmentRequest.project_id == project_id,
+        )
+    )
+    req = result.scalar_one_or_none()
+    if not req:
+        return None
+
+    if req.assembly_request_id is not None:
+        rows_result = await db.execute(
+            select(
+                AssemblyRequestItem.barcode,
+                Nomenclature.article_seller,
+                func.sum(AssemblyRequestItem.quantity),
+            )
+            .outerjoin(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+            .where(
+                AssemblyRequestItem.project_id == project_id,
+                AssemblyRequestItem.assembly_request_id == req.assembly_request_id,
+            )
+            .group_by(AssemblyRequestItem.barcode, Nomenclature.article_seller)
+            .order_by(func.sum(AssemblyRequestItem.quantity).desc())
+            .limit(_FF_GOODS_LIMIT + 1)
+        )
+    elif req.inbound_receipt_id is not None:
+        rows_result = await db.execute(
+            select(
+                InboundReceiptItem.barcode,
+                Nomenclature.article_seller,
+                func.sum(InboundReceiptItem.expected_qty),
+            )
+            .outerjoin(Nomenclature, Nomenclature.id == InboundReceiptItem.nomenclature_id)
+            .where(
+                InboundReceiptItem.project_id == project_id,
+                InboundReceiptItem.receipt_id == req.inbound_receipt_id,
+            )
+            .group_by(InboundReceiptItem.barcode, Nomenclature.article_seller)
+            .order_by(func.sum(InboundReceiptItem.expected_qty).desc())
+            .limit(_FF_GOODS_LIMIT + 1)
+        )
+    else:
+        return None
+
+    rows = [(bc, art, int(qty or 0)) for bc, art, qty in rows_result.all()]
+    if not rows:
+        return None
+
+    e = html.escape
+    ff_no = req.number or req.external_id
+    shown = rows[:_FF_GOODS_LIMIT]
+    lines = [f"📦 <b>Состав заявки</b> <code>{e(str(ff_no))}</code>", ""]
+    for barcode, article, qty in shown:
+        art_part = f" · {e(article)}" if article else ""
+        lines.append(f"<code>{e(barcode)}</code>{art_part} · <b>{qty} шт</b>")
+    if len(rows) > _FF_GOODS_LIMIT:
+        lines.append(f"\n…и ещё позиции (показаны первые {_FF_GOODS_LIMIT})")
+    else:
+        lines.append(f"\n<b>Итого:</b> {len(shown)} поз. · {sum(q for _, _, q in shown)} шт")
+    return "\n".join(lines)
 
 
 async def _collect_inbound_accept_candidates(

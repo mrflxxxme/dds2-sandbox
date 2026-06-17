@@ -19,17 +19,21 @@ case "$MSG" in
   "docs:"*|"docs("*) exit 0 ;;  # docs-коммиты (вкл. /learn-рефлексию) не возвращаем в очередь /learn
 esac
 
-# Пропустить если pending уже содержит этот hash
-if [ -f "$PENDING" ] && grep -q "^$HASH " "$PENDING" 2>/dev/null; then
-    exit 0
+# message (truncated 80 chars) — нужно и для записи, и для дедупа
+SHORT_MSG=$(echo "$MSG" | cut -c1-80)
+
+# Пропустить если pending уже содержит этот hash ИЛИ это же сообщение
+# (rebase даёт новый hash при том же subject → иначе очередь раздувается дублями)
+if [ -f "$PENDING" ]; then
+    if grep -q "^$HASH " "$PENDING" 2>/dev/null; then exit 0; fi
+    if grep -qF -- " $SHORT_MSG" "$PENDING" 2>/dev/null; then exit 0; fi
 fi
 
 # Создать .claude/ если не существует
 mkdir -p "$(dirname "$PENDING")"
 
-# Записать: hash | timestamp | message (truncated 80 chars)
+# Записать: hash | timestamp | message
 TS=$(date +%s)
-SHORT_MSG=$(echo "$MSG" | cut -c1-80)
 echo "$HASH $TS $SHORT_MSG" >> "$PENDING"
 
 exit 0
