@@ -19,5 +19,12 @@ export function addTelegramMethods(api: ApiClient) {
         toggleTelegramFfNotify(bindingId: number, enabled: boolean) {
             return api.request<MessageResponse>('PATCH', `/api/v1/telegram/chats/${bindingId}/ff-notify`, { enabled });
         },
+        /** Configure the pinned FF-board: on/off + optional warehouse scope (null = all warehouses). */
+        setTelegramFfBoard(bindingId: number, enabled: boolean, warehouseId: number | null) {
+            return api.request<MessageResponse>('PATCH', `/api/v1/telegram/chats/${bindingId}/ff-board`, {
+                enabled,
+                warehouse_id: warehouseId,
+            });
+        },
     };
 }

@@ -600,6 +600,9 @@ export interface TelegramChatBinding {
   brand: string | null;
   notify_enabled: boolean;
   ff_notify_enabled: boolean;
+  ff_board_enabled: boolean;
+  /** NULL = табло по всем складам; иначе — заявки только этого склада ФФ. */
+  ff_board_warehouse_id: number | null;
   created_by_id: number;
   created_at: string;
 }

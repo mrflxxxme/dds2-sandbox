@@ -148,12 +148,13 @@ _CAND_COMP_DATE_SCORES = {0: 20, 1: 15, 2: 10}
 # «…и ещё позиции», если строк больше.
 _FF_GOODS_LIMIT = 50
 
-# Закреплённое авто-табло заявок ФФ (build_ff_board_text). Активные статусы
-# сборок в порядке вывода; топ-N строк на статус (+ «…ещё M»), потолок выборки.
+# Закреплённое авто-табло заявок ФФ (build_ff_board_text). Порядок вывода секций
+# — от срочного: машина назначена → готово → в работе. Топ-N строк на статус
+# (+ «…ещё M»), бюджет символов держим под лимит Telegram (4096).
 _BOARD_STATUSES = (
-    AssemblyStatus.IN_PROGRESS.value,
-    AssemblyStatus.READY.value,
     AssemblyStatus.VEHICLE_ASSIGNED.value,
+    AssemblyStatus.READY.value,
+    AssemblyStatus.IN_PROGRESS.value,
 )
 _BOARD_STATUS_LABEL = {
     AssemblyStatus.IN_PROGRESS.value: "🔧 В работе",
@@ -162,6 +163,9 @@ _BOARD_STATUS_LABEL = {
 }
 _BOARD_FETCH_LIMIT = 500
 _BOARD_ROWS_PER_STATUS = 15
+_BOARD_CHAR_BUDGET = 3800  # запас под Telegram-лимит 4096 (теги + заголовки)
+_BOARD_AGE_ORANGE = 3  # 🟠 стареет, дней
+_BOARD_AGE_RED = 5  # 🔴 давно висит (для готовых/с машиной без просрочки плана)
 _MSK_OFFSET = timedelta(hours=3)
 _CAND_COMP_MIN_SCORE = 40
 
@@ -1727,31 +1731,119 @@ async def get_ff_request_goods(db: AsyncSession, project_id: int, ff_request_id:
     return "\n".join(lines)
 
 
-async def build_ff_board_text(db: AsyncSession, project_id: int) -> str | None:
-    """HTML-табло активных сборок проекта для закреплённого сообщения в Telegram.
+def _board_fmt_qty(n: int) -> str:
+    """1416 → «1 416» (пробел-разделитель тысяч для читаемости)."""
+    return f"{n:,}".replace(",", " ")
 
-    Группировка статус (в работе/готово/машина назначена) → склад ФФ, строки
-    «номер · кол-во · дата» (кол-во — сумма позиций сборки). Топ-N строк на
-    статус (+ «…ещё M»), детали в сворачиваемом <blockquote expandable>
-    (Telegram-лимит 4096). Только наши документы, без HTTP. None — нет активных
-    сборок (вызывающий тогда табло не трогает).
+
+def _board_city(fbo_city: str | None, manual_city: str | None, ff_wh: str | None) -> str | None:
+    """Склад назначения МП: поставка ВБ → ручной → склад ФФ (как в list_unlinked)."""
+    return fbo_city or manual_city or ff_wh or None
+
+
+def _board_age_days(today: date, status: str, created_at: datetime | None, act_date: date | None) -> int:
+    """Возраст в днях. Для готовых считаем от факт-готовности (сколько стоит без
+    машины = деньги), иначе от создания. created_at — UTC, переводим в МСК-дату."""
+    if status == AssemblyStatus.READY.value and act_date is not None:
+        base = act_date
+    elif created_at is not None:
+        base = (created_at + _MSK_OFFSET).date()
+    else:
+        return 0
+    return max(0, (today - base).days)
+
+
+def _board_pickup_line(it: dict, today: date) -> str:
+    """Вторая строка заявки с машиной: когда забор · слот · цена · бренд."""
+    pickup_date = it["pickup_date"]
+    if pickup_date is None:
+        return "└ <i>дата забора не задана</i>"
+    if pickup_date == today:
+        when = "<b>сегодня</b>"
+    elif pickup_date == today + timedelta(days=1):
+        when = "завтра"
+    else:
+        when = f"{pickup_date:%d.%m}"
+    parts = [when, html.escape(str(it["pickup_slot"])) if it["pickup_slot"] else "<i>слот не задан</i>"]
+    if it["pickup_cost"] is not None:
+        parts.append(f"<b>{_board_fmt_qty(int(it['pickup_cost']))} ₽</b>")
+    if it["vehicle_brand"]:
+        parts.append(html.escape(str(it["vehicle_brand"])))
+    return "└ " + " · ".join(parts)
+
+
+def _board_render_item(it: dict, today: date, scoped: bool) -> str:
+    """Одна заявка табло: 2 строки для «машины», иначе компактная однострочная."""
+    code = f"<code>{html.escape(it['number'])}</code>"
+    city = f" · <b>{html.escape(it['city'])}</b>" if it["city"] else ""
+    qty = f" · {_board_fmt_qty(it['qty'])} шт"
+    if it["status"] == AssemblyStatus.VEHICLE_ASSIGNED.value:
+        return f"{code}{city}{qty}\n{_board_pickup_line(it, today)}"
+    marker = {"red": "🔴 ", "orange": "🟠 "}.get(it["severity"], "")
+    if it["overdue"] and it["est_date"] is not None:
+        age = f" · <s>план {it['est_date']:%d.%m}</s>"
+    else:
+        age = f" · {it['age']}д"
+    hint = f" · <i>{html.escape(it['ff_hint'])}</i>" if (not scoped and it["ff_hint"]) else ""
+    return f"{marker}{code}{city}{qty}{age}{hint}"
+
+
+def _board_sort(status: str, items: list[dict], today: date) -> list[dict]:
+    """Внутри секции — самое срочное наверх."""
+    if status == AssemblyStatus.VEHICLE_ASSIGNED.value:
+        # ближайший забор выше; без даты — в конец
+        return sorted(items, key=lambda it: (it["pickup_date"] is None, it["pickup_date"] or today))
+    rank = {"red": 0, "orange": 1, "": 2}
+    return sorted(items, key=lambda it: (rank[it["severity"]], -it["age"]))
+
+
+async def build_ff_board_text(db: AsyncSession, project_id: int, warehouse_id: int | None = None) -> str | None:
+    """HTML-табло активных сборок для закреплённого сообщения в Telegram.
+
+    Шапка-сводка (тоталы + сплит статусов) → строка-светофор (🔴 просрочено /
+    🟠 стареет / 🚚 забор сегодня · Σ₽) → секции «машина → готово → в работе»,
+    срочное наверх, тело каждой в сворачиваемом <blockquote expandable>. Строка:
+    «[маркер] номер · город · кол-во · возраст/план · склад ФФ». Только наши
+    документы, без HTTP. None — активных сборок нет (вызывающий табло не трогает).
+
+    warehouse_id=None — все склады проекта (общее табло); иначе только заявки
+    этого склада ФФ (чат конкретного ФФ, напр. Газпром) — без хвоста-склада,
+    с именем склада в заголовке.
     """
+    conditions = [
+        AssemblyRequest.project_id == project_id,
+        AssemblyRequest.is_deleted == False,
+        AssemblyRequest.status.in_(_BOARD_STATUSES),
+    ]
+    if warehouse_id is not None:
+        conditions.append(AssemblyRequest.warehouse_id == warehouse_id)
     result = await db.execute(
         select(
             AssemblyRequest.status,
             Warehouse.name,
             AssemblyRequest.number,
             AssemblyRequest.created_at,
+            AssemblyRequest.estimated_ready_date,
+            AssemblyRequest.actual_ready_date,
+            AssemblyRequest.pickup_date,
+            AssemblyRequest.pickup_time_slot,
+            AssemblyRequest.pickup_cost,
+            AssemblyRequest.vehicle_brand,
+            WbFboSupply.warehouse_name,
+            AssemblyRequest.wb_warehouse_name_manual,
             func.coalesce(func.sum(AssemblyRequestItem.quantity), 0),
         )
         .join(Warehouse, Warehouse.id == AssemblyRequest.warehouse_id)
-        .outerjoin(AssemblyRequestItem, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
-        .where(
-            AssemblyRequest.project_id == project_id,
-            AssemblyRequest.is_deleted == False,
-            AssemblyRequest.status.in_(_BOARD_STATUSES),
+        .outerjoin(
+            WbFboSupply,
+            and_(
+                WbFboSupply.id == AssemblyRequest.wb_fbo_supply_id,
+                WbFboSupply.project_id == project_id,
+            ),
         )
-        .group_by(AssemblyRequest.id, Warehouse.name)
+        .outerjoin(AssemblyRequestItem, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .where(*conditions)
+        .group_by(AssemblyRequest.id, Warehouse.name, WbFboSupply.warehouse_name)
         .order_by(AssemblyRequest.created_at.desc())
         .limit(_BOARD_FETCH_LIMIT)
     )
@@ -1759,32 +1851,99 @@ async def build_ff_board_text(db: AsyncSession, project_id: int) -> str | None:
     if not rows:
         return None
 
-    e = html.escape
-    by_status: dict[str, list[tuple]] = {s: [] for s in _BOARD_STATUSES}
-    for status, wh_name, number, created_at, qty in rows:
-        by_status.setdefault(status, []).append((wh_name, number, created_at, int(qty or 0)))
-
     now_msk = utcnow() + _MSK_OFFSET
-    lines = ["📋 <b>Заявки ФФ</b>", f"<i>обновлено {now_msk:%d.%m %H:%M} МСК</i>", ""]
+    today = now_msk.date()
+    scoped = warehouse_id is not None
+    board_wh_name: str | None = None
+
+    by_status: dict[str, list[dict]] = {s: [] for s in _BOARD_STATUSES}
+    for (
+        status,
+        ff_wh,
+        number,
+        created_at,
+        est_date,
+        act_date,
+        pickup_date,
+        pickup_slot,
+        pickup_cost,
+        vehicle_brand,
+        fbo_city,
+        manual_city,
+        qty,
+    ) in rows:
+        if board_wh_name is None:
+            board_wh_name = ff_wh
+        age = _board_age_days(today, status, created_at, act_date)
+        overdue = status == AssemblyStatus.IN_PROGRESS.value and est_date is not None and est_date < today
+        severity = "red" if (overdue or age >= _BOARD_AGE_RED) else ("orange" if age >= _BOARD_AGE_ORANGE else "")
+        city = _board_city(fbo_city, manual_city, ff_wh)
+        by_status.setdefault(status, []).append(
+            {
+                "status": status,
+                "number": str(number),
+                "qty": int(qty or 0),
+                "age": age,
+                "overdue": overdue,
+                "severity": severity,
+                "est_date": est_date,
+                "city": city,
+                "ff_hint": ff_wh if (ff_wh and ff_wh != city) else None,
+                "pickup_date": pickup_date,
+                "pickup_slot": pickup_slot,
+                "pickup_cost": pickup_cost,
+                "vehicle_brand": vehicle_brand,
+            }
+        )
+
+    all_items = [it for items in by_status.values() for it in items]
+    total_qty = sum(it["qty"] for it in all_items)
+    n_prog = len(by_status.get(AssemblyStatus.IN_PROGRESS.value, []))
+    n_ready = len(by_status.get(AssemblyStatus.READY.value, []))
+    veh_items = by_status.get(AssemblyStatus.VEHICLE_ASSIGNED.value, [])
+    n_overdue = sum(1 for it in all_items if it["overdue"])
+    n_aging = sum(1 for it in all_items if it["severity"] and not it["overdue"])
+    pickup_today = [it for it in veh_items if it["pickup_date"] == today]
+    sum_pickup_today = sum(int(it["pickup_cost"]) for it in pickup_today if it["pickup_cost"] is not None)
+
+    title = "📋 <b>Заявки ФФ</b>"
+    if scoped and board_wh_name:
+        title = f"📋 <b>Заявки ФФ — {html.escape(board_wh_name)}</b>"
+    lines = [
+        f"{title} · {len(all_items)} · {_board_fmt_qty(total_qty)} шт",
+        f"🔧 {n_prog} · ✅ {n_ready} · 🚚 {len(veh_items)} · <i>обновлено {now_msk:%d.%m %H:%M} МСК</i>",
+        "",
+    ]
+    sig: list[str] = []
+    if n_overdue:
+        sig.append(f"🔴 <b>Просрочено {n_overdue}</b>")
+    if n_aging:
+        sig.append(f"🟠 стареет {n_aging}")
+    if pickup_today:
+        seg = f"🚚 забор сегодня {len(pickup_today)}"
+        if sum_pickup_today:
+            seg += f" · <b>{_board_fmt_qty(sum_pickup_today)} ₽</b>"
+        sig.append(seg)
+    lines.append("<blockquote>" + (" · ".join(sig) if sig else "✅ всё по графику") + "</blockquote>")
+    lines.append("")
+
     for status in _BOARD_STATUSES:
         items = by_status.get(status, [])
         if not items:
             continue
-        total_qty = sum(q for *_, q in items)
-        lines.append(f"{_BOARD_STATUS_LABEL[status]} — {len(items)} · {total_qty} шт")
-        shown = items[:_BOARD_ROWS_PER_STATUS]
-        by_wh: dict[str, list[tuple]] = {}
-        for wh_name, number, created_at, qty in shown:
-            by_wh.setdefault(wh_name or "—", []).append((number, created_at, qty))
-        block: list[str] = []
-        for wh_name, wh_rows in by_wh.items():
-            block.append(f"<b>{e(wh_name)}</b>")
-            for number, created_at, qty in wh_rows:
-                d = f"{created_at:%d.%m}" if created_at else "—"
-                block.append(f"<code>{e(str(number))}</code> · {qty} шт · {d}")
-        if len(items) > _BOARD_ROWS_PER_STATUS:
-            block.append(f"…ещё {len(items) - _BOARD_ROWS_PER_STATUS}")
-        lines.append("<blockquote expandable>" + "\n".join(block) + "</blockquote>")
+        items = _board_sort(status, items, today)
+        header = f"{_BOARD_STATUS_LABEL[status]} · {len(items)} · {_board_fmt_qty(sum(it['qty'] for it in items))} шт"
+        used = len("\n".join(lines))
+        body: list[str] = []
+        for it in items:
+            rendered = _board_render_item(it, today, scoped)
+            projected = used + len(header) + len("\n".join([*body, rendered])) + 40
+            if len(body) >= _BOARD_ROWS_PER_STATUS or projected > _BOARD_CHAR_BUDGET:
+                break
+            body.append(rendered)
+        if len(body) < len(items):
+            body.append(f"…ещё {len(items) - len(body)}")
+        lines.append(f"{header}\n<blockquote expandable>" + "\n".join(body) + "</blockquote>")
         lines.append("")
     return "\n".join(lines).strip()
 
