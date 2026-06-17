@@ -395,6 +395,7 @@ async def connect(
         # что токен его видит); это обязательно для FF-operator токена, который
         # видит весь tenant и чей customers[0] — произвольный клиент. Без
         # customer_id допускаем только токен с единственным клиентом (селлер).
+        chosen: dict | None
         try:
             if customer_id is not None:
                 if customer.get("id") == customer_id:
