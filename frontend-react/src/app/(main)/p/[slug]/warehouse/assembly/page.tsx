@@ -6,12 +6,28 @@ import { api } from '@/lib/api';
 import { formatDate, formatNumber, pluralRu } from '@/lib/utils';
 import { Toast } from '@/components';
 import TanStackDataTable from '@/components/TanStackDataTable';
+import { FfMismatchModal } from '@/components/FfMismatchModal';
 import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, Warehouse } from '@/types/api';
+import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, Warehouse } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 
 // ─── Status config ──────────────────────────────────────────────────────────
+
+// Все привязанные ФФ-заявки сборки: ff_links (migfull/«Натали» — 2+) либо первая
+// привязка из плоских полей (обратная совместимость).
+function ffLinksOf(row: AssemblyRequest): FfLinkInfo[] {
+    if (row.ff_links?.length) return row.ff_links;
+    if (row.ff_request_id) {
+        return [{
+            ff_request_id: row.ff_request_id,
+            ff_request_number: row.ff_request_number,
+            ff_stage_title: row.ff_stage_title,
+            ff_warehouse_id: row.ff_warehouse_id,
+        }];
+    }
+    return [];
+}
 
 const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
     // PENDING — legacy: больше не используется при создании, но может встретиться в истории.
@@ -299,6 +315,8 @@ export default function AssemblyListPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+    // id сборки, для которой открыта модалка «расхождение наполнения»
+    const [mismatchForId, setMismatchForId] = useState<number | null>(null);
 
     // Drafts / созданные партии — только каунты для полоски-сводки «Распределение»
     // (сами блоки живут на /warehouse/assembly/distribution)
@@ -555,17 +573,38 @@ export default function AssemblyListPage() {
         },
         {
             key: 'ff', label: 'Заявка ФФ',
-            getValue: (row: AssemblyRequest) => row.ff_request_number || '',
-            render: (_v, row: AssemblyRequest) => row.ff_request_id ? (
-                <Link
-                    href={`/p/${slug}/warehouse/${row.ff_warehouse_id ?? row.warehouse_id}/ff-request/${row.ff_request_id}`}
-                    onClick={(e) => e.stopPropagation()}
-                    style={{ color: 'var(--color-accent)', fontWeight: 500, fontSize: 13 }}
-                >
-                    {row.ff_request_number || `#${row.ff_request_id}`}{row.ff_stage_title ? ` (${row.ff_stage_title})` : ''}
-                </Link>
-            ) : '—',
-            exportValue: (row: AssemblyRequest) => row.ff_request_number || '',
+            getValue: (row: AssemblyRequest) => ffLinksOf(row).map(l => l.ff_request_number || `#${l.ff_request_id}`).join(', '),
+            // migfull/«Натали»: на одну сборку может быть несколько ФФ-заявок → показываем все
+            render: (_v, row: AssemblyRequest) => {
+                const links = ffLinksOf(row);
+                if (!links.length) return '—';
+                return (
+                    <span style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+                        {links.map(l => (
+                            <Link
+                                key={l.ff_request_id}
+                                href={`/p/${slug}/warehouse/${l.ff_warehouse_id ?? row.warehouse_id}/ff-request/${l.ff_request_id}`}
+                                onClick={(e) => e.stopPropagation()}
+                                style={{ color: 'var(--color-accent)', fontWeight: 500, fontSize: 13 }}
+                            >
+                                {l.ff_request_number || `#${l.ff_request_id}`}{l.ff_stage_title ? ` (${l.ff_stage_title})` : ''}
+                            </Link>
+                        ))}
+                        {row.ff_mismatch === true && (
+                            <button
+                                type="button"
+                                className="badge badge-warning"
+                                style={{ fontSize: 11, padding: '2px 8px', cursor: 'pointer', border: 'none' }}
+                                title="Показать расхождения по позициям"
+                                onClick={(e) => { e.stopPropagation(); setMismatchForId(row.id); }}
+                            >
+                                ⚠ расхождение
+                            </button>
+                        )}
+                    </span>
+                );
+            },
+            exportValue: (row: AssemblyRequest) => ffLinksOf(row).map(l => l.ff_request_number || `#${l.ff_request_id}`).join(', '),
         },
         {
             key: 'brands', label: 'Бренд',
@@ -648,6 +687,10 @@ export default function AssemblyListPage() {
             {/* Toast */}
             {toast && (
                 <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} duration={toast.type === 'error' ? 4000 : 2500} />
+            )}
+
+            {mismatchForId != null && (
+                <FfMismatchModal assemblyId={mismatchForId} onClose={() => setMismatchForId(null)} />
             )}
 
             {/* Header */}

@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
+import { FfMismatchBlock } from '@/components/FfMismatchModal';
 import type { Column } from '@/components/DataTable';
 import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, RefreshFromFboResponse, WbFboSupply } from '@/types/api';
 
@@ -785,20 +786,39 @@ export default function AssemblyDetailPage() {
                     {assembly.shipped_at && (
                         <InfoField label="Отгружена" value={formatDateTime(assembly.shipped_at)} />
                     )}
-                    {assembly.ff_request_id && (
-                        <InfoField
-                            label="Заявка ФФ"
-                            value={
-                                <Link
-                                    href={`/p/${slug}/warehouse/${assembly.ff_warehouse_id ?? assembly.warehouse_id}/ff-request/${assembly.ff_request_id}`}
-                                    title="Открыть ФФ-заявку и сверку состава"
-                                    style={{ color: 'var(--color-accent)' }}
-                                >
-                                    {assembly.ff_request_number}{assembly.ff_stage_title ? ` (${assembly.ff_stage_title})` : ''} →
-                                </Link>
-                            }
-                        />
-                    )}
+    {(() => {
+                        // migfull/«Натали»: на одну сборку может быть 2+ ФФ-заявки → показываем все.
+                        const ffLinks = assembly.ff_links?.length
+                            ? assembly.ff_links
+                            : (assembly.ff_request_id
+                                ? [{ ff_request_id: assembly.ff_request_id, ff_request_number: assembly.ff_request_number, ff_stage_title: assembly.ff_stage_title, ff_warehouse_id: assembly.ff_warehouse_id }]
+                                : []);
+                        if (!ffLinks.length) return null;
+                        return (
+                            <InfoField
+                                label={ffLinks.length > 1 ? `Заявки ФФ (${formatNumber(ffLinks.length, 0)})` : 'Заявка ФФ'}
+                                value={
+                                    <span style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 12 }}>
+                                        {ffLinks.map(lk => (
+                                            <Link
+                                                key={lk.ff_request_id}
+                                                href={`/p/${slug}/warehouse/${lk.ff_warehouse_id ?? assembly.warehouse_id}/ff-request/${lk.ff_request_id}`}
+                                                title="Открыть ФФ-заявку и сверку состава"
+                                                style={{ color: 'var(--color-accent)' }}
+                                            >
+                                                {lk.ff_request_number}{lk.ff_stage_title ? ` (${lk.ff_stage_title})` : ''} →
+                                            </Link>
+                                        ))}
+                                        {assembly.ff_mismatch === true && (
+                                            <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }} title="Подробности — в блоке «Расхождение наполнения» ниже">
+                                                ⚠ расхождение
+                                            </span>
+                                        )}
+                                    </span>
+                                }
+                            />
+                        );
+                    })()}
                     {assembly.comment && (
                         <div style={{ gridColumn: '1 / -1' }}>
                             <InfoField label="Комментарий" value={assembly.comment} />
@@ -806,6 +826,9 @@ export default function AssemblyDetailPage() {
                     )}
                 </div>
             </div>
+
+            {/* Расхождение наполнения с ФФ — отдельным блоком (без клика) */}
+            {assembly.ff_mismatch === true && <FfMismatchBlock assemblyId={assembly.id} />}
 
             {/* Items table */}
             {(() => {

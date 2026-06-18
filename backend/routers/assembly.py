@@ -24,10 +24,12 @@ from backend.schemas.assembly import (
     AssignVehicle,
     AssignVehicleBulk,
     CreatedGroupResponse,
+    FfLinkInfo,
     LogisticsAnalyticsResponse,
     RefreshFromFboResponse,
     ShipBulk,
 )
+from backend.schemas.fulfillment import FfMismatchDetail
 from backend.services import assembly_service, fulfillment_service
 from backend.services.assembly.analytics import get_assembly_flow_analytics, get_assembly_wb_warehouses
 from backend.utils.rate_limit import rate_limit_write
@@ -137,30 +139,41 @@ async def _enrich_ff_links(
             FulfillmentRequest.external_id,
             FulfillmentRequest.stage_title,
             FulfillmentRequest.warehouse_id,
-        ).where(
+        )
+        .where(
             FulfillmentRequest.project_id == project_id,
             FulfillmentRequest.assembly_request_id.in_(assembly_ids),
         )
+        # стабильный порядок: первая привязка детерминирована (для ff_request_*)
+        .order_by(FulfillmentRequest.assembly_request_id, FulfillmentRequest.id)
     )
-    links = {
-        row.assembly_request_id: {
-            "ff_request_id": row.id,
-            "ff_request_number": row.number or row.external_id,
-            "ff_stage_title": row.stage_title,
-            "ff_warehouse_id": row.warehouse_id,
-        }
-        for row in link_rows.all()
-    }
+    # У одной сборки может быть НЕСКОЛЬКО ФФ-заявок (migfull/«Натали», N:1).
+    links: dict[int, list[FfLinkInfo]] = {}
+    for row in link_rows.all():
+        links.setdefault(row.assembly_request_id, []).append(
+            FfLinkInfo(
+                ff_request_id=row.id,
+                ff_request_number=row.number or row.external_id,
+                ff_stage_title=row.stage_title,
+                ff_warehouse_id=row.warehouse_id,
+            )
+        )
     if not links:
         return
 
+    # Расхождение наполнения сборки с привязанными заявками ФФ (по зеркалу, без HTTP)
+    mismatch_map = await fulfillment_service.get_assembly_ff_mismatch_map(db, project_id, set(links))
+
     for resp in response_items:
-        link = links.get(resp.id)
-        if link is not None:
-            resp.ff_request_id = link["ff_request_id"]
-            resp.ff_request_number = link["ff_request_number"]
-            resp.ff_stage_title = link["ff_stage_title"]
-            resp.ff_warehouse_id = link["ff_warehouse_id"]
+        doc_links = links.get(resp.id)
+        if doc_links:
+            first = doc_links[0]
+            resp.ff_request_id = first.ff_request_id
+            resp.ff_request_number = first.ff_request_number
+            resp.ff_stage_title = first.ff_stage_title
+            resp.ff_warehouse_id = first.ff_warehouse_id
+            resp.ff_links = doc_links
+            resp.ff_mismatch = mismatch_map.get(resp.id)
 
 
 # --- Created groups (Предпросмотр созданных заявок) -------------------------
@@ -292,6 +305,23 @@ async def get_assembly_request(
     data = await assembly_service._build_response(db, req)
     data.update(await fulfillment_service.get_ff_link_for_assembly(db, project.id, request_id) or {})
     return AssemblyRequestResponse.model_validate(data)
+
+
+@router.get("/{request_id}/ff-mismatch", response_model=FfMismatchDetail)
+async def assembly_ff_mismatch(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Разбивка расхождения наполнения сборки с привязанными заявками ФФ (по позициям/итогам).
+
+    Питает модалку «расхождение» на деталке/списке сборок и вкладке «ФФ сборка».
+    Считается по зеркалу (без HTTP).
+    """
+    data = await fulfillment_service.get_assembly_ff_mismatch_detail(db, project.id, request_id)
+    if data is None:
+        raise HTTPException(404, "Assembly request not found")
+    return data
 
 
 # --- Update -----------------------------------------------------------------

@@ -15,6 +15,7 @@ import type {
 import type { Column } from '@/components/DataTable';
 import Toast from '@/components/Toast';
 import { FF_LINKED_STATUS_LABELS, FfLinkModal, ffSkippedNotice, ffStageBadge, ffStatusBadge, ffStatusLabel, ffEventBadge, ffEventSummary } from './ff-shared';
+import { FfMismatchModal } from '@/components/FfMismatchModal';
 import { whNamesMatch } from '@/lib/utils/ffLinkCandidates';
 
 /* ─── Transfers helpers (общие для страницы и вкладки) ───────────────────── */
@@ -2515,6 +2516,8 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
     // Тик-счётчики для ручного перезапуска загрузки заявок и блока «без связи» (после реверс-линка)
     const [reloadTick, setReloadTick] = useState(0);
     const [unlinkedReloadTick, setUnlinkedReloadTick] = useState(0);
+    // id сборки для модалки «расхождение наполнения»
+    const [mismatchForAssembly, setMismatchForAssembly] = useState<number | null>(null);
 
     // Смена вида/фильтра/перезагрузка — сбросить выбор (id устаревают)
     useEffect(() => { setSelected(new Set()); }, [warehouseId, kind, showArchived, stageFilter, statusFilter, reloadTick]);
@@ -2678,10 +2681,27 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
                 const acting = actingId === row.id;
                 if (row.linked_number) {
                     return (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                             <span style={{ fontWeight: 600 }}>{row.linked_number}</span>
                             {row.linked_status && (
                                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{linkedStatusLabel(row.linked_status)}</span>
+                            )}
+                            {row.linked_mismatch === true && (
+                                row.assembly_request_id != null ? (
+                                    <button
+                                        type="button"
+                                        className="badge badge-warning"
+                                        style={{ fontSize: 11, padding: '2px 8px', cursor: 'pointer', border: 'none' }}
+                                        title="Показать расхождения по позициям"
+                                        onClick={() => setMismatchForAssembly(row.assembly_request_id)}
+                                    >
+                                        ⚠ расхождение
+                                    </button>
+                                ) : (
+                                    <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }} title="Состав нашего документа расходится с заявкой ФФ по наполнению">
+                                        ⚠ расхождение
+                                    </span>
+                                )
                             )}
                             <button className="btn btn-sm btn-secondary" onClick={() => handleUnlink(row)} disabled={acting}>
                                 {acting ? '...' : 'Отвязать'}
@@ -2865,6 +2885,10 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             />
 
             {toast && <Toast message={toast} onClose={() => setToast('')} />}
+
+            {mismatchForAssembly != null && (
+                <FfMismatchModal assemblyId={mismatchForAssembly} onClose={() => setMismatchForAssembly(null)} />
+            )}
 
             {linkFor && (
                 <FfLinkModal

@@ -12,6 +12,21 @@ from pydantic import BaseModel, ConfigDict
 
 PackageTypeStr = Literal["BOX", "MONOPALLET", "SUPERSAFE"]
 
+
+class FfLinkInfo(BaseModel):
+    """Одна привязанная ФФ-заявка (зеркало фулфилмента) для деталки/списка сборки.
+
+    Сборка может быть связана с НЕСКОЛЬКИМИ ФФ-заявками (provider=migfull / «Натали»:
+    одной нашей заявке у них соответствуют 2+ заявки) — поэтому ff_links это список,
+    а одиночные поля ff_request_* остаются как первая привязка для обратной совместимости.
+    """
+
+    ff_request_id: int
+    ff_request_number: str | None = None
+    ff_stage_title: str | None = None
+    ff_warehouse_id: int | None = None
+
+
 # ─── Request schemas ────────────────────────────────────────────────────────
 
 
@@ -141,11 +156,17 @@ class AssemblyRequestResponse(BaseModel):
     items: list[AssemblyItemResponse] = []
     created_at: datetime
     updated_at: datetime
-    # Привязанная ФФ-заявка (зеркало фулфилмента) — заполняется только в GET деталки
+    # Привязанная ФФ-заявка (зеркало фулфилмента) — заполняется в GET деталки и списке.
+    # ff_request_* — ПЕРВАЯ привязка (обратная совместимость); ff_links — все привязки
+    # (migfull/«Натали» допускает 2+ ФФ-заявки на одну нашу сборку).
     ff_request_id: int | None = None
     ff_request_number: str | None = None
     ff_stage_title: str | None = None
     ff_warehouse_id: int | None = None
+    ff_links: list[FfLinkInfo] | None = None
+    # Состав сборки расходится с привязанной заявкой(ами) ФФ по наполнению
+    # (True — расхождение, False — совпадает, None — определить нельзя)
+    ff_mismatch: bool | None = None
 
 
 class AssemblyListResponse(BaseModel):
