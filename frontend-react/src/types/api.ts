@@ -1547,11 +1547,44 @@ export interface AssemblyRequest {
   items: AssemblyRequestItem[];
   created_at: string;
   updated_at: string;
-  /** привязанная ФФ-заявка (зеркало фулфилмента) — только в GET деталки */
+  /** привязанная ФФ-заявка (зеркало фулфилмента); ff_request_* — первая привязка */
   ff_request_id?: number | null;
   ff_request_number?: string | null;
   ff_stage_title?: string | null;
   ff_warehouse_id?: number | null;
+  /** все привязки (migfull/«Натали» — 2+ ФФ-заявки на одну сборку) */
+  ff_links?: FfLinkInfo[] | null;
+  /** состав сборки расходится с привязанной заявкой(ами) ФФ по наполнению (true — расхождение, null — неизвестно) */
+  ff_mismatch?: boolean | null;
+}
+
+export interface FfLinkInfo {
+  ff_request_id: number;
+  ff_request_number?: string | null;
+  ff_stage_title?: string | null;
+  ff_warehouse_id?: number | null;
+}
+
+/** Расходящаяся позиция: наш qty vs суммарный qty привязанных заявок ФФ */
+export interface FfMismatchDetailRow {
+  barcode: string;
+  article_seller?: string | null;
+  our_qty: number;
+  ff_qty: number;
+  /** ff_qty - our_qty (>0 — ФФ заявил больше, <0 — у нас больше) */
+  diff: number;
+}
+
+/** Разбивка расхождения наполнения сборки с привязанными заявками ФФ (модалка) */
+export interface FfMismatchDetail {
+  assembly_id: number;
+  assembly_number?: string | null;
+  /** barcode — сверка по ШК (rows заполнены); total — состав ФФ по позициям недоступен (только итоги) */
+  mode: 'barcode' | 'total';
+  our_total: number;
+  ff_total: number;
+  ff_request_numbers: string[];
+  rows: FfMismatchDetailRow[];
 }
 
 export interface AssemblyListResponse {
@@ -3176,6 +3209,30 @@ export interface AcceptanceCheckResponse {
   cache_hit: boolean;
 }
 
+// Сводные лимиты на сдачу — календарь дат (GET /warehouse/acceptance-limits)
+export type AcceptanceBoxType = 'box' | 'mono' | 'super';
+export interface AcceptanceLimitDay {
+  date: string; // ISO date
+  coefficient: number; // -1 closed, 0..1 free, >=2 paid multiplier
+  allow_unload: boolean;
+  is_free: boolean;
+  is_closed: boolean;
+  storage_coef?: number | null;
+  delivery_coef?: number | null;
+}
+export interface AcceptanceLimitEntry {
+  warehouse_id: number;
+  warehouse_name: string; // raw WB name
+  canonical_name: string;
+  box_type: AcceptanceBoxType;
+  days: AcceptanceLimitDay[];
+}
+export interface AcceptanceLimitsResponse {
+  warehouses: AcceptanceLimitEntry[];
+  dates: string[];
+  fetched_at: string;
+}
+
 // ─── Box multiplicity (кратность коробки) ────────────────────────────────────
 // Кратность резолвится ПЕР (товар, ФФ-склад) из принятых машин-поставок:
 //   machine → manual per-ФФ → default (box_qty_override) → none.
@@ -3525,6 +3582,8 @@ export interface FfRequestRow {
   /** Обогащение по связанному документу (заполняет сервис) */
   linked_number: string | null;
   linked_status: string | null;
+  /** состав нашего документа расходится с заявкой(ами) ФФ (true — расхождение, null — неизвестно) */
+  linked_mismatch?: boolean | null;
   /** Локальный архив (наша пометка, не статус провайдера) */
   local_archived: boolean;
   local_archived_at: string | null;
@@ -3730,6 +3789,8 @@ export interface FfLinkCandidate {
   reason: string | null;
   /** склад сдачи кандидата совпал со складом сдачи ФФ-заявки (нормализованно) */
   warehouse_match: boolean;
+  /** со сколькими ДРУГИМИ ФФ-заявками сборка уже связана (>0 только для migfull) */
+  linked_ff_count: number;
 }
 
 export interface FfLinkCandidatesResponse {

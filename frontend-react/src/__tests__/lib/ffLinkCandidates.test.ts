@@ -13,6 +13,7 @@ function makeCandidate(overrides: Partial<FfLinkCandidate> & { doc_id: number })
         score: null,
         reason: null,
         warehouse_match: true,
+        linked_ff_count: 0,
         ...overrides,
     };
 }

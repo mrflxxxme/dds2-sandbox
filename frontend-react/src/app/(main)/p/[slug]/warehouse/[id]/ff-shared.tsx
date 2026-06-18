@@ -164,6 +164,15 @@ export function FfLinkModal({ warehouseId, kind, request, onClose, onLinked }: {
                     <span className="badge badge-secondary" style={{ fontSize: 11, padding: '2px 8px' }}>
                         {FF_LINKED_STATUS_LABELS[c.status] || c.status}
                     </span>
+                    {c.linked_ff_count > 0 && (
+                        <span
+                            className="badge badge-warning"
+                            style={{ fontSize: 11, padding: '2px 8px' }}
+                            title="Эта заявка ДДС уже связана с другими заявками склада ФФ (Натали — несколько заявок на одну сборку)"
+                        >
+                            уже {formatNumber(c.linked_ff_count, 0)} ФФ
+                        </span>
+                    )}
                     {withScore && c.score != null && (
                         <span className={`badge ${c.score >= 70 ? 'badge-success' : 'badge-info'}`} style={{ fontSize: 11, padding: '2px 8px' }}>
                             {formatNumber(c.score, 0)}%

@@ -3,6 +3,7 @@ import { ApiClient } from './client';
 import type {
     AcceptanceCheckRequest,
     AcceptanceCheckResponse,
+    AcceptanceLimitsResponse,
     AssemblyDraft,
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
@@ -16,6 +17,7 @@ import type {
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
     CreatedAssemblyGroup,
+    FfMismatchDetail,
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBatchListResponse,
     BoxMultiplicityBatchRevertResponse,
@@ -81,6 +83,14 @@ export function addWarehouseMethods(api: ApiClient) {
                 ? '/api/v1/warehouse/acceptance-check?force=true'
                 : '/api/v1/warehouse/acceptance-check';
             return api.request<AcceptanceCheckResponse>('POST', url, body);
+        },
+        /** GET /warehouse/acceptance-limits — сводные лимиты на сдачу (календарь дат × тип упаковки). */
+        getWbAcceptanceLimits(warehouse?: string, force = false) {
+            const qs = new URLSearchParams();
+            if (warehouse) qs.set('warehouse', warehouse);
+            if (force) qs.set('force', 'true');
+            const q = qs.toString();
+            return api.request<AcceptanceLimitsResponse>('GET', `/api/v1/warehouse/acceptance-limits${q ? `?${q}` : ''}`);
         },
 
         // ─── Stock ───────────────────────────────────────────────────
@@ -343,6 +353,9 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         getAssemblyRequest(id: number) {
             return api.request<AssemblyRequest>('GET', `/api/v1/warehouse/assembly/${id}`);
+        },
+        getAssemblyFfMismatch(id: number) {
+            return api.request<FfMismatchDetail>('GET', `/api/v1/warehouse/assembly/${id}/ff-mismatch`);
         },
         updateAssemblyRequest(id: number, data: AssemblyRequestUpdate) {
             return api.request<AssemblyRequest>('PUT', `/api/v1/warehouse/assembly/${id}`, data);

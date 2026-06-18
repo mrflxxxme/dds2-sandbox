@@ -786,12 +786,15 @@ async def get_assembly_flow_analytics(
     # ff_closed_not_shipped (статус НЕ меняем — отгрузка двигает сток вручную).
     # Только пред-SHIPPED статусы: для SHIPPED закрытие ФФ ожидаемо. Локально
     # заархивированные строки зеркала исключаем. {assembly_request_id: ff_number}.
-    ff_closed_map: dict[int, str | None] = {}
+    # Сборка может иметь НЕСКОЛЬКО ФФ-заявок (migfull/«Натали», N:1) → собираем
+    # все номера закрытых заявок и склеиваем через запятую.
+    ff_closed_nums: dict[int, list[str]] = {}
     pre_ship_ids = [r.id for r in active_reqs if r.status != AssemblyStatus.SHIPPED]
     if pre_ship_ids:
         ff_rows = (
             await db.execute(
-                select(FulfillmentRequest.assembly_request_id, FulfillmentRequest.number).where(
+                select(FulfillmentRequest.assembly_request_id, FulfillmentRequest.number)
+                .where(
                     FulfillmentRequest.project_id == project_id,
                     FulfillmentRequest.assembly_request_id.in_(pre_ship_ids),
                     FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
@@ -801,11 +804,18 @@ async def get_assembly_flow_analytics(
                     ),
                     FulfillmentRequest.local_archived.is_(False),
                 )
+                .order_by(FulfillmentRequest.assembly_request_id, FulfillmentRequest.id)
             )
         ).all()
         for aid, num in ff_rows:
-            if aid is not None:
-                ff_closed_map.setdefault(aid, num)
+            if aid is None:
+                continue
+            nums = ff_closed_nums.setdefault(aid, [])  # ключ есть даже без номера → аномалия срабатывает
+            if num:
+                nums.append(num)
+    ff_closed_map: dict[int, str | None] = {
+        aid: (", ".join(nums) if nums else None) for aid, nums in ff_closed_nums.items()
+    }
 
     # --- Anomalies (текущее состояние, максимум одна категория на заявку) ---
     anomalies_raw: list[tuple[AssemblyRequest, str, datetime | None]] = []

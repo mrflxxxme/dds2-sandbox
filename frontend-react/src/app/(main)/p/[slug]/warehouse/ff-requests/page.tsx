@@ -16,6 +16,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
 import PageHeader from '@/components/PageHeader';
 import TanStackDataTable from '@/components/TanStackDataTable';
+import { FfMismatchModal } from '@/components/FfMismatchModal';
 import type { Column } from '@/components/DataTable';
 import type {
     FfIntegratedWarehouse,
@@ -77,6 +78,8 @@ export default function FfRequestsOverviewPage() {
     const [syncingId, setSyncingId] = useState<number | null>(null);
     const [actingId, setActingId] = useState<number | null>(null);
     const [linkFor, setLinkFor] = useState<FfOverviewRequestRow | null>(null);
+    // id сборки для модалки «расхождение наполнения»
+    const [mismatchForAssembly, setMismatchForAssembly] = useState<number | null>(null);
 
     // Перезагрузка: silent — без скелетона (после link/unlink/sync)
     const [reloadKey, setReloadKey] = useState(0);
@@ -237,6 +240,23 @@ export default function FfRequestsOverviewPage() {
                             )}
                             {row.linked_status && (
                                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{linkedStatusLabel(row.linked_status)}</span>
+                            )}
+                            {row.linked_mismatch === true && (
+                                row.assembly_request_id != null ? (
+                                    <button
+                                        type="button"
+                                        className="badge badge-warning"
+                                        style={{ fontSize: 11, padding: '2px 8px', cursor: 'pointer', border: 'none' }}
+                                        title="Показать расхождения по позициям"
+                                        onClick={() => setMismatchForAssembly(row.assembly_request_id)}
+                                    >
+                                        ⚠ расхождение
+                                    </button>
+                                ) : (
+                                    <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }} title="Состав нашего документа расходится с заявкой ФФ по наполнению">
+                                        ⚠ расхождение
+                                    </span>
+                                )
                             )}
                             <button
                                 className="btn btn-sm btn-secondary"
@@ -462,6 +482,10 @@ export default function FfRequestsOverviewPage() {
                         setLinkFor(null);
                     }}
                 />
+            )}
+
+            {mismatchForAssembly != null && (
+                <FfMismatchModal assemblyId={mismatchForAssembly} onClose={() => setMismatchForAssembly(null)} />
             )}
         </div>
     );
