@@ -38,7 +38,10 @@ import {
 } from 'recharts';
 import { api } from '@/lib/api';
 import { Toast } from '@/components';
+import TabLayout from '@/components/TabLayout';
 import { exportToExcel, formatDate, formatNumber, pluralRu } from '@/lib/utils';
+import LinkAnomaliesTab from './components/LinkAnomaliesTab';
+import StockDistributionTab from './components/StockDistributionTab';
 import type {
     AssemblyAnomalyKind,
     AssemblyAnomalyRow,
@@ -337,6 +340,9 @@ export default function AssemblyFlowAnalyticsPage() {
     const params = useParams();
     const slug = params.slug as string;
 
+    // Активная вкладка: поток / связи и расхождения / распределение остатков
+    const [tab, setTab] = useState<'flow' | 'links' | 'stock'>('flow');
+
     // Data
     const [data, setData] = useState<AssemblyFlowAnalyticsResponse | null>(null);
     const [loading, setLoading] = useState(true);
@@ -591,6 +597,8 @@ export default function AssemblyFlowAnalyticsPage() {
                         Скорость прохождения заявок по этапам и зависшие заявки
                     </p>
                 </div>
+                {/* Фильтры периода/порогов/категории/города — только на вкладке «Поток». */}
+                {tab === 'flow' && (
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                     {/* Период */}
                     <div style={{ display: 'flex', gap: 4 }}>
@@ -704,8 +712,27 @@ export default function AssemblyFlowAnalyticsPage() {
                         )}
                     </div>
                 </div>
+                )}
             </div>
 
+            {/* Вкладки: поток / связи и расхождения / распределение остатков */}
+            <TabLayout
+                tabs={[
+                    { key: 'flow', label: 'Поток' },
+                    { key: 'links', label: 'Связи и расхождения' },
+                    { key: 'stock', label: 'Распределение остатков' },
+                ]}
+                active={tab}
+                onChange={k => setTab(k as 'flow' | 'links' | 'stock')}
+            />
+
+            {/* Ленивый монтаж: новые вкладки фетчат, только когда активны */}
+            {tab === 'links' && <LinkAnomaliesTab slug={slug} />}
+            {tab === 'stock' && <StockDistributionTab slug={slug} />}
+
+            {/* Вкладка «Поток» — исходное содержимое страницы */}
+            {tab === 'flow' && (
+            <>
             {/* Error */}
             {error && !loading && (
                 <div className="glass-card" style={{ padding: 20, color: 'var(--color-danger)', marginBottom: 16 }}>
@@ -1256,6 +1283,8 @@ export default function AssemblyFlowAnalyticsPage() {
                         </div>
                     )}
                 </>
+            )}
+            </>
             )}
 
             {toast && (

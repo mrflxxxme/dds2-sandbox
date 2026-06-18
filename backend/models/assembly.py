@@ -19,6 +19,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -269,3 +270,44 @@ class AssemblyDraft(Base, TimestampMixin, SoftDeleteMixin):
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (Index("ix_assembly_drafts_project_id", "project_id"),)
+
+
+# ─── Stock distribution daily snapshot ──────────────────────────────────────
+
+
+class AssemblyStockDistributionDaily(Base, TimestampMixin):
+    """Ежедневный снимок распределения «где товар» по складу и статусу товара.
+
+    Накопительная история для вкладки «Распределение остатков»: остаток на
+    складе ФФ (`FulfillmentStock`) хранится лишь как текущий снимок (перезатир
+    каждым синком), поэтому динамику склада ФФ нельзя восстановить задним числом —
+    эта таблица копит её вперёд (одна строка на день x склад x статус товара).
+    Бакеты в штуках (как в `services/assembly/stock_distribution.py`):
+    ff_stock = max(qty_good - qty_reserve, 0)*units_per_box; in_assembly/ready/
+    in_transit — по статусам сборки. Пишется ежедневной scheduler-джобой
+    (idempotent: снимок дня перезаписывается).
+    """
+
+    __tablename__ = "assembly_stock_distribution_daily"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
+    # Статус товара: active / new / clearance / none (ProductStatusMap; none = без статуса).
+    product_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    ff_stock: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    in_assembly: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ready: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    in_transit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "snapshot_date",
+            "warehouse_id",
+            "product_status",
+            name="uq_asm_stock_dist_daily",
+        ),
+        Index("ix_asm_stock_dist_daily_project_date", "project_id", "snapshot_date"),
+    )

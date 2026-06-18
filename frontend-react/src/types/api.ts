@@ -1723,6 +1723,114 @@ export interface AssemblyFlowAnalyticsResponse {
   thresholds: AssemblyFlowThresholds;
 }
 
+/* ─── Связи и расхождения сборки (link anomalies) ─── */
+
+/** Сборка, состав которой расходится с привязанными заявками ФФ. */
+export interface FfMismatchRow {
+  assembly_id: number;
+  number: string;
+  status: AssemblyStatus;
+  warehouse_id: number;
+  warehouse_name: string | null;
+  ff_request_numbers: string[];
+  /** наш итог, шт */
+  our_total: number;
+  /** итог по привязанным заявкам ФФ, шт */
+  ff_total: number;
+  /** ff_total - our_total (знаковая разница) */
+  diff: number;
+  /** barcode — сверка по ШК; total — по суммарному кол-ву */
+  mode: 'barcode' | 'total';
+}
+
+/** Наша сборка на ФФ-складе без привязанной заявки ФФ. */
+export interface UnlinkedAssemblyRow {
+  assembly_id: number;
+  number: string;
+  status: AssemblyStatus;
+  warehouse_id: number;
+  warehouse_name: string | null;
+  provider: string | null;
+  total_qty: number;
+  created_at: string | null;
+  age_days: number;
+}
+
+/** Заявка ФФ без привязанной нашей сборки. */
+export interface UnlinkedFfRow {
+  ff_request_id: number;
+  provider: string;
+  number: string | null;
+  warehouse_id: number;
+  warehouse_name: string | null;
+  stage_title: string | null;
+  status: string | null;
+  total_qty: number | null;
+  external_created_at: string | null;
+}
+
+/** Сводка аномалий FBO-поставок ВБ (drill-through на /warehouse/fbo-supplies). */
+export interface FboAnomalyRollup {
+  without_assembly_count: number;
+  under_accepted_count: number;
+  under_accepted_qty: number;
+  excess_count: number;
+  excess_qty: number;
+}
+
+export interface LinkAnomaliesResponse {
+  ff_composition_mismatch: FfMismatchRow[];
+  assemblies_without_ff: UnlinkedAssemblyRow[];
+  ff_without_assembly: UnlinkedFfRow[];
+  fbo: FboAnomalyRollup;
+}
+
+/* ─── Распределение остатков сборки (stock distribution) ─── */
+
+/** Где сейчас товар (шт + доля от итога). Сумма долей ≈ 100. */
+export interface StockDistributionBucket {
+  /** на складе ФФ: qty_good - qty_reserve (≥0) */
+  ff_stock: number;
+  /** IN_PROGRESS («в сборке») */
+  in_assembly: number;
+  /** READY + VEHICLE_ASSIGNED («готово») */
+  ready: number;
+  /** SHIPPED («в пути») */
+  in_transit: number;
+  total: number;
+  ff_stock_pct: number;
+  in_assembly_pct: number;
+  ready_pct: number;
+  in_transit_pct: number;
+}
+
+/** Бакет с подписью группы — склад или статус товара. */
+export interface StockDistributionGroup {
+  key: string;
+  label: string;
+  bucket: StockDistributionBucket;
+}
+
+export interface StockDistributionResponse {
+  total: StockDistributionBucket;
+  by_warehouse: StockDistributionGroup[];
+  by_status: StockDistributionGroup[];
+}
+
+/** Снимок 4 бакетов «где товар» за один день (шт). */
+export interface StockDistributionDailyStat {
+  /** ISO YYYY-MM-DD */
+  date: string;
+  ff_stock: number;
+  in_assembly: number;
+  ready: number;
+  in_transit: number;
+}
+
+export interface StockDistributionHistoryResponse {
+  daily: StockDistributionDailyStat[];
+}
+
 export interface AssemblyHistoryEntry {
     id: number;
     old_status: string | null;

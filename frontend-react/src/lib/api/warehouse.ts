@@ -10,6 +10,9 @@ import type {
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
     AssemblyFlowAnalyticsResponse,
+    LinkAnomaliesResponse,
+    StockDistributionResponse,
+    StockDistributionHistoryResponse,
     HandedUnitItem,
     AssemblyHistoryEntry,
     AssemblyListResponse,
@@ -447,6 +450,39 @@ export function addWarehouseMethods(api: ApiClient) {
             }
             const qs = query.toString();
             return api.request<AssemblyFlowAnalyticsResponse>('GET', `/api/v1/warehouse/assembly/flow-analytics${qs ? `?${qs}` : ''}`);
+        },
+        /** Вкладка «Связи и расхождения»: расхождение наполнения, несвязанные заявки, аномалии FBO. */
+        getAssemblyLinkAnomalies(params?: { warehouse_ids?: string }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
+            return api.request<LinkAnomaliesResponse>('GET', `/api/v1/warehouse/assembly/flow-analytics/link-anomalies${qs ? `?${qs}` : ''}`);
+        },
+        /** Вкладка «Распределение остатков»: «где сейчас товар» (склад ФФ / в сборке / готово / в пути). */
+        getAssemblyStockDistribution(params?: { warehouse_ids?: string; product_status?: string }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
+            return api.request<StockDistributionResponse>('GET', `/api/v1/warehouse/assembly/flow-analytics/stock-distribution${qs ? `?${qs}` : ''}`);
+        },
+        /** История распределения остатков по дням (накопительные снимки). */
+        getAssemblyStockDistributionHistory(params?: { date_from?: string; date_to?: string; warehouse_ids?: string; product_status?: string }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
+            return api.request<StockDistributionHistoryResponse>('GET', `/api/v1/warehouse/assembly/flow-analytics/stock-distribution/history${qs ? `?${qs}` : ''}`);
         },
 
         // ─── Assembly Drafts ────────────────────────────────────────────

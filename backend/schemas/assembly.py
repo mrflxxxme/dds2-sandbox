@@ -349,3 +349,121 @@ class AssemblyFlowAnalyticsResponse(BaseModel):
     daily: list[AssemblyFlowDailyStat] = []
     stage_daily: list[AssemblyFlowStageDailyStat] = []
     thresholds: AssemblyFlowThresholds
+
+
+# ─── Связи и расхождения (link anomalies) ──────────────────────────────────
+# Вкладка «Связи и расхождения» на странице «Анализ сборки». Зеркало TS-контракта:
+# frontend-react/src/types/api.ts, блок «Связи и расхождения сборки».
+
+
+class FfMismatchRow(BaseModel):
+    """Сборка, состав которой расходится с привязанными заявками ФФ.
+
+    Считается по зеркалу (compute_doc_ff_mismatch), только по активным сборкам
+    в статусах IN_PROGRESS / READY / VEHICLE_ASSIGNED («в сборке» + «готово»).
+    """
+
+    assembly_id: int
+    number: str
+    status: str
+    warehouse_id: int
+    warehouse_name: str | None
+    ff_request_numbers: list[str]
+    our_total: int  # наш итог, шт
+    ff_total: int  # итог по привязанным заявкам ФФ, шт
+    diff: int  # ff_total - our_total (знаковая разница)
+    mode: Literal["barcode", "total"]  # сверка по ШК либо по суммарному кол-ву
+
+
+class UnlinkedAssemblyRow(BaseModel):
+    """Наша сборка на ФФ-складе без привязанной заявки ФФ."""
+
+    assembly_id: int
+    number: str
+    status: str
+    warehouse_id: int
+    warehouse_name: str | None
+    provider: str | None  # провайдер ФФ-интеграции склада, если определён
+    total_qty: int
+    created_at: str | None  # ISO
+    age_days: int  # сколько дней заявка живёт без привязки
+
+
+class UnlinkedFfRow(BaseModel):
+    """Заявка ФФ без привязанной нашей сборки (kind=assembly, не архив)."""
+
+    ff_request_id: int
+    provider: str
+    number: str | None
+    warehouse_id: int
+    warehouse_name: str | None
+    stage_title: str | None
+    status: str | None
+    total_qty: int | None
+    external_created_at: str | None  # ISO
+
+
+class FboAnomalyRollup(BaseModel):
+    """Сводка аномалий FBO-поставок ВБ (drill-through на /warehouse/fbo-supplies)."""
+
+    without_assembly_count: int  # ACCEPTED-поставка без нашей заявки на сборку
+    under_accepted_count: int  # недоприёмка (необработанная)
+    under_accepted_qty: int  # суммарно недопринято, шт
+    excess_count: int  # излишек (необработанный)
+    excess_qty: int  # суммарно излишек, шт
+
+
+class LinkAnomaliesResponse(BaseModel):
+    ff_composition_mismatch: list[FfMismatchRow]
+    assemblies_without_ff: list[UnlinkedAssemblyRow]
+    ff_without_assembly: list[UnlinkedFfRow]
+    fbo: FboAnomalyRollup
+
+
+# ─── Распределение остатков (stock distribution) ───────────────────────────
+# Вкладка «Распределение остатков»: «где сейчас товар» (100%). Зеркало TS-контракта:
+# frontend-react/src/types/api.ts, блок «Распределение остатков сборки».
+
+
+class StockDistributionBucket(BaseModel):
+    """Где сейчас товар (шт + доля от итога). Сумма долей ≈ 100."""
+
+    ff_stock: int  # на складе ФФ: qty_good - qty_reserve (≥0), короба сведены к россыпи
+    in_assembly: int  # IN_PROGRESS («в сборке»)
+    ready: int  # READY + VEHICLE_ASSIGNED («готово»)
+    in_transit: int  # SHIPPED («в пути»)
+    total: int  # сумма четырёх бакетов
+    ff_stock_pct: float
+    in_assembly_pct: float
+    ready_pct: float
+    in_transit_pct: float
+
+
+class StockDistributionGroup(BaseModel):
+    """Бакет с подписью группы — склад или статус товара."""
+
+    key: str  # warehouse_id (str) либо ключ статуса (active/new/clearance/none)
+    label: str  # имя склада / «Новинка» / «Без статуса» и т.п.
+    bucket: StockDistributionBucket
+
+
+class StockDistributionResponse(BaseModel):
+    total: StockDistributionBucket
+    by_warehouse: list[StockDistributionGroup]
+    by_status: list[StockDistributionGroup]
+
+
+class StockDistributionDailyStat(BaseModel):
+    """Снимок 4 бакетов «где товар» за один день (шт)."""
+
+    date: str  # ISO YYYY-MM-DD
+    ff_stock: int
+    in_assembly: int
+    ready: int
+    in_transit: int
+
+
+class StockDistributionHistoryResponse(BaseModel):
+    """Динамика распределения остатков по дням (накопительные снимки)."""
+
+    daily: list[StockDistributionDailyStat]
