@@ -141,6 +141,10 @@ class FfRequestRow(BaseModel):
     # Обогащение по связанному документу (заполняет сервис)
     linked_number: str | None = None
     linked_status: str | None = None
+    # Состав нашего документа расходится с привязанной заявкой(ами) ФФ по наполнению
+    # (True — расхождение, False — совпадает, None — определить нельзя). См.
+    # compute_doc_ff_mismatch: сверка по ШК (wmscelicom/migfull) либо по кол-ву (skladbot).
+    linked_mismatch: bool | None = None
 
 
 class FfRequestDetailProduct(BaseModel):
@@ -184,6 +188,29 @@ class FfRequestMatch(BaseModel):
     ff_total: int = 0
     our_total: int = 0
     mismatches: list[FfMatchRow] = Field(default_factory=list)
+
+
+class FfMismatchDetailRow(BaseModel):
+    """Расходящаяся позиция: наш qty vs суммарный qty привязанных заявок ФФ."""
+
+    barcode: str
+    article_seller: str | None = None
+    our_qty: int = 0
+    ff_qty: int = 0
+    diff: int = 0  # ff_qty - our_qty (>0 — ФФ заявил больше, <0 — у нас больше)
+
+
+class FfMismatchDetail(BaseModel):
+    """Разбивка расхождения наполнения сборки с привязанными заявками ФФ (модалка)."""
+
+    assembly_id: int
+    assembly_number: str | None = None
+    # barcode — сверка по ШК (rows заполнены); total — состав ФФ по позициям недоступен (только итоги)
+    mode: Literal["barcode", "total"]
+    our_total: int = 0
+    ff_total: int = 0
+    ff_request_numbers: list[str] = Field(default_factory=list)
+    rows: list[FfMismatchDetailRow] = Field(default_factory=list)
 
 
 class FfRequestStageLog(BaseModel):
@@ -243,6 +270,10 @@ class FfLinkCandidate(BaseModel):
     # Склад сдачи кандидата совпал со складом сдачи ФФ-заявки (нормализованное
     # сравнение имён). True, когда у ФФ-заявки склад неизвестен (фильтровать нечем).
     warehouse_match: bool = True
+    # Сколько ДРУГИХ ФФ-заявок уже связано с этим документом. >0 только для
+    # migfull/«Натали» (N:1 — одной сборке соответствуют 2+ заявки склада); для
+    # остальных провайдеров связанные документы из кандидатов исключаются → всегда 0.
+    linked_ff_count: int = 0
 
 
 class FfLinkCandidatesResponse(BaseModel):
@@ -495,6 +526,7 @@ class FfSyncResult(BaseModel):
     unmatched_barcodes: int = 0
     assemblies_marked_ready: int = 0  # наших заявок переведено в READY по стадии ФФ
     inbound_receipts_accepted: int = 0  # наших приёмок принято (сток запостен) по сигналу ФФ
+    assemblies_shipped: int = 0  # наших VEHICLE_ASSIGNED сборок отгружено (сток списан) по сигналу ФФ
     synced_at: datetime
 
 
