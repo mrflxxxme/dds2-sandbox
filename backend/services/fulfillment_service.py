@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import httpx
-from sqlalchemy import and_, delete, exists, func, select, text, tuple_, update
+from sqlalchemy import and_, delete, exists, func, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -253,6 +253,37 @@ def _transition_assembly_to_ready(
     )
 
 
+async def _other_linked_ff_all_ready(
+    db: AsyncSession,
+    project_id: int,
+    assembly_request_id: int,
+    *,
+    exclude_id: int,
+) -> bool:
+    """Все ОСТАЛЬНЫЕ активные привязанные сборочные ФФ-заявки сборки готовы?
+
+    Для авто-READY при ручной привязке (migfull/«Натали», N:1): сборку нельзя
+    перевести в READY, пока хоть одна другая привязанная заявка ещё собирается.
+    Для skladbot/wmscelicom других привязанных заявок нет → all([]) == True →
+    поведение не меняется.
+    """
+    result = await db.execute(
+        select(
+            FulfillmentRequest.provider,
+            FulfillmentRequest.stage_code,
+            FulfillmentRequest.stage_title,
+            FulfillmentRequest.is_completed,
+        ).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.assembly_request_id == assembly_request_id,
+            FulfillmentRequest.id != exclude_id,
+            FulfillmentRequest.archived == False,
+            FulfillmentRequest.local_archived == False,
+        )
+    )
+    return all(_assembly_ready_signal(r.provider, r.stage_code, r.stage_title, r.is_completed) for r in result.all())
+
+
 def _inbound_accept_signal(is_completed: bool) -> bool:
     """ФФ принял приёмку на остатки → нашу приёмку EXPECTED/DRAFT можно ACCEPT.
 
@@ -263,6 +294,18 @@ def _inbound_accept_signal(is_completed: bool) -> bool:
     _assembly_ready_signal): accept_receipt ПОСТИТ сток на склад, ложный приём
     дороже ложного READY (откат — лишь ACCEPTED→CANCELLED со встречными
     движениями). Отменённые приёмки приходят archived=True и отсекаются синком.
+    """
+    return bool(is_completed)
+
+
+def _assembly_shipped_signal(is_completed: bool) -> bool:
+    """ФФ отгрузил груз (терминальный статус) → нашу VEHICLE_ASSIGNED сборку SHIP.
+
+    Отгрузка у всех провайдеров = is_completed (см. _ff_status_code: assembly +
+    is_completed → shipped). Строгий сигнал, как _inbound_accept_signal:
+    ship_request СПИСЫВАЕТ сток и создаёт OutboundShipment — ложная отгрузка
+    дороже ложного READY (откат — CANCELLED со встречным возвратом стока).
+    Отменённые заявки приходят archived=True и отсекаются на сборе кандидатов.
     """
     return bool(is_completed)
 
@@ -658,8 +701,14 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         )
         .limit(_MIRROR_SELECT_LIMIT)
     )
-    marked_ready = await _mark_linked_assemblies_ready(db, project_id, list(linked_result.scalars().all()))
+    linked_assembly_reqs = list(linked_result.scalars().all())
+    marked_ready = await _mark_linked_assemblies_ready(db, project_id, linked_assembly_reqs)
     assemblies_marked_ready = len(marked_ready)
+    # Кандидаты на авто-SHIP сборок (машина назначена + ФФ отгрузил груз) собираем
+    # тут же, под синк-транзакцией (нужны свежие is_completed после UPSERT); сам
+    # ship_request — после commit, своей сессией (списывает сток, создаёт
+    # OutboundShipment и коммитит сам — внутри открытой транзакции его звать нельзя).
+    assembly_ship_ids = await _collect_assembly_ship_candidates(db, project_id, linked_assembly_reqs)
 
     # Кандидаты на авто-ACCEPT приёмок собираем ПОД синк-транзакцией (нужны
     # свежие is_completed после UPSERT), но сам приём — после commit (ниже):
@@ -736,6 +785,23 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             except Exception as e:  # — best-effort, синк уже зафиксирован
                 logger.warning("FF auto-accept: приёмка %s пропущена (%s)", receipt_id, e)
 
+    # Авто-SHIP сборок: ФФ отгрузил груз (is_completed), а у нас уже назначена
+    # машина (VEHICLE_ASSIGNED) → переводим сборку в SHIPPED. ship_request
+    # списывает сток + создаёт OutboundShipment и коммитит сам — ПОСЛЕ commit
+    # синка, своей сессией; дефицит стока/прочая ошибка синк НЕ валит (best-effort).
+    assemblies_shipped = 0
+    if assembly_ship_ids:
+        from backend.database import AsyncSessionLocal
+        from backend.services.assembly.status import ship_request
+
+        for asm_id in assembly_ship_ids:
+            try:
+                async with AsyncSessionLocal() as ship_db:
+                    await ship_request(ship_db, project_id, asm_id)
+                assemblies_shipped += 1
+            except Exception as e:  # — best-effort, синк уже зафиксирован
+                logger.warning("FF auto-ship: сборка %s пропущена (%s)", asm_id, e)
+
     if assemblies_marked_ready:
         await invalidate_cache("reports:assembly_flow")
 
@@ -766,7 +832,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
 
     logger.info(
         "Fulfillment sync: project=%s warehouse=%s stocks=%d requests=%d unmatched=%d "
-        "marked_ready=%d inbound_accepted=%d",
+        "marked_ready=%d inbound_accepted=%d shipped=%d",
         project_id,
         warehouse_id,
         stocks_synced,
@@ -774,6 +840,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         unmatched,
         assemblies_marked_ready,
         inbound_receipts_accepted,
+        assemblies_shipped,
     )
     return {
         "stocks_synced": stocks_synced,
@@ -781,6 +848,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         "unmatched_barcodes": unmatched,
         "assemblies_marked_ready": assemblies_marked_ready,
         "inbound_receipts_accepted": inbound_receipts_accepted,
+        "assemblies_shipped": assemblies_shipped,
         "synced_at": synced_at,
     }
 
@@ -1616,16 +1684,25 @@ async def _mark_linked_assemblies_ready(
     словарей по каждому переходу (assembly_number/ff_number/dest/qty) для
     Telegram-уведомлений. Commit — на стороне вызывающего.
     """
-    ff_by_assembly: dict[int, FulfillmentRequest] = {}
+    # Группируем ВСЕ активные привязанные сборочные ФФ-заявки по сборке. Сборку
+    # переводим в READY, только когда ВСЕ её привязанные заявки готовы: migfull/
+    # «Натали» допускает 2+ заявки на одну сборку, и пока хоть одна ещё собирается,
+    # сборка не готова. Для skladbot/wmscelicom на сборку ≤1 заявки → поведение не
+    # меняется. Вызывающий уже отфильтровал archived/local_archived и провайдер+склад,
+    # т.е. здесь — все активные заявки сборки (они одного склада/провайдера).
+    ff_by_assembly: dict[int, list[FulfillmentRequest]] = {}
     for req in ff_requests:
         if req.kind != FfRequestKind.ASSEMBLY.value or req.assembly_request_id is None:
             continue
         if req.archived:  # expired (просрочена) — активна, не исключаем
             continue
-        if not _assembly_ready_signal(req.provider, req.stage_code, req.stage_title, req.is_completed):
-            continue
-        ff_by_assembly[req.assembly_request_id] = req
-    if not ff_by_assembly:
+        ff_by_assembly.setdefault(req.assembly_request_id, []).append(req)
+    ready_by_assembly = {
+        aid: reqs
+        for aid, reqs in ff_by_assembly.items()
+        if all(_assembly_ready_signal(r.provider, r.stage_code, r.stage_title, r.is_completed) for r in reqs)
+    }
+    if not ready_by_assembly:
         return []
 
     result = await db.execute(
@@ -1636,7 +1713,7 @@ async def _mark_linked_assemblies_ready(
         .options(selectinload(AssemblyRequest.wb_fbo_supply))
         .where(
             AssemblyRequest.project_id == project_id,
-            AssemblyRequest.id.in_(list(ff_by_assembly)),
+            AssemblyRequest.id.in_(list(ready_by_assembly)),
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status == AssemblyStatus.IN_PROGRESS.value,
         )
@@ -1647,7 +1724,8 @@ async def _mark_linked_assemblies_ready(
     docs = list(result.scalars().all())
     transitioned: list[dict[str, object]] = []
     for doc in docs:
-        ff = ff_by_assembly[doc.id]
+        reqs = ready_by_assembly[doc.id]
+        ff = reqs[0]  # представитель для истории/уведомления; кол-во — суммарно
         _transition_assembly_to_ready(db, project_id, doc, ff)
         supply = doc.wb_fbo_supply
         transitioned.append(
@@ -1655,7 +1733,7 @@ async def _mark_linked_assemblies_ready(
                 "assembly_number": doc.number,
                 "ff_number": ff.number or ff.external_id,
                 "dest": ff.dest_warehouse,
-                "qty": ff.total_qty,
+                "qty": sum(r.total_qty or 0 for r in reqs) or None,
                 "ff_id": ff.id,
                 "wb_number": supply.wb_supply_id if supply else None,
             }
@@ -1979,6 +2057,45 @@ async def _collect_inbound_accept_candidates(
             InboundReceipt.id.in_(receipt_ids),
             InboundReceipt.is_deleted == False,
             InboundReceipt.status.in_((InboundStatus.DRAFT.value, InboundStatus.EXPECTED.value)),
+        )
+    )
+    return [row[0] for row in result.all()]
+
+
+async def _collect_assembly_ship_candidates(
+    db: AsyncSession,
+    project_id: int,
+    ff_requests: list[FulfillmentRequest],
+) -> list[int]:
+    """assembly_request_id'ы наших VEHICLE_ASSIGNED сборок, чьи ФФ-заявки отгружены.
+
+    Только СБОР id под синк-транзакцией; сам переход (ship_request — списывает
+    сток, создаёт OutboundShipment, коммитит) — ПОСЛЕ commit синка, своей
+    сессией. Сборку отгружаем, только когда ВСЕ её активные привязанные
+    assembly-заявки is_completed (migfull/«Натали» N:1; для skladbot/wmscelicom
+    заявка одна → all([…]) и поведение не меняется). Статус-гейт VEHICLE_ASSIGNED:
+    READY (машина ещё не назначена) — рано; SHIPPED/далее — уже отгружена; прочие
+    статусы ship_request отверг бы переходом. Вызывающий уже отфильтровал
+    archived/local_archived и провайдер+склад (та же выборка, что для авто-READY).
+    """
+    ff_by_assembly: dict[int, list[FulfillmentRequest]] = {}
+    for req in ff_requests:
+        if req.kind != FfRequestKind.ASSEMBLY.value or req.assembly_request_id is None:
+            continue
+        if req.archived:  # expired (просрочена) — активна, не исключаем
+            continue
+        ff_by_assembly.setdefault(req.assembly_request_id, []).append(req)
+    shipped_ids = {
+        aid for aid, reqs in ff_by_assembly.items() if all(_assembly_shipped_signal(r.is_completed) for r in reqs)
+    }
+    if not shipped_ids:
+        return []
+    result = await db.execute(
+        select(AssemblyRequest.id).where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.id.in_(shipped_ids),
+            AssemblyRequest.is_deleted == False,
+            AssemblyRequest.status == AssemblyStatus.VEHICLE_ASSIGNED.value,
         )
     )
     return [row[0] for row in result.all()]
@@ -2345,17 +2462,23 @@ def _request_to_dict(
     assembly_map: dict | None = None,
     inbound_map: dict | None = None,
     units_map: dict | None = None,
+    mismatch_map: dict | None = None,
 ) -> dict:
     """FulfillmentRequest → FfRequestRow-shaped dict с обогащением связи.
 
     units_map[req.id] — кол-во в штуках россыпи (пересчёт коробов, migfull);
     None — провайдер без коробов / состав не разрезолвлен (колонка «Кол-во (шт)»).
+    mismatch_map[("assembly"|"inbound", doc_id)] — расхождение наполнения связанного
+    документа с заявкой(ами) ФФ (см. compute_doc_ff_mismatch).
     """
     linked_number = linked_status = None
+    linked_mismatch: bool | None = None
     if req.assembly_request_id and assembly_map and req.assembly_request_id in assembly_map:
         linked_number, linked_status = assembly_map[req.assembly_request_id]
+        linked_mismatch = (mismatch_map or {}).get(("assembly", req.assembly_request_id))
     elif req.inbound_receipt_id and inbound_map and req.inbound_receipt_id in inbound_map:
         linked_number, linked_status = inbound_map[req.inbound_receipt_id]
+        linked_mismatch = (mismatch_map or {}).get(("inbound", req.inbound_receipt_id))
     return {
         "id": req.id,
         "external_id": req.external_id,
@@ -2388,6 +2511,7 @@ def _request_to_dict(
         "inbound_receipt_id": req.inbound_receipt_id,
         "linked_number": linked_number,
         "linked_status": linked_status,
+        "linked_mismatch": linked_mismatch,
     }
 
 
@@ -2443,8 +2567,9 @@ async def list_requests(
         inbound_map = {row[0]: (row[1], row[2]) for row in result.all()}
 
     units_map = await _migfull_units_by_request(db, project_id, warehouse_id, requests)
+    mismatch_map = await compute_doc_ff_mismatch(db, project_id, assembly_ids, inbound_ids)
 
-    return [_request_to_dict(r, assembly_map, inbound_map, units_map) for r in requests]
+    return [_request_to_dict(r, assembly_map, inbound_map, units_map, mismatch_map) for r in requests]
 
 
 async def _migfull_units_by_request(
@@ -2995,11 +3120,12 @@ async def get_overview(
         inbound_map = {row[0]: (row[1], row[2]) for row in result.all()}
 
     suggestions_by_request = await _load_match_suggestions(db, project_id, requests)
+    mismatch_map = await compute_doc_ff_mismatch(db, project_id, assembly_ids, inbound_ids)
 
     wh_name_by_id = {row.warehouse_id: row.name for row in integrations}
     out_requests = []
     for r in requests:
-        row_dict = _request_to_dict(r, assembly_map, inbound_map)
+        row_dict = _request_to_dict(r, assembly_map, inbound_map, mismatch_map=mismatch_map)
         row_dict.update(
             {
                 "warehouse_id": r.warehouse_id,
@@ -3425,8 +3551,275 @@ def _build_match(
     }
 
 
+def _mirror_ff_composition(req: FulfillmentRequest, mig_guid_map: dict[str, tuple[str, int]]) -> dict[str, int] | None:
+    """Состав ФФ-заявки {barcode: qty>0} ИЗ ЗЕРКАЛА (без HTTP). None — недоступно.
+
+    wmscelicom — из raw (assembly: items/Packages, inbound: items); migfull —
+    из raw planned_lines + guid→barcode (mig_guid_map склада); skladbot — состава
+    в зеркале нет (только в живой деталке) → None. Это «лёгкая» версия
+    _fetch_ff_composition без HTTP — для пакетного флага расхождения по списку.
+    """
+    if req.provider == "wmscelicom":
+        comp: dict[str, int] = {}
+        if req.kind == FfRequestKind.ASSEMBLY.value:
+            comp = _raw_assembly_composition(req.provider, req.raw)
+        else:
+            for item in (req.raw or {}).get("items") or []:  # PHP-API: бывают null-элементы
+                if not isinstance(item, dict):
+                    continue
+                barcode = str(item.get("barcode") or "").strip()
+                if barcode:
+                    comp[barcode] = comp.get(barcode, 0) + _safe_int(item.get("count"))
+        comp = {bc: q for bc, q in comp.items() if q > 0}
+        return comp or None
+
+    if req.provider == "migfull":
+        if req.kind != FfRequestKind.ASSEMBLY.value:
+            return None
+        guid_qty: dict[str, int] = {}
+        for p in _migfull_products_from_lines(
+            _migfull_line_rows((req.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
+        ):
+            if p["qty"] > 0:
+                guid_qty[p["guid"]] = guid_qty.get(p["guid"], 0) + p["qty"]
+        if not guid_qty:
+            return None
+        # Часть guid не разрезолвлена (cold-start SKU ещё не в зеркале остатков) →
+        # состав НЕПОЛНЫЙ, сравнивать по ШК нельзя (дало бы ложное расхождение).
+        # Возвращаем None → вердикт уйдёт в фолбэк по суммарному кол-ву.
+        if any(guid not in mig_guid_map for guid in guid_qty):
+            return None
+        comp = {}
+        for guid, qty in guid_qty.items():
+            bc, units = mig_guid_map[guid]
+            comp[bc] = comp.get(bc, 0) + qty * units
+        return comp or None
+
+    return None  # skladbot — состав только в живой деталке
+
+
+async def compute_doc_ff_mismatch(
+    db: AsyncSession,
+    project_id: int,
+    assembly_ids: set[int],
+    inbound_ids: set[int],
+) -> dict[tuple[str, int], bool | None]:
+    """Флаг расхождения наполнения для связанных документов (все провайдеры).
+
+    Ключ — ("assembly"|"inbound", doc_id). Значение: True — состав НАШЕГО
+    документа расходится с привязанной заявкой(ами) ФФ; False — совпадает;
+    None — определить нельзя (нет ни состава, ни суммарного кол-ва).
+
+    Считается ТОЛЬКО по зеркалу (без HTTP, пакетно — для списков): где состав ФФ
+    есть в зеркале (wmscelicom/migfull) — сверка по ШК; иначе (skladbot) — по
+    суммарному кол-ву (FF total_qty vs наш итог). При N:1 (migfull) берётся
+    ОБЪЕДИНЁННЫЙ состав ВСЕХ привязанных к документу заявок ФФ. Документы без
+    привязанных заявок в результат не попадают.
+    """
+    assembly_ids = set(assembly_ids or ())
+    inbound_ids = set(inbound_ids or ())
+    out: dict[tuple[str, int], bool | None] = {}
+    if not assembly_ids and not inbound_ids:
+        return out
+
+    # 1) наш состав по документам {doc_id: {barcode: qty}}
+    our_asm: dict[int, dict[str, int]] = {}
+    if assembly_ids:
+        rows = await db.execute(
+            select(
+                AssemblyRequestItem.assembly_request_id,
+                AssemblyRequestItem.barcode,
+                func.sum(AssemblyRequestItem.quantity),
+            )
+            .where(
+                AssemblyRequestItem.project_id == project_id,
+                AssemblyRequestItem.assembly_request_id.in_(assembly_ids),
+            )
+            .group_by(AssemblyRequestItem.assembly_request_id, AssemblyRequestItem.barcode)
+        )
+        for aid, bc, qty in rows.all():
+            if bc:
+                our_asm.setdefault(aid, {})[bc] = int(qty or 0)
+    our_inb: dict[int, dict[str, int]] = {}
+    if inbound_ids:
+        rows = await db.execute(
+            select(InboundReceiptItem.receipt_id, InboundReceiptItem.barcode, func.sum(InboundReceiptItem.expected_qty))
+            .where(
+                InboundReceiptItem.project_id == project_id,
+                InboundReceiptItem.receipt_id.in_(inbound_ids),
+            )
+            .group_by(InboundReceiptItem.receipt_id, InboundReceiptItem.barcode)
+        )
+        for rid, bc, qty in rows.all():
+            if bc:
+                our_inb.setdefault(rid, {})[bc] = int(qty or 0)
+
+    # 2) активные привязанные заявки ФФ (project-scoped). archived (провайдер,
+    # закрыта/отменена) и local_archived (наш архив) исключаем — как и все прочие
+    # active-set запросы: иначе отменённая/архивная заявка раздувает сводный состав
+    # и даёт ложное расхождение.
+    conds = []
+    if assembly_ids:
+        conds.append(FulfillmentRequest.assembly_request_id.in_(assembly_ids))
+    if inbound_ids:
+        conds.append(FulfillmentRequest.inbound_receipt_id.in_(inbound_ids))
+    ff_result = await db.execute(
+        select(FulfillmentRequest).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.archived == False,
+            FulfillmentRequest.local_archived == False,
+            or_(*conds),
+        )
+    )
+    ff_reqs = list(ff_result.scalars().all())
+    ff_by_asm: dict[int, list[FulfillmentRequest]] = {}
+    ff_by_inb: dict[int, list[FulfillmentRequest]] = {}
+    for r in ff_reqs:
+        if r.assembly_request_id in assembly_ids:
+            ff_by_asm.setdefault(r.assembly_request_id, []).append(r)
+        elif r.inbound_receipt_id in inbound_ids:
+            ff_by_inb.setdefault(r.inbound_receipt_id, []).append(r)
+
+    # 3) migfull guid→barcode по складам (батч, без HTTP)
+    mig_guids_by_wh: dict[int, set[str]] = {}
+    for r in ff_reqs:
+        if r.provider == "migfull" and r.kind == FfRequestKind.ASSEMBLY.value:
+            for p in _migfull_products_from_lines(
+                _migfull_line_rows((r.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
+            ):
+                if p["qty"] > 0:
+                    mig_guids_by_wh.setdefault(r.warehouse_id, set()).add(p["guid"])
+    mig_maps: dict[int, dict[str, tuple[str, int]]] = {}
+    for wh_id, guids in mig_guids_by_wh.items():
+        mig_maps[wh_id] = await _migfull_guid_barcodes(db, project_id, wh_id, guids)
+
+    def _verdict(our_comp: dict[str, int], reqs: list[FulfillmentRequest]) -> bool | None:
+        comps = [_mirror_ff_composition(r, mig_maps.get(r.warehouse_id, {})) for r in reqs]
+        if all(c is not None for c in comps):
+            combined: dict[str, int] = {}
+            for c in comps:
+                for bc, q in c.items():  # type: ignore[union-attr]
+                    combined[bc] = combined.get(bc, 0) + q
+            return combined != our_comp
+        # фолбэк по суммарному кол-ву (когда у всех заявок известно total_qty)
+        if any(r.total_qty is None for r in reqs):
+            return None
+        return sum(r.total_qty or 0 for r in reqs) != sum(our_comp.values())
+
+    for aid, reqs in ff_by_asm.items():
+        out[("assembly", aid)] = _verdict(our_asm.get(aid, {}), reqs)
+    for rid, reqs in ff_by_inb.items():
+        out[("inbound", rid)] = _verdict(our_inb.get(rid, {}), reqs)
+    return out
+
+
+async def get_assembly_ff_mismatch_map(
+    db: AsyncSession, project_id: int, assembly_ids: set[int]
+) -> dict[int, bool | None]:
+    """{assembly_id: расхождение наполнения с привязанными ФФ-заявками} (см. compute_doc_ff_mismatch)."""
+    res = await compute_doc_ff_mismatch(db, project_id, set(assembly_ids), set())
+    return {aid: verdict for (kind, aid), verdict in res.items() if kind == "assembly"}
+
+
+async def get_assembly_ff_mismatch_detail(db: AsyncSession, project_id: int, assembly_request_id: int) -> dict | None:
+    """Разбивка расхождения наполнения сборки с привязанными заявками ФФ (модалка «что не так»).
+
+    None — сборка не найдена в проекте. Иначе FfMismatchDetail-shape:
+    - mode="barcode": сверка по ШК (wmscelicom/migfull) — rows только по расходящимся
+      позициям (наш qty vs суммарный qty всех АКТИВНЫХ привязанных заявок ФФ);
+    - mode="total": состав ФФ по позициям недоступен (skladbot / неполный резолв
+      migfull) → только итоги (our_total vs ff_total), rows пуст.
+    Считается ТОЛЬКО по зеркалу (без HTTP), как и compute_doc_ff_mismatch.
+    """
+    asm = (
+        await db.execute(
+            select(AssemblyRequest.id, AssemblyRequest.number).where(
+                AssemblyRequest.id == assembly_request_id,
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.is_deleted == False,
+            )
+        )
+    ).first()
+    if asm is None:
+        return None
+
+    our_rows = await db.execute(
+        select(AssemblyRequestItem.barcode, func.sum(AssemblyRequestItem.quantity))
+        .where(
+            AssemblyRequestItem.project_id == project_id,
+            AssemblyRequestItem.assembly_request_id == assembly_request_id,
+        )
+        .group_by(AssemblyRequestItem.barcode)
+    )
+    our_comp = {bc: int(q or 0) for bc, q in our_rows.all() if bc}
+    our_total = sum(our_comp.values())
+
+    ff_reqs = list(
+        (
+            await db.execute(
+                select(FulfillmentRequest).where(
+                    FulfillmentRequest.project_id == project_id,
+                    FulfillmentRequest.assembly_request_id == assembly_request_id,
+                    FulfillmentRequest.archived == False,
+                    FulfillmentRequest.local_archived == False,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    ff_numbers = [r.number or r.external_id for r in ff_reqs]
+
+    # migfull guid→barcode по складам (батч, без HTTP)
+    mig_guids_by_wh: dict[int, set[str]] = {}
+    for r in ff_reqs:
+        if r.provider == "migfull" and r.kind == FfRequestKind.ASSEMBLY.value:
+            for p in _migfull_products_from_lines(
+                _migfull_line_rows((r.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
+            ):
+                if p["qty"] > 0:
+                    mig_guids_by_wh.setdefault(r.warehouse_id, set()).add(p["guid"])
+    mig_maps: dict[int, dict[str, tuple[str, int]]] = {}
+    for wh_id, guids in mig_guids_by_wh.items():
+        mig_maps[wh_id] = await _migfull_guid_barcodes(db, project_id, wh_id, guids)
+
+    comps = [_mirror_ff_composition(r, mig_maps.get(r.warehouse_id, {})) for r in ff_reqs]
+    base = {
+        "assembly_id": assembly_request_id,
+        "assembly_number": asm.number,
+        "our_total": our_total,
+        "ff_request_numbers": ff_numbers,
+    }
+    if ff_reqs and all(c is not None for c in comps):
+        combined: dict[str, int] = {}
+        for c in comps:
+            for bc, q in c.items():  # type: ignore[union-attr]
+                combined[bc] = combined.get(bc, 0) + q
+        noms = await _resolve_noms(db, project_id, set(our_comp) | set(combined))
+        sortable: list[tuple[int, str, dict]] = []
+        for bc in set(our_comp) | set(combined):
+            our_qty = our_comp.get(bc, 0)
+            ff_qty = combined.get(bc, 0)
+            if our_qty == ff_qty:
+                continue
+            _nid, article = noms.get(bc, (None, None))
+            diff = ff_qty - our_qty
+            row = {"barcode": bc, "article_seller": article, "our_qty": our_qty, "ff_qty": ff_qty, "diff": diff}
+            sortable.append((-abs(diff), bc, row))
+        rows = [row for _, _, row in sorted(sortable, key=lambda t: (t[0], t[1]))]
+        return {**base, "mode": "barcode", "ff_total": sum(combined.values()), "rows": rows}
+
+    # фолбэк: состав ФФ по позициям недоступен → только итоги
+    return {**base, "mode": "total", "ff_total": sum(r.total_qty or 0 for r in ff_reqs), "rows": []}
+
+
 async def get_ff_link_for_assembly(db: AsyncSession, project_id: int, assembly_request_id: int) -> dict | None:
-    """Зеркальная ФФ-заявка, привязанная к нашей заявке на сборку (или None)."""
+    """Привязанные ФФ-заявки нашей заявки на сборку (или None, если связей нет).
+
+    Сборка может быть связана с НЕСКОЛЬКИМИ ФФ-заявками (migfull/«Натали»: N:1).
+    ff_links — все привязки; ff_request_* — первая (обратная совместимость).
+    ff_mismatch — состав сборки расходится с привязанными заявками ФФ.
+    """
     result = await db.execute(
         select(
             FulfillmentRequest.id,
@@ -3439,17 +3832,22 @@ async def get_ff_link_for_assembly(db: AsyncSession, project_id: int, assembly_r
             FulfillmentRequest.project_id == project_id,
             FulfillmentRequest.assembly_request_id == assembly_request_id,
         )
-        .limit(1)
+        .order_by(FulfillmentRequest.id)
     )
-    row = result.first()
-    if row is None:
+    rows = result.all()
+    if not rows:
         return None
-    return {
-        "ff_request_id": row.id,
-        "ff_request_number": row.number or row.external_id,
-        "ff_stage_title": row.stage_title,
-        "ff_warehouse_id": row.warehouse_id,
-    }
+    links = [
+        {
+            "ff_request_id": row.id,
+            "ff_request_number": row.number or row.external_id,
+            "ff_stage_title": row.stage_title,
+            "ff_warehouse_id": row.warehouse_id,
+        }
+        for row in rows
+    ]
+    mismatch = await get_assembly_ff_mismatch_map(db, project_id, {assembly_request_id})
+    return {**links[0], "ff_links": links, "ff_mismatch": mismatch.get(assembly_request_id)}
 
 
 async def get_request_detail(
@@ -3752,6 +4150,7 @@ async def link_request(
     assembly_map: dict[int, tuple] = {}
     inbound_map: dict[int, tuple] = {}
     marked_ready = False
+    accept_inbound = False
 
     if assembly_request_id is not None:
         if req.kind != FfRequestKind.ASSEMBLY.value:
@@ -3771,25 +4170,31 @@ async def link_request(
             raise ValueError("Заявка на сборку не найдена в проекте")
         if doc.warehouse_id != req.warehouse_id:
             raise ValueError("Заявка на сборку принадлежит другому складу")
-        conflict = await db.execute(
-            select(FulfillmentRequest.id)
-            .where(
-                FulfillmentRequest.project_id == project_id,
-                FulfillmentRequest.assembly_request_id == assembly_request_id,
-                FulfillmentRequest.id != ff_request_id,
+        # migfull/«Натали»: одной нашей сборке у склада соответствуют 2+ заявки
+        # (N:1) → двойную привязку РАЗРЕШАЕМ. Для остальных провайдеров (skladbot/
+        # wmscelicom, push создаёт ровно одну заявку) — оставляем строгий 1:1.
+        if req.provider != "migfull":
+            conflict = await db.execute(
+                select(FulfillmentRequest.id)
+                .where(
+                    FulfillmentRequest.project_id == project_id,
+                    FulfillmentRequest.assembly_request_id == assembly_request_id,
+                    FulfillmentRequest.id != ff_request_id,
+                )
+                .limit(1)
             )
-            .limit(1)
-        )
-        if conflict.scalar_one_or_none() is not None:
-            raise ValueError("Заявка на сборку уже связана с другой ФФ-заявкой")
+            if conflict.scalar_one_or_none() is not None:
+                raise ValueError("Заявка на сборку уже связана с другой ФФ-заявкой")
         req.assembly_request_id = assembly_request_id
         # Авто-READY при привязке: стадия ФФ уже «готов», наша заявка ещё
-        # IN_PROGRESS → переводим сразу (та же логика, что при синке)
+        # IN_PROGRESS → переводим сразу (та же логика, что при синке). Для migfull
+        # (N:1) — только если ВСЕ остальные привязанные заявки сборки тоже готовы.
         if (
             not req.archived
             # expired (просрочена) — активна, авто-READY как при синке
             and doc.status == AssemblyStatus.IN_PROGRESS.value
             and _assembly_ready_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
+            and await _other_linked_ff_all_ready(db, project_id, assembly_request_id, exclude_id=ff_request_id)
         ):
             _transition_assembly_to_ready(db, project_id, doc, req)
             marked_ready = True
@@ -3821,11 +4226,35 @@ async def link_request(
         if conflict.scalar_one_or_none() is not None:
             raise ValueError("Приёмка уже связана с другой ФФ-заявкой")
         req.inbound_receipt_id = inbound_receipt_id
+        # Авто-ACCEPT при привязке (симметрично авто-READY сборки выше): ФФ уже
+        # принял приёмку на остатки (is_completed) и наша приёмка ещё EXPECTED/
+        # DRAFT → принимаем сразу, не дожидаясь синка. Сам accept_receipt — ПОСЛЕ
+        # commit, своей сессией (постит сток и коммитит сам), как в sync_warehouse.
+        accept_inbound = (
+            not req.archived
+            and not req.local_archived
+            and _inbound_accept_signal(req.is_completed)
+            and inb_doc.status in (InboundStatus.DRAFT.value, InboundStatus.EXPECTED.value)
+        )
         inbound_map = {inb_doc.id: (inb_doc.number, inb_doc.status)}
 
     await db.commit()
     if marked_ready:
         await invalidate_cache("reports:assembly_flow")
+    # Приём — после commit связи, отдельной сессией; ошибку не даём свалить линк
+    # (best-effort, ровно как авто-ACCEPT в синке). При успехе правим статус в
+    # ответе на ACCEPTED, чтобы UI сразу увидел принятую приёмку.
+    if accept_inbound and inbound_receipt_id is not None:
+        from backend.database import AsyncSessionLocal
+        from backend.services.warehouse_inbound import accept_receipt
+
+        try:
+            async with AsyncSessionLocal() as accept_db:
+                await accept_receipt(accept_db, project_id, inbound_receipt_id)
+            number = inbound_map[inbound_receipt_id][0]
+            inbound_map[inbound_receipt_id] = (number, InboundStatus.ACCEPTED.value)
+        except Exception as e:  # — best-effort, связь уже сохранена
+            logger.warning("FF link auto-accept: приёмка %s пропущена (%s)", inbound_receipt_id, e)
     return _request_to_dict(req, assembly_map, inbound_map)
 
 
@@ -4069,14 +4498,18 @@ async def _assembly_candidates(
     project_id: int,
     warehouse_id: int,
     ff_request_id: int,
-) -> tuple[list[AssemblyRequest], dict[int, dict[str, int]]]:
-    """Заявки на сборку склада, не связанные с ДРУГИМИ ФФ-заявками, + их позиции."""
-    linked_subq = select(FulfillmentRequest.assembly_request_id).where(
-        FulfillmentRequest.project_id == project_id,
-        FulfillmentRequest.assembly_request_id.is_not(None),
-        FulfillmentRequest.id != ff_request_id,
-    )
-    result = await db.execute(
+    *,
+    provider: str,
+) -> tuple[list[AssemblyRequest], dict[int, dict[str, int]], dict[int, int]]:
+    """Заявки на сборку склада + их позиции + сколько ДРУГИХ ФФ-заявок уже связано.
+
+    migfull/«Натали» (N:1 — одной сборке соответствуют 2+ заявки склада) НЕ исключает
+    уже связанные сборки: их можно привязать к ещё одной ФФ-заявке (linked_ff_count
+    показывает, со сколькими другими ФФ-заявками сборка уже связана). Для прочих
+    провайдеров сборки, связанные с другой ФФ-заявкой, из кандидатов исключаются.
+    """
+    allow_multi = provider == "migfull"
+    q = (
         select(AssemblyRequest)
         .options(selectinload(AssemblyRequest.wb_fbo_supply))
         .where(
@@ -4084,14 +4517,23 @@ async def _assembly_candidates(
             AssemblyRequest.warehouse_id == warehouse_id,
             AssemblyRequest.is_deleted == False,
             AssemblyRequest.status != AssemblyStatus.CANCELLED.value,
-            AssemblyRequest.id.not_in(linked_subq),
         )
         .order_by(AssemblyRequest.created_at.desc(), AssemblyRequest.id.desc())
         .limit(_LINK_CANDIDATES_LIMIT)
     )
+    if not allow_multi:
+        linked_subq = select(FulfillmentRequest.assembly_request_id).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.assembly_request_id.is_not(None),
+            FulfillmentRequest.id != ff_request_id,
+        )
+        q = q.where(AssemblyRequest.id.not_in(linked_subq))
+    result = await db.execute(q)
     docs = list(result.scalars().all())
     items_by_doc: dict[int, dict[str, int]] = {}
+    linked_by_doc: dict[int, int] = {}
     if docs:
+        doc_ids = [d.id for d in docs]
         items_result = await db.execute(
             select(
                 AssemblyRequestItem.assembly_request_id,
@@ -4100,13 +4542,25 @@ async def _assembly_candidates(
             )
             .where(
                 AssemblyRequestItem.project_id == project_id,
-                AssemblyRequestItem.assembly_request_id.in_([d.id for d in docs]),
+                AssemblyRequestItem.assembly_request_id.in_(doc_ids),
             )
             .group_by(AssemblyRequestItem.assembly_request_id, AssemblyRequestItem.barcode)
         )
         for doc_id, barcode, qty in items_result.all():
             items_by_doc.setdefault(doc_id, {})[barcode] = int(qty or 0)
-    return docs, items_by_doc
+        if allow_multi:
+            # Сколько ДРУГИХ ФФ-заявок уже связано с каждой сборкой-кандидатом
+            linked_result = await db.execute(
+                select(FulfillmentRequest.assembly_request_id, func.count(FulfillmentRequest.id))
+                .where(
+                    FulfillmentRequest.project_id == project_id,
+                    FulfillmentRequest.assembly_request_id.in_(doc_ids),
+                    FulfillmentRequest.id != ff_request_id,
+                )
+                .group_by(FulfillmentRequest.assembly_request_id)
+            )
+            linked_by_doc = {aid: int(cnt or 0) for aid, cnt in linked_result.all()}
+    return docs, items_by_doc, linked_by_doc
 
 
 async def _inbound_candidates(
@@ -4183,8 +4637,11 @@ async def get_link_candidates(
     composition_available = bool(comp)
 
     docs: list[AssemblyRequest] | list[InboundReceipt]
+    linked_by_doc: dict[int, int] = {}
     if kind == FfRequestKind.ASSEMBLY.value:
-        docs, items_by_doc = await _assembly_candidates(db, project_id, warehouse_id, ff_request_id)
+        docs, items_by_doc, linked_by_doc = await _assembly_candidates(
+            db, project_id, warehouse_id, ff_request_id, provider=req.provider
+        )
     else:
         docs, items_by_doc = await _inbound_candidates(db, project_id, warehouse_id, ff_request_id)
 
@@ -4217,6 +4674,8 @@ async def get_link_candidates(
                 "reason": reason,
                 # Совпадение склада сдачи — только для сборок (у приёмок склада сдачи нет → не фильтруем)
                 "warehouse_match": _wh_names_match(ff_dest, dest_warehouse) if is_assembly else True,
+                # >0 только для migfull (сборка уже связана с N другими ФФ-заявками)
+                "linked_ff_count": linked_by_doc.get(doc.id, 0),
             }
         )
 

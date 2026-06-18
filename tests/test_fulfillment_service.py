@@ -2424,6 +2424,237 @@ async def test_sync_inbound_no_accept_without_link(db_session, project, warehous
     assert result["inbound_receipts_accepted"] == 0
 
 
+# ─── Авто-ACCEPT приёмки ПРЯМО ПРИ ПРИВЯЗКЕ (симметрия с авто-READY сборки) ───
+
+
+async def _make_receipt_with_item(db_session, project, warehouse, nom, bc, expected_qty=10):
+    receipt = InboundReceipt(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        number=f"IN-{_uid()[:6]}",
+        status=InboundStatus.EXPECTED,
+    )
+    db_session.add(receipt)
+    await db_session.flush()
+    db_session.add(
+        InboundReceiptItem(
+            project_id=project.id,
+            receipt_id=receipt.id,
+            nomenclature_id=nom.id,
+            barcode=bc,
+            expected_qty=expected_qty,
+            actual_qty=0,
+        )
+    )
+    await db_session.commit()
+    await db_session.refresh(receipt)
+    return receipt
+
+
+@pytest.mark.asyncio
+async def test_link_inbound_completed_auto_accepts(db_session, project, warehouse, connected_key, monkeypatch):
+    """Привязка ЗАВЕРШЁННОЙ приёмки ФФ к нашей EXPECTED сразу принимает её + постит сток.
+
+    Регрессия: раньше приёмка принималась только следующим синком (в отличие от
+    сборки, что авто-READY прямо при привязке). Теперь линк завершённой заявки
+    принимает приёмку немедленно.
+    """
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    # ФФ уже завершил приёмку (is_completed)
+    _mock_requests(monkeypatch, {852: [_req(8810, status="new", completed=1, stage_title=None)]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    receipt = await _make_receipt_with_item(db_session, project, warehouse, nom, bc, expected_qty=10)
+    mirror = await _mirror_row(db_session, project.id, "8810")
+
+    row = await fulfillment_service.link_request(db_session, project.id, mirror.id, inbound_receipt_id=receipt.id)
+    assert row["linked_status"] == InboundStatus.ACCEPTED.value  # UI сразу видит принятую
+
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.ACCEPTED
+    assert receipt.actual_date == date.today()
+
+    stock = (
+        await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.project_id == project.id,
+                WarehouseStock.warehouse_id == warehouse.id,
+                WarehouseStock.barcode == bc,
+            )
+        )
+    ).scalar_one()
+    assert stock.quantity == 10
+
+
+@pytest.mark.asyncio
+async def test_link_inbound_not_completed_stays_expected(db_session, project, warehouse, connected_key, monkeypatch):
+    """Привязка НЕзавершённой приёмки ФФ не принимает нашу — ждём синк/завершения ФФ."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {852: [_req(8811, stage_title="Приемка", stage_code="acceptance")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    receipt = await _make_receipt_with_item(db_session, project, warehouse, nom, bc)
+    mirror = await _mirror_row(db_session, project.id, "8811")
+
+    row = await fulfillment_service.link_request(db_session, project.id, mirror.id, inbound_receipt_id=receipt.id)
+    assert row["linked_status"] == InboundStatus.EXPECTED.value
+
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.EXPECTED
+    stock = (
+        await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.project_id == project.id,
+                WarehouseStock.barcode == bc,
+            )
+        )
+    ).scalar_one_or_none()
+    assert stock is None  # сток не постился
+
+
+# ─── Авто-SHIP: ФФ отгрузил груз + у нас назначена машина → SHIPPED ──────────
+
+
+def test_assembly_shipped_signal():
+    sig = fulfillment_service._assembly_shipped_signal
+    assert sig(True) is True  # ФФ отгрузил
+    assert sig(False) is False  # ещё не отгружен
+
+
+async def _make_vehicle_assigned_doc(db_session, project, warehouse, nom, bc, qty=5, stock_qty=20):
+    """Сборка VEHICLE_ASSIGNED с позицией + сток на складе (достаточный для отгрузки)."""
+    doc = AssemblyRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        number=f"A-{_uid()[:6]}",
+        status=AssemblyStatus.VEHICLE_ASSIGNED.value,
+        pallets_count=1,
+        pallet_weight_kg=Decimal("10.00"),
+        vehicle_info="А123ВС 77",
+    )
+    db_session.add(doc)
+    await db_session.flush()
+    db_session.add(
+        AssemblyRequestItem(
+            project_id=project.id,
+            assembly_request_id=doc.id,
+            nomenclature_id=nom.id,
+            barcode=bc,
+            quantity=qty,
+        )
+    )
+    db_session.add(
+        WarehouseStock(
+            project_id=project.id,
+            warehouse_id=warehouse.id,
+            nomenclature_id=nom.id,
+            barcode=bc,
+            quantity=stock_qty,
+        )
+    )
+    await db_session.commit()
+    await db_session.refresh(doc)
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_sync_ships_vehicle_assigned_assembly(db_session, project, warehouse, connected_key, monkeypatch):
+    """ФФ отгрузил (is_completed) + наша сборка VEHICLE_ASSIGNED → SHIPPED + сток списан."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    # ФФ ещё везёт груз на склад МП (стадия логистики, не завершено)
+    _mock_requests(monkeypatch, {851: [_req(9501, stage_title="Погрузка")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_vehicle_assigned_doc(db_session, project, warehouse, nom, bc, qty=5, stock_qty=20)
+    mirror = await _mirror_row(db_session, project.id, "9501")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    # Пока ФФ не отгрузил — сборка остаётся VEHICLE_ASSIGNED, сток на месте
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_shipped"] == 0
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.VEHICLE_ASSIGNED.value
+
+    # ФФ отгрузил FBO (is_completed) → наша сборка SHIPPED, сток списан, OutboundShipment создан
+    _mock_requests(monkeypatch, {851: [_req(9501, status="done", completed=1, stage_title="Выполнена")]})
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_shipped"] == 1
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.SHIPPED.value
+    assert doc.outbound_shipment_id is not None
+    assert doc.shipped_at is not None
+
+    stock = (
+        await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.project_id == project.id,
+                WarehouseStock.warehouse_id == warehouse.id,
+                WarehouseStock.barcode == bc,
+            )
+        )
+    ).scalar_one()
+    assert stock.quantity == 15  # 20 − 5
+
+    # Идемпотентность: повторный синк не задвоит отгрузку/списание
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_shipped"] == 0
+    await db_session.refresh(stock)
+    assert stock.quantity == 15
+
+
+@pytest.mark.asyncio
+async def test_sync_no_ship_when_not_vehicle_assigned(db_session, project, warehouse, connected_key, monkeypatch):
+    """ФФ отгрузил, но машина у нас НЕ назначена (READY) → авто-SHIP не срабатывает."""
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(9601, stage_title="Погрузка")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_assembly_doc(db_session, project, warehouse, status=AssemblyStatus.READY.value)
+    mirror = await _mirror_row(db_session, project.id, "9601")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    _mock_requests(monkeypatch, {851: [_req(9601, status="done", completed=1, stage_title="Выполнена")]})
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_shipped"] == 0
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.READY.value
+
+
+@pytest.mark.asyncio
+async def test_sync_ship_stock_deficit_best_effort(db_session, project, warehouse, connected_key, monkeypatch):
+    """Дефицит стока: ship_request падает, синк не валится, сборка остаётся VEHICLE_ASSIGNED."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(9701, status="done", completed=1, stage_title="Выполнена")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    # Сборке нужно 5, на складе только 2 → дефицит
+    doc = await _make_vehicle_assigned_doc(db_session, project, warehouse, nom, bc, qty=5, stock_qty=2)
+    mirror = await _mirror_row(db_session, project.id, "9701")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_shipped"] == 0
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.VEHICLE_ASSIGNED.value
+    stock = (
+        await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.project_id == project.id,
+                WarehouseStock.barcode == bc,
+            )
+        )
+    ).scalar_one()
+    assert stock.quantity == 2  # не списан
+
+
 # ─── wmscelicom: total_qty / dest_warehouse из списочных методов ─────────────
 
 
