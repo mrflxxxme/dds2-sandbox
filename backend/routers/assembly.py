@@ -25,13 +25,18 @@ from backend.schemas.assembly import (
     AssignVehicleBulk,
     CreatedGroupResponse,
     FfLinkInfo,
+    LinkAnomaliesResponse,
     LogisticsAnalyticsResponse,
     RefreshFromFboResponse,
     ShipBulk,
+    StockDistributionHistoryResponse,
+    StockDistributionResponse,
 )
 from backend.schemas.fulfillment import FfMismatchDetail
 from backend.services import assembly_service, fulfillment_service
 from backend.services.assembly.analytics import get_assembly_flow_analytics, get_assembly_wb_warehouses
+from backend.services.assembly.link_anomalies import get_link_anomalies
+from backend.services.assembly.stock_distribution import get_stock_distribution, get_stock_distribution_history
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/warehouse/assembly", tags=["Assembly"])
@@ -270,6 +275,48 @@ async def get_flow_wb_warehouses(
 ):
     """Distinct «города сдачи» (целевые склады ВБ) по заявкам — фильтр аналитики."""
     return await get_assembly_wb_warehouses(db, project.id)
+
+
+@router.get("/flow-analytics/link-anomalies", response_model=LinkAnomaliesResponse)
+async def get_flow_link_anomalies(
+    warehouse_ids: str | None = Query(None, description="Comma-separated warehouse IDs"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Вкладка «Связи и расхождения»: расхождение наполнения, несвязанные заявки
+    (с обеих сторон), сводка аномалий FBO-поставок. Read-only, по зеркалу."""
+    wh_ids = _parse_warehouse_ids(warehouse_ids)
+    return await get_link_anomalies(db, project.id, warehouse_ids=wh_ids)
+
+
+@router.get("/flow-analytics/stock-distribution", response_model=StockDistributionResponse)
+async def get_flow_stock_distribution(
+    warehouse_ids: str | None = Query(None, description="Comma-separated warehouse IDs"),
+    product_status: str | None = Query(None, description="Фильтр по статусу товара (active/new/clearance/none)"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Вкладка «Распределение остатков»: «где сейчас товар» (склад ФФ / в сборке /
+    готово / в пути) — суммарно, по складам и по статусу товара."""
+    wh_ids = _parse_warehouse_ids(warehouse_ids)
+    return await get_stock_distribution(db, project.id, warehouse_ids=wh_ids, product_status=product_status)
+
+
+@router.get("/flow-analytics/stock-distribution/history", response_model=StockDistributionHistoryResponse)
+async def get_flow_stock_distribution_history(
+    date_from: date | None = Query(None, description="Начало периода (snapshot_date)"),
+    date_to: date | None = Query(None),
+    warehouse_ids: str | None = Query(None, description="Comma-separated warehouse IDs"),
+    product_status: str | None = Query(None, description="Фильтр по статусу товара (active/new/clearance/none)"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """История распределения остатков по дням (накопительные снимки). Пусто, пока
+    ежедневная джоба не накопила данные — динамика копится вперёд, без бэкфилла."""
+    wh_ids = _parse_warehouse_ids(warehouse_ids)
+    return await get_stock_distribution_history(
+        db, project.id, date_from=date_from, date_to=date_to, warehouse_ids=wh_ids, product_status=product_status
+    )
 
 
 # --- Create -----------------------------------------------------------------

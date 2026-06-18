@@ -34,6 +34,7 @@ from backend.scheduler.jobs.funnel import (
 from backend.scheduler.jobs.health_check import health_monitor
 from backend.scheduler.jobs.heartbeat import heartbeat_ping
 from backend.scheduler.jobs.prewarm import prewarm_all_reports, prewarm_project  # noqa: F401
+from backend.scheduler.jobs.stock_distribution_snapshot import snapshot_all_projects_stock_distribution
 from backend.scheduler.jobs.wb_finance import (
     sync_all_projects_wb_finance,
     sync_all_projects_wb_finance_daily,
@@ -136,6 +137,17 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,
+    )
+
+    # Stock distribution snapshot: daily 23:50 MSK — копит динамику «где товар» вперёд
+    _scheduler.add_job(
+        snapshot_all_projects_stock_distribution,
+        trigger=CronTrigger(hour=23, minute=50, timezone=MSK),
+        id="stock_distribution_snapshot",
+        name="Assembly stock distribution daily snapshot (23:50 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
     )
 
     # Nomenclature sync: 2x/day at 08:30 and 20:30 MSK
