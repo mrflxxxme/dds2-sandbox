@@ -24,6 +24,7 @@ from backend.schemas.box_multiplicity import (
 from backend.schemas.warehouse import (
     AcceptanceCheckRequest,
     AcceptanceCheckResponse,
+    AcceptanceLimitsResponse,
     CostPriceUpdate,
     DefectBulkOperation,
     DefectBulkResponse,
@@ -177,6 +178,31 @@ async def check_wb_acceptance(
             db,
             project.id,
             items,
+            force=force,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/acceptance-limits", response_model=AcceptanceLimitsResponse)
+async def get_wb_acceptance_limits(
+    warehouse: str | None = Query(None, description="Фильтр по имени склада (substring, case-insensitive)"),
+    force: bool = Query(False, description="Skip Redis cache and call WB API live"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сводный календарь лимитов приёмки WB на ближайшие 14 дней.
+
+    Для каждого (склад × тип упаковки) отдаёт по дню: коэффициент WB
+    (-1 закрыто, 0..1 бесплатно, ≥2 платно), флаги is_free / is_closed и
+    тарифы хранения/логистики. Источник — кэш коэффициентов (TTL 1ч, WB
+    rate limit 6 req/min); `force=true` обходит кэш (UI «🔄 Обновить»).
+    """
+    try:
+        return await warehouse_acceptance_service.get_acceptance_limits(
+            db,
+            project.id,
+            warehouse=warehouse,
             force=force,
         )
     except ValueError as e:

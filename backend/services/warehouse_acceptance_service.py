@@ -559,6 +559,109 @@ def redistribute_blocked_qty(
     return new_dist, moves
 
 
+# Box type display order: КОРОБ (дешевле) → МОНО → СУПЕР.
+_BOX_TYPE_ORDER = {"box": 0, "mono": 1, "super": 2}
+
+
+def _coef_to_float(v: object) -> float | None:
+    """Coerce WB coefficient/tariff value (int | str | None) → float | None."""
+    if v is None:
+        return None
+    try:
+        return float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_acceptance_limits(
+    raw_coefficients: list[dict],
+    wh_id_to_name: dict[int, str],
+    *,
+    warehouse_filter: str | None = None,
+    paid_threshold: int = 1,
+) -> dict:
+    """Build the acceptance calendar (warehouse × package_type × day).
+
+    Pure transform over WB `tariffs/v1/acceptance/coefficients` output →
+    AcceptanceLimitsResponse-shaped dict (без `fetched_at` — его ставит
+    async-обёртка). No I/O — fully unit-tested.
+
+    Каждая запись = (warehouse_id, canonical_name, box_type); внутри —
+    список дней, отсортированных по дате. `dates` — глобально отсортированные
+    ISO-даты (колонки календаря).
+
+    warehouse_filter — опц. подстрока (case-insensitive) по canonical ИЛИ
+    raw WB-имени склада; пусто/None → все склады.
+
+    День: is_closed = coefficient == -1 ИЛИ allowUnload=false;
+          is_free   = НЕ closed И coefficient ∈ {0..paid_threshold}.
+    """
+    wf = (warehouse_filter or "").strip().lower()
+
+    # (warehouse_id, canonical_name, raw_name, box_type) → {date: day_dict}
+    grouped: dict[tuple[int, str, str, str], dict[str, dict]] = {}
+    all_dates: set[str] = set()
+
+    for e in raw_coefficients:
+        wid = e.get("warehouseID")
+        if wid is None:
+            continue
+        wid = int(wid)
+        raw_name = wh_id_to_name.get(wid) or e.get("warehouseName") or ""
+        if not raw_name:
+            continue
+        canon = _normalize_acceptance_wh(raw_name)
+        if not canon:
+            continue
+        box_type_id = e.get("boxTypeID")
+        if box_type_id is None:
+            continue
+        type_key = _BOX_TYPE_ID_TO_KEY.get(int(box_type_id))
+        if type_key is None:
+            continue
+        if wf and wf not in canon.lower() and wf not in raw_name.lower():
+            continue
+        raw_date = e.get("date")
+        if not raw_date:
+            continue
+        day = str(raw_date)[:10]  # YYYY-MM-DD
+        all_dates.add(day)
+
+        coef = e.get("coefficient")
+        coef_f = _coef_to_float(coef)
+        allow = bool(e.get("allowUnload"))
+        is_closed = coef_f is None or coef_f == -1 or not allow
+        is_free = (not is_closed) and coef_f is not None and coef_f <= paid_threshold
+
+        key = (wid, canon, raw_name, type_key)
+        # last entry per (key, date) wins — WB отдаёт 1 строку на дату/тип
+        grouped.setdefault(key, {})[day] = {
+            "date": day,
+            "coefficient": coef_f if coef_f is not None else -1.0,
+            "allow_unload": allow,
+            "is_free": is_free,
+            "is_closed": is_closed,
+            "storage_coef": _coef_to_float(e.get("storageCoef")),
+            "delivery_coef": _coef_to_float(e.get("deliveryCoef")),
+        }
+
+    warehouses: list[dict] = []
+    for (wid, canon, raw_name, type_key), by_date in grouped.items():
+        warehouses.append(
+            {
+                "warehouse_id": wid,
+                "warehouse_name": raw_name,
+                "canonical_name": canon,
+                "box_type": type_key,
+                "days": [by_date[d] for d in sorted(by_date)],
+            }
+        )
+
+    warehouses.sort(key=lambda w: (w["canonical_name"], _BOX_TYPE_ORDER.get(w["box_type"], 9)))
+
+    return {"warehouses": warehouses, "dates": sorted(all_dates)}
+
+
 # ─── async public API ───────────────────────────────────────────────────────
 
 
@@ -685,6 +788,37 @@ async def _load_coefficients(
         except Exception as e:  # pragma: no cover
             logger.warning(f"acceptance.coef_cache_set_failed: {e}")
     return raw
+
+
+async def get_acceptance_limits(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    warehouse: str | None = None,
+    force: bool = False,
+) -> dict:
+    """Build the WB acceptance calendar (лимиты складов на ближайшие 14 дней).
+
+    Переиспользует кэш коэффициентов и карту warehouseID→name
+    (`_load_coefficients`, `_load_warehouse_id_map`, TTL 1ч, WB rate limit
+    6 req/min). `force=True` — обойти кэш и дёрнуть WB live (кнопка «🔄»).
+
+    Возвращает AcceptanceLimitsResponse-shaped dict. Если ключ без scope
+    «Поставки» / network fail — `_load_coefficients` отдаёт [] → пустой
+    календарь (graceful). Если WB-ключ не настроен вовсе — ValueError
+    (роутер → 400).
+    """
+    api_key = await get_wb_key(db, project_id, "wb")
+    if not api_key:
+        raise ValueError("WB API key not configured for this project")
+
+    client = WBApiClient(api_key=api_key, project_id=project_id)
+    wh_id_to_name = await _load_warehouse_id_map(client, project_id)
+    raw_coefficients = await _load_coefficients(client, project_id, force=force)
+
+    result = _build_acceptance_limits(raw_coefficients, wh_id_to_name, warehouse_filter=warehouse)
+    result["fetched_at"] = utcnow()
+    return result
 
 
 async def check_acceptance_and_redistribute(

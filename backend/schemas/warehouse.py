@@ -450,3 +450,46 @@ class AcceptanceCheckResponse(BaseModel):
     moves: list[RedistributionMove]
     checked_at: datetime
     cache_hit: bool = False
+
+
+# ─── WB Acceptance Limits (GET /warehouse/acceptance-limits) ────────────────
+
+
+class AcceptanceLimitDay(BaseModel):
+    """Один день календаря приёмки для (склад, тип упаковки).
+
+    coefficient — WB-коэффициент: -1 закрыто, 0..1 бесплатно, ≥2 платный
+    множитель к базовому тарифу. is_free = coefficient ∈ {0,1} И allow_unload.
+    is_closed = coefficient == -1 ИЛИ allow_unload=false.
+    """
+
+    date: str  # ISO date (YYYY-MM-DD)
+    coefficient: float
+    allow_unload: bool
+    is_free: bool
+    is_closed: bool
+    storage_coef: float | None = None
+    delivery_coef: float | None = None
+
+
+class AcceptanceLimitEntry(BaseModel):
+    """Календарь одного (склад × тип упаковки) на ближайшие дни."""
+
+    warehouse_id: int
+    warehouse_name: str  # raw WB name
+    canonical_name: str
+    box_type: str  # box | mono | super
+    days: list[AcceptanceLimitDay]
+
+
+class AcceptanceLimitsResponse(BaseModel):
+    """Response for GET /warehouse/acceptance-limits — сводный календарь лимитов.
+
+    `dates` — отсортированные ISO-даты (колонки календаря). `warehouses` —
+    по одной записи на (склад × тип упаковки), отсортированы по canonical-имени
+    и типу (короб → моно → супер).
+    """
+
+    warehouses: list[AcceptanceLimitEntry]
+    dates: list[str]
+    fetched_at: datetime
