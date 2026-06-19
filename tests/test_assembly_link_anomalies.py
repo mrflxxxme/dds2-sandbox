@@ -23,7 +23,9 @@ import pytest_asyncio
 
 from backend.models import FulfillmentRequest, Nomenclature, Warehouse
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.fulfillment import FulfillmentStock
 from backend.models.integrations import IntegrationKey
+from backend.models.warehouse import WarehouseStock
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
 from backend.services.assembly.link_anomalies import get_link_anomalies
 
@@ -164,12 +166,16 @@ async def test_empty_project(db_session, project):
     assert res["ff_composition_mismatch"] == []
     assert res["assemblies_without_ff"] == []
     assert res["ff_without_assembly"] == []
+    assert res["stock_mismatch"] == []
     assert res["fbo"] == {
         "without_assembly_count": 0,
         "under_accepted_count": 0,
         "under_accepted_qty": 0,
         "excess_count": 0,
         "excess_qty": 0,
+        "without_assembly_supplies": [],
+        "under_accepted_supplies": [],
+        "excess_supplies": [],
     }
 
 
@@ -444,3 +450,238 @@ async def test_warehouse_ids_filter(db_session, project, warehouse):
     # Фильтр по правильному складу → показывается.
     res2 = await _raw(db_session, project.id, warehouse_ids=[warehouse.id])
     assert any(r["assembly_id"] == doc.id for r in res2["ff_composition_mismatch"])
+
+
+# ─── (g) stock_mismatch — расхождение остатков наш склад vs ФФ-зеркало ────────
+
+
+async def _integrate(db_session, project_id, warehouse_id, service="skladbot"):
+    """Сделать склад «ФФ-интегрированным» (IntegrationKey задаёт провайдера)."""
+    return await _add(
+        db_session,
+        IntegrationKey(
+            project_id=project_id,
+            service=service,
+            warehouse_id=warehouse_id,
+            encrypted_key="enc",
+            label=f"warehouse:{warehouse_id}-{_uid()}",
+        ),
+    )
+
+
+async def _ff_stock(
+    db_session,
+    project_id,
+    warehouse_id,
+    barcode,
+    qty_good,
+    *,
+    provider="skladbot",
+    base_barcode=None,
+    units_per_box=1,
+    nomenclature_id=None,
+    name=None,
+):
+    return await _add(
+        db_session,
+        FulfillmentStock(
+            project_id=project_id,
+            warehouse_id=warehouse_id,
+            provider=provider,
+            barcode=barcode,
+            base_barcode=base_barcode,
+            units_per_box=units_per_box,
+            qty_good=qty_good,
+            nomenclature_id=nomenclature_id,
+            name=name,
+        ),
+    )
+
+
+async def _our_stock(db_session, project_id, warehouse_id, nomenclature_id, barcode, quantity):
+    return await _add(
+        db_session,
+        WarehouseStock(
+            project_id=project_id,
+            warehouse_id=warehouse_id,
+            nomenclature_id=nomenclature_id,
+            barcode=barcode,
+            quantity=quantity,
+        ),
+    )
+
+
+def _wh_row(res, warehouse_id):
+    rows = [r for r in res["stock_mismatch"] if r["warehouse_id"] == warehouse_id]
+    return rows[0] if rows else None
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_ff_more(db_session, project, warehouse):
+    """У ФФ больше, чем у нас (diff > 0)."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 100, nomenclature_id=nom.id, name="Товар A")
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 60)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    assert row["provider"] == "skladbot"
+    assert row["surplus_ff_qty"] == 40
+    assert row["surplus_ff_sku"] == 1
+    assert row["surplus_our_qty"] == 0
+    assert row["surplus_our_sku"] == 0
+    assert row["net_diff"] == 40
+    assert row["sku_total"] == 1
+    assert row["truncated"] is False
+    assert len(row["rows"]) == 1
+    sku = row["rows"][0]
+    assert sku["barcode"] == bc
+    assert sku["ff_good"] == 100
+    assert sku["our_quantity"] == 60
+    assert sku["diff"] == 40
+    assert sku["article_seller"] == nom.article_seller
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_our_more(db_session, project, warehouse):
+    """У нас больше, чем у ФФ (diff < 0)."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 30, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 80)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    assert row["surplus_our_qty"] == 50
+    assert row["surplus_our_sku"] == 1
+    assert row["surplus_ff_qty"] == 0
+    assert row["net_diff"] == -50
+    assert row["rows"][0]["diff"] == -50
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_equal_not_flagged(db_session, project, warehouse):
+    """Совпадающий остаток не флагается; склад без расхождений в ответе отсутствует."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 50, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 50)
+
+    res = await _raw(db_session, project.id)
+    assert _wh_row(res, warehouse.id) is None
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_box_to_loose(db_session, project, warehouse):
+    """Остаток короба сводится к россыпи (qty_good × units_per_box) перед diff."""
+    await _integrate(db_session, project.id, warehouse.id, service="migfull")
+    loose_bc = f"20{_uid()}"
+    box_bc = f"14{_uid()}"
+    nom = await _nom(db_session, project.id, loose_bc)
+    # Короб: 5 коробов × 10 = 50 штук россыпи под ШК россыпи loose_bc.
+    await _ff_stock(
+        db_session,
+        project.id,
+        warehouse.id,
+        box_bc,
+        5,
+        provider="migfull",
+        base_barcode=loose_bc,
+        units_per_box=10,
+        nomenclature_id=nom.id,
+    )
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, loose_bc, 30)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    assert row["rows"][0]["barcode"] == loose_bc
+    assert row["rows"][0]["ff_good"] == 50
+    assert row["rows"][0]["diff"] == 20
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_only_ff_integrated_warehouses(db_session, project):
+    """Склад без ФФ-интеграции (нет IntegrationKey) в расхождении остатков не участвует."""
+    wh = await _add(
+        db_session,
+        Warehouse(project_id=project.id, name=f"OWN-{_uid()}", warehouse_type="OWN"),
+    )
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, wh.id, bc, 100, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, wh.id, nom.id, bc, 10)
+
+    res = await _raw(db_session, project.id)
+    assert _wh_row(res, wh.id) is None
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_warehouse_filter(db_session, project, warehouse):
+    """warehouse_ids фильтрует расхождение остатков."""
+    await _integrate(db_session, project.id, warehouse.id)
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 100, nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 60)
+
+    res_other = await _raw(db_session, project.id, warehouse_ids=[warehouse.id + 99999])
+    assert res_other["stock_mismatch"] == []
+    res_self = await _raw(db_session, project.id, warehouse_ids=[warehouse.id])
+    assert _wh_row(res_self, warehouse.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_project_isolation(db_session, project, other_project):
+    """Расхождение остатков чужого проекта не видно."""
+    other_wh = await _add(
+        db_session,
+        Warehouse(project_id=other_project.id, name=f"OTH-{_uid()}", warehouse_type="FULFILLMENT"),
+    )
+    await _integrate(db_session, other_project.id, other_wh.id)
+    bc = f"20{_uid()}"
+    other_nom = await _add(
+        db_session, Nomenclature(project_id=other_project.id, barcode=bc, article_seller=f"ART-{_uid()[:6]}")
+    )
+    await _ff_stock(db_session, other_project.id, other_wh.id, bc, 100, nomenclature_id=other_nom.id)
+    await _our_stock(db_session, other_project.id, other_wh.id, other_nom.id, bc, 10)
+
+    res = await _raw(db_session, project.id)
+    assert res["stock_mismatch"] == []
+
+
+# ─── (h) fbo списки поставок (разворот) ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_fbo_supply_lists_populated(db_session, project):
+    """Под счётчиками лежат сами поставки: недоприёмка / излишек / без заявки."""
+    under = await _make_supply(db_session, project.id, status=WbSupplyStatus.ACCEPTED, total_qty=10, accepted_qty=7)
+    excess = await _make_supply(db_session, project.id, status=WbSupplyStatus.ACCEPTED, total_qty=5, accepted_qty=8)
+
+    res = await _raw(db_session, project.id)
+    fbo = res["fbo"]
+
+    under_ids = {s["supply_id"] for s in fbo["under_accepted_supplies"]}
+    assert under.id in under_ids
+    under_row = next(s for s in fbo["under_accepted_supplies"] if s["supply_id"] == under.id)
+    assert under_row["wb_supply_id"] == under.wb_supply_id
+    assert under_row["total_qty"] == 10
+    assert under_row["accepted_qty"] == 7
+    assert under_row["diff"] == -3
+
+    excess_ids = {s["supply_id"] for s in fbo["excess_supplies"]}
+    assert excess.id in excess_ids
+    excess_row = next(s for s in fbo["excess_supplies"] if s["supply_id"] == excess.id)
+    assert excess_row["diff"] == 3
+
+    # Обе поставки не привязаны к сборке → в «без заявки».
+    no_asm_ids = {s["supply_id"] for s in fbo["without_assembly_supplies"]}
+    assert under.id in no_asm_ids
+    assert excess.id in no_asm_ids

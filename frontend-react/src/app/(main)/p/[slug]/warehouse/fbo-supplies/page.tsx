@@ -1,6 +1,6 @@
 'use client';
-import React, { useCallback, useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime } from '@/lib/utils';
@@ -31,6 +31,13 @@ const STATUS_OPTIONS = [
 export default function FboSuppliesPage() {
     const params = useParams();
     const slug = params.slug as string;
+    const searchParams = useSearchParams();
+
+    // Deep-link из «Анализ сборки» → «Аномалии поставок FBO»: ?filter=… и/или
+    // ?supply=<wb_supply_id>. Применяется один раз (ref-guard); пустые searchParams
+    // на первом рендере до гидратации пропускаем (учтено в эффекте ниже).
+    const deepLinkAppliedRef = useRef(false);
+    const [pendingSupplyWb, setPendingSupplyWb] = useState<string | null>(null);
 
     // Data
     const [supplies, setSupplies] = useState<WbFboSupply[]>([]);
@@ -207,6 +214,36 @@ export default function FboSuppliesPage() {
         }
         setLoadingItems(false);
     };
+
+    // ─── Deep-link: применить ?filter= / ?supply= один раз ───────────────
+    useEffect(() => {
+        if (deepLinkAppliedRef.current) return;
+        const filter = searchParams.get('filter') ?? '';
+        const supplyParam = searchParams.get('supply') ?? '';
+        if (!filter && !supplyParam) return; // ничего не задано (или ещё не гидратировано)
+        deepLinkAppliedRef.current = true;
+        // Целевая поставка может быть старше дефолтного 30-дн окна — снимаем его.
+        setDateFrom('');
+        if (filter === 'without_assembly') setWithoutAssembly(true);
+        else if (filter === 'partial') setPartialOnly(true);
+        else if (filter === 'excess') setExcessOnly(true);
+        if (supplyParam) {
+            setSearch(supplyParam);
+            setSearchInput(supplyParam);
+            setPendingSupplyWb(supplyParam);
+        }
+        setPage(0);
+    }, [searchParams]);
+
+    // После загрузки списка авто-развернуть deep-link-поставку (один раз).
+    useEffect(() => {
+        if (!pendingSupplyWb) return;
+        const match = supplies.find(s => s.wb_supply_id === pendingSupplyWb);
+        if (!match) return; // ещё не подгрузилась — ждём следующего setSupplies
+        setPendingSupplyWb(null);
+        if (expandedId !== match.id) toggleExpand(match.id);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [supplies, pendingSupplyWb]);
 
     // ─── Sort toggle ─────────────────────────────────────────────────────
 

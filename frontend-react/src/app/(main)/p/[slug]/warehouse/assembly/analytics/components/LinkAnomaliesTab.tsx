@@ -12,13 +12,15 @@
  * Свой селект ФФ-склада сверху. Блоки 1–3 — таблицы с Excel-экспортом, блок 4 — мини-карточки.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { exportToExcel, formatDate, formatNumber } from '@/lib/utils';
 import type {
+    FboAnomalySupply,
     FfMismatchRow,
     LinkAnomaliesResponse,
+    StockMismatchWarehouseRow,
     UnlinkedAssemblyRow,
     UnlinkedFfRow,
     Warehouse,
@@ -45,6 +47,16 @@ function statusBadge(status: string | null): { label: string; cls: string } {
 const MODE_LABEL: Record<FfMismatchRow['mode'], string> = {
     barcode: 'по ШК',
     total: 'по кол-ву',
+};
+
+// Какая категория аномалий FBO раскрыта (мини-карточки кликабельны).
+type FboBucket = 'without' | 'under' | 'excess' | null;
+
+// Соответствие категории фильтру страницы «Поставки FBO» (deep-link).
+const FBO_FILTER_PARAM: Record<Exclude<FboBucket, null>, string> = {
+    without: 'without_assembly',
+    under: 'partial',
+    excess: 'excess',
 };
 
 // ─── UI atoms ───────────────────────────────────────────────────────────────
@@ -139,6 +151,10 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
 
     const [warehouseId, setWarehouseId] = useState<number | ''>('');
     const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+
+    // Развороты: склад в блоке расхождения остатков; категория аномалий FBO.
+    const [expandedWh, setExpandedWh] = useState<number | null>(null);
+    const [fboBucket, setFboBucket] = useState<FboBucket>(null);
 
     // ─── Load FF-warehouses (один раз) ────────────────────────────────────
     useEffect(() => {
@@ -255,10 +271,47 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
         );
     }, [data]);
 
+    const exportStockMismatch = useCallback(() => {
+        const whs = data?.stock_mismatch ?? [];
+        if (whs.length === 0) return;
+        const flat = whs.flatMap(w =>
+            w.rows.map(r => ({
+                warehouse: w.warehouse_name || '',
+                provider: w.provider || '',
+                barcode: r.barcode,
+                article_seller: r.article_seller || '',
+                brand: r.brand || '',
+                name: r.name || '',
+                ff_good: r.ff_good,
+                our_quantity: r.our_quantity,
+                diff: r.diff,
+                direction: r.diff > 0 ? 'у ФФ больше' : 'у нас больше',
+            })),
+        );
+        if (flat.length === 0) return;
+        exportToExcel(
+            flat,
+            'assembly_stock_mismatch',
+            [
+                { key: 'warehouse', label: 'Склад' },
+                { key: 'provider', label: 'Провайдер' },
+                { key: 'barcode', label: 'ШК' },
+                { key: 'article_seller', label: 'Артикул' },
+                { key: 'brand', label: 'Бренд' },
+                { key: 'name', label: 'Название' },
+                { key: 'ff_good', label: 'ФФ шт' },
+                { key: 'our_quantity', label: 'Наш шт' },
+                { key: 'diff', label: 'Δ' },
+                { key: 'direction', label: 'Направление' },
+            ],
+        );
+    }, [data]);
+
     // ─── Derived ──────────────────────────────────────────────────────────
     const mismatch: FfMismatchRow[] = useMemo(() => data?.ff_composition_mismatch ?? [], [data]);
     const asmWithoutFf: UnlinkedAssemblyRow[] = useMemo(() => data?.assemblies_without_ff ?? [], [data]);
     const ffWithoutAsm: UnlinkedFfRow[] = useMemo(() => data?.ff_without_assembly ?? [], [data]);
+    const stockMismatch: StockMismatchWarehouseRow[] = useMemo(() => data?.stock_mismatch ?? [], [data]);
     const fbo = data?.fbo;
     const fboHasAnomalies =
         !!fbo && (fbo.without_assembly_count > 0 || fbo.under_accepted_count > 0 || fbo.excess_count > 0);
@@ -468,7 +521,16 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                         )}
                     </div>
 
-                    {/* 4. Аномалии поставок FBO */}
+                    {/* 4. Расхождение остатков с ФФ (наш склад vs API-зеркало) */}
+                    <StockMismatchBlock
+                        rows={stockMismatch}
+                        slug={slug}
+                        expandedWh={expandedWh}
+                        onToggle={wid => setExpandedWh(prev => (prev === wid ? null : wid))}
+                        onExport={exportStockMismatch}
+                    />
+
+                    {/* 5. Аномалии поставок FBO */}
                     {fbo && (
                         <div className="glass-card" style={{ padding: 0, overflow: 'hidden', borderLeft: '3px solid var(--color-danger)' }}>
                             <BlockHeader
@@ -476,30 +538,62 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                                 title="Аномалии поставок FBO"
                                 count={fbo.without_assembly_count + fbo.under_accepted_count + fbo.excess_count}
                                 color="var(--color-danger)"
-                                note="По всем складам — расхождения FBO-поставок ВБ."
+                                note="По всем складам — расхождения FBO-поставок ВБ. Кликните карточку, чтобы увидеть сами поставки."
                             />
                             {!fboHasAnomalies ? (
                                 <BlockEmpty text="Нет аномалий FBO — всё чисто" />
                             ) : (
-                                <div style={{ padding: '4px 20px 16px', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                                    <FboMiniCard
-                                        label="Без заявки"
-                                        value={fbo.without_assembly_count}
-                                        color="var(--color-warning)"
-                                    />
-                                    <FboMiniCard
-                                        label="Недоприёмка"
-                                        value={fbo.under_accepted_count}
-                                        sub={`${formatNumber(fbo.under_accepted_qty, 0)} шт`}
-                                        color="var(--color-danger)"
-                                    />
-                                    <FboMiniCard
-                                        label="Излишек"
-                                        value={fbo.excess_count}
-                                        sub={`${formatNumber(fbo.excess_qty, 0)} шт`}
-                                        color="var(--color-accent)"
-                                    />
-                                </div>
+                                <>
+                                    <div style={{ padding: '4px 20px 16px', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                                        <FboMiniCard
+                                            label="Без заявки"
+                                            value={fbo.without_assembly_count}
+                                            color="var(--color-warning)"
+                                            active={fboBucket === 'without'}
+                                            onClick={() => setFboBucket(b => (b === 'without' ? null : 'without'))}
+                                        />
+                                        <FboMiniCard
+                                            label="Недоприёмка"
+                                            value={fbo.under_accepted_count}
+                                            sub={`${formatNumber(fbo.under_accepted_qty, 0)} шт`}
+                                            color="var(--color-danger)"
+                                            active={fboBucket === 'under'}
+                                            onClick={() => setFboBucket(b => (b === 'under' ? null : 'under'))}
+                                        />
+                                        <FboMiniCard
+                                            label="Излишек"
+                                            value={fbo.excess_count}
+                                            sub={`${formatNumber(fbo.excess_qty, 0)} шт`}
+                                            color="var(--color-accent)"
+                                            active={fboBucket === 'excess'}
+                                            onClick={() => setFboBucket(b => (b === 'excess' ? null : 'excess'))}
+                                        />
+                                    </div>
+                                    {fboBucket === 'without' && (
+                                        <FboSupplyTable
+                                            slug={slug}
+                                            supplies={fbo.without_assembly_supplies}
+                                            totalCount={fbo.without_assembly_count}
+                                            bucket="without"
+                                        />
+                                    )}
+                                    {fboBucket === 'under' && (
+                                        <FboSupplyTable
+                                            slug={slug}
+                                            supplies={fbo.under_accepted_supplies}
+                                            totalCount={fbo.under_accepted_count}
+                                            bucket="under"
+                                        />
+                                    )}
+                                    {fboBucket === 'excess' && (
+                                        <FboSupplyTable
+                                            slug={slug}
+                                            supplies={fbo.excess_supplies}
+                                            totalCount={fbo.excess_count}
+                                            bucket="excess"
+                                        />
+                                    )}
+                                </>
                             )}
                             <div style={{ padding: '0 20px 16px' }}>
                                 <Link
@@ -528,37 +622,292 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
     );
 }
 
-/** Мини-карточка-счётчик аномалий FBO. */
+/** Мини-карточка-счётчик аномалий FBO. Кликабельна — разворачивает список поставок. */
 function FboMiniCard({
     label,
     value,
     sub,
     color,
+    active = false,
+    onClick,
 }: {
     label: string;
     value: number;
     sub?: string;
     color: string;
+    active?: boolean;
+    onClick?: () => void;
 }) {
+    const clickable = !!onClick && value > 0;
     return (
-        <div
+        <button
+            type="button"
+            onClick={clickable ? onClick : undefined}
+            disabled={!clickable}
             style={{
                 flex: '1 1 140px',
                 minWidth: 140,
                 padding: '14px 16px',
                 borderRadius: 12,
-                border: '1px solid var(--color-border)',
-                background: `color-mix(in srgb, ${color} 6%, transparent)`,
+                textAlign: 'left',
+                border: active ? `1px solid ${color}` : '1px solid var(--color-border)',
+                background: `color-mix(in srgb, ${color} ${active ? 12 : 6}%, transparent)`,
+                cursor: clickable ? 'pointer' : 'default',
+                boxShadow: active ? `0 0 0 1px ${color} inset` : 'none',
+                transition: 'background 0.2s, border-color 0.2s',
             }}
         >
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
-                {label}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    {label}
+                </span>
+                {clickable && (
+                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)', marginLeft: 'auto' }}>
+                        {active ? '▾' : '▸'}
+                    </span>
+                )}
             </div>
-            <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.1, color }}>
+            <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em', lineHeight: 1.1, color, marginTop: 6 }}>
                 {formatNumber(value, 0)}
             </div>
             {sub && (
                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>{sub}</div>
+            )}
+        </button>
+    );
+}
+
+/** Список аномальных FBO-поставок одной категории. Каждая строка — deep-link на «Поставки FBO». */
+function FboSupplyTable({
+    slug,
+    supplies,
+    totalCount,
+    bucket,
+}: {
+    slug: string;
+    supplies: FboAnomalySupply[];
+    totalCount: number;
+    bucket: Exclude<FboBucket, null>;
+}) {
+    const filterParam = FBO_FILTER_PARAM[bucket];
+    const supplyHref = (s: FboAnomalySupply) =>
+        s.wb_supply_id
+            ? `/p/${slug}/warehouse/fbo-supplies?supply=${encodeURIComponent(s.wb_supply_id)}`
+            : `/p/${slug}/warehouse/fbo-supplies?filter=${filterParam}`;
+    const hidden = totalCount - supplies.length;
+    return (
+        <div style={{ padding: '0 20px 16px' }}>
+            {supplies.length === 0 ? (
+                <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Нет поставок в этой категории.</div>
+            ) : (
+                <div style={{ overflowX: 'auto', border: '1px solid var(--color-border)', borderRadius: 12 }}>
+                    <table className="data-table" style={{ fontSize: 13, margin: 0 }}>
+                        <thead>
+                            <tr>
+                                <th>Поставка</th>
+                                <th>Склад ВБ</th>
+                                <th>Сборка</th>
+                                <th style={{ textAlign: 'right' }}>Заявлено</th>
+                                <th style={{ textAlign: 'right' }}>Принято</th>
+                                <th style={{ textAlign: 'right' }}>Δ</th>
+                                <th>Дата</th>
+                                <th />
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {supplies.map(s => (
+                                <tr key={s.supply_id}>
+                                    <td>
+                                        <Link
+                                            href={supplyHref(s)}
+                                            style={{ color: 'var(--color-accent)', fontWeight: 600, textDecoration: 'none' }}
+                                        >
+                                            {s.wb_supply_id || s.name || `#${s.supply_id}`}
+                                        </Link>
+                                    </td>
+                                    <td style={{ color: 'var(--color-text-muted)' }}>{s.warehouse_name || '—'}</td>
+                                    <td style={{ color: 'var(--color-text-muted)' }}>{s.assembly_request_number || '—'}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(s.total_qty, 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(s.accepted_qty, 0)}</td>
+                                    <td style={{ textAlign: 'right' }}>
+                                        <span
+                                            style={{
+                                                fontWeight: 700,
+                                                color: s.diff > 0
+                                                    ? 'var(--color-accent)'
+                                                    : s.diff < 0
+                                                        ? 'var(--color-danger)'
+                                                        : 'var(--color-text)',
+                                            }}
+                                        >
+                                            {s.diff > 0 ? '+' : ''}{formatNumber(s.diff, 0)}
+                                        </span>
+                                    </td>
+                                    <td style={{ color: 'var(--color-text-muted)' }}>
+                                        {s.actual_date ? formatDate(s.actual_date) : s.planned_date ? formatDate(s.planned_date) : '—'}
+                                    </td>
+                                    <td style={{ textAlign: 'right' }}>
+                                        <Link
+                                            href={supplyHref(s)}
+                                            style={{ color: 'var(--color-accent)', textDecoration: 'none', fontSize: 12, whiteSpace: 'nowrap' }}
+                                        >
+                                            Открыть →
+                                        </Link>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+            {hidden > 0 && (
+                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                    Показаны первые {formatNumber(supplies.length, 0)} из {formatNumber(totalCount, 0)}.{' '}
+                    <Link
+                        href={`/p/${slug}/warehouse/fbo-supplies?filter=${filterParam}`}
+                        style={{ color: 'var(--color-accent)', textDecoration: 'none', fontWeight: 600 }}
+                    >
+                        Показать все →
+                    </Link>
+                </div>
+            )}
+        </div>
+    );
+}
+
+/** Блок «Расхождение остатков с ФФ»: строки по складам с разворотом по SKU. */
+function StockMismatchBlock({
+    rows,
+    slug,
+    expandedWh,
+    onToggle,
+    onExport,
+}: {
+    rows: StockMismatchWarehouseRow[];
+    slug: string;
+    expandedWh: number | null;
+    onToggle: (warehouseId: number) => void;
+    onExport: () => void;
+}) {
+    return (
+        <div className="glass-card" style={{ padding: 0, overflow: 'hidden', borderLeft: '3px solid var(--color-warning)' }}>
+            <BlockHeader
+                icon="📊"
+                title="Расхождение остатков с ФФ"
+                count={rows.length}
+                color="var(--color-warning)"
+                onExport={onExport}
+                note="Наш остаток не сходится с зеркалом склада по API. Δ = ФФ − наш (кликните склад, чтобы развернуть по SKU)."
+            />
+            {rows.length === 0 ? (
+                <BlockEmpty text="Остатки сходятся с ФФ — всё чисто" />
+            ) : (
+                <div style={{ overflowX: 'auto' }}>
+                    <table className="data-table" style={{ fontSize: 13 }}>
+                        <thead>
+                            <tr>
+                                <th>Склад</th>
+                                <th>Провайдер</th>
+                                <th style={{ textAlign: 'right' }}>У ФФ больше</th>
+                                <th style={{ textAlign: 'right' }}>У нас больше</th>
+                                <th style={{ textAlign: 'right' }}>Δ нетто</th>
+                                <th>Синк</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows.map(w => {
+                                const open = expandedWh === w.warehouse_id;
+                                return (
+                                    <Fragment key={w.warehouse_id}>
+                                        <tr
+                                            onClick={() => onToggle(w.warehouse_id)}
+                                            style={{ cursor: 'pointer' }}
+                                        >
+                                            <td style={{ fontWeight: 600 }}>
+                                                <span style={{ color: 'var(--color-text-muted)', marginRight: 6, fontSize: 11 }}>
+                                                    {open ? '▾' : '▸'}
+                                                </span>
+                                                {w.warehouse_name || `#${w.warehouse_id}`}
+                                            </td>
+                                            <td style={{ color: 'var(--color-text-muted)' }}>{w.provider || '—'}</td>
+                                            <td style={{ textAlign: 'right' }}>
+                                                {w.surplus_ff_qty > 0 ? (
+                                                    <span style={{ color: 'var(--color-accent)', fontWeight: 600 }}>
+                                                        +{formatNumber(w.surplus_ff_qty, 0)}
+                                                        <span style={{ color: 'var(--color-text-muted)', fontWeight: 400, fontSize: 11 }}>
+                                                            {' '}/ {formatNumber(w.surplus_ff_sku, 0)} SKU
+                                                        </span>
+                                                    </span>
+                                                ) : '—'}
+                                            </td>
+                                            <td style={{ textAlign: 'right' }}>
+                                                {w.surplus_our_qty > 0 ? (
+                                                    <span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>
+                                                        −{formatNumber(w.surplus_our_qty, 0)}
+                                                        <span style={{ color: 'var(--color-text-muted)', fontWeight: 400, fontSize: 11 }}>
+                                                            {' '}/ {formatNumber(w.surplus_our_sku, 0)} SKU
+                                                        </span>
+                                                    </span>
+                                                ) : '—'}
+                                            </td>
+                                            <td style={{ textAlign: 'right', fontWeight: 700, color: w.net_diff > 0 ? 'var(--color-accent)' : w.net_diff < 0 ? 'var(--color-danger)' : 'var(--color-text)' }}>
+                                                {w.net_diff > 0 ? '+' : ''}{formatNumber(w.net_diff, 0)}
+                                            </td>
+                                            <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+                                                {w.synced_at ? formatDate(w.synced_at) : '—'}
+                                            </td>
+                                        </tr>
+                                        {open && (
+                                            <tr>
+                                                <td colSpan={6} style={{ padding: 0, background: 'color-mix(in srgb, var(--color-warning) 4%, transparent)' }}>
+                                                    <div style={{ padding: '8px 20px 12px' }}>
+                                                        <div style={{ overflowX: 'auto', border: '1px solid var(--color-border)', borderRadius: 12, background: 'var(--color-bg-card)' }}>
+                                                            <table className="data-table" style={{ fontSize: 12, margin: 0 }}>
+                                                                <thead>
+                                                                    <tr>
+                                                                        <th>ШК</th>
+                                                                        <th>Артикул</th>
+                                                                        <th>Бренд</th>
+                                                                        <th style={{ textAlign: 'right' }}>ФФ шт</th>
+                                                                        <th style={{ textAlign: 'right' }}>Наш шт</th>
+                                                                        <th style={{ textAlign: 'right' }}>Δ</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    {w.rows.map(r => (
+                                                                        <tr key={r.barcode}>
+                                                                            <td style={{ fontFamily: 'monospace' }}>{r.barcode}</td>
+                                                                            <td>{r.article_seller || r.name || '—'}</td>
+                                                                            <td style={{ color: 'var(--color-text-muted)' }}>{r.brand || '—'}</td>
+                                                                            <td style={{ textAlign: 'right' }}>{formatNumber(r.ff_good, 0)}</td>
+                                                                            <td style={{ textAlign: 'right' }}>{formatNumber(r.our_quantity, 0)}</td>
+                                                                            <td style={{ textAlign: 'right', fontWeight: 700, color: r.diff > 0 ? 'var(--color-accent)' : 'var(--color-danger)' }}>
+                                                                                {r.diff > 0 ? '+' : ''}{formatNumber(r.diff, 0)}
+                                                                            </td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                        <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                            {w.truncated && <span>Показаны крупнейшие {formatNumber(w.rows.length, 0)} из {formatNumber(w.sku_total, 0)} SKU. </span>}
+                                                            <Link
+                                                                href={`/p/${slug}/warehouse/${w.warehouse_id}?tab=ff-stocks`}
+                                                                style={{ color: 'var(--color-accent)', textDecoration: 'none', fontWeight: 600 }}
+                                                            >
+                                                                Открыть остатки склада →
+                                                            </Link>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </Fragment>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
             )}
         </div>
     );

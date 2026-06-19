@@ -1769,6 +1769,23 @@ export interface UnlinkedFfRow {
   external_created_at: string | null;
 }
 
+/** Одна аномальная FBO-поставка (разворот-список с drill на /warehouse/fbo-supplies). */
+export interface FboAnomalySupply {
+  supply_id: number;
+  /** WB-I-xxxx — для deep-link и показа */
+  wb_supply_id: string | null;
+  name: string | null;
+  /** склад ВБ (город сдачи) */
+  warehouse_name: string | null;
+  total_qty: number;
+  accepted_qty: number;
+  /** accepted_qty - total_qty (<0 — недоприёмка, >0 — излишек) */
+  diff: number;
+  planned_date: string | null;
+  actual_date: string | null;
+  assembly_request_number: string | null;
+}
+
 /** Сводка аномалий FBO-поставок ВБ (drill-through на /warehouse/fbo-supplies). */
 export interface FboAnomalyRollup {
   without_assembly_count: number;
@@ -1776,6 +1793,47 @@ export interface FboAnomalyRollup {
   under_accepted_qty: number;
   excess_count: number;
   excess_qty: number;
+  without_assembly_supplies: FboAnomalySupply[];
+  under_accepted_supplies: FboAnomalySupply[];
+  excess_supplies: FboAnomalySupply[];
+}
+
+/** Построчное расхождение остатка по SKU: наш склад vs ФФ-зеркало. */
+export interface StockMismatchSkuRow {
+  barcode: string;
+  article_seller: string | null;
+  brand: string | null;
+  name: string | null;
+  /** у ФФ (зеркало провайдера), штук россыпи */
+  ff_good: number;
+  /** у нас (WarehouseStock.quantity) */
+  our_quantity: number;
+  /** ff_good - our_quantity (>0 — у ФФ больше, <0 — у нас больше) */
+  diff: number;
+}
+
+/** Расхождение остатка по ФФ-интегрированному складу (наш склад vs API-зеркало). */
+export interface StockMismatchWarehouseRow {
+  warehouse_id: number;
+  warehouse_name: string | null;
+  provider: string | null;
+  /** суммарно у ФФ больше, штук */
+  surplus_ff_qty: number;
+  /** на скольких SKU у ФФ больше */
+  surplus_ff_sku: number;
+  /** суммарно у нас больше, штук */
+  surplus_our_qty: number;
+  /** на скольких SKU у нас больше */
+  surplus_our_sku: number;
+  /** surplus_ff_qty - surplus_our_qty (нетто ФФ − наш) */
+  net_diff: number;
+  /** всего SKU с расхождением */
+  sku_total: number;
+  /** rows обрезаны до лимита (на складе больше расхождений) */
+  truncated: boolean;
+  /** ISO — последний синк остатков ФФ */
+  synced_at: string | null;
+  rows: StockMismatchSkuRow[];
 }
 
 export interface LinkAnomaliesResponse {
@@ -1783,6 +1841,8 @@ export interface LinkAnomaliesResponse {
   assemblies_without_ff: UnlinkedAssemblyRow[];
   ff_without_assembly: UnlinkedFfRow[];
   fbo: FboAnomalyRollup;
+  /** Расхождение остатков по складам с ФФ-интеграцией. */
+  stock_mismatch: StockMismatchWarehouseRow[];
 }
 
 /* ─── Распределение остатков сборки (stock distribution) ─── */
