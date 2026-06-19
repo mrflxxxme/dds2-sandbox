@@ -626,6 +626,68 @@ class TestRefreshFromFbo:
         assert result.removed == 1
         assert len(result.items) == 0
 
+    async def test_refresh_pulls_goods_and_adds_new_barcode(self, db_session):
+        """Кнопка «Из FBO» форс-перетягивает goods из WB: новый ШК, появившийся в
+        кабинете после создания поставки, попадает в заявку (а не теряется в
+        устаревшем зеркале WbFboSupplyItem)."""
+        from unittest.mock import AsyncMock
+
+        from backend.services.assembly.analytics import refresh_from_fbo
+
+        req = await _create_test_request(db_session)  # позиция: TEST_BARCODE_1 = 5
+        # wb_supply_id должен быть числовым (в проде так и есть) — иначе int() в
+        # enrich-хелпере падает и WB-вызов тихо пропускается.
+        fbo_id = await _get_fbo_supply_id(db_session)
+        supply = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == fbo_id))).scalar_one()
+        supply.wb_supply_id = "40012237"
+        await db_session.commit()
+
+        # WB-состав вырос: TEST_BARCODE_1 → 10 и новый TEST_BARCODE_2 = 7.
+        mock_client = AsyncMock()
+        mock_client.get_fbw_supply_detail.return_value = {
+            "warehouseName": "Электросталь",
+            "quantity": 17,
+            "statusID": 1,
+        }
+        mock_client.get_fbw_supply_goods.return_value = [
+            {"barcode": TEST_BARCODE_1, "vendorCode": "ART1", "nmID": 1, "quantity": 10, "acceptedQuantity": 0},
+            {"barcode": TEST_BARCODE_2, "vendorCode": "ART2", "nmID": 2, "quantity": 7, "acceptedQuantity": 0},
+        ]
+
+        result = await refresh_from_fbo(db_session, PROJECT_ID, req.id, api_client=mock_client)
+
+        assert mock_client.get_fbw_supply_goods.called, "goods обязаны перетянуться из WB"
+        assert result.added == 1  # TEST_BARCODE_2 добавлен
+        assert result.changed == 1  # TEST_BARCODE_1: 5 → 10
+        assert result.skipped == []
+        assert TEST_BARCODE_2 in {i.barcode for i in result.items}
+
+    async def test_refresh_skips_barcode_absent_in_nomenclature(self, db_session):
+        """Goods содержит ШК, которого нет в номенклатуре → не валим рефреш (был бы
+        HTTP 400), а копим в skipped."""
+        from unittest.mock import AsyncMock
+
+        from backend.services.assembly.analytics import refresh_from_fbo
+
+        req = await _create_test_request(db_session)  # позиция: TEST_BARCODE_1 = 5
+        fbo_id = await _get_fbo_supply_id(db_session)
+        supply = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == fbo_id))).scalar_one()
+        supply.wb_supply_id = "40012237"
+        await db_session.commit()
+
+        mock_client = AsyncMock()
+        mock_client.get_fbw_supply_detail.return_value = {"warehouseName": "Электросталь", "quantity": 5, "statusID": 1}
+        mock_client.get_fbw_supply_goods.return_value = [
+            {"barcode": "UNRESOLVABLE_BC_ZZZ", "vendorCode": "X", "nmID": 9, "quantity": 5, "acceptedQuantity": 0},
+        ]
+
+        # Не должно бросать ValueError
+        result = await refresh_from_fbo(db_session, PROJECT_ID, req.id, api_client=mock_client)
+
+        assert "UNRESOLVABLE_BC_ZZZ" in result.skipped
+        assert result.added == 0
+        assert result.removed == 1  # TEST_BARCODE_1 ушёл из состава WB
+
 
 @pytest.mark.asyncio
 class TestLifecycle:

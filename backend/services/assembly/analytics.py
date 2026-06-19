@@ -10,6 +10,7 @@ import logging
 import statistics
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,10 +39,16 @@ async def refresh_from_fbo(
     db: AsyncSession,
     project_id: int,
     request_id: int,
+    api_client: Any = None,
 ) -> RefreshFromFboResponse:
     """
     Re-sync items from linked WbFboSupply.
     Available: PENDING -> VEHICLE_ASSIGNED (not SHIPPED, not CANCELLED).
+
+    Перед сравнением форс-перетягиваем построчный состав поставки из WB (goods),
+    иначе диф идёт по устаревшему локальному зеркалу WbFboSupplyItem и не видит
+    позиций, добавленных в кабинете WB после создания поставки. api_client —
+    инъекция для тестов (в проде строится из WB-ключа внутри enrich-хелпера).
     """
     from .crud import get_assembly_request
 
@@ -66,11 +73,13 @@ async def refresh_from_fbo(
     if not supply:
         raise ValueError("Linked FBO supply not found")
 
-    # Force-pull WB detail to refresh warehouse_name (если изменился в WB
-    # либо ещё не enriched). Best-effort, не блокирующее.
+    # Force-pull WB detail + per-barcode goods, чтобы локальное зеркало
+    # WbFboSupplyItem отражало текущий состав в кабинете WB (а не застрявший
+    # снимок). Best-effort: при отсутствии ключа/ошибке WB diff пойдёт по тому,
+    # что уже лежит в БД.
     from .crud import _try_force_enrich_supply
 
-    await _try_force_enrich_supply(db, project_id, supply, force=True)
+    await _try_force_enrich_supply(db, project_id, supply, force=True, with_goods=True, api_client=api_client)
     if supply.warehouse_name and req.wb_warehouse_name_manual != supply.warehouse_name:
         req.wb_warehouse_name_manual = supply.warehouse_name
 
@@ -96,6 +105,7 @@ async def refresh_from_fbo(
     added = 0
     removed = 0
     changed = 0
+    skipped: list[str] = []
 
     # Remove items not in FBO anymore
     for barcode, item in current_map.items():
@@ -118,8 +128,14 @@ async def refresh_from_fbo(
         else:
             if qty == 0:
                 continue  # новую позицию с 0 не добавляем
-            # New barcode - resolve nomenclature
-            nom = await _resolve_barcode(db, project_id, barcode)
+            # New barcode — резолвим номенклатуру. Нет в справочнике → не валим
+            # весь рефреш (был бы HTTP 400, юзер не увидел бы остальные правки),
+            # а копим в skipped, чтобы показать «не смогли добавить эти ШК».
+            try:
+                nom = await _resolve_barcode(db, project_id, barcode)
+            except ValueError:
+                skipped.append(barcode)
+                continue
             new_item = AssemblyRequestItem(
                 project_id=project_id,
                 assembly_request_id=req.id,
@@ -138,6 +154,7 @@ async def refresh_from_fbo(
         added=added,
         removed=removed,
         changed=changed,
+        skipped=skipped,
         items=[
             AssemblyItemResponse(
                 id=item.id,

@@ -205,6 +205,9 @@ class RefreshFromFboResponse(BaseModel):
     removed: int
     changed: int
     items: list[AssemblyItemResponse]
+    # ШК из WB-состава, которых нет в номенклатуре проекта — не добавлены в заявку
+    # (резолв упал), но рефреш не валим: показываем пользователю, что пропустили.
+    skipped: list[str] = []
 
 
 class AssemblyHistoryResponse(BaseModel):

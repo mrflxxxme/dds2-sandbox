@@ -40,6 +40,17 @@ ACCEPTED_REENRICH_COOLDOWN_HOURS = 24
 # supply transitions to ACCEPTED). Same cooldown to bound rate-limit usage.
 ACTIVE_REENRICH_COOLDOWN_HOURS = 24
 
+# Статусы, для которых enrich перетягивает построчный состав (goods → WbFboSupplyItem),
+# не только агрегаты из detail. ACCEPTED — нужен per-SKU accepted_qty при приёмке.
+# IN_PROGRESS / ON_DELIVERY — состав поставки в WB ещё может меняться после создания
+# (напр. FBW-40012237: +152 шт добавили в кабинете), а detail отдаёт только итоги →
+# без goods зеркало item-ов застревает и расходится с WB и заявками ФФ.
+_GOODS_REFRESH_STATUSES = (
+    WbSupplyStatus.ACCEPTED,
+    WbSupplyStatus.IN_PROGRESS,
+    WbSupplyStatus.ON_DELIVERY,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -255,14 +266,15 @@ async def enrich_fbo_supplies(
             if detail:
                 _update_supply_from_fbw_detail(supply, detail)
 
-            # Also sync per-item accepted_qty for ACCEPTED supplies with partial
-            # acceptance (WB returns acceptedQuantity per barcode in goods API).
-            # WB detail.acceptedQuantity and sum(goods.acceptedQuantity) can
-            # diverge (detail counts depersonalized as accepted, goods doesn't) —
-            # we trust per-SKU goods numbers for supply-level accepted_qty too,
-            # otherwise partial_only filter misses these supplies.
+            # Перетягиваем построчный состав (goods → WbFboSupplyItem) для всех
+            # «живых» статусов (_GOODS_REFRESH_STATUSES), а не только ACCEPTED:
+            #  - ACCEPTED — per-SKU accepted_qty при частичной приёмке (WB отдаёт
+            #    acceptedQuantity по баркоду; detail.acceptedQuantity и
+            #    sum(goods.acceptedQuantity) расходятся — доверяем per-SKU);
+            #  - IN_PROGRESS / ON_DELIVERY — состав ещё меняется в кабинете WB, и
+            #    без goods локальное зеркало item-ов устаревает (расхождение с WB/ФФ).
             goods_ok = True
-            if supply.wb_status == WbSupplyStatus.ACCEPTED:
+            if supply.wb_status in _GOODS_REFRESH_STATUSES:
                 goods_ok = False
                 try:
                     await asyncio.sleep(FBW_RATE_LIMIT_DELAY)
