@@ -138,6 +138,7 @@ async def start_assembly(db: AsyncSession, project_id: int, request_id: int) -> 
     await db.commit()
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
     return req
 
 
@@ -167,6 +168,7 @@ async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> Asse
     await db.commit()
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
     return req
 
 
@@ -196,6 +198,7 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
     await db.commit()
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
     return req
 
 
@@ -222,6 +225,7 @@ async def unassign_vehicle(db: AsyncSession, project_id: int, request_id: int) -
     await db.commit()
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
     return req
 
 
@@ -307,6 +311,7 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
 
     await invalidate_cache("reports:balance")
     await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
 
     return req
 
@@ -375,6 +380,7 @@ async def cancel_request(db: AsyncSession, project_id: int, request_id: int) -> 
 
     await invalidate_cache("reports:balance")
     await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
 
     return req
 
@@ -490,6 +496,7 @@ async def return_to_warehouse(
     await invalidate_cache("reports:balance")
     await invalidate_cache("reports:logistics_analytics")
     await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
 
     return req
 
@@ -517,6 +524,7 @@ async def delete_request(db: AsyncSession, project_id: int, request_id: int) -> 
 
     await invalidate_cache("reports:balance")
     await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
 
 
 # --- Bulk operations --------------------------------------------------------
@@ -578,6 +586,7 @@ async def deliver_request(
     await db.commit()
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
     return req
 
 
