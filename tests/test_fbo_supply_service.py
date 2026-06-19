@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
 from backend.services.fbo_supply_service import (
@@ -959,15 +959,26 @@ class TestEnrichActiveWarehouseRefresh:
             "quantity": 192,
             "statusID": 3,
         }
+        # Состав в WB вырос (192 → 230): enrich непринятой поставки обязан
+        # перетянуть goods, иначе зеркало item-ов застрянет на старом наполнении.
+        mock_client.get_fbw_supply_goods.return_value = [
+            {"barcode": "BC-IP-1", "vendorCode": "VC1", "nmID": 1, "quantity": 200, "acceptedQuantity": 0},
+            {"barcode": "BC-IP-2", "vendorCode": "VC2", "nmID": 2, "quantity": 30, "acceptedQuantity": 0},
+        ]
 
         result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
 
         assert result["enriched"] == 1
         assert mock_client.get_fbw_supply_detail.called
-        assert not mock_client.get_fbw_supply_goods.called, "goods API only for ACCEPTED"
+        assert mock_client.get_fbw_supply_goods.called, "goods API must be pulled for IN_PROGRESS too"
 
         await db_session.refresh(supply)
         assert supply.warehouse_name == "Коледино"
+        assert supply.total_qty == 230, "total_qty пересчитан из goods"
+        items = (
+            await db_session.execute(select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == supply.id))
+        ).scalars().all()
+        assert {i.barcode for i in items} == {"BC-IP-1", "BC-IP-2"}
 
     async def test_in_progress_within_cooldown_is_skipped(self, db_session):
         """Recently synced IN_PROGRESS supply must not be re-enriched (cooldown)."""
@@ -1017,12 +1028,20 @@ class TestEnrichActiveWarehouseRefresh:
             "quantity": 100,
             "statusID": 2,
         }
+        mock_client.get_fbw_supply_goods.return_value = [
+            {"barcode": "BC-OD-1", "vendorCode": "VC1", "nmID": 1, "quantity": 100, "acceptedQuantity": 0},
+        ]
 
         result = await enrich_fbo_supplies(db_session, 1, mock_client, max_calls=5)
 
         assert result["enriched"] == 1
+        assert mock_client.get_fbw_supply_goods.called, "goods API must be pulled for ON_DELIVERY too"
         await db_session.refresh(supply)
         assert supply.warehouse_name == "Электросталь"
+        items = (
+            await db_session.execute(select(WbFboSupplyItem).where(WbFboSupplyItem.supply_id == supply.id))
+        ).scalars().all()
+        assert {i.barcode for i in items} == {"BC-OD-1"}
 
 
 # ─── Backfill: supply ↔ shipment link via AssemblyRequest ──────────────────

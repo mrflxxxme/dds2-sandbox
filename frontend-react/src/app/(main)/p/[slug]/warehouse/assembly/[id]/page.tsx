@@ -580,6 +580,11 @@ export default function AssemblyDetailPage() {
                         <span>Удалено: {refreshResult.removed}</span>
                         <span>Изменено: {refreshResult.changed}</span>
                     </div>
+                    {refreshResult.skipped && refreshResult.skipped.length > 0 && (
+                        <div style={{ marginTop: 8, fontSize: 13, color: 'var(--color-warning)' }}>
+                            Пропущено (нет в номенклатуре): {refreshResult.skipped.join(', ')}
+                        </div>
+                    )}
                     <button className="btn btn-secondary btn-sm" style={{ marginTop: 8 }} onClick={() => setRefreshResult(null)}>
                         Скрыть
                     </button>

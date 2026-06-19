@@ -8,6 +8,7 @@ Part of the assembly service package. See backend/DOMAIN_ASSEMBLY.md for spec.
 import logging
 from datetime import date, datetime, time
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,34 +47,51 @@ async def _try_force_enrich_supply(
     project_id: int,
     supply: WbFboSupply,
     force: bool = False,
+    with_goods: bool = False,
+    api_client: Any = None,
 ) -> None:
     """
-    On-demand force-pull warehouse_name from WB detail API when supply is linked
-    to an assembly but periodic enrich hasn't filled it yet (race window between
-    list-sync creating supply and enrich job catching up). Best-effort: any error
-    is swallowed — caller proceeds, scheduled enrich will catch up later.
+    On-demand force-pull from WB when supply is linked to an assembly but periodic
+    enrich hasn't caught up (race window между list-sync и enrich-джобой). Best-effort:
+    любая ошибка глотается — caller продолжает, плановый enrich догонит позже.
 
     force=True — pull даже если warehouse_name уже задан (для «Обновить из WB»
     когда юзер мог сменить склад назначения в кабинете WB).
+
+    with_goods=True — дополнительно перетянуть построчный состав (goods →
+    WbFboSupplyItem). Detail-эндпоинт отдаёт только агрегаты; per-barcode состав —
+    отдельный вызов. Без него зеркало item-ов застревает на старом наполнении, и
+    кнопка «Из FBO» по непринятой поставке не видит новых ШК (расхождение с WB/ФФ).
+
+    api_client — инъекция для тестов; если None, строится из WB-ключа проекта.
     """
     if not force and supply.warehouse_name:
         return
     try:
-        from backend.integrations.wb_api import WBApiClient
-        from backend.services.fbo_supply.mappers import _update_supply_from_fbw_detail
-        from backend.services.integrations_service import _get_wb_key
+        from backend.services.fbo_supply.mappers import _update_supply_from_fbw_detail, _upsert_supply_items_fbw
 
-        try:
-            _key, api_key = await _get_wb_key(db, project_id)
-        except ValueError:
-            return  # no WB key — silent skip
+        client = api_client
+        if client is None:
+            from backend.integrations.wb_api import WBApiClient
+            from backend.services.integrations_service import _get_wb_key
 
-        api_client = WBApiClient(api_key, project_id=project_id)
+            try:
+                _key, api_key = await _get_wb_key(db, project_id)
+            except ValueError:
+                return  # no WB key — silent skip
+            client = WBApiClient(api_key, project_id=project_id)
+
         wb_id_int = int(supply.wb_supply_id)
-        detail = await api_client.get_fbw_supply_detail(wb_id_int)
+        detail = await client.get_fbw_supply_detail(wb_id_int)
         if detail:
             _update_supply_from_fbw_detail(supply, detail)
-            await db.flush()
+        if with_goods:
+            goods = await client.get_fbw_supply_goods(wb_id_int, limit=100, offset=0)
+            if goods:
+                await _upsert_supply_items_fbw(db, project_id, supply.id, wb_id_int, goods)
+                supply.accepted_qty = sum(int(g.get("acceptedQuantity") or 0) for g in goods)
+                supply.total_qty = sum(int(g.get("quantity") or 0) for g in goods)
+        await db.flush()
     except Exception as e:
         logger.info(
             "assembly.force_enrich_skipped",

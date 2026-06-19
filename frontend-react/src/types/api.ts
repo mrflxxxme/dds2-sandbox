@@ -1875,6 +1875,8 @@ export interface RefreshFromFboResponse {
   removed: number;
   changed: number;
   items: AssemblyRequestItem[];
+  // ШК из состава WB, которых нет в номенклатуре проекта — не добавлены в заявку.
+  skipped?: string[];
 }
 
 // ─── Logistics Analytics ───────────────────────────────────────────────────
