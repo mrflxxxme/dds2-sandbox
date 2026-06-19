@@ -517,7 +517,12 @@ async def _fbo_rollup(db: AsyncSession, project_id: int) -> dict:
         )
     ).scalar()
 
-    async def _supplies(**flag: bool) -> list[dict]:
+    async def _supplies(
+        *,
+        without_assembly: bool = False,
+        partial_only: bool = False,
+        excess_only: bool = False,
+    ) -> list[dict]:
         rows, _total = await fbo_service.list_fbo_supplies(
             db,
             project_id,
@@ -525,7 +530,9 @@ async def _fbo_rollup(db: AsyncSession, project_id: int) -> dict:
             limit=_FBO_SUPPLY_LIST_CAP,
             sort_by="created_at_wb",
             sort_order="desc",
-            **flag,
+            without_assembly=without_assembly,
+            partial_only=partial_only,
+            excess_only=excess_only,
         )
         return [_fbo_supply_row(d) for d in rows]
 
