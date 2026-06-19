@@ -3694,6 +3694,13 @@ async def compute_doc_ff_mismatch(
         mig_maps[wh_id] = await _migfull_guid_barcodes(db, project_id, wh_id, guids)
 
     def _verdict(our_comp: dict[str, int], reqs: list[FulfillmentRequest]) -> bool | None:
+        # Выкидываем позиции с qty 0: combined всегда содержит только >0
+        # (_mirror_ff_composition фильтрует), а наш состав может держать ШК с 0
+        # (позиция отредактирована в 0). Без фильтра `combined != our_comp` ловит
+        # лишний ключ bc:0 и даёт ЛОЖНОЕ расхождение, тогда как детальная панель
+        # (get_assembly_ff_mismatch_detail) такие ШК пропускает (our_qty==ff_qty==0)
+        # → бейдж «расхождение» горит, а при переходе в заявке его нет.
+        our_comp = {bc: q for bc, q in our_comp.items() if q > 0}
         comps = [_mirror_ff_composition(r, mig_maps.get(r.warehouse_id, {})) for r in reqs]
         if all(c is not None for c in comps):
             combined: dict[str, int] = {}
