@@ -149,6 +149,7 @@ async def refresh_from_fbo(
     await db.commit()
     await db.refresh(req, ["items"])
     await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
 
     return RefreshFromFboResponse(
         added=added,
