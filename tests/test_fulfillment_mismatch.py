@@ -164,6 +164,31 @@ async def test_wmscelicom_extra_barcode_is_mismatch(db_session, project, warehou
     assert await _verdict(db_session, project.id, doc.id) is True
 
 
+@pytest.mark.asyncio
+async def test_zero_qty_barcode_not_false_positive(db_session, project, warehouse):
+    """Регресс: позиция сборки с qty 0, которой нет в составе ФФ, НЕ должна давать
+    ложное расхождение в бейдже (verdict), раз детальная панель его не показывает.
+    Раньше `combined != our_comp` ловил лишний ключ bc0:0 → бейдж «расхождение»
+    горел, а при переходе в заявку панель пустая (our_qty==ff_qty==0)."""
+    bc1, bc0 = f"20{_uid()}", f"20{_uid()}"
+    doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(bc1, 5), (bc0, 0)])
+    await _make_ff(
+        db_session,
+        project.id,
+        warehouse.id,
+        provider="wmscelicom",
+        assembly_request_id=doc.id,
+        raw=_wms_raw([(bc1, 5)]),  # bc0 (qty 0) у ФФ отсутствует
+    )
+    # Бейдж: расхождения нет (0-позиция игнорируется)
+    assert await _verdict(db_session, project.id, doc.id) is False
+    # Панель: тоже нет расхождения — итоги сходятся, строк нет (консистентно с бейджем)
+    detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id)
+    assert detail["mode"] == "barcode"
+    assert detail["our_total"] == detail["ff_total"] == 5
+    assert detail["rows"] == []
+
+
 # ─── migfull N:1: объединённый состав двух заявок ────────────────────────────
 
 
