@@ -14,19 +14,28 @@
 backend/schemas/assembly.py.
 """
 
+from datetime import datetime
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.auth import Project
-from backend.models.fulfillment import FfRequestKind, FulfillmentRequest
+from backend.models.cost import Nomenclature
+from backend.models.fulfillment import FfRequestKind, FulfillmentRequest, FulfillmentStock
 from backend.models.integrations import IntegrationKey
-from backend.models.warehouse import Warehouse
+from backend.models.warehouse import Warehouse, WarehouseStock
 from backend.models.wb_fbo import WbFboSupply, WbSupplyStatus
 from backend.services import fulfillment_service
 from backend.services.fbo_supply import service as fbo_service
 from backend.utils.time import utcnow
+
+# Cap на построчные SKU-расхождения, отдаваемые на склад (UI-разворот); если их
+# больше — список обрезается (truncated=True), детали — на вкладке «ФФ остатки».
+_STOCK_MISMATCH_SKU_CAP = 200
+# Cap на список самих аномальных FBO-поставок в каждой категории (новые сверху).
+_FBO_SUPPLY_LIST_CAP = 50
 
 # Активные статусы для блока ff_composition_mismatch («в сборке» + «готово»).
 # SHIPPED/закрытые НЕ участвуют — расхождение состава с ФФ для них неактуально.
@@ -288,11 +297,206 @@ async def _ff_without_assembly(db: AsyncSession, project_id: int, warehouse_ids:
     return rows
 
 
+async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list[int] | None) -> list[dict]:
+    """Блок 5: расхождение остатков «наш склад vs ФФ-зеркало» по складам с API-интеграцией.
+
+    diff = ff_good − our_quantity (>0 — у ФФ больше, <0 — у нас больше). Остаток
+    короба сводится к россыпи (qty_good × units_per_box, ключ = base_barcode|barcode),
+    как в fulfillment_service.list_stocks — иначе diff несопоставим с нашим стоком.
+    Наш склад (WarehouseStock) производен от документов; ФФ — зеркало провайдера
+    (см. DOMAIN_FULFILLMENT). Строки с diff==0 не показываем.
+    """
+    providers = await _ff_warehouse_providers(db, project_id)  # warehouse_id → service
+    ff_wh_ids = set(providers)
+    if warehouse_ids:
+        ff_wh_ids &= set(warehouse_ids)
+    if not ff_wh_ids:
+        return []
+    ff_wh_list = list(ff_wh_ids)
+
+    # ФФ-сток (зеркало провайдера) по интегрированным складам. Без .limit() —
+    # это полная агрегация (усечение исказило бы diff: уцелевшая сторона дала бы
+    # ложное одностороннее расхождение); выборка ограничена ФФ-складами (подмн-во).
+    ff_rows = (
+        await db.execute(
+            select(
+                FulfillmentStock.warehouse_id,
+                FulfillmentStock.barcode,
+                FulfillmentStock.base_barcode,
+                FulfillmentStock.nomenclature_id,
+                FulfillmentStock.name,
+                FulfillmentStock.qty_good,
+                FulfillmentStock.units_per_box,
+                FulfillmentStock.synced_at,
+            ).where(
+                FulfillmentStock.project_id == project_id,
+                FulfillmentStock.warehouse_id.in_(ff_wh_list),
+            )
+        )
+    ).all()
+
+    # Наш склад (производный от документов): только ненулевые остатки.
+    our_rows = (
+        await db.execute(
+            select(
+                WarehouseStock.warehouse_id,
+                WarehouseStock.barcode,
+                WarehouseStock.nomenclature_id,
+                WarehouseStock.quantity,
+            ).where(
+                WarehouseStock.project_id == project_id,
+                WarehouseStock.warehouse_id.in_(ff_wh_list),
+                WarehouseStock.quantity > 0,
+            )
+        )
+    ).all()
+
+    # Свод по (склад, эффективный ШК): короб сведён к россыпи под её ШК.
+    cells: dict[tuple[int, str], dict] = {}
+
+    def _cell(wid: int, key: str, nom_id: int | None) -> dict:
+        c = cells.get((wid, key))
+        if c is None:
+            c = cells[(wid, key)] = {
+                "barcode": key,
+                "nomenclature_id": nom_id,
+                "name": None,
+                "ff_good": 0,
+                "our_quantity": 0,
+            }
+        return c
+
+    synced_by_wh: dict[int, datetime] = {}
+    for r in ff_rows:
+        units = r.units_per_box or 1
+        key = r.base_barcode or r.barcode
+        c = _cell(r.warehouse_id, key, r.nomenclature_id)
+        c["ff_good"] += r.qty_good * units
+        if c["nomenclature_id"] is None and r.nomenclature_id is not None:
+            c["nomenclature_id"] = r.nomenclature_id
+        # Имя — с россыпной строки (короб лишь заполняет пустое).
+        if not r.base_barcode and r.name:
+            c["name"] = r.name
+        elif c["name"] is None:
+            c["name"] = r.name
+        if r.synced_at and (r.warehouse_id not in synced_by_wh or r.synced_at > synced_by_wh[r.warehouse_id]):
+            synced_by_wh[r.warehouse_id] = r.synced_at
+
+    for wr in our_rows:
+        c = _cell(wr.warehouse_id, wr.barcode, wr.nomenclature_id)
+        c["our_quantity"] += wr.quantity
+        if c["nomenclature_id"] is None and wr.nomenclature_id is not None:
+            c["nomenclature_id"] = wr.nomenclature_id
+
+    # Резолв article_seller/brand одним запросом (без N+1).
+    nom_ids = {c["nomenclature_id"] for c in cells.values() if c["nomenclature_id"]}
+    nom_by_id: dict[int, tuple[str | None, str | None]] = {}
+    if nom_ids:
+        nom_by_id = {
+            row.id: (row.article_seller, row.brand)
+            for row in (
+                await db.execute(
+                    select(Nomenclature.id, Nomenclature.article_seller, Nomenclature.brand).where(
+                        Nomenclature.project_id == project_id,
+                        Nomenclature.id.in_(nom_ids),
+                    )
+                )
+            ).all()
+        }
+
+    # Агрегат по складу.
+    wh_acc: dict[int, dict] = {}
+    for (wid, _key), c in cells.items():
+        diff = c["ff_good"] - c["our_quantity"]
+        if diff == 0:
+            continue
+        acc = wh_acc.setdefault(
+            wid,
+            {
+                "surplus_ff_qty": 0,
+                "surplus_ff_sku": 0,
+                "surplus_our_qty": 0,
+                "surplus_our_sku": 0,
+                "rows": [],
+            },
+        )
+        if diff > 0:
+            acc["surplus_ff_qty"] += diff
+            acc["surplus_ff_sku"] += 1
+        else:
+            acc["surplus_our_qty"] += -diff
+            acc["surplus_our_sku"] += 1
+        article, brand = nom_by_id.get(c["nomenclature_id"], (None, None))
+        acc["rows"].append(
+            {
+                "barcode": c["barcode"],
+                "article_seller": article,
+                "brand": brand,
+                "name": c["name"],
+                "ff_good": c["ff_good"],
+                "our_quantity": c["our_quantity"],
+                "diff": diff,
+            }
+        )
+
+    if not wh_acc:
+        return []
+
+    wh_names = await _warehouse_names(db, project_id, set(wh_acc))
+
+    out: list[dict] = []
+    for wid, acc in wh_acc.items():
+        rows = sorted(acc["rows"], key=lambda x: (-abs(x["diff"]), x["barcode"]))
+        sku_total = len(rows)
+        synced = synced_by_wh.get(wid)
+        out.append(
+            {
+                "warehouse_id": wid,
+                "warehouse_name": wh_names.get(wid),
+                "provider": providers.get(wid),
+                "surplus_ff_qty": acc["surplus_ff_qty"],
+                "surplus_ff_sku": acc["surplus_ff_sku"],
+                "surplus_our_qty": acc["surplus_our_qty"],
+                "surplus_our_sku": acc["surplus_our_sku"],
+                "net_diff": acc["surplus_ff_qty"] - acc["surplus_our_qty"],
+                "sku_total": sku_total,
+                "truncated": sku_total > _STOCK_MISMATCH_SKU_CAP,
+                "synced_at": synced.isoformat() if synced else None,
+                "rows": rows[:_STOCK_MISMATCH_SKU_CAP],
+            }
+        )
+    # Крупнейшее суммарное расхождение первым.
+    out.sort(key=lambda r: (-(r["surplus_ff_qty"] + r["surplus_our_qty"]), r["warehouse_id"]))
+    return out
+
+
+def _fbo_supply_row(d: dict) -> dict:
+    """Enriched-словарь list_fbo_supplies → слим-строка FboAnomalySupply."""
+    total = int(d.get("total_qty") or 0)
+    accepted = int(d.get("accepted_qty") or 0)
+    planned = d.get("planned_date")
+    actual = d.get("actual_date")
+    return {
+        "supply_id": d["id"],
+        "wb_supply_id": d.get("wb_supply_id"),
+        "name": d.get("name"),
+        "warehouse_name": d.get("warehouse_name"),
+        "total_qty": total,
+        "accepted_qty": accepted,
+        "diff": accepted - total,
+        "planned_date": planned.isoformat() if planned else None,
+        "actual_date": actual.isoformat() if actual else None,
+        "assembly_request_number": d.get("assembly_request_number"),
+    }
+
+
 async def _fbo_rollup(db: AsyncSession, project_id: int) -> dict:
     """Блок 4: сводка аномалий FBO-поставок ВБ (project-global, без warehouse-фильтра).
 
     Счётчики берутся из fbo_supply.service с тем же accounting_started_at, что и
     дефолтный вид /warehouse/fbo-supplies — иначе цифры разойдутся со страницей.
+    Списки самих поставок (cap _FBO_SUPPLY_LIST_CAP) — через тот же list_fbo_supplies
+    с теми же фильтрами, что и счётчики, чтобы разворот сходился со страницей.
     """
     acc = (await db.execute(select(Project.accounting_started_at).where(Project.id == project_id))).scalar_one_or_none()
 
@@ -313,12 +517,27 @@ async def _fbo_rollup(db: AsyncSession, project_id: int) -> dict:
         )
     ).scalar()
 
+    async def _supplies(**flag: bool) -> list[dict]:
+        rows, _total = await fbo_service.list_fbo_supplies(
+            db,
+            project_id,
+            accounting_started_at=acc,
+            limit=_FBO_SUPPLY_LIST_CAP,
+            sort_by="created_at_wb",
+            sort_order="desc",
+            **flag,
+        )
+        return [_fbo_supply_row(d) for d in rows]
+
     return {
         "without_assembly_count": int(counts["accepted_without_assembly"]),
         "under_accepted_count": int(counts["accepted_partial"]),
         "under_accepted_qty": int(partial["unaccepted_total"]),
         "excess_count": int(counts["accepted_excess"]),
         "excess_qty": int(excess_qty or 0),
+        "without_assembly_supplies": await _supplies(without_assembly=True),
+        "under_accepted_supplies": await _supplies(partial_only=True),
+        "excess_supplies": await _supplies(excess_only=True),
     }
 
 
@@ -334,6 +553,7 @@ async def get_link_anomalies(
         "ff_composition_mismatch": await _ff_composition_mismatch(db, project_id, warehouse_ids),
         "assemblies_without_ff": await _assemblies_without_ff(db, project_id, warehouse_ids),
         "ff_without_assembly": await _ff_without_assembly(db, project_id, warehouse_ids),
+        "stock_mismatch": await _stock_mismatch(db, project_id, warehouse_ids),
         # FBO привязан к имени склада ВБ (не к нашему складу) → warehouse_ids не применяем.
         "fbo": await _fbo_rollup(db, project_id),
     }

@@ -47,7 +47,7 @@ const SEGMENTS: {
     label: string;
     color: string;
 }[] = [
-    { qtyKey: 'ff_stock', pctKey: 'ff_stock_pct', label: 'Склад ФФ', color: 'var(--color-text-dim)' },
+    { qtyKey: 'ff_stock', pctKey: 'ff_stock_pct', label: 'На складе', color: 'var(--color-text-dim)' },
     { qtyKey: 'in_assembly', pctKey: 'in_assembly_pct', label: 'В сборке', color: 'var(--color-accent)' },
     { qtyKey: 'ready', pctKey: 'ready_pct', label: 'Готово', color: 'var(--color-success)' },
     { qtyKey: 'in_transit', pctKey: 'in_transit_pct', label: 'В пути', color: 'var(--color-warning)' },
@@ -59,7 +59,7 @@ const HISTORY_SERIES: {
     label: string;
     color: string;
 }[] = [
-    { key: 'ff_stock', label: 'Склад ФФ', color: 'var(--color-text-dim)' },
+    { key: 'ff_stock', label: 'На складе', color: 'var(--color-text-dim)' },
     { key: 'in_assembly', label: 'В сборке', color: 'var(--color-accent)' },
     { key: 'ready', label: 'Готово', color: 'var(--color-success)' },
     { key: 'in_transit', label: 'В пути', color: 'var(--color-warning)' },

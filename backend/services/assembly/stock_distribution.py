@@ -34,7 +34,7 @@ from backend.models.assembly import (
 from backend.models.cost import Nomenclature
 from backend.models.fulfillment import FulfillmentStock
 from backend.models.refs import ProductStatusMap
-from backend.models.warehouse import Warehouse
+from backend.models.warehouse import Warehouse, WarehouseStock
 
 # Статусы сборки → бакет пайплайна.
 _STATUS_TO_BUCKET: dict[str, str] = {
@@ -99,6 +99,12 @@ async def _compute_distribution_cells(
 
     Единый источник правды для live-распределения, снапшота и (через таблицу) истории.
     product_status-фильтр тут НЕ применяется — это полная разбивка.
+
+    Бакет ff_stock («на складе»): для складов с ФФ-зеркалом (есть строки FulfillmentStock) —
+    остаток провайдера (короб→россыпь, max(qty_good−reserve,0)); для складов БЕЗ зеркала
+    (ФФ-интеграции нет/не синкалась) — наш складской остаток (WarehouseStock.quantity).
+    Иначе товар таких складов не учитывался и тоталы были занижены — склад показывал
+    только пайплайн (в сборке/готово/в пути).
     """
     # --- FF-сток: агрегируем штуки в Python (короб→россыпь, max(...,0)) ---
     ff_filters = [FulfillmentStock.project_id == project_id]
@@ -114,6 +120,23 @@ async def _compute_distribution_cells(
                 FulfillmentStock.base_barcode,
                 FulfillmentStock.units_per_box,
             ).where(*ff_filters)
+        )
+    ).all()
+    # Склад «ФФ-зеркальный», если у него есть ХОТЯ БЫ одна строка остатка ФФ
+    # (в т.ч. нулевая — синк хранит и нули). Для остальных берём наш склад.
+    ff_sourced_wh = {r.warehouse_id for r in ff_rows}
+
+    # --- Наш складской остаток (склады БЕЗ ФФ-зеркала) ---
+    ws_filters = [WarehouseStock.project_id == project_id, WarehouseStock.quantity > 0]
+    if warehouse_ids:
+        ws_filters.append(WarehouseStock.warehouse_id.in_(warehouse_ids))
+    ws_rows = (
+        await db.execute(
+            select(
+                WarehouseStock.warehouse_id,
+                WarehouseStock.nomenclature_id,
+                WarehouseStock.quantity,
+            ).where(*ws_filters)
         )
     ).all()
 
@@ -142,6 +165,7 @@ async def _compute_distribution_cells(
     # --- Резолв статуса товара для всех задействованных номенклатур ---
     nom_ids = {r.nomenclature_id for r in ff_rows if r.nomenclature_id is not None}
     nom_ids |= {r.nomenclature_id for r in pipe_rows if r.nomenclature_id is not None}
+    nom_ids |= {r.nomenclature_id for r in ws_rows if r.nomenclature_id is not None}
     nom_to_nm: dict[int, int] = {}
     if nom_ids:
         nm_rows = (
@@ -168,12 +192,19 @@ async def _compute_distribution_cells(
     def _add(warehouse_id: int, status_key: str, bucket_key: str, qty: int) -> None:
         cells.setdefault((warehouse_id, status_key), _empty_acc())[bucket_key] += qty
 
+    # ФФ-зеркало — для складов с зеркалом (оно для них авторитетно).
     for r in ff_rows:
         units_per_box = r.units_per_box or 1
         available = max(r.qty_good - r.qty_reserve, 0) * units_per_box
         if available == 0:
             continue
         _add(r.warehouse_id, _status_key(r.nomenclature_id, nom_to_nm, status_map), "ff_stock", available)
+
+    # Наш складской остаток — для складов БЕЗ ФФ-зеркала (иначе товар не учитывался).
+    for wr in ws_rows:
+        if wr.warehouse_id in ff_sourced_wh or wr.quantity == 0:
+            continue
+        _add(wr.warehouse_id, _status_key(wr.nomenclature_id, nom_to_nm, status_map), "ff_stock", wr.quantity)
 
     for pr in pipe_rows:
         qty = int(pr.qty)

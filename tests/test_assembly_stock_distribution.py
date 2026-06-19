@@ -27,6 +27,7 @@ from backend.cache import invalidate_cache
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.fulfillment import FulfillmentProvider, FulfillmentStock
 from backend.models.refs import ProductStatusMap
+from backend.models.warehouse import WarehouseStock
 from backend.services.assembly.stock_distribution import (
     get_stock_distribution,
     get_stock_distribution_history,
@@ -147,6 +148,28 @@ async def _mk_request(
     return req
 
 
+async def _mk_our_stock(
+    db_session,
+    env,
+    *,
+    quantity: int,
+    warehouse_id: int,
+    nomenclature_id: int | None = "DEFAULT",
+    barcode: str | None = None,
+) -> None:
+    nom = env.nom_id if nomenclature_id == "DEFAULT" else nomenclature_id
+    db_session.add(
+        WarehouseStock(
+            project_id=env.project_id,
+            warehouse_id=warehouse_id,
+            nomenclature_id=nom,
+            barcode=barcode or BARCODE,
+            quantity=quantity,
+        )
+    )
+    await db_session.commit()
+
+
 async def _set_status(db_session, env, nm_id: int, status: str) -> None:
     db_session.add(ProductStatusMap(project_id=env.project_id, nm_id=nm_id, status=status))
     await db_session.commit()
@@ -246,6 +269,52 @@ async def test_ff_stock_reserve_clamped_to_zero(db_session, env):
     await _mk_stock(db_session, env, qty_good=10, qty_reserve=40)
     res = await _dist(db_session, env.project_id)
     assert res["total"]["ff_stock"] == 0
+
+
+# --- warehouse without FF mirror falls back to WarehouseStock ----------------
+
+
+@pytest.mark.asyncio
+async def test_warehouse_without_ff_mirror_uses_our_stock(db_session, env):
+    """Склад БЕЗ ФФ-зеркала: «на складе» берётся из WarehouseStock, а не теряется.
+
+    Регрессия: апл/хамза (FULFILLMENT-склады без ФФ-интеграции) показывали только
+    пайплайн, т.к. бакет ff_stock строился исключительно из FulfillmentStock.
+    """
+    # wh2 — ни одной строки FulfillmentStock → не «ФФ-зеркальный».
+    await _mk_our_stock(db_session, env, quantity=14296, warehouse_id=env.wh2_id)
+    # Плюс пайплайн на этом же складе.
+    await _mk_request(db_session, env, status=AssemblyStatus.IN_PROGRESS, qty=200, warehouse_id=env.wh2_id)
+
+    res = await _dist(db_session, env.project_id)
+    g = _wh_group(res, env.wh2_id)
+    assert g is not None
+    assert g["bucket"]["ff_stock"] == 14296
+    assert g["bucket"]["in_assembly"] == 200
+    assert g["bucket"]["total"] == 14496
+    assert res["total"]["ff_stock"] == 14296
+
+
+@pytest.mark.asyncio
+async def test_ff_mirror_wins_over_our_stock(db_session, env):
+    """Склад С ФФ-зеркалом: показываем зеркало, наш WarehouseStock игнорируется."""
+    await _mk_stock(db_session, env, qty_good=100, warehouse_id=env.wh_id)  # ФФ-зеркало
+    await _mk_our_stock(db_session, env, quantity=9999, warehouse_id=env.wh_id)  # игнор
+    res = await _dist(db_session, env.project_id)
+    g = _wh_group(res, env.wh_id)
+    assert g is not None
+    assert g["bucket"]["ff_stock"] == 100
+
+
+@pytest.mark.asyncio
+async def test_mixed_ff_and_non_ff_warehouses(db_session, env):
+    """Смешанный проект: один склад из ФФ-зеркала, другой — из WarehouseStock."""
+    await _mk_stock(db_session, env, qty_good=40, warehouse_id=env.wh_id)  # ФФ-зеркало
+    await _mk_our_stock(db_session, env, quantity=60, warehouse_id=env.wh2_id)  # наш склад
+    res = await _dist(db_session, env.project_id)
+    assert _wh_group(res, env.wh_id)["bucket"]["ff_stock"] == 40
+    assert _wh_group(res, env.wh2_id)["bucket"]["ff_stock"] == 60
+    assert res["total"]["ff_stock"] == 100
 
 
 # --- (d) box row → loose ------------------------------------------------------

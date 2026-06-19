@@ -406,6 +406,21 @@ class UnlinkedFfRow(BaseModel):
     external_created_at: str | None  # ISO
 
 
+class FboAnomalySupply(BaseModel):
+    """Одна аномальная FBO-поставка (для разворота-списка с drill на /warehouse/fbo-supplies)."""
+
+    supply_id: int
+    wb_supply_id: str | None  # WB-I-xxxx — для deep-link и показа
+    name: str | None
+    warehouse_name: str | None  # склад ВБ (город сдачи)
+    total_qty: int
+    accepted_qty: int
+    diff: int  # accepted_qty - total_qty (<0 — недоприёмка, >0 — излишек)
+    planned_date: str | None  # ISO
+    actual_date: str | None  # ISO
+    assembly_request_number: str | None  # привязанная сборка, если есть
+
+
 class FboAnomalyRollup(BaseModel):
     """Сводка аномалий FBO-поставок ВБ (drill-through на /warehouse/fbo-supplies)."""
 
@@ -414,6 +429,40 @@ class FboAnomalyRollup(BaseModel):
     under_accepted_qty: int  # суммарно недопринято, шт
     excess_count: int  # излишек (необработанный)
     excess_qty: int  # суммарно излишек, шт
+    # Списки самих поставок (cap 50/категория, новые сверху). Дефолты — на случай
+    # записи в кэше от прошлой версии без этих ключей.
+    without_assembly_supplies: list[FboAnomalySupply] = []
+    under_accepted_supplies: list[FboAnomalySupply] = []
+    excess_supplies: list[FboAnomalySupply] = []
+
+
+class StockMismatchSkuRow(BaseModel):
+    """Построчное расхождение остатка по SKU: наш склад vs ФФ-зеркало."""
+
+    barcode: str
+    article_seller: str | None
+    brand: str | None
+    name: str | None
+    ff_good: int  # у ФФ (зеркало провайдера), штук россыпи
+    our_quantity: int  # у нас (WarehouseStock.quantity)
+    diff: int  # ff_good - our_quantity (>0 — у ФФ больше, <0 — у нас больше)
+
+
+class StockMismatchWarehouseRow(BaseModel):
+    """Расхождение остатка по ФФ-интегрированному складу (наш склад vs API-зеркало)."""
+
+    warehouse_id: int
+    warehouse_name: str | None
+    provider: str | None  # провайдер ФФ-интеграции склада
+    surplus_ff_qty: int  # суммарно у ФФ больше, штук
+    surplus_ff_sku: int  # на скольких SKU у ФФ больше
+    surplus_our_qty: int  # суммарно у нас больше, штук
+    surplus_our_sku: int  # на скольких SKU у нас больше
+    net_diff: int  # surplus_ff_qty - surplus_our_qty (нетто ФФ − наш)
+    sku_total: int  # всего SKU с расхождением
+    truncated: bool  # rows обрезаны до лимита (на складе больше расхождений)
+    synced_at: str | None  # ISO — последний синк остатков ФФ
+    rows: list[StockMismatchSkuRow]  # построчно, |diff| desc (cap)
 
 
 class LinkAnomaliesResponse(BaseModel):
@@ -421,6 +470,9 @@ class LinkAnomaliesResponse(BaseModel):
     assemblies_without_ff: list[UnlinkedAssemblyRow]
     ff_without_assembly: list[UnlinkedFfRow]
     fbo: FboAnomalyRollup
+    # Расхождение остатков по складам с ФФ-интеграцией. Дефолт — на случай
+    # записи в кэше от прошлой версии без этого ключа.
+    stock_mismatch: list[StockMismatchWarehouseRow] = []
 
 
 # ─── Распределение остатков (stock distribution) ───────────────────────────
@@ -431,7 +483,8 @@ class LinkAnomaliesResponse(BaseModel):
 class StockDistributionBucket(BaseModel):
     """Где сейчас товар (шт + доля от итога). Сумма долей ≈ 100."""
 
-    ff_stock: int  # на складе ФФ: qty_good - qty_reserve (≥0), короба сведены к россыпи
+    ff_stock: int  # на складе: ФФ-зеркало (qty_good−reserve, ≥0, короб→россыпь) либо
+    #                наш WarehouseStock.quantity для складов без ФФ-зеркала
     in_assembly: int  # IN_PROGRESS («в сборке»)
     ready: int  # READY + VEHICLE_ASSIGNED («готово»)
     in_transit: int  # SHIPPED («в пути»)
