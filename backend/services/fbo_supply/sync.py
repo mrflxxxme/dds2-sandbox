@@ -160,9 +160,17 @@ async def sync_fbo_supplies(
                 if await _auto_deliver_assembly(db, project_id, supply.id):
                     assembly_delivered = True
 
+        # 6. Авто-SHIP «забыли отгрузить»: WB принял поставку (ACCEPTED), а наша
+        #    сборка с уже назначенной машиной (VEHICLE_ASSIGNED) ещё не отгружена →
+        #    отгружаем. Кандидаты собираем ПОД синк-транзакцией, сам ship_request —
+        #    ПОСЛЕ commit (списывает сток + коммитит сам, своей сессией).
+        ship_ids = await _collect_assembly_ship_on_wb_accepted(db, project_id, list(existing_map.values()))
+
         await db.commit()
         if assembly_delivered:
             await invalidate_cache("reports:assembly_flow")
+
+        assemblies_shipped = await _ship_assemblies_best_effort(project_id, ship_ids)
 
         sync_log.status = "OK"
         sync_log.rows_fetched = len(all_supplies)
@@ -175,6 +183,7 @@ async def sync_fbo_supplies(
             "created": created,
             "updated": updated,
             "errors": errors,
+            "assemblies_shipped": assemblies_shipped,
             "message": (
                 f"Загружено {created + updated} поставок "
                 f"({created} новых, {updated} обновлено). "
@@ -348,6 +357,7 @@ async def sync_fbo_statuses(
             "synced": 0,
             "updated": 0,
             "errors": 0,
+            "assemblies_shipped": 0,
             "message": "No active supplies to update",
         }
 
@@ -428,14 +438,22 @@ async def sync_fbo_statuses(
         )
         errors += 1
 
+    # Авто-SHIP «забыли отгрузить» по тому же сигналу WB ACCEPTED, что и full-sync:
+    # поставка только что перешла в ACCEPTED, а машина уже назначена → отгружаем.
+    # Кандидаты — под синк-транзакцией; ship_request — ПОСЛЕ commit, своей сессией.
+    ship_ids = await _collect_assembly_ship_on_wb_accepted(db, project_id, list(active_supplies))
+
     await db.commit()
     if assembly_delivered:
         await invalidate_cache("reports:assembly_flow")
+
+    assemblies_shipped = await _ship_assemblies_best_effort(project_id, ship_ids)
 
     return {
         "synced": updated,
         "updated": updated,
         "errors": errors,
+        "assemblies_shipped": assemblies_shipped,
         "message": f"Updated {updated} supply statuses",
     }
 
@@ -570,3 +588,66 @@ async def _auto_deliver_assembly(
         )
         return True
     return False
+
+
+# ─── Auto-ship helpers (WB ACCEPTED → VEHICLE_ASSIGNED → SHIPPED) ───────────
+
+
+async def _collect_assembly_ship_on_wb_accepted(
+    db: AsyncSession,
+    project_id: int,
+    supplies: list[WbFboSupply],
+) -> list[int]:
+    """assembly_request_id'ы VEHICLE_ASSIGNED сборок, чьи WB-поставки уже ACCEPTED.
+
+    «Забыли отгрузить»: WB принял поставку, а наша сборка с уже назначенной машиной
+    ещё висит неотгруженной. Зеркалит FF-авто-шип (ФФ закрыл заявку,
+    fulfillment_service._collect_assembly_ship_candidates), но по второму сигналу —
+    приёмке WB; вместе закрывают правило «машина назначена И (ФФ закрыл ИЛИ WB
+    принял) → отгружаем». Покрывает и склады без интеграции ФФ (там FF-сигнала нет).
+
+    Только СБОР id под синк-транзакцией; сам переход (ship_request — списывает сток,
+    создаёт OutboundShipment, коммитит сам) — ПОСЛЕ commit синка, своей сессией
+    (внутри открытой транзакции его звать нельзя). Гейт VEHICLE_ASSIGNED: READY
+    (машина не назначена) — рано; SHIPPED/далее — уже отгружена (там auto-deliver);
+    прочие статусы ship_request отверг бы переходом.
+    """
+    accepted_supply_ids = [s.id for s in supplies if s.wb_status == WbSupplyStatus.ACCEPTED]
+    if not accepted_supply_ids:
+        return []
+    result = await db.execute(
+        select(AssemblyRequest.id).where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.wb_fbo_supply_id.in_(accepted_supply_ids),
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+            AssemblyRequest.status == AssemblyStatus.VEHICLE_ASSIGNED,
+        )
+    )
+    return [row[0] for row in result.all()]
+
+
+async def _ship_assemblies_best_effort(project_id: int, assembly_ids: list[int]) -> int:
+    """Авто-SHIP собранных кандидатов — каждый своей сессией, ПОСЛЕ commit синка.
+
+    ship_request списывает сток + создаёт OutboundShipment и коммитит сам. Best-effort:
+    дефицит стока / гонка с FF-авто-шипом (заявка уже не VEHICLE_ASSIGNED → transition
+    ValueError) синк НЕ валит — заявка просто остаётся, как и при FF-авто-шипе.
+    Returns: число фактически отгруженных заявок.
+    """
+    if not assembly_ids:
+        return 0
+    from backend.database import AsyncSessionLocal
+    from backend.services.assembly.status import ship_request
+
+    shipped = 0
+    for asm_id in assembly_ids:
+        try:
+            async with AsyncSessionLocal() as ship_db:
+                await ship_request(ship_db, project_id, asm_id)
+            shipped += 1
+        except Exception as e:  # best-effort: синк уже зафиксирован
+            logger.warning(
+                "fbo_sync.auto_ship_skipped",
+                extra={"project_id": project_id, "assembly_id": asm_id, "error": str(e)},
+            )
+    return shipped

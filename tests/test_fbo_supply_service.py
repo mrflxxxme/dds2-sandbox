@@ -13,20 +13,26 @@ Covers:
 9. WB API client: FBW methods exist
 """
 
+import uuid
 from datetime import date, datetime
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
 
+from backend.models import IntegrationKey, Nomenclature, OutboundShipment, Warehouse, WarehouseStock
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
 from backend.services.fbo_supply_service import (
+    _collect_assembly_ship_on_wb_accepted,
     _create_supply_from_fbw_list,
     _map_fbw_box_type,
     _map_fbw_status,
     _parse_wb_date,
     _parse_wb_datetime,
+    _ship_assemblies_best_effort,
     _update_supply_from_fbw_detail,
     _update_supply_from_fbw_list,
     get_fbo_supply_items,
@@ -1626,3 +1632,259 @@ class TestWbApiMethods:
         from backend.integrations.wb_api import WB_SUPPLIERS_API_BASE
 
         assert "supplies-api.wildberries.ru" in WB_SUPPLIERS_API_BASE
+
+
+# ─── Auto-ship on WB ACCEPTED ──────────────────────────────────────────────
+
+
+def _uid() -> str:
+    return uuid.uuid4().hex[:10]
+
+
+async def _make_ff_warehouse(db_session) -> Warehouse:
+    wh = Warehouse(project_id=1, name=f"auto-ship-{_uid()}", warehouse_type="FULFILLMENT")
+    db_session.add(wh)
+    await db_session.commit()
+    await db_session.refresh(wh)
+    return wh
+
+
+async def _make_nom(db_session, barcode: str) -> Nomenclature:
+    nom = Nomenclature(project_id=1, barcode=barcode, article_seller="ART-AUTOSHIP")
+    db_session.add(nom)
+    await db_session.commit()
+    await db_session.refresh(nom)
+    return nom
+
+
+async def _make_accepted_supply(db_session, status=WbSupplyStatus.ACCEPTED) -> WbFboSupply:
+    supply = WbFboSupply(
+        project_id=1,
+        wb_supply_id=f"SUP-{_uid()}",
+        wb_status=status,
+        warehouse_name="Электросталь",
+        created_at_wb=datetime(2026, 6, 1),
+    )
+    db_session.add(supply)
+    await db_session.commit()
+    await db_session.refresh(supply)
+    return supply
+
+
+async def _make_assembly_on_supply(
+    db_session,
+    wh: Warehouse,
+    supply: WbFboSupply,
+    nom: Nomenclature,
+    bc: str,
+    *,
+    qty: int = 5,
+    stock_qty: int | None = 20,
+    status=AssemblyStatus.VEHICLE_ASSIGNED,
+) -> AssemblyRequest:
+    """Сборка, привязанная к поставке WB, с позицией и (опц.) стоком на складе."""
+    doc = AssemblyRequest(
+        project_id=1,
+        warehouse_id=wh.id,
+        number=f"ASM-{_uid()[:6]}",
+        status=status.value,
+        wb_fbo_supply_id=supply.id,
+        pallets_count=1,
+        pallet_weight_kg=Decimal("10.00"),
+        vehicle_info="А123ВС 77",
+    )
+    db_session.add(doc)
+    await db_session.flush()
+    db_session.add(
+        AssemblyRequestItem(
+            project_id=1,
+            assembly_request_id=doc.id,
+            nomenclature_id=nom.id,
+            barcode=bc,
+            quantity=qty,
+        )
+    )
+    if stock_qty is not None:
+        db_session.add(
+            WarehouseStock(
+                project_id=1,
+                warehouse_id=wh.id,
+                nomenclature_id=nom.id,
+                barcode=bc,
+                quantity=stock_qty,
+            )
+        )
+    await db_session.commit()
+    await db_session.refresh(doc)
+    return doc
+
+
+@pytest.mark.asyncio
+class TestAutoShipOnWbAccepted:
+    """WB принял поставку (ACCEPTED) + машина назначена (VEHICLE_ASSIGNED) → авто-SHIP."""
+
+    async def test_collect_picks_vehicle_assigned_accepted(self, db_session):
+        """Машина назначена + поставка ACCEPTED → заявка в кандидатах."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        doc = await _make_assembly_on_supply(db_session, wh, supply, nom, bc)
+
+        ids = await _collect_assembly_ship_on_wb_accepted(db_session, 1, [supply])
+        assert ids == [doc.id]
+
+    async def test_collect_skips_ready_without_vehicle(self, db_session):
+        """Машина НЕ назначена (READY) → не кандидат, даже если WB принял."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        await _make_assembly_on_supply(db_session, wh, supply, nom, bc, status=AssemblyStatus.READY)
+
+        ids = await _collect_assembly_ship_on_wb_accepted(db_session, 1, [supply])
+        assert ids == []
+
+    async def test_collect_skips_non_accepted_supply(self, db_session):
+        """Поставка ещё не принята (IN_PROGRESS) → не кандидат."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session, status=WbSupplyStatus.IN_PROGRESS)
+        await _make_assembly_on_supply(db_session, wh, supply, nom, bc)
+
+        ids = await _collect_assembly_ship_on_wb_accepted(db_session, 1, [supply])
+        assert ids == []
+
+    async def test_collect_skips_already_shipped(self, db_session):
+        """Заявка уже SHIPPED → не кандидат (там работает auto-deliver)."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        await _make_assembly_on_supply(db_session, wh, supply, nom, bc, status=AssemblyStatus.SHIPPED)
+
+        ids = await _collect_assembly_ship_on_wb_accepted(db_session, 1, [supply])
+        assert ids == []
+
+    async def test_collect_picks_partial_acceptance(self, db_session):
+        """Частичная приёмка (statusID 5/6 → ACCEPTED, accepted_qty < total_qty) ТОЖЕ
+        отгружается — порога по qty нет; недоприёмка добивается отдельным flow
+        (process_fbo_return). Пиннит намеренное поведение от тихого регресса."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        supply.total_qty = 10
+        supply.accepted_qty = 6  # принято не всё
+        await db_session.commit()
+        doc = await _make_assembly_on_supply(db_session, wh, supply, nom, bc)
+
+        ids = await _collect_assembly_ship_on_wb_accepted(db_session, 1, [supply])
+        assert ids == [doc.id]
+
+    async def test_ship_deducts_stock_and_is_idempotent(self, db_session):
+        """ship-runner: SHIPPED + сток списан + OutboundShipment; повтор — no-op."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        doc = await _make_assembly_on_supply(db_session, wh, supply, nom, bc, qty=5, stock_qty=20)
+
+        shipped = await _ship_assemblies_best_effort(1, [doc.id])
+        assert shipped == 1
+        await db_session.refresh(doc)
+        assert doc.status == AssemblyStatus.SHIPPED.value
+        assert doc.outbound_shipment_id is not None
+        assert doc.shipped_at is not None
+
+        stock = (
+            await db_session.execute(
+                select(WarehouseStock).where(
+                    WarehouseStock.project_id == 1,
+                    WarehouseStock.warehouse_id == wh.id,
+                    WarehouseStock.barcode == bc,
+                )
+            )
+        ).scalar_one()
+        assert stock.quantity == 15  # 20 − 5
+
+        # OutboundShipment создан и привязан к поставке
+        shipment = (
+            await db_session.execute(
+                select(OutboundShipment).where(OutboundShipment.id == doc.outbound_shipment_id)
+            )
+        ).scalar_one()
+        assert shipment.wb_supply_id == supply.wb_supply_id
+
+        # Идемпотентность: заявка уже SHIPPED → transition ValueError, сток не двигается
+        again = await _ship_assemblies_best_effort(1, [doc.id])
+        assert again == 0
+        await db_session.refresh(stock)
+        assert stock.quantity == 15
+
+    async def test_ship_stock_deficit_best_effort(self, db_session):
+        """Дефицит стока: ship падает, счётчик 0, заявка остаётся VEHICLE_ASSIGNED."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        doc = await _make_assembly_on_supply(db_session, wh, supply, nom, bc, qty=5, stock_qty=2)
+
+        shipped = await _ship_assemblies_best_effort(1, [doc.id])
+        assert shipped == 0
+        await db_session.refresh(doc)
+        assert doc.status == AssemblyStatus.VEHICLE_ASSIGNED.value
+
+    async def test_full_sync_ships_forgotten_assembly(self, db_session):
+        """E2E: уже-ACCEPTED поставка в БД + VEHICLE_ASSIGNED сборка → full-sync отгружает."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        doc = await _make_assembly_on_supply(db_session, wh, supply, nom, bc, qty=5, stock_qty=20)
+
+        key = IntegrationKey(project_id=1, service="wb", encrypted_key="x", is_active=True)
+        db_session.add(key)
+        await db_session.commit()
+        await db_session.refresh(key)
+
+        mock_client = AsyncMock()
+        mock_client.get_fbw_supplies.return_value = []  # API ничего нового не отдаёт
+
+        result = await sync_fbo_supplies(db_session, 1, mock_client, key.id)
+        assert result["assemblies_shipped"] == 1
+        await db_session.refresh(doc)
+        assert doc.status == AssemblyStatus.SHIPPED.value
+        assert doc.outbound_shipment_id is not None
+
+    async def test_status_sync_ships_on_fresh_accept(self, db_session):
+        """E2E status-sync (основной триггер «вб уже принял»): поставка в БД ещё
+        IN_PROGRESS, WB отдаёт её ACCEPTED (statusID=4) → VEHICLE_ASSIGNED сборка
+        авто-отгружается. Покрывает path-specific pre-filter + in-place мутацию."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session, status=WbSupplyStatus.IN_PROGRESS)
+        doc = await _make_assembly_on_supply(db_session, wh, supply, nom, bc, qty=5, stock_qty=20)
+
+        key = IntegrationKey(project_id=1, service="wb", encrypted_key="x", is_active=True)
+        db_session.add(key)
+        await db_session.commit()
+        await db_session.refresh(key)
+
+        mock_client = AsyncMock()
+        # WB отдаёт ту же поставку уже принятой (statusID=4 → ACCEPTED)
+        mock_client.get_fbw_supplies.return_value = [
+            {
+                "supplyID": supply.wb_supply_id,
+                "statusID": 4,
+                "createDate": datetime.utcnow().isoformat() + "Z",
+            },
+        ]
+
+        result = await sync_fbo_statuses(db_session, 1, mock_client, key.id)
+        assert result["assemblies_shipped"] == 1
+        await db_session.refresh(doc)
+        assert doc.status == AssemblyStatus.SHIPPED.value
+        assert doc.outbound_shipment_id is not None

@@ -40,6 +40,8 @@ from .service import (
 from .sync import (
     _auto_deliver_assembly,
     _auto_deliver_shipment,
+    _collect_assembly_ship_on_wb_accepted,
+    _ship_assemblies_best_effort,
     enrich_fbo_supplies,
     sync_fbo_statuses,
     sync_fbo_supplies,
@@ -76,6 +78,8 @@ __all__ = [
     # sync
     "_auto_deliver_assembly",
     "_auto_deliver_shipment",
+    "_collect_assembly_ship_on_wb_accepted",
+    "_ship_assemblies_best_effort",
     "enrich_fbo_supplies",
     "sync_fbo_statuses",
     "sync_fbo_supplies",
