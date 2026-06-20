@@ -239,7 +239,21 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
     if not req:
         raise ValueError("Assembly request not found")
 
-    _check_transition(AssemblyStatus(req.status), AssemblyStatus.SHIPPED)
+    # Row-lock + ре-чтение статуса под локом: сериализует параллельные попытки
+    # отгрузить ОДНУ заявку (WB-ACCEPTED авто-шип ‖ FF авто-шип ‖ ручной/bulk —
+    # это разные scheduler-джобы/эндпоинты в одном event-loop). Без лока оба
+    # читают VEHICLE_ASSIGNED и оба отгружают → дубль OutboundShipment + движений
+    # стока. Проигравший блокируется до commit победителя, видит SHIPPED и
+    # бракуется _check_transition. Симметрично row-lock в return_to_warehouse.
+    locked_status = (
+        await db.execute(
+            select(AssemblyRequest.status)
+            .where(AssemblyRequest.id == req.id, AssemblyRequest.project_id == project_id)
+            .with_for_update()
+        )
+    ).scalar_one()
+
+    _check_transition(AssemblyStatus(locked_status), AssemblyStatus.SHIPPED)
 
     # 1. Validate stock
     deficits = await _validate_stock_for_ship(db, project_id, req.warehouse_id, req.items)

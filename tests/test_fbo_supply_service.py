@@ -1767,6 +1767,22 @@ class TestAutoShipOnWbAccepted:
         ids = await _collect_assembly_ship_on_wb_accepted(db_session, 1, [supply])
         assert ids == []
 
+    async def test_collect_picks_partial_acceptance(self, db_session):
+        """Частичная приёмка (statusID 5/6 → ACCEPTED, accepted_qty < total_qty) ТОЖЕ
+        отгружается — порога по qty нет; недоприёмка добивается отдельным flow
+        (process_fbo_return). Пиннит намеренное поведение от тихого регресса."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        supply.total_qty = 10
+        supply.accepted_qty = 6  # принято не всё
+        await db_session.commit()
+        doc = await _make_assembly_on_supply(db_session, wh, supply, nom, bc)
+
+        ids = await _collect_assembly_ship_on_wb_accepted(db_session, 1, [supply])
+        assert ids == [doc.id]
+
     async def test_ship_deducts_stock_and_is_idempotent(self, db_session):
         """ship-runner: SHIPPED + сток списан + OutboundShipment; повтор — no-op."""
         wh = await _make_ff_warehouse(db_session)
@@ -1837,6 +1853,37 @@ class TestAutoShipOnWbAccepted:
         mock_client.get_fbw_supplies.return_value = []  # API ничего нового не отдаёт
 
         result = await sync_fbo_supplies(db_session, 1, mock_client, key.id)
+        assert result["assemblies_shipped"] == 1
+        await db_session.refresh(doc)
+        assert doc.status == AssemblyStatus.SHIPPED.value
+        assert doc.outbound_shipment_id is not None
+
+    async def test_status_sync_ships_on_fresh_accept(self, db_session):
+        """E2E status-sync (основной триггер «вб уже принял»): поставка в БД ещё
+        IN_PROGRESS, WB отдаёт её ACCEPTED (statusID=4) → VEHICLE_ASSIGNED сборка
+        авто-отгружается. Покрывает path-specific pre-filter + in-place мутацию."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session, status=WbSupplyStatus.IN_PROGRESS)
+        doc = await _make_assembly_on_supply(db_session, wh, supply, nom, bc, qty=5, stock_qty=20)
+
+        key = IntegrationKey(project_id=1, service="wb", encrypted_key="x", is_active=True)
+        db_session.add(key)
+        await db_session.commit()
+        await db_session.refresh(key)
+
+        mock_client = AsyncMock()
+        # WB отдаёт ту же поставку уже принятой (statusID=4 → ACCEPTED)
+        mock_client.get_fbw_supplies.return_value = [
+            {
+                "supplyID": supply.wb_supply_id,
+                "statusID": 4,
+                "createDate": datetime.utcnow().isoformat() + "Z",
+            },
+        ]
+
+        result = await sync_fbo_statuses(db_session, 1, mock_client, key.id)
         assert result["assemblies_shipped"] == 1
         await db_session.refresh(doc)
         assert doc.status == AssemblyStatus.SHIPPED.value
