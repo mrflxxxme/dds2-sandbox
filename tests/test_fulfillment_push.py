@@ -826,6 +826,46 @@ async def test_wms_push_happy_path(db_session, project, warehouse, connected_wms
     assert row.status == "На сборке"
 
 
+def test_wms_dispatch_comment_builder():
+    """Комментарий зОГ дописывает склад WB и поставку; пустые значения пропускает."""
+    f = fulfillment_service._wms_dispatch_comment
+    assert f("Заявка ASM-1 (DDS)", "Электросталь", "FBW-1") == "Заявка ASM-1 (DDS) · склад WB: Электросталь · поставка FBW-1"
+    assert f("base", "Казань", None) == "base · склад WB: Казань"
+    assert f("base", None, None) == "base"
+
+
+@pytest.mark.asyncio
+async def test_wms_push_comment_carries_wb_warehouse_and_supply(
+    db_session, project, warehouse, connected_wms_key, monkeypatch
+):
+    """Склад WB и номер FBO-поставки уходят в comment зОГ: API «Целиком» не берёт
+    склад МП структурно (самовывоз без адреса), comment — единственный канал."""
+    bc = f"20{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    supply = WbFboSupply(
+        project_id=project.id,
+        wb_supply_id="FBW-40234215",
+        created_at_wb=datetime(2026, 6, 1, 12, 0, 0),
+        planned_date=date(2026, 6, 22),
+        warehouse_name="Электросталь",
+    )
+    db_session.add(supply)
+    await db_session.commit()
+    await db_session.refresh(supply)
+    doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 5)])
+    doc.wb_fbo_supply_id = supply.id
+    await db_session.commit()
+    holder: dict = {}
+    _mock_wms_create(monkeypatch, holder)
+
+    await fulfillment_service.create_ff_request_from_assembly(
+        db_session, project.id, warehouse.id, doc.id, _wms_payload()
+    )
+    comment = holder["create"]["comment"]
+    assert "склад WB: Электросталь" in comment
+    assert "поставка FBW-40234215" in comment
+
+
 @pytest.mark.asyncio
 async def test_wms_push_send_failure_links_but_errors(db_session, project, warehouse, connected_wms_key, monkeypatch):
     """add прошёл, send упал — заявка создана («Новая»), зеркало+связь есть, но ValueError."""

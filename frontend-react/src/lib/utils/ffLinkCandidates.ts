@@ -4,21 +4,66 @@
  */
 import type { FfLinkCandidate } from '@/types/api';
 
-/**
- * Нормализация имени склада для сопоставления (зеркало `_norm_wh_name` бэкенда):
- * lower-case + только буквы/цифры. «Коледино» ↔ «МСК Коледино» матчатся по вхождению.
- */
-export function normWhName(value: string | null | undefined): string {
-    return (value ?? '').toLowerCase().replace(/[^0-9a-zа-яё]+/g, '');
+// Зеркало `_wh_*` бэкенда (fulfillment_service.py): стем-токенное совпадение
+// имён складов сдачи. Маркетплейс-маркеры ФФ («ВБ | …») места не несут.
+const WH_NOISE_TOKENS = new Set(['вб', 'wb']);
+
+// Родовые/падежные окончания прилагательных («Перспективн-ый» ↔ «Перспективн-ая»).
+// Длиннее раньше — срезаем максимальный суффикс.
+const WH_ADJ_SUFFIXES = [
+    'ого', 'его', 'ому', 'ему', 'ыми', 'ими',
+    'ая', 'яя', 'ое', 'ее', 'ые', 'ие', 'ый', 'ий', 'ой',
+    'ым', 'им', 'ом', 'ем', 'ых', 'их', 'ую', 'юю',
+];
+
+/** Срезать родовое/падежное окончание прилагательного, оставив стем ≥4 символов. */
+export function whStem(token: string): string {
+    for (const suf of WH_ADJ_SUFFIXES) {
+        if (token.endsWith(suf) && token.length - suf.length >= 4) return token.slice(0, token.length - suf.length);
+    }
+    return token;
 }
 
-/** Совпадение складов сдачи по нормализованным именам (вхождение в обе стороны).
- *  Пустой `a` (склад неизвестен) → true: фильтровать не по чему. */
+/** Имя склада → стемы слов + числа + стемы-прилагательные (улицы).
+ *  Стем со срезанным окончанием = прилагательное-улица: по нему решаем,
+ *  различают ли склады числа (топоним+номер «Чехов 1» vs улица+дом). */
+export function whTokens(
+    value: string | null | undefined,
+): { words: Set<string>; digits: Set<string>; adjectives: Set<string> } {
+    const words = new Set<string>();
+    const digits = new Set<string>();
+    const adjectives = new Set<string>();
+    for (const tok of (value ?? '').toLowerCase().match(/[0-9a-zа-яё]+/g) ?? []) {
+        if (WH_NOISE_TOKENS.has(tok)) continue;
+        if (/^\d+$/.test(tok)) { digits.add(tok); continue; }
+        const stem = whStem(tok);
+        words.add(stem);
+        if (stem !== tok) adjectives.add(stem); // окончание срезано → улица, не топоним
+    }
+    return { words, digits, adjectives };
+}
+
+/** Один и тот же склад сдачи под разными именами двух систем?
+ *  Меньшее множество слов должно входить в большее (город + улица совпали).
+ *  Числа различают склады ТОЛЬКО у топонима с порядковым номером («Чехов 1» ≠
+ *  «Чехов 2»): если общий токен — прилагательное-улица, число это номер дома и
+ *  расходится между системами («Перспективная 14» ≡ «Перспективный 12/2»).
+ *  Пустое `a` (склад неизвестен) → true: фильтровать не по чему. */
 export function whNamesMatch(a: string | null | undefined, b: string | null | undefined): boolean {
-    const na = normWhName(a);
-    if (!na) return true;
-    const nb = normWhName(b);
-    return !!nb && (na.includes(nb) || nb.includes(na));
+    const ta = whTokens(a);
+    if (ta.words.size === 0) return true;
+    const tb = whTokens(b);
+    if (tb.words.size === 0) return false;
+    const [small, large] = ta.words.size <= tb.words.size ? [ta.words, tb.words] : [tb.words, ta.words];
+    for (const w of small) if (!large.has(w)) return false;
+    // Общий токен — улица (прилагательное) → числа = дома, игнорируем.
+    for (const w of small) if (ta.adjectives.has(w) || tb.adjectives.has(w)) return true;
+    if (ta.digits.size > 0 && tb.digits.size > 0) {
+        let intersects = false;
+        for (const d of ta.digits) if (tb.digits.has(d)) { intersects = true; break; }
+        if (!intersects) return false;
+    }
+    return true;
 }
 
 /** Поиск по номеру / ФБО-поставке / складу назначения (case-insensitive) */

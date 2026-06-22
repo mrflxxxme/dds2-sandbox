@@ -2609,6 +2609,49 @@ async def test_sync_ships_vehicle_assigned_assembly(db_session, project, warehou
 
 
 @pytest.mark.asyncio
+async def test_sync_ships_when_ff_completed_and_archived(db_session, project, warehouse, connected_key, monkeypatch):
+    """ФФ отгрузил И сдал заявку в архив (is_completed + archived, как skladbot у «Газпром»)
+    → авто-SHIP всё равно срабатывает: archived-после-завершения ≠ отмена."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(9701, stage_title="Погрузка")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_vehicle_assigned_doc(db_session, project, warehouse, nom, bc, qty=5, stock_qty=20)
+    mirror = await _mirror_row(db_session, project.id, "9701")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    # is_completed=1 И archived=1 одновременно (status «new» — сырой ярлык skladbot)
+    _mock_requests(monkeypatch, {851: [_req(9701, status="new", completed=1, archived=1, stage_title="Выполнена")]})
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_shipped"] == 1
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.SHIPPED.value
+    assert doc.outbound_shipment_id is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_no_ship_when_ff_archived_not_completed(db_session, project, warehouse, connected_key, monkeypatch):
+    """Отменённая ФФ-заявка (archived без is_completed) НЕ отгружает сборку — сток не двигаем."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(9801, stage_title="Погрузка")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_vehicle_assigned_doc(db_session, project, warehouse, nom, bc, qty=5, stock_qty=20)
+    mirror = await _mirror_row(db_session, project.id, "9801")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    _mock_requests(monkeypatch, {851: [_req(9801, status="canceled", completed=0, archived=1, stage_title="Отменена")]})
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_shipped"] == 0
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.VEHICLE_ASSIGNED.value
+
+
+@pytest.mark.asyncio
 async def test_sync_no_ship_when_not_vehicle_assigned(db_session, project, warehouse, connected_key, monkeypatch):
     """ФФ отгрузил, но машина у нас НЕ назначена (READY) → авто-SHIP не срабатывает."""
     _mock_products(monkeypatch, [])
@@ -3241,6 +3284,53 @@ async def test_migfull_request_detail_inbound_live_lines(
     await fulfillment_service.disconnect(db_session, project.id, warehouse.id)
     with pytest.raises(ValueError, match="не подключён"):
         await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+
+
+@pytest.mark.asyncio
+async def test_migfull_inbound_detail_resolves_barcode_absent_from_mirror(
+    db_session, project, warehouse, connected_mig_key, monkeypatch
+):
+    """Товар приёмки без остатка не попал в зеркало → ШК дотягивается живой карточкой.
+
+    Баг «не опознанный баркод»: строка приёмки несёт guid, но товар с нулевым
+    остатком при синке не карточится → в зеркале ШК нет. Деталка должна
+    дорезолвить ШК напрямую из карточки и сматчить с номенклатурой.
+    """
+    bc = f"BC-{_uid()}"
+    p_zero = _mig_guid(85)  # есть в /products, но остаток 0 → не карточится при синке
+    sub = _mig_guid(84)
+    await _make_nomenclature(db_session, project.id, bc, article="ART-NEW")
+    lines = {
+        (sub, "incoming"): [_mig_line(p_zero, 6)],
+        (sub, "received"): [_mig_line(p_zero, 6)],
+    }
+    calls: dict = {}
+    _mock_mig_fetches(
+        monkeypatch,
+        products=[_mig_product(p_zero, actual=0, locked=0)],
+        product_details={p_zero: {"barcodes": [{"value": bc, "is_primary": True}]}},
+        submissions=[_mig_submission(sub, status="processing")],
+        submission_lines=lines,
+        calls=calls,
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    # Зеркало пусто по этому guid: zero-stock товар не закарточен синком
+    stocks = await _ff_stocks(db_session, project.id, warehouse.id)
+    assert all(s.external_product_id != p_zero for s in stocks)
+    product_calls_after_sync = calls["product"]
+
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "inbound")
+    ff_id = next(r["id"] for r in rows if r["external_id"] == sub)
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    assert row is not None
+    # Деталка сходила в карточку (live-резолв) и сматчила номенклатуру
+    assert calls["product"] > product_calls_after_sync
+    product = row["products"][0]
+    assert product["barcode"] == bc
+    assert product["nomenclature_id"] is not None
+    assert product["article_seller"] == "ART-NEW"
+    assert product["qty"] == 6
 
 
 # ─── Авто-READY и классификатор (migfull) ────────────────────────────────────
