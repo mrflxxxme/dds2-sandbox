@@ -272,10 +272,14 @@ async def get_wb_bdr(
             # Cost: aggregate avg cost across articles in this group
             sale_qty = metrics["sale_qty"]
             if method != DEFAULT_METHOD and sa_name in grouped_cogs:
-                # Engine-computed group COGS (already net of returns).
-                cost_total = grouped_cogs[sa_name]
+                # Engine per-unit cost for the group (Σ window-month COGS / Σ net
+                # qty); apply it to the window's actual net units — NOT the engine's
+                # whole-month COGS total — so COGS spans the SAME days as revenue.
+                # The engine buckets COGS by calendar month, so the raw group total
+                # would charge a full month against a sub-month window.
                 g_qty = grouped_cogs_qty.get(sa_name, 0)
-                cost_price = (cost_total / g_qty) if g_qty > 0 else 0.0
+                cost_price = (grouped_cogs[sa_name] / g_qty) if g_qty > 0 else 0.0
+                cost_total = cost_price * sale_qty if sale_qty > 0 else 0
             else:
                 cost_price = grouped_avg_cost.get(sa_name, 0)
                 cost_total = cost_price * sale_qty if sale_qty > 0 else 0
@@ -307,8 +311,13 @@ async def get_wb_bdr(
             sku = sa_name.lower() if sa_name else ""
             sale_qty = metrics["sale_qty"]
             if method != DEFAULT_METHOD and sku in win:
-                cost_total = float(win[sku]["cogs"])
+                # eff_cost is the engine's per-unit COGS for the window's month(s).
+                # Apply it to the window's actual net units (sale_qty) so COGS spans
+                # the SAME days as revenue. Using win[sku]["cogs"] directly charges
+                # the WHOLE calendar month's COGS against a sub-month window (the
+                # engine buckets COGS by month) → COGS far above revenue / phantom loss.
                 cost_price = float(win[sku]["eff_cost"])
+                cost_total = cost_price * sale_qty if sale_qty > 0 else 0
             else:
                 cost_price = cost_map.get(sku, 0) if sku else 0
                 if cost_price == 0 and nm_id in cost_overrides:
