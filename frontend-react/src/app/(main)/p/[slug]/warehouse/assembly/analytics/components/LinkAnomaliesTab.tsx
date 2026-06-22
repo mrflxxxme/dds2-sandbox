@@ -156,6 +156,10 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
     const [expandedWh, setExpandedWh] = useState<number | null>(null);
     const [fboBucket, setFboBucket] = useState<FboBucket>(null);
 
+    // Архив заявки ФФ прямо из блока «без нашей сборки» (локальная пометка)
+    const [archivingId, setArchivingId] = useState<number | null>(null);
+    const [archiveError, setArchiveError] = useState('');
+
     // ─── Load FF-warehouses (один раз) ────────────────────────────────────
     useEffect(() => {
         const controller = new AbortController();
@@ -191,6 +195,20 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
         load(controller.signal);
         return () => controller.abort();
     }, [load, reloadTick]);
+
+    // Убрать заявку ФФ в локальный архив прямо из блока «без нашей сборки» → уйдёт из списка
+    const archiveFf = useCallback(async (row: UnlinkedFfRow) => {
+        setArchivingId(row.ff_request_id);
+        setArchiveError('');
+        try {
+            await api.archiveFulfillmentRequest(row.warehouse_id, row.ff_request_id);
+            setReloadTick(t => t + 1);
+        } catch (e: unknown) {
+            setArchiveError(e instanceof Error ? e.message : 'Не удалось убрать заявку ФФ в архив');
+        } finally {
+            setArchivingId(null);
+        }
+    }, []);
 
     // ─── Exports ──────────────────────────────────────────────────────────
     const exportMismatch = useCallback(() => {
@@ -485,6 +503,9 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                             onExport={exportFfWithoutAsm}
                             note="Заявка фулфилмента, к которой не привязана наша сборка."
                         />
+                        {archiveError && (
+                            <div style={{ padding: '8px 16px', color: 'var(--color-danger)', fontSize: 13 }}>{archiveError}</div>
+                        )}
                         {ffWithoutAsm.length === 0 ? (
                             <BlockEmpty text="Все заявки ФФ привязаны — всё чисто" />
                         ) : (
@@ -499,6 +520,7 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                                             <th>Статус</th>
                                             <th style={{ textAlign: 'right' }}>Шт</th>
                                             <th>Создана</th>
+                                            <th>Действия</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -512,6 +534,23 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                                                 <td style={{ textAlign: 'right' }}>{formatNumber(row.total_qty ?? 0, 0)}</td>
                                                 <td style={{ color: 'var(--color-text-muted)' }}>
                                                     {row.external_created_at ? formatDate(row.external_created_at) : '—'}
+                                                </td>
+                                                <td style={{ whiteSpace: 'nowrap' }}>
+                                                    <Link
+                                                        href={`/p/${slug}/warehouse/${row.warehouse_id}/ff-request/${row.ff_request_id}`}
+                                                        className="btn btn-sm btn-secondary"
+                                                        style={{ marginRight: 8 }}
+                                                    >
+                                                        Открыть
+                                                    </Link>
+                                                    <button
+                                                        className="btn btn-sm btn-secondary"
+                                                        title="Убрать заявку ФФ в архив (локальная пометка) — уйдёт из блока"
+                                                        onClick={() => archiveFf(row)}
+                                                        disabled={archivingId === row.ff_request_id}
+                                                    >
+                                                        {archivingId === row.ff_request_id ? '...' : 'В архив'}
+                                                    </button>
                                                 </td>
                                             </tr>
                                         ))}
