@@ -229,33 +229,13 @@ async def _assemblies_without_ff(db: AsyncSession, project_id: int, warehouse_id
     return rows
 
 
-def _ff_request_is_active(
-    provider: str, stage_code: str | None, stage_title: str | None, is_completed: bool, expired: bool
-) -> bool:
-    """Заявка ФФ ещё в работе («в сборке»/«новая»), а не собрана/закрыта/завершена.
-
-    Завершённые исключаем (их в блок «без нашей сборки» класть не нужно):
-    - is_completed (отгружено/закрыто у всех провайдеров) или expired;
-    - migfull: stage_code 'ready' («Собран») / 'closed' («Закрыт»);
-    - wmscelicom: stage_title «Собрана»/«Ожидает отгрузки».
-    skladbot и прочие — активна, пока не is_completed (агрессивный deny-list
-    READY-сигнала тут НЕ применяем: ранние стадии skladbot, помеченные им как
-    «готово», на деле ещё актуальны для привязки).
-    """
-    if is_completed or expired:
-        return False
-    if provider == "migfull":
-        return (stage_code or "").strip().lower() not in ("ready", "closed")
-    if provider == "wmscelicom":
-        return (stage_title or "").strip() not in fulfillment_service.WMS_ASSEMBLY_READY_TITLES
-    return True
-
-
 async def _ff_without_assembly(db: AsyncSession, project_id: int, warehouse_ids: list[int] | None) -> list[dict]:
-    """Блок 3: АКТИВНЫЕ заявки ФФ (kind=assembly) без привязанной нашей сборки.
+    """Блок 3: заявки ФФ (kind=assembly) без привязанной нашей сборки.
 
-    Собранные/закрытые/завершённые не показываем — только то, что ещё в работе
-    (см. _ff_request_is_active): это сигнал «надо завести/привязать сборку».
+    Показываем ВСЁ незвязанное, КРОМЕ архивных (провайдерский `archived` либо наш
+    `local_archived`) — стадия/завершённость НЕ фильтруют: собранные/отгруженные
+    без нашей сборки тоже сигнал «надо завести/привязать сборку», а обработанное
+    оператор сам убирает кнопкой «В архив».
     """
     ff_filters = [
         FulfillmentRequest.project_id == project_id,
@@ -263,17 +243,11 @@ async def _ff_without_assembly(db: AsyncSession, project_id: int, warehouse_ids:
         FulfillmentRequest.assembly_request_id.is_(None),
         FulfillmentRequest.archived == False,  # noqa: E712
         FulfillmentRequest.local_archived == False,  # noqa: E712
-        FulfillmentRequest.is_completed == False,  # noqa: E712
-        FulfillmentRequest.expired == False,  # noqa: E712
     ]
     if warehouse_ids:
         ff_filters.append(FulfillmentRequest.warehouse_id.in_(warehouse_ids))
 
-    reqs = [
-        r
-        for r in (await db.execute(select(FulfillmentRequest).where(*ff_filters))).scalars().all()
-        if _ff_request_is_active(r.provider, r.stage_code, r.stage_title, r.is_completed, r.expired)
-    ]
+    reqs = list((await db.execute(select(FulfillmentRequest).where(*ff_filters))).scalars().all())
     if not reqs:
         return []
 

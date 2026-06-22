@@ -337,8 +337,8 @@ async def test_ff_with_assembly_or_archived_excluded(db_session, project, wareho
 
 
 @pytest.mark.asyncio
-async def test_ff_without_assembly_only_active(db_session, project, warehouse):
-    """Только активные заявки ФФ: собранные/закрытые/завершённые исключаются."""
+async def test_ff_without_assembly_shows_all_non_archived(db_session, project, warehouse):
+    """Показываем ВСЁ незвязанное, кроме архивных — стадия/завершённость не фильтруют."""
     active_sklad = await _make_ff(db_session, project.id, warehouse.id, provider="skladbot")
     mig_wip = await _make_ff(db_session, project.id, warehouse.id, provider="migfull", stage_code="new")
     mig_ready = await _make_ff(db_session, project.id, warehouse.id, provider="migfull", stage_code="ready")
@@ -347,15 +347,14 @@ async def test_ff_without_assembly_only_active(db_session, project, warehouse):
     wms_ready = await _make_ff(
         db_session, project.id, warehouse.id, provider="wmscelicom", stage_title="Ожидает отгрузки"
     )
+    archived = await _make_ff(db_session, project.id, warehouse.id, provider="skladbot", archived=True)
 
     res = await _raw(db_session, project.id)
     ids = {r["ff_request_id"] for r in res["ff_without_assembly"]}
-    assert active_sklad.id in ids  # skladbot WIP
-    assert mig_wip.id in ids  # migfull «Новая»
-    assert mig_ready.id not in ids  # migfull «Собран» (ready)
-    assert mig_closed.id not in ids  # migfull «Закрыт»
-    assert completed.id not in ids  # is_completed
-    assert wms_ready.id not in ids  # wmscelicom «Ожидает отгрузки»
+    # стадия/завершённость не фильтруют — всё незвязанное и не в архиве показывается
+    for ff in (active_sklad, mig_wip, mig_ready, mig_closed, completed, wms_ready):
+        assert ff.id in ids
+    assert archived.id not in ids  # архив — скрыт
 
 
 # ─── (e) fbo сводка ──────────────────────────────────────────────────────────
