@@ -404,3 +404,90 @@ class TestComputeProjectValuationDB:
 
         other_val = await compute_project_valuation(db_session, other_project.id, skus={art})
         assert art.lower() not in other_val
+
+
+class TestBdrSubMonthWindowCogs:
+    """Regression: FIFO/moving COGS in the BDR must span the SAME days as the
+    revenue it is compared against.
+
+    The engine buckets COGS by calendar MONTH; ``slice_window`` can only filter
+    on month boundaries. For a sub-month BDR window (e.g. 15–20 June) the engine
+    returns the WHOLE month's COGS, while revenue/units come from the exact
+    day-range SQL. Charging a full month of COGS against a few days of revenue
+    inflated COGS to ~135 % of revenue → a phantom multi-million-rouble loss
+    (prod, 2026-06: −16 М ₽ instead of +7 % profit). The fix applies the engine's
+    per-unit cost to the window's actual units, exactly like the lifetime path."""
+
+    @pytest.mark.asyncio
+    async def test_partial_month_cogs_scales_with_window_units(self, db_session, project):
+        from unittest.mock import AsyncMock, patch
+
+        from backend.services.settings_service import set_valuation_method
+        from backend.services.wb_bdr_service import get_wb_bdr
+
+        pid = project.id
+        art = f"ART-WIN-{pid}"
+        bc = f"BC-WIN-{pid}"
+        # 1000 units @ unit cost 100.00 (total_rub is per-unit) — covers all sales.
+        await _seed_batch_order(
+            db_session, pid, order_no=f"WIN-A-{pid}", article=art, barcode=bc,
+            qty=1000, total_rub="100.00", arrival=date(2026, 6, 1),
+        )
+        # 100 units sold 5 June (OUTSIDE the 15–20 window), 10 units 17 June (INSIDE).
+        await _seed_sale(db_session, pid, rrd_id=pid * 1000 + 61, article=art, d=date(2026, 6, 5), qty=100)
+        await _seed_sale(db_session, pid, rrd_id=pid * 1000 + 62, article=art, d=date(2026, 6, 17), qty=10)
+        await set_valuation_method(db_session, pid, "fifo")
+        await db_session.commit()
+
+        with (
+            patch(
+                "backend.services.wb_finance_sync.get_sync_status",
+                new_callable=AsyncMock,
+                return_value={"status": "ok"},
+            ),
+            patch("backend.cache._redis_client", None),
+        ):
+            result = await get_wb_bdr(
+                db_session,
+                project_id=pid,
+                date_from=date(2026, 6, 15),
+                date_to=date(2026, 6, 20),
+                group_by="article",
+            )
+
+        # Window holds 10 net units → COGS must be 10 × 100 = 1000, NOT the whole
+        # June bucket (110 × 100 = 11000) the engine reports for "2026-06".
+        cost_total = result["summary"]["cost_total"]
+        assert cost_total == pytest.approx(1000.0), cost_total
+
+    @pytest.mark.asyncio
+    async def test_opiu_partial_month_cogs_scales_with_window_units(self, db_session, project):
+        """ОПиУ shares the engine consumer path and the same month-bucket trap:
+        a sub-month window must prorate, not charge the whole month."""
+        from unittest.mock import patch
+
+        from backend.services.opiu_service import get_opiu
+        from backend.services.settings_service import set_valuation_method
+
+        pid = project.id
+        art = f"ART-OWIN-{pid}"
+        bc = f"BC-OWIN-{pid}"
+        await _seed_batch_order(
+            db_session, pid, order_no=f"OWIN-A-{pid}", article=art, barcode=bc,
+            qty=1000, total_rub="100.00", arrival=date(2026, 6, 1),
+        )
+        await _seed_sale(db_session, pid, rrd_id=pid * 1000 + 71, article=art, d=date(2026, 6, 5), qty=100)
+        await _seed_sale(db_session, pid, rrd_id=pid * 1000 + 72, article=art, d=date(2026, 6, 17), qty=10)
+        await set_valuation_method(db_session, pid, "fifo")
+        await db_session.commit()
+
+        with patch("backend.cache._redis_client", None):
+            result = await get_opiu(
+                db_session,
+                project_id=pid,
+                date_from=date(2026, 6, 15),
+                date_to=date(2026, 6, 20),
+            )
+
+        cost_row = next(r for r in result["rows"] if r["key"] == "cost_price")
+        assert cost_row["total"] == pytest.approx(1000.0), cost_row["total"]

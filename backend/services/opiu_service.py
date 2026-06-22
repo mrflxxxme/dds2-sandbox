@@ -195,9 +195,15 @@ async def get_opiu(
         nm_id = row.nm_id or 0
         qty = int(row.total_qty or 0)
         sku = sa_name.lower() if sa_name else ""
-        if method != DEFAULT_METHOD and sku in win and mk in win[sku]["monthly"]:
-            # Engine-computed per-month COGS for this SKU (already net of returns).
-            cost_amount = float(win[sku]["monthly"][mk]["cogs"])
+        m_engine = win.get(sku, {}).get("monthly", {}).get(mk) if method != DEFAULT_METHOD else None
+        if m_engine is not None:
+            # Engine per-unit cost for this month × the window's net units (qty).
+            # Both are net of returns, so a FULL month gives the month's exact COGS
+            # (qty == engine month qty); a SUB-MONTH window is prorated instead of
+            # being charged the whole month — the engine buckets COGS by month.
+            m_qty = int(m_engine["qty"])
+            eff = (float(m_engine["cogs"]) / m_qty) if m_qty else 0.0
+            cost_amount = eff * qty
         else:
             # lifetime_avg path, or override fallback for SKUs missing from valuation.
             # cost_map keyed by lowercased article_seller; sa_name from WB may differ in case
