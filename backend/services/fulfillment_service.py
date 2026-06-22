@@ -694,7 +694,14 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             FulfillmentRequest.provider == provider,
             FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
             FulfillmentRequest.assembly_request_id.is_not(None),
-            FulfillmentRequest.archived == False,
+            # Завершённые-и-заархивированные (ФФ отгрузил груз, затем сдал заявку в
+            # архив — напр. skladbot: is_completed+archived) НЕ исключаем: их сборку
+            # надо авто-отгрузить. Отменённые (archived без is_completed) отсеются
+            # ниже в коллекторах. Auto-READY (_mark_linked_…) сам пропускает archived.
+            or_(
+                FulfillmentRequest.archived == False,
+                FulfillmentRequest.is_completed == True,
+            ),
             # expired (просрочена) НЕ исключаем: заявка с истёкшим сроком всё
             # ещё активна и проходит стадии — её сборку тоже надо авто-READY
             FulfillmentRequest.local_archived == False,
@@ -1146,6 +1153,45 @@ async def _resolve_migfull_barcodes(
         barcode = _migfull_primary_barcode(detail)
         if barcode:
             barcode_by_guid[guid] = barcode
+
+
+async def _migfull_resolve_detail_barcodes(
+    client: MigfullClient,
+    guids: set[str],
+    guid_barcodes: dict[str, tuple[str, int]],
+) -> None:
+    """Дотянуть guid→(ШК россыпи, штук в коробе) живыми карточками товара (in-place).
+
+    В деталке приёмки ШК берётся из зеркала остатков (`_migfull_guid_barcodes`),
+    но товар без остатка (новый / не закарточенный / за cap'ом синка) в зеркало
+    НЕ попал → строка приёмки висит «не опознанной» (barcode=None, без матча с
+    номенклатурой). Тянем карточку напрямую `GET /products/{guid}` → barcodes[];
+    короб (ITF14 + «короб N шт.») сводим к россыпи так же, как остатки. Cap
+    `_ENRICH_DETAIL_CAP`; ошибки деталку НЕ валят: 429/circuit — стоп, прочее —
+    пропуск товара (останется без ШК, как и было).
+    """
+    missing = [g for g in guids if g and g not in guid_barcodes]
+    if len(missing) > _ENRICH_DETAIL_CAP:
+        logger.warning(
+            "Fulfillment migfull: detail barcode resolve cap %d exceeded, %d skipped",
+            _ENRICH_DETAIL_CAP,
+            len(missing) - _ENRICH_DETAIL_CAP,
+        )
+        missing = missing[:_ENRICH_DETAIL_CAP]
+    for guid in missing:
+        try:
+            detail = await client.fetch_product(guid)
+        except (RateLimitError, CircuitOpenError) as e:
+            logger.warning("Fulfillment migfull: detail barcode resolve stopped (%s)", e)
+            break
+        except (MigfullApiError, httpx.HTTPError, ValueError) as e:
+            logger.warning("Fulfillment migfull: product %s detail barcode skipped (%s)", guid, e)
+            continue
+        barcode = _migfull_primary_barcode(detail)
+        if not barcode:
+            continue
+        pack = _migfull_box_pack(barcode, detail.get("name"))
+        guid_barcodes[guid] = pack or (barcode, 1)
 
 
 def _ean13_check_digit(body12: str) -> str:
@@ -2075,14 +2121,18 @@ async def _collect_assembly_ship_candidates(
     assembly-заявки is_completed (migfull/«Натали» N:1; для skladbot/wmscelicom
     заявка одна → all([…]) и поведение не меняется). Статус-гейт VEHICLE_ASSIGNED:
     READY (машина ещё не назначена) — рано; SHIPPED/далее — уже отгружена; прочие
-    статусы ship_request отверг бы переходом. Вызывающий уже отфильтровал
-    archived/local_archived и провайдер+склад (та же выборка, что для авто-READY).
+    статусы ship_request отверг бы переходом. Вызывающий отфильтровал
+    local_archived и провайдер+склад; завершённые-и-заархивированные заявки сюда
+    доходят (та же выборка, что для авто-READY) — их отгружаем, отменённые отсеиваем.
     """
     ff_by_assembly: dict[int, list[FulfillmentRequest]] = {}
     for req in ff_requests:
         if req.kind != FfRequestKind.ASSEMBLY.value or req.assembly_request_id is None:
             continue
-        if req.archived:  # expired (просрочена) — активна, не исключаем
+        # Отменённую (archived без is_completed) — мимо; завершённую-и-сданную в
+        # архив (ФФ отгрузил, затем заархивировал) отгружаем: is_completed = сигнал
+        # отгрузки. expired (просрочена) — активна, не исключаем.
+        if req.archived and not req.is_completed:
             continue
         ff_by_assembly.setdefault(req.assembly_request_id, []).append(req)
     shipped_ids = {
@@ -3955,6 +4005,7 @@ async def get_request_detail(
 
     if req.provider == "migfull":
         raw = req.raw or {}
+        mig_client: MigfullClient | None = None  # задаётся только для приёмок (живые lines)
         if req.kind == FfRequestKind.ASSEMBLY.value:
             # Состав отгрузки уже в зеркале: planned/shipped_lines из списочного метода
             mig_products = _migfull_products_from_lines(
@@ -3993,7 +4044,13 @@ async def get_request_detail(
 
         # ШК только в карточке товара → guid→(ШК россыпи, штук в коробе) из зеркала
         # остатков. Короб сводится к россыпи: ШК россыпи для матча, qty × units_per_box.
-        guid_barcodes = await _migfull_guid_barcodes(db, project_id, warehouse_id, {p["guid"] for p in mig_products})
+        line_guids = {p["guid"] for p in mig_products}
+        guid_barcodes = await _migfull_guid_barcodes(db, project_id, warehouse_id, line_guids)
+        if mig_client is not None:
+            # Приёмка: товар без остатка в зеркало не попал → ШК «не опознан».
+            # Дотягиваем живой карточкой (commit — не держать транзакцию на HTTP).
+            await db.commit()
+            await _migfull_resolve_detail_barcodes(mig_client, line_guids, guid_barcodes)
         match_barcodes = {bc for bc, _ in guid_barcodes.values()} | set(our_by_barcode or {})
         nom_by_barcode = await _resolve_noms(db, project_id, match_barcodes)
         products = []
@@ -4807,14 +4864,73 @@ async def create_assembly_from_ff(
 _DEFAULT_MARKETPLACE_NAME = "Wildberries"
 
 
-def _norm_wh_name(value: str | None) -> str:
-    """Нормализация имени склада для сопоставления (наш WB-склад vs склад МП ФФ).
+# Маркетплейс-маркеры в имени склада ФФ («ВБ | …») — места не несут, выкидываем.
+_WH_NOISE_TOKENS = frozenset({"вб", "wb"})
 
-    Имя WB-склада в заявке («Коледино») и в справочнике skladbot («МСК Коледино»,
-    «Москва (Коледино)») не совпадают буквально — приводим к lower и оставляем
-    только буквы/цифры, чтобы матчить по вхождению.
+# Родовые/падежные окончания прилагательных: «Перспективн-ый» ↔ «Перспективн-ая»
+# — один склад под разными именами систем. Длиннее раньше (срезаем максимальное).
+_WH_ADJ_SUFFIXES = (
+    "ого",
+    "его",
+    "ому",
+    "ему",
+    "ыми",
+    "ими",
+    "ая",
+    "яя",
+    "ое",
+    "ее",
+    "ые",
+    "ие",
+    "ый",
+    "ий",
+    "ой",
+    "ым",
+    "им",
+    "ом",
+    "ем",
+    "ых",
+    "их",
+    "ую",
+    "юю",
+)
+
+
+def _wh_stem(token: str) -> str:
+    """Срезать родовое/падежное окончание прилагательного, оставив стем ≥4 симв.
+
+    «перспективный»/«перспективная» → «перспективн». Guard на длину стема не даёт
+    схлопнуть короткие и не-прилагательные слова («белая» остаётся как есть).
     """
-    return re.sub(r"[^0-9a-zа-яё]+", "", (value or "").lower())
+    for suf in _WH_ADJ_SUFFIXES:
+        if token.endswith(suf) and len(token) - len(suf) >= 4:
+            return token[: -len(suf)]
+    return token
+
+
+def _wh_tokens(value: str | None) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Имя склада → (стемы слов, числовые токены, стемы-прилагательные).
+
+    Слова стеммятся (родовые окончания), маркетплейс-маркеры («ВБ»/«WB»)
+    выкидываются, числа выносятся отдельно. Стем со срезанным окончанием
+    помечается прилагательным (улица: «Перспективн-ая») — по нему решаем,
+    различают ли склады числа: у топонима число = порядковый номер склада
+    («Чехов 1»), у улицы = номер дома (см. `_wh_names_match`).
+    """
+    words: set[str] = set()
+    digits: set[str] = set()
+    adjectives: set[str] = set()
+    for tok in re.findall(r"[0-9a-zа-яё]+", (value or "").lower()):
+        if tok in _WH_NOISE_TOKENS:
+            continue
+        if tok.isdigit():
+            digits.add(tok)
+            continue
+        stem = _wh_stem(tok)
+        words.add(stem)
+        if stem != tok:  # окончание срезано → прилагательное-улица, не топоним
+            adjectives.add(stem)
+    return frozenset(words), frozenset(digits), frozenset(adjectives)
 
 
 def _parse_ff_form_options(
@@ -4994,27 +5110,41 @@ def _format_deficit_message(deficit: list[dict]) -> str:
 
 
 def _match_wh_option(wh_options: list[dict], hint: str | None) -> dict | None:
-    """Подобрать склад МП по имени склада WB заявки (вхождение нормализованных имён)."""
-    norm_hint = _norm_wh_name(hint)
-    if not norm_hint:
+    """Подобрать склад МП по имени склада WB заявки (стем-токенное совпадение)."""
+    hint_words, _, _ = _wh_tokens(hint)
+    if not hint_words:
         return None
     for w in wh_options:
-        nw = _norm_wh_name(w["name"])
-        if nw and (norm_hint in nw or nw in norm_hint):
+        if _wh_names_match(hint, w["name"]):
             return w
     return None
 
 
 def _wh_names_match(a: str | None, b: str | None) -> bool:
-    """Совпадение складов сдачи по нормализованным именам (вхождение в обе стороны).
+    """Один и тот же склад сдачи под разными именами двух систем?
 
-    Пустой `a` (склад сдачи ФФ-заявки неизвестен) → True: фильтровать не по чему.
+    Меньшее множество слов должно входить в большее (город-якорь + улица совпали).
+    Числовые токены различают склады ТОЛЬКО у топонима с порядковым номером
+    («Чехов 1» ≠ «Чехов 2», «Подольск 3» ≠ «Подольск 4»): если общий токен —
+    прилагательное-улица, число это номер дома и расходится между системами
+    («Перспективная 14» ≡ «Перспективный 12/2» у «Целиком»), числа игнорируем.
+    Пустое имя `a` (склад сдачи ФФ-заявки неизвестен) → True: фильтровать не по
+    чему. «ВБ | Екатеринбург Перспективный» ↔ «Екатеринбург - Перспективная 14» —
+    match; «Коледино» ↔ «МСК Коледино» — match; «Екатеринбург Испытателей» ↔ той
+    же «Перспективной» — нет (улица другая).
     """
-    na = _norm_wh_name(a)
-    if not na:
+    wa, da, adja = _wh_tokens(a)
+    if not wa:
         return True
-    nb = _norm_wh_name(b)
-    return bool(nb) and (na in nb or nb in na)
+    wb, db, adjb = _wh_tokens(b)
+    if not wb:
+        return False
+    small, large = (wa, wb) if len(wa) <= len(wb) else (wb, wa)
+    if not small <= large:
+        return False
+    if small & (adja | adjb):  # общий ориентир — улица → числа = дома, игнорируем
+        return True
+    return not (da and db and da.isdisjoint(db))
 
 
 async def _load_assembly_composition(
@@ -5467,6 +5597,24 @@ async def _push_assembly_to_ff(
     return res
 
 
+def _wms_dispatch_comment(base: str, wb_warehouse: str | None, fbo_supply: str | None) -> str:
+    """Дописать к комментарию зОГ склад WB и номер FBO-поставки.
+
+    `dispatchorders/add` «Целиком» НЕ принимает склад МП структурно: контракт —
+    самовывоз (delivery=2) без адреса, в OpenAPI-схеме add поля склада нет, склад
+    выбирается в их UI и проставляется на стороне «Целиком» (в зОГ это отдельное
+    поле `warehouse`, не из payload). Единственный канал до оператора — `comment`:
+    дописываем склад WB и номер поставки, чтобы оператор привязал зОГ к нужному
+    складу/поставке. Пустые значения пропускаем.
+    """
+    parts = [base]
+    if wb_warehouse:
+        parts.append(f"склад WB: {wb_warehouse}")
+    if fbo_supply:
+        parts.append(f"поставка {fbo_supply}")
+    return " · ".join(parts)
+
+
 async def _push_assembly_to_wms(
     db: AsyncSession,
     project_id: int,
@@ -5480,10 +5628,12 @@ async def _push_assembly_to_wms(
 
     Контракт FBO «Целиком»: dispatchorders/add (delivery=2 самовывоз, fbo=1, состав
     [{barcode, count}]) → dispatchorders/send (перевод в сборку, создаётся Shipment).
-    Склад WB в payload НЕ задаётся — определяется привязкой к WB-поставке на стороне
-    «Целиком». Дефицит заранее не проверяем (нет stock-резолва; «Целиком» резервирует
-    на add). Возвращает результат-словарь как ядро skladbot (status: not_found /
-    error / already_linked / empty / created).
+    Склад WB в payload структурно НЕ задаётся (в OpenAPI add поля склада нет —
+    самовывоз без адреса); проставляется в UI «Целиком». Чтобы оператор не угадывал
+    склад, дописываем его и номер FBO-поставки в `comment` (см. _wms_dispatch_comment).
+    Дефицит заранее не проверяем (нет stock-резолва; «Целиком» резервирует на add).
+    Возвращает результат-словарь как ядро skladbot (status: not_found / error /
+    already_linked / empty / created).
 
     Авто-send: после add сразу подтверждаем в сборку. Если add прошёл, а send упал
     — заявка УЖЕ создана («Новая»): зеркалим и связываем со сборкой (идемпотентность),
@@ -5501,17 +5651,30 @@ async def _push_assembly_to_wms(
     asm_number = assembly.number
     asm_status = assembly.status
 
+    # Склад WB + номер FBO-поставки — для комментария зОГ (API «Целиком» не берёт
+    # склад МП структурно). Грузим ДО commit, пока сессия в read-транзакции.
+    wb_warehouse = assembly.wb_warehouse_name_manual
+    fbo_supply_no: str | None = None
+    if assembly.wb_fbo_supply_id is not None:
+        supply = await db.get(WbFboSupply, assembly.wb_fbo_supply_id)
+        if supply is not None and supply.project_id == project_id:
+            wb_warehouse = supply.warehouse_name or wb_warehouse
+            fbo_supply_no = supply.wb_supply_id
+
     def _result(status: str, **extra: object) -> dict:
         return {"status": status, "assembly_request_id": asm_id, "assembly_number": asm_number, **extra}
 
     items = [{"barcode": bc, "count": qty} for bc, qty in qty_by_barcode.items()]
     total_qty = sum(qty_by_barcode.values())
+    dispatch_comment = _wms_dispatch_comment(
+        comment or f"Заявка на сборку {asm_number} (DDS)", wb_warehouse, fbo_supply_no
+    )
 
     await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
 
     # 1) Создать заявку на отгрузку (реальный заказ у «Целиком»), БЕЗ retry
     try:
-        created = await client.create_dispatch(items, comment=comment or f"Заявка на сборку {asm_number} (DDS)")
+        created = await client.create_dispatch(items, comment=dispatch_comment)
     except CircuitOpenError as e:
         return _result("error", message=f"«Целиком» временно недоступен, попробуйте позже ({e})")
     except RateLimitError:

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filterFfLinkCandidates, splitFfLinkCandidates, normWhName, whNamesMatch } from '@/lib/utils/ffLinkCandidates';
+import { filterFfLinkCandidates, splitFfLinkCandidates, whStem, whNamesMatch } from '@/lib/utils/ffLinkCandidates';
 import type { FfLinkCandidate } from '@/types/api';
 
 function makeCandidate(overrides: Partial<FfLinkCandidate> & { doc_id: number }): FfLinkCandidate {
@@ -48,6 +48,58 @@ describe('filterFfLinkCandidates', () => {
     it('null fields do not crash and do not match', () => {
         const r = filterFfLinkCandidates(candidates, 'nomatch');
         expect(r).toHaveLength(0);
+    });
+});
+
+describe('whNamesMatch (стем-токенное совпадение складов сдачи)', () => {
+    it('сводит migfull «ВБ | Екатеринбург Перспективный» и наш «Екатеринбург - Перспективная 14»', () => {
+        const a = 'ВБ | Екатеринбург Перспективный';
+        const b = 'Екатеринбург - Перспективная 14';
+        expect(whNamesMatch(a, b)).toBe(true);
+        expect(whNamesMatch(b, a)).toBe(true);
+    });
+
+    it('игнорирует маркетплейс-префикс и пунктуацию', () => {
+        expect(whNamesMatch('Коледино', 'МСК Коледино')).toBe(true);
+        expect(whNamesMatch('Москва (Коледино)', 'Коледино')).toBe(true);
+        expect(whNamesMatch('WB Казань', 'Казань')).toBe(true);
+    });
+
+    it('разные улицы одного города — не совпадают', () => {
+        expect(whNamesMatch('Екатеринбург Испытателей 14', 'Екатеринбург - Перспективная 14')).toBe(false);
+    });
+
+    it('улица-адрес: номера дома расходятся, склад тот же («Целиком» 12/2 ≡ WB 14)', () => {
+        expect(whNamesMatch('Екатеринбург - Перспективная 14', 'Екатеринбург - Перспективный 12/2')).toBe(true);
+        expect(whNamesMatch('Екатеринбург - Перспективный 12/2', 'Екатеринбург - Перспективная 14')).toBe(true);
+    });
+
+    it('топоним + порядковый номер: число различает склады', () => {
+        expect(whNamesMatch('Чехов 1', 'Чехов 2')).toBe(false);
+        expect(whNamesMatch('Подольск 3', 'Подольск 4')).toBe(false);
+        expect(whNamesMatch('Чехов 1', 'Чехов 1')).toBe(true);
+        expect(whNamesMatch('Чехов', 'Чехов 1')).toBe(true); // номер только с одной стороны → ок
+    });
+
+    it('пустой склад ФФ-заявки → совпадает со всеми; пустой наш → нет', () => {
+        expect(whNamesMatch(null, 'Коледино')).toBe(true);
+        expect(whNamesMatch('ВБ', 'Коледино')).toBe(true); // только маркер → слов нет
+        expect(whNamesMatch('Коледино', null)).toBe(false);
+    });
+
+    it('разные города — не совпадают', () => {
+        expect(whNamesMatch('Казань', 'Коледино')).toBe(false);
+    });
+});
+
+describe('whStem', () => {
+    it('схлопывает родовые окончания прилагательных', () => {
+        expect(whStem('перспективный')).toBe(whStem('перспективная'));
+        expect(whStem('центральный')).toBe('центральн');
+    });
+    it('не трогает короткие/не-прилагательные слова', () => {
+        expect(whStem('белая')).toBe('белая');
+        expect(whStem('коледино')).toBe('коледино');
     });
 });
 

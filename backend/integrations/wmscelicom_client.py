@@ -256,10 +256,11 @@ class WmsCelicomClient:
         """Создать заявку на отгрузку (POST dispatchorders/add/) в статусе «Новая».
 
         Контракт FBO-отгрузки на склад МП у «Целиком»: `delivery`=2 (самовывоз —
-        WB/транспорт забирает со склада ФФ; склад WB определяется привязкой к
-        WB-поставке на стороне «Целиком», в payload НЕ задаётся), `fbo`=1 (списание
-        FBO), состав — `items` = [{barcode, count}]. БЕЗ retry: повторный POST =
-        дубликат реального заказа. Ответ — {status: OK, id: <orderId>, ...}.
+        WB/транспорт забирает со склада ФФ), `fbo`=1 (списание FBO), состав —
+        `items` = [{barcode, count}]. Склад WB в payload структурно НЕ передаётся:
+        в OpenAPI add поля склада нет (самовывоз без адреса), он выбирается в UI
+        «Целиком» — мы дописываем его в `comment` (см. сервис). БЕЗ retry: повторный
+        POST = дубликат реального заказа. Ответ — {status: OK, id: <orderId>, ...}.
         """
         payload: dict = {"delivery": delivery, "fbo": fbo, "items": items}
         if comment:
