@@ -37,6 +37,13 @@ from backend.services.cost.nomenclature import (
     get_nomenclature_subjects,
     upload_nomenclature,
 )
+from backend.services.cost.opening_balance import (
+    get_opening_balances,
+    get_sku_valuation,
+    get_valuation_summary,
+    update_order_arrival_date,
+    upsert_opening_balances,
+)
 from backend.services.cost.orders import (
     create_cost_order,
     delete_cost_order,
@@ -91,6 +98,12 @@ __all__ = [
     "recalculate_order_items",
     # Plan
     "generate_payment_plan",
+    # Opening balance + valuation analytics
+    "get_opening_balances",
+    "upsert_opening_balances",
+    "update_order_arrival_date",
+    "get_sku_valuation",
+    "get_valuation_summary",
     # ETL
     "detect_and_normalize_excel",
 ]

@@ -1,6 +1,10 @@
 /** Cost API methods */
 import { ApiClient } from './client';
-import type { CostOrder, CostOrderItem, Nomenclature, DutyRule, DutyException, MissingAreaBarcode, MissingWeightBarcode, MessageResponse } from '@/types/api';
+import type {
+    CostOrder, CostOrderItem, Nomenclature, DutyRule, DutyException,
+    MissingAreaBarcode, MissingWeightBarcode, MessageResponse,
+    SkuValuation, ValuationSummaryRow, OpeningBalanceItem, ValuationMethod,
+} from '@/types/api';
 
 export function addCostMethods(api: ApiClient) {
     return {
@@ -36,6 +40,49 @@ export function addCostMethods(api: ApiClient) {
             formData.append('file', file);
             return api.uploadFormData<{ inserted: number; unrecognized: number }>(
                 `/api/v1/cost/orders/${encodeURIComponent(orderNo)}/upload`, formData
+            );
+        },
+
+        // ─── SKU Valuation analytics (FIFO / moving / lifetime) ─────────────
+        getSkuValuation(barcode: string, dateFrom?: string, dateTo?: string) {
+            const q = new URLSearchParams();
+            q.set('barcode', barcode);
+            if (dateFrom) q.set('date_from', dateFrom);
+            if (dateTo) q.set('date_to', dateTo);
+            return api.request<SkuValuation>('GET', `/api/v1/cost/valuation/sku?${q.toString()}`);
+        },
+        getValuationSummary(dateFrom?: string, dateTo?: string) {
+            const q = new URLSearchParams();
+            if (dateFrom) q.set('date_from', dateFrom);
+            if (dateTo) q.set('date_to', dateTo);
+            const qs = q.toString();
+            return api.request<ValuationSummaryRow[]>('GET', `/api/v1/cost/valuation/summary${qs ? '?' + qs : ''}`);
+        },
+        getValuationMethod() {
+            return api.request<{ method: ValuationMethod }>('GET', '/api/v1/cost/valuation_method');
+        },
+        setValuationMethod(method: ValuationMethod) {
+            return api.request<{ method: ValuationMethod }>('PUT', '/api/v1/cost/valuation_method', { method });
+        },
+        getValuationStart() {
+            return api.request<{ start_date: string | null }>('GET', '/api/v1/cost/valuation_start');
+        },
+        setValuationStart(startDate: string | null) {
+            return api.request<{ start_date: string | null }>('PUT', '/api/v1/cost/valuation_start', { start_date: startDate });
+        },
+        setOrderArrivalDate(orderNo: string, actualArrivalDate: string | null) {
+            return api.request<MessageResponse>(
+                'PUT',
+                `/api/v1/cost/orders/${encodeURIComponent(orderNo)}/arrival_date`,
+                { actual_arrival_date: actualArrivalDate },
+            );
+        },
+        getOpeningBalances() {
+            return api.request<OpeningBalanceItem[]>('GET', '/api/v1/cost/opening_balance');
+        },
+        setOpeningBalances(items: OpeningBalanceItem[]) {
+            return api.request<{ saved: number; not_found: string[] }>(
+                'PUT', '/api/v1/cost/opening_balance', { items },
             );
         },
     };

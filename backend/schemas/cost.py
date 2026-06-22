@@ -137,3 +137,91 @@ class CostOrderCreate(BaseModel):
     dt_number: str | None = None
     status: str | None = None
     target_warehouse_id: int | None = None
+
+
+# ─── Valuation analytics (FIFO / moving / lifetime) ──────────────────────────
+
+
+class CostLayerSchema(BaseModel):
+    """One batch in the SKU ledger (received / consumed / remaining)."""
+
+    order_no: str
+    avail_date: date | None = None
+    qty: int
+    remaining: int
+    consumed: int
+    unit_cost: float
+    arrival_known: bool
+
+
+class MonthlyCogsSchema(BaseModel):
+    """Per-month COGS for a SKU under all three methods."""
+
+    month: str
+    qty: int  # net = sold − returned
+    sold: int
+    returned: int
+    cogs_fifo: float
+    cogs_avg: float
+    cogs_moving: float
+
+
+class SkuValuationSchema(BaseModel):
+    """Full per-SKU valuation analytics for the cost page drill-down."""
+
+    sku: str
+    barcode: str | None = None
+    article_wb: int | None = None
+    brand: str = ""
+    subject: str = ""
+    lifetime_avg: float
+    eff_now: dict[str, float]
+    on_hand_qty: int
+    on_hand_value: dict[str, float]
+    total_received: int
+    total_sold: int
+    is_estimated: bool
+    warnings: list[str] = []
+    ledger: list[CostLayerSchema] = []
+    monthly: list[MonthlyCogsSchema] = []
+
+
+class ValuationSummaryRow(BaseModel):
+    """One SKU in the project-wide distortion summary."""
+
+    sku: str
+    barcode: str | None = None
+    article_wb: int | None = None
+    brand: str = ""
+    subject: str = ""
+    qty: int
+    cogs_current: float
+    cogs_fifo: float
+    distortion: float  # cogs_fifo − cogs_current (per window)
+    is_estimated: bool
+
+
+class OpeningBalanceItem(BaseModel):
+    barcode: str
+    qty: int
+    unit_cost: Decimal
+    as_of_date: date | None = None
+    note: str | None = None
+
+
+class OpeningBalanceUpdate(BaseModel):
+    items: list[OpeningBalanceItem]
+
+
+class ArrivalDateUpdate(BaseModel):
+    actual_arrival_date: date | None = None
+
+
+class ValuationMethodUpdate(BaseModel):
+    method: str  # lifetime_avg | fifo | moving_avg
+
+
+class ValuationStartUpdate(BaseModel):
+    """Data-start cutoff: ignore sales before this date (incomplete early data)."""
+
+    start_date: date | None = None

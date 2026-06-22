@@ -33,6 +33,7 @@ from backend.models.category_rules import (
 
 # Cost
 from backend.models.cost import (
+    CostOpeningBalance,
     CostOrder,
     CostOrderItem,
     DutyException,
@@ -269,6 +270,7 @@ __all__ = [
     "DutyException",
     "CostOrder",
     "CostOrderItem",
+    "CostOpeningBalance",
     # Integrations & Funnel
     "IntegrationKey",
     "SyncLog",

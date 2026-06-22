@@ -6,18 +6,18 @@ import { usePermissions } from '@/lib/hooks/usePermissions';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import type {
     CostHistoryResponse, CostHistoryArticle, CostHistoryOrder,
-    Nomenclature,
+    Nomenclature, SkuValuation, MonthlyCogs, CostLayer, ValuationMethod, ValuationSummaryRow,
 } from '@/types/api';
 
 export default function CostPage() {
-    const [tab, setTab] = useState<'history' | 'bulk'>('history');
+    const [tab, setTab] = useState<'history' | 'bulk' | 'analytics'>('history');
 
     return (
         <div className="animate-in">
             <div className="page-header">
                 <div>
                     <h1 className="page-title">💰 Себестоимость</h1>
-                    <p className="page-subtitle">История себестоимости по заказам и массовая загрузка</p>
+                    <p className="page-subtitle">История себестоимости по заказам, массовая загрузка и аналитика SKU</p>
                 </div>
             </div>
             <div style={{ display: 'flex', gap: 4, marginBottom: 20 }}>
@@ -25,9 +25,12 @@ export default function CostPage() {
                     onClick={() => setTab('history')}>📋 История себестоимости</button>
                 <button className={`btn ${tab === 'bulk' ? 'btn-primary' : 'btn-secondary'} btn-sm`}
                     onClick={() => setTab('bulk')}>📥 Массовая себестоимость</button>
+                <button className={`btn ${tab === 'analytics' ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                    onClick={() => setTab('analytics')}>📊 Аналитика SKU</button>
             </div>
             {tab === 'history' && <CostHistory />}
             {tab === 'bulk' && <BulkCost />}
+            {tab === 'analytics' && <SkuAnalytics />}
         </div>
     );
 }
@@ -582,6 +585,684 @@ function BulkCost() {
                         : `Сохранить (${pasteFilledRows.length})`}
                 </button>
             </div>
+        </div>
+    );
+}
+
+/* ─── Tab 3: Аналитика SKU (FIFO / Скользящая / Пожизненная) ──────────────── */
+
+const METHOD_LABELS: Record<ValuationMethod, string> = {
+    fifo: 'FIFO',
+    moving_avg: 'Скользящая',
+    lifetime_avg: 'Пожизненная',
+};
+const METHOD_ORDER: ValuationMethod[] = ['fifo', 'moving_avg', 'lifetime_avg'];
+
+/** monthly COGS field for a given preview method. */
+function monthlyCogs(m: MonthlyCogs, method: ValuationMethod): number {
+    if (method === 'fifo') return m.cogs_fifo;
+    if (method === 'moving_avg') return m.cogs_moving;
+    return m.cogs_avg; // lifetime_avg
+}
+
+function SkuAnalytics() {
+    // Nomenclature for the SKU picker (barcode / article search)
+    const [nomenclature, setNomenclature] = useState<Nomenclature[]>([]);
+    const [query, setQuery] = useState('');
+    const [barcode, setBarcode] = useState<string>('');
+
+    // Drill-down data
+    const [val, setVal] = useState<SkuValuation | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+
+    // Preview method (client-side only — does NOT call set_valuation_method)
+    const [previewMethod, setPreviewMethod] = useState<ValuationMethod>('lifetime_avg');
+
+    // Saved (applied-to-all-reports) method
+    const [savedMethod, setSavedMethod] = useState<ValuationMethod | null>(null);
+    const [applying, setApplying] = useState(false);
+
+    // Project-wide data-start cutoff — sales before this date are ignored
+    // (incomplete early periods, e.g. Dec 2025).
+    const [cutoff, setCutoff] = useState<string>('');
+    const [savingCutoff, setSavingCutoff] = useState(false);
+
+    // Bump to refetch the current SKU after an edit (cutoff / arrival / opening).
+    const [reloadKey, setReloadKey] = useState(0);
+    const reload = () => setReloadKey(k => k + 1);
+
+    const saveCutoff = async (value: string | null) => {
+        setSavingCutoff(true);
+        try {
+            const r = await api.setValuationStart(value);
+            setCutoff(r.start_date || '');
+            reload();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setSavingCutoff(false);
+    };
+
+    // Load nomenclature + current saved method once
+    useEffect(() => {
+        const controller = new AbortController();
+        api.getNomenclature().then(rows => {
+            if (controller.signal.aborted) return;
+            setNomenclature(rows);
+        }).catch(() => {});
+        api.getValuationMethod().then(r => {
+            if (controller.signal.aborted) return;
+            setSavedMethod(r.method);
+            setPreviewMethod(r.method);
+        }).catch(() => {});
+        api.getValuationStart().then(r => {
+            if (controller.signal.aborted) return;
+            setCutoff(r.start_date || '');
+        }).catch(() => {});
+        return () => controller.abort();
+    }, []);
+
+    // Load valuation for the selected barcode
+    useEffect(() => {
+        if (!barcode) { setVal(null); setError(''); return; }
+        const controller = new AbortController();
+        setLoading(true);
+        setError('');
+        api.getSkuValuation(barcode)
+            .then(r => {
+                if (controller.signal.aborted) return;
+                setVal(r);
+                setLoading(false);
+            })
+            .catch((e: unknown) => {
+                if (controller.signal.aborted) return;
+                setError(e instanceof Error ? e.message : 'Ошибка');
+                setVal(null);
+                setLoading(false);
+            });
+        return () => controller.abort();
+    }, [barcode, reloadKey]);
+
+    // SKU search suggestions (barcode / article_seller / article_wb)
+    const suggestions = React.useMemo(() => {
+        const q = query.trim().toLowerCase();
+        if (!q) return [] as Nomenclature[];
+        return nomenclature.filter(n =>
+            (n.barcode && n.barcode.toLowerCase().includes(q)) ||
+            (n.article_seller && n.article_seller.toLowerCase().includes(q)) ||
+            (n.article_wb && String(n.article_wb).includes(q))
+        ).slice(0, 20);
+    }, [query, nomenclature]);
+
+    const pickSku = (n: Nomenclature) => {
+        if (!n.barcode) return;
+        setBarcode(n.barcode);
+        setQuery(n.article_seller || n.barcode);
+    };
+
+    const applyMethodToAll = async () => {
+        const ok = window.confirm(
+            `Применить метод «${METHOD_LABELS[previewMethod]}» ко ВСЕМ отчётам проекта?\n\n` +
+            `Это изменит расчёт себестоимости (COGS, прибыль, маржинальность) во всех отчётах. ` +
+            `Сейчас применён: «${savedMethod ? METHOD_LABELS[savedMethod] : '—'}».`
+        );
+        if (!ok) return;
+        setApplying(true);
+        try {
+            const r = await api.setValuationMethod(previewMethod);
+            setSavedMethod(r.method);
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setApplying(false);
+    };
+
+    const selectStyle: React.CSSProperties = {
+        padding: '8px 12px', borderRadius: 8,
+        border: '1px solid var(--border)',
+        background: 'var(--bg-secondary)', color: 'var(--text-primary)',
+    };
+
+    return (
+        <div>
+            {/* ─── SKU picker ─── */}
+            <div style={{ position: 'relative', marginBottom: 16, maxWidth: 420 }}>
+                <input
+                    type="text"
+                    placeholder="🔍 Артикул / WB артикул / баркод"
+                    value={query}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
+                    style={{ ...selectStyle, width: '100%' }}
+                />
+                {query.trim() && suggestions.length > 0 && barcode !== suggestions[0]?.barcode && (
+                    <div className="glass-card" style={{
+                        position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 20,
+                        marginTop: 4, maxHeight: 280, overflow: 'auto', padding: 4,
+                    }}>
+                        {suggestions.map((n, i) => (
+                            <div
+                                key={`${n.barcode || n.article_wb}-${i}`}
+                                onClick={() => pickSku(n)}
+                                style={{
+                                    padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+                                    fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8,
+                                }}
+                                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-secondary)')}
+                                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                            >
+                                <span style={{ fontWeight: 600 }}>{n.article_seller || n.barcode}</span>
+                                <span style={{ opacity: 0.5, fontFamily: 'monospace', fontSize: 12 }}>{n.barcode}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* ─── Data-start cutoff (project-wide) ─── */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 16, fontSize: 13 }}>
+                <span style={{ opacity: 0.7 }}>Учитывать продажи с:</span>
+                <input
+                    type="date"
+                    value={cutoff}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setCutoff(e.target.value)}
+                    style={{ ...selectStyle, padding: '6px 10px' }}
+                />
+                <button className="btn btn-secondary btn-sm" disabled={savingCutoff} onClick={() => saveCutoff(cutoff || null)}>
+                    {savingCutoff ? 'Сохранение...' : 'Применить'}
+                </button>
+                {cutoff && (
+                    <button className="btn btn-sm" style={{ opacity: 0.6 }} disabled={savingCutoff} onClick={() => saveCutoff(null)}>
+                        Сбросить
+                    </button>
+                )}
+                <span style={{ opacity: 0.45, fontSize: 12 }}>продажи до даты игнорируются (неполные ранние данные)</span>
+            </div>
+
+            {/* ─── States ─── */}
+            {!barcode && (
+                <ValuationOverview
+                    cutoff={cutoff}
+                    savedMethod={savedMethod}
+                    setSavedMethod={setSavedMethod}
+                    onPick={(bc, name) => { setBarcode(bc); setQuery(name); }}
+                />
+            )}
+            {barcode && loading && (
+                <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>⏳ Загрузка...</div>
+            )}
+            {barcode && error && (
+                <div className="glass-card" style={{ padding: 32, color: 'var(--danger)' }}>❌ {error}</div>
+            )}
+            {barcode && !loading && !error && val && (
+                <SkuAnalyticsPanel
+                    val={val}
+                    previewMethod={previewMethod}
+                    setPreviewMethod={setPreviewMethod}
+                    savedMethod={savedMethod}
+                    applying={applying}
+                    applyMethodToAll={applyMethodToAll}
+                    reload={reload}
+                />
+            )}
+        </div>
+    );
+}
+
+interface OverviewGroup {
+    key: string;
+    qty: number;
+    cogs_current: number;
+    cogs_fifo: number;
+    distortion: number;
+    barcode?: string | null;
+}
+
+/** Empty-state overview: global method switch + project-wide FIFO-vs-current
+ *  distortion, grouped by brand / category / top SKU. */
+function ValuationOverview({ cutoff, savedMethod, setSavedMethod, onPick }: {
+    cutoff: string;
+    savedMethod: ValuationMethod | null;
+    setSavedMethod: (m: ValuationMethod) => void;
+    onPick: (barcode: string, name: string) => void;
+}) {
+    const [summary, setSummary] = useState<ValuationSummaryRow[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [groupBy, setGroupBy] = useState<'brand' | 'subject' | 'sku'>('brand');
+    const [applying, setApplying] = useState(false);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true);
+        const from = cutoff || '2025-01-01';
+        const to = new Date().toISOString().slice(0, 10);
+        api.getValuationSummary(from, to)
+            .then(rows => { if (controller.signal.aborted) return; setSummary(rows); setLoading(false); })
+            .catch(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [cutoff]);
+
+    const applyMethod = async (m: ValuationMethod) => {
+        if (m === savedMethod) return;
+        if (!window.confirm(
+            `Переключить ВСЕ отчёты проекта на метод «${METHOD_LABELS[m]}»?\n\n` +
+            `Это изменит себестоимость, прибыль и маржу в ОПиУ, BDR, воронке и на складе. ` +
+            `Сейчас: «${savedMethod ? METHOD_LABELS[savedMethod] : '—'}».`
+        )) return;
+        setApplying(true);
+        try { const r = await api.setValuationMethod(m); setSavedMethod(r.method); }
+        catch (e: unknown) { alert(e instanceof Error ? e.message : 'Ошибка'); }
+        setApplying(false);
+    };
+
+    const groups: OverviewGroup[] = React.useMemo(() => {
+        if (groupBy === 'sku') {
+            return summary.slice(0, 50).map(r => ({
+                key: r.sku, qty: r.qty, cogs_current: r.cogs_current,
+                cogs_fifo: r.cogs_fifo, distortion: r.distortion, barcode: r.barcode,
+            }));
+        }
+        const map = new Map<string, OverviewGroup>();
+        for (const r of summary) {
+            const key = (groupBy === 'brand' ? r.brand : r.subject) || '—';
+            const g = map.get(key) || { key, qty: 0, cogs_current: 0, cogs_fifo: 0, distortion: 0 };
+            g.qty += r.qty; g.cogs_current += r.cogs_current;
+            g.cogs_fifo += r.cogs_fifo; g.distortion += r.distortion;
+            map.set(key, g);
+        }
+        return [...map.values()].sort((a, b) => Math.abs(b.distortion) - Math.abs(a.distortion));
+    }, [summary, groupBy]);
+
+    const totalDistortion = summary.reduce((s, r) => s + Math.abs(r.distortion), 0);
+
+    const gbBtn = (k: 'brand' | 'subject' | 'sku', label: string) => (
+        <button className={`btn ${groupBy === k ? 'btn-primary' : 'btn-secondary'} btn-sm`} onClick={() => setGroupBy(k)}>{label}</button>
+    );
+
+    return (
+        <div>
+            {/* Global method switch (answers "как переключить весь себес") */}
+            <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 14, fontWeight: 600 }}>Метод себестоимости в отчётах:</span>
+                <div style={{ display: 'flex', gap: 4 }}>
+                    {METHOD_ORDER.map(m => (
+                        <button key={m} className={`btn ${savedMethod === m ? 'btn-primary' : 'btn-secondary'} btn-sm`} disabled={applying} onClick={() => applyMethod(m)}>
+                            {METHOD_LABELS[m]}{savedMethod === m ? ' ✓' : ''}
+                        </button>
+                    ))}
+                </div>
+                <span style={{ fontSize: 12, opacity: 0.55 }}>применяется к ОПиУ, BDR, воронке, складу — пересчёт всех отчётов</span>
+            </div>
+
+            {/* Project-wide distortion */}
+            <div className="glass-card" style={{ padding: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                    <span style={{ fontSize: 15, fontWeight: 600 }}>Искажение прибыли: FIFO vs текущий метод</span>
+                    <span style={{ fontSize: 22, fontWeight: 700, color: 'var(--danger)' }}>{formatNumber(totalDistortion)} ₽</span>
+                    <span style={{ fontSize: 12, opacity: 0.5 }}>суммарно по проекту с {cutoff || '2025-01-01'}</span>
+                    <div style={{ flex: 1 }} />
+                    {gbBtn('brand', 'По брендам')}
+                    {gbBtn('subject', 'По категориям')}
+                    {gbBtn('sku', 'Топ SKU')}
+                </div>
+                {loading ? (
+                    <div style={{ padding: 24, textAlign: 'center', opacity: 0.6 }}>⏳ Считаем по всему проекту...</div>
+                ) : groups.length === 0 ? (
+                    <div style={{ padding: 24, textAlign: 'center', opacity: 0.6 }}>Нет данных за период.</div>
+                ) : (
+                    <div style={{ overflow: 'auto' }}>
+                        <table className="data-table" style={{ marginBottom: 0, fontSize: 13 }}>
+                            <thead>
+                                <tr>
+                                    <th>{groupBy === 'brand' ? 'Бренд' : groupBy === 'subject' ? 'Категория' : 'Артикул'}</th>
+                                    <th style={{ textAlign: 'right' }}>Продажи (шт)</th>
+                                    <th style={{ textAlign: 'right' }}>Себес текущая ₽</th>
+                                    <th style={{ textAlign: 'right' }}>Себес FIFO ₽</th>
+                                    <th style={{ textAlign: 'right' }}>Δ прибыли (→FIFO) ₽</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {groups.slice(0, 50).map(g => {
+                                    const delta = g.cogs_current - g.cogs_fifo; // меньше COGS под FIFO → +прибыль
+                                    const color = delta > 0 ? 'var(--success)' : delta < 0 ? 'var(--danger)' : 'var(--text-primary)';
+                                    const clickable = groupBy === 'sku' && !!g.barcode;
+                                    return (
+                                        <tr key={g.key}
+                                            style={clickable ? { cursor: 'pointer' } : undefined}
+                                            onClick={clickable ? () => onPick(g.barcode as string, g.key) : undefined}
+                                            title={clickable ? 'Открыть детальную аналитику' : undefined}>
+                                            <td style={{ fontWeight: 600 }}>{g.key}{clickable ? ' →' : ''}</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(g.qty, 0)}</td>
+                                            <td style={{ textAlign: 'right', opacity: 0.8 }}>{formatNumber(g.cogs_current)}</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(g.cogs_fifo)}</td>
+                                            <td style={{ textAlign: 'right', color, fontWeight: 600 }}>{delta > 0 ? '+' : ''}{formatNumber(delta)}</td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+                <div style={{ fontSize: 12, opacity: 0.5, marginTop: 10 }}>
+                    Или выберите товар выше — детальная аналитика по партиям, методам и помесячно.
+                </div>
+            </div>
+        </div>
+    );
+}
+
+interface PanelProps {
+    val: SkuValuation;
+    previewMethod: ValuationMethod;
+    setPreviewMethod: (m: ValuationMethod) => void;
+    savedMethod: ValuationMethod | null;
+    applying: boolean;
+    applyMethodToAll: () => void;
+    reload: () => void;
+}
+
+function SkuAnalyticsPanel({
+    val, previewMethod, setPreviewMethod, savedMethod, applying, applyMethodToAll, reload,
+}: PanelProps) {
+    // KPI: profit distortion = Σ|cogs_fifo − cogs_avg| over months
+    const distortion = val.monthly.reduce((s, m) => s + Math.abs(m.cogs_fifo - m.cogs_avg), 0);
+    const onHandPreview = val.on_hand_value[previewMethod];
+    const effPreview = val.eff_now[previewMethod];
+
+    // Inline arrival-date editor (per batch row); RETURN/OPENING rows aren't editable.
+    const [editOrder, setEditOrder] = useState<string | null>(null);
+    const [editDate, setEditDate] = useState('');
+    const [savingArr, setSavingArr] = useState(false);
+
+    const saveArrival = async (orderNo: string) => {
+        setSavingArr(true);
+        try {
+            await api.setOrderArrivalDate(orderNo, editDate || null);
+            setEditOrder(null);
+            reload();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setSavingArr(false);
+    };
+
+    const kpiCardStyle: React.CSSProperties = {
+        flex: '1 1 180px', padding: 16, borderRadius: 16,
+        background: 'var(--bg-card, var(--bg-secondary))',
+        border: '1px solid var(--border)',
+    };
+    const kpiLabel: React.CSSProperties = { fontSize: 12, opacity: 0.6, marginBottom: 6 };
+    const kpiValue: React.CSSProperties = { fontSize: 24, fontWeight: 700 };
+
+    const maxBatchQty = Math.max(1, ...val.ledger.map(l => l.qty));
+
+    return (
+        <div>
+            {/* Header line */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 18, fontWeight: 700 }}>{val.sku}</span>
+                {val.article_wb != null && <span className="badge badge-info" style={{ fontSize: 11 }}>WB {val.article_wb}</span>}
+                {val.brand && <span className="badge badge-secondary" style={{ fontSize: 11 }}>{val.brand}</span>}
+                {val.subject && <span style={{ opacity: 0.6, fontSize: 13 }}>{val.subject}</span>}
+                {val.barcode && <span style={{ opacity: 0.4, fontFamily: 'monospace', fontSize: 12 }}>{val.barcode}</span>}
+            </div>
+
+            {/* Warnings */}
+            {(val.is_estimated || val.warnings.length > 0) && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+                    {val.is_estimated && (
+                        <span className="badge badge-warning" style={{ fontSize: 11 }}>⚠ Оценочная себестоимость</span>
+                    )}
+                    {val.warnings.map((w, i) => (
+                        <span key={i} className="badge badge-warning" style={{ fontSize: 11 }}>{w}</span>
+                    ))}
+                </div>
+            )}
+
+            {/* KPI cards */}
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+                <div style={kpiCardStyle}>
+                    <div style={kpiLabel}>Себес сейчас (пожизненная)</div>
+                    <div style={{ ...kpiValue, color: 'var(--primary)' }}>{formatNumber(val.lifetime_avg)} ₽</div>
+                </div>
+                <div style={kpiCardStyle}>
+                    <div style={kpiLabel}>FIFO сейчас</div>
+                    <div style={{ ...kpiValue, color: 'var(--success)' }}>{formatNumber(val.eff_now.fifo)} ₽</div>
+                </div>
+                <div style={kpiCardStyle}>
+                    <div style={kpiLabel}>Оценка остатка ({METHOD_LABELS[previewMethod]})</div>
+                    <div style={kpiValue}>{formatNumber(onHandPreview)} ₽</div>
+                    <div style={{ fontSize: 11, opacity: 0.5, marginTop: 2 }}>{formatNumber(val.on_hand_qty, 0)} шт</div>
+                </div>
+                <div style={kpiCardStyle}>
+                    <div style={kpiLabel}>Искажение прибыли (FIFO vs пожизненная)</div>
+                    <div style={{ ...kpiValue, color: distortion > 0 ? 'var(--danger)' : 'var(--text-primary)' }}>
+                        {formatNumber(distortion)} ₽
+                    </div>
+                </div>
+            </div>
+
+            {/* Method toggle (PREVIEW) + apply button */}
+            <div style={{
+                display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+                marginBottom: 16, padding: 12, borderRadius: 12,
+                background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+            }}>
+                <span style={{ fontSize: 13, opacity: 0.7 }}>Метод (превью):</span>
+                <div style={{ display: 'flex', gap: 4 }}>
+                    {METHOD_ORDER.map(m => (
+                        <button
+                            key={m}
+                            className={`btn ${previewMethod === m ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                            onClick={() => setPreviewMethod(m)}
+                        >
+                            {METHOD_LABELS[m]}
+                        </button>
+                    ))}
+                </div>
+                <div style={{ flex: 1 }} />
+                <span style={{ fontSize: 12, opacity: 0.6 }}>
+                    В отчётах: <b>{savedMethod ? METHOD_LABELS[savedMethod] : '—'}</b>
+                </span>
+                <button
+                    className="btn btn-success btn-sm"
+                    onClick={applyMethodToAll}
+                    disabled={applying || previewMethod === savedMethod}
+                    title={previewMethod === savedMethod ? 'Этот метод уже применён' : undefined}
+                    style={{ opacity: previewMethod === savedMethod ? 0.5 : 1 }}
+                >
+                    {applying ? 'Применение...' : 'Применить метод ко всем отчётам'}
+                </button>
+            </div>
+
+            {/* Monthly table */}
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>Помесячная себестоимость</div>
+            {val.monthly.length === 0 ? (
+                <div className="glass-card" style={{ padding: 20, textAlign: 'center', opacity: 0.6, marginBottom: 24 }}>
+                    Нет продаж за период.
+                </div>
+            ) : (
+                <div className="glass-card" style={{ overflow: 'auto', marginBottom: 24, padding: 0 }}>
+                    <table className="data-table" style={{ marginBottom: 0, fontSize: 13 }}>
+                        <thead>
+                            <tr>
+                                <th style={{ minWidth: 90 }}>Месяц</th>
+                                <th style={{ textAlign: 'right' }}>Продажи (шт)</th>
+                                <th style={{ textAlign: 'right' }}>Себес {METHOD_LABELS[previewMethod]} ₽</th>
+                                <th style={{ textAlign: 'right' }}>Себес текущая (пожизненная) ₽</th>
+                                <th style={{ textAlign: 'right' }}>Δ прибыли ₽</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {val.monthly.map((m) => {
+                                const cogsPreview = monthlyCogs(m, previewMethod);
+                                const cogsLifetime = m.cogs_avg;
+                                // Δ прибыли = насколько прибыль выше/ниже при превью-методе vs текущей.
+                                // Меньший COGS → больше прибыль (положительная Δ).
+                                const deltaProfit = cogsLifetime - cogsPreview;
+                                const color = deltaProfit > 0 ? 'var(--success)' : deltaProfit < 0 ? 'var(--danger)' : 'var(--text-primary)';
+                                return (
+                                    <tr key={m.month}>
+                                        <td style={{ fontWeight: 600 }}>{m.month}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(m.qty, 0)}</td>
+                                        <td style={{ textAlign: 'right' }}>{formatNumber(cogsPreview)}</td>
+                                        <td style={{ textAlign: 'right', opacity: 0.8 }}>{formatNumber(cogsLifetime)}</td>
+                                        <td style={{ textAlign: 'right', color, fontWeight: 600 }}>
+                                            {deltaProfit > 0 ? '+' : ''}{formatNumber(deltaProfit)}
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+
+            {/* Batch ledger */}
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>Партии (приходы)</div>
+            {val.ledger.length === 0 ? (
+                <div className="glass-card" style={{ padding: 20, textAlign: 'center', opacity: 0.6 }}>
+                    Нет данных о партиях прихода.
+                </div>
+            ) : (
+                <div className="glass-card" style={{ padding: 16 }}>
+                    {val.ledger.map((l: CostLayer, i) => {
+                        const consumedPct = l.qty > 0 ? (l.consumed / l.qty) * 100 : 0;
+                        const widthPct = (l.qty / maxBatchQty) * 100;
+                        return (
+                            <div key={`${l.order_no}-${i}`} style={{ marginBottom: i < val.ledger.length - 1 ? 14 : 0 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8, marginBottom: 4, fontSize: 13 }}>
+                                    <span style={{ fontWeight: 600 }}>
+                                        {l.order_no}
+                                        {!l.arrival_known && (
+                                            <span className="badge badge-warning" style={{ fontSize: 10, marginLeft: 6 }}>дата прихода?</span>
+                                        )}
+                                    </span>
+                                    <span style={{ opacity: 0.6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                        {editOrder === l.order_no ? (
+                                            <>
+                                                <input
+                                                    type="date"
+                                                    value={editDate}
+                                                    onChange={(e: ChangeEvent<HTMLInputElement>) => setEditDate(e.target.value)}
+                                                    style={{ padding: '2px 6px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 12 }}
+                                                />
+                                                <button className="btn btn-primary btn-sm" disabled={savingArr} onClick={() => saveArrival(l.order_no)}>✓</button>
+                                                <button className="btn btn-sm" disabled={savingArr} onClick={() => setEditOrder(null)}>✕</button>
+                                            </>
+                                        ) : l.order_no !== 'RETURN' && l.order_no !== 'OPENING' ? (
+                                            <>
+                                                <span
+                                                    style={{ cursor: 'pointer', textDecoration: 'underline dotted' }}
+                                                    title="Изменить дату прихода"
+                                                    onClick={() => { setEditOrder(l.order_no); setEditDate(l.avail_date || ''); }}
+                                                >
+                                                    {l.avail_date ? formatDate(l.avail_date) : 'задать дату прихода'}
+                                                </span>
+                                                <span> · {formatNumber(l.unit_cost)} ₽/шт</span>
+                                            </>
+                                        ) : (
+                                            <span>{l.avail_date ? formatDate(l.avail_date) : '—'} · {formatNumber(l.unit_cost)} ₽/шт</span>
+                                        )}
+                                    </span>
+                                </div>
+                                {/* Bar: consumed vs remaining */}
+                                <div style={{
+                                    width: `${widthPct}%`, minWidth: 60, height: 22, borderRadius: 6,
+                                    background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                                    display: 'flex', overflow: 'hidden',
+                                }}>
+                                    <div style={{
+                                        width: `${consumedPct}%`, background: 'var(--primary)',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        fontSize: 10, color: '#fff', whiteSpace: 'nowrap',
+                                    }} title={`Списано: ${l.consumed} шт`}>
+                                        {consumedPct > 18 ? `${formatNumber(l.consumed, 0)}` : ''}
+                                    </div>
+                                    <div style={{
+                                        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        fontSize: 10, opacity: 0.7, whiteSpace: 'nowrap',
+                                    }} title={`Остаток: ${l.remaining} шт`}>
+                                        {100 - consumedPct > 18 ? `${formatNumber(l.remaining, 0)}` : ''}
+                                    </div>
+                                </div>
+                                <div style={{ fontSize: 11, opacity: 0.5, marginTop: 3 }}>
+                                    Партия {formatNumber(l.qty, 0)} шт · списано {formatNumber(l.consumed, 0)} · остаток {formatNumber(l.remaining, 0)}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+
+            {/* ─── Opening balance editor ─── */}
+            {val.barcode && (
+                <OpeningBalanceEditor barcode={val.barcode} suggestedCost={val.lifetime_avg} reload={reload} />
+            )}
+        </div>
+    );
+}
+
+function OpeningBalanceEditor({ barcode, suggestedCost, reload }: { barcode: string; suggestedCost: number; reload: () => void }) {
+    const [open, setOpen] = useState(false);
+    const [qty, setQty] = useState('');
+    const [cost, setCost] = useState('');
+    const [asOf, setAsOf] = useState('');
+    const [saving, setSaving] = useState(false);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        api.getOpeningBalances().then(rows => {
+            if (controller.signal.aborted) return;
+            const cur = rows.find(r => r.barcode === barcode);
+            if (cur) { setQty(String(cur.qty)); setCost(String(cur.unit_cost)); setAsOf(cur.as_of_date || ''); }
+        }).catch(() => {});
+        return () => controller.abort();
+    }, [barcode]);
+
+    const save = async () => {
+        setSaving(true);
+        try {
+            await api.setOpeningBalances([{ barcode, qty: Number(qty) || 0, unit_cost: Number(cost) || 0, as_of_date: asOf || null }]);
+            reload();
+        } catch (e: unknown) {
+            alert(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setSaving(false);
+    };
+
+    const inp: React.CSSProperties = {
+        padding: '6px 10px', borderRadius: 8, border: '1px solid var(--border)',
+        background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13, width: 130,
+    };
+
+    return (
+        <div style={{ marginTop: 20 }}>
+            <button className="btn btn-secondary btn-sm" onClick={() => setOpen(o => !o)}>
+                {open ? '▾' : '▸'} Стартовый остаток (опенинг-баланс)
+            </button>
+            {open && (
+                <div className="glass-card" style={{ padding: 16, marginTop: 8, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                    <label style={{ fontSize: 12, opacity: 0.7 }}>
+                        Кол-во, шт<br />
+                        <input type="number" value={qty} onChange={(e: ChangeEvent<HTMLInputElement>) => setQty(e.target.value)} style={inp} />
+                    </label>
+                    <label style={{ fontSize: 12, opacity: 0.7 }}>
+                        Себес/шт, ₽<br />
+                        <input type="number" step="0.01" value={cost} placeholder={String(suggestedCost)} onChange={(e: ChangeEvent<HTMLInputElement>) => setCost(e.target.value)} style={inp} />
+                    </label>
+                    <label style={{ fontSize: 12, opacity: 0.7 }}>
+                        На дату<br />
+                        <input type="date" value={asOf} onChange={(e: ChangeEvent<HTMLInputElement>) => setAsOf(e.target.value)} style={inp} />
+                    </label>
+                    <button className="btn btn-primary btn-sm" disabled={saving} onClick={save}>
+                        {saving ? 'Сохранение...' : 'Сохранить'}
+                    </button>
+                    <span style={{ fontSize: 11, opacity: 0.5, flexBasis: '100%' }}>
+                        Старейшая партия — гасится FIFO первой. Нужен, если продажи начинаются раньше первой завезённой партии.
+                    </span>
+                </div>
+            )}
         </div>
     );
 }

@@ -95,17 +95,33 @@ async def run_funnel_sync(
         "days_done": 0,
     }
 
-    # Use same cost sources as BDR (weighted average + overrides)
+    # Use same cost sources as BDR. lifetime_avg: weighted average + overrides
+    # (legacy path, kept identical). fifo/moving_avg: per-unit as-of cost from the
+    # valuation engine (eff_now[method]), keyed by lowered article_seller (= vendor_code
+    # lowercased); overrides still seed nm_id keys as a fallback.
     from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides
+    from backend.services.cost.valuation import (
+        DEFAULT_METHOD,
+        compute_project_valuation,
+    )
+    from backend.services.settings_service import get_valuation_method
 
     cost_map: dict = {}
     try:
-        cost_by_article = await load_avg_costs(db, pid)
-        for art, cost in cost_by_article.items():
-            cost_map[art] = Decimal(str(cost))
+        method = await get_valuation_method(db, pid)
+        if method == DEFAULT_METHOD:
+            cost_by_article = await load_avg_costs(db, pid)
+            for art, cost in cost_by_article.items():
+                cost_map[art] = Decimal(str(cost))
+        else:
+            valuation = await compute_project_valuation(db, pid)
+            for sku, v in valuation.items():
+                eff = Decimal(str(v["eff_now"][method]))
+                if eff > 0:
+                    cost_map[sku] = eff
         cost_overrides = await load_cost_overrides(db, pid)
         for nm_id, cost in cost_overrides.items():
-            cost_map[nm_id] = Decimal(str(cost))
+            cost_map.setdefault(nm_id, Decimal(str(cost)))
     except Exception as e:
         logger.warning(f"Cost lookup failed: {e}")
 

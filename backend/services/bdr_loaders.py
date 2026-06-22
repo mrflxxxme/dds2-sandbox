@@ -8,10 +8,11 @@ import logging
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import case, desc, func, select
+from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import CostOrderItem, WbCostOverride, WbFunnelDaily
+from backend.models.enums import VehicleStatus
 
 logger = logging.getLogger("dds.bdr_loaders")
 
@@ -155,6 +156,7 @@ async def load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
             CostOrderItem.article_seller.isnot(None),
             CostOrderItem.total_rub.isnot(None),
             CostOrderItem.qty > 0,
+            or_(CostOrder.status.is_(None), CostOrder.status != VehicleStatus.FORMING),
         )
         .group_by(article_lower)
     )

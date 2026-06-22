@@ -741,6 +741,82 @@ export interface CostHistoryResponse {
   brands: string[];
 }
 
+// ─── SKU Valuation analytics (FIFO / moving / lifetime) ─────────────────────
+
+/** Valuation method keys returned/accepted by the backend. */
+export type ValuationMethod = 'lifetime_avg' | 'fifo' | 'moving_avg';
+
+/** Per-method numeric map (eff_now / on_hand_value). */
+export interface ValuationMethodMap {
+  lifetime_avg: number;
+  fifo: number;
+  moving_avg: number;
+}
+
+/** One batch in the SKU ledger (received / consumed / remaining). */
+export interface CostLayer {
+  order_no: string;
+  avail_date: string | null;
+  qty: number;
+  remaining: number;
+  consumed: number;
+  unit_cost: number;
+  arrival_known: boolean;
+}
+
+/** Per-month COGS for a SKU under all three methods. */
+export interface MonthlyCogs {
+  month: string;
+  qty: number; // net = sold − returned
+  sold: number;
+  returned: number;
+  cogs_fifo: number;
+  cogs_avg: number;
+  cogs_moving: number;
+}
+
+/** Full per-SKU valuation analytics for the cost page drill-down. */
+export interface SkuValuation {
+  sku: string;
+  barcode: string | null;
+  article_wb: number | null;
+  brand: string;
+  subject: string;
+  lifetime_avg: number;
+  eff_now: ValuationMethodMap;
+  on_hand_qty: number;
+  on_hand_value: ValuationMethodMap;
+  total_received: number;
+  total_sold: number;
+  is_estimated: boolean;
+  warnings: string[];
+  ledger: CostLayer[];
+  monthly: MonthlyCogs[];
+}
+
+/** One SKU in the project-wide distortion summary. */
+export interface ValuationSummaryRow {
+  sku: string;
+  barcode: string | null;
+  article_wb: number | null;
+  brand: string;
+  subject: string;
+  qty: number;
+  cogs_current: number;
+  cogs_fifo: number;
+  distortion: number; // cogs_fifo − cogs_current (per window)
+  is_estimated: boolean;
+}
+
+/** One opening-balance row (manual stock seed for valuation). */
+export interface OpeningBalanceItem {
+  barcode: string;
+  qty: number;
+  unit_cost: number;
+  as_of_date?: string | null;
+  note?: string | null;
+}
+
 // ─── Funnel Filters ─────────────────────────────────────────────────────────
 
 export interface FunnelFilters {

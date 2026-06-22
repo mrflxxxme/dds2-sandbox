@@ -9,6 +9,7 @@ from decimal import Decimal
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.cache import invalidate_project_reports
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import VehicleStatus
@@ -1344,15 +1345,36 @@ async def get_unified_stock_summary(
             if n.article_wb:
                 nm_id_to_nom_id[n.article_wb] = n.id
 
-    # 7. Load average costs: CostOrderItem → WbCostOverride → WarehouseStock.cost_price
+    # 7. Load average costs: CostOrderItem → WbCostOverride → WarehouseStock.cost_price.
+    # lifetime_avg — взвешенное среднее по заказам (легаси-путь). fifo/moving_avg —
+    # as-of цена из движка оценки (eff_now[method]) по article_seller_lower; остальные
+    # ступени приоритета (override → склад) сохраняются.
     from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides
+    from backend.services.cost.valuation import (
+        DEFAULT_METHOD,
+        compute_project_valuation,
+    )
+    from backend.services.settings_service import get_valuation_method
 
-    avg_costs_by_article = await load_avg_costs(db, project_id)
+    valuation_method = await get_valuation_method(db, project_id)
+    if valuation_method == DEFAULT_METHOD:
+        avg_costs_by_article = await load_avg_costs(db, project_id)
+    else:
+        _val = await compute_project_valuation(db, project_id)
+        # Skip zero/negative as-of costs so the override → stock priority chain still
+        # applies for SKUs the engine can't price (matches lifetime_avg, which simply
+        # has no map entry for such SKUs).
+        avg_costs_by_article = {
+            sku: float(v["eff_now"][valuation_method])
+            for sku, v in _val.items()
+            if float(v["eff_now"][valuation_method]) > 0
+        }
     cost_overrides = await load_cost_overrides(db, project_id)  # nm_id → cost_price
 
     cost_map: dict[int, float] = {}
     for nom_id, info in nom_map.items():
-        # Priority 1: CostOrderItem weighted average by article_seller (case-insensitive)
+        # Priority 1: per-unit cost by article_seller (case-insensitive) — legacy
+        # weighted average or, for fifo/moving_avg, the engine's as-of unit cost.
         article = info.get("article_seller")
         article_key = article.lower() if article else ""
         if article_key and article_key in avg_costs_by_article:
@@ -1748,4 +1770,6 @@ async def update_cost_price(db: AsyncSession, project_id: int, stock_id: int, co
     stock.updated_at = utcnow()
     await db.commit()
     await db.refresh(stock)
+    # Iron rule 7: changing a unit cost feeds COGS in BDR/ОПИУ/funnel/stock summaries.
+    await invalidate_project_reports(project_id)
     return stock

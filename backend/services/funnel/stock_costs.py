@@ -92,8 +92,28 @@ async def get_stock_cost_map(db: AsyncSession, pid: int) -> dict[int, dict]:
     )
     article_by_nm: dict[int, str | None] = {r.nm_id: r.article_seller for r in nom_result.all()}
 
-    # 3. Цена единицы
-    avg_costs = await load_avg_costs(db, pid)  # article_seller_lower → cost
+    # 3. Цена единицы.
+    # lifetime_avg — взвешенное среднее по заказам (легаси-путь, без изменений).
+    # fifo/moving_avg — as-of цена из движка оценки (eff_now[method]) по тому же
+    # ключу article_seller_lower; остальная часть приоритета (override → склад) та же.
+    from backend.services.cost.valuation import (
+        DEFAULT_METHOD,
+        compute_project_valuation,
+    )
+    from backend.services.settings_service import get_valuation_method
+
+    method = await get_valuation_method(db, pid)
+    if method == DEFAULT_METHOD:
+        avg_costs = await load_avg_costs(db, pid)  # article_seller_lower → cost
+    else:
+        valuation = await compute_project_valuation(db, pid)
+        # >0 only: для SKU без реальной as-of цены приоритет проваливается на
+        # override → склад (как в lifetime_avg, где записи в карте просто нет).
+        avg_costs = {
+            sku: float(v["eff_now"][method])
+            for sku, v in valuation.items()
+            if float(v["eff_now"][method]) > 0
+        }
     overrides = await load_cost_overrides(db, pid)  # nm_id → cost
 
     # 4. Скорость продаж: текущие и предыдущие 7 дней одним запросом
