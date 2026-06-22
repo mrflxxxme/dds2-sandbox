@@ -25,6 +25,11 @@ from backend.services.bdr_loaders import (
     load_cost_overrides,
     load_tax_settings,
 )
+from backend.services.cost.valuation import (
+    DEFAULT_METHOD,
+    compute_project_valuation,
+    slice_window,
+)
 from backend.services.opiu_helpers import (
     build_aggregate_sql,
     build_article_nm_ids_sql,
@@ -34,6 +39,7 @@ from backend.services.opiu_helpers import (
     build_row,
     empty_totals,
 )
+from backend.services.settings_service import get_valuation_method
 
 logger = logging.getLogger("dds.opiu")
 
@@ -166,8 +172,20 @@ async def get_opiu(
             monthly_ads[mk] = sum(month_ads.values())
 
     # ── 7. Cost per month (need per-article qty) ──
-    cost_map = await load_avg_costs(db, project_id)
+    # COGS source depends on the project's valuation method. lifetime_avg keeps
+    # the legacy global-average path bit-for-bit (zero regression). fifo/moving_avg
+    # source per-month COGS from the path-dependent valuation engine, falling back
+    # to the manual override map for SKUs the engine doesn't cover.
+    method = await get_valuation_method(db, project_id)
     cost_overrides = await load_cost_overrides(db, project_id)
+
+    win: dict[str, dict] = {}
+    if method == DEFAULT_METHOD:
+        cost_map = await load_avg_costs(db, project_id)
+    else:
+        cost_map = {}
+        valuation = await compute_project_valuation(db, project_id)
+        win = slice_window(valuation, date_from, date_to, method)
 
     cost_result = await db.execute(text(build_cost_qty_sql(brand, article)), params)
     monthly_cost: dict[str, float] = {mk: 0.0 for mk in months_set}
@@ -176,14 +194,21 @@ async def get_opiu(
         sa_name = row.sa_name or ""
         nm_id = row.nm_id or 0
         qty = int(row.total_qty or 0)
-        # cost_map keyed by lowercased article_seller; sa_name from WB may differ in case
-        cost_price = cost_map.get(sa_name.lower(), 0) if sa_name else 0
-        if cost_price == 0 and nm_id in cost_overrides:
-            cost_price = cost_overrides[nm_id]
-        if mk in monthly_cost:
-            monthly_cost[mk] += cost_price * qty
+        sku = sa_name.lower() if sa_name else ""
+        if method != DEFAULT_METHOD and sku in win and mk in win[sku]["monthly"]:
+            # Engine-computed per-month COGS for this SKU (already net of returns).
+            cost_amount = float(win[sku]["monthly"][mk]["cogs"])
         else:
-            monthly_cost[mk] = cost_price * qty
+            # lifetime_avg path, or override fallback for SKUs missing from valuation.
+            # cost_map keyed by lowercased article_seller; sa_name from WB may differ in case
+            cost_price = cost_map.get(sku, 0) if sku else 0
+            if cost_price == 0 and nm_id in cost_overrides:
+                cost_price = cost_overrides[nm_id]
+            cost_amount = cost_price * qty
+        if mk in monthly_cost:
+            monthly_cost[mk] += cost_amount
+        else:
+            monthly_cost[mk] = cost_amount
     total_cost_val = sum(monthly_cost.values())
 
     # ── 8. Build P&L rows ──

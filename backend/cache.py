@@ -143,6 +143,7 @@ async def invalidate_project_reports(project_id: int):
         "reports:wb_bdr",
         "reports:opiu",
         "reports:cost_dna",
+        "reports:cost_valuation",
         "reports:income_daily",
         "reports:order_geography",
         "reports:cashflow",

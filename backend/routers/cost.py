@@ -4,9 +4,12 @@ Router: /cost — nomenclature, duty rules, cost orders & items, cost calculatio
 Thin HTTP layer — all business logic is in services/cost_service.py.
 """
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.cache import invalidate_cache, invalidate_project_reports
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
@@ -17,6 +20,14 @@ from backend.schemas import (
     DutyExceptionSchema,
     DutyRuleSchema,
     VatRateUpdate,
+)
+from backend.schemas.cost import (
+    ArrivalDateUpdate,
+    OpeningBalanceUpdate,
+    SkuValuationSchema,
+    ValuationMethodUpdate,
+    ValuationStartUpdate,
+    ValuationSummaryRow,
 )
 from backend.services import cost as cost_service
 from backend.utils.rate_limit import rate_limit_import, rate_limit_write
@@ -246,6 +257,24 @@ async def create_cost_order(
     return result
 
 
+# NOTE: registered BEFORE the generic PUT /orders/{order_no:path} — that route's
+# `:path` converter is greedy and would otherwise swallow "<order>/arrival_date".
+@router.put("/orders/{order_no:path}/arrival_date", dependencies=[Depends(rate_limit_write)])
+async def set_order_arrival_date(
+    order_no: str,
+    payload: ArrivalDateUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set the actual arrival date of a cost order (affects FIFO ordering)."""
+    ok = await cost_service.update_order_arrival_date(db, project.id, order_no, payload.actual_arrival_date)
+    if not ok:
+        raise HTTPException(404, "Not found")
+    await invalidate_project_reports(project.id)
+    await invalidate_cache(f"reports:cost_valuation:project_id={project.id}")
+    return {"ok": True}
+
+
 @router.put("/orders/{order_no:path}", dependencies=[Depends(rate_limit_write)])
 async def update_cost_order(
     order_no: str,
@@ -411,3 +440,114 @@ async def set_vat_rate(
 
     new_rate = await _set_vat_rate(db, project, payload.vat_rate)
     return {"status": "ok", "vat_rate": float(new_rate)}
+
+
+# ─── Valuation analytics (FIFO / moving / lifetime) ──────────────────────────
+
+
+@router.get("/valuation/sku", response_model=SkuValuationSchema)
+async def get_sku_valuation(
+    barcode: str = Query(...),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Full per-SKU valuation drill-down (ledger + monthly COGS, all methods)."""
+    data = await cost_service.get_sku_valuation(db, project.id, barcode, date_from, date_to)
+    if data is None:
+        raise HTTPException(404, "SKU не найден или нет данных себестоимости")
+    return data
+
+
+@router.get("/valuation/summary", response_model=list[ValuationSummaryRow])
+async def get_valuation_summary(
+    date_from: date = Query(...),
+    date_to: date = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Project-wide distortion summary: FIFO vs. current method, top by impact."""
+    return await cost_service.get_valuation_summary(db, project.id, date_from, date_to)
+
+
+# ─── Opening balance ──────────────────────────────────────────────────────────
+
+
+@router.get("/opening_balance")
+async def get_opening_balance(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await cost_service.get_opening_balances(db, project.id)
+
+
+@router.put("/opening_balance", dependencies=[Depends(rate_limit_write)])
+async def update_opening_balance(
+    payload: OpeningBalanceUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upsert opening-balance rows (unique per barcode); seeds FIFO/moving valuation."""
+    updated = await cost_service.upsert_opening_balances(db, project.id, payload.items)
+    await invalidate_project_reports(project.id)
+    await invalidate_cache(f"reports:cost_valuation:project_id={project.id}")
+    return {"ok": True, "updated": updated}
+
+
+# ─── Valuation method ─────────────────────────────────────────────────────────
+
+
+@router.get("/valuation_method")
+async def get_valuation_method_endpoint(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    from backend.services.settings_service import get_valuation_method
+
+    method = await get_valuation_method(db, project.id)
+    return {"method": method}
+
+
+@router.put("/valuation_method", dependencies=[Depends(rate_limit_write)])
+async def set_valuation_method_endpoint(
+    payload: ValuationMethodUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    from backend.services.settings_service import set_valuation_method
+
+    try:
+        method = await set_valuation_method(db, project.id, payload.method)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    await invalidate_project_reports(project.id)
+    return {"method": method}
+
+
+# ─── Valuation data-start cutoff ──────────────────────────────────────────────
+
+
+@router.get("/valuation_start")
+async def get_valuation_start_endpoint(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    from backend.services.settings_service import get_valuation_start_date
+
+    d = await get_valuation_start_date(db, project.id)
+    return {"start_date": d.isoformat() if d else None}
+
+
+@router.put("/valuation_start", dependencies=[Depends(rate_limit_write)])
+async def set_valuation_start_endpoint(
+    payload: ValuationStartUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    from backend.services.settings_service import set_valuation_start_date
+
+    await set_valuation_start_date(db, project.id, payload.start_date)
+    await invalidate_project_reports(project.id)
+    await invalidate_cache(f"reports:cost_valuation:project_id={project.id}")
+    return {"start_date": payload.start_date.isoformat() if payload.start_date else None}

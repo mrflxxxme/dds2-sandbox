@@ -3,6 +3,7 @@
 
 import json
 import logging
+from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -126,3 +127,48 @@ async def set_forecast_rf_default_days(db: AsyncSession, project_id: int, days: 
     await set_setting(db, project_id, _FORECAST_RF_DEFAULT_DAYS_KEY, str(days))
     logger.info("Set forecast_rf_default_days for project %s: %d", project_id, days)
     return days
+
+
+# ─── Cost valuation method (lifetime_avg | fifo | moving_avg) ────────────────
+
+
+_VALUATION_METHOD_KEY = "valuation_method"
+_VALUATION_METHODS = ("lifetime_avg", "fifo", "moving_avg")
+_VALUATION_METHOD_DEFAULT = "lifetime_avg"
+
+
+async def get_valuation_method(db: AsyncSession, project_id: int) -> str:
+    """Project COGS valuation method. Defaults to lifetime_avg (current behaviour)."""
+    raw = await get_setting(db, project_id, _VALUATION_METHOD_KEY)
+    return raw if raw in _VALUATION_METHODS else _VALUATION_METHOD_DEFAULT
+
+
+async def set_valuation_method(db: AsyncSession, project_id: int, method: str) -> str:
+    if method not in _VALUATION_METHODS:
+        raise ValueError(f"invalid valuation method: {method}")
+    await set_setting(db, project_id, _VALUATION_METHOD_KEY, method)
+    logger.info("Set valuation_method for project %s: %s", project_id, method)
+    return method
+
+
+# ─── Cost valuation data-start cutoff (incomplete early-period guard) ─────────
+
+
+_VALUATION_START_KEY = "valuation_start_date"
+
+
+async def get_valuation_start_date(db: AsyncSession, project_id: int) -> date | None:
+    """Sales before this date are ignored by the valuation engine (incomplete
+    early-period data, e.g. Dec 2025). None = use all history."""
+    raw = await get_setting(db, project_id, _VALUATION_START_KEY)
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+async def set_valuation_start_date(db: AsyncSession, project_id: int, d: date | None) -> None:
+    await set_setting(db, project_id, _VALUATION_START_KEY, d.isoformat() if d else "")
+    logger.info("Set valuation_start_date for project %s: %s", project_id, d)

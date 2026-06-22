@@ -37,6 +37,12 @@ from backend.services.bdr_loaders import (
     load_orders_stocks,
     load_tax_settings,
 )
+from backend.services.cost.valuation import (
+    DEFAULT_METHOD,
+    compute_project_valuation,
+    slice_window,
+)
+from backend.services.settings_service import get_valuation_method
 from backend.services.wb_bdr_helpers import (
     build_bdr_aggregate_sql,
     build_brands_sql_bdr,
@@ -129,10 +135,24 @@ async def get_wb_bdr(
     # ── 5. Load enrichment data (small queries) ──
     ads_map = await load_ads(db, project_id, date_from, date_to)
     orders_stocks_map = await load_orders_stocks(db, project_id, date_from, date_to)
-    cost_map = await load_avg_costs(db, project_id)
     cost_overrides = await load_cost_overrides(db, project_id)
     tax_info = await load_tax_settings(db, project_id, date_from, date_to)
     cancel_stats = await load_cancel_stats(db, project_id, date_from, date_to)
+
+    # COGS source depends on the project's valuation method. lifetime_avg keeps the
+    # legacy global-average path bit-for-bit (zero regression): cost_map holds the
+    # per-unit weighted average, cost_total = cost_price × sale_qty. fifo/moving_avg
+    # source per-period COGS from the path-dependent valuation engine (win[sku]["cogs"]),
+    # with eff_cost shown as the per-unit price; override fallback covers SKUs the
+    # engine doesn't know.
+    method = await get_valuation_method(db, project_id)
+    win: dict[str, dict] = {}
+    if method == DEFAULT_METHOD:
+        cost_map = await load_avg_costs(db, project_id)
+    else:
+        cost_map = {}
+        valuation = await compute_project_valuation(db, project_id)
+        win = slice_window(valuation, date_from, date_to, method)
 
     period_days = max((date_to - date_from).days + 1, 1)
 
@@ -209,6 +229,18 @@ async def get_wb_bdr(
             if grouped_cost_count.get(gk, 0) > 0
         }
 
+        # Engine path (fifo/moving_avg): per-group COGS = Σ per-SKU window COGS for
+        # the SKUs that map into the group. eff per-unit = group COGS / group net qty.
+        grouped_cogs: dict[str, float] = {}
+        grouped_cogs_qty: dict[str, int] = {}
+        if method != DEFAULT_METHOD:
+            for sku, wv in win.items():
+                gk = sa_to_group.get(sku, "")
+                if not gk:
+                    continue
+                grouped_cogs[gk] = grouped_cogs.get(gk, 0.0) + float(wv["cogs"])
+                grouped_cogs_qty[gk] = grouped_cogs_qty.get(gk, 0) + int(wv["qty"])
+
     # ── 6. Compute metrics per article from SQL rows ──
     total_metrics = _empty_metrics()
     total_adv = ZERO
@@ -238,9 +270,15 @@ async def get_wb_bdr(
             total_adv += D(str(adv_sum))
 
             # Cost: aggregate avg cost across articles in this group
-            cost_price = grouped_avg_cost.get(sa_name, 0)
             sale_qty = metrics["sale_qty"]
-            cost_total = cost_price * sale_qty if sale_qty > 0 else 0
+            if method != DEFAULT_METHOD and sa_name in grouped_cogs:
+                # Engine-computed group COGS (already net of returns).
+                cost_total = grouped_cogs[sa_name]
+                g_qty = grouped_cogs_qty.get(sa_name, 0)
+                cost_price = (cost_total / g_qty) if g_qty > 0 else 0.0
+            else:
+                cost_price = grouped_avg_cost.get(sa_name, 0)
+                cost_total = cost_price * sale_qty if sale_qty > 0 else 0
             metrics["cost_price"] = round(cost_price, 2)
             metrics["cost_total"] = round(cost_total, 2)
             total_cost += D(str(cost_total))
@@ -262,13 +300,20 @@ async def get_wb_bdr(
             metrics["adv_sum"] = adv_sum
             total_adv += D(str(adv_sum))
 
-            # Cost from history (avg), fallback to manual override by nm_id
-            # cost_map keyed by lowercased article_seller; sa_name from WB may differ in case
-            cost_price = cost_map.get(sa_name.lower(), 0) if sa_name else 0
-            if cost_price == 0 and nm_id in cost_overrides:
-                cost_price = cost_overrides[nm_id]
+            # Cost: engine per-period COGS when method != lifetime_avg, else the
+            # legacy weighted-average path. Override by nm_id is the fallback for
+            # SKUs the engine doesn't cover. cost_map keyed by lowercased
+            # article_seller; sa_name from WB may differ in case.
+            sku = sa_name.lower() if sa_name else ""
             sale_qty = metrics["sale_qty"]
-            cost_total = cost_price * sale_qty if sale_qty > 0 else 0
+            if method != DEFAULT_METHOD and sku in win:
+                cost_total = float(win[sku]["cogs"])
+                cost_price = float(win[sku]["eff_cost"])
+            else:
+                cost_price = cost_map.get(sku, 0) if sku else 0
+                if cost_price == 0 and nm_id in cost_overrides:
+                    cost_price = cost_overrides[nm_id]
+                cost_total = cost_price * sale_qty if sale_qty > 0 else 0
             metrics["cost_price"] = round(cost_price, 2)
             metrics["cost_total"] = round(cost_total, 2)
             total_cost += D(str(cost_total))

@@ -259,3 +259,27 @@ class CostOrderItem(Base, SoftDeleteMixin):
         # FK lookup index — used by factory-order merge re-point and check_and_close_order.
         Index("ix_cost_order_items_factory_item", "factory_order_item_id"),
     )
+
+
+class CostOpeningBalance(Base):
+    """Opening inventory per SKU — seed for FIFO / moving-average valuation.
+
+    Stock that predates the recorded ``cost_orders`` (units sold before the
+    first imported batch arrived). Keyed by barcode: qty + per-unit landed cost
+    as of a date. Without it the valuation engine falls back to
+    ``WbCostOverride`` / last cost for the shortfall and flags ``is_estimated``.
+    """
+
+    __tablename__ = "cost_opening_balance"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    barcode: Mapped[str] = mapped_column(String(50), nullable=False)
+    qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    as_of_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (UniqueConstraint("project_id", "barcode", name="uq_cost_opening_balance_pb"),)
