@@ -643,6 +643,13 @@ def _build_acceptance_limits(
         raw_name = wh_id_to_name.get(wid) or e.get("warehouseName") or ""
         if not raw_name:
             continue
+        # Спец-склады (СГТ/Питание/Горючее/СЦ/виртуальные) — вне обычной FBO.
+        # Их сырые имена алиасятся в канон базового склада (ACCEPTANCE_TO_STOCK_NAME),
+        # поэтому без отсева они засоряют календарь и в supply-slots перетирают
+        # реальный склад своим закрытым коробом (last-wins по канон-имени). Отсекаем
+        # по СЫРОМУ имени ДО нормализации — зеркало `_flags_for_warehouse`.
+        if _is_spec_acceptance_wh(raw_name):
+            continue
         canon = _normalize_acceptance_wh(raw_name)
         if not canon:
             continue

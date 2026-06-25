@@ -152,6 +152,37 @@ def test_rows_sorted_by_warehouse_then_planned_date():
     ]
 
 
+def test_exact_raw_name_preferred_over_canonical_collision():
+    # Два физических склада WB нормализуются в одно канон-имя (напр. «Астана» и
+    # «Астана 2» → «Астана Карагандинское шоссе»). Матч строго по канону = last-wins
+    # и может выбрать ЗАКРЫТЫЙ склад-двойник. Точное совпадение сырого имени склада
+    # поставки должно иметь приоритет и выбирать ПРАВИЛЬНЫЙ склад.
+    limits = {
+        "warehouses": [
+            {
+                "warehouse_id": 204939,
+                "warehouse_name": "Астана",
+                "canonical_name": "Астана Карагандинское шоссе",
+                "box_type": "box",
+                "days": [_day("2026-06-25", 0, free=True)],
+            },
+            {
+                "warehouse_id": 324108,
+                "warehouse_name": "Астана 2",
+                "canonical_name": "Астана Карагандинское шоссе",
+                "box_type": "box",
+                "days": [_day("2026-06-25", -1, free=False, closed=True)],
+            },
+        ],
+        "dates": ["2026-06-25"],
+    }
+    out = _build_supply_acceptance_slots([_req(effective_warehouse="Астана")], limits)
+    row = out["rows"][0]
+    assert row["matched"] is True
+    assert row["warehouse_id"] == 204939  # «Астана», не закрытый двойник «Астана 2»
+    assert row["days"][0]["is_free"] is True
+
+
 def test_dates_axis_passed_through():
     out = _build_supply_acceptance_slots([_req()], _limits())
     assert out["dates"] == ["2026-06-19", "2026-06-20", "2026-06-21"]

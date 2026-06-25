@@ -160,3 +160,35 @@ class TestBuildAcceptanceLimits:
         day = _build_acceptance_limits(raw, WH)["warehouses"][0]["days"][0]
         assert day["storage_coef"] == 1.6
         assert day["delivery_coef"] == 2.15
+
+    def test_spec_warehouse_excluded(self):
+        # Спец-склады WB (Питание/СГТ/Горючее/СЦ/виртуальные) — вне обычной FBO.
+        # Их сырые имена алиасятся в канон базового склада (ACCEPTANCE_TO_STOCK_NAME),
+        # поэтому без отсева они засоряют календарь и (в supply-slots) перетирают
+        # реальный склад своим закрытым коробом. Зеркало `_flags_for_warehouse`.
+        wh = {301983: "Волгоград", 397484: "Волгоград: Питание", 325360: "Екатеринбург СГТ"}
+        raw = [
+            _entry(301983, 2, "2026-06-25", 0),  # реальный Волгоград, короб бесплатно
+            _entry(397484, 2, "2026-06-25", -1),  # Питание — закрыт, должен отсеяться
+            _entry(325360, 2, "2026-06-25", -1),  # СГТ — закрыт, должен отсеяться
+        ]
+        out = _build_acceptance_limits(raw, wh)
+        assert len(out["warehouses"]) == 1
+        only = out["warehouses"][0]
+        assert only["warehouse_id"] == 301983
+        assert only["warehouse_name"] == "Волгоград"
+        assert only["days"][0]["is_free"] is True
+
+    def test_spec_warehouse_does_not_shadow_real(self):
+        # Даже если спец-склад идёт ПОСЛЕ реального (последний в исходном списке) —
+        # он не должен попасть в выдачу под тем же канон-именем.
+        wh = {300571: "Екатеринбург - Перспективная 14", 325360: "Екатеринбург СГТ"}
+        raw = [
+            _entry(300571, 2, "2026-06-25", 0),  # реальный ЕКБ — короб бесплатно
+            _entry(325360, 2, "2026-06-25", -1),  # СГТ — закрыт (раньше перетирал)
+        ]
+        canon = "Екатеринбург - Перспективная 14"
+        box = [w for w in _build_acceptance_limits(raw, wh)["warehouses"] if w["canonical_name"] == canon]
+        assert len(box) == 1
+        assert box[0]["warehouse_id"] == 300571
+        assert box[0]["days"][0]["is_closed"] is False

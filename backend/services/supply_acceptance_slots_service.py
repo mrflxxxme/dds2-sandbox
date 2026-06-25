@@ -61,16 +61,27 @@ def _build_supply_acceptance_slots(requests: list[dict], limits: dict) -> dict:
     если для склада+типа в календаре нет записи (склад закрыт совсем / не
     сматчилось имя / ключ без scope «Поставки»).
     """
+    # Два индекса: по сырому имени склада WB и по канон-имени. Несколько
+    # физических складов могут нормализоваться в одно канон-имя («Астана»/«Астана 2»
+    # → «Астана Карагандинское шоссе»), поэтому матч строго по канону = last-wins и
+    # рискует выбрать закрытый склад-двойник. Точное совпадение сырого имени поставки
+    # (`warehouse_name` хранит конкретный склад) приоритетнее.
+    by_raw: dict[tuple[str, str], dict] = {}
     by_key: dict[tuple[str, str], dict] = {}
     for entry in limits.get("warehouses", []):
         by_key[(entry["canonical_name"], entry["box_type"])] = entry
+        raw_name = entry.get("warehouse_name")
+        if raw_name:
+            by_raw[(raw_name, entry["box_type"])] = entry
 
     rows: list[dict] = []
     for r in requests:
         eff = r.get("effective_warehouse")
         canon = _normalize_acceptance_wh(eff)
         box = _PACKAGE_TYPE_TO_BOX_KEY.get(r.get("package_type") or "BOX", "box")
-        entry = by_key.get((canon, box))
+        entry = by_raw.get((eff, box)) if eff else None
+        if entry is None:
+            entry = by_key.get((canon, box))
         rows.append(
             {
                 "assembly_request_id": r["id"],
