@@ -252,6 +252,28 @@ class TestSchemas:
         assert schema.wb_supply_id == "37847227"
         assert schema.total_qty == 10
 
+    def test_supply_schema_exposes_return_fields(self):
+        """Regression: WbFboSupplySchema must declare return_processed_at / return_qty /
+        return_type (symmetric to excess_*). Before the fix the schema omitted them, so
+        Pydantic silently dropped the columns at serialization and the FBO list UI never
+        learned a недоприёмка return was processed → banner + «Оформить возврат» button
+        stayed active forever (backend then 400'd on the double submit)."""
+        from backend.schemas.wb_fbo import WbFboSupplySchema
+
+        schema = WbFboSupplySchema(
+            id=1,
+            project_id=1,
+            wb_supply_id="37847227",
+            wb_status="ACCEPTED",
+            created_at_wb=datetime(2026, 5, 22, 16, 20),
+            return_processed_at=datetime(2026, 6, 25, 10, 0),
+            return_qty=27,
+            return_type="GOODS",
+        )
+        assert schema.return_processed_at == datetime(2026, 6, 25, 10, 0)
+        assert schema.return_qty == 27
+        assert schema.return_type == "GOODS"
+
     def test_supply_item_schema(self):
         from backend.schemas.wb_fbo import WbFboSupplyItemSchema
 
@@ -321,6 +343,38 @@ class TestListFboSupplies:
         assert total >= 1
         found = [s for s in supplies if s["wb_supply_id"] == "SEARCH-12345"]
         assert len(found) == 1
+
+    async def test_list_row_carries_return_processed_fields(self, db_session):
+        """Regression: the list enrichment dict + response schema must surface
+        return_processed_at/return_qty/return_type, mirroring the router path
+        (WbFboSupplySchema(**row)). This is what lets the UI flip the недоприёмка
+        banner to its «✓ обработана» done-state once a return receipt exists."""
+        from backend.schemas.wb_fbo import WbFboSupplySchema
+
+        processed_at = datetime(2026, 6, 25, 10, 0)
+        supply = WbFboSupply(
+            project_id=1,
+            wb_supply_id="RET-EXPOSED",
+            wb_status=WbSupplyStatus.ACCEPTED,
+            created_at_wb=datetime(2026, 5, 22),
+            total_qty=1409,
+            accepted_qty=1406,
+            return_processed_at=processed_at,
+            return_qty=27,
+            return_type="GOODS",
+        )
+        db_session.add(supply)
+        await db_session.commit()
+
+        supplies, _total = await list_fbo_supplies(db_session, project_id=1, search="RET-EXPOSED")
+        row = next(s for s in supplies if s["wb_supply_id"] == "RET-EXPOSED")
+        # enrichment dict copies all columns…
+        assert row["return_processed_at"] == processed_at
+        # …and the response schema must pass them through (the bug was it dropping them).
+        serialized = WbFboSupplySchema(**row)
+        assert serialized.return_processed_at == processed_at
+        assert serialized.return_qty == 27
+        assert serialized.return_type == "GOODS"
 
     async def test_list_filter_by_status(self, db_session):
         """Filter by status returns only matching supplies."""
