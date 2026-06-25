@@ -302,6 +302,7 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                 name: r.name || '',
                 ff_good: r.ff_good,
                 our_quantity: r.our_quantity,
+                our_defect: r.our_defect,
                 diff: r.diff,
                 direction: r.diff > 0 ? 'у ФФ больше' : 'у нас больше',
             })),
@@ -319,6 +320,7 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                 { key: 'name', label: 'Название' },
                 { key: 'ff_good', label: 'ФФ шт' },
                 { key: 'our_quantity', label: 'Наш шт' },
+                { key: 'our_defect', label: 'Наш брак' },
                 { key: 'diff', label: 'Δ' },
                 { key: 'direction', label: 'Направление' },
             ],
@@ -909,6 +911,7 @@ function StockMismatchBlock({
                                                                         <th>Бренд</th>
                                                                         <th style={{ textAlign: 'right' }}>ФФ шт</th>
                                                                         <th style={{ textAlign: 'right' }}>Наш шт</th>
+                                                                        {w.provider === 'migfull' && <th style={{ textAlign: 'right' }}>Наш брак</th>}
                                                                         <th style={{ textAlign: 'right' }}>Δ</th>
                                                                     </tr>
                                                                 </thead>
@@ -920,6 +923,11 @@ function StockMismatchBlock({
                                                                             <td style={{ color: 'var(--color-text-muted)' }}>{r.brand || '—'}</td>
                                                                             <td style={{ textAlign: 'right' }}>{formatNumber(r.ff_good, 0)}</td>
                                                                             <td style={{ textAlign: 'right' }}>{formatNumber(r.our_quantity, 0)}</td>
+                                                                            {w.provider === 'migfull' && (
+                                                                                <td style={{ textAlign: 'right', color: r.our_defect > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)' }}>
+                                                                                    {formatNumber(r.our_defect, 0)}
+                                                                                </td>
+                                                                            )}
                                                                             <td style={{ textAlign: 'right', fontWeight: 700, color: r.diff > 0 ? 'var(--color-accent)' : 'var(--color-danger)' }}>
                                                                                 {r.diff > 0 ? '+' : ''}{formatNumber(r.diff, 0)}
                                                                             </td>
