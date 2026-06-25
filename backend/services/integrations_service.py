@@ -252,12 +252,14 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
     Fetches all product cards and upserts into nomenclature table.
     """
     key, api_key = await _get_wb_key(db, project_id)
+    key_id = key.id  # capture before any rollback expires the ORM object
+    started_at = utcnow()
 
     sync_log = SyncLog(
-        integration_id=key.id,
+        integration_id=key_id,
         service="wb",
         sync_type="nomenclature",
-        started_at=utcnow(),
+        started_at=started_at,
         status="RUNNING",
     )
     db.add(sync_log)
@@ -331,12 +333,27 @@ async def sync_wb_nomenclature(db: AsyncSession, project_id: int) -> SyncLog:
         await db.refresh(sync_log)
 
     except Exception as e:
-        sync_log.status = "ERROR"
-        sync_log.error_msg = str(e)[:1000]
-        sync_log.finished_at = utcnow()
-        await db.commit()
-        await db.refresh(sync_log)
+        # A failed flush (e.g. a card value out of column range) poisons the
+        # session — `sync_log` and any partial inserts are unusable until we
+        # roll back. Without this rollback the ERROR-write below would raise
+        # PendingRollbackError and the endpoint would return 500 instead of a
+        # proper ERROR SyncLog (the "Внутренняя ошибка сервера" symptom).
+        await db.rollback()
         logger.error("WB nomenclature sync error: %s", e)
+
+        err_log = SyncLog(
+            integration_id=key_id,
+            service="wb",
+            sync_type="nomenclature",
+            started_at=started_at,
+            finished_at=utcnow(),
+            status="ERROR",
+            error_msg=str(e)[:1000],
+        )
+        db.add(err_log)
+        await db.commit()
+        await db.refresh(err_log)
+        return err_log
 
     return sync_log
 

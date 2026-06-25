@@ -8,6 +8,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -37,8 +38,9 @@ class Nomenclature(Base):
     brand: Mapped[str | None] = mapped_column(String(100))
     subject: Mapped[str | None] = mapped_column(String(100))
     article_seller: Mapped[str | None] = mapped_column(String(100))
-    article_wb: Mapped[int | None] = mapped_column(Integer)
-    imt_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # WB nmID/imtID: int64 — WB-side IDs outgrew int32 (imtID seen at 2.72B).
+    article_wb: Mapped[int | None] = mapped_column(BigInteger)
+    imt_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     volume_l: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     area_m2: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     # Reference per-barcode weight (kg) — fallback for WEIGHT-basis duty when the

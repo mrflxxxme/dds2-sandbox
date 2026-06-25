@@ -11,7 +11,19 @@ if TYPE_CHECKING:
     from backend.models.transactions import Transaction
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
@@ -171,7 +183,7 @@ class ImtAlias(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
-    imt_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    imt_id: Mapped[int] = mapped_column(BigInteger, nullable=False)  # WB imtID outgrew int32
     name: Mapped[str] = mapped_column(String(100), nullable=False)
 
     __table_args__ = (UniqueConstraint("project_id", "imt_id", name="uq_imt_alias"),)
