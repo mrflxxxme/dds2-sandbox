@@ -493,3 +493,42 @@ class AcceptanceLimitsResponse(BaseModel):
     warehouses: list[AcceptanceLimitEntry]
     dates: list[str]
     fetched_at: datetime
+
+
+class SupplyAcceptanceSlotRow(BaseModel):
+    """Активная заявка/поставка + календарь слотов приёмки её склада WB.
+
+    Те же дни (`days`), что и в `/warehouse/acceptance-limits`, но привязанные
+    к конкретной поставке: склад берётся из ФБО-поставки (или ручного поля),
+    тип упаковки — из заявки. `matched=false` — склад заявки не нашёлся в
+    календаре коэффициентов (тогда `days` пуст; матч идёт по нормализованному
+    имени, т.к. WbFboSupply не хранит numeric warehouseID).
+    """
+
+    assembly_request_id: int
+    assembly_number: str
+    status: str
+    wb_supply_id: str | None = None  # ФБО-поставка WB (напр. «39950266»)
+    warehouse_name: str | None = None  # effective: FBO warehouse_name или ручной
+    canonical_name: str  # нормализованное имя склада (ключ матча/группировки)
+    warehouse_id: int | None = None  # WB warehouseID, если склад сматчился
+    box_type: str  # box | mono | super (из package_type заявки)
+    package_type: str  # BOX | MONOPALLET | SUPERSAFE
+    planned_date: date | None = None  # плановая «Сдача ВБ»
+    actual_date: date | None = None
+    wb_fbo_status: str | None = None
+    matched: bool  # склад заявки найден в календаре приёмки
+    days: list[AcceptanceLimitDay]
+
+
+class SupplyAcceptanceSlotsResponse(BaseModel):
+    """Response for GET /warehouse/acceptance-slots — слоты сдачи по поставкам.
+
+    `rows` — по одной на активную заявку, отсортированы по складу и плановой
+    дате (фронт группирует по `canonical_name`). `dates` — общая ось дат
+    (ISO, 14 дней WB), как в календаре лимитов.
+    """
+
+    rows: list[SupplyAcceptanceSlotRow]
+    dates: list[str]
+    fetched_at: datetime

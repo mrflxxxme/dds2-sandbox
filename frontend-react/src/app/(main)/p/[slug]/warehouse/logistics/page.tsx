@@ -8,7 +8,51 @@ import { formatDate, formatNumber, exportToExcel } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import KpiCard from '@/components/KpiCard';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, LogisticsRouteStat } from '@/types/api';
+import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, LogisticsRouteStat, LogisticsShipmentRow, LogisticsAnomalyType, CostForecastResponse, CostForecastWarehouse } from '@/types/api';
+import LogisticsCostByPallets from './components/LogisticsCostByPallets';
+import LogisticsCarriers from './components/LogisticsCarriers';
+import LogisticsAnomalies from './components/LogisticsAnomalies';
+
+// Сегменты аналитики истории отправок.
+type AnalyticsView = 'overview' | 'pallets' | 'carriers' | 'anomalies' | 'matrix';
+
+const ANOMALY_BADGE: Record<LogisticsAnomalyType, { label: string; className: string }> = {
+    no_cost: { label: 'нет цены', className: 'badge-secondary' },
+    overpriced: { label: 'завышена', className: 'badge-danger' },
+    underpriced: { label: 'занижена', className: 'badge-warning' },
+};
+
+// ─── Cost forecast helpers ───────────────────────────────────────────────────
+
+// Корзина размера отгрузки — зеркалит backend `_bucket_for_pallets`.
+function bucketForPallets(p: number): string {
+    if (p <= 1) return '1';
+    if (p <= 3) return '2-3';
+    if (p <= 5) return '4-5';
+    if (p <= 10) return '6-10';
+    return '11+';
+}
+
+interface ForecastResult { total: number; cpp: number; low: number; high: number; basis: string; sample: number; }
+
+/** Прогноз стоимости перевозки заявки: склад+размер → склад → глобально. */
+function forecastFor(model: CostForecastResponse | null, warehouse: string | null | undefined, pallets: number | null | undefined): ForecastResult | null {
+    if (!model || !warehouse || !pallets || pallets <= 0) return null;
+    const bucket = bucketForPallets(pallets);
+    const wh: CostForecastWarehouse | undefined = model.warehouses.find(w => w.dest_warehouse === warehouse);
+    // Decimal-поля приходят из API строками — коэрсим в number для formatNumber.
+    let cpp: number | null = null, low = 0, high = 0, basis = '', sample = 0;
+    if (wh) {
+        const b = wh.buckets.find(x => x.bucket === bucket);
+        if (b && b.sample_size >= 2) { cpp = Number(b.cpp); low = Number(b.low); high = Number(b.high); basis = 'склад+размер'; sample = b.sample_size; }
+        else if (wh.sample_size >= 2) { cpp = Number(wh.cpp); low = Number(wh.low); high = Number(wh.high); basis = 'склад'; sample = wh.sample_size; }
+    }
+    if (cpp == null) {
+        if (model.sample_size >= 2) { cpp = Number(model.global_cpp); low = Number(model.global_low); high = Number(model.global_high); basis = 'в среднем'; sample = model.sample_size; }
+        else return null;
+    }
+    return { total: cpp * pallets, cpp, low: low * pallets, high: high * pallets, basis, sample };
+}
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -46,15 +90,18 @@ export default function LogisticsPage() {
 
     // Tab
     const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
-    // History tab
-    const [historyItems, setHistoryItems] = useState<AssemblyRequest[]>([]);
-    const [historyTotal, setHistoryTotal] = useState(0);
-    const [historyLoading, setHistoryLoading] = useState(false);
+    // History tab — построчные отправки (источник для сортируемой таблицы)
+    const [shipmentRows, setShipmentRows] = useState<LogisticsShipmentRow[]>([]);
+    const [shipmentsTotal, setShipmentsTotal] = useState(0);
+    const [shipmentsTruncated, setShipmentsTruncated] = useState(false);
+    const [shipmentsLoading, setShipmentsLoading] = useState(false);
+    // Растущий набор брендов для дропдауна (не теряем опции при фильтрации)
+    const [brandOptions, setBrandOptions] = useState<string[]>([]);
 
     // Analytics
     const [analyticsData, setAnalyticsData] = useState<LogisticsAnalyticsResponse | null>(null);
     const [analyticsLoading, setAnalyticsLoading] = useState(false);
-    const [analyticsView, setAnalyticsView] = useState<'chart' | 'heatmap'>('chart');
+    const [analyticsView, setAnalyticsView] = useState<AnalyticsView>('overview');
 
     // Analytics filters
     const [analyticsDateFrom, setAnalyticsDateFrom] = useState(() => {
@@ -64,12 +111,17 @@ export default function LogisticsPage() {
     const [analyticsDateTo, setAnalyticsDateTo] = useState(() => new Date().toISOString().slice(0, 10));
     const [analyticsBrand, setAnalyticsBrand] = useState('');
     const [analyticsDestFilter, setAnalyticsDestFilter] = useState('');
+    const [analyticsCarrier, setAnalyticsCarrier] = useState<number | ''>('');
 
     // Filters
     const [groupBy, setGroupBy] = useState<GroupBy>('wb_warehouse');
     const [showSoonReady, setShowSoonReady] = useState(false);
     const [showInProgress, setShowInProgress] = useState(false);
     const [warehouseFilter, setWarehouseFilter] = useState('');
+    const [statusFilter, setStatusFilter] = useState('');
+    const [activeSearch, setActiveSearch] = useState('');
+    // Прогнозная модель ₽/паллета (для неназначенных заявок).
+    const [forecast, setForecast] = useState<CostForecastResponse | null>(null);
 
     // View mode
     const [viewMode, setViewMode] = useState<'cards' | 'table'>(() => {
@@ -159,25 +211,44 @@ export default function LogisticsPage() {
 
     useEffect(() => { load(); }, [load]);
 
-    // ─── Load history ───────────────────────────────────────────────────────
+    // Прогнозная модель грузится один раз (не зависит от фильтров).
+    useEffect(() => { api.getCostForecast().then(setForecast).catch(() => {}); }, []);
 
-    const loadHistory = useCallback(async () => {
-        setHistoryLoading(true);
+    // ─── Load shipments (построчная история отправок за период) ──────────────
+    // Грузим ВЕСЬ набор за период — клиентская сортировка идёт по всему периоду,
+    // а не по одной странице (фикс бага сортировки).
+
+    const loadShipments = useCallback(async () => {
+        setShipmentsLoading(true);
         try {
-            const resp = await api.getAssemblyRequests({
-                status: 'SHIPPED,DELIVERED',
-                limit: 50,
-                offset: 0,
+            const resp = await api.getShipmentsList({
+                date_from: analyticsDateFrom || undefined,
+                date_to: analyticsDateTo || undefined,
+                brands: analyticsBrand || undefined,
+                carrier_id: analyticsCarrier || undefined,
+                dest_warehouse: analyticsDestFilter || undefined,
             });
-            setHistoryItems(resp.items);
-            setHistoryTotal(resp.total);
-        } catch { /* ignore */ }
-        setHistoryLoading(false);
-    }, []);
+            setShipmentRows(resp.items);
+            setShipmentsTotal(resp.total);
+            setShipmentsTruncated(resp.truncated);
+            // Растим список брендов (union) — чтобы фильтр не терял опции.
+            setBrandOptions(prev => {
+                const next = new Set(prev);
+                for (const r of resp.items) {
+                    if (r.brands) r.brands.split(',').forEach(b => { const t = b.trim(); if (t) next.add(t); });
+                }
+                return Array.from(next).sort((a, b) => a.localeCompare(b, 'ru'));
+            });
+        } catch (e) {
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки отправок');
+        }
+        setShipmentsLoading(false);
+    }, [analyticsDateFrom, analyticsDateTo, analyticsBrand, analyticsCarrier, analyticsDestFilter]);
 
-    useEffect(() => { if (activeTab === 'history') loadHistory(); }, [activeTab, loadHistory]);
+    useEffect(() => { if (activeTab === 'history') loadShipments(); }, [activeTab, loadShipments]);
 
     // ─── Load analytics ────────────────────────────────────────────────────
+    // Аналитика — обзор по периоду/бренду (подрядчик/склад — drill-фильтры таблицы).
 
     const loadAnalytics = useCallback(async () => {
         setAnalyticsLoading(true);
@@ -189,7 +260,7 @@ export default function LogisticsPage() {
             });
             setAnalyticsData(resp);
         } catch (e) {
-            console.error('Analytics load error:', e);
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки аналитики');
         }
         setAnalyticsLoading(false);
     }, [analyticsDateFrom, analyticsDateTo, analyticsBrand]);
@@ -208,12 +279,23 @@ export default function LogisticsPage() {
 
     // ─── Filtered items ─────────────────────────────────────────────────
 
-    const filteredItems = warehouseFilter
-        ? items.filter(i => {
+    // Статусы, реально присутствующие в загруженных заявках (для дропдауна фильтра).
+    const statusOptions = Array.from(new Set(items.map(i => i.status)));
+
+    const searchNorm = activeSearch.trim().toLowerCase();
+    const filteredItems = items.filter(i => {
+        if (warehouseFilter) {
             const val = groupBy === 'wb_warehouse' ? i.effective_wb_warehouse : i.warehouse_name;
-            return val === warehouseFilter;
-        })
-        : items;
+            if (val !== warehouseFilter) return false;
+        }
+        if (statusFilter && i.status !== statusFilter) return false;
+        if (searchNorm) {
+            // Поиск по нашей заявке (№) и по ФБО-поставке (WB id / имя).
+            const hay = `${i.number || ''} ${i.wb_supply_id_wb || ''} ${i.wb_supply_name || ''}`.toLowerCase();
+            if (!hay.includes(searchNorm)) return false;
+        }
+        return true;
+    });
 
     // ─── Grouping ─────────────────────────────────────────────────────────
 
@@ -362,6 +444,35 @@ export default function LogisticsPage() {
     const isSoonReady = (item: AssemblyRequest) =>
         item.status === 'PENDING' || item.status === 'IN_PROGRESS';
 
+    // Дата сдачи на ВБ из FBO-поставки: факт приоритетнее плана.
+    const renderWbDeliveryDate = (item: AssemblyRequest): React.ReactNode => {
+        if (item.wb_fbo_actual_date) {
+            return <span style={{ color: 'var(--color-success)' }}>{formatDate(item.wb_fbo_actual_date)} <span style={{ fontSize: 10, opacity: 0.7 }}>факт</span></span>;
+        }
+        if (item.wb_fbo_planned_date) {
+            return <span style={{ color: 'var(--color-text-muted)' }}>{formatDate(item.wb_fbo_planned_date)} <span style={{ fontSize: 10, opacity: 0.7 }}>план</span></span>;
+        }
+        return <span style={{ color: 'var(--color-text-muted)' }}>{'—'}</span>;
+    };
+
+    // Прогноз стоимости для ещё не назначенной заявки (READY) — по складу сдачи и паллетам.
+    const renderForecastCard = (item: AssemblyRequest): React.ReactNode => {
+        if (item.status !== 'READY') return null;
+        const f = forecastFor(forecast, item.effective_wb_warehouse, item.pallets_count);
+        if (!f) return null;
+        return (
+            <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--color-border)' }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-accent)' }}>
+                    📊 Прогноз: ~{formatNumber(f.total, 0)} ₽
+                    <span style={{ fontWeight: 400, color: 'var(--color-text-muted)' }}> · ~{formatNumber(f.cpp, 0)} ₽/пал</span>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title={`Диапазон по истории · уровень: ${f.basis} · отгрузок: ${f.sample}`}>
+                    {formatNumber(f.low, 0)}–{formatNumber(f.high, 0)} ₽ · {f.basis}
+                </div>
+            </div>
+        );
+    };
+
     return (
         <div className="animate-in">
             {/* Header */}
@@ -449,6 +560,28 @@ export default function LogisticsPage() {
                                     ))}
                                 </select>
                             </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <select
+                                    className="form-input"
+                                    value={statusFilter}
+                                    onChange={e => setStatusFilter(e.target.value)}
+                                >
+                                    <option value="">Все статусы</option>
+                                    {statusOptions.map(s => (
+                                        <option key={s} value={s}>{STATUS_MAP[s]?.label || s}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <input
+                                    className="form-input"
+                                    type="search"
+                                    value={activeSearch}
+                                    onChange={e => setActiveSearch(e.target.value)}
+                                    placeholder="Поиск: № заявки или поставка ФБО"
+                                    style={{ minWidth: 240 }}
+                                />
+                            </div>
                             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 14 }}>
                                 <input
                                     type="checkbox"
@@ -507,10 +640,12 @@ export default function LogisticsPage() {
                                         <th>Бренд</th>
                                         <th>Забор</th>
                                         <th>Сдача WB</th>
+                                        <th>Дата сдачи</th>
                                         <th>Поставка</th>
                                         <th style={{ textAlign: 'right' }}>Палет</th>
                                         <th style={{ textAlign: 'right' }}>Вес</th>
                                         <th style={{ textAlign: 'right' }}>Позиции</th>
+                                        <th style={{ textAlign: 'right' }}>Прогноз ₽</th>
                                         <th>Статус</th>
                                         <th></th>
                                     </tr>
@@ -519,7 +654,7 @@ export default function LogisticsPage() {
                                     {grouped.map(group => (
                                         <React.Fragment key={group.key}>
                                             <tr>
-                                                <td colSpan={11} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
+                                                <td colSpan={13} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
                                                     {group.label || 'Без склада'}
                                                     <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8 }}>
                                                         {group.items.length} заявок, {group.items.reduce((s, i) => s + i.pallets_count, 0)} палет
@@ -560,10 +695,17 @@ export default function LogisticsPage() {
                                                         <td style={{ fontSize: 12 }}>{item.brands || '\u2014'}</td>
                                                         <td style={{ color: 'var(--color-text-muted)' }}>{item.warehouse_name || '\u2014'}</td>
                                                         <td>{item.effective_wb_warehouse || '—'}</td>
-                                                        <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.wb_supply_id_wb || '\u2014'}</td>
+                                                        <td style={{ fontSize: 12 }}>{renderWbDeliveryDate(item)}</td>
+                                                        <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.wb_supply_id_wb ||'\u2014'}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.items?.length || 0}</td>
+                                                        <td style={{ textAlign: 'right' }}>{(() => {
+                                                            const f = item.status === 'READY' ? forecastFor(forecast, item.effective_wb_warehouse, item.pallets_count) : null;
+                                                            return f
+                                                                ? <span style={{ color: 'var(--color-accent)', fontWeight: 600 }} title={`~${formatNumber(f.cpp, 0)} ₽/пал · ${formatNumber(f.low, 0)}–${formatNumber(f.high, 0)} ₽ · ${f.basis}`}>~{formatNumber(f.total, 0)}</span>
+                                                                : <span style={{ color: 'var(--color-text-muted)' }}>{'—'}</span>;
+                                                        })()}</td>
                                                         <td><span className={`badge ${statusCfg.className}`}>{statusCfg.label}</span></td>
                                                         <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
                                                             {item.status === 'READY' && (
@@ -674,10 +816,15 @@ export default function LogisticsPage() {
                                                         {item.effective_wb_warehouse && (
                                                             <div>WB: {item.effective_wb_warehouse}</div>
                                                         )}
+                                                        {(item.wb_fbo_actual_date || item.wb_fbo_planned_date) && (
+                                                            <div>Сдача ВБ: {renderWbDeliveryDate(item)}</div>
+                                                        )}
                                                     </div>
 
+                                                    {renderForecastCard(item)}
+
                                                     {!soon && (
-                                                        <div style={{ display: 'flex', gap: 8 }}>
+                                                        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                                                             {item.status === 'READY' && (
                                                                 <button
                                                                     className="btn btn-primary btn-sm"
@@ -759,8 +906,17 @@ export default function LogisticsPage() {
                                 <label className="form-label" style={{ fontSize: 12 }}>Бренд</label>
                                 <select className="form-input" value={analyticsBrand} onChange={e => setAnalyticsBrand(e.target.value)} style={{ fontSize: 13, minWidth: 140 }}>
                                     <option value="">Все бренды</option>
-                                    {[...new Set(historyItems.map(i => i.brands).filter(Boolean))].map(b => (
+                                    {brandOptions.map(b => (
                                         <option key={b} value={b}>{b}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label" style={{ fontSize: 12 }}>Подрядчик</label>
+                                <select className="form-input" value={analyticsCarrier} onChange={e => setAnalyticsCarrier(e.target.value ? Number(e.target.value) : '')} style={{ fontSize: 13, minWidth: 180 }}>
+                                    <option value="">Все подрядчики</option>
+                                    {analyticsData?.by_carrier.filter(c => c.counterparty_id != null).map(c => (
+                                        <option key={c.counterparty_id} value={c.counterparty_id as number}>{c.carrier_name}</option>
                                     ))}
                                 </select>
                             </div>
@@ -774,6 +930,9 @@ export default function LogisticsPage() {
                                 </select>
                             </div>
                         </div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 8 }}>
+                            Период и бренд — для всей аналитики; подрядчик и склад дополнительно фильтруют таблицу отправок.
+                        </div>
                     </div>
 
                     {/* Analytics section */}
@@ -781,100 +940,145 @@ export default function LogisticsPage() {
                         <div className="glass-card" style={{ padding: 32, textAlign: 'center', marginBottom: 16 }}>Загрузка аналитики...</div>
                     ) : analyticsData && (
                         <>
-                            {/* KPI Cards */}
+                            {/* KPI Cards — расширенная сводка периода */}
                             <div className="stats-grid" style={{ marginBottom: 16 }}>
-                                <KpiCard label="Всего отправок" value={analyticsData.summary.total_shipments} />
-                                <KpiCard label="Всего палет" value={analyticsData.summary.total_pallets} />
+                                <KpiCard label="Всего отправок" value={formatNumber(analyticsData.summary.total_shipments, 0)} />
+                                <KpiCard label="Всего заявок" value={formatNumber(analyticsData.summary.total_requests, 0)} />
+                                <KpiCard label="Всего палет" value={formatNumber(analyticsData.summary.total_pallets, 0)} />
+                                <KpiCard label="Товаров, шт" value={formatNumber(analyticsData.summary.total_items, 0)} />
+                                <KpiCard label="Складов сдачи" value={formatNumber(analyticsData.summary.total_destinations, 0)} />
+                                <KpiCard label="Подрядчиков" value={formatNumber(analyticsData.summary.total_carriers, 0)} />
                                 <KpiCard label="Общая стоимость" value={formatNumber(analyticsData.summary.total_cost, 0)} sub="₽" />
-                                <KpiCard label="Средняя стоимость/палета" value={formatNumber(analyticsData.summary.avg_cost_per_pallet, 0)} sub="₽" />
+                                <KpiCard label="Средняя ₽/палета" value={formatNumber(analyticsData.summary.avg_cost_per_pallet, 0)} sub="₽" />
                             </div>
 
-                            {/* View toggle */}
-                            <div style={{ display: 'flex', gap: 0, marginBottom: 16 }}>
-                                <button
-                                    className={`btn btn-sm ${analyticsView === 'chart' ? 'btn-primary' : 'btn-secondary'}`}
-                                    onClick={() => setAnalyticsView('chart')}
-                                    style={{ borderRadius: '8px 0 0 8px' }}
-                                >
-                                    График
-                                </button>
-                                <button
-                                    className={`btn btn-sm ${analyticsView === 'heatmap' ? 'btn-primary' : 'btn-secondary'}`}
-                                    onClick={() => setAnalyticsView('heatmap')}
-                                    style={{ borderRadius: '0 8px 8px 0' }}
-                                >
-                                    Матрица маршрутов
-                                </button>
+                            {/* View segmented control */}
+                            <div style={{ display: 'flex', gap: 0, marginBottom: 16, flexWrap: 'wrap' }}>
+                                {([
+                                    ['overview', 'Обзор'],
+                                    ['pallets', 'Стоимость и паллеты'],
+                                    ['carriers', 'Подрядчики'],
+                                    ['anomalies', `Аномалии${analyticsData.anomalies.length ? ` (${analyticsData.anomalies.length})` : ''}`],
+                                    ['matrix', 'Матрица маршрутов'],
+                                ] as [AnalyticsView, string][]).map(([v, label], i, arr) => (
+                                    <button
+                                        key={v}
+                                        className={`btn btn-sm ${analyticsView === v ? 'btn-primary' : 'btn-secondary'}`}
+                                        onClick={() => setAnalyticsView(v)}
+                                        style={{ borderRadius: i === 0 ? '8px 0 0 8px' : i === arr.length - 1 ? '0 8px 8px 0' : 0 }}
+                                    >
+                                        {label}
+                                    </button>
+                                ))}
                             </div>
 
-                            {analyticsView === 'chart' && analyticsData.by_destination.length > 0 && (
-                                <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
-                                    <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Средняя стоимость по складам WB</div>
-                                    <ResponsiveContainer width="100%" height={300}>
-                                        <BarChart data={analyticsData.by_destination} margin={{ top: 5, right: 20, bottom: 5, left: 20 }}>
-                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-                                            <XAxis dataKey="dest_warehouse" tick={{ fontSize: 11 }} angle={-30} textAnchor="end" height={80} />
-                                            <YAxis tick={{ fontSize: 12 }} />
-                                            <RechartsTooltip
-                                                formatter={(value: number) => [formatNumber(value, 0) + ' ₽', 'Средняя стоимость']}
-                                                contentStyle={{ background: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 13 }}
-                                            />
-                                            <Bar dataKey="avg_cost" radius={[4, 4, 0, 0]}>
-                                                {analyticsData.by_destination.map((entry, idx) => (
-                                                    <Cell key={idx} fill={entry.avg_cost > 4000 ? '#ff7e79' : '#007aff'} />
-                                                ))}
-                                            </Bar>
-                                        </BarChart>
-                                    </ResponsiveContainer>
-                                </div>
+                            {analyticsView === 'overview' && (
+                                analyticsData.by_destination.length > 0 ? (
+                                    <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                                        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Средняя ₽/палета по складам сдачи</div>
+                                        <ResponsiveContainer width="100%" height={320}>
+                                            <BarChart data={analyticsData.by_destination} margin={{ top: 5, right: 20, bottom: 5, left: 20 }}>
+                                                <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                                                <XAxis dataKey="dest_warehouse" tick={{ fontSize: 11 }} angle={-30} textAnchor="end" height={90} interval={0} />
+                                                <YAxis tick={{ fontSize: 12 }} />
+                                                <RechartsTooltip
+                                                    formatter={(value: number) => [formatNumber(value, 0) + ' ₽', 'Средняя ₽/палета']}
+                                                    contentStyle={{ background: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: 8, fontSize: 13 }}
+                                                />
+                                                <Bar dataKey="avg_cost" radius={[4, 4, 0, 0]}>
+                                                    {analyticsData.by_destination.map((entry, idx) => (
+                                                        <Cell key={idx} fill={entry.avg_cost > 4000 ? '#ff7e79' : '#007aff'} />
+                                                    ))}
+                                                </Bar>
+                                            </BarChart>
+                                        </ResponsiveContainer>
+                                    </div>
+                                ) : (
+                                    <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)', marginBottom: 16 }}>Нет данных за период</div>
+                                )
                             )}
 
-                            {analyticsView === 'heatmap' && analyticsData.by_route.length > 0 && (
-                                <HeatmapMatrix routes={analyticsData.by_route} />
+                            {analyticsView === 'pallets' && (
+                                <LogisticsCostByPallets
+                                    buckets={analyticsData.pallet_buckets}
+                                    points={analyticsData.cost_points}
+                                    byDestination={analyticsData.by_destination}
+                                    destCells={analyticsData.dest_pallet_cells}
+                                />
+                            )}
+
+                            {analyticsView === 'carriers' && (
+                                <LogisticsCarriers
+                                    byCarrier={analyticsData.by_carrier}
+                                    byDestination={analyticsData.by_destination}
+                                />
+                            )}
+
+                            {analyticsView === 'anomalies' && (
+                                <LogisticsAnomalies anomalies={analyticsData.anomalies} slug={slug} />
+                            )}
+
+                            {analyticsView === 'matrix' && (
+                                analyticsData.by_route.length > 0
+                                    ? <HeatmapMatrix routes={analyticsData.by_route} />
+                                    : <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)', marginBottom: 16 }}>Нет маршрутов за период</div>
                             )}
                         </>
                     )}
 
-                    {/* History table */}
-                    {historyLoading ? (
+                    {/* Shipments table — построчная история отправок (фикс сортировки: весь период) */}
+                    {shipmentsTruncated && (
+                        <div className="glass-card" style={{ padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--color-warning)' }}>
+                            Показаны первые {formatNumber(shipmentRows.length, 0)} из {formatNumber(shipmentsTotal, 0)} отправок — сузьте период для полного списка.
+                        </div>
+                    )}
+                    {shipmentsLoading ? (
                         <div className="glass-card" style={{ padding: 32, textAlign: 'center' }}>Загрузка...</div>
-                    ) : historyItems.length === 0 ? (
+                    ) : shipmentRows.length === 0 ? (
                         <div className="glass-card" style={{ padding: 64, textAlign: 'center' }}>
-                            <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8 }}>Нет отправок</div>
+                            <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8 }}>Нет отправок за период</div>
                             <div style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>
-                                Здесь появятся отгруженные и принятые WB заявки
+                                Измените период или фильтры — здесь все отгрузки заявок за выбранный диапазон
                             </div>
                         </div>
                     ) : (
                         <TanStackDataTable
                             columns={[
-                                { key: 'status', label: 'Статус', render: (_v: string, row: any) => { const cfg = STATUS_MAP[row.status as AssemblyStatus] || { label: row.status, className: '' }; return <span className={`badge ${cfg.className}`}>{cfg.label}</span>; }},
-                                { key: 'number', label: '№', render: (v: string) => <span style={{ fontWeight: 500 }}>{v}</span> },
-                                { key: 'brands', label: 'Бренд', render: (v: string) => <span style={{ fontSize: 12 }}>{v || '\u2014'}</span> },
-                                { key: 'wb_supply_id_wb', label: 'Поставка WB', render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v || '\u2014'}</span> },
-                                { key: 'wb_fbo_status', label: 'Статус WB', render: (v: string) => { if (!v) return '\u2014'; const cfg = WB_STATUS_MAP[v]; return cfg ? <span className={`badge ${cfg.className}`}>{cfg.label}</span> : '\u2014'; }},
-                                { key: 'warehouse_name', label: 'Склад забора', render: (v: string) => <span style={{ color: 'var(--color-text-muted)' }}>{v || '\u2014'}</span> },
-                                { key: 'effective_wb_warehouse', label: 'Склад сдачи', render: (v: string) => <span style={{ color: 'var(--color-text-muted)' }}>{v || '\u2014'}</span> },
-                                { key: 'shipped_at', label: 'Дата отгрузки', format: 'date' },
-                                { key: 'wb_fbo_actual_date', label: 'Дата сдачи', render: (v: string) => v ? formatDate(v) : '\u2014' },
-                                { key: 'wb_fbo_planned_date', label: 'План сдачи', render: (v: string) => v ? formatDate(v) : '\u2014' },
-                                { key: 'pallets_count', label: 'Палеты', align: 'right', format: 'number' },
-                                { key: 'pickup_cost', label: 'Стоимость', align: 'right', render: (v: number) => v ? formatNumber(v, 0) : '\u2014' },
-                                { key: 'cost_per_pallet', label: '₽/палета', align: 'right', render: (_v: unknown, row: any) => {
-                                    const cost = Number(row.pickup_cost) || 0;
-                                    const pallets = Number(row.pallets_count) || 0;
-                                    if (!cost || !pallets) return '\u2014';
-                                    const cpp = cost / pallets;
-                                    return <span style={{ color: cpp > 4000 ? 'var(--color-danger)' : undefined }}>{formatNumber(cpp, 0)}</span>;
+                                { key: 'status', label: 'Статус', sortable: true, render: (_v: string, row: LogisticsShipmentRow) => { const cfg = STATUS_MAP[row.status as AssemblyStatus] || { label: row.status || '—', className: '' }; return <span className={`badge ${cfg.className}`}>{cfg.label}</span>; }},
+                                { key: 'assembly_number', label: '№', sortable: true, render: (v: string) => <span style={{ fontWeight: 500 }}>{v || '—'}</span> },
+                                { key: 'brands', label: 'Бренд', sortable: true, render: (v: string) => <span style={{ fontSize: 12 }}>{v || '—'}</span> },
+                                { key: 'carrier_name', label: 'Подрядчик', sortable: true, render: (v: string | null, row: LogisticsShipmentRow) => v ? <span title={row.carrier_inn || ''} style={{ fontSize: 12 }}>{v}</span> : <span style={{ color: 'var(--color-text-muted)' }}>{'—'}</span> },
+                                { key: 'wb_supply_id', label: 'Поставка WB', sortable: true, render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v || '—'}</span> },
+                                { key: 'wb_fbo_status', label: 'Статус WB', sortable: true, render: (v: string) => { if (!v) return '—'; const cfg = WB_STATUS_MAP[v]; return cfg ? <span className={`badge ${cfg.className}`}>{cfg.label}</span> : '—'; }},
+                                { key: 'src_warehouse', label: 'Склад забора', sortable: true, render: (v: string) => <span style={{ color: 'var(--color-text-muted)' }}>{v || '—'}</span> },
+                                { key: 'dest_warehouse', label: 'Склад сдачи', sortable: true, render: (v: string) => <span style={{ color: 'var(--color-text-muted)' }}>{v || '—'}</span> },
+                                { key: 'shipped_date', label: 'Дата отгрузки', sortable: true, render: (v: string) => v ? formatDate(v) : '—' },
+                                { key: 'wb_fbo_actual_date', label: 'Дата сдачи', sortable: true, render: (v: string) => v ? formatDate(v) : '—' },
+                                { key: 'wb_fbo_planned_date', label: 'План сдачи', sortable: true, render: (v: string) => v ? formatDate(v) : '—' },
+                                { key: 'pallets_count', label: 'Палеты', align: 'right', sortable: true, render: (v: number | null) => v != null ? formatNumber(v, 0) : '—' },
+                                { key: 'pickup_cost', label: 'Стоимость', align: 'right', sortable: true, render: (v: number | null) => v != null ? formatNumber(v, 0) : '—' },
+                                { key: 'cost_per_pallet', label: '₽/палета', align: 'right', sortable: true, render: (v: number | null, row: LogisticsShipmentRow) => {
+                                    if (v == null) {
+                                        return row.anomaly_type === 'no_cost'
+                                            ? <span className="badge badge-secondary">нет цены</span>
+                                            : '—';
+                                    }
+                                    const anom = row.anomaly_type ? ANOMALY_BADGE[row.anomaly_type] : null;
+                                    const color = row.anomaly_type === 'overpriced' ? 'var(--color-danger)' : row.anomaly_type === 'underpriced' ? 'var(--color-warning)' : undefined;
+                                    return <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center', justifyContent: 'flex-end' }}>
+                                        <span style={{ color, fontWeight: anom ? 600 : undefined }}>{formatNumber(v, 0)}</span>
+                                        {anom && <span className={`badge ${anom.className}`} style={{ fontSize: 10 }}>{anom.label}</span>}
+                                    </span>;
                                 }},
-                                { key: 'total_weight_kg', label: 'Вес', align: 'right', render: (v: number) => v ? formatNumber(v, 1) + ' кг' : '\u2014' },
+                                { key: 'total_weight_kg', label: 'Вес', align: 'right', sortable: true, render: (v: number | null) => v ? formatNumber(v, 1) + ' кг' : '—' },
                             ]}
-                            data={historyItems}
-                            title={`Всего: ${historyTotal}`}
+                            data={shipmentRows}
+                            title={`Всего отправок: ${shipmentsTotal}`}
+                            exportName="logistics_shipments"
                             enableSorting
                             enablePagination
                             pageSize={50}
-                            onRowClick={(row: any) => { window.location.href = `/p/${slug}/warehouse/assembly/${row.id}`; }}
+                            onRowClick={(row: LogisticsShipmentRow) => { if (row.assembly_request_id) window.location.href = `/p/${slug}/warehouse/assembly/${row.assembly_request_id}`; }}
                         />
                     )}
                 </>

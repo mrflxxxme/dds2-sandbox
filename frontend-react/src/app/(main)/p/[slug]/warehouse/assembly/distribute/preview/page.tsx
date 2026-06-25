@@ -20,6 +20,7 @@ import {
     PREVIEW_EXPORT_COLUMNS_FF,
     type PreviewLine,
 } from '@/lib/utils/assemblyPreview';
+import { palletsForLines, maxPalletHeightCm, parseBoxSize, type PalletCount } from '@/lib/utils/boxPallet';
 
 const toggleInSet = (s: Set<string>, value: string): Set<string> => {
     const n = new Set(s);
@@ -78,8 +79,10 @@ export default function AssemblyPreviewPage() {
     const [selectedBrands, setSelectedBrands] = useState<Set<string>>(new Set());
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
     const [nmMeta, setNmMeta] = useState<Map<number, { subject: string; brand: string }>>(new Map());
+    const [nmBoxSize, setNmBoxSize] = useState<Map<number, string | null>>(new Map());
+    const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
     const [viewMode, setViewMode] = useState<'cards' | 'table' | 'matrix'>('cards');
-    const [matrixUnit, setMatrixUnit] = useState<'qty' | 'boxes'>('qty');
+    const [matrixUnit, setMatrixUnit] = useState<'qty' | 'boxes' | 'pallets'>('qty');
 
     const backToDistribute = useCallback(() => {
         if (draftId) router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draftId}`);
@@ -154,6 +157,7 @@ export default function AssemblyPreviewPage() {
                 if (cancelled) return;
                 const m = new Map<number, number | null>();
                 const meta = new Map<number, { subject: string; brand: string }>();
+                const sizes = new Map<number, string | null>();
                 for (const r of resp.items) {
                     let ppb: number | null = null;
                     if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
@@ -167,13 +171,33 @@ export default function AssemblyPreviewPage() {
                         }
                         ppb = best > 0 ? best : null;
                     }
+                    // Размер коробки SKU — box_size ФФ с наибольшим стоком, где он задан
+                    // и парсится (зеркало resolveSkuBoxSize в WarehouseNeedView).
+                    let boxSize: string | null = null;
+                    let bestStock = -1;
+                    for (const p of r.per_warehouse) {
+                        if (!p.box_size || !parseBoxSize(p.box_size)) continue;
+                        if (p.rf_stock > bestStock) { boxSize = p.box_size; bestStock = p.rf_stock; }
+                    }
                     m.set(r.nm_id, ppb);
                     meta.set(r.nm_id, { subject: r.subject || '', brand: r.brand || '' });
+                    sizes.set(r.nm_id, boxSize);
                 }
                 setNmPpb(m);
                 setNmMeta(meta);
+                setNmBoxSize(sizes);
             })
             .catch(() => { /* best-effort: без кратности покажем только штуки */ });
+        return () => { cancelled = true; };
+    }, []);
+
+    // Ручной override «коробок на паллету» по размеру (best-effort) — перебивает
+    // геометрию в palletsForLines. Без него считаем чисто по габаритам.
+    useEffect(() => {
+        let cancelled = false;
+        api.getPalletBoxesBySize()
+            .then(ov => { if (!cancelled) setPalletOverrides(ov || {}); })
+            .catch(() => { /* best-effort */ });
         return () => { cancelled = true; };
     }, []);
 
@@ -258,6 +282,84 @@ export default function AssemblyPreviewPage() {
         return k && k > 0 ? Math.ceil(l.qty / k) : 0;
     }, [nmPpb]);
     const boxesSum = useCallback((ls: PreviewLine[]) => ls.reduce((s, l) => s + boxesOf(l), 0), [boxesOf]);
+
+    // ─── Паллеты (геометрия box_size) ─────────────────────────────────────
+    // Паллеты для набора линий ОДНОГО склада-цели: короб = смешанные паллеты
+    // (Σ долей объёма по SKU), моно/сейф = по SKU. Высота — лимит склада-цели.
+    const palletsForCell = useCallback((ls: PreviewLine[], wbName: string): PalletCount => {
+        const byPkg = new Map<PackageType, PreviewLine[]>();
+        for (const l of ls) {
+            const arr = byPkg.get(l.pkg);
+            if (arr) arr.push(l); else byPkg.set(l.pkg, [l]);
+        }
+        const height = maxPalletHeightCm(wbName);
+        let pallets = 0, fill = 0, unknownLines = 0, unknownUnits = 0;
+        for (const [pkg, lns] of byPkg) {
+            const r = palletsForLines(
+                lns.map(l => ({ units: l.qty, boxQty: nmPpb.get(l.nmId), boxSize: nmBoxSize.get(l.nmId) ?? null })),
+                height,
+                pkg === 'BOX' ? 'box' : 'mono',
+                palletOverrides,
+            );
+            pallets += r.pallets; fill += r.fill; unknownLines += r.unknownLines; unknownUnits += r.unknownUnits;
+        }
+        return { pallets, fill, unknownLines, unknownUnits };
+    }, [nmPpb, nmBoxSize, palletOverrides]);
+
+    // Паллеты склада-источника = Σ по его складам-целям (каждый — отдельная поставка,
+    // короба разных целей не кладутся на одну паллету).
+    const palletsForFf = useCallback((ls: PreviewLine[]): PalletCount => {
+        let pallets = 0, fill = 0, unknownLines = 0, unknownUnits = 0;
+        for (const { wb, items } of groupByWb(ls)) {
+            const r = palletsForCell(items, wb);
+            pallets += r.pallets; fill += r.fill; unknownLines += r.unknownLines; unknownUnits += r.unknownUnits;
+        }
+        return { pallets, fill, unknownLines, unknownUnits };
+    }, [palletsForCell]);
+
+    // Итог по всему срезу (Σ паллет по всем (источник × цель)).
+    const palletTotals = useMemo(() => {
+        let pallets = 0, unknownUnits = 0;
+        for (const g of groupByFf(allLines)) {
+            const r = palletsForFf(g.lines);
+            pallets += r.pallets; unknownUnits += r.unknownUnits;
+        }
+        return { pallets, unknownUnits };
+    }, [allLines, palletsForFf]);
+
+    // Map для commit: "{ffId}::{wbName}::{pkg}" → паллет (мин. 1 на заявку с товаром).
+    // Считается по ВСЕМУ срезу (commit создаёт срез целиком, не по фильтру дисплея).
+    const palletCounts = useMemo(() => {
+        const groups = new Map<string, PreviewLine[]>();
+        for (const l of allLines) {
+            const k = `${l.ffId}::${l.wbName}::${l.pkg}`;
+            const arr = groups.get(k);
+            if (arr) arr.push(l); else groups.set(k, [l]);
+        }
+        const out: Record<string, number> = {};
+        for (const [k, ls] of groups) {
+            const r = palletsForLines(
+                ls.map(l => ({ units: l.qty, boxQty: nmPpb.get(l.nmId), boxSize: nmBoxSize.get(l.nmId) ?? null })),
+                maxPalletHeightCm(ls[0].wbName),
+                ls[0].pkg === 'BOX' ? 'box' : 'mono',
+                palletOverrides,
+            );
+            out[k] = Math.max(1, r.pallets);
+        }
+        return out;
+    }, [allLines, nmPpb, nmBoxSize, palletOverrides]);
+
+    // Бейдж паллет для отображения: средняя заполненность + флаг недозагрузки
+    // (последняя/единственная паллета почти пустая — как Самара с 2 коробками).
+    const palletBadge = useCallback((pc: PalletCount) => {
+        const avg = pc.pallets > 0 ? pc.fill / pc.pallets : 0;
+        return {
+            pallets: pc.pallets,
+            pct: Math.round(avg * 100),
+            underfilled: pc.pallets > 0 && avg < 0.6,
+            unknownUnits: pc.unknownUnits,
+        };
+    }, []);
 
     const scopeLabel = pkgTab === 'MONOPALLET' ? 'Моно' : 'Короб';
 
@@ -360,16 +462,37 @@ export default function AssemblyPreviewPage() {
         }
         return m;
     }, [lines, boxesOf]);
-    const matrixColTotal = useCallback((wb: string) =>
-        lines.reduce((s, l) => l.wbName === wb ? s + (matrixUnit === 'boxes' ? boxesOf(l) : l.qty) : s, 0),
-        [lines, matrixUnit, boxesOf]);
+    // Паллеты по ячейкам (источник × цель) + итоги по столбцам/всего. Считаем по
+    // линиям одной ячейки (смешанные паллеты короба), а не суммой долей разных целей.
+    const matrixPallets = useMemo(() => {
+        const cells = new Map<string, number>();
+        const colTotals = new Map<string, number>();
+        let grand = 0;
+        const groups = new Map<string, { wb: string; items: PreviewLine[] }>();
+        for (const l of lines) {
+            const key = `${l.ffId}::${l.wbName}`;
+            const e = groups.get(key);
+            if (e) e.items.push(l); else groups.set(key, { wb: l.wbName, items: [l] });
+        }
+        for (const [key, { wb, items }] of groups) {
+            const p = palletsForCell(items, wb).pallets;
+            cells.set(key, p);
+            colTotals.set(wb, (colTotals.get(wb) || 0) + p);
+            grand += p;
+        }
+        return { cells, colTotals, grand };
+    }, [lines, palletsForCell]);
+    const matrixColTotal = useCallback((wb: string) => {
+        if (matrixUnit === 'pallets') return matrixPallets.colTotals.get(wb) || 0;
+        return lines.reduce((s, l) => l.wbName === wb ? s + (matrixUnit === 'boxes' ? boxesOf(l) : l.qty) : s, 0);
+    }, [lines, matrixUnit, boxesOf, matrixPallets]);
 
     // ─── Commit ──────────────────────────────────────────────────────────
     const handleCreate = useCallback(async () => {
         if (!draftId) return;
         setCommitting(true);
         try {
-            const resp = await api.commitAssemblyDraft(draftId, pkgTab);
+            const resp = await api.commitAssemblyDraft(draftId, pkgTab, palletCounts);
             const ids = resp.created_request_ids || [];
             // Остался ли черновик (другой срез) — решаем, куда уйти.
             let leftoverRows = 0;
@@ -396,7 +519,7 @@ export default function AssemblyPreviewPage() {
             setToast({ message: e instanceof Error ? e.message : 'Ошибка создания сборок', type: 'error' });
             setCommitting(false);
         }
-    }, [draftId, pkgTab, router, slug]);
+    }, [draftId, pkgTab, palletCounts, router, slug]);
 
     // ─── Render ──────────────────────────────────────────────────────────
     if (loading) {
@@ -485,6 +608,13 @@ export default function AssemblyPreviewPage() {
                 <KpiCard label="Заявок" value={totalAssemblies} icon="📋" color="var(--color-accent)" sub={breakdown.withNewcomer > 0 ? `🆕 с новинками: ${breakdown.withNewcomer}` : 'все обычные'} />
                 <KpiCard label="Штук" value={sumQty(allLines)} icon="🔢" color="var(--color-success)" />
                 <KpiCard label="Коробок" value={boxesSum(allLines)} icon="📦" color="var(--color-accent)" />
+                <KpiCard
+                    label="Паллет"
+                    value={palletTotals.pallets}
+                    icon="🟫"
+                    color="var(--color-accent)"
+                    sub={palletTotals.unknownUnits > 0 ? `${formatNumber(palletTotals.unknownUnits, 0)} шт без габаритов` : 'по габаритам коробки'}
+                />
                 <KpiCard label="SKU" value={distinctSku} icon="🏷️" color="var(--color-warning)" sub="уникальных" />
                 <KpiCard
                     label="Неполных коробов"
@@ -509,6 +639,7 @@ export default function AssemblyPreviewPage() {
                             <div style={{ width: 1, alignSelf: 'stretch', background: 'var(--color-border)', margin: '0 4px' }} />
                             <button className={`btn btn-sm ${matrixUnit === 'qty' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setMatrixUnit('qty')}>Штуки</button>
                             <button className={`btn btn-sm ${matrixUnit === 'boxes' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setMatrixUnit('boxes')}>Коробки</button>
+                            <button className={`btn btn-sm ${matrixUnit === 'pallets' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setMatrixUnit('pallets')}>Паллеты</button>
                         </>
                     )}
                 </div>
@@ -584,7 +715,7 @@ export default function AssemblyPreviewPage() {
                         <thead>
                             <tr>
                                 <th style={{ position: 'sticky', left: 0, zIndex: 2, background: '#f5f5f7', textAlign: 'left', padding: '8px 10px', borderBottom: '2px solid var(--color-border)', whiteSpace: 'nowrap' }}>
-                                    Источник \ WB-цель ({matrixUnit === 'boxes' ? 'кор' : 'шт'})
+                                    Источник \ WB-цель ({matrixUnit === 'pallets' ? 'пал' : matrixUnit === 'boxes' ? 'кор' : 'шт'})
                                 </th>
                                 {matrixWbCols.map(wb => (
                                     <th key={wb} style={{ padding: '8px 10px', textAlign: 'right', borderBottom: '2px solid var(--color-border)', background: '#f5f5f7', whiteSpace: 'nowrap' }} title={wb}>
@@ -598,7 +729,9 @@ export default function AssemblyPreviewPage() {
                         <tbody>
                             {ffGroups.map(g => {
                                 const isOpen = expanded.has(g.ffId);
-                                const rowTotal = matrixUnit === 'boxes' ? boxesSum(g.lines) : sumQty(g.lines);
+                                const rowTotal = matrixUnit === 'pallets'
+                                    ? palletsForFf(g.lines).pallets
+                                    : matrixUnit === 'boxes' ? boxesSum(g.lines) : sumQty(g.lines);
                                 // Второй уровень — товары склада, разбитые по тем же WB-колонкам.
                                 const skuRows = isOpen ? (() => {
                                     const byNm = new Map<number, { nmId: number; vendor: string; isNew: boolean; cells: Map<string, number>; total: number }>();
@@ -626,7 +759,9 @@ export default function AssemblyPreviewPage() {
                                             </td>
                                             {matrixWbCols.map(wb => {
                                                 const cell = matrixCells.get(`${g.ffId}::${wb}`);
-                                                const val = cell ? (matrixUnit === 'boxes' ? cell.boxes : cell.qty) : 0;
+                                                const val = matrixUnit === 'pallets'
+                                                    ? (matrixPallets.cells.get(`${g.ffId}::${wb}`) || 0)
+                                                    : cell ? (matrixUnit === 'boxes' ? cell.boxes : cell.qty) : 0;
                                                 return (
                                                     <td key={wb} style={{ textAlign: 'right', padding: '6px 10px', borderBottom: '1px solid var(--color-border)', color: val > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }}>
                                                         {val > 0 ? formatNumber(val, 0) : '·'}
@@ -664,7 +799,7 @@ export default function AssemblyPreviewPage() {
                                     <td key={wb} style={{ textAlign: 'right', padding: '8px 10px', fontWeight: 700, background: '#f5f5f7' }}>{formatNumber(matrixColTotal(wb), 0)}</td>
                                 ))}
                                 <td style={{ textAlign: 'right', padding: '8px 10px', fontWeight: 700, background: 'rgba(59,130,246,0.08)' }}>
-                                    {formatNumber(matrixUnit === 'boxes' ? boxesSum(lines) : sumQty(lines), 0)}
+                                    {formatNumber(matrixUnit === 'pallets' ? matrixPallets.grand : matrixUnit === 'boxes' ? boxesSum(lines) : sumQty(lines), 0)}
                                 </td>
                             </tr>
                         </tbody>
@@ -675,6 +810,7 @@ export default function AssemblyPreviewPage() {
                     {ffGroups.map(g => {
                         const isOpen = expanded.has(g.ffId);
                         const ffName = warehouseNameById(g.ffId);
+                        const ffPallets = palletsForFf(g.lines).pallets;
                         return (
                             <div key={g.ffId} className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
                                 <div
@@ -688,7 +824,7 @@ export default function AssemblyPreviewPage() {
                                     <span style={{ fontSize: 12, width: 12, color: 'var(--color-text-muted)' }}>{isOpen ? '▾' : '▸'}</span>
                                     <span style={{ fontWeight: 700, fontSize: 15 }}>📦 {ffName}</span>
                                     <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                        Σ {formatNumber(sumQty(g.lines), 0)} шт · {formatNumber(boxesSum(g.lines), 0)} кор · {reqCountOf(g.lines)} заявок · {skuCountOf(g.lines)} SKU
+                                        Σ {formatNumber(sumQty(g.lines), 0)} шт · {formatNumber(boxesSum(g.lines), 0)} кор · <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(ffPallets, 0)} пал</strong> · {reqCountOf(g.lines)} заявок · {skuCountOf(g.lines)} SKU
                                     </span>
                                     <div style={{ flex: 1 }} />
                                     <button
@@ -708,10 +844,12 @@ export default function AssemblyPreviewPage() {
                                 </div>
                                 {isOpen && (
                                     <div style={{ padding: '4px 16px 14px 34px', borderTop: '1px solid var(--color-border)' }}>
-                                        {groupByWb(g.lines).map(({ wb, items }) => (
+                                        {groupByWb(g.lines).map(({ wb, items }) => {
+                                            const pb = palletBadge(palletsForCell(items, wb));
+                                            return (
                                             <div key={wb} style={{ marginTop: 10 }}>
                                                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-warning)', marginBottom: 4 }}>
-                                                    → {wb} <span style={{ color: 'var(--color-text-muted)', fontWeight: 500 }}>(Σ {formatNumber(sumQty(items), 0)} шт · {formatNumber(boxesSum(items), 0)} кор)</span>
+                                                    → {wb} <span style={{ color: 'var(--color-text-muted)', fontWeight: 500 }}>(Σ {formatNumber(sumQty(items), 0)} шт · {formatNumber(boxesSum(items), 0)} кор{pb.pallets > 0 && <> · <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(pb.pallets, 0)} пал</strong></>}{pb.underfilled && <span style={{ color: 'var(--color-warning)' }} title={`Паллета заполнена ~${pb.pct}% — мало товара на это направление`}> · ⚠ ~{pb.pct}%</span>}{pb.unknownUnits > 0 && <span style={{ color: 'var(--color-text-muted)' }} title="Нет габаритов коробки — паллеты не считаются"> · {formatNumber(pb.unknownUnits, 0)} шт б/габ</span>})</span>
                                                 </div>
                                                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                                                     <thead>
@@ -753,7 +891,8 @@ export default function AssemblyPreviewPage() {
                                                     </tbody>
                                                 </table>
                                             </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 )}
                             </div>

@@ -519,16 +519,25 @@ async def return_to_warehouse(
         if fbo_supply and fbo_supply.return_processed_at is not None:
             raise ValueError("Возврат по связанной поставке уже обработан")
 
-    # 1. Приёмка-возврат на складе возврата (годный сток), привязанная к попытке.
+    # 1. Приёмка-возврат на складе возврата, привязанная к попытке.
+    #    Если склад возврата ведёт оператор ФФ-портала (Хамза) — приёмку создаём
+    #    EXPECTED: сток вернётся, когда оператор её ПРИМЕТ в портале (с факт. кол-вом
+    #    и браком). Иначе — прежнее поведение: сразу ACCEPTED + возврат годного стока.
+    from backend.ff_context import warehouse_has_ff_operator
+
+    pending_accept = await warehouse_has_ff_operator(db, project_id, return_wh_id)
+
     receipt_number = await _next_number(db, project_id, "IN", InboundReceipt)
     auto_comment = f"Возврат по заявке {req.number} (попытка {current_attempt_no}, WB не принял поставку)"
+    if pending_accept:
+        auto_comment += " — ожидает приёмки оператором ФФ"
     receipt = InboundReceipt(
         project_id=project_id,
         warehouse_id=return_wh_id,
         number=receipt_number,
-        status=InboundStatus.ACCEPTED,
+        status=InboundStatus.EXPECTED if pending_accept else InboundStatus.ACCEPTED,
         planned_date=date.today(),
-        actual_date=date.today(),
+        actual_date=None if pending_accept else date.today(),
         comment=f"{auto_comment}. {comment}" if comment else auto_comment,
         assembly_request_id=req.id,
         assembly_attempt_no=current_attempt_no,
@@ -536,7 +545,8 @@ async def return_to_warehouse(
     db.add(receipt)
     await db.flush()
 
-    # 2. Позиции приёмки + возврат остатков (+qty, годный) на склад возврата.
+    # 2. Позиции приёмки. Возврат остатков (+qty, годный) проводим СРАЗУ только если
+    #    склад не портальный; для портального — при приёмке оператором (accept_receipt_ff).
     for item in req.items:
         db.add(
             InboundReceiptItem(
@@ -545,21 +555,22 @@ async def return_to_warehouse(
                 nomenclature_id=item.nomenclature_id,
                 barcode=item.barcode,
                 expected_qty=item.quantity,
-                actual_qty=item.quantity,
+                actual_qty=0 if pending_accept else item.quantity,
             )
         )
-        await _update_stock(
-            db,
-            project_id=project_id,
-            warehouse_id=return_wh_id,
-            nomenclature_id=item.nomenclature_id,
-            barcode=item.barcode,
-            delta=+item.quantity,
-            movement_type=MovementType.INBOUND,
-            reference_type="RECEIPT",
-            reference_id=receipt.id,
-            comment=f"Возврат по заявке {req.number}",
-        )
+        if not pending_accept:
+            await _update_stock(
+                db,
+                project_id=project_id,
+                warehouse_id=return_wh_id,
+                nomenclature_id=item.nomenclature_id,
+                barcode=item.barcode,
+                delta=+item.quantity,
+                movement_type=MovementType.INBOUND,
+                reference_type="RECEIPT",
+                reference_id=receipt.id,
+                comment=f"Возврат по заявке {req.number}",
+            )
 
     # 3. Помечаем связанную FBO-поставку обработанной возвратом (флаг был None —
     #    проверено под row-lock на шаге 0) — уходит из «недоприёмки».
@@ -588,7 +599,8 @@ async def return_to_warehouse(
     await db.refresh(req)
 
     await invalidate_cache("reports:balance")
-    await invalidate_cache("reports:logistics_analytics")
+    await invalidate_cache("reports:logistics_analytics_v2")
+    await invalidate_cache("reports:logistics_forecast")
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
 
@@ -653,7 +665,8 @@ async def close_request(
     )
     await db.commit()
     await db.refresh(req)
-    await invalidate_cache("reports:logistics_analytics")
+    await invalidate_cache("reports:logistics_analytics_v2")
+    await invalidate_cache("reports:logistics_forecast")
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
     return req

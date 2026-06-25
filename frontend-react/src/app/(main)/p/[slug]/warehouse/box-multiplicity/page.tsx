@@ -15,8 +15,9 @@ import type {
     BoxMultiplicitySourceRow,
 } from '@/types/api';
 import { parseBoxMultiplicityPaste } from '@/lib/utils/boxMultiplicityPaste';
+import { parseBoxSize, effectiveBoxesPerPallet, palletsForBoxes, maxPalletHeightCm, canonBoxSize } from '@/lib/utils/boxPallet';
 
-type StockFilter = 'all' | 'rf' | 'partial' | 'mixed' | 'no_box_qty';
+type StockFilter = 'all' | 'rf' | 'partial' | 'mixed' | 'no_box_qty' | 'no_pallet';
 
 const SOURCE_TYPE_META: Record<string, { label: string; icon: string }> = {
     vehicle: { label: 'Машина', icon: '🚚' },
@@ -372,6 +373,7 @@ function SkuExpandPanel({
     onSavePerRfSize,
     onTogglePerRfUse,
     onRowUpdated,
+    palletOverrides,
 }: {
     sku: BoxMultiplicityRow;
     perRfEdit: Record<string, string>;
@@ -382,6 +384,7 @@ function SkuExpandPanel({
     onSavePerRfSize: (row: BoxMultiplicityRow, wh: BoxMultiplicityPerWarehouseRow) => void;
     onTogglePerRfUse: (row: BoxMultiplicityRow, wh: BoxMultiplicityPerWarehouseRow, next: boolean) => void;
     onRowUpdated: (row: BoxMultiplicityRow) => void;
+    palletOverrides: Record<string, number>;
 }) {
     const panelStyle: React.CSSProperties = {
         background: 'var(--color-bg)',
@@ -625,6 +628,7 @@ function SkuExpandPanel({
                             <th style={{ textAlign: 'left', padding: '4px 8px' }}>Кратность</th>
                             <th style={{ textAlign: 'left', padding: '4px 8px', width: 110 }}>Размер</th>
                             <th style={{ textAlign: 'right', padding: '4px 8px', width: 110 }}>Коробов</th>
+                            <th style={{ textAlign: 'right', padding: '4px 8px', width: 130 }}>Паллета</th>
                             <th style={{ textAlign: 'center', padding: '4px 8px', width: 90 }}>Учитывать</th>
                         </tr>
                     </thead>
@@ -639,6 +643,13 @@ function SkuExpandPanel({
                             const ppb = wh.box_qty;
                             const fullBoxes = ppb && ppb > 0 ? Math.floor(wh.rf_stock / ppb) : null;
                             const remPcs = ppb && ppb > 0 ? wh.rf_stock % ppb : 0;
+                            // Паллета из габаритов коробки (евро 120×80 + лимит высоты склада).
+                            // Вес НЕ учитываем (по требованию) — только геометрия.
+                            const palDims = parseBoxSize(wh.box_size);
+                            const whMaxHcm = maxPalletHeightCm(wh.warehouse_name);
+                            // override по размеру (если задан на странице pallet-sizes) перебивает геометрию.
+                            const boxesPerPal = effectiveBoxesPerPallet(wh.box_size, whMaxHcm, palletOverrides);
+                            const palletsNow = boxesPerPal && fullBoxes ? palletsForBoxes(fullBoxes, boxesPerPal) : 0;
                             return (
                                 <tr key={wh.warehouse_id} style={{ borderTop: '1px solid var(--color-border)' }}>
                                     <td style={{ padding: '6px 8px', fontWeight: 500 }}>{wh.warehouse_name}</td>
@@ -803,6 +814,29 @@ function SkuExpandPanel({
                                             <span style={{ color: 'var(--color-text-dim)' }}>—</span>
                                         )}
                                     </td>
+                                    <td style={{ padding: '6px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                        {boxesPerPal !== null ? (
+                                            <span title={`${boxesPerPal} коробок на евро-паллету (120×80, высота склада ${whMaxHcm / 100} м)${ppb ? `; ${formatNumber(boxesPerPal * ppb, 0)} шт/паллету` : ''}`}>
+                                                <strong>{formatNumber(boxesPerPal, 0)}</strong>
+                                                <span style={{ color: 'var(--color-text-muted)' }}> кор/пал</span>
+                                                {palletsNow > 0 && (
+                                                    <span style={{ color: 'var(--color-accent)' }}> · ≈{formatNumber(palletsNow, 0)} пал</span>
+                                                )}
+                                            </span>
+                                        ) : palDims ? (
+                                            <span
+                                                style={{ color: 'var(--color-warning)' }}
+                                                title="Коробка крупногабаритная или выше лимита высоты склада — на паллету коробами не уложить (монопаллета)"
+                                            >⚠️ крупногабарит</span>
+                                        ) : ppb && ppb > 0 ? (
+                                            <span
+                                                style={{ color: 'var(--color-warning)' }}
+                                                title="Нет габаритов коробки — паллету не сформировать. Задайте размер в колонке «Размер»."
+                                            >⚠️ нет габаритов</span>
+                                        ) : (
+                                            <span style={{ color: 'var(--color-text-dim)' }}>—</span>
+                                        )}
+                                    </td>
                                     <td style={{ padding: '6px 8px', textAlign: 'center' }}>
                                         {/* Per-ФФ тоггл разрешён даже на машинных ФФ */}
                                         <input
@@ -833,6 +867,31 @@ function skuHasBoxQty(row: BoxMultiplicityRow): boolean {
     return row.per_warehouse.some(p => p.rf_stock > 0 && p.box_qty !== null);
 }
 
+// Можно ли SKU палетизировать: есть ФФ с остатком, у которого И кратность, И
+// габариты коробки (box_size парсится). Без обоих паллету не сформировать и
+// корректно распределить нельзя — такие SKU подсвечиваем («Нет габаритов»).
+function skuCanPalletize(row: BoxMultiplicityRow): boolean {
+    return row.per_warehouse.some(
+        p => p.rf_stock > 0 && p.box_qty !== null && parseBoxSize(p.box_size) !== null,
+    );
+}
+
+// Размеры коробки SKU по ФФ-складам. У одного товара на разных ФФ коробки могут
+// отличаться → собираем все уникальные размеры + раскладку «склад: размер».
+function skuBoxSizeInfo(row: BoxMultiplicityRow): { sizes: string[]; perFf: Array<{ wh: string; size: string }> } {
+    const perFf = row.per_warehouse
+        .filter(p => p.box_size && p.box_size.trim())
+        .map(p => ({ wh: p.warehouse_name, size: (p.box_size as string).trim() }));
+    // Уникальные по КАНОНУ: разные написания одного размера («60x40xc40» и
+    // «60*40*40») = один размер, не «разные». Показываем по представителю на канон.
+    const byCanon = new Map<string, string>();
+    for (const p of perFf) {
+        const c = canonBoxSize(p.size);
+        if (!byCanon.has(c)) byCanon.set(c, p.size);
+    }
+    return { sizes: Array.from(byCanon.values()), perFf };
+}
+
 // Частичная кратность: среди ФФ с остатком есть И с заданной, И без — не везде заполнено.
 function skuHasPartialBoxQty(row: BoxMultiplicityRow): boolean {
     const stocked = row.per_warehouse.filter(p => p.rf_stock > 0);
@@ -860,6 +919,9 @@ export default function BoxMultiplicityPage() {
     const [rows, setRows] = useState<BoxMultiplicityRow[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    // Ручной override «коробок на паллету» по размеру (страница pallet-sizes) —
+    // перебивает геометрию в колонке «Паллета».
+    const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
 
     // Per-ФФ inline edit кратности: "{nm_id}:{warehouse_id}" → string value
     const [perRfEdit, setPerRfEdit] = useState<Record<string, string>>({});
@@ -915,6 +977,15 @@ export default function BoxMultiplicityPage() {
     }, []);
 
     useEffect(() => { load(); }, [load]);
+
+    // Ручной override «коробок на паллету» по размеру коробки (best-effort).
+    useEffect(() => {
+        let cancelled = false;
+        api.getPalletBoxesBySize()
+            .then(ov => { if (!cancelled) setPalletOverrides(ov || {}); })
+            .catch(() => { /* нет override → геометрия */ });
+        return () => { cancelled = true; };
+    }, []);
 
     // ─── Карта имени ФФ → ID (для резолва per-ФФ paste) ────────────────────
     const warehouseMap = useMemo(() => {
@@ -1266,6 +1337,8 @@ export default function BoxMultiplicityPage() {
                 case 'partial': return skuHasPartialBoxQty(r);
                 case 'mixed': return skuHasMixedBoxQty(r);
                 case 'no_box_qty': return r.rf_stock > 0 && !skuHasBoxQty(r);
+                // «Нет габаритов» — кратность есть, но размер коробки не задан → паллету не сформировать.
+                case 'no_pallet': return r.rf_stock > 0 && skuHasBoxQty(r) && !skuCanPalletize(r);
                 default: return true;
             }
         });
@@ -1290,6 +1363,8 @@ export default function BoxMultiplicityPage() {
             mixed: scopeRows.filter(skuHasMixedBoxQty).length,
             // «Нет кратности» — есть остаток на ФФ И кратность не задана.
             no_box_qty: scopeRows.filter(r => r.rf_stock > 0 && !skuHasBoxQty(r)).length,
+            // «Нет габаритов» — кратность есть, но размер коробки не задан → паллету не сформировать.
+            no_pallet: scopeRows.filter(r => r.rf_stock > 0 && skuHasBoxQty(r) && !skuCanPalletize(r)).length,
         };
         return { total, filterCounts };
     }, [scopeRows]);
@@ -1482,6 +1557,54 @@ export default function BoxMultiplicityPage() {
                 return withQty === stocked.length ? 'есть' : 'есть частично';
             },
         },
+        {
+            key: 'box_sizes',
+            label: 'Размер коробки',
+            align: 'left',
+            width: '170px',
+            // Сорт: 0 = нет данных, 1 = один размер, 2 = разные по складам.
+            getValue: (r: BoxMultiplicityRow) => {
+                const n = skuBoxSizeInfo(r).sizes.length;
+                return n === 0 ? 0 : n === 1 ? 1 : 2;
+            },
+            render: (_v: unknown, r: BoxMultiplicityRow) => {
+                const { sizes, perFf } = skuBoxSizeInfo(r);
+                if (sizes.length === 0) {
+                    return r.rf_stock > 0 ? (
+                        <span
+                            className="badge badge-warning"
+                            style={{ fontSize: 11 }}
+                            title="Нет габаритов коробки ни на одном ФФ — паллету не сформировать. Задайте размер в раскрытии строки или вставкой из буфера."
+                        >
+                            нет данных
+                        </span>
+                    ) : (
+                        <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>—</span>
+                    );
+                }
+                const tip = perFf.map(p => `${p.wh}: ${p.size}`).join('\n');
+                if (sizes.length === 1) {
+                    return (
+                        <span style={{ fontSize: 12, fontFamily: 'monospace' }} title={tip}>
+                            {sizes[0]}
+                        </span>
+                    );
+                }
+                return (
+                    <span
+                        className="badge badge-info"
+                        style={{ fontSize: 11 }}
+                        title={`Разные коробки по складам:\n${tip}`}
+                    >
+                        разные ({sizes.length})
+                    </span>
+                );
+            },
+            exportValue: (r: BoxMultiplicityRow) => {
+                const { sizes } = skuBoxSizeInfo(r);
+                return sizes.length === 0 ? 'нет данных' : sizes.join(' / ');
+            },
+        },
     ];
 
     if (loading) {
@@ -1513,6 +1636,13 @@ export default function BoxMultiplicityPage() {
                     </p>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
+                    <Link
+                        href={`/p/${slug}/warehouse/pallet-sizes`}
+                        className="btn btn-secondary btn-sm"
+                        title="Все размеры коробок из системы + коробок на паллету (с ручным переопределением)"
+                    >
+                        📐 Паллеты по размерам
+                    </Link>
                     <button
                         className={`btn btn-sm ${historyOpen ? 'btn-primary' : 'btn-secondary'}`}
                         onClick={toggleHistory}
@@ -1839,6 +1969,7 @@ export default function BoxMultiplicityPage() {
                     { key: 'partial', label: 'Частичная кратность', count: stats.filterCounts.partial, color: 'var(--color-warning)' },
                     { key: 'mixed', label: 'Разные кратности', count: stats.filterCounts.mixed, color: 'var(--color-accent)' },
                     { key: 'no_box_qty', label: 'Нет кратности', count: stats.filterCounts.no_box_qty, color: 'var(--color-danger)' },
+                    { key: 'no_pallet', label: 'Нет габаритов', count: stats.filterCounts.no_pallet, color: 'var(--color-warning)' },
                 ] as Array<{ key: StockFilter; label: string; count: number; color: string }>).map(c => {
                     const active = stockFilter === c.key;
                     return (
@@ -1915,6 +2046,7 @@ export default function BoxMultiplicityPage() {
                             { key: 'partial', label: 'Частичная кратность', count: stats.filterCounts.partial },
                             { key: 'mixed', label: 'Разные кратности', count: stats.filterCounts.mixed },
                             { key: 'no_box_qty', label: 'Нет кратности', count: stats.filterCounts.no_box_qty },
+                            { key: 'no_pallet', label: 'Нет габаритов', count: stats.filterCounts.no_pallet },
                         ] as Array<{ key: StockFilter; label: string; count: number }>).map(c => (
                             <button
                                 key={c.key}
@@ -1963,6 +2095,7 @@ export default function BoxMultiplicityPage() {
                                     onTogglePerRfUse={togglePerRfUse}
                                     onRowUpdated={updated =>
                                         setRows(prev => prev.map(x => x.nm_id === updated.nm_id ? updated : x))}
+                                    palletOverrides={palletOverrides}
                                 />
                             )}
                         />

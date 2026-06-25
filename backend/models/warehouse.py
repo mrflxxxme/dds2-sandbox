@@ -134,6 +134,13 @@ class InboundReceipt(Base, TimestampMixin, SoftDeleteMixin):
     )
     assembly_attempt_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # FF-портал: «взял в работу» — кто из операторов фулфилмента и когда начал приёмку.
+    # Промежуточного статуса у приёмки нет (EXPECTED→ACCEPTED); claim хранится тут.
+    assigned_to_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    work_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Relationships
     warehouse: Mapped["Warehouse"] = relationship(back_populates="receipts")
     items: Mapped[list["InboundReceiptItem"]] = relationship(
@@ -160,6 +167,10 @@ class InboundReceiptItem(Base):
     barcode: Mapped[str] = mapped_column(String(50), nullable=False)
     expected_qty: Mapped[int] = mapped_column(Integer, nullable=False)
     actual_qty: Mapped[int] = mapped_column(Integer, default=0)
+    # FF-портал: брак по позиции при приёмке (Хамза вводит факт + брак отдельно).
+    # actual_qty = годный принятый; defect_qty = брак; недовоз = expected − (actual+defect).
+    defect_qty: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    defect_reason: Mapped[str | None] = mapped_column(Text)
 
     # Relationships
     receipt: Mapped["InboundReceipt"] = relationship(back_populates="items")

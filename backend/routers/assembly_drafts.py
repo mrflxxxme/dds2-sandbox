@@ -9,7 +9,7 @@ unique (source_ff, target_wb) pair with non-zero qty, then soft-deletes
 the draft.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -24,6 +24,7 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftUnitMove,
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
+    CommitDraftOptions,
 )
 from backend.services import assembly_draft_service
 from backend.utils.rate_limit import rate_limit_write
@@ -116,6 +117,7 @@ async def commit_draft(
         default=None,
         description="Коммитить только этот тип упаковки (BOX/MONOPALLET); остальное остаётся в черновике",
     ),
+    options: CommitDraftOptions = Body(default_factory=CommitDraftOptions),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> AssemblyDraftCommitResponse:
@@ -124,8 +126,13 @@ async def commit_draft(
     `package_type` (короб/моно) — партиальный коммит по упаковке: всё не выбранное
     остаётся в черновике. Без фильтра коммитит весь черновик. Новинки и обычные
     товары на один склад идут одной заявкой.
+
+    `options.pallet_counts` (опц.) — паллет на заявку по ключу
+    `"{ff_id}::{wb_name}::{pkg}"`; иначе плоский `distribution.pallets_count`.
     """
-    return await assembly_draft_service.commit_draft(db, project.id, draft_id, package_type)
+    return await assembly_draft_service.commit_draft(
+        db, project.id, draft_id, package_type, options.pallet_counts,
+    )
 
 
 @router.post(

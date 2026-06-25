@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 export function WarehouseExclusionSettings() {
     const [warehouses, setWarehouses] = useState<Array<{ name: string; is_sorting_center?: boolean }>>([]);
     const [excluded, setExcluded] = useState<string[]>([]);
+    const [preorderAllowed, setPreorderAllowed] = useState<string[]>([]);
     const [rfDefaultDays, setRfDefaultDays] = useState<number>(8);
     const [rfDefaultDaysSaved, setRfDefaultDaysSaved] = useState<number>(8);
     const [savingRf, setSavingRf] = useState(false);
@@ -17,13 +18,15 @@ export function WarehouseExclusionSettings() {
     useEffect(() => {
         (async () => {
             try {
-                const [wh, ex, rf] = await Promise.all([
+                const [wh, ex, pa, rf] = await Promise.all([
                     api.getAllWbWarehouses(),
                     api.getExcludedWarehouses(),
+                    api.getPreorderAllowedWarehouses(),
                     api.getForecastRfDefaultDays(),
                 ]);
                 setWarehouses(wh);
                 setExcluded(ex);
+                setPreorderAllowed(pa);
                 setRfDefaultDays(rf.days);
                 setRfDefaultDaysSaved(rf.days);
             } catch {
@@ -57,11 +60,22 @@ export function WarehouseExclusionSettings() {
         setHasChanges(true);
     };
 
+    const togglePreorder = (name: string) => {
+        setPreorderAllowed(prev => {
+            const next = prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name];
+            return next;
+        });
+        setHasChanges(true);
+    };
+
     const save = async () => {
         setSaving(true);
         setMsg('');
         try {
-            await api.setExcludedWarehouses(excluded);
+            await Promise.all([
+                api.setExcludedWarehouses(excluded),
+                api.setPreorderAllowedWarehouses(preorderAllowed),
+            ]);
             setMsg('✅ Сохранено');
             setHasChanges(false);
         } catch {
@@ -186,6 +200,57 @@ export function WarehouseExclusionSettings() {
                                     fontSize: 14,
                                     textDecoration: isExcluded ? 'line-through' : 'none',
                                     color: isExcluded ? 'var(--color-danger)' : 'var(--color-text)',
+                                }}>
+                                    {w.name}
+                                </span>
+                            </label>
+                        );
+                    })}
+                </div>
+            </div>
+
+            <div className="glass-card" style={{ padding: 20, marginBottom: 16 }}>
+                <h3 style={{ margin: '0 0 8px' }}>⌛ Предзаявка без лимита — разрешённые склады</h3>
+                <p style={{ color: 'var(--color-text-muted)', margin: '0 0 16px', fontSize: 14 }}>
+                    Склад без приёмочного лимита WB (⌛, нет ни одного дня приёмки по box/mono/super) по умолчанию <strong>исключается</strong> из расчёта потребности и новинок — его qty уходит на ближайший открытый склад. Отметьте склады, на которые предзаявку без лимита делать <strong>можно</strong> — они останутся в расчёте.
+                </p>
+
+                <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                        Разрешено под предзаявку: <strong>{preorderAllowed.length}</strong> / {warehouses.length}
+                    </span>
+                </div>
+
+                <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                    gap: 8,
+                }}>
+                    {warehouses.map(w => {
+                        const isAllowed = preorderAllowed.includes(w.name);
+                        return (
+                            <label
+                                key={w.name}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: 8,
+                                    padding: '8px 12px',
+                                    borderRadius: 8,
+                                    border: `1px solid ${isAllowed ? 'var(--color-success)' : 'var(--color-border)'}`,
+                                    background: isAllowed ? 'rgba(34,197,94,0.08)' : 'var(--color-bg-card)',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.15s',
+                                }}
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={isAllowed}
+                                    onChange={() => togglePreorder(w.name)}
+                                    style={{ accentColor: 'var(--color-success)' }}
+                                />
+                                <span style={{
+                                    fontSize: 14,
+                                    color: isAllowed ? 'var(--color-success)' : 'var(--color-text)',
+                                    fontWeight: isAllowed ? 500 : 400,
                                 }}>
                                     {w.name}
                                 </span>

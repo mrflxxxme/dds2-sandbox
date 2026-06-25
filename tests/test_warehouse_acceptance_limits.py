@@ -27,7 +27,7 @@ class TestBuildAcceptanceLimits:
         assert _build_acceptance_limits([], {}) == {"warehouses": [], "dates": []}
 
     def test_single_free_day(self):
-        raw = [_entry(507, 6, "2026-06-19T00:00:00Z", 0)]
+        raw = [_entry(507, 2, "2026-06-19T00:00:00Z", 0)]  # boxTypeID=2 = Короба
         out = _build_acceptance_limits(raw, WH)
         assert out["dates"] == ["2026-06-19"]
         assert len(out["warehouses"]) == 1
@@ -73,14 +73,15 @@ class TestBuildAcceptanceLimits:
         assert day["is_free"] is False
 
     def test_box_type_id_mapping(self):
-        raw = [
-            _entry(507, 6, "2026-06-19", 0),  # box
-            _entry(507, 5, "2026-06-19", 0),  # mono
-            _entry(507, 2, "2026-06-19", 0),  # super
-        ]
-        out = _build_acceptance_limits(raw, WH)
-        types = {w["box_type"] for w in out["warehouses"]}
-        assert types == {"box", "mono", "super"}
+        # Подтверждено живыми данными WB (2026-06-22): 2=Короба, 5=Монопаллеты,
+        # 6=Суперсейф. Раньше 2 и 6 были перепутаны → короб читался как супер.
+        def _bt(box_type_id: int) -> str:
+            out = _build_acceptance_limits([_entry(507, box_type_id, "2026-06-19", 0)], WH)
+            return out["warehouses"][0]["box_type"]
+
+        assert _bt(2) == "box"
+        assert _bt(5) == "mono"
+        assert _bt(6) == "super"
 
     def test_unknown_box_type_id_skipped(self):
         out = _build_acceptance_limits([_entry(507, 99, "2026-06-19", 0)], WH)
@@ -116,9 +117,9 @@ class TestBuildAcceptanceLimits:
 
     def test_grouping_by_warehouse_and_box_type(self):
         raw = [
-            _entry(507, 6, "2026-06-19", 0),
-            _entry(507, 6, "2026-06-20", 1),
-            _entry(507, 5, "2026-06-19", 0),
+            _entry(507, 2, "2026-06-19", 0),  # box (Короба)
+            _entry(507, 2, "2026-06-20", 1),  # box
+            _entry(507, 5, "2026-06-19", 0),  # mono (Монопаллеты)
         ]
         out = _build_acceptance_limits(raw, WH)
         # one (Коледино, box) with 2 days + one (Коледино, mono) with 1 day
@@ -129,9 +130,9 @@ class TestBuildAcceptanceLimits:
 
     def test_sorted_by_canonical_then_box_order(self):
         raw = [
-            _entry(507, 2, "2026-06-19", 0),  # Коледино super
-            _entry(507, 6, "2026-06-19", 0),  # Коледино box
-            _entry(117501, 6, "2026-06-19", 0),  # Подольск box
+            _entry(507, 6, "2026-06-19", 0),  # Коледино super (boxTypeID=6)
+            _entry(507, 2, "2026-06-19", 0),  # Коледино box (boxTypeID=2)
+            _entry(117501, 2, "2026-06-19", 0),  # Подольск box
         ]
         out = _build_acceptance_limits(raw, WH)
         order = [(w["canonical_name"], w["box_type"]) for w in out["warehouses"]]

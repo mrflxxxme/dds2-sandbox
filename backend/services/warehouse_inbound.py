@@ -9,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.utils.time import utcnow
+
 from backend.models.warehouse import (
     InboundReceipt,
     InboundReceiptItem,
@@ -389,4 +391,125 @@ async def cancel_receipt(db: AsyncSession, project_id: int, receipt_id: int) -> 
 
     await db.commit()
     await db.refresh(receipt, ["items"])
+    return receipt
+
+
+# ─── FF-портал: «взять в работу» + приёмка с расхождениями/браком ─────────────
+
+
+async def claim_receipt(db: AsyncSession, project_id: int, receipt_id: int, user_id: int) -> InboundReceipt:
+    """FF: «взять в работу». Помечает кто/когда начал приёмку (статус не меняется)."""
+    receipt = await get_receipt(db, project_id, receipt_id)
+    if not receipt:
+        raise ValueError("Receipt not found")
+    if receipt.status != InboundStatus.EXPECTED:
+        raise ValueError(f"Взять в работу можно только ожидаемую приёмку, статус: {receipt.status}")
+    receipt.assigned_to_user_id = user_id
+    receipt.work_started_at = utcnow()
+    await db.commit()
+    await db.refresh(receipt, ["items"])
+    return receipt
+
+
+async def accept_receipt_ff(
+    db: AsyncSession,
+    project_id: int,
+    receipt_id: int,
+    items: list[dict],
+) -> InboundReceipt:
+    """FF: приёмка с факт. кол-вом и браком по позициям. EXPECTED → ACCEPTED.
+
+    items: [{item_id, actual_qty, defect_qty, defect_reason?}].
+      actual_qty → годный в WarehouseStock.quantity (INBOUND);
+      defect_qty → брак в WarehouseStock.defect_quantity (DEFECT_RECEIVE);
+      недовоз = expected − (actual + defect) — фиксируется расхождением (для сверки).
+    Та же запись, что у нас → «автоматически принимается» бесплатно.
+    """
+    from backend.cache import invalidate_cache
+
+    receipt = await get_receipt(db, project_id, receipt_id)
+    if not receipt:
+        raise ValueError("Receipt not found")
+    if receipt.status not in (InboundStatus.DRAFT, InboundStatus.EXPECTED):
+        raise ValueError(f"Нельзя принять приёмку в статусе {receipt.status}")
+    if not receipt.items:
+        raise ValueError("В приёмке нет позиций")
+
+    # Row-lock + ре-чтение статуса (как в accept_receipt): сериализует двойной клик /
+    # ретрай 401 — второй видит ACCEPTED под локом и падает, без двойного прихода.
+    locked_status = (
+        await db.execute(
+            select(InboundReceipt.status)
+            .where(InboundReceipt.id == receipt_id, InboundReceipt.project_id == project_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if locked_status not in (InboundStatus.DRAFT, InboundStatus.EXPECTED):
+        raise ValueError(f"Нельзя принять приёмку в статусе {locked_status}")
+
+    # Идемпотентность: если приход уже проведён для этой приёмки — не дублируем.
+    already = await db.execute(
+        select(StockMovement.id)
+        .where(
+            StockMovement.project_id == project_id,
+            StockMovement.reference_type == "RECEIPT",
+            StockMovement.reference_id == receipt_id,
+        )
+        .limit(1)
+    )
+    if already.first() is not None:
+        raise ValueError("Приход по этой приёмке уже проведён")
+
+    by_id = {it.id: it for it in receipt.items}
+    for payload in items:
+        raw_id = payload.get("item_id")
+        if raw_id is None:
+            continue
+        item = by_id.get(int(raw_id))
+        if item is None:
+            continue
+        actual = max(0, int(payload.get("actual_qty") or 0))
+        defect = max(0, int(payload.get("defect_qty") or 0))
+        item.actual_qty = actual
+        item.defect_qty = defect
+        reason = payload.get("defect_reason")
+        item.defect_reason = (reason or "").strip() or None
+
+    # Проводим сток по факту: годный → quantity, брак → defect_quantity.
+    for item in receipt.items:
+        if item.actual_qty > 0:
+            await _update_stock(
+                db,
+                project_id=project_id,
+                warehouse_id=receipt.warehouse_id,
+                nomenclature_id=item.nomenclature_id,
+                barcode=item.barcode,
+                delta=item.actual_qty,
+                movement_type=MovementType.INBOUND,
+                reference_type="RECEIPT",
+                reference_id=receipt.id,
+            )
+        if item.defect_qty > 0:
+            await _update_stock(
+                db,
+                project_id=project_id,
+                warehouse_id=receipt.warehouse_id,
+                nomenclature_id=item.nomenclature_id,
+                barcode=item.barcode,
+                delta=0,
+                defect_delta=item.defect_qty,
+                movement_type=MovementType.DEFECT_RECEIVE,
+                reference_type="RECEIPT",
+                reference_id=receipt.id,
+                comment="Брак при приёмке (ФФ)",
+            )
+
+    receipt.status = InboundStatus.ACCEPTED
+    receipt.actual_date = date.today()
+
+    await db.commit()
+    await db.refresh(receipt, ["items"])
+
+    await invalidate_cache("reports:balance")
+    await invalidate_cache("reports:assembly_link_anomalies")
     return receipt

@@ -4,6 +4,8 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { dropCommittedRows } from '@/lib/utils/assemblyDraftReconcile';
+import { parseBoxSize } from '@/lib/utils/boxPallet';
+import { consolidatePalletsInDraftRows } from '@/lib/utils/assemblyPalletConsolidate';
 import { Toast } from '@/components';
 import type {
     AssemblyDraft,
@@ -24,6 +26,7 @@ interface StockNeedArticle {
 
 interface StockNeedWarehouseRow {
     name: string;
+    district_key?: string;
     articles: Record<number, { need: number; stock: number; avg_daily: number }>;
 }
 
@@ -76,6 +79,12 @@ export default function AssemblyDistributePage() {
     const [pkgTab, setPkgTab] = useState<'BOX' | 'MONOPALLET'>('BOX');
     const [multFilter, setMultFilter] = useState<'none' | 'with' | 'without'>('none');
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
+    const [nmBoxSize, setNmBoxSize] = useState<Map<number, string | null>>(new Map());
+    const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
+    // Состояние геометрии коробок (ppb + box_size) — гейт для «Дозабить паллеты»:
+    // 'loading' до ответа (клик дал бы ложный «уже целые»), 'ready' после успеха,
+    // 'error' если запрос упал (кнопка остаётся выключенной, но тултип честный).
+    const [geomState, setGeomState] = useState<'loading' | 'ready' | 'error'>('loading');
     const [coldStartShares, setColdStartShares] = useState<Record<string, number> | null>(null);
     // Замороженные заявки (передан на ФФ) — вырезаны из rows, на distribute не
     // редактируются. Храним, чтобы автосейв/сохранение не затёрло их.
@@ -145,6 +154,7 @@ export default function AssemblyDistributePage() {
             .then(resp => {
                 if (cancelled) return;
                 const m = new Map<number, number | null>();
+                const sizes = new Map<number, string | null>();
                 for (const r of resp.items) {
                     let ppb: number | null = null;
                     if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
@@ -158,10 +168,30 @@ export default function AssemblyDistributePage() {
                         }
                         ppb = best > 0 ? best : null;
                     }
+                    // Размер коробки SKU — box_size ФФ с наибольшим стоком, где он
+                    // парсится (зеркало resolveSkuBoxSize в WarehouseNeedView).
+                    let boxSize: string | null = null;
+                    let bestStock = -1;
+                    for (const p of r.per_warehouse) {
+                        if (!p.box_size || !parseBoxSize(p.box_size)) continue;
+                        if (p.rf_stock > bestStock) { boxSize = p.box_size; bestStock = p.rf_stock; }
+                    }
                     m.set(r.nm_id, ppb);
+                    sizes.set(r.nm_id, boxSize);
                 }
                 setNmPpb(m);
+                setNmBoxSize(sizes);
+                setGeomState('ready');
             })
+            .catch(() => { if (!cancelled) setGeomState('error'); });
+        return () => { cancelled = true; };
+    }, []);
+
+    // Ручной override «коробов на паллету» по размеру (best-effort) — для дозабивки.
+    useEffect(() => {
+        let cancelled = false;
+        api.getPalletBoxesBySize()
+            .then(ov => { if (!cancelled) setPalletOverrides(ov || {}); })
             .catch(() => { /* best-effort */ });
         return () => { cancelled = true; };
     }, []);
@@ -218,6 +248,55 @@ export default function AssemblyDistributePage() {
             setSaving(false);
         }
     }, [draftId, buildDistribution, name, comment, rows]);
+
+    // ─── Дозабить паллеты: строгая палет-консолидация по округам ──────────
+    // Слить недогруженные города одного ЦФО на приоритетный склад, неполный хвост
+    // ≥20% едет частичной паллетой, <20% — отказ (остаётся на ФФ). Без перезавоза.
+    const handleConsolidatePallets = useCallback(() => {
+        // Без геометрии (ppb/box_size ещё не загрузились / упали) консолидация — no-op,
+        // что дало бы ложный «уже целые». Отличаем «нет данных» от «нечего делать».
+        if (geomState !== 'ready') {
+            setToast({
+                message: geomState === 'error'
+                    ? 'Геометрия коробок недоступна — обновите страницу'
+                    : 'Геометрия коробок ещё загружается — повторите через секунду',
+                type: 'error',
+            });
+            return;
+        }
+        const districtMap = new Map<string, string>();
+        for (const w of stockNeed?.warehouses ?? []) {
+            if (w.district_key) districtMap.set(w.name, w.district_key);
+        }
+        if (districtMap.size === 0) {
+            setToast({ message: 'Нет данных об округах складов (stock_need) — дозабивка недоступна', type: 'error' });
+            return;
+        }
+        const res = consolidatePalletsInDraftRows(rows, {
+            ppbOf: nm => nmPpb.get(nm),
+            boxSizeOf: nm => nmBoxSize.get(nm) ?? null,
+            districtOf: wb => districtMap.get(wb) || 'unknown',
+            overrides: palletOverrides,
+            minFill: 0.2,
+        });
+        if (!res.changed) {
+            setToast({ message: 'Паллеты уже целые — дозабивать нечего', type: 'success' });
+            return;
+        }
+        // Столбцы городов, опустевшие из-за слияния крошек на anchor, убираем из матрицы
+        // (иначе остаются пустыми «—»). Вручную добавленные пустые столбцы (не
+        // использованные и до консолидации) сохраняем — паттерн handleMergeWb.
+        const usedBefore = new Set<string>();
+        for (const r of rows) for (const [wb, q] of Object.entries(r.tgt)) if (q > 0) usedBefore.add(wb);
+        const usedAfter = new Set<string>();
+        for (const r of res.rows) for (const [wb, q] of Object.entries(r.tgt)) if (q > 0) usedAfter.add(wb);
+        setTargetWarehouseNames(prev => prev.filter(n => usedAfter.has(n) || !usedBefore.has(n)));
+        setRows(res.rows);
+        const parts: string[] = [];
+        if (res.mergedDirections > 0) parts.push(`объединено направлений: ${res.mergedDirections}`);
+        if (res.droppedUnits > 0) parts.push(`снято <20%: ${formatNumber(res.droppedUnits, 0)} шт`);
+        setToast({ message: `Паллеты дозабиты — ${parts.join(', ') || 'округлено до целых'}`, type: 'success' });
+    }, [rows, nmPpb, nmBoxSize, palletOverrides, stockNeed, geomState]);
 
     // ─── Autosave: debounce 5s after any change ──────────────────────────
     useEffect(() => {
@@ -569,6 +648,19 @@ export default function AssemblyDistributePage() {
                     </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                        className="btn btn-secondary"
+                        onClick={handleConsolidatePallets}
+                        disabled={saving || rows.length === 0 || geomState !== 'ready'}
+                        title={geomState === 'loading'
+                            ? 'Загрузка геометрии коробок…'
+                            : geomState === 'error'
+                                ? 'Геометрия коробок недоступна — обновите страницу'
+                                : 'Строгая консолидация по округам: недогруженные города одного ЦФО сливаются на приоритетный склад целыми паллетами; '
+                                    + 'неполный хвост ≥20% едет частичной паллетой, <20% — отказ (остаётся на ФФ). Без перезавоза. Затрагивает только короб.'}
+                    >
+                        📦 Дозабить паллеты
+                    </button>
                     <button
                         className="btn btn-secondary"
                         onClick={() => saveDraft(false)}

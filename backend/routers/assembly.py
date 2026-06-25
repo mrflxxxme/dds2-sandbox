@@ -24,10 +24,12 @@ from backend.schemas.assembly import (
     AssemblyRequestUpdate,
     AssignVehicle,
     AssignVehicleBulk,
+    CostForecastResponse,
     CreatedGroupResponse,
     FfLinkInfo,
     LinkAnomaliesResponse,
     LogisticsAnalyticsResponse,
+    LogisticsShipmentListResponse,
     RefreshFromFboResponse,
     ReturnToWarehouse,
     ShipBulk,
@@ -36,7 +38,12 @@ from backend.schemas.assembly import (
 )
 from backend.schemas.fulfillment import FfMismatchDetail
 from backend.services import assembly_service, fulfillment_service
-from backend.services.assembly.analytics import get_assembly_flow_analytics, get_assembly_wb_warehouses
+from backend.services.assembly.analytics import (
+    get_assembly_flow_analytics,
+    get_assembly_wb_warehouses,
+    get_cost_forecast,
+    get_logistics_shipments,
+)
 from backend.services.assembly.link_anomalies import get_link_anomalies
 from backend.services.assembly.stock_distribution import get_stock_distribution, get_stock_distribution_history
 from backend.utils.rate_limit import rate_limit_write
@@ -217,10 +224,12 @@ async def get_logistics_analytics(
     date_to: date | None = Query(None),
     warehouse_ids: str | None = Query(None, description="Comma-separated warehouse IDs"),
     brands: str | None = Query(None, description="Comma-separated brand names"),
+    carrier_id: int | None = Query(None, description="Filter by carrier counterparty id"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Logistics cost analytics: summary, by destination, by route."""
+    """Logistics cost analytics: summary, by destination/route/carrier, pallet
+    buckets, scatter points и аномальные отгрузки."""
     wh_ids = _parse_warehouse_ids(warehouse_ids)
     brand_list = [x.strip() for x in brands.split(",") if x.strip()] if brands else None
     return await assembly_service.get_logistics_analytics(
@@ -230,7 +239,52 @@ async def get_logistics_analytics(
         date_to=date_to,
         warehouse_ids=wh_ids,
         brands=brand_list,
+        carrier_id=carrier_id,
     )
+
+
+@router.get("/shipments/list", response_model=LogisticsShipmentListResponse)
+async def list_logistics_shipments(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    warehouse_ids: str | None = Query(None, description="Comma-separated warehouse IDs"),
+    brands: str | None = Query(None, description="Comma-separated brand names"),
+    carrier_id: int | None = Query(None, description="Filter by carrier counterparty id"),
+    dest_warehouse: str | None = Query(None, description="Filter by WB destination warehouse name"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Построчная история отправок за период (для сортируемой таблицы).
+
+    Возвращает ВСЕ строки периода (кап на сервере), чтобы клиентская сортировка
+    шла по всему периоду, а не по одной странице.
+    """
+    wh_ids = _parse_warehouse_ids(warehouse_ids)
+    brand_list = [x.strip() for x in brands.split(",") if x.strip()] if brands else None
+    return await get_logistics_shipments(
+        db,
+        project.id,
+        date_from=date_from,
+        date_to=date_to,
+        warehouse_ids=wh_ids,
+        brands=brand_list,
+        carrier_id=carrier_id,
+        dest_warehouse=dest_warehouse,
+    )
+
+
+@router.get("/cost-forecast", response_model=CostForecastResponse)
+async def cost_forecast(
+    lookback_days: int | None = Query(None, ge=1, description="Окно истории в днях; пусто — вся история"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Прогнозная модель ₽/паллета по истории отгрузок — для неназначенных заявок.
+
+    Фронт по (склад сдачи, кол-во паллет) выбирает уровень: склад+размер → склад →
+    глобально, и умножает на число паллет заявки.
+    """
+    return await get_cost_forecast(db, project.id, lookback_days=lookback_days)
 
 
 # --- Flow analytics ----------------------------------------------------------

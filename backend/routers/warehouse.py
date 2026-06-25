@@ -41,6 +41,7 @@ from backend.schemas.warehouse import (
     StockMovementSchema,
     StockTransferCreate,
     StockTransferSchema,
+    SupplyAcceptanceSlotsResponse,
     WarehouseCounterpartyLink,
     WarehouseCreate,
     WarehouseReorder,
@@ -50,6 +51,7 @@ from backend.schemas.warehouse import (
 )
 from backend.services import (
     box_multiplicity_service,
+    supply_acceptance_slots_service,
     warehouse_acceptance_service,
     warehouse_defect,
     warehouse_service,
@@ -203,6 +205,31 @@ async def get_wb_acceptance_limits(
             db,
             project.id,
             warehouse=warehouse,
+            force=force,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/acceptance-slots", response_model=SupplyAcceptanceSlotsResponse)
+async def get_supply_acceptance_slots(
+    force: bool = Query(False, description="Skip Redis cache and call WB API live"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Слоты сдачи приёмки WB для активных заявок (Лист логиста → поставки).
+
+    Для каждой активной заявки (IN_PROGRESS / READY / VEHICLE_ASSIGNED) с её
+    складом WB отдаёт календарь коэффициентов приёмки этого склада (free/paid/
+    closed по дням) — какие ещё дни доступны для сдачи, кроме плановой даты.
+    Источник тот же, что у `/warehouse/acceptance-limits` (кэш 1ч); `force=true`
+    обходит кэш (UI «🔄»). `matched=false` в строке — склад заявки не нашёлся в
+    календаре приёмки.
+    """
+    try:
+        return await supply_acceptance_slots_service.get_supply_acceptance_slots(
+            db,
+            project.id,
             force=force,
         )
     except ValueError as e:

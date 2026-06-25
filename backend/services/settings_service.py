@@ -3,6 +3,7 @@
 
 import json
 import logging
+import re
 from datetime import date
 
 from sqlalchemy import select
@@ -67,6 +68,92 @@ async def set_excluded_warehouses(db: AsyncSession, project_id: int, warehouses:
         logger.warning("invalidate reports:warehouse_need failed: %s", e)
     logger.info("Set excluded warehouses for project %s: %s", project_id, valid)
     return valid
+
+
+async def get_preorder_allowed_warehouses(db: AsyncSession, project_id: int) -> list[str]:
+    """Warehouses where a preorder (предзаявка) is allowed even without a WB
+    acceptance limit. Whitelist: складам ВНЕ списка предзаявка по «нет лимита»
+    запрещена → они вырезаются из расчёта (см. `get_acceptance_blocked_warehouses`)."""
+    raw = await get_setting(db, project_id, "preorder_allowed_warehouses")
+    if not raw:
+        return []
+    try:
+        parsed: list[str] = json.loads(raw)
+        return parsed
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+async def set_preorder_allowed_warehouses(db: AsyncSession, project_id: int, warehouses: list[str]) -> list[str]:
+    """Set preorder-allowed warehouses. Normalizes names (strips parenthesized suffix)."""
+    import re
+
+    from backend.cache import invalidate_cache
+
+    parens_re = re.compile(r"\s*\([^)]*\)\s*$")
+    valid = sorted({parens_re.sub("", w).strip() for w in warehouses if w and w.strip()})
+    await set_setting(db, project_id, "preorder_allowed_warehouses", json.dumps(valid, ensure_ascii=False))
+    # Iron rule #7: список влияет на отсев складов в матрице потребности.
+    try:
+        await invalidate_cache("reports:warehouse_need")
+    except Exception as e:
+        logger.warning("invalidate reports:warehouse_need failed: %s", e)
+    logger.info("Set preorder-allowed warehouses for project %s: %s", project_id, valid)
+    return valid
+
+
+_BOX_SIZE_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _canon_box_size(s: str) -> str:
+    """Канон ключа размера коробки по ЧИСЛАМ (первые 3) — устойчив к разделителям
+    и опечаткам: «60×40×50», «60x40x50», «60*40*40», «60x40xc40» (лишняя буква) →
+    «60x40x40»; дробное «9.0» → «9». Зеркало фронтового canonBoxSize."""
+    nums = _BOX_SIZE_NUM_RE.findall(s or "")
+    if len(nums) >= 3:
+        def _n(x: str) -> str:
+            f = float(x)
+            return str(int(f)) if f == int(f) else str(f)
+
+        return "x".join(_n(n) for n in nums[:3])
+    return (s or "").strip().lower().replace(" ", "")
+
+
+async def get_pallet_boxes_by_size(db: AsyncSession, project_id: int) -> dict[str, int]:
+    """Ручной override «коробок на паллету» по размеру коробки (canonical → int).
+    Пусто = используется геометрия (boxesPerPallet)."""
+    raw = await get_setting(db, project_id, "pallet_boxes_by_size")
+    if not raw:
+        return {}
+    try:
+        parsed: dict = json.loads(raw)
+        return {str(k): int(v) for k, v in parsed.items() if int(v) > 0}
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+        return {}
+
+
+async def set_pallet_boxes_by_size(db: AsyncSession, project_id: int, mapping: dict[str, int]) -> dict[str, int]:
+    """Сохранить override «коробок на паллету» по размеру. Ключи канонизируются,
+    значения ≤0 / нечисловые отбрасываются."""
+    from backend.cache import invalidate_cache
+
+    clean: dict[str, int] = {}
+    for k, v in mapping.items():
+        key = _canon_box_size(str(k))
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if key and n > 0:
+            clean[key] = n
+    await set_setting(db, project_id, "pallet_boxes_by_size", json.dumps(clean, ensure_ascii=False))
+    # Влияет на паллетную консолидацию в матрице потребности.
+    try:
+        await invalidate_cache("reports:warehouse_need")
+    except Exception as e:
+        logger.warning("invalidate reports:warehouse_need failed: %s", e)
+    logger.info("Set pallet_boxes_by_size for project %s: %d sizes", project_id, len(clean))
+    return clean
 
 
 async def get_all_warehouses(db: AsyncSession | None = None, project_id: int | None = None) -> list[dict]:

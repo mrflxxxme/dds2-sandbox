@@ -201,10 +201,13 @@ async def get_warehouse_need(
     # `wb:acceptance_coefficients:{pid}` (TTL 1ч). Fail-open: если кэша нет —
     # склады не блокируем (поведение как до фичи).
     from backend.services.warehouse_acceptance_service import (
-        get_acceptance_closed_warehouses,
+        get_acceptance_blocked_warehouses,
     )
 
-    acceptance_closed = await get_acceptance_closed_warehouses(project_id)
+    # «Закрытые по приёмке» МИНУС whitelist `preorder_allowed_warehouses`: склад
+    # без лимита блокируется (вырезается из расчёта), кроме явно разрешённых под
+    # предзаявку. См. get_acceptance_blocked_warehouses.
+    acceptance_closed = await get_acceptance_blocked_warehouses(db, project_id)
     # Объединяем с excluded_set: на все последующие фильтры (haversine,
     # priority-chain, stock_lookup, Hamilton) распространяется единый запрет.
     if acceptance_closed:

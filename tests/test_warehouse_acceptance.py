@@ -478,14 +478,14 @@ class TestAggregateCoefficients:
     def test_free_paid_closed_counts(self):
         wh_id_to_name = {507: "Коледино"}
         raw = [
-            {"warehouseID": 507, "coefficient": 0, "allowUnload": True, "boxTypeID": 6},
-            {"warehouseID": 507, "coefficient": 1, "allowUnload": True, "boxTypeID": 6},
-            {"warehouseID": 507, "coefficient": 3, "allowUnload": True, "boxTypeID": 6},  # paid
-            {"warehouseID": 507, "coefficient": -1, "allowUnload": False, "boxTypeID": 6},  # closed
-            {"warehouseID": 507, "coefficient": 0, "allowUnload": False, "boxTypeID": 6},  # closed (allow=false)
+            {"warehouseID": 507, "coefficient": 0, "allowUnload": True, "boxTypeID": 2},
+            {"warehouseID": 507, "coefficient": 1, "allowUnload": True, "boxTypeID": 2},
+            {"warehouseID": 507, "coefficient": 3, "allowUnload": True, "boxTypeID": 2},  # paid
+            {"warehouseID": 507, "coefficient": -1, "allowUnload": False, "boxTypeID": 2},  # closed
+            {"warehouseID": 507, "coefficient": 0, "allowUnload": False, "boxTypeID": 2},  # closed (allow=false)
         ]
         out = _aggregate_coefficients(raw, wh_id_to_name)
-        meta = out[("Коледино", "box")]
+        meta = out[("Коледино", "box")]  # boxTypeID=2 = Короба
         assert meta["free_days_14"] == 2
         assert meta["paid_days_14"] == 1
         assert meta["closed_days_14"] == 2
@@ -535,10 +535,10 @@ class TestFlagsForWarehouseWithCoefficients:
 
     def test_strict_mode_filters_when_coefficients_closed(self):
         """Opt-in строгий режим: AND с coefficients.free_days > 0."""
-        wh_id_to_name = {367641: "Ярославль СГТ"}
+        wh_id_to_name = {367641: "Ярославль"}
         raw_options = [{"warehouseID": 367641, "canMonopallet": True}]
         coef = {
-            ("Ярославль СГТ", "mono"): {
+            ("Ярославль", "mono"): {
                 "free_days_14": 0,
                 "paid_days_14": 0,
                 "closed_days_14": 15,
@@ -547,7 +547,7 @@ class TestFlagsForWarehouseWithCoefficients:
             }
         }
         out = _flags_for_warehouse(raw_options, wh_id_to_name, coef, require_free_days=True)
-        assert out["Ярославль СГТ"]["can_monopallet"] is False  # строгий режим скрыл
+        assert out["Ярославль"]["can_monopallet"] is False  # строгий режим скрыл
 
     def test_options_yes_and_coefficients_have_free_days(self):
         wh_id_to_name = {130744: "Краснодар (Тихорецкая)"}
@@ -574,11 +574,11 @@ class TestFlagsForWarehouseWithCoefficients:
 
     def test_no_coefficients_data_keeps_options_as_is(self):
         # Если coefficients пустые (graceful degradation) — флаги = как у options
-        wh_id_to_name = {367641: "Ярославль СГТ"}
+        wh_id_to_name = {367641: "Ярославль"}
         raw_options = [{"warehouseID": 367641, "canBox": True, "canMonopallet": True}]
         out = _flags_for_warehouse(raw_options, wh_id_to_name, {})
-        assert out["Ярославль СГТ"]["can_box"] is True
-        assert out["Ярославль СГТ"]["can_monopallet"] is True
+        assert out["Ярославль"]["can_box"] is True
+        assert out["Ярославль"]["can_monopallet"] is True
 
     def test_paid_only_filtered_in_strict_mode_only(self):
         # paid_days_14 > 0, free_days_14 = 0 → в строгом режиме считается «закрыт».
@@ -626,6 +626,100 @@ class TestFlagsForWarehouseWithCoefficients:
         assert out["Самара (Новосемейкино)"]["mono_meta"]["free_days_14"] == 15
 
 
+class TestFlagsForWarehouseSpecSkip:
+    """Спец-склады (СГТ/Питание/Горючее/СЦ/виртуальные) исключаются из availability."""
+
+    def test_sgt_only_warehouse_excluded(self):
+        out = _flags_for_warehouse(
+            [{"warehouseID": 1, "canBox": True, "canMonopallet": True}],
+            {1: "Владивосток СГТ"},
+        )
+        assert out == {}
+
+    def test_food_warehouse_excluded_not_merged_into_base(self):
+        # «Электросталь: Питание» НЕ должен подмешивать доступность в «Электросталь».
+        out = _flags_for_warehouse(
+            [{"warehouseID": 1, "canBox": True}],
+            {1: "Электросталь: Питание"},
+        )
+        assert out == {}
+
+    def test_sc_and_virtual_excluded(self):
+        out = _flags_for_warehouse(
+            [{"warehouseID": 1, "canBox": True}, {"warehouseID": 2, "canBox": True}],
+            {1: "СЦ Симферополь", 2: "Виртуальный Челябинск"},
+        )
+        assert out == {}
+
+    def test_regular_kept_spec_dropped(self):
+        # Обычный «Склад Владивосток» остаётся, СГТ-двойник отброшен и НЕ
+        # просачивает свой can_box в обычный склад.
+        out = _flags_for_warehouse(
+            [
+                {"warehouseID": 1, "canMonopallet": True},
+                {"warehouseID": 2, "canBox": True},
+            ],
+            {1: "Склад Владивосток", 2: "Владивосток СГТ"},
+        )
+        assert list(out.keys()) == ["Владивосток"]
+        assert out["Владивосток"]["can_monopallet"] is True
+        assert out["Владивосток"]["can_box"] is False
+
+
+class TestFlagsForWarehouseAcceptanceDay:
+    """require_acceptance_day: гейт по лимиту приёмки (≥1 день free|paid в 14 дн)."""
+
+    @staticmethod
+    def _coef(free: int, paid: int, closed: int) -> dict:
+        return {
+            ("Коледино", "box"): {
+                "free_days_14": free,
+                "paid_days_14": paid,
+                "closed_days_14": closed,
+                "min_coefficient": 0 if (free or paid) else None,
+                "total_days": free + paid + closed,
+            }
+        }
+
+    def test_fully_closed_limit_blocks(self):
+        # options=True, но лимит закрыт все 14 дней (free=paid=0) → can_box=False.
+        out = _flags_for_warehouse(
+            [{"warehouseID": 507, "canBox": True}], {507: "Коледино"},
+            self._coef(0, 0, 14), require_acceptance_day=True,
+        )
+        assert out["Коледино"]["can_box"] is False
+
+    def test_paid_day_keeps_open(self):
+        # Есть платные дни → доступен (мягкий вариант «любой день приёмки»).
+        out = _flags_for_warehouse(
+            [{"warehouseID": 507, "canBox": True}], {507: "Коледино"},
+            self._coef(0, 10, 4), require_acceptance_day=True,
+        )
+        assert out["Коледино"]["can_box"] is True
+
+    def test_free_day_keeps_open(self):
+        out = _flags_for_warehouse(
+            [{"warehouseID": 507, "canBox": True}], {507: "Коледино"},
+            self._coef(8, 0, 6), require_acceptance_day=True,
+        )
+        assert out["Коледино"]["can_box"] is True
+
+    def test_no_coef_data_fail_open(self):
+        # Нет коэффициентов по складу → fail-open (доверяем options).
+        out = _flags_for_warehouse(
+            [{"warehouseID": 507, "canBox": True}], {507: "Коледино"},
+            {}, require_acceptance_day=True,
+        )
+        assert out["Коледино"]["can_box"] is True
+
+    def test_options_false_stays_false(self):
+        out = _flags_for_warehouse(
+            [{"warehouseID": 507, "canBox": False}], {507: "Коледино"},
+            self._coef(15, 0, 0), require_acceptance_day=True,
+        )
+        assert out["Коледино"]["can_box"] is False
+
+
 # ─── get_acceptance_closed_warehouses ────────────────────────────────────────
 
 
@@ -671,3 +765,55 @@ async def test_get_acceptance_closed_finds_zero_free_zero_paid(monkeypatch):
     closed = await svc.get_acceptance_closed_warehouses(project_id=42)
     assert "Test" in closed
     assert "Коледино" not in closed
+
+
+# ─── get_acceptance_blocked_warehouses (closed − whitelist предзаявок) ─────────
+
+
+@pytest.mark.asyncio
+async def test_get_acceptance_blocked_subtracts_whitelist(monkeypatch):
+    """Склад без лимита, НЕ в whitelist → блокируется; в whitelist → остаётся."""
+    import json
+
+    import backend.services.settings_service as settings_svc
+    import backend.services.warehouse_acceptance_service as svc
+
+    # Оба склада полностью закрыты по приёмке (coef=-1 / allowUnload=false × 14).
+    raw_coef = [
+        *[{"warehouseID": 507, "boxTypeID": 6, "coefficient": -1, "allowUnload": False} for _ in range(14)],
+        *[{"warehouseID": 999, "boxTypeID": 6, "coefficient": -1, "allowUnload": False} for _ in range(14)],
+    ]
+    wh_map = {507: "Коледино", 999: "Test"}
+
+    class _StubRedis:
+        async def get(self, key):
+            if "coefficients" in key:
+                return json.dumps(raw_coef)
+            if "warehouses" in key:
+                return json.dumps({str(k): v for k, v in wh_map.items()})
+            return None
+
+    monkeypatch.setattr(svc, "_redis_client", _StubRedis())
+
+    async def fake_allowed(db, project_id):
+        return ["Коледино"]  # whitelist — предзаявка по нему разрешена
+
+    monkeypatch.setattr(settings_svc, "get_preorder_allowed_warehouses", fake_allowed)
+
+    blocked = await svc.get_acceptance_blocked_warehouses(db=None, project_id=42)
+    assert "Test" in blocked  # вне whitelist → блок
+    assert "Коледино" not in blocked  # в whitelist → предзаявку можно
+
+
+@pytest.mark.asyncio
+async def test_get_acceptance_blocked_empty_when_no_cache(monkeypatch):
+    """Пустой кэш коэффициентов → пустой blocked (fail-open), whitelist не дёргается."""
+    import backend.services.warehouse_acceptance_service as svc
+
+    class _StubRedis:
+        async def get(self, key):
+            return None
+
+    monkeypatch.setattr(svc, "_redis_client", _StubRedis())
+    blocked = await svc.get_acceptance_blocked_warehouses(db=None, project_id=999)
+    assert blocked == set()

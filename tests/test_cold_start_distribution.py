@@ -314,6 +314,21 @@ class TestColdStartSubtractAssembly:
     (wb_warehouse_name_manual="Новосемейкино" vs bench-key "Самара" и т.п.).
     """
 
+    @pytest.fixture(autouse=True)
+    def _no_acceptance_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Нейтрализуем фильтр закрытых-по-приёмке складов: он требует БД
+        (`get_acceptance_blocked_warehouses` → settings_service.db.execute), а эти
+        тесты зовут `compute_*` с db=None и проверяют вычет сборки/WB-стока, не приёмку.
+        Без этого тесты флака-падают, когда в Redis есть остаточные коэффициенты."""
+
+        async def _empty(*_a: Any, **_kw: Any) -> set[str]:
+            return set()
+
+        monkeypatch.setattr(
+            "backend.services.warehouse_acceptance_service.get_acceptance_blocked_warehouses",
+            _empty,
+        )
+
     @pytest.mark.asyncio
     async def test_table_returns_zero_when_all_ff_already_in_assembly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """rf_qty=144, asm_qty=144 → total_allocated=0 (нечего распределять)."""
@@ -430,6 +445,7 @@ class TestColdStartSubtractAssembly:
             window_days=14,
             min_pack=5,
             bench_from_project_id=None,
+            ship_fraction=1.0,  # изолируем вычет от капа «сеять 55%» (см. отд. тест)
         )
         row = resp.rows[0]
         # 100 - 40 = 60, central=1.0, anchor=Электросталь → весь остаток туда
@@ -574,6 +590,7 @@ class TestColdStartSubtractAssembly:
             window_days=14,
             min_pack=5,
             bench_from_project_id=None,  # type: ignore[arg-type]
+            ship_fraction=1.0,  # изолируем вычет WB-стока от капа «сеять 55%» (см. отд. тест)
         )
         row = resp.rows[0]
         # network = 100 (свободный ФФ) + 80 (WB на A) = 180; цель A=90, B=90.
@@ -648,6 +665,68 @@ class TestColdStartSubtractAssembly:
         assert row.total_allocated == 10, f"Σship должно быть ≤ свободного ФФ, получено {row.total_allocated}"
         assert row.allocations.get("A", 0) == 0
         assert row.allocations.get("B") == 10
+
+    @pytest.mark.asyncio
+    async def test_ship_fraction_caps_default_55pct(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Дефолтный кап «сеять, не вытряхивать»: при большом свободном ФФ отгружаем
+        ship_fraction (55%), остаток — буфер на ФФ под добор по факту продаж.
+        free ФФ=200 > ship_floor(50) → ship_cap = round(200×0.55) = 110."""
+
+        async def fake_excluded(*_a: Any, **_kw: Any) -> list[str]:
+            return []
+
+        async def fake_district_share(*_a: Any, **_kw: Any) -> tuple[dict[str, float], int]:
+            return ({"central": 1.0}, 1000)
+
+        async def fake_traffic(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"Электросталь": 1000}
+
+        async def fake_segment(*_a: Any, **_kw: Any) -> list[dict]:
+            return [
+                {
+                    "internal_id": 9,
+                    "nm_id": 557,
+                    "article_seller": "T3",
+                    "subject": "X",
+                    "brand": "Y",
+                    "barcode": "",
+                    "rf_qty": 200,
+                    "wb_qty": 0,
+                    "asm_qty": 0,
+                    "sales_14d": 0,
+                    "revenue_30d": 0.0,
+                    "is_newcomer": True,
+                }
+            ]
+
+        async def fake_active_asm(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {}
+
+        async def fake_rf_wh(*_a: Any, **_kw: Any) -> list:
+            return []
+
+        def fake_anchors(d: str) -> tuple[tuple[str, int], ...]:
+            return (("Электросталь", 1),) if d == "central" else ()
+
+        monkeypatch.setattr(cs, "get_excluded_warehouses", fake_excluded)
+        monkeypatch.setattr(cs, "fetch_district_share", fake_district_share)
+        monkeypatch.setattr(cs, "fetch_warehouse_traffic", fake_traffic)
+        monkeypatch.setattr(cs, "fetch_cold_start_segment", fake_segment)
+        monkeypatch.setattr(cs, "fetch_active_assemblies_for_sku", fake_active_asm)
+        monkeypatch.setattr(cs, "fetch_rf_warehouses", fake_rf_wh)
+        monkeypatch.setattr(cs, "get_anchors_for_okrug", fake_anchors)
+
+        resp = await cs.compute_cold_start_table(
+            db=None,  # type: ignore[arg-type]
+            project_id=1,
+            window_days=14,
+            min_pack=5,
+            bench_from_project_id=None,
+        )
+        row = resp.rows[0]
+        # свободный ФФ=200, единственный anchor; кап 55% → отгружаем 110, 90 буфер.
+        assert row.total_allocated == 110
+        assert row.allocations.get("Электросталь") == 110
 
 
 @pytest.mark.unit

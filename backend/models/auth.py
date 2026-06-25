@@ -24,6 +24,10 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     role: Mapped[str] = mapped_column(String(20), default="member", server_default="member", nullable=False)
+    # External account (fulfillment operator, e.g. Хамза). Such users work ONLY
+    # via the /api/v1/ff/* portal — a middleware 403s them on any other API path,
+    # so they never see cost/margin/analytics of the projects they belong to.
+    is_external: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     telegram_username: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

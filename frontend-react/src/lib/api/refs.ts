@@ -41,6 +41,12 @@ export function addRefMethods(api: ApiClient) {
         getAllWbWarehouses() { return api.request<Array<{ name: string; lat: number; lng: number; is_sorting_center?: boolean }>>('GET', '/api/v1/refs/warehouses'); },
         getExcludedWarehouses() { return api.request<string[]>('GET', '/api/v1/refs/excluded-warehouses'); },
         setExcludedWarehouses(warehouses: string[]) { return api.request<{ ok: boolean; excluded: string[] }>('PUT', '/api/v1/refs/excluded-warehouses', { warehouses }); },
+        // Whitelist складов, куда можно делать предзаявку без приёмочного лимита (⌛). Склад вне списка вырезается из расчёта.
+        getPreorderAllowedWarehouses() { return api.request<string[]>('GET', '/api/v1/refs/preorder-allowed-warehouses'); },
+        setPreorderAllowedWarehouses(warehouses: string[]) { return api.request<{ ok: boolean; preorder_allowed: string[] }>('PUT', '/api/v1/refs/preorder-allowed-warehouses', { warehouses }); },
+        // Ручной override «коробок на паллету» по размеру коробки (canonical box_size → int). Перебивает геометрию.
+        getPalletBoxesBySize() { return api.request<Record<string, number>>('GET', '/api/v1/refs/pallet-boxes-by-size'); },
+        setPalletBoxesBySize(sizes: Record<string, number>) { return api.request<{ ok: boolean; sizes: Record<string, number> }>('PUT', '/api/v1/refs/pallet-boxes-by-size', { sizes }); },
         getForecastRfDefaultDays() { return api.request<{ days: number }>('GET', '/api/v1/refs/forecast-rf-default-days'); },
         setForecastRfDefaultDays(days: number) { return api.request<{ ok: boolean; days: number }>('PUT', '/api/v1/refs/forecast-rf-default-days', { days }); },
 

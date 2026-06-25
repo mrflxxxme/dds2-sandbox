@@ -28,6 +28,7 @@ from backend.routers import (
     cost,
     counterparty,
     fbo_supplies,
+    ff_portal,
     fulfillment,
     funnel,
     import_txn,
@@ -274,6 +275,37 @@ app.add_middleware(SlowRequestMiddleware)
 
 
 @app.middleware("http")
+async def block_external_users(request: Request, call_next):
+    """External (fulfillment) accounts may ONLY hit /api/v1/ff/* and /api/v1/auth/*.
+
+    Enforced on the `ext` JWT claim (set at login for User.is_external) so a curious
+    Хамза cannot read cost/margin/analytics of the projects he belongs to via the
+    main API. Single global choke-point: the backend has no other role enforcement
+    (require_role is unused; pages are frontend-only).
+    """
+    path = request.url.path
+    if path.startswith("/api/") and not (
+        path.startswith("/api/v1/ff") or path.startswith("/api/v1/auth")
+    ):
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            try:
+                import jwt
+
+                payload = jwt.decode(auth_header[7:], settings.SECRET_KEY, algorithms=["HS256"])
+            except Exception:
+                payload = None  # invalid/expired → let the endpoint's auth return 401
+            if payload and payload.get("ext"):
+                from fastapi.responses import JSONResponse
+
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Внешний аккаунт фулфилмента: доступ только к ФФ-порталу"},
+                )
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -309,7 +341,11 @@ def _extract_user_id_from_headers(headers: dict[bytes, bytes]) -> int | None:
 
             token = auth_header[7:]
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-            return payload.get("sub") or payload.get("user_id")
+            # JWT `sub` is str(user_id) (see auth.create_access_token); the
+            # audit_log.user_id column is INTEGER, so cast — returning the raw
+            # str triggers asyncpg DataError and silently drops the audit row.
+            raw = payload.get("sub") or payload.get("user_id")
+            return int(raw) if raw is not None else None
     except Exception:
         pass
     return None
@@ -511,6 +547,13 @@ app.include_router(
     fulfillment.router,
     prefix="/api/v1",
     tags=["Fulfillment"],
+    dependencies=[Depends(get_current_user)],
+)
+# FF-портал внешнего оператора (Хамза) — кросс-проектный, скоуп внутри роутера.
+app.include_router(
+    ff_portal.router,
+    prefix="/api/v1",
+    tags=["FF Portal"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

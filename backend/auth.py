@@ -48,14 +48,20 @@ def validate_password_strength(password: str) -> None:
         )
 
 
-def create_access_token(user_id: int, username: str) -> str:
-    """Create a short-lived JWT access token (30 min default)."""
+def create_access_token(user_id: int, username: str, is_external: bool = False) -> str:
+    """Create a short-lived JWT access token (30 min default).
+
+    `is_external` is carried as the `ext` claim so the external-user middleware can
+    block fulfillment-portal accounts from any non-/ff API path without a DB hit.
+    """
     expire = utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": str(user_id),
         "username": username,
         "exp": expire,
     }
+    if is_external:
+        payload["ext"] = True
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=ALGORITHM)
 
 

@@ -24,6 +24,10 @@ ROLE_HIERARCHY: dict[str, int] = {
     "admin": 3,
     "editor": 2,
     "viewer": 1,
+    # External fulfillment operator (Хамза). Below viewer on purpose: even if a
+    # `require_role` guard is ever added to a main endpoint, an FF user fails it.
+    # Real isolation is enforced by the external-user middleware (only /ff/* allowed).
+    "fulfillment": 0,
 }
 
 ALL_PAGES: list[str] = [
