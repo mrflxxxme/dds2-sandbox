@@ -101,6 +101,35 @@ class FulfillmentBoxOverride(Base):
     )
 
 
+class FulfillmentGuidBarcode(Base):
+    """Ручной ШК для товара ФФ, у которого карточка провайдера БЕЗ штрихкода.
+
+    migfull отдаёт ШК только в карточке `GET /products/{guid}` (`barcodes[]`).
+    У части карточек (обычно свежих) `barcodes[]` пуст → строка приёмки/остатка
+    висит «не опознанной» (barcode=None, нет матча с номенклатурой). Здесь
+    пользователь привязывает ШК (короба ITF14 или россыпи EAN13) к `product_guid`.
+    Применяется и в синке (overlay на barcode_by_guid → авто-вывод россыпь/штук
+    из «короб N шт.»), и в живой деталке приёмки (overlay на guid_barcodes) —
+    побеждает и пустую карточку, и кэш остатков. Не SoftDelete — hard delete.
+    """
+
+    __tablename__ = "fulfillment_guid_barcodes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    warehouse_id: Mapped[int] = mapped_column(Integer, ForeignKey("warehouses.id"), nullable=False)
+    product_guid: Mapped[str] = mapped_column(String(100), nullable=False)  # guid товара у ФФ
+    barcode: Mapped[str] = mapped_column(String(100), nullable=False)  # ШК короба (ITF14) или россыпи (EAN13)
+    note: Mapped[str | None] = mapped_column(String(300))  # необязательная пометка пользователя
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "warehouse_id", "product_guid", name="uq_ff_guid_barcode_wh_guid"),
+        Index("ix_ff_guid_barcodes_project_wh", "project_id", "warehouse_id"),
+    )
+
+
 class FulfillmentRequest(Base):
     """Зеркало заявки фулфилмента (сборка/приёмка) + связь с нашими документами."""
 

@@ -69,6 +69,7 @@ from backend.models.enums import (
 from backend.models.fulfillment import (
     FfRequestKind,
     FulfillmentBoxOverride,
+    FulfillmentGuidBarcode,
     FulfillmentProvider,
     FulfillmentRequest,
     FulfillmentStatusEvent,
@@ -285,6 +286,7 @@ __all__ = [
     # Fulfillment
     "FulfillmentProvider",
     "FulfillmentBoxOverride",
+    "FulfillmentGuidBarcode",
     "FulfillmentRequest",
     "FulfillmentStatusEvent",
     "FulfillmentStock",

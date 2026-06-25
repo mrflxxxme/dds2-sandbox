@@ -3896,6 +3896,8 @@ export interface FfSyncRun {
 
 export interface FfRequestDetailProduct {
   barcode: string | null;
+  /** guid товара у ФФ (migfull) — для ручной привязки ШК на строках без номенклатуры */
+  product_guid?: string | null;
   vendor_code: string | null;
   name: string | null;
   nomenclature_id: number | null;
@@ -3916,6 +3918,13 @@ export interface FfRequestDetailProduct {
   size: string | null;
   comment: string | null;
   image: string | null;
+}
+
+/** Ручной ШК для товара ФФ без штрихкода в карточке (привязка по product_guid) */
+export interface FfGuidBarcodeRow {
+  product_guid: string;
+  barcode: string;
+  note: string | null;
 }
 
 /** Строка расхождения состава: ФФ-заявка vs наш документ (по barcode) */

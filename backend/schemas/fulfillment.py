@@ -110,6 +110,23 @@ class FfNomenclatureOption(BaseModel):
     subject: str | None = None
 
 
+class FfGuidBarcodePayload(BaseModel):
+    """Ручной ШК для товара ФФ без штрихкода в карточке (короб ITF14 / россыпь EAN13)."""
+
+    barcode: str = Field(min_length=8, max_length=100)
+    note: str | None = Field(default=None, max_length=300)
+
+
+class FfGuidBarcodeRow(BaseModel):
+    """Ручная привязка ШК к product_guid (overlay поверх карточки/кэша)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    product_guid: str
+    barcode: str
+    note: str | None = None
+
+
 # ─── Requests ────────────────────────────────────────────────────────────────
 
 
@@ -151,6 +168,7 @@ class FfRequestDetailProduct(BaseModel):
     """Позиция заявки ФФ (из недокументированного GET /v1/requests/show/{id})."""
 
     barcode: str | None = None
+    product_guid: str | None = None  # guid товара у ФФ (migfull) — для ручной привязки ШК
     vendor_code: str | None = None
     name: str | None = None
     nomenclature_id: int | None = None

@@ -3333,6 +3333,91 @@ async def test_migfull_inbound_detail_resolves_barcode_absent_from_mirror(
     assert product["qty"] == 6
 
 
+@pytest.mark.asyncio
+async def test_migfull_guid_barcode_override_resolves_inbound_detail(
+    db_session, project, warehouse, connected_mig_key, monkeypatch
+):
+    """Карточка товара БЕЗ ШК (barcodes[] пуст) → строка приёмки не опознана;
+    ручной ШК короба (set_guid_barcode) сводит к россыпи и матчит номенклатуру,
+    delete — возвращает в «не опознан»."""
+    itf14 = "12044388647254"
+    box_name = "ковер 1 шт 160х200_бежевыйоднотон короб 16 шт., 160х200, однотон"
+    base_barcode, units = fulfillment_service._migfull_box_pack(itf14, box_name)
+    assert units == 16  # из «короб 16 шт.»
+    nom = await _make_nomenclature(db_session, project.id, base_barcode, article="ART-EMPTY")
+
+    p = _mig_guid(120)
+    sub = _mig_guid(121)
+    lines = {
+        (sub, "incoming"): [_mig_line(p, 2, name=box_name)],
+        (sub, "received"): [_mig_line(p, 2, name=box_name)],
+    }
+    _mock_mig_fetches(
+        monkeypatch,
+        products=[_mig_product(p, name=box_name, actual=2)],
+        product_details={p: {"barcodes": []}},  # карточка провайдера без ШК
+        submissions=[_mig_submission(sub, status="processing")],
+        submission_lines=lines,
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "inbound")
+    ff_id = next(r["id"] for r in rows if r["external_id"] == sub)
+
+    # До override: товар не опознан, но guid доступен фронту для привязки
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    prod = row["products"][0]
+    assert prod["barcode"] is None
+    assert prod["nomenclature_id"] is None
+    assert prod["product_guid"] == p
+
+    # Ручной ШК короба → сводится к россыпи, units из «короб 16 шт.», сматчен
+    saved = await fulfillment_service.set_guid_barcode(db_session, project.id, warehouse.id, p, itf14, note="ручной")
+    assert saved == {"product_guid": p, "barcode": itf14, "note": "ручной"}
+    row2 = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    prod2 = row2["products"][0]
+    assert prod2["barcode"] == base_barcode
+    assert prod2["units_per_box"] == 16
+    assert prod2["qty"] == 2 * 16  # 32 шт россыпи
+    assert prod2["nomenclature_id"] == nom.id
+    assert prod2["article_seller"] == "ART-EMPTY"
+
+    # delete → снова не опознан (зеркало по этому guid пусто — пересинка не было)
+    await fulfillment_service.delete_guid_barcode(db_session, project.id, warehouse.id, p)
+    row3 = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    assert row3["products"][0]["nomenclature_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_migfull_guid_barcode_override_seeds_stock_on_sync(
+    db_session, project, warehouse, connected_mig_key, monkeypatch
+):
+    """Ручной ШК заведён ДО синка → синк выводит короб в зеркало остатков
+    (barcode=ITF14, base_barcode=россыпь, units, номенклатура) и самоподдерживается."""
+    itf14 = "12044388679644"
+    box_name = "ковер 1 шт 200х300_трава короб 9 шт., 200х300, трава"
+    base_barcode, units = fulfillment_service._migfull_box_pack(itf14, box_name)
+    nom = await _make_nomenclature(db_session, project.id, base_barcode, article="ART-TRAVA")
+    p = _mig_guid(130)
+
+    await fulfillment_service.set_guid_barcode(db_session, project.id, warehouse.id, p, itf14)
+    calls: dict = {}
+    _mock_mig_fetches(
+        monkeypatch,
+        products=[_mig_product(p, name=box_name, actual=3)],
+        product_details={p: {"barcodes": []}},  # карточка без ШК — override её замещает
+        calls=calls,
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    # Override сделал guid «опознанным» → синк не дёргал пустую карточку
+    assert calls["product"] == 0
+    seeded = next(s for s in await _ff_stocks(db_session, project.id, warehouse.id) if s.external_product_id == p)
+    assert seeded.barcode == itf14
+    assert seeded.base_barcode == base_barcode
+    assert seeded.units_per_box == units
+    assert seeded.nomenclature_id == nom.id
+
+
 # ─── Авто-READY и классификатор (migfull) ────────────────────────────────────
 
 

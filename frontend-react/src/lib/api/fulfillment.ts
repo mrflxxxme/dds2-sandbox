@@ -10,6 +10,7 @@ import type {
     FfCreateAssemblyResult,
     FfCreateFormResponse,
     FfCreateRequestPayload,
+    FfGuidBarcodeRow,
     FfLinkCandidatesResponse,
     FfLinkPayload,
     FfNomenclatureOption,
@@ -65,6 +66,14 @@ export function addFulfillmentMethods(api: ApiClient) {
         },
         deleteFulfillmentBoxOverride(warehouseId: number, boxBarcode: string) {
             return api.request<FfBoxPack | null>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/box-packs/${encodeURIComponent(boxBarcode)}/override`);
+        },
+
+        // ─── Ручной ШК по guid (товар ФФ без штрихкода в карточке) ────
+        setFfGuidBarcode(warehouseId: number, productGuid: string, payload: { barcode: string; note?: string | null }) {
+            return api.request<FfGuidBarcodeRow>('PUT', `/api/v1/warehouse/${warehouseId}/fulfillment/guid-barcodes/${encodeURIComponent(productGuid)}`, payload);
+        },
+        deleteFfGuidBarcode(warehouseId: number, productGuid: string) {
+            return api.request<void>('DELETE', `/api/v1/warehouse/${warehouseId}/fulfillment/guid-barcodes/${encodeURIComponent(productGuid)}`);
         },
 
         // ─── Overview (сводная «Заявки ФФ» по всем складам) ─────────
