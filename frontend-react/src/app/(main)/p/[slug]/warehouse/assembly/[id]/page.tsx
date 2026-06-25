@@ -8,7 +8,7 @@ import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchBlock } from '@/components/FfMismatchModal';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, RefreshFromFboResponse, WbFboSupply } from '@/types/api';
+import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, RefreshFromFboResponse, Warehouse, WbFboSupply } from '@/types/api';
 
 // Статусы, в которых заявку имеет смысл отправлять на ФФ (до отгрузки нашей стороной).
 const FF_PUSH_STATUSES: ReadonlySet<AssemblyStatus> = new Set<AssemblyStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED']);
@@ -23,8 +23,16 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
     SHIPPED:          { label: 'Отгружена',          className: 'badge-success' },
     DELIVERED:        { label: 'Принята WB',         className: 'badge-success' },
+    RETURNED:         { label: 'Возврат на склад',   className: 'badge-warning' },
     CLOSED:           { label: 'Закрыт',             className: 'badge-warning' },
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
+};
+
+// Исход попытки отгрузки (для бейджа в таймлайне попыток).
+const ATTEMPT_OUTCOME: Record<AssemblyAttempt['outcome'], { label: string; className: string }> = {
+    accepted:   { label: 'Принято WB',  className: 'badge-success' },
+    rejected:   { label: 'Не принято',  className: 'badge-danger' },
+    in_transit: { label: 'В пути',      className: 'badge-info' },
 };
 
 // ─── Component ──────────────────────────────────────────────────────────────
@@ -54,6 +62,9 @@ export default function AssemblyDetailPage() {
     const [showShipModal, setShowShipModal] = useState(false);
     const [showCancelModal, setShowCancelModal] = useState(false);
     const [showReturnModal, setShowReturnModal] = useState(false);
+    // Возврат: склад возврата (по умолчанию — склад-источник) + список ФФ-складов.
+    const [returnWarehouseId, setReturnWarehouseId] = useState<number | ''>('');
+    const [ffWarehouses, setFfWarehouses] = useState<Warehouse[]>([]);
 
     // ФФ push (создать заявку на ФФ из нашей сборки)
     const [ffStatus, setFfStatus] = useState<FulfillmentStatus | null>(null);
@@ -72,6 +83,9 @@ export default function AssemblyDetailPage() {
 
     // History
     const [history, setHistory] = useState<AssemblyHistoryEntry[]>([]);
+
+    // Цепочка попыток отгрузки (отгрузил → не приняли → вернул → переотгрузил).
+    const [attempts, setAttempts] = useState<AssemblyAttempt[]>([]);
 
     // Кратность короба по баркоду — для колонки «Коробок».
     const [ppbByBarcode, setPpbByBarcode] = useState<Map<string, number | null>>(new Map());
@@ -93,6 +107,7 @@ export default function AssemblyDetailPage() {
             const data = await api.getAssemblyRequest(id);
             setAssembly(data);
             api.getAssemblyHistory(id).then(setHistory).catch(() => {});
+            api.getAssemblyAttempts(id).then(setAttempts).catch(() => {});
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
@@ -262,13 +277,54 @@ export default function AssemblyDetailPage() {
         setActionLoading(false);
     };
 
+    const openReturnModal = () => {
+        if (!assembly) return;
+        setReturnWarehouseId(assembly.warehouse_id);
+        setShowReturnModal(true);
+        // Список ФФ-складов для выбора склада возврата (можно вернуть на другой).
+        api.getWarehouses()
+            .then(whs => setFfWarehouses(whs.filter(w => w.warehouse_type === 'FULFILLMENT')))
+            .catch(() => {});
+    };
+
     const handleReturn = async () => {
+        if (!assembly) return;
         setActionLoading(true);
         setError('');
         try {
-            const updated = await api.returnAssembly(id);
+            const updated = await api.returnAssembly(id, {
+                return_warehouse_id: returnWarehouseId === '' ? null : returnWarehouseId,
+            });
             setAssembly(updated);
             setShowReturnModal(false);
+            api.getAssemblyAttempts(id).then(setAttempts).catch(() => {});
+            api.getAssemblyHistory(id).then(setHistory).catch(() => {});
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setActionLoading(false);
+    };
+
+    const handleReopen = async () => {
+        setActionLoading(true);
+        setError('');
+        try {
+            const updated = await api.reopenAssembly(id);
+            setAssembly(updated);
+            api.getAssemblyHistory(id).then(setHistory).catch(() => {});
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка');
+        }
+        setActionLoading(false);
+    };
+
+    const handleClose = async () => {
+        setActionLoading(true);
+        setError('');
+        try {
+            const updated = await api.closeAssembly(id);
+            setAssembly(updated);
+            api.getAssemblyHistory(id).then(setHistory).catch(() => {});
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка');
         }
@@ -510,8 +566,22 @@ export default function AssemblyDetailPage() {
             case 'SHIPPED':
             case 'DELIVERED':
                 buttons.push(
-                    <button key="return" className="btn btn-primary" onClick={() => setShowReturnModal(true)} disabled={actionLoading}>
+                    <button key="return" className="btn btn-primary" onClick={openReturnModal} disabled={actionLoading}>
                         Вернуть на склад
+                    </button>,
+                    <Link key="edit" href={`/p/${slug}/warehouse/assembly/${assembly.id}/edit`}>
+                        <button className="btn btn-secondary">Редактировать</button>
+                    </Link>,
+                );
+                break;
+            case 'RETURNED':
+                buttons.push(
+                    <button key="reopen" className="btn btn-primary" onClick={handleReopen} disabled={actionLoading}
+                        title="Переотгрузить: вернуть в «Готово», привязать новую FBW-поставку и назначить водителя">
+                        Переотгрузить
+                    </button>,
+                    <button key="close" className="btn btn-secondary" onClick={handleClose} disabled={actionLoading}>
+                        Закрыть заявку
                     </button>,
                     <Link key="edit" href={`/p/${slug}/warehouse/assembly/${assembly.id}/edit`}>
                         <button className="btn btn-secondary">Редактировать</button>
@@ -831,6 +901,55 @@ export default function AssemblyDetailPage() {
                     )}
                 </div>
             </div>
+
+            {/* Цепочка попыток отгрузки (отгрузил → не приняли → вернул → переотгрузил) */}
+            {attempts.length > 0 && (
+                <div className="glass-card" style={{ padding: 24, marginTop: 16 }}>
+                    <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>
+                        Попытки отгрузки ({formatNumber(attempts.length, 0)})
+                    </h2>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+                        {attempts.map((a, idx) => {
+                            const oc = ATTEMPT_OUTCOME[a.outcome];
+                            const isLast = idx === attempts.length - 1;
+                            const dotColor = a.outcome === 'rejected' ? 'var(--color-danger)'
+                                : a.outcome === 'accepted' ? 'var(--color-success)' : 'var(--color-accent)';
+                            return (
+                                <div key={a.shipment_id} style={{ display: 'flex', gap: 12, position: 'relative' }}>
+                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 20 }}>
+                                        <div style={{ width: 10, height: 10, borderRadius: '50%', background: dotColor, flexShrink: 0, marginTop: 6 }} />
+                                        {!isLast && <div style={{ width: 2, flex: 1, background: 'var(--color-border)' }} />}
+                                    </div>
+                                    <div style={{ paddingBottom: isLast ? 0 : 16, flex: 1 }}>
+                                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                            <span style={{ fontWeight: 600, fontSize: 14 }}>Попытка {formatNumber(a.attempt_no, 0)}</span>
+                                            <span className={`badge ${oc.className}`} style={{ fontSize: 11 }}>{oc.label}</span>
+                                            {a.shipped_at && (
+                                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{formatDateTime(a.shipped_at)}</span>
+                                            )}
+                                        </div>
+                                        <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+                                            {a.wb_warehouse_name && <span>Склад WB: <strong style={{ color: 'var(--color-text)' }}>{a.wb_warehouse_name}</strong></span>}
+                                            {a.wb_supply_id && <span>FBW: <span style={{ fontFamily: 'monospace' }}>{a.wb_supply_id}</span></span>}
+                                            {(a.vehicle_info || a.vehicle_brand) && <span>Машина: {[a.vehicle_info, a.vehicle_brand].filter(Boolean).join(', ')}</span>}
+                                            {a.driver_phone && <span>Тел.: {a.driver_phone}</span>}
+                                            {a.carrier_name && <span>Подрядчик: {a.carrier_name}</span>}
+                                            {a.pickup_cost != null && <span>Стоимость: <strong style={{ color: 'var(--color-text)' }}>{formatNumber(a.pickup_cost)} ₽</strong></span>}
+                                            {a.pallets_count != null && <span>Палет: {formatNumber(a.pallets_count, 0)}</span>}
+                                        </div>
+                                        {a.outcome === 'rejected' && a.returned_to_warehouse_name && (
+                                            <div style={{ fontSize: 13, color: 'var(--color-warning)', marginTop: 4 }}>
+                                                ↩ Возвращено на склад: {a.returned_to_warehouse_name}
+                                                {a.returned_at ? ` (${formatDate(a.returned_at)})` : ''}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
 
             {/* Расхождение наполнения с ФФ — отдельным блоком (без клика) */}
             {assembly.ff_mismatch === true && <FfMismatchBlock assemblyId={assembly.id} />}
@@ -1183,8 +1302,28 @@ export default function AssemblyDetailPage() {
                     <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 460 }}>
                         <h2 className="modal-title">Вернуть на склад</h2>
                         <div style={{ marginBottom: 16, fontSize: 14 }}>
-                            <p>WB не принял поставку по заявке <strong>{assembly.number}</strong>, товар вернулся на склад <strong>{assembly.warehouse_name}</strong>.</p>
-                            <p>Будет создана приёмка-возврат на годный сток, а заявка перейдёт в статус <strong>«Закрыт»</strong>. Логистика (стоимость перевозки) сохранится в аналитике.</p>
+                            <p>WB не принял поставку по заявке <strong>{assembly.number}</strong>, товар возвращается на склад.</p>
+                            <p>Будет создана приёмка-возврат на годный сток, заявка перейдёт в статус <strong>«Возврат на склад»</strong> — после этого её можно <strong>переотгрузить</strong> (новый водитель + новая FBW-поставка) или <strong>закрыть</strong>. Стоимость этой перевозки сохранится в аналитике.</p>
+                        </div>
+                        <div style={{ marginBottom: 16 }}>
+                            <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'block', marginBottom: 4 }}>
+                                Склад возврата
+                            </label>
+                            <select
+                                value={returnWarehouseId}
+                                onChange={e => setReturnWarehouseId(e.target.value === '' ? '' : Number(e.target.value))}
+                                style={{ width: '100%' }}
+                            >
+                                {/* По умолчанию — склад-источник; можно вернуть на другой ФФ-склад. */}
+                                {ffWarehouses.length === 0 && assembly.warehouse_name && (
+                                    <option value={assembly.warehouse_id}>{assembly.warehouse_name} (источник)</option>
+                                )}
+                                {ffWarehouses.map(w => (
+                                    <option key={w.id} value={w.id}>
+                                        {w.name}{w.id === assembly.warehouse_id ? ' (источник)' : ''}
+                                    </option>
+                                ))}
+                            </select>
                         </div>
                         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                             <button className="btn btn-secondary" onClick={() => setShowReturnModal(false)}>

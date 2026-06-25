@@ -22,8 +22,12 @@ from backend.models.assembly import (
     AssemblyStatus,
 )
 from backend.models.cost import Nomenclature
+from backend.models.counterparty import Counterparty
 from backend.models.fulfillment import FulfillmentRequest
 from backend.models.warehouse import (
+    InboundReceipt,
+    OutboundShipment,
+    Warehouse,
     WarehouseStock,
     WarehouseType,
 )
@@ -803,10 +807,16 @@ async def update_assembly_request(
     if req.status == AssemblyStatus.CANCELLED:
         raise ValueError(f"Cannot edit in status {req.status}")
 
-    # SHIPPED / DELIVERED / CLOSED — «закрытые» статусы: структурные поля (склад,
-    # FBO-поставка, позиции) менять нельзя; мета (палеты, вес, даты, комментарий,
+    # SHIPPED / DELIVERED / RETURNED / CLOSED — «закрытые» статусы: структурные поля
+    # (склад, FBO-поставка, позиции) менять нельзя; мета (палеты, вес, даты, комментарий,
     # склад WB, упаковка) и логистика — можно (товар уже отгружён/возвращён).
-    _is_closed = req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CLOSED)
+    # Переотгрузка из RETURNED идёт через reopen_for_reship → READY, где FBO снова правится.
+    _is_closed = req.status in (
+        AssemblyStatus.SHIPPED,
+        AssemblyStatus.DELIVERED,
+        AssemblyStatus.RETURNED,
+        AssemblyStatus.CLOSED,
+    )
 
     # Update FBO supply link — only on actual change, and not in closed statuses.
     if payload.wb_fbo_supply_id is not None and payload.wb_fbo_supply_id != req.wb_fbo_supply_id:
@@ -894,13 +904,41 @@ async def update_assembly_request(
         cp_id = await _resolve_carrier(db, project_id, payload.carrier_inn, payload.carrier_name)
         req.counterparty_id = cp_id  # None if inn was empty
 
-    # Update items: allowed everywhere except SHIPPED/DELIVERED/CANCELLED.
+    # Зеркалим правки логистики на отгрузку ТЕКУЩЕЙ попытки, чтобы аналитика
+    # логистики (сумма по OutboundShipment) учитывала постфактум-правки стоимости.
+    if req.outbound_shipment_id and req.status in (AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED):
+        cur_ship = (
+            await db.execute(
+                select(OutboundShipment).where(
+                    OutboundShipment.id == req.outbound_shipment_id,
+                    OutboundShipment.project_id == project_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if cur_ship is not None:
+            if payload.pickup_cost is not None:
+                cur_ship.pickup_cost = req.pickup_cost
+            if payload.vehicle_info is not None:
+                cur_ship.vehicle_info = req.vehicle_info
+            if payload.vehicle_brand is not None:
+                cur_ship.vehicle_brand = req.vehicle_brand
+            if payload.driver_phone is not None:
+                cur_ship.driver_phone = req.driver_phone
+            if payload.carrier_inn is not None:
+                cur_ship.counterparty_id = req.counterparty_id
+            if payload.pallets_count is not None:
+                cur_ship.pallets_count = req.pallets_count
+            if payload.pallet_weight_kg is not None:
+                cur_ship.pallet_weight_kg = req.pallet_weight_kg
+
+    # Update items: allowed everywhere except SHIPPED/DELIVERED/RETURNED/CANCELLED.
     # READY/VEHICLE_ASSIGNED — позволяем подправить кол-во под факт WB (например,
     # WB принял меньше заявленного — редактируем позиции до отгрузки).
     if payload.items is not None:
         if req.status in (
             AssemblyStatus.SHIPPED,
             AssemblyStatus.DELIVERED,
+            AssemblyStatus.RETURNED,
             AssemblyStatus.CLOSED,
             AssemblyStatus.CANCELLED,
         ):
@@ -968,3 +1006,108 @@ async def update_assembly_request(
     updated = await get_assembly_request(db, project_id, req.id)
     assert updated is not None, "Assembly request disappeared after update"
     return updated
+
+
+async def get_assembly_attempts(db: AsyncSession, project_id: int, request_id: int) -> list[dict[str, Any]]:
+    """Цепочка попыток отгрузки заявки: по одной на OutboundShipment (+ её возврат).
+
+    Снимок логистики берём с самой отгрузки (не с заявки — там лишь последняя попытка).
+    Исход: rejected — есть приёмка-возврат для попытки; accepted — FBW принята / заявка
+    DELIVERED; иначе in_transit. Возвраты сопоставляются по assembly_attempt_no
+    (legacy-приёмки без номера попытки и единственная отгрузка → её возврат).
+    """
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+
+    ship_rows = (
+        await db.execute(
+            select(
+                OutboundShipment,
+                WbFboSupply.name.label("supply_name"),
+                WbFboSupply.wb_status.label("supply_status"),
+                WbFboSupply.wb_supply_id.label("supply_wb_id"),
+                Counterparty.inn.label("carrier_inn"),
+                Counterparty.name.label("carrier_name"),
+            )
+            .outerjoin(WbFboSupply, OutboundShipment.wb_fbo_supply_id == WbFboSupply.id)
+            .outerjoin(Counterparty, OutboundShipment.counterparty_id == Counterparty.id)
+            .where(
+                OutboundShipment.assembly_request_id == request_id,
+                OutboundShipment.project_id == project_id,
+                OutboundShipment.is_deleted == False,  # noqa: E712
+            )
+            .order_by(OutboundShipment.attempt_no.asc(), OutboundShipment.id.asc())
+        )
+    ).all()
+
+    ret_rows = (
+        await db.execute(
+            select(InboundReceipt, Warehouse.name.label("wh_name"))
+            .outerjoin(Warehouse, InboundReceipt.warehouse_id == Warehouse.id)
+            .where(
+                InboundReceipt.assembly_request_id == request_id,
+                InboundReceipt.project_id == project_id,
+                InboundReceipt.is_deleted == False,  # noqa: E712
+            )
+            .order_by(InboundReceipt.id.asc())
+        )
+    ).all()
+
+    returns_by_attempt: dict[int, tuple] = {}
+    legacy_returns: list[tuple] = []
+    for receipt, wh_name in ret_rows:
+        if receipt.assembly_attempt_no is not None:
+            returns_by_attempt.setdefault(receipt.assembly_attempt_no, (receipt, wh_name))
+        else:
+            legacy_returns.append((receipt, wh_name))
+
+    attempts: list[dict[str, Any]] = []
+    for ship, supply_name, supply_status, supply_wb_id, carrier_inn, carrier_name in ship_rows:
+        ret = returns_by_attempt.get(ship.attempt_no)
+        if ret is None and legacy_returns and len(ship_rows) == 1:
+            ret = legacy_returns[0]
+
+        if ret is not None:
+            outcome = "rejected"
+            returned_to_warehouse_id = ret[0].warehouse_id
+            returned_to_warehouse_name = ret[1]
+            returned_at = ret[0].created_at
+        elif supply_status == "ACCEPTED" or req.status == AssemblyStatus.DELIVERED:
+            outcome = "accepted"
+            returned_to_warehouse_id = None
+            returned_to_warehouse_name = None
+            returned_at = None
+        else:
+            outcome = "in_transit"
+            returned_to_warehouse_id = None
+            returned_to_warehouse_name = None
+            returned_at = None
+
+        attempts.append(
+            {
+                "attempt_no": ship.attempt_no,
+                "shipment_id": ship.id,
+                "shipment_number": ship.number,
+                "shipped_at": ship.created_at,
+                "wb_supply_id": ship.wb_supply_id or supply_wb_id,
+                "wb_supply_name": supply_name,
+                "wb_warehouse_name": ship.destination,
+                "wb_fbo_status": supply_status,
+                "vehicle_info": ship.vehicle_info,
+                "vehicle_brand": ship.vehicle_brand,
+                "driver_phone": ship.driver_phone,
+                "carrier_inn": carrier_inn,
+                "carrier_name": carrier_name,
+                "pickup_cost": ship.pickup_cost,
+                "pallets_count": ship.pallets_count,
+                "pickup_date": ship.pickup_date,
+                "delivery_date": ship.delivery_date,
+                "outcome": outcome,
+                "returned_to_warehouse_id": returned_to_warehouse_id,
+                "returned_to_warehouse_name": returned_to_warehouse_name,
+                "returned_at": returned_at,
+            }
+        )
+
+    return attempts

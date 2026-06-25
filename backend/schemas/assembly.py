@@ -227,6 +227,47 @@ class StockDeficit(BaseModel):
     have: int
 
 
+# ─── Shipping attempts (цепочка попыток отгрузки) ──────────────────────────
+
+
+class ReturnToWarehouse(BaseModel):
+    """Возврат отгрузки на склад (WB не принял). По умолчанию — склад-источник;
+    можно вернуть на другой склад (return_warehouse_id)."""
+
+    return_warehouse_id: int | None = None
+    comment: str | None = None
+
+
+class AssemblyAttempt(BaseModel):
+    """Одна попытка отгрузки заявки (= один OutboundShipment + опц. возврат).
+
+    Снимок логистики берётся с отгрузки (на момент отгрузки), исход выводится:
+    accepted — WB принял; rejected — оформлен возврат на склад; in_transit — едет.
+    """
+
+    attempt_no: int
+    shipment_id: int
+    shipment_number: str | None = None
+    shipped_at: datetime | None = None  # момент отгрузки (created_at отгрузки)
+    wb_supply_id: str | None = None  # FBW-... (снимок на отгрузке)
+    wb_supply_name: str | None = None  # имя связанной FBO-поставки
+    wb_warehouse_name: str | None = None  # склад WB (город сдачи) — снимок destination
+    wb_fbo_status: str | None = None  # статус связанной FBO-поставки (ACTIVE/ACCEPTED/...)
+    vehicle_info: str | None = None
+    vehicle_brand: str | None = None
+    driver_phone: str | None = None
+    carrier_inn: str | None = None
+    carrier_name: str | None = None
+    pickup_cost: Decimal | None = None
+    pallets_count: int | None = None
+    pickup_date: date | None = None
+    delivery_date: date | None = None
+    outcome: Literal["accepted", "rejected", "in_transit"]
+    returned_to_warehouse_id: int | None = None
+    returned_to_warehouse_name: str | None = None
+    returned_at: datetime | None = None  # момент возврата (created_at приёмки-возврата)
+
+
 # ─── Logistics analytics ───────────────────────────────────────────────────
 
 

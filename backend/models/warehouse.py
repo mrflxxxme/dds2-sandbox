@@ -127,6 +127,13 @@ class InboundReceipt(Base, TimestampMixin, SoftDeleteMixin):
     is_defect: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     defect_reason: Mapped[str | None] = mapped_column(Text)
 
+    # Возврат сборки: к какой заявке/попытке относится этот приём-возврат.
+    # warehouse_id выше = склад, НА который вернули (может отличаться от склада-источника).
+    assembly_request_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("assembly_requests.id", ondelete="SET NULL"), nullable=True
+    )
+    assembly_attempt_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Relationships
     warehouse: Mapped["Warehouse"] = relationship(back_populates="receipts")
     items: Mapped[list["InboundReceiptItem"]] = relationship(
@@ -137,6 +144,7 @@ class InboundReceipt(Base, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         Index("ix_inbound_receipts_project_id", "project_id"),
         Index("ix_inbound_receipts_warehouse_id", "warehouse_id"),
+        Index("ix_inbound_receipts_assembly_request_id", "assembly_request_id"),
     )
 
 
@@ -181,6 +189,32 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
     is_defect: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     defect_reason: Mapped[str | None] = mapped_column(Text)
 
+    # ─── Assembly shipping attempt (цепочка попыток отгрузки) ──────────────
+    # Долговечная 1:N связь заявка→отгрузки (на AssemblyRequest хранится лишь
+    # последняя попытка-зеркало и затирается при переотгрузке). Каждая отгрузка
+    # одной заявки = одна попытка с собственным водителем/FBW/складом WB/стоимостью.
+    assembly_request_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("assembly_requests.id", ondelete="SET NULL"), nullable=True
+    )
+    wb_fbo_supply_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wb_fbo_supplies.id", ondelete="SET NULL"), nullable=True
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    # Снимок логистики попытки на момент отгрузки — на AssemblyRequest эти поля
+    # перезатираются при назначении нового водителя; здесь сохраняются по-попыточно.
+    pickup_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    vehicle_info: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    vehicle_brand: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    driver_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    counterparty_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("counterparty.id", ondelete="SET NULL"), nullable=True
+    )
+    pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    pallets_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pallet_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+
     # Relationships
     warehouse: Mapped["Warehouse"] = relationship(back_populates="shipments")
     items: Mapped[list["OutboundShipmentItem"]] = relationship(
@@ -191,6 +225,9 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         Index("ix_outbound_shipments_project_id", "project_id"),
         Index("ix_outbound_shipments_warehouse_id", "warehouse_id"),
+        Index("ix_outbound_shipments_assembly_request_id", "assembly_request_id"),
+        Index("ix_outbound_shipments_wb_fbo_supply_id", "wb_fbo_supply_id"),
+        Index("ix_outbound_shipments_counterparty_id", "counterparty_id"),
     )
 
 

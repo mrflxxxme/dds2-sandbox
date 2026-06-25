@@ -15,6 +15,7 @@ from backend.models.fulfillment import FulfillmentRequest
 from backend.models.integrations import IntegrationKey
 from backend.project_context import get_current_project
 from backend.schemas.assembly import (
+    AssemblyAttempt,
     AssemblyFlowAnalyticsResponse,
     AssemblyHistoryResponse,
     AssemblyListResponse,
@@ -28,6 +29,7 @@ from backend.schemas.assembly import (
     LinkAnomaliesResponse,
     LogisticsAnalyticsResponse,
     RefreshFromFboResponse,
+    ReturnToWarehouse,
     ShipBulk,
     StockDistributionHistoryResponse,
     StockDistributionResponse,
@@ -363,9 +365,10 @@ async def assembly_ff_mismatch(
     """Разбивка расхождения наполнения сборки с привязанными заявками ФФ (по позициям/итогам).
 
     Питает модалку «расхождение» на деталке/списке сборок и вкладке «ФФ сборка».
-    Считается по зеркалу (без HTTP).
+    live=True: migfull-отгрузка дотягивает неразрезолвленные ШК живой карточкой →
+    сверка по позициям в штуках (а не фолбэк «по количеству» в коробах).
     """
-    data = await fulfillment_service.get_assembly_ff_mismatch_detail(db, project.id, request_id)
+    data = await fulfillment_service.get_assembly_ff_mismatch_detail(db, project.id, request_id, live=True)
     if data is None:
         raise HTTPException(404, "Assembly request not found")
     return data
@@ -484,13 +487,65 @@ async def cancel_request(
 @router.post("/{request_id}/return", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
 async def return_to_warehouse(
     request_id: int,
+    payload: ReturnToWarehouse | None = None,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """SHIPPED/DELIVERED -> CLOSED: WB не принял поставку, товар вернулся на склад."""
+    """SHIPPED/DELIVERED -> RETURNED: WB не принял поставку, товар вернулся на склад
+    (по умолчанию склад-источник; можно вернуть на другой). Дальше — переотгрузка
+    (`/reopen`) или закрытие (`/close`)."""
+    body = payload or ReturnToWarehouse()
     try:
-        req = await assembly_service.return_to_warehouse(db, project.id, request_id)
+        req = await assembly_service.return_to_warehouse(
+            db,
+            project.id,
+            request_id,
+            comment=body.comment,
+            return_warehouse_id=body.return_warehouse_id,
+        )
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/{request_id}/reopen", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
+async def reopen_for_reship(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """RETURNED -> READY: переотгрузка (новая FBW-поставка + новый водитель)."""
+    try:
+        req = await assembly_service.reopen_for_reship(db, project.id, request_id)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/{request_id}/close", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
+async def close_request(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """RETURNED/DELIVERED -> CLOSED: терминальное закрытие заявки."""
+    try:
+        req = await assembly_service.close_request(db, project.id, request_id)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.get("/{request_id}/attempts", response_model=list[AssemblyAttempt])
+async def get_assembly_attempts(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Цепочка попыток отгрузки заявки (водитель/FBW/склад WB/стоимость/исход по попыткам)."""
+    try:
+        attempts = await assembly_service.get_assembly_attempts(db, project.id, request_id)
+        return [AssemblyAttempt.model_validate(a) for a in attempts]
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 

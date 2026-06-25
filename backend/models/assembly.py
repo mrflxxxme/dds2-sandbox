@@ -44,7 +44,8 @@ class AssemblyStatus(enum.StrEnum):
     VEHICLE_ASSIGNED = "VEHICLE_ASSIGNED"
     SHIPPED = "SHIPPED"
     DELIVERED = "DELIVERED"  # WB accepted the supply (auto from FBO sync)
-    CLOSED = "CLOSED"  # WB не принял поставку — товар возвращён на склад, логистика сохранена
+    RETURNED = "RETURNED"  # WB не принял — товар вернулся на склад; ждёт переотгрузки или закрытия
+    CLOSED = "CLOSED"  # терминал: заявка закрыта после возврата(ов), новая поставка WB заводится отдельно
     CANCELLED = "CANCELLED"
 
 
@@ -71,15 +72,19 @@ ASSEMBLY_TRANSITIONS: dict[AssemblyStatus, set[AssemblyStatus]] = {
     AssemblyStatus.IN_PROGRESS: {AssemblyStatus.READY, AssemblyStatus.CANCELLED},
     AssemblyStatus.READY: {AssemblyStatus.VEHICLE_ASSIGNED, AssemblyStatus.IN_PROGRESS, AssemblyStatus.CANCELLED},
     AssemblyStatus.VEHICLE_ASSIGNED: {AssemblyStatus.SHIPPED, AssemblyStatus.READY, AssemblyStatus.CANCELLED},
+    # WB не принял отгрузку → RETURNED (товар вернулся на склад). Из RETURNED заявку
+    # либо переотгружают (→ READY: новая FBW-поставка + новый водитель), либо закрывают.
     AssemblyStatus.SHIPPED: {
         AssemblyStatus.DELIVERED,
         AssemblyStatus.READY,
-        AssemblyStatus.CLOSED,
+        AssemblyStatus.RETURNED,
         AssemblyStatus.CANCELLED,
     },
-    # WB принял, но позже выяснилось, что часть/всё вернулось → закрытие возвратом.
-    AssemblyStatus.DELIVERED: {AssemblyStatus.CLOSED},
-    AssemblyStatus.CLOSED: set(),  # final status — товар возвращён, логистика сохранена
+    # WB принял, но позже выяснилось, что часть/всё вернулось → возврат либо закрытие.
+    AssemblyStatus.DELIVERED: {AssemblyStatus.RETURNED, AssemblyStatus.CLOSED},
+    # Возврат на склад: переотгрузка (READY) ‖ закрытие (CLOSED) ‖ отмена.
+    AssemblyStatus.RETURNED: {AssemblyStatus.READY, AssemblyStatus.CLOSED, AssemblyStatus.CANCELLED},
+    AssemblyStatus.CLOSED: set(),  # final status — заявка закрыта, логистика попыток сохранена
     AssemblyStatus.CANCELLED: set(),
 }
 

@@ -39,12 +39,15 @@ from backend.services.assembly_service import (
     assign_vehicle,
     assign_vehicle_bulk,
     cancel_request,
+    close_request,
     create_assembly_request,
     deliver_request,
+    get_assembly_attempts,
     get_assembly_request,
     get_logistics_analytics,
     list_assembly_requests,
     mark_ready,
+    reopen_for_reship,
     return_to_warehouse,
     ship_request,
     start_assembly,
@@ -915,7 +918,7 @@ async def _create_and_ship(db_session, *, pickup_cost: int = 15000) -> AssemblyR
 
 @pytest.mark.asyncio
 class TestReturnToWarehouse:
-    """Возврат: WB не принял поставку → CLOSED, товар на склад, логистика сохранена."""
+    """Возврат: WB не принял поставку → RETURNED, товар на склад, логистика сохранена."""
 
     async def test_return_restores_stock_keeps_shipment_and_logistics(self, db_session):
         req = await _create_and_ship(db_session, pickup_cost=15000)
@@ -941,10 +944,12 @@ class TestReturnToWarehouse:
         # Return to warehouse
         req = await return_to_warehouse(db_session, PROJECT_ID, req.id)
 
-        assert req.status == AssemblyStatus.CLOSED
-        # Logistics preserved: shipment link and shipped_at NOT cleared
-        assert req.outbound_shipment_id == shipment_id
-        assert req.shipped_at is not None
+        assert req.status == AssemblyStatus.RETURNED
+        # Зеркало последней попытки очищено (для переотгрузки/пере-связки FBW);
+        # сама попытка сохранена на OutboundShipment.
+        assert req.outbound_shipment_id is None
+        assert req.shipped_at is None
+        assert req.wb_fbo_supply_id is None
 
         # Stock restored (+5 back to source warehouse)
         restored_qty = (
@@ -984,7 +989,11 @@ class TestReturnToWarehouse:
         assert fbo.return_type == "GOODS"
         assert fbo.return_qty == 5
 
-        # Logistics analytics STILL counts the CLOSED request (перевозка оплачена)
+        # Возврат-приёмка привязана к заявке и номеру попытки
+        assert receipt.assembly_request_id == req.id
+        assert receipt.assembly_attempt_no == 1
+
+        # Logistics analytics STILL counts the returned attempt (перевозка оплачена)
         analytics = await get_logistics_analytics(db_session, PROJECT_ID)
         assert analytics["summary"]["total_shipments"] == 1
         assert float(analytics["summary"]["total_cost"]) == 15000.0
@@ -995,10 +1004,10 @@ class TestReturnToWarehouse:
             await return_to_warehouse(db_session, PROJECT_ID, req.id)
 
     async def test_return_idempotent_second_call_blocked(self, db_session):
-        """Повторный возврат по уже CLOSED-заявке запрещён (CLOSED→CLOSED нет)."""
+        """Повторный возврат по уже RETURNED-заявке запрещён (RETURNED→RETURNED нет)."""
         req = await _create_and_ship(db_session)
         req = await return_to_warehouse(db_session, PROJECT_ID, req.id)
-        assert req.status == AssemblyStatus.CLOSED
+        assert req.status == AssemblyStatus.RETURNED
         with pytest.raises(ValueError):
             await return_to_warehouse(db_session, PROJECT_ID, req.id)
 
@@ -1048,12 +1057,135 @@ class TestReturnToWarehouse:
         assert reloaded.status == AssemblyStatus.SHIPPED
 
     async def test_return_from_delivered(self, db_session):
-        """DELIVERED → CLOSED тоже работает (возврат после приёмки WB)."""
+        """DELIVERED → RETURNED тоже работает (возврат после приёмки WB)."""
         req = await _create_and_ship(db_session)
         req = await deliver_request(db_session, PROJECT_ID, req.id)
         assert req.status == AssemblyStatus.DELIVERED
         req = await return_to_warehouse(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.RETURNED
+
+    async def test_return_to_different_warehouse(self, db_session):
+        """Возврат на ДРУГОЙ склад: остаток падает на выбранный склад, не на источник."""
+        req = await _create_and_ship(db_session)
+        wh2 = await _create_second_fulfillment_wh(db_session, stock_for=[TEST_BARCODE_1])
+        nom_id = (
+            await db_session.execute(
+                text("SELECT id FROM nomenclature WHERE project_id = :pid AND barcode = :bc"),
+                {"pid": PROJECT_ID, "bc": TEST_BARCODE_1},
+            )
+        ).scalar()
+
+        req = await return_to_warehouse(db_session, PROJECT_ID, req.id, return_warehouse_id=wh2)
+        assert req.status == AssemblyStatus.RETURNED
+
+        # Остаток вернулся на wh2 (+5 к посеянным 100), не на склад-источник
+        qty2 = (
+            await db_session.execute(
+                select(WarehouseStock.quantity).where(
+                    WarehouseStock.project_id == PROJECT_ID,
+                    WarehouseStock.warehouse_id == wh2,
+                    WarehouseStock.nomenclature_id == nom_id,
+                )
+            )
+        ).scalar_one()
+        assert qty2 == 105
+
+        receipt = (
+            await db_session.execute(
+                select(InboundReceipt).where(InboundReceipt.assembly_request_id == req.id)
+            )
+        ).scalar_one()
+        assert receipt.warehouse_id == wh2
+
+        attempts = await get_assembly_attempts(db_session, PROJECT_ID, req.id)
+        assert len(attempts) == 1
+        assert attempts[0]["outcome"] == "rejected"
+        assert attempts[0]["returned_to_warehouse_id"] == wh2
+
+
+@pytest.mark.asyncio
+class TestReshipChain:
+    """Цепочка попыток: отгрузил → не приняли → вернул → переотгрузил новым водителем."""
+
+    async def test_reship_creates_second_attempt_and_sums_logistics(self, db_session):
+        # Попытка 1 — отгружена и возвращена
+        req = await _create_and_ship(db_session, pickup_cost=15000)
+        req = await return_to_warehouse(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.RETURNED
+
+        # Переотгрузка: возврат в READY
+        req = await reopen_for_reship(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.READY
+
+        # Привязываем НОВУЮ FBW-поставку (другой склад WB)
+        fbo2 = WbFboSupply(
+            project_id=PROJECT_ID,
+            wb_supply_id="ASM-FBO-TEST-2",
+            wb_status=WbSupplyStatus.ACTIVE,
+            name="FBO 2",
+            warehouse_name="Коледино",
+            created_at_wb=datetime(2026, 3, 25),
+        )
+        db_session.add(fbo2)
+        await db_session.commit()
+        req = await update_assembly_request(
+            db_session, PROJECT_ID, req.id, AssemblyRequestUpdate(wb_fbo_supply_id=fbo2.id)
+        )
+        assert req.wb_fbo_supply_id == fbo2.id
+
+        # Новый водитель + отгрузка (попытка 2)
+        await assign_vehicle(
+            db_session,
+            PROJECT_ID,
+            req.id,
+            AssignVehicle(
+                vehicle_info="Truck B",
+                vehicle_brand="Volvo",
+                driver_phone="+79993333333",
+                pickup_date="2026-03-26",
+                pickup_time_slot="09:00-13:00",
+                pickup_cost=18000,
+                delivery_date="2026-03-28",
+            ),
+        )
+        req = await ship_request(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.SHIPPED
+
+        # Цепочка попыток: 1 отклонена, 2 в пути; водители/склады WB по-попыточно
+        attempts = await get_assembly_attempts(db_session, PROJECT_ID, req.id)
+        assert len(attempts) == 2
+        a1, a2 = attempts
+        assert a1["attempt_no"] == 1
+        assert a1["outcome"] == "rejected"
+        assert a1["driver_phone"] == "+79992222222"
+        assert a2["attempt_no"] == 2
+        assert a2["outcome"] == "in_transit"
+        assert a2["driver_phone"] == "+79993333333"
+        assert a2["wb_warehouse_name"] == "Коледино"
+
+        # Логистика суммирует ОБЕ попытки (платили за оба рейса)
+        analytics = await get_logistics_analytics(db_session, PROJECT_ID)
+        assert analytics["summary"]["total_shipments"] == 2
+        assert float(analytics["summary"]["total_cost"]) == 33000.0
+
+    async def test_close_from_returned(self, db_session):
+        """Из RETURNED можно закрыть заявку (терминально)."""
+        req = await _create_and_ship(db_session)
+        req = await return_to_warehouse(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.RETURNED
+        req = await close_request(db_session, PROJECT_ID, req.id)
         assert req.status == AssemblyStatus.CLOSED
+
+    async def test_attempts_accepted_after_deliver(self, db_session):
+        """get_assembly_attempts: SHIPPED → in_transit, после deliver → accepted."""
+        req = await _create_and_ship(db_session)
+        attempts = await get_assembly_attempts(db_session, PROJECT_ID, req.id)
+        assert len(attempts) == 1
+        assert attempts[0]["outcome"] == "in_transit"
+
+        await deliver_request(db_session, PROJECT_ID, req.id)
+        attempts = await get_assembly_attempts(db_session, PROJECT_ID, req.id)
+        assert attempts[0]["outcome"] == "accepted"
 
 
 @pytest.mark.asyncio

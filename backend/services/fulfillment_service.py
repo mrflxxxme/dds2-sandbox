@@ -1199,6 +1199,21 @@ async def _migfull_resolve_detail_barcodes(
         guid_barcodes[guid] = pack or (barcode, 1)
 
 
+async def _try_migfull_client(db: AsyncSession, project_id: int, warehouse_id: int) -> MigfullClient | None:
+    """Best-effort migfull-клиент для live-добора ШК. None — не подключён / нет
+    GUID кабинета / битый ключ. Деталки и сверка работают и без него (из зеркала+raw)."""
+    key = await get_integration(db, project_id, warehouse_id)
+    if not key:
+        return None
+    tenant_guid = str((key.config or {}).get("tenant_guid") or "")
+    if not tenant_guid:
+        return None
+    try:
+        return MigfullClient(tenant_guid, _decrypt(key.encrypted_key), project_id=project_id)
+    except ValueError:
+        return None
+
+
 def _ean13_check_digit(body12: str) -> str:
     """Контрольная цифра EAN13 по первым 12 цифрам."""
     total = sum((3 if i % 2 else 1) * int(c) for i, c in enumerate(body12))
@@ -3694,6 +3709,25 @@ def _build_match(
     }
 
 
+def _ff_unit_total(req: FulfillmentRequest, mig_guid_map: dict[str, tuple[str, int]]) -> int:
+    """ФФ-итог в ШТУКАХ россыпи для сводки расхождения (фолбэк mode=total).
+
+    migfull-отгрузка: `total_qty` хранит число КОРОБОВ — пересчитываем в штуки
+    (короба × штук в коробе из mig_guid_map; неразрезолвленный guid → ×1, лучше
+    чем короб). Прочие провайдеры — `total_qty` уже в штуках.
+    """
+    if req.provider == "migfull" and req.kind == FfRequestKind.ASSEMBLY.value:
+        total = 0
+        for p in _migfull_products_from_lines(
+            _migfull_line_rows((req.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
+        ):
+            if p["qty"] > 0:
+                _bc, units = mig_guid_map.get(p["guid"], (None, 1))
+                total += p["qty"] * units
+        return total
+    return req.total_qty or 0
+
+
 def _mirror_ff_composition(req: FulfillmentRequest, mig_guid_map: dict[str, tuple[str, int]]) -> dict[str, int] | None:
     """Состав ФФ-заявки {barcode: qty>0} ИЗ ЗЕРКАЛА (без HTTP). None — недоступно.
 
@@ -3851,10 +3885,12 @@ async def compute_doc_ff_mismatch(
                 for bc, q in c.items():  # type: ignore[union-attr]
                     combined[bc] = combined.get(bc, 0) + q
             return combined != our_comp
-        # фолбэк по суммарному кол-ву (когда у всех заявок известно total_qty)
+        # фолбэк по суммарному кол-ву В ШТУКАХ (migfull-отгрузка: короба × штук в
+        # коробе, а не total_qty=коробá → иначе ложное расхождение vs наш итог в штуках)
         if any(r.total_qty is None for r in reqs):
             return None
-        return sum(r.total_qty or 0 for r in reqs) != sum(our_comp.values())
+        ff_units = sum(_ff_unit_total(r, mig_maps.get(r.warehouse_id, {})) for r in reqs)
+        return ff_units != sum(our_comp.values())
 
     for aid, reqs in ff_by_asm.items():
         out[("assembly", aid)] = _verdict(our_asm.get(aid, {}), reqs)
@@ -3871,15 +3907,20 @@ async def get_assembly_ff_mismatch_map(
     return {aid: verdict for (kind, aid), verdict in res.items() if kind == "assembly"}
 
 
-async def get_assembly_ff_mismatch_detail(db: AsyncSession, project_id: int, assembly_request_id: int) -> dict | None:
+async def get_assembly_ff_mismatch_detail(
+    db: AsyncSession, project_id: int, assembly_request_id: int, *, live: bool = False
+) -> dict | None:
     """Разбивка расхождения наполнения сборки с привязанными заявками ФФ (модалка «что не так»).
 
     None — сборка не найдена в проекте. Иначе FfMismatchDetail-shape:
     - mode="barcode": сверка по ШК (wmscelicom/migfull) — rows только по расходящимся
       позициям (наш qty vs суммарный qty всех АКТИВНЫХ привязанных заявок ФФ);
     - mode="total": состав ФФ по позициям недоступен (skladbot / неполный резолв
-      migfull) → только итоги (our_total vs ff_total), rows пуст.
-    Считается ТОЛЬКО по зеркалу (без HTTP), как и compute_doc_ff_mismatch.
+      migfull) → только итоги; ФФ-итог migfull считается в ШТУКАХ (`_ff_unit_total`,
+      короба × штук), а не в коробах из `total_qty`.
+    live=True (деталка одной сборки) — дотягиваем неразрезолвленные migfull-guid живой
+    карточкой + ручные ШК (overlay) → состав становится полным → mode="barcode".
+    live=False (батч аномалий, `compute_doc_ff_mismatch`) — только зеркало, без HTTP.
     """
     asm = (
         await db.execute(
@@ -3920,8 +3961,9 @@ async def get_assembly_ff_mismatch_detail(db: AsyncSession, project_id: int, ass
     )
     ff_numbers = [r.number or r.external_id for r in ff_reqs]
 
-    # migfull guid→barcode по складам (батч, без HTTP)
+    # migfull guid→barcode по складам (зеркало; live=True ещё и живой карточкой)
     mig_guids_by_wh: dict[int, set[str]] = {}
+    name_by_guid: dict[str, str | None] = {}
     for r in ff_reqs:
         if r.provider == "migfull" and r.kind == FfRequestKind.ASSEMBLY.value:
             for p in _migfull_products_from_lines(
@@ -3929,9 +3971,25 @@ async def get_assembly_ff_mismatch_detail(db: AsyncSession, project_id: int, ass
             ):
                 if p["qty"] > 0:
                     mig_guids_by_wh.setdefault(r.warehouse_id, set()).add(p["guid"])
+                    name_by_guid.setdefault(p["guid"], p.get("name"))
     mig_maps: dict[int, dict[str, tuple[str, int]]] = {}
+    overrides_by_wh: dict[int, dict[str, str]] = {}
     for wh_id, guids in mig_guids_by_wh.items():
         mig_maps[wh_id] = await _migfull_guid_barcodes(db, project_id, wh_id, guids)
+        overrides_by_wh[wh_id] = await _load_guid_barcode_overrides(db, project_id, wh_id)
+    # Ручной ШК (overlay поверх зеркала) — короб по имени «короб N шт.», иначе как есть
+    for wh_id, guids in mig_guids_by_wh.items():
+        for g, ob in overrides_by_wh[wh_id].items():
+            if g in guids:
+                mig_maps[wh_id][g] = _migfull_box_pack(ob, name_by_guid.get(g)) or (ob, 1)
+    # live: дотянуть неразрезолвленные guid живой карточкой (как деталка ФФ). Иначе
+    # отгрузка с ШК в карточке, но нулевым остатком → фолбэк «по количеству».
+    if live and mig_guids_by_wh:
+        await db.commit()  # закрыть read-транзакцию до HTTP
+        for wh_id, guids in mig_guids_by_wh.items():
+            client = await _try_migfull_client(db, project_id, wh_id)
+            if client is not None:
+                await _migfull_resolve_detail_barcodes(client, guids, mig_maps[wh_id])
 
     comps = [_mirror_ff_composition(r, mig_maps.get(r.warehouse_id, {})) for r in ff_reqs]
     base = {
@@ -3959,8 +4017,9 @@ async def get_assembly_ff_mismatch_detail(db: AsyncSession, project_id: int, ass
         rows = [row for _, _, row in sorted(sortable, key=lambda t: (t[0], t[1]))]
         return {**base, "mode": "barcode", "ff_total": sum(combined.values()), "rows": rows}
 
-    # фолбэк: состав ФФ по позициям недоступен → только итоги
-    return {**base, "mode": "total", "ff_total": sum(r.total_qty or 0 for r in ff_reqs), "rows": []}
+    # фолбэк: состав ФФ по позициям недоступен → только итоги (migfull — в штуках, не коробах)
+    ff_total = sum(_ff_unit_total(r, mig_maps.get(r.warehouse_id, {})) for r in ff_reqs)
+    return {**base, "mode": "total", "ff_total": ff_total, "rows": []}
 
 
 async def get_ff_link_for_assembly(db: AsyncSession, project_id: int, assembly_request_id: int) -> dict | None:
@@ -4109,14 +4168,7 @@ async def get_request_detail(
             # Best-effort live-добор ШК: товар с нулевым остатком в зеркало не попал,
             # но его карточка может нести ШК короба → дотягиваем живьём, как для приёмки.
             # Без ключа (disconnect) деталка работает из зеркала+raw как раньше.
-            key = await get_integration(db, project_id, warehouse_id)
-            if key:
-                tenant_guid = str((key.config or {}).get("tenant_guid") or "")
-                if tenant_guid:
-                    try:
-                        mig_client = MigfullClient(tenant_guid, _decrypt(key.encrypted_key), project_id=project_id)
-                    except ValueError:
-                        mig_client = None
+            mig_client = await _try_migfull_client(db, project_id, warehouse_id)
         else:
             # Приёмки: состава в списке нет — ЖИВЫЕ lines/incoming + received
             key = await get_integration(db, project_id, warehouse_id)

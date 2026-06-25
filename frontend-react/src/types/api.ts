@@ -1425,8 +1425,8 @@ export interface WbFboSupply {
   assembly_request_status?: string;
   source_warehouse_id?: number;
   synced_at?: string;
-  return_processed_at?: string;
-  return_type?: 'GOODS' | 'DEFECT' | 'UTILIZED' | null;
+  return_processed_at?: string | null;
+  return_type?: 'GOODS' | 'DEFECT' | 'UTILIZED' | 'MIXED' | null;
   return_qty?: number | null;
   created_at?: string;
   updated_at?: string;
@@ -1569,7 +1569,7 @@ export interface FboAuditRevertResponse {
 
 // ─── Assembly Requests ────────────────────────────────────────────────────
 
-export type AssemblyStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'DELIVERED' | 'CLOSED' | 'CANCELLED';
+export type AssemblyStatus = 'PENDING' | 'IN_PROGRESS' | 'READY' | 'VEHICLE_ASSIGNED' | 'SHIPPED' | 'DELIVERED' | 'RETURNED' | 'CLOSED' | 'CANCELLED';
 
 export type PackageType = 'BOX' | 'MONOPALLET' | 'SUPERSAFE';
 
@@ -1974,6 +1974,37 @@ export interface AssemblyHistoryEntry {
     changed_at: string;
     changed_by: string | null;
     comment: string | null;
+}
+
+/** Одна попытка отгрузки заявки (цепочка: отгрузил → не приняли → вернул → переотгрузил). */
+export interface AssemblyAttempt {
+    attempt_no: number;
+    shipment_id: number;
+    shipment_number: string | null;
+    shipped_at: string | null;
+    wb_supply_id: string | null;
+    wb_supply_name: string | null;
+    wb_warehouse_name: string | null;
+    wb_fbo_status: string | null;
+    vehicle_info: string | null;
+    vehicle_brand: string | null;
+    driver_phone: string | null;
+    carrier_inn: string | null;
+    carrier_name: string | null;
+    pickup_cost: number | null;
+    pallets_count: number | null;
+    pickup_date: string | null;
+    delivery_date: string | null;
+    outcome: 'accepted' | 'rejected' | 'in_transit';
+    returned_to_warehouse_id: number | null;
+    returned_to_warehouse_name: string | null;
+    returned_at: string | null;
+}
+
+/** Тело возврата отгрузки на склад (опц. другой склад). */
+export interface AssemblyReturnPayload {
+    return_warehouse_id?: number | null;
+    comment?: string | null;
 }
 
 export interface AssemblyRequestCreate {

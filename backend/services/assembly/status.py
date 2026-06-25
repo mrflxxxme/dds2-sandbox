@@ -8,7 +8,7 @@ One-way dependency: status -> crud (never crud -> status, except _log_status_cha
 
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_cache
@@ -27,6 +27,8 @@ from backend.models.warehouse import (
     OutboundShipment,
     OutboundShipmentItem,
     OutboundStatus,
+    Warehouse,
+    WarehouseType,
 )
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import AssignVehicle
@@ -284,7 +286,18 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
     )
     fbo_supply = fbo_result.scalar_one_or_none()
 
-    # 4. Create OutboundShipment
+    # 4. Create OutboundShipment — попытка отгрузки со СНИМКОМ логистики.
+    #    attempt_no = max по прошлым отгрузкам этой заявки + 1 (под тем же row-lock,
+    #    что и статус) — переотгрузка после возврата даёт попытку №2, №3, …
+    max_attempt = (
+        await db.execute(
+            select(func.coalesce(func.max(OutboundShipment.attempt_no), 0)).where(
+                OutboundShipment.assembly_request_id == req.id,
+                OutboundShipment.project_id == project_id,
+                OutboundShipment.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one()
     ship_number = await _next_number(db, project_id, "OUT", OutboundShipment)
     shipment = OutboundShipment(
         project_id=project_id,
@@ -294,6 +307,20 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
         destination=fbo_supply.warehouse_name if fbo_supply else None,
         wb_supply_id=fbo_supply.wb_supply_id if fbo_supply else None,
         shipped_date=date.today(),
+        # Цепочка попыток: долговечная связь + снимок логистики на момент отгрузки.
+        assembly_request_id=req.id,
+        wb_fbo_supply_id=req.wb_fbo_supply_id,
+        attempt_no=int(max_attempt) + 1,
+        pickup_cost=req.pickup_cost,
+        vehicle_info=req.vehicle_info,
+        vehicle_brand=req.vehicle_brand,
+        driver_phone=req.driver_phone,
+        counterparty_id=req.counterparty_id,
+        pickup_date=req.pickup_date,
+        pickup_time_slot=req.pickup_time_slot,
+        delivery_date=req.delivery_date,
+        pallets_count=req.pallets_count,
+        pallet_weight_kg=req.pallet_weight_kg,
     )
     db.add(shipment)
     await db.flush()
@@ -405,15 +432,22 @@ async def return_to_warehouse(
     request_id: int,
     changed_by: str = "user",
     comment: str | None = None,
+    return_warehouse_id: int | None = None,
 ) -> AssemblyRequest:
     """
-    SHIPPED/DELIVERED -> CLOSED: WB не принял поставку, товар вернулся на склад-источник.
+    SHIPPED/DELIVERED -> RETURNED: WB не принял поставку, товар вернулся на склад.
 
-    В отличие от cancel_request:
-      - заявка НЕ отменяется (статус CLOSED, не CANCELLED) → pickup_cost остаётся в
-        аналитике логистики (перевозка оплачена, история нужна);
-      - OutboundShipment НЕ soft-удаляется (история отгрузки сохранена);
-      - товар возвращается на склад-источник как ГОДНЫЙ сток через InboundReceipt(ACCEPTED).
+    Возврат НЕтерминальный: из RETURNED заявку либо переотгружают (`reopen_for_reship`,
+    новый водитель + новая FBW-поставка), либо закрывают (`close_request`).
+
+      - заявка НЕ отменяется → попытка остаётся в аналитике логистики (перевозка оплачена);
+      - OutboundShipment этой попытки НЕ soft-удаляется (история отгрузки сохранена);
+      - товар возвращается ГОДНЫМ стоком через InboundReceipt(ACCEPTED) на склад возврата
+        (`return_warehouse_id` или склад-источник, если не задан — можно вернуть на ДРУГОЙ);
+      - приёмка-возврат привязывается к заявке и НОМЕРУ ПОПЫТКИ (assembly_attempt_no);
+      - зеркало последней попытки на заявке очищается (outbound_shipment_id / shipped_at /
+        wb_fbo_supply_id → None), чтобы заявку можно было пере-связать с новой FBW-поставкой
+        (partial-unique индекс по wb_fbo_supply_id перестаёт её держать).
 
     Связанная FBO-поставка помечается return_processed_at / return_type=GOODS (если ещё
     не обработана) — чтобы она не висела в «недоприёмке» и не было двойного возврата.
@@ -424,16 +458,55 @@ async def return_to_warehouse(
     if not req:
         raise ValueError("Assembly request not found")
 
-    current = AssemblyStatus(req.status)
-    _check_transition(current, AssemblyStatus.CLOSED)
+    # Row-lock + ре-чтение статуса (симметрично ship_request): сериализует
+    # «Вернуть» ‖ параллельные переходы по этой заявке.
+    locked_status = (
+        await db.execute(
+            select(AssemblyRequest.status)
+            .where(AssemblyRequest.id == req.id, AssemblyRequest.project_id == project_id)
+            .with_for_update()
+        )
+    ).scalar_one()
+    current = AssemblyStatus(locked_status)
+    _check_transition(current, AssemblyStatus.RETURNED)
 
     if not req.items:
         raise ValueError("Нет позиций для возврата")
 
-    # 0. Блокируем связанную FBO-поставку и гардим двойной возврат. Защищает от:
-    #   - кросс-флоу: если возврат уже оформлен через «недоприёмку» (process_fbo_return
-    #     выставил return_processed_at) — повторный возврат тут задвоил бы остаток;
-    #   - гонки параллельных кликов «Вернуть» (row-lock сериализует транзакции).
+    # Склад возврата: по умолчанию — склад-источник, иначе валидируем выбранный.
+    return_wh_id = req.warehouse_id
+    if return_warehouse_id is not None and return_warehouse_id != req.warehouse_id:
+        new_wh = (
+            await db.execute(
+                select(Warehouse).where(
+                    Warehouse.id == return_warehouse_id,
+                    Warehouse.project_id == project_id,
+                    Warehouse.is_deleted == False,  # noqa: E712
+                )
+            )
+        ).scalar_one_or_none()
+        if not new_wh:
+            raise ValueError("Склад возврата не найден")
+        if new_wh.warehouse_type != WarehouseType.FULFILLMENT:
+            raise ValueError("Вернуть можно только на склад фулфилмента")
+        return_wh_id = return_warehouse_id
+
+    # Номер текущей попытки — с её отгрузки (для привязки приёмки-возврата).
+    current_attempt_no = 1
+    if req.outbound_shipment_id:
+        cur_ship = (
+            await db.execute(
+                select(OutboundShipment.attempt_no).where(
+                    OutboundShipment.id == req.outbound_shipment_id,
+                    OutboundShipment.project_id == project_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if cur_ship:
+            current_attempt_no = int(cur_ship)
+
+    # 0. Блокируем связанную FBO-поставку и гардим двойной возврат. Защищает от
+    #    кросс-флоу (возврат уже оформлен через «недоприёмку») и гонки кликов.
     fbo_supply = None
     if req.wb_fbo_supply_id:
         fbo_supply = (
@@ -446,22 +519,24 @@ async def return_to_warehouse(
         if fbo_supply and fbo_supply.return_processed_at is not None:
             raise ValueError("Возврат по связанной поставке уже обработан")
 
-    # 1. Приёмка-возврат на складе-источнике (годный сток).
+    # 1. Приёмка-возврат на складе возврата (годный сток), привязанная к попытке.
     receipt_number = await _next_number(db, project_id, "IN", InboundReceipt)
-    auto_comment = f"Возврат по заявке {req.number} (WB не принял поставку)"
+    auto_comment = f"Возврат по заявке {req.number} (попытка {current_attempt_no}, WB не принял поставку)"
     receipt = InboundReceipt(
         project_id=project_id,
-        warehouse_id=req.warehouse_id,
+        warehouse_id=return_wh_id,
         number=receipt_number,
         status=InboundStatus.ACCEPTED,
         planned_date=date.today(),
         actual_date=date.today(),
         comment=f"{auto_comment}. {comment}" if comment else auto_comment,
+        assembly_request_id=req.id,
+        assembly_attempt_no=current_attempt_no,
     )
     db.add(receipt)
     await db.flush()
 
-    # 2. Позиции приёмки + возврат остатков (+qty, годный).
+    # 2. Позиции приёмки + возврат остатков (+qty, годный) на склад возврата.
     for item in req.items:
         db.add(
             InboundReceiptItem(
@@ -476,7 +551,7 @@ async def return_to_warehouse(
         await _update_stock(
             db,
             project_id=project_id,
-            warehouse_id=req.warehouse_id,
+            warehouse_id=return_wh_id,
             nomenclature_id=item.nomenclature_id,
             barcode=item.barcode,
             delta=+item.quantity,
@@ -486,21 +561,26 @@ async def return_to_warehouse(
             comment=f"Возврат по заявке {req.number}",
         )
 
-    # 3. Помечаем связанную FBO-поставку обработанной возвратом (флаг гарантированно
-    #    был None — проверено под row-lock на шаге 0) — уходит из «недоприёмки».
+    # 3. Помечаем связанную FBO-поставку обработанной возвратом (флаг был None —
+    #    проверено под row-lock на шаге 0) — уходит из «недоприёмки».
     if fbo_supply is not None:
         fbo_supply.return_processed_at = utcnow()
         fbo_supply.return_type = "GOODS"
         fbo_supply.return_qty = sum(it.quantity for it in req.items)
+        fbo_supply.outbound_shipment_id = None
 
-    # 4. Статус → CLOSED. Логистику (pickup_cost) и отгрузку НЕ трогаем.
-    req.status = AssemblyStatus.CLOSED
+    # 4. Статус → RETURNED. Снимок попытки уже на OutboundShipment — очищаем зеркало
+    #    заявки, чтобы её можно было пере-связать с новой FBW-поставкой при переотгрузке.
+    req.status = AssemblyStatus.RETURNED
+    req.outbound_shipment_id = None
+    req.shipped_at = None
+    req.wb_fbo_supply_id = None
     await _log_status_change(
         db,
         project_id,
         req.id,
         current,
-        AssemblyStatus.CLOSED,
+        AssemblyStatus.RETURNED,
         changed_by=changed_by,
         comment=comment or "Возврат на склад (WB не принял)",
     )
@@ -512,6 +592,70 @@ async def return_to_warehouse(
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
 
+    return req
+
+
+async def reopen_for_reship(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+    changed_by: str = "user",
+) -> AssemblyRequest:
+    """RETURNED -> READY: переотгрузка. Заявка снова «готова» — пользователь
+    привязывает НОВУЮ FBW-поставку и назначает нового водителя, затем отгружает
+    (следующая попытка). Сток уже вернулся при возврате, заново ничего не двигаем."""
+    from .crud import get_assembly_request
+
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+
+    _check_transition(AssemblyStatus(req.status), AssemblyStatus.READY)
+    old = req.status
+    req.status = AssemblyStatus.READY
+    req.actual_ready_date = date.today()
+    await _log_status_change(
+        db, project_id, req.id, old, AssemblyStatus.READY, changed_by=changed_by, comment="Переотгрузка"
+    )
+    await db.commit()
+    await db.refresh(req)
+    await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
+    return req
+
+
+async def close_request(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+    changed_by: str = "user",
+    comment: str | None = None,
+) -> AssemblyRequest:
+    """RETURNED/DELIVERED -> CLOSED: терминальное закрытие заявки. Сток уже вернулся
+    при возврате (RETURNED) — здесь только меняем статус; история попыток сохранена."""
+    from .crud import get_assembly_request
+
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+
+    _check_transition(AssemblyStatus(req.status), AssemblyStatus.CLOSED)
+    old = req.status
+    req.status = AssemblyStatus.CLOSED
+    await _log_status_change(
+        db,
+        project_id,
+        req.id,
+        old,
+        AssemblyStatus.CLOSED,
+        changed_by=changed_by,
+        comment=comment or "Заявка закрыта",
+    )
+    await db.commit()
+    await db.refresh(req)
+    await invalidate_cache("reports:logistics_analytics")
+    await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
     return req
 
 
