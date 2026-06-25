@@ -23,8 +23,14 @@ from backend.models.assembly import (
     AssemblyStatusHistory,
 )
 from backend.models.cost import Nomenclature
+from backend.models.counterparty import Counterparty
 from backend.models.fulfillment import FfRequestKind, FulfillmentRequest
-from backend.models.warehouse import OutboundShipment, OutboundStatus, Warehouse
+from backend.models.warehouse import (
+    OutboundShipment,
+    OutboundShipmentItem,
+    OutboundStatus,
+    Warehouse,
+)
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem
 from backend.schemas.assembly import AssemblyItemResponse, RefreshFromFboResponse
 from backend.services.warehouse_service import _resolve_barcode
@@ -171,50 +177,57 @@ async def refresh_from_fbo(
 # --- Logistics Analytics ---------------------------------------------------
 
 
-@cached(prefix="reports:logistics_analytics", ttl=300)
-async def get_logistics_analytics(
-    db: AsyncSession,
+# Destination warehouse name: снимок назначения на отгрузке, fallback — manual заявки.
+_DEST_WAREHOUSE = func.coalesce(
+    OutboundShipment.destination,
+    AssemblyRequest.wb_warehouse_name_manual,
+)
+# avg_cost = average cost PER PALLET (not per shipment)
+_COST_PER_PALLET = case(
+    (OutboundShipment.pallets_count > 0, OutboundShipment.pickup_cost / OutboundShipment.pallets_count),
+    else_=OutboundShipment.pickup_cost,
+)
+# Кап строк для построчной выдачи отгрузок (период шире — режем + флаг truncated).
+_SHIPMENTS_LIMIT = 5000
+# Минимум отгрузок для устойчивой статистики ₽/паллета (иначе медиана/MAD шумят):
+# склады с меньшей выборкой считаются по глобальной статистике; если и глобальной
+# выборки мало — over/under не размечаем (остаётся только no_cost).
+_MIN_STATS_SAMPLE = 5
+
+
+def _logistics_base_filters(
     project_id: int,
     *,
-    date_from: date | None = None,
-    date_to: date | None = None,
-    warehouse_ids: list[int] | None = None,
-    brands: list[str] | None = None,
-) -> dict:
+    date_from: date | None,
+    date_to: date | None,
+    warehouse_ids: list[int] | None,
+    brands: list[str] | None,
+    carrier_id: int | None,
+    dest_warehouse: str | None = None,
+) -> list:
+    """Единый набор фильтров для аналитики и построчной выдачи отгрузок.
+
+    Один источник истины, чтобы таблица «История отправок» и сводки шли по
+    идентичной выборке (период считается по shipped_date, как в аналитике).
     """
-    Logistics cost analytics — по ПОПЫТКАМ отгрузки (OutboundShipment).
-
-    Каждая отгрузка заявки = одна оплаченная перевозка. Переотгрузка после возврата
-    (новый водитель/FBW) даёт отдельную попытку — её стоимость суммируется (а не
-    затирается, как было бы при счёте по AssemblyRequest). Отменённые отгрузки
-    soft-удалены и не считаются; возвраты (RETURNED/CLOSED) — считаются (оплачено).
-
-    Returns summary, by_destination, and by_route breakdowns.
-    """
-    # Destination warehouse name: снимок назначения на отгрузке, fallback — manual заявки.
-    dest_warehouse = func.coalesce(
-        OutboundShipment.destination,
-        AssemblyRequest.wb_warehouse_name_manual,
-    ).label("dest_warehouse")
-
-    src_warehouse = Warehouse.name.label("src_warehouse")
-
-    # Base filters — каждая непустая отгрузка, привязанная к заявке.
-    base_filters = [
+    filters = [
         OutboundShipment.project_id == project_id,
         OutboundShipment.is_deleted == False,  # noqa: E712
         OutboundShipment.assembly_request_id.isnot(None),
         OutboundShipment.status != OutboundStatus.CANCELLED,
+        AssemblyRequest.project_id == project_id,
         AssemblyRequest.is_deleted == False,  # noqa: E712
     ]
-
-    # Optional filters
     if date_from is not None:
-        base_filters.append(OutboundShipment.shipped_date >= date_from)
+        filters.append(OutboundShipment.shipped_date >= date_from)
     if date_to is not None:
-        base_filters.append(OutboundShipment.shipped_date < date_to + timedelta(days=1))
+        filters.append(OutboundShipment.shipped_date < date_to + timedelta(days=1))
     if warehouse_ids:
-        base_filters.append(OutboundShipment.warehouse_id.in_(warehouse_ids))
+        filters.append(OutboundShipment.warehouse_id.in_(warehouse_ids))
+    if carrier_id is not None:
+        filters.append(OutboundShipment.counterparty_id == carrier_id)
+    if dest_warehouse:
+        filters.append(_DEST_WAREHOUSE == dest_warehouse)
     if brands:
         # Filter by brand via items -> nomenclature join (по заявке отгрузки)
         brand_subq = (
@@ -224,22 +237,154 @@ async def get_logistics_analytics(
             .distinct()
             .scalar_subquery()
         )
-        base_filters.append(OutboundShipment.assembly_request_id.in_(brand_subq))
+        filters.append(OutboundShipment.assembly_request_id.in_(brand_subq))
+    return filters
+
+
+def _bucket_for_pallets(p: int) -> tuple[str, int]:
+    """Корзина размера отгрузки для кривой «объём → ₽/паллета»."""
+    if p <= 1:
+        return "1", 1
+    if p <= 3:
+        return "2-3", 2
+    if p <= 5:
+        return "4-5", 3
+    if p <= 10:
+        return "6-10", 4
+    return "11+", 5
+
+
+def _robust_stats(values: list[float]) -> tuple[float, float]:
+    """Медиана и робастная сигма (1.4826·MAD) — устойчивы к выбросам логистики."""
+    if not values:
+        return 0.0, 0.0
+    med = statistics.median(values)
+    mad = statistics.median([abs(v - med) for v in values])
+    return med, 1.4826 * mad
+
+
+def _median_iqr(values: list[float]) -> tuple[float, float, float]:
+    """Медиана и квартильный коридор (p25, p75) — типичная цена и её разброс.
+
+    Медиана устойчива к выбросам (аномально дорогим/дешёвым перевозкам), квартили
+    дают реалистичный диапазон прогноза. Для 1 точки — все три равны ей.
+    """
+    if not values:
+        return 0.0, 0.0, 0.0
+    vs = sorted(values)
+    med = statistics.median(vs)
+    if len(vs) < 2:
+        return med, med, med
+    q = statistics.quantiles(vs, n=4)  # [p25, p50, p75]
+    return med, q[0], q[2]
+
+
+def _classify_cpp(
+    cpp: float,
+    dest: str,
+    dest_stats: dict[str, tuple[float, float]],
+    global_stats: tuple[float, float],
+) -> tuple[str | None, float, float | None, float | None, str]:
+    """Классифицировать ₽/паллета как over/under/норму по складу (fallback — глобально).
+
+    Returns (anomaly_type|None, severity, expected_low, expected_high, reason).
+    """
+    med, sigma = dest_stats.get(dest, (0.0, 0.0))
+    scope = "складу"
+    if med <= 0 or sigma <= 0:
+        med, sigma = global_stats
+        scope = "всем складам"
+    if med <= 0:
+        return None, 0.0, None, None, ""
+    if sigma <= 0:
+        # Разброса нет — относительный коридор ±40 %.
+        low, high = med * 0.6, med * 1.4
+        if cpp > high:
+            return "overpriced", round(cpp / med, 2), low, high, f"Выше типичной по {scope} ({med:,.0f} ₽/пал)"
+        if cpp < low:
+            return "underpriced", round(med / cpp, 2) if cpp else 0.0, low, high, f"Ниже типичной по {scope} ({med:,.0f} ₽/пал)"
+        return None, 0.0, low, high, ""
+    z = (cpp - med) / sigma
+    low = max(0.0, med - 3.5 * sigma)
+    high = med + 3.5 * sigma
+    # Требуем ОБА условия: статзначимость (|z|>3.5) И заметное отклонение цены
+    # (±30% от медианы). Только z недостаточно — при низком разбросе даже мелкая
+    # абсолютная разница даёт большой z и плодит ложные «аномалии».
+    if z > 3.5 and cpp >= med * 1.3:
+        return "overpriced", round(z, 2), low, high, f"Завышена: {cpp:,.0f} при медиане {med:,.0f} ₽/пал по {scope}"
+    if z < -3.5 and cpp <= med * 0.7:
+        return "underpriced", round(abs(z), 2), low, high, f"Занижена: {cpp:,.0f} при медиане {med:,.0f} ₽/пал по {scope}"
+    return None, 0.0, low, high, ""
+
+
+@cached(prefix="reports:logistics_analytics_v2", ttl=300)
+async def get_logistics_analytics(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    warehouse_ids: list[int] | None = None,
+    brands: list[str] | None = None,
+    carrier_id: int | None = None,
+) -> dict:
+    """
+    Logistics cost analytics — по ПОПЫТКАМ отгрузки (OutboundShipment).
+
+    Каждая отгрузка заявки = одна оплаченная перевозка. Переотгрузка после возврата
+    (новый водитель/FBW) даёт отдельную попытку — её стоимость суммируется (а не
+    затирается, как было бы при счёте по AssemblyRequest). Отменённые отгрузки
+    soft-удалены и не считаются; возвраты (RETURNED/CLOSED) — считаются (оплачено).
+
+    Returns summary, by_destination, by_route, by_carrier, pallet_buckets,
+    cost_points и anomalies.
+    """
+    dest_warehouse = _DEST_WAREHOUSE.label("dest_warehouse")
+    src_warehouse = Warehouse.name.label("src_warehouse")
+    base_filters = _logistics_base_filters(
+        project_id,
+        date_from=date_from,
+        date_to=date_to,
+        warehouse_ids=warehouse_ids,
+        brands=brands,
+        carrier_id=carrier_id,
+    )
 
     # JOIN заявки ко всем запросам (для dest manual-fallback и is_deleted-гейта).
     req_join = (AssemblyRequest, OutboundShipment.assembly_request_id == AssemblyRequest.id)
+    cost_per_pallet = _COST_PER_PALLET
 
-    # --- Summary ---
+    # --- Summary (агрегаты по отгрузкам) ---
+    weight_expr = func.coalesce(OutboundShipment.pallet_weight_kg, Decimal("0")) * func.coalesce(
+        OutboundShipment.pallets_count, 0
+    )
     summary_q = (
         select(
             func.coalesce(func.sum(OutboundShipment.pickup_cost), Decimal("0")).label("total_cost"),
             func.coalesce(func.sum(OutboundShipment.pallets_count), 0).label("total_pallets"),
             func.count().label("total_shipments"),
+            func.count(func.distinct(OutboundShipment.assembly_request_id)).label("total_requests"),
+            func.count(func.distinct(dest_warehouse)).label("total_destinations"),
+            func.count(func.distinct(OutboundShipment.counterparty_id)).label("total_carriers"),
+            func.coalesce(func.sum(weight_expr), Decimal("0")).label("total_weight"),
         )
         .join(*req_join)
         .where(*base_filters)
     )
     summary_row = (await db.execute(summary_q)).one()
+
+    # Штуки/SKU товара — через позиции отгрузок (OutboundShipmentItem).
+    items_q = (
+        select(
+            func.coalesce(func.sum(OutboundShipmentItem.quantity), 0).label("total_items"),
+            func.count(func.distinct(OutboundShipmentItem.nomenclature_id)).label("total_skus"),
+        )
+        .select_from(OutboundShipmentItem)
+        .join(OutboundShipment, OutboundShipment.id == OutboundShipmentItem.shipment_id)
+        .join(*req_join)
+        .where(*base_filters, OutboundShipmentItem.project_id == project_id)
+    )
+    items_row = (await db.execute(items_q)).one()
 
     total_pallets = int(summary_row.total_pallets)
     total_cost = summary_row.total_cost or Decimal("0")
@@ -250,20 +395,25 @@ async def get_logistics_analytics(
         "avg_cost_per_pallet": avg_cost_per_pallet.quantize(Decimal("0.01")),
         "total_pallets": total_pallets,
         "total_shipments": int(summary_row.total_shipments),
+        "total_requests": int(summary_row.total_requests),
+        "total_items": int(items_row.total_items),
+        "total_skus": int(items_row.total_skus),
+        "total_weight_kg": (summary_row.total_weight or Decimal("0")).quantize(Decimal("0.01")),
+        "total_destinations": int(summary_row.total_destinations),
+        "total_carriers": int(summary_row.total_carriers),
     }
 
-    # --- By destination ---
-    # avg_cost = average cost PER PALLET (not per shipment)
-    cost_per_pallet = case(
-        (OutboundShipment.pallets_count > 0, OutboundShipment.pickup_cost / OutboundShipment.pallets_count),
-        else_=OutboundShipment.pickup_cost,
-    )
+    # --- By destination (+ контекст объёма паллет) ---
     dest_q = (
         select(
             dest_warehouse,
             func.avg(cost_per_pallet).label("avg_cost"),
             func.sum(OutboundShipment.pickup_cost).label("total_cost"),
             func.count().label("shipments_count"),
+            func.coalesce(func.sum(OutboundShipment.pallets_count), 0).label("total_pallets"),
+            func.avg(OutboundShipment.pallets_count).label("avg_pallets"),
+            func.min(cost_per_pallet).label("min_cpp"),
+            func.max(cost_per_pallet).label("max_cpp"),
         )
         .join(*req_join)
         .where(*base_filters)
@@ -278,6 +428,10 @@ async def get_logistics_analytics(
             "avg_cost": (row.avg_cost or Decimal("0")).quantize(Decimal("0.01")),
             "total_cost": row.total_cost or Decimal("0"),
             "shipments_count": int(row.shipments_count),
+            "total_pallets": int(row.total_pallets),
+            "avg_pallets": (row.avg_pallets or Decimal("0")).quantize(Decimal("0.1")),
+            "min_cost_per_pallet": (row.min_cpp or Decimal("0")).quantize(Decimal("0.01")),
+            "max_cost_per_pallet": (row.max_cpp or Decimal("0")).quantize(Decimal("0.01")),
         }
         for row in dest_rows
     ]
@@ -291,7 +445,7 @@ async def get_logistics_analytics(
             func.count().label("shipments_count"),
         )
         .join(*req_join)
-        .join(Warehouse, OutboundShipment.warehouse_id == Warehouse.id)
+        .join(Warehouse, and_(OutboundShipment.warehouse_id == Warehouse.id, Warehouse.project_id == project_id))
         .where(*base_filters)
         .group_by(src_warehouse, dest_warehouse)
         .order_by(func.count().desc())
@@ -308,10 +462,436 @@ async def get_logistics_analytics(
         for row in route_rows
     ]
 
+    # --- By carrier (top подрядчиков) ---
+    carrier_q = (
+        select(
+            OutboundShipment.counterparty_id,
+            Counterparty.inn.label("carrier_inn"),
+            Counterparty.name.label("carrier_name"),
+            func.count().label("shipments_count"),
+            func.coalesce(func.sum(OutboundShipment.pallets_count), 0).label("total_pallets"),
+            func.coalesce(func.sum(OutboundShipment.pickup_cost), Decimal("0")).label("total_cost"),
+            func.avg(cost_per_pallet).label("avg_cost"),
+            func.count(func.distinct(dest_warehouse)).label("destinations_count"),
+        )
+        .join(*req_join)
+        .join(Counterparty, and_(OutboundShipment.counterparty_id == Counterparty.id, Counterparty.project_id == project_id))
+        .where(*base_filters, OutboundShipment.counterparty_id.isnot(None))
+        .group_by(OutboundShipment.counterparty_id, Counterparty.inn, Counterparty.name)
+        .order_by(func.sum(OutboundShipment.pickup_cost).desc())
+    )
+    carrier_rows = (await db.execute(carrier_q)).all()
+
+    by_carrier = [
+        {
+            "counterparty_id": row.counterparty_id,
+            "carrier_inn": row.carrier_inn,
+            "carrier_name": row.carrier_name or "Без названия",
+            "shipments_count": int(row.shipments_count),
+            "total_pallets": int(row.total_pallets),
+            "total_cost": row.total_cost or Decimal("0"),
+            "avg_cost_per_pallet": (row.avg_cost or Decimal("0")).quantize(Decimal("0.01")),
+            "destinations_count": int(row.destinations_count),
+        }
+        for row in carrier_rows
+    ]
+
+    # --- Pallet buckets (объём → ₽/паллета) + scatter-точки + аномалии ---
+    # Тянем построчно (только нужные поля) — кап для аномалий/scatter одинаков.
+    detail_q = (
+        select(
+            OutboundShipment.id.label("shipment_id"),
+            OutboundShipment.assembly_request_id.label("assembly_request_id"),
+            AssemblyRequest.number.label("assembly_number"),
+            dest_warehouse,
+            Counterparty.name.label("carrier_name"),
+            OutboundShipment.pallets_count.label("pallets_count"),
+            OutboundShipment.pickup_cost.label("pickup_cost"),
+            OutboundShipment.shipped_date.label("shipped_date"),
+        )
+        .join(*req_join)
+        .outerjoin(Counterparty, and_(OutboundShipment.counterparty_id == Counterparty.id, Counterparty.project_id == project_id))
+        .where(*base_filters)
+        .order_by(OutboundShipment.shipped_date.desc().nullslast(), OutboundShipment.id.desc())
+        .limit(_SHIPMENTS_LIMIT)
+    )
+    detail_rows = (await db.execute(detail_q)).all()
+
+    # CPP по складам для робастной статистики.
+    cpp_by_dest: dict[str, list[float]] = {}
+    all_cpp: list[float] = []
+    for r in detail_rows:
+        if r.pickup_cost and r.pallets_count and r.pallets_count > 0:
+            cpp = float(r.pickup_cost) / r.pallets_count
+            cpp_by_dest.setdefault(r.dest_warehouse or "N/A", []).append(cpp)
+            all_cpp.append(cpp)
+    # Только склады с достаточной выборкой — иначе медиана/MAD по 1-2 точкам шумят
+    # и нормальная отгрузка ложно становится аномалией. Малые склады → глобальная
+    # статистика; мало и глобально → (0,0) (over/under не размечаем).
+    dest_stats = {d: _robust_stats(v) for d, v in cpp_by_dest.items() if len(v) >= _MIN_STATS_SAMPLE}
+    global_stats = _robust_stats(all_cpp) if len(all_cpp) >= _MIN_STATS_SAMPLE else (0.0, 0.0)
+
+    # Корзины размеров отгрузки (глобально + по складам сдачи).
+    bucket_acc: dict[str, dict] = {}
+    dest_bucket_acc: dict[tuple[str, str], dict] = {}
+    cost_points: list[dict] = []
+    anomalies: list[dict] = []
+    for r in detail_rows:
+        pallets = r.pallets_count or 0
+        cost = r.pickup_cost or Decimal("0")
+        dest = r.dest_warehouse or "N/A"
+        cpp = (float(r.pickup_cost) / pallets) if (r.pickup_cost and pallets > 0) else None
+
+        if cpp is not None:
+            label, order = _bucket_for_pallets(pallets)
+            acc = bucket_acc.setdefault(
+                label,
+                {"sort_order": order, "n": 0, "pallets": 0, "cost": Decimal("0")},
+            )
+            acc["n"] += 1
+            acc["pallets"] += pallets
+            acc["cost"] += cost
+            dacc = dest_bucket_acc.setdefault(
+                (dest, label),
+                {"sort_order": order, "n": 0, "pallets": 0, "cost": Decimal("0")},
+            )
+            dacc["n"] += 1
+            dacc["pallets"] += pallets
+            dacc["cost"] += cost
+            if len(cost_points) < 1500:
+                cost_points.append(
+                    {
+                        "dest_warehouse": dest,
+                        "pallets": pallets,
+                        "cost_per_pallet": Decimal(str(round(cpp, 2))),
+                        "shipped_date": r.shipped_date,
+                    }
+                )
+
+        # Аномалии.
+        if not r.pickup_cost or cost <= 0:
+            anomalies.append(
+                {
+                    "shipment_id": r.shipment_id,
+                    "assembly_request_id": r.assembly_request_id,
+                    "assembly_number": r.assembly_number,
+                    "dest_warehouse": dest,
+                    "carrier_name": r.carrier_name,
+                    "pallets_count": pallets or None,
+                    "pickup_cost": cost if r.pickup_cost is not None else None,
+                    "cost_per_pallet": None,
+                    "shipped_date": r.shipped_date,
+                    "anomaly_type": "no_cost",
+                    "severity": Decimal("0"),
+                    "expected_low": None,
+                    "expected_high": None,
+                    "reason": "Не указана стоимость перевозки",
+                }
+            )
+        elif cpp is not None:
+            atype, severity, low, high, reason = _classify_cpp(cpp, dest, dest_stats, global_stats)
+            if atype:
+                anomalies.append(
+                    {
+                        "shipment_id": r.shipment_id,
+                        "assembly_request_id": r.assembly_request_id,
+                        "assembly_number": r.assembly_number,
+                        "dest_warehouse": dest,
+                        "carrier_name": r.carrier_name,
+                        "pallets_count": pallets,
+                        "pickup_cost": cost,
+                        "cost_per_pallet": Decimal(str(round(cpp, 2))),
+                        "shipped_date": r.shipped_date,
+                        "anomaly_type": atype,
+                        "severity": Decimal(str(severity)),
+                        "expected_low": Decimal(str(round(low, 2))) if low is not None else None,
+                        "expected_high": Decimal(str(round(high, 2))) if high is not None else None,
+                        "reason": reason,
+                    }
+                )
+
+    pallet_buckets = [
+        {
+            "bucket": label,
+            "sort_order": acc["sort_order"],
+            "shipments_count": acc["n"],
+            "avg_pallets": (Decimal(str(acc["pallets"])) / Decimal(str(acc["n"]))).quantize(Decimal("0.1")),
+            "total_pallets": acc["pallets"],
+            "total_cost": acc["cost"],
+            "avg_cost_per_pallet": (acc["cost"] / Decimal(str(acc["pallets"]))).quantize(Decimal("0.01")),
+        }
+        for label, acc in bucket_acc.items()
+    ]
+    pallet_buckets.sort(key=lambda b: b["sort_order"])
+
+    # Матрица «склад сдачи × размер отгрузки → ₽/паллета» (per-warehouse кривая объёма).
+    dest_pallet_cells = [
+        {
+            "dest_warehouse": dest,
+            "bucket": label,
+            "sort_order": acc["sort_order"],
+            "shipments_count": acc["n"],
+            "total_pallets": acc["pallets"],
+            "avg_cost_per_pallet": (acc["cost"] / Decimal(str(acc["pallets"]))).quantize(Decimal("0.01")),
+        }
+        for (dest, label), acc in dest_bucket_acc.items()
+    ]
+    dest_pallet_cells.sort(key=lambda c: (c["dest_warehouse"], c["sort_order"]))
+
+    # no_cost первыми, затем по severity убыв.; кап 100.
+    anomalies.sort(key=lambda a: (a["anomaly_type"] != "no_cost", -float(a["severity"])))
+    anomalies = anomalies[:100]
+
     return {
         "summary": summary,
         "by_destination": by_destination,
         "by_route": by_route,
+        "by_carrier": by_carrier,
+        "pallet_buckets": pallet_buckets,
+        "dest_pallet_cells": dest_pallet_cells,
+        "cost_points": cost_points,
+        "anomalies": anomalies,
+    }
+
+
+async def get_logistics_shipments(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    warehouse_ids: list[int] | None = None,
+    brands: list[str] | None = None,
+    carrier_id: int | None = None,
+    dest_warehouse: str | None = None,
+) -> dict:
+    """Построчная «История отправок» за период (для сортируемой таблицы).
+
+    Источник — OutboundShipment (попытки), а не AssemblyRequest: переотгрузки
+    видны отдельно и совпадают с аналитикой. Возвращаем ВСЕ строки периода (кап
+    _SHIPMENTS_LIMIT) — клиент сортирует/пагинирует по полному набору, поэтому
+    сортировка работает по всему периоду, а не по странице.
+    """
+    dest_expr = _DEST_WAREHOUSE.label("dest_warehouse")
+    base_filters = _logistics_base_filters(
+        project_id,
+        date_from=date_from,
+        date_to=date_to,
+        warehouse_ids=warehouse_ids,
+        brands=brands,
+        carrier_id=carrier_id,
+        dest_warehouse=dest_warehouse,
+    )
+    req_join = (AssemblyRequest, OutboundShipment.assembly_request_id == AssemblyRequest.id)
+
+    total = (
+        await db.execute(
+            select(func.count()).select_from(OutboundShipment).join(*req_join).where(*base_filters)
+        )
+    ).scalar() or 0
+
+    weight_expr = func.coalesce(OutboundShipment.pallet_weight_kg, Decimal("0")) * func.coalesce(
+        OutboundShipment.pallets_count, 0
+    )
+    rows = (
+        await db.execute(
+            select(
+                OutboundShipment.id.label("shipment_id"),
+                OutboundShipment.attempt_no.label("attempt_no"),
+                OutboundShipment.assembly_request_id.label("assembly_request_id"),
+                AssemblyRequest.number.label("assembly_number"),
+                AssemblyRequest.status.label("status"),
+                Warehouse.name.label("src_warehouse"),
+                dest_expr,
+                OutboundShipment.counterparty_id.label("counterparty_id"),
+                Counterparty.inn.label("carrier_inn"),
+                Counterparty.name.label("carrier_name"),
+                func.coalesce(OutboundShipment.wb_supply_id, WbFboSupply.wb_supply_id).label("wb_supply_id"),
+                WbFboSupply.name.label("wb_supply_name"),
+                WbFboSupply.wb_status.label("wb_fbo_status"),
+                WbFboSupply.planned_date.label("wb_fbo_planned_date"),
+                WbFboSupply.actual_date.label("wb_fbo_actual_date"),
+                OutboundShipment.pallets_count.label("pallets_count"),
+                OutboundShipment.pickup_cost.label("pickup_cost"),
+                weight_expr.label("total_weight_kg"),
+                OutboundShipment.shipped_date.label("shipped_date"),
+                OutboundShipment.created_at.label("shipped_at"),
+            )
+            .join(*req_join)
+            .join(Warehouse, and_(OutboundShipment.warehouse_id == Warehouse.id, Warehouse.project_id == project_id))
+            .outerjoin(Counterparty, and_(OutboundShipment.counterparty_id == Counterparty.id, Counterparty.project_id == project_id))
+            .outerjoin(WbFboSupply, and_(OutboundShipment.wb_fbo_supply_id == WbFboSupply.id, WbFboSupply.project_id == project_id))
+            .where(*base_filters)
+            .order_by(OutboundShipment.shipped_date.desc().nullslast(), OutboundShipment.id.desc())
+            .limit(_SHIPMENTS_LIMIT)
+        )
+    ).all()
+
+    # Brands per assembly (batch, без N+1).
+    req_ids = [r.assembly_request_id for r in rows if r.assembly_request_id]
+    brands_by_req: dict[int, str] = {}
+    if req_ids:
+        brand_rows = (
+            await db.execute(
+                select(
+                    AssemblyRequestItem.assembly_request_id,
+                    Nomenclature.brand,
+                )
+                .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+                .where(
+                    AssemblyRequestItem.assembly_request_id.in_(set(req_ids)),
+                    Nomenclature.brand.isnot(None),
+                )
+                .distinct()
+            )
+        ).all()
+        acc: dict[int, set[str]] = {}
+        for rid, brand in brand_rows:
+            if brand:
+                acc.setdefault(rid, set()).add(brand)
+        brands_by_req = {rid: ", ".join(sorted(bs)) for rid, bs in acc.items()}
+
+    # Робастная статистика ₽/паллета по складам (как в аналитике) — для флага аномалии.
+    cpp_by_dest: dict[str, list[float]] = {}
+    all_cpp: list[float] = []
+    for r in rows:
+        if r.pickup_cost and r.pallets_count and r.pallets_count > 0:
+            cpp = float(r.pickup_cost) / r.pallets_count
+            cpp_by_dest.setdefault(r.dest_warehouse or "N/A", []).append(cpp)
+            all_cpp.append(cpp)
+    # Только склады с достаточной выборкой — иначе медиана/MAD по 1-2 точкам шумят
+    # и нормальная отгрузка ложно становится аномалией. Малые склады → глобальная
+    # статистика; мало и глобально → (0,0) (over/under не размечаем).
+    dest_stats = {d: _robust_stats(v) for d, v in cpp_by_dest.items() if len(v) >= _MIN_STATS_SAMPLE}
+    global_stats = _robust_stats(all_cpp) if len(all_cpp) >= _MIN_STATS_SAMPLE else (0.0, 0.0)
+
+    items = []
+    for r in rows:
+        pallets = r.pallets_count or 0
+        cpp = (float(r.pickup_cost) / pallets) if (r.pickup_cost and pallets > 0) else None
+        dest = r.dest_warehouse or "N/A"
+        anomaly_type: str | None = None
+        if not r.pickup_cost or r.pickup_cost <= 0:
+            anomaly_type = "no_cost"
+        elif cpp is not None:
+            atype, *_ = _classify_cpp(cpp, dest, dest_stats, global_stats)
+            anomaly_type = atype
+        items.append(
+            {
+                "shipment_id": r.shipment_id,
+                "attempt_no": r.attempt_no,
+                "assembly_request_id": r.assembly_request_id,
+                "assembly_number": r.assembly_number,
+                "status": r.status,
+                "brands": brands_by_req.get(r.assembly_request_id) if r.assembly_request_id else None,
+                "src_warehouse": r.src_warehouse,
+                "dest_warehouse": dest,
+                "counterparty_id": r.counterparty_id,
+                "carrier_inn": r.carrier_inn,
+                "carrier_name": r.carrier_name,
+                "wb_supply_id": r.wb_supply_id,
+                "wb_supply_name": r.wb_supply_name,
+                "wb_fbo_status": r.wb_fbo_status,
+                "wb_fbo_planned_date": r.wb_fbo_planned_date,
+                "wb_fbo_actual_date": r.wb_fbo_actual_date,
+                "pallets_count": r.pallets_count,
+                "pickup_cost": r.pickup_cost,
+                "cost_per_pallet": Decimal(str(round(cpp, 2))) if cpp is not None else None,
+                "total_weight_kg": (r.total_weight_kg or Decimal("0")).quantize(Decimal("0.01")),
+                "shipped_date": r.shipped_date,
+                "shipped_at": r.shipped_at,
+                "anomaly_type": anomaly_type,
+            }
+        )
+
+    return {"items": items, "total": int(total), "truncated": total > _SHIPMENTS_LIMIT}
+
+
+# --- Cost forecast for unassigned requests ----------------------------------
+
+
+@cached(prefix="reports:logistics_forecast", ttl=300)
+async def get_cost_forecast(
+    db: AsyncSession,
+    project_id: int,
+    *,
+    lookback_days: int | None = None,
+) -> dict:
+    """Прогнозная ₽/паллета по истории отгрузок — для ещё не назначенных заявок.
+
+    Модель строится из прошлых отгрузок (OutboundShipment): для каждого склада
+    сдачи и размера отгрузки берём медиану ₽/паллета (+ квартильный коридор).
+    Фронт по (склад сдачи, кол-во паллет заявки) выбирает самый точный уровень:
+    склад+размер → склад → глобально. Медиана устойчива к аномальным ценам.
+    """
+    dest_warehouse = _DEST_WAREHOUSE.label("dest_warehouse")
+    filters = _logistics_base_filters(
+        project_id,
+        date_from=None,
+        date_to=None,
+        warehouse_ids=None,
+        brands=None,
+        carrier_id=None,
+    )
+    filters.append(OutboundShipment.pickup_cost > 0)
+    filters.append(OutboundShipment.pallets_count > 0)
+    if lookback_days is not None:
+        cutoff = (utcnow() - timedelta(days=lookback_days)).date()
+        filters.append(OutboundShipment.shipped_date >= cutoff)
+
+    rows = (
+        await db.execute(
+            select(
+                dest_warehouse,
+                OutboundShipment.pallets_count.label("pallets"),
+                OutboundShipment.pickup_cost.label("cost"),
+            )
+            .join(AssemblyRequest, OutboundShipment.assembly_request_id == AssemblyRequest.id)
+            .where(*filters)
+            .limit(_SHIPMENTS_LIMIT)
+        )
+    ).all()
+
+    by_dest: dict[str, list[float]] = {}
+    by_dest_bucket: dict[tuple[str, str, int], list[float]] = {}
+    all_cpp: list[float] = []
+    for r in rows:
+        if not r.cost or not r.pallets or r.pallets <= 0:
+            continue
+        cpp = float(r.cost) / r.pallets
+        dest = r.dest_warehouse or "N/A"
+        label, order = _bucket_for_pallets(r.pallets)
+        by_dest.setdefault(dest, []).append(cpp)
+        by_dest_bucket.setdefault((dest, label, order), []).append(cpp)
+        all_cpp.append(cpp)
+
+    def _pack(values: list[float]) -> dict:
+        med, low, high = _median_iqr(values)
+        return {
+            "cpp": Decimal(str(round(med, 2))),
+            "low": Decimal(str(round(low, 2))),
+            "high": Decimal(str(round(high, 2))),
+            "sample_size": len(values),
+        }
+
+    g_med, g_low, g_high = _median_iqr(all_cpp)
+
+    warehouses = []
+    for dest, vals in sorted(by_dest.items()):
+        buckets = [
+            {"bucket": label, "sort_order": order, **_pack(bvals)}
+            for (d, label, order), bvals in by_dest_bucket.items()
+            if d == dest
+        ]
+        buckets.sort(key=lambda b: b["sort_order"])
+        warehouses.append({"dest_warehouse": dest, **_pack(vals), "buckets": buckets})
+
+    return {
+        "global_cpp": Decimal(str(round(g_med, 2))),
+        "global_low": Decimal(str(round(g_low, 2))),
+        "global_high": Decimal(str(round(g_high, 2))),
+        "sample_size": len(all_cpp),
+        "warehouses": warehouses,
     }
 
 

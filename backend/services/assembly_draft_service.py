@@ -399,6 +399,7 @@ async def commit_draft(
     project_id: int,
     draft_id: int,
     package_type: str | None = None,
+    pallet_counts: dict[str, int] | None = None,
 ) -> AssemblyDraftCommitResponse:
     """
     Validate the distribution, then create one AssemblyRequest per
@@ -533,6 +534,16 @@ async def commit_draft(
     pallet_weight = distribution.pallet_weight_kg or 0.0
     base_comment = draft.comment
 
+    # Паллет на заявку (опц., из фронта): ключ "{ff_id}::{wb_name}::{pkg}". Иначе —
+    # плоский pallets_count черновика (старое поведение). Считаем здесь, чтобы у
+    # каждой заявки было своё число паллет (раньше всем ставился общий pallets_count=1).
+    def _pallets_for(src_id: int, wb_name: str, pkg: str) -> int:
+        if pallet_counts:
+            override = pallet_counts.get(f"{src_id}::{wb_name}::{pkg}")
+            if override is not None:
+                return max(1, int(override))
+        return pallets
+
     # 6. Create AssemblyRequest per pair (atomic — single transaction)
     from backend.services.assembly.status import _log_status_change
 
@@ -556,7 +567,7 @@ async def commit_draft(
                 wb_fbo_supply_id=None,  # not linked — manual WB warehouse
                 wb_warehouse_name_manual=target_wb_name,
                 estimated_ready_date=eta,
-                pallets_count=pallets,
+                pallets_count=_pallets_for(source_ff_id, target_wb_name, package_type),
                 pallet_weight_kg=pallet_weight,
                 comment=req_comment,
                 package_type=package_type,

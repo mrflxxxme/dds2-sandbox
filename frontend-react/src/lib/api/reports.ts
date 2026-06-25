@@ -223,10 +223,12 @@ export function addReportMethods(api: ApiClient) {
                 'GET', `/api/v1/reports/counterparty-turnovers?${q.toString()}`
             );
         },
-        getColdStartTable(windowDays: number = 30, minPack: number = 5, benchFromProjectId?: number) {
+        getColdStartTable(windowDays: number = 30, minPack: number = 5, shipPct: number = 55, shipFloor: number = 50, benchFromProjectId?: number) {
             const q = new URLSearchParams();
             q.set('window_days', String(windowDays));
             q.set('min_pack', String(minPack));
+            q.set('ship_pct', String(shipPct));
+            q.set('ship_floor', String(shipFloor));
             if (benchFromProjectId) q.set('bench_from_project_id', String(benchFromProjectId));
             return api.request<ColdStartTableResponse>(
                 'GET', `/api/v1/reports/cold_start_table?${q.toString()}`

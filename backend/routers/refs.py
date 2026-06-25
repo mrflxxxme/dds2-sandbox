@@ -20,6 +20,8 @@ from backend.schemas.refs import (
     ExcludedWarehousesPayload,
     ForecastRfDefaultDaysPayload,
     ImtAliasPayload,
+    PalletBoxesBySizePayload,
+    PreorderAllowedWarehousesPayload,
     ProductStatusBulkPayload,
     ProductStatusPayload,
     ProductTagMappingPayload,
@@ -225,6 +227,57 @@ async def set_excluded_warehouses(
 
     result = await settings_service.set_excluded_warehouses(db, project.id, payload.warehouses)
     return {"ok": True, "excluded": result}
+
+
+@router.get("/preorder-allowed-warehouses")
+async def get_preorder_allowed_warehouses(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Warehouses where a preorder (предзаявка) is allowed without a WB acceptance
+    limit. Складам ВНЕ списка предзаявка по «нет лимита» запрещена."""
+    from backend.services import settings_service
+
+    return await settings_service.get_preorder_allowed_warehouses(db, project.id)
+
+
+@router.put("/preorder-allowed-warehouses")
+async def set_preorder_allowed_warehouses(
+    payload: PreorderAllowedWarehousesPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    """Set preorder-allowed warehouses. Body: {"warehouses": ["Электросталь", ...]}"""
+    from backend.services import settings_service
+
+    result = await settings_service.set_preorder_allowed_warehouses(db, project.id, payload.warehouses)
+    return {"ok": True, "preorder_allowed": result}
+
+
+@router.get("/pallet-boxes-by-size")
+async def get_pallet_boxes_by_size(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ручной override «коробок на паллету» по размеру коробки (canonical → int)."""
+    from backend.services import settings_service
+
+    return await settings_service.get_pallet_boxes_by_size(db, project.id)
+
+
+@router.put("/pallet-boxes-by-size")
+async def set_pallet_boxes_by_size(
+    payload: PalletBoxesBySizePayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    """Set pallet boxes-per-size override. Body: {"sizes": {"60x40x50": 16, ...}}"""
+    from backend.services import settings_service
+
+    result = await settings_service.set_pallet_boxes_by_size(db, project.id, payload.sizes)
+    return {"ok": True, "sizes": result}
 
 
 @router.get("/forecast-rf-default-days")

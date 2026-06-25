@@ -446,7 +446,7 @@ class WBApiClient:
           "warehouseID": int,
           "warehouseName": str,
           "allowUnload": bool,
-          "boxTypeID": 5 (МОНО) | 6 (КОРОБ) | 2 (иной/«Суперсейф»),
+          "boxTypeID": 2 (КОРОБА) | 5 (МОНОПАЛЛЕТЫ) | 6 (СУПЕРСЕЙФ),
           "isSortingCenter": bool,
           ...
         }, ...]

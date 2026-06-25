@@ -276,6 +276,13 @@ class LogisticsCostSummary(BaseModel):
     avg_cost_per_pallet: Decimal
     total_pallets: int
     total_shipments: int
+    # Расширенные метрики периода (task: расширенная аналитика).
+    total_requests: int = 0  # distinct заявок (сборок) в отгрузках
+    total_items: int = 0  # суммарно штук товара по отгрузкам (OutboundShipmentItem.quantity)
+    total_skus: int = 0  # distinct номенклатур
+    total_weight_kg: Decimal = Decimal("0")  # суммарный вес (паллеты × вес паллеты)
+    total_destinations: int = 0  # уникальных складов сдачи
+    total_carriers: int = 0  # уникальных подрядчиков (с привязкой)
 
 
 class LogisticsRouteStat(BaseModel):
@@ -287,15 +294,170 @@ class LogisticsRouteStat(BaseModel):
 
 class LogisticsDestStat(BaseModel):
     dest_warehouse: str
-    avg_cost: Decimal
+    avg_cost: Decimal  # средняя ₽/паллета
     total_cost: Decimal
     shipments_count: int
+    # Контекст объёма (task: стоимость склада в зависимости от кол-ва паллет).
+    total_pallets: int = 0
+    avg_pallets: Decimal = Decimal("0")  # средний размер отгрузки в паллетах
+    min_cost_per_pallet: Decimal = Decimal("0")
+    max_cost_per_pallet: Decimal = Decimal("0")
+
+
+class LogisticsCarrierStat(BaseModel):
+    """Сводка по подрядчику-перевозчику (top по подрядчикам)."""
+
+    counterparty_id: int | None = None
+    carrier_inn: str | None = None
+    carrier_name: str
+    shipments_count: int
+    total_pallets: int
+    total_cost: Decimal
+    avg_cost_per_pallet: Decimal
+    destinations_count: int  # на сколько разных складов возит
+
+
+class LogisticsPalletBucketStat(BaseModel):
+    """Зависимость ₽/паллета от размера отгрузки (эффект объёма: больше паллет — дешевле)."""
+
+    bucket: str  # "1", "2-3", "4-5", "6-10", "11+"
+    sort_order: int
+    shipments_count: int
+    avg_pallets: Decimal
+    total_pallets: int
+    total_cost: Decimal
+    avg_cost_per_pallet: Decimal
+
+
+class LogisticsCostPoint(BaseModel):
+    """Точка для scatter-графика: размер отгрузки vs ₽/паллета по складу."""
+
+    dest_warehouse: str
+    pallets: int
+    cost_per_pallet: Decimal
+    shipped_date: date | None = None
+
+
+class LogisticsDestBucketCell(BaseModel):
+    """Ячейка матрицы «склад сдачи × размер отгрузки → ₽/паллета».
+
+    Кривая эффекта объёма отдельно по каждому складу (а не только в среднем).
+    """
+
+    dest_warehouse: str
+    bucket: str  # "1", "2-3", "4-5", "6-10", "11+"
+    sort_order: int
+    shipments_count: int
+    total_pallets: int
+    avg_cost_per_pallet: Decimal
+
+
+class LogisticsAnomaly(BaseModel):
+    """Аномальная отгрузка: без стоимости / завышенная / заниженная ₽/паллета."""
+
+    shipment_id: int
+    assembly_request_id: int | None = None
+    assembly_number: str | None = None
+    dest_warehouse: str
+    carrier_name: str | None = None
+    pallets_count: int | None = None
+    pickup_cost: Decimal | None = None
+    cost_per_pallet: Decimal | None = None
+    shipped_date: date | None = None
+    anomaly_type: Literal["no_cost", "overpriced", "underpriced"]
+    severity: Decimal  # «насколько» отклонение (z-подобная мера; для no_cost = 0)
+    expected_low: Decimal | None = None  # ожидаемый коридор ₽/паллета по складу
+    expected_high: Decimal | None = None
+    reason: str
 
 
 class LogisticsAnalyticsResponse(BaseModel):
     summary: LogisticsCostSummary
     by_destination: list[LogisticsDestStat]
     by_route: list[LogisticsRouteStat]
+    by_carrier: list[LogisticsCarrierStat] = []
+    pallet_buckets: list[LogisticsPalletBucketStat] = []
+    dest_pallet_cells: list[LogisticsDestBucketCell] = []
+    cost_points: list[LogisticsCostPoint] = []
+    anomalies: list[LogisticsAnomaly] = []
+
+
+# ─── Logistics shipments list (История отправок — построчно) ────────────────
+
+
+class LogisticsShipmentRow(BaseModel):
+    """Одна отгрузка (попытка) для таблицы «История отправок».
+
+    Источник — OutboundShipment (а не AssemblyRequest): переотгрузки видны
+    отдельными строками, что совпадает с аналитикой по попыткам отгрузки.
+    """
+
+    shipment_id: int
+    attempt_no: int = 1
+    assembly_request_id: int | None = None
+    assembly_number: str | None = None
+    status: str | None = None  # статус заявки
+    brands: str | None = None
+    src_warehouse: str | None = None
+    dest_warehouse: str | None = None
+    counterparty_id: int | None = None
+    carrier_inn: str | None = None
+    carrier_name: str | None = None
+    wb_supply_id: str | None = None  # FBW-...
+    wb_supply_name: str | None = None
+    wb_fbo_status: str | None = None
+    wb_fbo_planned_date: date | None = None
+    wb_fbo_actual_date: date | None = None
+    pallets_count: int | None = None
+    pickup_cost: Decimal | None = None
+    cost_per_pallet: Decimal | None = None
+    total_weight_kg: Decimal | None = None
+    shipped_date: date | None = None
+    shipped_at: datetime | None = None
+    anomaly_type: Literal["no_cost", "overpriced", "underpriced"] | None = None
+
+
+class LogisticsShipmentListResponse(BaseModel):
+    items: list[LogisticsShipmentRow]
+    total: int
+    truncated: bool = False  # True — вернули кап (период шире, чем лимит строк)
+
+
+# ─── Cost forecast (прогноз стоимости неназначенных заявок) ─────────────────
+
+
+class CostForecastBucket(BaseModel):
+    """Прогноз ₽/паллета для склада сдачи при конкретном размере отгрузки."""
+
+    bucket: str  # "1", "2-3", "4-5", "6-10", "11+"
+    sort_order: int
+    cpp: Decimal  # медианная ₽/паллета
+    low: Decimal  # p25 коридора
+    high: Decimal  # p75 коридора
+    sample_size: int
+
+
+class CostForecastWarehouse(BaseModel):
+    dest_warehouse: str
+    cpp: Decimal  # медиана по складу (все размеры)
+    low: Decimal
+    high: Decimal
+    sample_size: int
+    buckets: list[CostForecastBucket]
+
+
+class CostForecastResponse(BaseModel):
+    """Модель прогноза стоимости перевозки по истории отгрузок.
+
+    Фронт по (склад сдачи, кол-во паллет заявки) выбирает уровень:
+    склад+размер → склад → глобально (по убыванию точности).
+    """
+
+    global_cpp: Decimal
+    global_low: Decimal
+    global_high: Decimal
+    sample_size: int
+    warehouses: list[CostForecastWarehouse]
 
 
 # ─── Flow analytics (анализ потока сборки) ─────────────────────────────────

@@ -61,6 +61,22 @@ def _normalize_acceptance_wh(name: str | None) -> str:
     return stripped
 
 
+def _is_spec_acceptance_wh(name: str | None) -> bool:
+    """Спец-склад WB (крупногабарит СГТ, Питание, Горючее, СЦ, виртуальный)?
+
+    Для обычной FBO-поставки такие склады не нужны и засоряют выдачу — исключаем
+    из проверки приёмки по СЫРОМУ имени WB (до нормализации), иначе «Электросталь:
+    Питание» алиасится в «Электросталь» (ACCEPTANCE_TO_STOCK_NAME) и доступность
+    спец-склада ложно подмешивается в обычный. Зеркало фронтового isSpecWarehouse.
+    """
+    if not name:
+        return False
+    n = name.strip()
+    if n.startswith("Виртуальный") or n.startswith("СЦ ") or " СЦ " in n:
+        return True
+    return any(s in n for s in (" СГТ", "Питание", "Горючее"))
+
+
 logger = logging.getLogger("dds.warehouse_acceptance")
 
 CACHE_TTL_SECONDS = 300  # 5 min — WB rate limit 6 req/min
@@ -68,19 +84,21 @@ WAREHOUSE_NAMES_CACHE_TTL = 3600  # 1 hour — IDs are stable
 COEFFICIENTS_CACHE_TTL = 3600  # 1 hour — WB обновляет ~раз в день в 03:00 МСК
 
 # WB box type ID → ours canonical key.
-# ВАЖНО (2026-05-10, реверс из реальных данных tariffs/v1/acceptance/coefficients):
-#   • 5 = МОНО      (подтверждено: Екатеринбург - Перспективная 14, boxTypeID=5
-#                    отдаёт Логистика 175% / Хранение 215% — точное совпадение
-#                    с экраном WB-кабинета «Монопаллетой» для одеяла 193х203 9кг)
-#   • 6 = КОРОБ
-#   • 2 = иной тип (вероятно «Суперсейф»; заводим как "super" для разделимости)
-# Прежний маппинг {2:mono, 5:super, 6:box} был НЕВЕРНЫМ — он делал моно-склады
-# (Великий Камень, Владивосток, Хабаровск) «по индивидуальной квоте» в нашем UI,
-# хотя WB-кабинет показывал их как «Есть бесплатные даты».
+# ВАЖНО (исправлено 2026-06-22 по живым данным tariffs/v1/acceptance/coefficients
+# и WB-кабинету; подтверждено пользователем на BZ-YY8820A/30x60 / Шушары):
+#   • 2 = КОРОБА      (самый массовый тип — открыт на 39 складах из выборки;
+#                      Склад Шушары box открыт все 14 дней, что видно в кабинете)
+#   • 5 = МОНОПАЛЛЕТЫ (Екатеринбург - Перспективная 14 boxTypeID=5 = высокое
+#                      хранение 15–27.5 ₽/л — характерно для моно; 29 складов)
+#   • 6 = СУПЕРСЕЙФ   (нишевый — открыт лишь на 7 складах; те же ставки что у короба)
+# Совпадает с офиц. WB-доками (2=Короба, 5=Монопаллеты, 6=Суперсейф). Прежний
+# маппинг {2:super, 6:box} был ПЕРЕПУТАН (2↔6) — для коробочных SKU читался
+# коэффициент суперсейфа (редкий→закрыт) вместо короба → ложный ⌛ «нет лимита» и
+# пол-ёмкости «терялось». Ещё раньше {2:mono,5:super,6:box} тоже был неверным.
 _BOX_TYPE_ID_TO_KEY = {
-    2: "super",
+    2: "box",
     5: "mono",
-    6: "box",
+    6: "super",
 }
 
 
@@ -158,6 +176,7 @@ def _flags_for_warehouse(
     coefficients_by_canon: dict[tuple[str, str], dict] | None = None,
     *,
     require_free_days: bool = False,
+    require_acceptance_day: bool = False,
 ) -> dict[str, dict]:
     """Map raw WB warehouses[] → {canonical_name: {warehouse_id, can_box, ...}}.
 
@@ -185,12 +204,22 @@ def _flags_for_warehouse(
         meta = coef.get((canon, type_key))
         if not raw_can:
             return False, meta
-        if not require_free_days:
-            return True, meta
-        if meta is None:
-            # Coefficients не получены (нет ключа / fail) — оставляем как сказал options.
-            return True, None
-        return meta["free_days_14"] > 0, meta
+        if require_free_days:
+            if meta is None:
+                # Coefficients не получены (нет ключа / fail) — оставляем как сказал options.
+                return True, None
+            return meta["free_days_14"] > 0, meta
+        if require_acceptance_day:
+            # Лимит приёмки (как на /acceptance-limits): склад открыт для этого типа
+            # упаковки, если в ближайшие 14 дней есть ≥1 день приёмки — бесплатный
+            # ИЛИ платный (coef ≥ 0 / allowUnload=true). Полностью закрытый лимит
+            # (coef −1 / allowUnload=false все дни → free=paid=0 при total>0) →
+            # склад закрыт для этого типа. Нет данных по (склад,тип) → fail-open
+            # (оставляем как сказал options, чтобы не закрыть склад без оснований).
+            if meta is None or meta.get("total_days", 0) == 0:
+                return True, meta
+            return (meta["free_days_14"] + meta["paid_days_14"]) > 0, meta
+        return True, meta
 
     result: dict[str, dict] = {}
     for w in raw_warehouses:
@@ -199,6 +228,10 @@ def _flags_for_warehouse(
             continue
         name = wh_id_to_name.get(int(wid))
         if not name:
+            continue
+        # Спец-склады (СГТ/Питание/Горючее/СЦ/виртуальные) — вне обычной FBO,
+        # отсекаем по сырому имени ДО нормализации (иначе мёржатся в базовый склад).
+        if _is_spec_acceptance_wh(name):
             continue
         norm = _normalize_acceptance_wh(name)
         if not norm:
@@ -725,6 +758,31 @@ async def get_acceptance_closed_warehouses(project_id: int) -> set[str]:
     return closed
 
 
+async def get_acceptance_blocked_warehouses(db: AsyncSession, project_id: int) -> set[str]:
+    """Closed-by-acceptance warehouses MINUS the preorder whitelist.
+
+    «Закрыт по приёмке» (нет лимита ни по одному типу, см.
+    `get_acceptance_closed_warehouses`) → по умолчанию склад блокируется:
+    вырезается из расчёта потребности и новинок, его qty перераспределяется на
+    ближайший открытый/разрешённый склад. Whitelist `preorder_allowed_warehouses`
+    (настройка проекта) — список складов, на которые предзаявку по «нет лимита»
+    делать МОЖНО: они НЕ блокируются и остаются в расчёте (с ⌛ предзаявкой).
+
+    Имена сравниваются в каноничном пространстве (`_normalize_acceptance_wh`),
+    чтобы whitelist (имена из `get_all_warehouses`, без скобок) совпал с closed
+    (canonical WB-имена). Fail-open наследуется от `get_acceptance_closed_warehouses`:
+    пустой кэш коэффициентов → пустой set → ничего не блокируем.
+    """
+    closed = await get_acceptance_closed_warehouses(project_id)
+    if not closed:
+        return set()
+    from backend.services.settings_service import get_preorder_allowed_warehouses
+
+    allowed = await get_preorder_allowed_warehouses(db, project_id)
+    allowed_norm = {_normalize_acceptance_wh(w) for w in allowed if w}
+    return {w for w in closed if _normalize_acceptance_wh(w) not in allowed_norm}
+
+
 async def _load_warehouse_id_map(client: WBApiClient, project_id: int) -> dict[int, str]:
     """Cached WB warehouseID → name map (TTL 1 hour)."""
     cache_key = f"wb:acceptance_warehouses:{project_id}"
@@ -895,6 +953,10 @@ async def check_acceptance_and_redistribute(
         if entry.get("error"):
             availability_per_barcode[bc] = {}
             continue
+        # ВАЖНО: лимит приёмки НЕ блокирует доступность (can_X = options как WB-
+        # кабинет). Закрытый/отсутствующий публичный лимит ≠ «нельзя отправить» —
+        # на такой склад можно слать предзаявкой. Лимит несём в *_meta
+        # (free/paid/closed_days_14) — фронт рисует ⌛ «нет лимита, можно предзаявку».
         availability_per_barcode[bc] = _flags_for_warehouse(
             entry.get("warehouses") or [],
             wh_id_to_name,

@@ -122,8 +122,23 @@ class ExcludedWarehousesPayload(BaseModel):
     warehouses: list[str]
 
 
+class PreorderAllowedWarehousesPayload(BaseModel):
+    """Input payload for warehouses where a preorder (предзаявка) is allowed even
+    without a WB acceptance limit. Whitelist — складам ВНЕ списка предзаявка по
+    «нет лимита» запрещена (они вырезаются из расчёта потребности и новинок)."""
+
+    warehouses: list[str]
+
+
 class ForecastRfDefaultDaysPayload(BaseModel):
     """Input payload for default RF→WB lead time (days), used when
     `WarehouseDeliveryTime` rows are missing for a fulfillment warehouse."""
 
     days: int
+
+
+class PalletBoxesBySizePayload(BaseModel):
+    """Ручной override «коробок на паллету» по размеру коробки.
+    `sizes`: {canonical box_size → коробок на паллету}. Перебивает геометрию."""
+
+    sizes: dict[str, int]

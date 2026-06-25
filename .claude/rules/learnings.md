@@ -12,6 +12,7 @@ paths:
 
 ## JS/TS ловушки
 - `formatNumber()` по умолчанию 2 знака — для счётчиков/штук всегда `formatNumber(x, 0)`, иначе UI показывает «3,00 черновика» (поймано сразу на двух новых страницах)
+- `Numeric`/`Decimal`-поля бэка сериализуются в JSON СТРОКОЙ, не number (несмотря на тип `number` в `types/api.ts`). `formatNumber(s)` зовёт `String.prototype.toLocaleString` — опции игнорируются, строка отдаётся as-is («1666.67» вместо «1 667»). Арифметика (`s * n`) коэрсит в number и маскирует баг, а прямой показ — нет. Перед `formatNumber` на сыром Decimal-поле — `Number(x)` (поймано на прогнозе логиста; те же «1771008.00» в KPI History)
 - `\b` regex НЕ матчит кириллицу — использовать `includes()` для русских маркеров
 - React StrictMode (dev) монтирует `useEffect` дважды: catch/finally первого (abort-нутого) запроса перезаписывает загруженные данные ложной ошибкой → `AbortController` + `if (controller.signal.aborted) return` в then/catch/finally
 - `useSearchParams` пуст на первом рендере до гидратации — не редиректь, пока сырая строка пуста (`const raw = sp.get('x') ?? ''; if (raw && cond) router.replace(...)`)

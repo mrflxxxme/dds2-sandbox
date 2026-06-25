@@ -103,6 +103,15 @@ class AssemblyDraftRead(BaseModel):
     newcomer_nm_ids: list[int] = Field(default_factory=list)
 
 
+class CommitDraftOptions(BaseModel):
+    """Опции коммита черновика. `pallet_counts` — map `"{ff_id}::{wb_name}::{pkg}" →
+    паллет`: число паллет, авто-проставляемое в каждую создаваемую заявку (считается
+    на фронте из габаритов коробки). Ключ отсутствует → берётся плоский
+    `distribution.pallets_count` (старое поведение)."""
+
+    pallet_counts: dict[str, int] | None = None
+
+
 class AssemblyDraftCommitResponse(BaseModel):
     """Returned after a draft is committed into N AssemblyRequests."""
 

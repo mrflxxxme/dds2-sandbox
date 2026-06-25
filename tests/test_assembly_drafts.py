@@ -415,6 +415,37 @@ async def test_commit_draft_one_source_two_targets(db_session):
 
 
 @pytest.mark.asyncio
+async def test_commit_draft_pallet_counts_per_request(db_session):
+    """pallet_counts проставляет паллеты per-request по ключу «ff::wb::pkg»;
+    отсутствующий ключ → плоский distribution.pallets_count (fallback)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111,
+            barcode=TEST_BARCODE_1,
+            src={str(wh_a): 10},
+            tgt={"Электросталь": 6, "Казань": 4},
+        )
+    ]
+    payload = _build_payload([wh_a], ["Электросталь", "Казань"], rows, pallets=1)
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    # Казань намеренно опущена → должна упасть на плоский pallets_count=1.
+    pallet_counts = {f"{wh_a}::Электросталь::BOX": 3}
+    resp = await assembly_draft_service.commit_draft(
+        db_session, PROJECT_ID, draft.id, None, pallet_counts
+    )
+    assert len(resp.created_request_ids) == 2
+
+    res = await db_session.execute(
+        select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids))
+    )
+    by_wb = {r.wb_warehouse_name_manual: r for r in res.scalars().all()}
+    assert by_wb["Электросталь"].pallets_count == 3  # из map
+    assert by_wb["Казань"].pallets_count == 1  # fallback на плоский pallets_count
+
+
+@pytest.mark.asyncio
 async def test_commit_draft_two_sources_two_targets_pro_rata(db_session):
     """2 sources x 2 targets, pro-rata distribution stays balanced + total preserved."""
     wh_a, wh_b = await _get_warehouse_ids(db_session)

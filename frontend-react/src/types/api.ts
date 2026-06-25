@@ -2055,6 +2055,12 @@ export interface LogisticsCostSummary {
   avg_cost_per_pallet: number;
   total_pallets: number;
   total_shipments: number;
+  total_requests: number;
+  total_items: number;
+  total_skus: number;
+  total_weight_kg: number;
+  total_destinations: number;
+  total_carriers: number;
 }
 
 export interface LogisticsDestStat {
@@ -2062,6 +2068,10 @@ export interface LogisticsDestStat {
   avg_cost: number;
   total_cost: number;
   shipments_count: number;
+  total_pallets: number;
+  avg_pallets: number;
+  min_cost_per_pallet: number;
+  max_cost_per_pallet: number;
 }
 
 export interface LogisticsRouteStat {
@@ -2071,10 +2081,129 @@ export interface LogisticsRouteStat {
   shipments_count: number;
 }
 
+export interface LogisticsCarrierStat {
+  counterparty_id: number | null;
+  carrier_inn: string | null;
+  carrier_name: string;
+  shipments_count: number;
+  total_pallets: number;
+  total_cost: number;
+  avg_cost_per_pallet: number;
+  destinations_count: number;
+}
+
+export interface LogisticsPalletBucketStat {
+  bucket: string;
+  sort_order: number;
+  shipments_count: number;
+  avg_pallets: number;
+  total_pallets: number;
+  total_cost: number;
+  avg_cost_per_pallet: number;
+}
+
+export interface LogisticsCostPoint {
+  dest_warehouse: string;
+  pallets: number;
+  cost_per_pallet: number;
+  shipped_date: string | null;
+}
+
+export interface LogisticsDestBucketCell {
+  dest_warehouse: string;
+  bucket: string;
+  sort_order: number;
+  shipments_count: number;
+  total_pallets: number;
+  avg_cost_per_pallet: number;
+}
+
+export type LogisticsAnomalyType = 'no_cost' | 'overpriced' | 'underpriced';
+
+export interface LogisticsAnomaly {
+  shipment_id: number;
+  assembly_request_id: number | null;
+  assembly_number: string | null;
+  dest_warehouse: string;
+  carrier_name: string | null;
+  pallets_count: number | null;
+  pickup_cost: number | null;
+  cost_per_pallet: number | null;
+  shipped_date: string | null;
+  anomaly_type: LogisticsAnomalyType;
+  severity: number;
+  expected_low: number | null;
+  expected_high: number | null;
+  reason: string;
+}
+
 export interface LogisticsAnalyticsResponse {
   summary: LogisticsCostSummary;
   by_destination: LogisticsDestStat[];
   by_route: LogisticsRouteStat[];
+  by_carrier: LogisticsCarrierStat[];
+  pallet_buckets: LogisticsPalletBucketStat[];
+  dest_pallet_cells: LogisticsDestBucketCell[];
+  cost_points: LogisticsCostPoint[];
+  anomalies: LogisticsAnomaly[];
+}
+
+export interface LogisticsShipmentRow {
+  shipment_id: number;
+  attempt_no: number;
+  assembly_request_id: number | null;
+  assembly_number: string | null;
+  status: string | null;
+  brands: string | null;
+  src_warehouse: string | null;
+  dest_warehouse: string | null;
+  counterparty_id: number | null;
+  carrier_inn: string | null;
+  carrier_name: string | null;
+  wb_supply_id: string | null;
+  wb_supply_name: string | null;
+  wb_fbo_status: string | null;
+  wb_fbo_planned_date: string | null;
+  wb_fbo_actual_date: string | null;
+  pallets_count: number | null;
+  pickup_cost: number | null;
+  cost_per_pallet: number | null;
+  total_weight_kg: number | null;
+  shipped_date: string | null;
+  shipped_at: string | null;
+  anomaly_type: LogisticsAnomalyType | null;
+}
+
+export interface LogisticsShipmentListResponse {
+  items: LogisticsShipmentRow[];
+  total: number;
+  truncated: boolean;
+}
+
+export interface CostForecastBucket {
+  bucket: string;
+  sort_order: number;
+  cpp: number;
+  low: number;
+  high: number;
+  sample_size: number;
+}
+
+export interface CostForecastWarehouse {
+  dest_warehouse: string;
+  cpp: number;
+  low: number;
+  high: number;
+  sample_size: number;
+  buckets: CostForecastBucket[];
+}
+
+export interface CostForecastResponse {
+  global_cpp: number;
+  global_low: number;
+  global_high: number;
+  sample_size: number;
+  warehouses: CostForecastWarehouse[];
 }
 
 // ─── Anomalies ──────────────────────────────────────────────────────────────
@@ -3508,6 +3637,30 @@ export interface AcceptanceLimitEntry {
 }
 export interface AcceptanceLimitsResponse {
   warehouses: AcceptanceLimitEntry[];
+  dates: string[];
+  fetched_at: string;
+}
+
+// Слоты сдачи по поставкам — активные заявки + календарь приёмки их склада
+// (GET /warehouse/acceptance-slots). matched=false → склад не нашёлся, days пуст.
+export interface SupplyAcceptanceSlotRow {
+  assembly_request_id: number;
+  assembly_number: string;
+  status: string;
+  wb_supply_id?: string | null; // ФБО-поставка WB
+  warehouse_name?: string | null; // effective: FBO или ручной
+  canonical_name: string; // ключ группировки
+  warehouse_id?: number | null;
+  box_type: AcceptanceBoxType;
+  package_type: string; // BOX | MONOPALLET | SUPERSAFE
+  planned_date?: string | null; // плановая «Сдача ВБ»
+  actual_date?: string | null;
+  wb_fbo_status?: string | null;
+  matched: boolean;
+  days: AcceptanceLimitDay[];
+}
+export interface SupplyAcceptanceSlotsResponse {
+  rows: SupplyAcceptanceSlotRow[];
   dates: string[];
   fetched_at: string;
 }

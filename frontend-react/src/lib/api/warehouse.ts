@@ -4,6 +4,7 @@ import type {
     AcceptanceCheckRequest,
     AcceptanceCheckResponse,
     AcceptanceLimitsResponse,
+    SupplyAcceptanceSlotsResponse,
     AssemblyDraft,
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
@@ -51,7 +52,9 @@ import type {
     FboReturnResponse,
     FboSyncResult,
     InboundReceipt,
+    CostForecastResponse,
     LogisticsAnalyticsResponse,
+    LogisticsShipmentListResponse,
     OutboundShipment,
     RefreshFromFboResponse,
     StockAdjustment,
@@ -96,6 +99,11 @@ export function addWarehouseMethods(api: ApiClient) {
             if (force) qs.set('force', 'true');
             const q = qs.toString();
             return api.request<AcceptanceLimitsResponse>('GET', `/api/v1/warehouse/acceptance-limits${q ? `?${q}` : ''}`);
+        },
+        /** GET /warehouse/acceptance-slots — слоты сдачи по активным заявкам (поставка → календарь приёмки её склада). */
+        getSupplyAcceptanceSlots(force = false) {
+            const q = force ? '?force=true' : '';
+            return api.request<SupplyAcceptanceSlotsResponse>('GET', `/api/v1/warehouse/acceptance-slots${q}`);
         },
 
         // ─── Stock ───────────────────────────────────────────────────
@@ -433,7 +441,7 @@ export function addWarehouseMethods(api: ApiClient) {
         getAssemblyHistory(id: number) {
             return api.request<AssemblyHistoryEntry[]>('GET', `/api/v1/warehouse/assembly/${id}/history`);
         },
-        getShipmentAnalytics(params?: { date_from?: string; date_to?: string; warehouse_ids?: string; brands?: string }) {
+        getShipmentAnalytics(params?: { date_from?: string; date_to?: string; warehouse_ids?: string; brands?: string; carrier_id?: number }) {
             const query = new URLSearchParams();
             if (params) {
                 Object.entries(params).forEach(([k, v]) => {
@@ -442,6 +450,22 @@ export function addWarehouseMethods(api: ApiClient) {
             }
             const qs = query.toString();
             return api.request<LogisticsAnalyticsResponse>('GET', `/api/v1/warehouse/assembly/shipments/analytics${qs ? `?${qs}` : ''}`);
+        },
+        /** Построчная история отправок за период (весь набор — клиентская сортировка по всему периоду). */
+        getShipmentsList(params?: { date_from?: string; date_to?: string; warehouse_ids?: string; brands?: string; carrier_id?: number; dest_warehouse?: string }) {
+            const query = new URLSearchParams();
+            if (params) {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '') query.set(k, String(v));
+                });
+            }
+            const qs = query.toString();
+            return api.request<LogisticsShipmentListResponse>('GET', `/api/v1/warehouse/assembly/shipments/list${qs ? `?${qs}` : ''}`);
+        },
+        /** Прогнозная модель ₽/паллета по истории отгрузок (для неназначенных заявок). */
+        getCostForecast(lookbackDays?: number) {
+            const qs = lookbackDays ? `?lookback_days=${lookbackDays}` : '';
+            return api.request<CostForecastResponse>('GET', `/api/v1/warehouse/assembly/cost-forecast${qs}`);
         },
         /** Distinct «города сдачи» по заявкам (поставка → manual) — фильтр аналитики. */
         getAssemblyWbWarehouses() {
@@ -512,13 +536,20 @@ export function addWarehouseMethods(api: ApiClient) {
         deleteAssemblyDraft(id: number) {
             return api.request<void>('DELETE', `/api/v1/assembly/drafts/${id}`);
         },
-        commitAssemblyDraft(id: number, packageType?: string) {
+        /** @param palletCounts map `"{ffId}::{wbName}::{pkg}" → паллет` — авто-проставляется
+         *  в каждую создаваемую заявку (иначе бэкенд берёт плоский pallets_count черновика). */
+        commitAssemblyDraft(id: number, packageType?: string, palletCounts?: Record<string, number>) {
             const qs = new URLSearchParams();
             if (packageType) qs.set('package_type', packageType);
             const q = qs.toString();
+            const body =
+                palletCounts && Object.keys(palletCounts).length > 0
+                    ? { pallet_counts: palletCounts }
+                    : undefined;
             return api.request<AssemblyDraftCommitResponse>(
                 'POST',
                 `/api/v1/assembly/drafts/${id}/commit${q ? `?${q}` : ''}`,
+                body,
             );
         },
         /** «Передать на ФФ» — заморозить заявку-юнит (вырезать в handed_units). */

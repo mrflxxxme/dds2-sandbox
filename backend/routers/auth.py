@@ -139,7 +139,7 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         )
 
     logger.info(f"Successful login: {body.username} (id={user.id})")
-    access = create_access_token(user.id, user.username)
+    access = create_access_token(user.id, user.username, is_external=user.is_external)
     refresh = await create_refresh_token(user.id)
     return TokenResponse(access_token=access, refresh_token=refresh)
 
@@ -318,7 +318,7 @@ async def refresh_token(body: RefreshRequest, request: Request, db: AsyncSession
     # Rotate: revoke old, issue new
     await revoke_refresh_token(body.refresh_token)
 
-    access = create_access_token(user.id, user.username)
+    access = create_access_token(user.id, user.username, is_external=user.is_external)
     refresh = await create_refresh_token(user.id)
 
     logger.info(f"Token refreshed for user: {user.username} (id={user.id})")

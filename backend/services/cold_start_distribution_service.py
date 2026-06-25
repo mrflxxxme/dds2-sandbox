@@ -551,9 +551,13 @@ async def compute_distribution(db: AsyncSession, project_id: int, req: Distribut
     total_asm = sum(active_asm.values())
     total_qty = int(req.total_qty) if req.total_qty is not None else max(0, rf_qty - total_asm)
 
-    # 2. Excluded warehouses (set для быстрой проверки)
+    # 2. Excluded warehouses (set для быстрой проверки) + закрытые по приёмке
+    # (нет лимита) минус whitelist предзаявок — единый отсев складов.
+    from backend.services.warehouse_acceptance_service import get_acceptance_blocked_warehouses
+
     excluded_list = await get_excluded_warehouses(db, project_id)
     excluded: set[str] = {str(w).strip() for w in excluded_list}
+    excluded |= await get_acceptance_blocked_warehouses(db, project_id)
 
     # 3. Бенчмарк по ФО
     own_share, own_total = await fetch_district_share(db, project_id, req.window_days)
@@ -779,14 +783,30 @@ async def compute_cold_start_table(
     window_days: int,
     min_pack: int,
     bench_from_project_id: int | None = None,
+    ship_fraction: float = 0.55,
+    ship_floor: int = 50,
 ) -> ColdStartTableResponse:
     """Cold-start таблица: список SKU из сегмента + per-SKU allocation.
+
+    ship_fraction (0..1) — доля свободного ФФ-остатка, которую разрешено отгрузить
+    на WB за раз. У новинки нет сигнала спроса → «сеем» часть (дефолт 55%), остаток
+    держим буфером на ФФ под добор по факту продаж. Кап режет ТОЛЬКО тотал;
+    per-склад пропорции и вычет WB/сборки/пути сохраняются.
+
+    ship_floor — пол: если свободного ФФ ≤ ship_floor шт, буфер держать бессмысленно
+    → отгружаем 100% (кап не действует). Формула капа:
+    `max(round(ФФ × ship_fraction), min(ФФ, ship_floor))`.
 
     Бенчмарк (доли по ФО + главный склад) считается ОДИН раз для всех SKU.
     Для каждого SKU делается distribute(rf_qty, ...) с тем же бенчмарком.
     """
+    # Excluded + закрытые по приёмке (нет лимита) минус whitelist предзаявок —
+    # склад без лимита и не в whitelist вырезается из расчёта новинок.
+    from backend.services.warehouse_acceptance_service import get_acceptance_blocked_warehouses
+
     excluded_list = await get_excluded_warehouses(db, project_id)
     excluded: set[str] = {str(w).strip() for w in excluded_list}
+    excluded |= await get_acceptance_blocked_warehouses(db, project_id)
 
     # bench: свои → сосед → fallback
     own_share, own_total = await fetch_district_share(db, project_id, window_days)
@@ -948,14 +968,17 @@ async def compute_cold_start_table(
             if ship > 0:
                 final_alloc[wh] = ship
 
-        # Σship может превысить свободный ФФ: min_pack-bump в distribute_multi
-        # раздувает отдельные target, а перетаренные склады дают ship=0 (их «минус»
-        # не компенсирует). Урезаем до total_qty (пропорционально + largest-remainder).
+        # Кап «сеять, не вытряхивать весь ФФ»: отгружаем не более ship_fraction
+        # свободного ФФ (дефолт 55%), остаток — буфер на ФФ под добор по факту.
+        # ПОЛ: ниже ship_floor шт буфер бессмысленен → отгружаем 100% (= min(ФФ, floor)).
+        # Заодно ловит превышение из-за min_pack-bump в distribute_multi.
+        # Урезаем пропорционально + largest-remainder (пропорции складов сохраняются).
+        ship_cap = max(round(total_qty * ship_fraction), min(total_qty, ship_floor))
         ship_total = sum(final_alloc.values())
-        if ship_total > total_qty:
-            scale = total_qty / ship_total
+        if ship_total > ship_cap:
+            scale = ship_cap / ship_total if ship_total > 0 else 0
             trimmed = {wh: int(q * scale) for wh, q in final_alloc.items()}
-            leftover = total_qty - sum(trimmed.values())
+            leftover = ship_cap - sum(trimmed.values())
             for wh in sorted(trimmed, key=lambda w: -final_alloc[w]):
                 if leftover <= 0:
                     break
@@ -973,6 +996,9 @@ async def compute_cold_start_table(
                 rf_qty=sku["rf_qty"],
                 rf_by_warehouse=sku.get("rf_by_warehouse", {}),
                 wb_qty=sku["wb_qty"],
+                # Per-склад WB-сток (канонизирован) — нужен фронту для coverage-aware
+                # пересчёта при ручном override «Распределить» (вычет WB/сборки/пути).
+                wb_by_warehouse=sku.get("wb_by_warehouse", {}),
                 in_assembly_total=sku["asm_qty"],
                 asm_by_warehouse=active_asm,
                 sales_14d=sku["sales_14d"],

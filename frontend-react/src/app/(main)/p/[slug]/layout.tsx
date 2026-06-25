@@ -39,6 +39,7 @@ const navGroups = [
             { href: '/warehouse/assembly/analytics', label: 'Анализ сборки', icon: '⏱️', pageKey: 'assembly-analytics' },
             { href: '/warehouse/ff-requests', label: 'Заявки ФФ', icon: '🔗', pageKey: 'assembly' },
             { href: '/warehouse/logistics', label: 'Лист логиста', icon: '🚛', pageKey: 'logistics' },
+            { href: '/warehouse/acceptance-slots', label: 'Слоты сдачи', icon: '🗓️', pageKey: 'logistics' },
             { href: '/warehouse/stock', label: 'Сводные остатки', icon: '📦', pageKey: 'stocks' },
             { href: '/warehouse/fbo-supplies', label: 'Поставки FBO', icon: '📮', pageKey: 'fbo' },
             { href: '/warehouse/acceptance-limits', label: 'Лимиты приёмки', icon: '📅', pageKey: 'fbo' },

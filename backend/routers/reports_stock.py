@@ -327,6 +327,8 @@ async def distribute_cold_start(
 async def cold_start_table(
     window_days: int = Query(30, ge=1, le=180),
     min_pack: int = Query(5, ge=1, le=1000),
+    ship_pct: int = Query(55, ge=10, le=100, description="Отгружать не более N% свободного ФФ-остатка"),
+    ship_floor: int = Query(50, ge=0, le=10000, description="Ниже N свободного ФФ — отгружать 100% (кап не действует)"),
     bench_from_project_id: int | None = Query(None),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -352,4 +354,6 @@ async def cold_start_table(
         window_days,
         min_pack,
         bench_from_project_id,
+        ship_fraction=ship_pct / 100,
+        ship_floor=ship_floor,
     )
