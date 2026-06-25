@@ -485,8 +485,9 @@ class StockMismatchSkuRow(BaseModel):
     brand: str | None
     name: str | None
     ff_good: int  # у ФФ (зеркало провайдера), штук россыпи
-    our_quantity: int  # у нас (WarehouseStock.quantity)
-    diff: int  # ff_good - our_quantity (>0 — у ФФ больше, <0 — у нас больше)
+    our_quantity: int  # у нас годный (WarehouseStock.quantity)
+    our_defect: int = 0  # у нас брак (учтён в diff только для migfull)
+    diff: int  # ff_good − (our_quantity + our_defect для migfull); >0 — у ФФ больше
 
 
 class StockMismatchWarehouseRow(BaseModel):

@@ -274,11 +274,14 @@ async def _ff_without_assembly(db: AsyncSession, project_id: int, warehouse_ids:
 async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list[int] | None) -> list[dict]:
     """Блок 5: расхождение остатков «наш склад vs ФФ-зеркало» по складам с API-интеграцией.
 
-    diff = ff_good − our_quantity (>0 — у ФФ больше, <0 — у нас больше). Остаток
-    короба сводится к россыпи (qty_good × units_per_box, ключ = base_barcode|barcode),
-    как в fulfillment_service.list_stocks — иначе diff несопоставим с нашим стоком.
-    Наш склад (WarehouseStock) производен от документов; ФФ — зеркало провайдера
-    (см. DOMAIN_FULFILLMENT). Строки с diff==0 не показываем.
+    diff = ff_good − (our_quantity + our_defect для migfull) (>0 — у ФФ больше,
+    <0 — у нас больше). Остаток короба сводится к россыпи (qty_good × units_per_box,
+    ключ = base_barcode|barcode), как в fulfillment_service.list_stocks — иначе diff
+    несопоставим с нашим стоком. У migfull «ФФ годный» (stock_actual) ВКЛЮЧАЕТ брак
+    (отдельного поля брака в API нет), поэтому сверяем с нашим ИТОГОМ (годный+брак) —
+    иначе diff раздувается ровно на наш брак (как было в list_stocks до фикса). Наш
+    склад (WarehouseStock) производен от документов; ФФ — зеркало провайдера (см.
+    DOMAIN_FULFILLMENT). Строки с diff==0 не показываем.
     """
     providers = await _ff_warehouse_providers(db, project_id)  # warehouse_id → service
     ff_wh_ids = set(providers)
@@ -287,6 +290,7 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
     if not ff_wh_ids:
         return []
     ff_wh_list = list(ff_wh_ids)
+    migfull_wids = {w for w in ff_wh_ids if providers.get(w) == "migfull"}
 
     # ФФ-сток (зеркало провайдера) по интегрированным складам. Без .limit() —
     # это полная агрегация (усечение исказило бы diff: уцелевшая сторона дала бы
@@ -309,7 +313,8 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
         )
     ).all()
 
-    # Наш склад (производный от документов): только ненулевые остатки.
+    # Наш склад (производный от документов): ненулевой годный ИЛИ брак (брак нужен
+    # для migfull — его «ФФ годный» включает брак, сверяем с нашим итогом).
     our_rows = (
         await db.execute(
             select(
@@ -317,10 +322,11 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
                 WarehouseStock.barcode,
                 WarehouseStock.nomenclature_id,
                 WarehouseStock.quantity,
+                WarehouseStock.defect_quantity,
             ).where(
                 WarehouseStock.project_id == project_id,
                 WarehouseStock.warehouse_id.in_(ff_wh_list),
-                WarehouseStock.quantity > 0,
+                (WarehouseStock.quantity > 0) | (WarehouseStock.defect_quantity > 0),
             )
         )
     ).all()
@@ -337,6 +343,7 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
                 "name": None,
                 "ff_good": 0,
                 "our_quantity": 0,
+                "our_defect": 0,
             }
         return c
 
@@ -359,6 +366,9 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
     for wr in our_rows:
         c = _cell(wr.warehouse_id, wr.barcode, wr.nomenclature_id)
         c["our_quantity"] += wr.quantity
+        # Брак учитываем только для migfull (его ФФ-годный включает брак).
+        if wr.warehouse_id in migfull_wids:
+            c["our_defect"] += wr.defect_quantity
         if c["nomenclature_id"] is None and wr.nomenclature_id is not None:
             c["nomenclature_id"] = wr.nomenclature_id
 
@@ -381,7 +391,8 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
     # Агрегат по складу.
     wh_acc: dict[int, dict] = {}
     for (wid, _key), c in cells.items():
-        diff = c["ff_good"] - c["our_quantity"]
+        # our_defect=0 для не-migfull → формула сводится к ff_good − our_quantity.
+        diff = c["ff_good"] - (c["our_quantity"] + c["our_defect"])
         if diff == 0:
             continue
         acc = wh_acc.setdefault(
@@ -409,6 +420,7 @@ async def _stock_mismatch(db: AsyncSession, project_id: int, warehouse_ids: list
                 "name": c["name"],
                 "ff_good": c["ff_good"],
                 "our_quantity": c["our_quantity"],
+                "our_defect": c["our_defect"],
                 "diff": diff,
             }
         )

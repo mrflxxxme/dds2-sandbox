@@ -497,7 +497,7 @@ async def _ff_stock(
     )
 
 
-async def _our_stock(db_session, project_id, warehouse_id, nomenclature_id, barcode, quantity):
+async def _our_stock(db_session, project_id, warehouse_id, nomenclature_id, barcode, quantity, defect_quantity=0):
     return await _add(
         db_session,
         WarehouseStock(
@@ -506,6 +506,7 @@ async def _our_stock(db_session, project_id, warehouse_id, nomenclature_id, barc
             nomenclature_id=nomenclature_id,
             barcode=barcode,
             quantity=quantity,
+            defect_quantity=defect_quantity,
         ),
     )
 
@@ -561,6 +562,52 @@ async def test_stock_mismatch_our_more(db_session, project, warehouse):
     assert row["surplus_ff_qty"] == 0
     assert row["net_diff"] == -50
     assert row["rows"][0]["diff"] == -50
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_migfull_subtracts_our_defect(db_session, project, warehouse):
+    """migfull: ФФ годный включает брак → сверяем с нашим итогом (годный+брак).
+    Расхождение брак↔годный (итог сходится) не флагается; реальная недостача — да."""
+    await _integrate(db_session, project.id, warehouse.id, service="migfull")
+    # SKU1: ФФ 939 = наш годный 421 + наш брак 518 → diff 0 (только реклассификация)
+    bc1 = f"20{_uid()}"
+    nom1 = await _nom(db_session, project.id, bc1)
+    await _ff_stock(db_session, project.id, warehouse.id, bc1, 939, provider="migfull", nomenclature_id=nom1.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom1.id, bc1, 421, defect_quantity=518)
+    # SKU2: реальная недостача — ФФ 100, наш итог 30+0 → diff +70
+    bc2 = f"20{_uid()}"
+    nom2 = await _nom(db_session, project.id, bc2)
+    await _ff_stock(db_session, project.id, warehouse.id, bc2, 100, provider="migfull", nomenclature_id=nom2.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom2.id, bc2, 30, defect_quantity=0)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    assert row["provider"] == "migfull"
+    # SKU1 не во флагах (итог сошёлся), показан только SKU2
+    bcs = {s["barcode"] for s in row["rows"]}
+    assert bc1 not in bcs and bc2 in bcs
+    assert row["surplus_ff_qty"] == 70 and row["surplus_our_qty"] == 0
+    assert row["net_diff"] == 70
+    sku2 = next(s for s in row["rows"] if s["barcode"] == bc2)
+    assert sku2["our_defect"] == 0 and sku2["diff"] == 70
+
+
+@pytest.mark.asyncio
+async def test_stock_mismatch_non_migfull_ignores_our_defect(db_session, project, warehouse):
+    """Не-migfull (skladbot): наш брак НЕ вычитается — diff = ФФ годный − наш годный."""
+    await _integrate(db_session, project.id, warehouse.id, service="skladbot")
+    bc = f"20{_uid()}"
+    nom = await _nom(db_session, project.id, bc)
+    await _ff_stock(db_session, project.id, warehouse.id, bc, 100, provider="skladbot", nomenclature_id=nom.id)
+    await _our_stock(db_session, project.id, warehouse.id, nom.id, bc, 60, defect_quantity=30)
+
+    res = await _raw(db_session, project.id)
+    row = _wh_row(res, warehouse.id)
+    assert row is not None
+    sku = row["rows"][0]
+    assert sku["diff"] == 40  # 100 − 60, брак 30 НЕ вычтен
+    assert sku["our_defect"] == 0  # для не-migfull брак в строке не показываем
 
 
 @pytest.mark.asyncio

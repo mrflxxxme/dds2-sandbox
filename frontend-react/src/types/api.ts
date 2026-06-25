@@ -1882,9 +1882,11 @@ export interface StockMismatchSkuRow {
   name: string | null;
   /** у ФФ (зеркало провайдера), штук россыпи */
   ff_good: number;
-  /** у нас (WarehouseStock.quantity) */
+  /** у нас годный (WarehouseStock.quantity) */
   our_quantity: number;
-  /** ff_good - our_quantity (>0 — у ФФ больше, <0 — у нас больше) */
+  /** у нас брак (вычтен из diff только для migfull) */
+  our_defect: number;
+  /** ff_good − (our_quantity + our_defect для migfull); >0 — у ФФ больше */
   diff: number;
 }
 
