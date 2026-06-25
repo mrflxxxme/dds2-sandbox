@@ -14,11 +14,13 @@ import type {
     StockDistributionResponse,
     StockDistributionHistoryResponse,
     HandedUnitItem,
+    AssemblyAttempt,
     AssemblyHistoryEntry,
     AssemblyListResponse,
     AssemblyRequest,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
+    AssemblyReturnPayload,
     CreatedAssemblyGroup,
     FfMismatchDetail,
     BoxMultiplicityBulkRequest,
@@ -391,8 +393,17 @@ export function addWarehouseMethods(api: ApiClient) {
         cancelAssembly(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/cancel`);
         },
-        returnAssembly(id: number) {
-            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/return`);
+        returnAssembly(id: number, payload?: AssemblyReturnPayload) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/return`, payload ?? {});
+        },
+        reopenAssembly(id: number) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/reopen`);
+        },
+        closeAssembly(id: number) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/close`);
+        },
+        getAssemblyAttempts(id: number) {
+            return api.request<AssemblyAttempt[]>('GET', `/api/v1/warehouse/assembly/${id}/attempts`);
         },
         deleteAssembly(id: number) {
             return api.request<void>('DELETE', `/api/v1/warehouse/assembly/${id}`);

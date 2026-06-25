@@ -24,7 +24,7 @@ from backend.models.assembly import (
 )
 from backend.models.cost import Nomenclature
 from backend.models.fulfillment import FfRequestKind, FulfillmentRequest
-from backend.models.warehouse import Warehouse
+from backend.models.warehouse import OutboundShipment, OutboundStatus, Warehouse
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem
 from backend.schemas.assembly import AssemblyItemResponse, RefreshFromFboResponse
 from backend.services.warehouse_service import _resolve_barcode
@@ -182,52 +182,63 @@ async def get_logistics_analytics(
     brands: list[str] | None = None,
 ) -> dict:
     """
-    Logistics cost analytics for shipped/delivered assembly requests.
+    Logistics cost analytics — по ПОПЫТКАМ отгрузки (OutboundShipment).
+
+    Каждая отгрузка заявки = одна оплаченная перевозка. Переотгрузка после возврата
+    (новый водитель/FBW) даёт отдельную попытку — её стоимость суммируется (а не
+    затирается, как было бы при счёте по AssemblyRequest). Отменённые отгрузки
+    soft-удалены и не считаются; возвраты (RETURNED/CLOSED) — считаются (оплачено).
 
     Returns summary, by_destination, and by_route breakdowns.
     """
-    # Destination warehouse name: prefer manual, fallback to FBO supply
+    # Destination warehouse name: снимок назначения на отгрузке, fallback — manual заявки.
     dest_warehouse = func.coalesce(
+        OutboundShipment.destination,
         AssemblyRequest.wb_warehouse_name_manual,
-        WbFboSupply.warehouse_name,
     ).label("dest_warehouse")
 
     src_warehouse = Warehouse.name.label("src_warehouse")
 
-    # Base filters — always applied.
-    # CLOSED (возврат: WB не принял, товар вернулся) тоже считается: перевозка
-    # оплачена, поэтому логистика этой заявки остаётся в аналитике.
+    # Base filters — каждая непустая отгрузка, привязанная к заявке.
     base_filters = [
-        AssemblyRequest.project_id == project_id,
+        OutboundShipment.project_id == project_id,
+        OutboundShipment.is_deleted == False,  # noqa: E712
+        OutboundShipment.assembly_request_id.isnot(None),
+        OutboundShipment.status != OutboundStatus.CANCELLED,
         AssemblyRequest.is_deleted == False,  # noqa: E712
-        AssemblyRequest.status.in_([AssemblyStatus.SHIPPED, AssemblyStatus.DELIVERED, AssemblyStatus.CLOSED]),
     ]
 
     # Optional filters
     if date_from is not None:
-        base_filters.append(AssemblyRequest.shipped_at >= date_from)
+        base_filters.append(OutboundShipment.shipped_date >= date_from)
     if date_to is not None:
-        base_filters.append(AssemblyRequest.shipped_at < date_to + timedelta(days=1))
+        base_filters.append(OutboundShipment.shipped_date < date_to + timedelta(days=1))
     if warehouse_ids:
-        base_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))
+        base_filters.append(OutboundShipment.warehouse_id.in_(warehouse_ids))
     if brands:
-        # Filter by brand via items -> nomenclature join
+        # Filter by brand via items -> nomenclature join (по заявке отгрузки)
         brand_subq = (
             select(AssemblyRequestItem.assembly_request_id)
             .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
             .where(Nomenclature.brand.in_(brands))
             .distinct()
-            .correlate(AssemblyRequest)
             .scalar_subquery()
         )
-        base_filters.append(AssemblyRequest.id.in_(brand_subq))
+        base_filters.append(OutboundShipment.assembly_request_id.in_(brand_subq))
+
+    # JOIN заявки ко всем запросам (для dest manual-fallback и is_deleted-гейта).
+    req_join = (AssemblyRequest, OutboundShipment.assembly_request_id == AssemblyRequest.id)
 
     # --- Summary ---
-    summary_q = select(
-        func.coalesce(func.sum(AssemblyRequest.pickup_cost), Decimal("0")).label("total_cost"),
-        func.coalesce(func.sum(AssemblyRequest.pallets_count), 0).label("total_pallets"),
-        func.count().label("total_shipments"),
-    ).where(*base_filters)
+    summary_q = (
+        select(
+            func.coalesce(func.sum(OutboundShipment.pickup_cost), Decimal("0")).label("total_cost"),
+            func.coalesce(func.sum(OutboundShipment.pallets_count), 0).label("total_pallets"),
+            func.count().label("total_shipments"),
+        )
+        .join(*req_join)
+        .where(*base_filters)
+    )
     summary_row = (await db.execute(summary_q)).one()
 
     total_pallets = int(summary_row.total_pallets)
@@ -244,20 +255,20 @@ async def get_logistics_analytics(
     # --- By destination ---
     # avg_cost = average cost PER PALLET (not per shipment)
     cost_per_pallet = case(
-        (AssemblyRequest.pallets_count > 0, AssemblyRequest.pickup_cost / AssemblyRequest.pallets_count),
-        else_=AssemblyRequest.pickup_cost,
+        (OutboundShipment.pallets_count > 0, OutboundShipment.pickup_cost / OutboundShipment.pallets_count),
+        else_=OutboundShipment.pickup_cost,
     )
     dest_q = (
         select(
             dest_warehouse,
             func.avg(cost_per_pallet).label("avg_cost"),
-            func.sum(AssemblyRequest.pickup_cost).label("total_cost"),
+            func.sum(OutboundShipment.pickup_cost).label("total_cost"),
             func.count().label("shipments_count"),
         )
-        .outerjoin(WbFboSupply, AssemblyRequest.wb_fbo_supply_id == WbFboSupply.id)
+        .join(*req_join)
         .where(*base_filters)
         .group_by(dest_warehouse)
-        .order_by(func.sum(AssemblyRequest.pickup_cost).desc())
+        .order_by(func.sum(OutboundShipment.pickup_cost).desc())
     )
     dest_rows = (await db.execute(dest_q)).all()
 
@@ -279,8 +290,8 @@ async def get_logistics_analytics(
             func.avg(cost_per_pallet).label("avg_cost"),
             func.count().label("shipments_count"),
         )
-        .join(Warehouse, AssemblyRequest.warehouse_id == Warehouse.id)
-        .outerjoin(WbFboSupply, AssemblyRequest.wb_fbo_supply_id == WbFboSupply.id)
+        .join(*req_join)
+        .join(Warehouse, OutboundShipment.warehouse_id == Warehouse.id)
         .where(*base_filters)
         .group_by(src_warehouse, dest_warehouse)
         .order_by(func.count().desc())
@@ -408,8 +419,14 @@ async def get_assembly_wb_warehouses(db: AsyncSession, project_id: int) -> list[
 
 
 # Терминальные статусы: заявка больше не занимает ни одного этапа потока.
+# RETURNED (возврат, ждёт переотгрузки/закрытия) тоже не занимает этап.
 _TERMINAL_STATUSES: frozenset[str] = frozenset(
-    (AssemblyStatus.DELIVERED.value, AssemblyStatus.CANCELLED.value, AssemblyStatus.CLOSED.value)
+    (
+        AssemblyStatus.DELIVERED.value,
+        AssemblyStatus.RETURNED.value,
+        AssemblyStatus.CANCELLED.value,
+        AssemblyStatus.CLOSED.value,
+    )
 )
 
 
