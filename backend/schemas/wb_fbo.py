@@ -48,6 +48,12 @@ class WbFboSupplySchema(BaseModel):
     is_archived: bool | None = None
     excess_processed_at: datetime | None = None
     excess_qty: int | None = None
+    # Symmetric to excess_*: surfaces the «недоприёмка» (under-acceptance) return
+    # state so the list can hide the banner/«Оформить возврат» button and show the
+    # «✓ Недоприёмка обработана» done-state once the return receipt was created.
+    return_processed_at: datetime | None = None
+    return_qty: int | None = None
+    return_type: str | None = None
     reassigned_to_supply_id: int | None = None
     reassigned_to_wb_supply_id: str | None = None
     reassigned_from_wb_supply_ids: list[str] = []
