@@ -16,7 +16,7 @@ backend/schemas/assembly.py.
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
@@ -177,14 +177,22 @@ async def _assemblies_without_ff(db: AsyncSession, project_id: int, warehouse_id
         return []
 
     # Сборки, у которых УЖЕ есть привязанная (живая) заявка ФФ.
+    # archived+is_completed (skladbot сдал завершённую заявку в архив после отгрузки)
+    # — это ОТРАБОТАВШАЯ связь, а не пропущенная: считаем её живой (тот же критерий,
+    # что в авто-READY синке, fulfillment_service). Чисто архивная без завершения
+    # (wmscelicom «Аннулирована»: archived, не completed) живой связью НЕ считается —
+    # сборка остаётся в аномалии, ей нужна новая привязка.
     linked_rows = (
         await db.execute(
             select(FulfillmentRequest.assembly_request_id)
             .where(
                 FulfillmentRequest.project_id == project_id,
                 FulfillmentRequest.assembly_request_id.is_not(None),
-                FulfillmentRequest.archived == False,  # noqa: E712
                 FulfillmentRequest.local_archived == False,  # noqa: E712
+                or_(
+                    FulfillmentRequest.archived == False,  # noqa: E712
+                    FulfillmentRequest.is_completed == True,  # noqa: E712
+                ),
             )
             .distinct()
         )

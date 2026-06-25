@@ -286,6 +286,47 @@ async def test_linked_assembly_not_in_without_ff(db_session, project, warehouse)
 
 
 @pytest.mark.asyncio
+async def test_linked_assembly_archived_completed_ff_not_flagged(db_session, project, warehouse):
+    """Регресс (сборка ASM-455 / id 561): SHIPPED-сборка, чья заявка ФФ ЗАВЕРШЕНА и
+    заархивирована (skladbot сдал заявку в архив после отгрузки), — НЕ аномалия:
+    связь была и отработала штатно. archived+is_completed считается живой связью."""
+    doc = await _make_assembly(
+        db_session, project.id, warehouse.id, status=AssemblyStatus.SHIPPED, items=[("20a", 4)]
+    )
+    await _make_ff(
+        db_session,
+        project.id,
+        warehouse.id,
+        provider="skladbot",
+        assembly_request_id=doc.id,
+        archived=True,
+        is_completed=True,
+    )
+    res = await _raw(db_session, project.id)
+    assert all(r["assembly_id"] != doc.id for r in res["assemblies_without_ff"])
+
+
+@pytest.mark.asyncio
+async def test_linked_assembly_annulled_ff_still_flagged(db_session, project, warehouse):
+    """Заявка ФФ аннулирована (archived, но НЕ completed — напр. wmscelicom «Аннулирована»):
+    живой связи у сборки больше нет → она остаётся аномалией (нужна новая привязка)."""
+    doc = await _make_assembly(
+        db_session, project.id, warehouse.id, status=AssemblyStatus.READY, items=[("20a", 4)]
+    )
+    await _make_ff(
+        db_session,
+        project.id,
+        warehouse.id,
+        provider="wmscelicom",
+        assembly_request_id=doc.id,
+        archived=True,
+        is_completed=False,
+    )
+    res = await _raw(db_session, project.id)
+    assert any(r["assembly_id"] == doc.id for r in res["assemblies_without_ff"])
+
+
+@pytest.mark.asyncio
 async def test_assembly_on_non_ff_warehouse_not_flagged(db_session, project, warehouse):
     """Склад без ФФ-интеграции (нет ни одной заявки ФФ) → ручную сборку не флагаем."""
     doc = await _make_assembly(db_session, project.id, warehouse.id, items=[("20a", 4)])
