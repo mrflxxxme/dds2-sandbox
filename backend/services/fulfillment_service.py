@@ -2184,10 +2184,41 @@ def _parse_date(value: object) -> date | None:
 # ─── Stocks view ─────────────────────────────────────────────────────────────
 
 
+async def _migfull_assembled_by_guid(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[str, int]:
+    """Σ planned-строк СОБРАННЫХ отгрузок migfull (`ready`) по product_guid.
+
+    Берётся из заявок-отгрузок, которые мы синкаем (`planned_lines`). У migfull
+    сток блокируется (`stock_locked`) только когда заявку СОБРАЛИ (→ `ready`);
+    заявки в статусе `uploaded` («Загружен», ещё в работе) сток НЕ держат —
+    проверено живьём. Поэтому `stock_locked = собрано (ready) + брак`, и в
+    `list_stocks`: «Собрано» = min(это, qty_reserve), «Брак» = остаток. Единицы —
+    как у qty_reserve (короб-guid → в коробах, россыпь-guid → в россыпи)."""
+    result = await db.execute(
+        select(FulfillmentRequest.raw).where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.provider == "migfull",
+            FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+            FulfillmentRequest.stage_code == "ready",
+        )
+    )
+    assembled: dict[str, int] = {}
+    for (raw,) in result.all():
+        for line in (raw or {}).get("planned_lines") or []:
+            guid = str(line.get("product_guid") or "")
+            if guid:
+                assembled[guid] = assembled.get(guid, 0) + _safe_int(line.get("quantity"))
+    return assembled
+
+
 async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> dict:
     """UNION остатков ФФ и нашего склада по barcode (FfStocksResponse shape).
 
-    diff = ff_good - our_quantity; сортировка diff desc, затем barcode.
+    Не-migfull: diff = ff_good − our_quantity (брак ФФ приходит отдельным полем).
+    migfull: ff_good (stock_actual) ВКЛЮЧАЕТ брак, отдельного поля брака нет, а
+    резерв (stock_locked) делится на «Собрано» (ready, capped под резерв) + «Брак ФФ»
+    (остаток). diff сверяет ИТОГИ: ff_good − (our_quantity + our_defect). Сортировка
+    diff desc, затем barcode.
     """
     result = await db.execute(
         select(FulfillmentStock)
@@ -2198,6 +2229,12 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         .limit(STOCKS_LIMIT)
     )
     ff_rows = list(result.scalars().all())
+
+    # migfull не отдаёт брак отдельным полем — выводим его из stock_locked.
+    is_migfull = any(r.provider == "migfull" for r in ff_rows)
+    assembled_by_guid = (
+        await _migfull_assembled_by_guid(db, project_id, warehouse_id) if is_migfull else {}
+    )
 
     ws_result = await db.execute(
         select(WarehouseStock)
@@ -2243,6 +2280,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
             "brand": brand,
             "ff_good": 0,
             "ff_reserve": 0,
+            "ff_reserve_ready": 0,  # migfull: часть резерва под собранные отгрузки (ready)
             "ff_defect": 0,
             "ff_nominal": 0,
             "ff_box_units": 0,  # из них пришло коробами (в штуках россыпи)
@@ -2264,7 +2302,16 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         row = rows.get(key) or rows.setdefault(key, _new_row(key, r.nomenclature_id))
         row["ff_good"] += r.qty_good * units
         row["ff_reserve"] += r.qty_reserve * units
-        row["ff_defect"] += r.qty_defect * units
+        if is_migfull:
+            # Резерв (stock_locked) = собрано (ready) + брак. «Собрано» капуем под
+            # резерв (заявка планирует больше, чем реально заблокировано — короб
+            # собирается из россыпи), остаток резерва = брак. Так части всегда ≥0 и
+            # в сумме = qty_reserve. Единицы — как у qty_reserve → ×units к россыпи.
+            ready_cap = min(assembled_by_guid.get(r.external_product_id or "", 0), r.qty_reserve)
+            row["ff_reserve_ready"] += ready_cap * units
+            row["ff_defect"] += (r.qty_reserve - ready_cap) * units
+        else:
+            row["ff_defect"] += r.qty_defect * units
         row["ff_nominal"] += r.qty_nominal * units
         if is_box:
             row["ff_box_units"] += r.qty_good * units
@@ -2292,12 +2339,18 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         ws_row["our_defect"] = wr.defect_quantity
 
     for row in rows.values():
-        row["diff"] = row["ff_good"] - row["our_quantity"]
+        if is_migfull:
+            # ff_good (stock_actual) включает брак → сравниваем с нашим ИТОГОМ,
+            # иначе «расхождение» раздувается ровно на величину брака.
+            row["diff"] = row["ff_good"] - (row["our_quantity"] + row["our_defect"])
+        else:
+            row["diff"] = row["ff_good"] - row["our_quantity"]
 
     out_rows = sorted(rows.values(), key=lambda x: (-x["diff"], x["barcode"]))
     totals = {
         "ff_good": sum(r["ff_good"] for r in out_rows),
         "ff_reserve": sum(r["ff_reserve"] for r in out_rows),
+        "ff_reserve_ready": sum(r["ff_reserve_ready"] for r in out_rows),
         "ff_defect": sum(r["ff_defect"] for r in out_rows),
         "ff_box_units": sum(r["ff_box_units"] for r in out_rows),
         "our_quantity": sum(r["our_quantity"] for r in out_rows),

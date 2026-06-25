@@ -606,6 +606,144 @@ async def test_list_stocks_union_and_diff(db_session, project, warehouse, connec
     assert diffs == sorted(diffs, reverse=True)
 
 
+@pytest.mark.asyncio
+async def test_list_stocks_migfull_splits_reserve_into_ready_and_defect(db_session, project, warehouse):
+    """migfull: резерв (stock_locked) = Собрано (ready, capped) + Брак (остаток).
+    Заявки `uploaded` («в работе») сток не блокируют → игнорируются. diff =
+    ff_good − (наш годный + наш брак), т.к. stock_actual включает брак."""
+    bc_pure = f"BC-{_uid()}"  # резерв = весь брак (нет собранных отгрузок)
+    bc_mixed = f"BC-{_uid()}"  # резерв = собрано + брак
+    bc_over = f"BC-{_uid()}"  # собрано планирует больше, чем locked → кап
+    nom_pure = await _make_nomenclature(db_session, project.id, bc_pure, article="ART-PURE")
+    nom_mixed = await _make_nomenclature(db_session, project.id, bc_mixed, article="ART-MIX")
+    nom_over = await _make_nomenclature(db_session, project.id, bc_over, article="ART-OVER")
+
+    db_session.add_all(
+        [
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode=bc_pure,
+                external_product_id="g-pure",
+                nomenclature_id=nom_pure.id,
+                qty_good=479,
+                qty_reserve=87,
+                qty_defect=0,
+                qty_nominal=392,
+            ),
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode=bc_mixed,
+                external_product_id="g-mixed",
+                nomenclature_id=nom_mixed.id,
+                qty_good=90,
+                qty_reserve=30,
+                qty_defect=0,
+                qty_nominal=60,
+            ),
+            WarehouseStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                nomenclature_id=nom_pure.id,
+                barcode=bc_pure,
+                quantity=392,
+                defect_quantity=87,
+            ),
+            WarehouseStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                nomenclature_id=nom_mixed.id,
+                barcode=bc_mixed,
+                quantity=70,
+                defect_quantity=20,
+            ),
+            FulfillmentStock(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                barcode=bc_over,
+                external_product_id="g-over",
+                nomenclature_id=nom_over.id,
+                qty_good=50,
+                qty_reserve=8,  # locked < сумма заявок (20+3) → кап
+                qty_defect=0,
+                qty_nominal=42,
+            ),
+            # g-mixed: 10 собрано (ready); uploaded 7 и closed 999 — игнорируются
+            FulfillmentRequest(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                external_id="ship-uploaded",
+                kind="assembly",
+                stage_code="uploaded",
+                raw={"planned_lines": [{"product_guid": "g-mixed", "quantity": 7}]},
+            ),
+            FulfillmentRequest(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                external_id="ship-ready",
+                kind="assembly",
+                stage_code="ready",
+                raw={
+                    "planned_lines": [
+                        {"product_guid": "g-mixed", "quantity": 10},
+                        {"product_guid": "g-over", "quantity": 20},  # > locked 8
+                    ]
+                },
+            ),
+            FulfillmentRequest(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                external_id="ship-uploaded-over",
+                kind="assembly",
+                stage_code="uploaded",
+                raw={"planned_lines": [{"product_guid": "g-over", "quantity": 3}]},
+            ),
+            FulfillmentRequest(
+                project_id=project.id,
+                warehouse_id=warehouse.id,
+                provider="migfull",
+                external_id="ship-closed",
+                kind="assembly",
+                stage_code="closed",
+                raw={"planned_lines": [{"product_guid": "g-mixed", "quantity": 999}]},
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    rows = {r["barcode"]: r for r in data["rows"]}
+
+    # bc_pure: нет собранных отгрузок → весь резерв (87) = брак ФФ
+    assert rows[bc_pure]["ff_reserve_ready"] == 0
+    assert rows[bc_pure]["ff_defect"] == 87
+    assert rows[bc_pure]["diff"] == 479 - (392 + 87)  # 0 — реальный дрейф
+
+    # bc_mixed: 30 = 10 собрано + 20 брак (uploaded 7 и closed 999 НЕ учтены)
+    m = rows[bc_mixed]
+    assert m["ff_reserve_ready"] == 10
+    assert m["ff_defect"] == 20
+    assert m["ff_reserve_ready"] + m["ff_defect"] == m["ff_reserve"]  # сходится с резервом
+    assert m["diff"] == 90 - (70 + 20)  # 0
+
+    # bc_over: locked 8 < собрано 20 → кап: собрано=min(20,8)=8, брак=0; uploaded 3 игнор
+    o = rows[bc_over]
+    assert o["ff_reserve_ready"] == 8
+    assert o["ff_defect"] == 0
+    assert o["ff_reserve_ready"] + o["ff_defect"] == o["ff_reserve"]
+
+    totals = data["totals"]
+    assert totals["ff_reserve_ready"] == 10 + 8
+    assert totals["ff_defect"] == 87 + 20
+
+
 # ─── migfull короб → россыпь (box → loose) ──────────────────────────────────
 
 

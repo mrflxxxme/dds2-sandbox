@@ -1780,7 +1780,7 @@ function FulfillmentTabs({
                     </button>
                 ))}
             </div>
-            {activeSub === 'stocks' && <FfStocksTab warehouseId={warehouseId} />}
+            {activeSub === 'stocks' && <FfStocksTab warehouseId={warehouseId} provider={provider} />}
             {activeSub === 'boxes' && <FfBoxPacksTab warehouseId={warehouseId} />}
             {activeSub === 'assembly' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="assembly" />}
             {activeSub === 'inbound' && <FfRequestsTab warehouseId={warehouseId} slug={slug} kind="inbound" />}
@@ -1794,7 +1794,7 @@ function FulfillmentTabs({
 
 type FfStockQuickFilter = 'diff' | 'unmatched' | null;
 
-function FfStocksTab({ warehouseId }: { warehouseId: number }) {
+function FfStocksTab({ warehouseId, provider }: { warehouseId: number; provider: string | null }) {
     const [data, setData] = useState<FfStocksResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -1836,6 +1836,7 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
 
     const totals = data?.totals;
     const hasFilters = Boolean(subjectFilter || brandFilter || search.trim() || quickFilter);
+    const isMigfull = provider === 'migfull';  // только у «Натали» резерв раскладывается на части
 
     const diffCell = (v: number) => {
         if (!v) return <span style={{ color: 'var(--color-text-muted)' }}>0</span>;
@@ -1880,6 +1881,12 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
             exportValue: (row: FfStockRow) => row.ff_good,
         },
         { key: 'ff_reserve', label: 'ФФ резерв', align: 'right', format: 'number' },
+        // migfull: из резерва выделяем «Собрано» (ready) — то, что физически заблокировано
+        // под собранные отгрузки; остаток резерва = брак. «В работе» (uploaded) сток не
+        // блокирует (резерв занимается на сборке), потому в таблице его не показываем.
+        ...(isMigfull ? ([
+            { key: 'ff_reserve_ready', label: 'Собрано', align: 'right', format: 'number' },
+        ] as Column[]) : []),
         {
             key: 'ff_defect', label: 'ФФ брак', align: 'right',
             render: (v: number) => (
@@ -1903,6 +1910,9 @@ function FfStocksTab({ warehouseId }: { warehouseId: number }) {
     const summary: { label: string; value: number; color?: string; filter?: FfStockQuickFilter }[] = totals ? [
         { label: 'Годный ФФ', value: totals.ff_good },
         { label: 'Резерв', value: totals.ff_reserve },
+        ...(isMigfull ? [
+            { label: 'Собрано', value: totals.ff_reserve_ready, color: 'var(--color-accent)' },
+        ] : []),
         { label: 'Брак ФФ', value: totals.ff_defect, color: totals.ff_defect > 0 ? 'var(--color-warning)' : undefined },
         ...(totals.ff_box_units > 0 ? [{ label: 'В коробах', value: totals.ff_box_units, color: 'var(--color-accent)' }] : []),
         { label: 'У нас', value: totals.our_quantity },
