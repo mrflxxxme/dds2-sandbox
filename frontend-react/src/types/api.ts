@@ -3522,6 +3522,16 @@ export interface AssemblyDraftCommitResponse {
   draft_id: number;
 }
 
+/** Явная отгрузка ФФ→склад для commit (режим «только целые паллеты»): заявка
+ *  создаётся ровно из этих баркодов, минуя pro-rata распределение на бэке. */
+export interface CommitSupply {
+  source_ff_id: number;
+  target_wb_name: string;
+  package_type: string;
+  /** barcode → штук. */
+  items: Record<string, number>;
+}
+
 export interface AssemblyDraftMergeRequest {
   /** IDs of drafts to merge (≥2 distinct values). */
   draft_ids: number[];

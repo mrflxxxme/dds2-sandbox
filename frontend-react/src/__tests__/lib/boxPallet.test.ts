@@ -13,6 +13,7 @@ import {
     trimToWholePallets,
     consolidateMixedDistrictPallets,
     palletsForLines,
+    snapToWholePallets,
     DEFAULT_MAX_PALLET_HEIGHT_CM,
     type BoxDims,
 } from '@/lib/utils/boxPallet';
@@ -569,5 +570,79 @@ describe('palletsForLines', () => {
     it('пустой/нулевой ввод → 0 паллет', () => {
         expect(palletsForLines([], H, 'box').pallets).toBe(0);
         expect(palletsForLines([{ units: 0, boxQty: BOXQTY, boxSize: SIZE }], H, 'box').pallets).toBe(0);
+    });
+});
+
+describe('snapToWholePallets', () => {
+    // upp=160 для SKU 'a','b' (упрощённо: 16 кор/пал × ppb 10). Разный upp — 'c'=150.
+    const UPP: Record<string, number> = { a: 160, b: 160, c: 150 };
+    const upp = (k: string): number | null => UPP[k] ?? null;
+    const sum = (o: Record<string, number>) => Object.values(o).reduce((s, v) => s + v, 0);
+    const fillOf = (km: Record<string, number>) =>
+        Object.entries(km).reduce((s, [k, u]) => { const p = upp(k); return s + (p ? u / p : 0); }, 0);
+
+    it('один SKU: 165 → ровно 160 (1 целая), снято 5', () => {
+        const r = snapToWholePallets({ a: 165 }, upp);
+        expect(r.kept).toEqual({ a: 160 });
+        expect(r.dropped).toEqual({ a: 5 });
+    });
+
+    it('один SKU: 175 → 160 (снято 15)', () => {
+        const r = snapToWholePallets({ a: 175 }, upp);
+        expect(r.kept).toEqual({ a: 160 });
+        expect(r.dropped).toEqual({ a: 15 });
+    });
+
+    it('один SKU: 331 → 320 (2 целых, снято 11)', () => {
+        const r = snapToWholePallets({ a: 331 }, upp);
+        expect(r.kept).toEqual({ a: 320 });
+        expect(sum(r.dropped)).toBe(11);
+    });
+
+    it('город < целой паллеты (120 = 0.75) → снято всё, kept пуст', () => {
+        const r = snapToWholePallets({ a: 120 }, upp);
+        expect(r.kept).toEqual({});
+        expect(r.dropped).toEqual({ a: 120 });
+    });
+
+    it('ровно целые (320 = 2 пал) → без изменений', () => {
+        const r = snapToWholePallets({ a: 320 }, upp);
+        expect(r.kept).toEqual({ a: 320 });
+        expect(r.dropped).toEqual({});
+    });
+
+    it('смешанная одинаковый upp: {a:160,b:171} → footprint ровно 2.0', () => {
+        const r = snapToWholePallets({ a: 160, b: 171 }, upp);
+        expect(Math.abs(fillOf(r.kept) - 2)).toBeLessThan(1e-9); // целое
+        expect(sum(r.kept) + sum(r.dropped)).toBe(331);          // сохранение
+    });
+
+    it('смешанная РАЗНЫЙ upp: footprint ≤ keep, в пределах одной штуки', () => {
+        // a:163 (1.019) + c:151 (1.007) = 2.025 → keep 2; сливер < 0.02
+        const r = snapToWholePallets({ a: 163, c: 151 }, upp);
+        const f = fillOf(r.kept);
+        expect(f).toBeLessThanOrEqual(2 + 1e-9);
+        expect(Math.abs(f - Math.round(f))).toBeLessThan(0.02);
+        expect(sum(r.kept) + sum(r.dropped)).toBe(314);
+    });
+
+    it('ИДЕМПОТЕНТНОСТЬ: повторный snap ничего не меняет (смешанный разный upp)', () => {
+        const once = snapToWholePallets({ a: 163, c: 151 }, upp).kept;
+        const twice = snapToWholePallets(once, upp);
+        expect(twice.kept).toEqual(once);
+        expect(twice.dropped).toEqual({});
+    });
+
+    it('не палетизируемый SKU (upp=null) не режется; считается только палетизируемый', () => {
+        // 'x' без upp остаётся; 'a' 120 (0.75) < паллеты снимается.
+        const r = snapToWholePallets({ a: 120, x: 999 }, (k) => (k === 'a' ? 160 : null));
+        expect(r.kept).toEqual({ x: 999 });
+        expect(r.dropped).toEqual({ a: 120 });
+    });
+
+    it('всё непалетизируемое → без изменений (паллеты не посчитать)', () => {
+        const r = snapToWholePallets({ x: 50, y: 30 }, () => null);
+        expect(r.kept).toEqual({ x: 50, y: 30 });
+        expect(r.dropped).toEqual({});
     });
 });

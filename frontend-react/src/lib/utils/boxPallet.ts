@@ -452,6 +452,83 @@ export function trimToWholePallets(
     return out;
 }
 
+export interface SnapWholeResult {
+    /** key → оставленные units (целые паллеты по суммарному footprint). */
+    kept: Record<string, number>;
+    /** key → снятые units (неполный хвост — остаются на ФФ). */
+    dropped: Record<string, number>;
+}
+
+/**
+ * Срез коробов ОДНОГО склада-цели до ЦЕЛЫХ паллет (units-footprint), СТРОГО.
+ *
+ * Footprint (в паллетах) смешанной поставки = Σ units_i / units_на_паллету_i (короба
+ * любых артикулов на одной паллете, как у WB). Оставляем `floor(footprint)` целых
+ * паллет; неполный хвост (даже 80%) снимается на ФФ. Снимаем РОВНО хвост: убираем
+ * `ceil(excess × upp)` штук с наименее объёмного палетизируемого SKU, не «проскакивая»
+ * границу паллеты целыми коробами (в отличие от `shaveToWhole`, который снимает целыми
+ * коробами и может уйти ниже целой паллеты, оставив неполную).
+ *
+ * Для ОДНОГО SKU footprint садится РОВНО на целое (`units mod upp` — целое). Для
+ * смешанной поставки с РАЗНЫМ upp точное целое в штучной модели не всегда достижимо —
+ * footprint садится в пределах ОДНОЙ штуки от целого (≤ keep). Чтобы это не ломало:
+ *   • дисплей (`ceil(fill−eps)`) показывает РОВНО `keep` (хвост-«сливер» < штуки округлится);
+ *   • повторный клик ИДЕМПОТЕНТЕН — `keep` считается с допуском дискретизации `tol`
+ *     (=одна штука самого «крупного» SKU), поэтому город, уже севший на keep−сливер,
+ *     распознаётся целым и не режется снова (иначе floor «съел» бы ещё паллету).
+ *
+ * keep==0 (поставка < целой паллеты в пределах tol) → все палетизируемые units снимаются
+ * (направление исчезает, если непалетизируемых нет). Линии без `upp` (нет габаритов/
+ * кратности — `uppOf` вернул null/≤0) НЕ режутся: паллету по ним не посчитать, объём
+ * остаётся. Чистая функция — полностью юнит-тестируется.
+ *
+ * @param km    key → units (целые короба + возможный россыпь-хвост) одного склада-цели.
+ * @param uppOf key → штук в полной паллете SKU (или null — не палетизируется).
+ */
+export function snapToWholePallets(
+    km: Record<string, number>,
+    uppOf: (key: string) => number | null,
+): SnapWholeResult {
+    const EPS = 1e-9;
+    const kept: Record<string, number> = {};
+    const dropped: Record<string, number> = {};
+    for (const [k, u] of Object.entries(km)) if (u > 0) kept[k] = u;
+
+    let fill = 0;
+    let tol = 0; // допуск дискретизации = одна штука «крупнейшего» (мин upp) SKU
+    for (const [k, u] of Object.entries(kept)) {
+        const upp = uppOf(k);
+        if (upp && upp > 0) { fill += u / upp; tol = Math.max(tol, 1 / upp); }
+    }
+    if (tol <= 0) return { kept, dropped }; // нет палетизируемых линий — не режем
+    tol = Math.min(tol, 0.5); // предохранитель от вырожденного upp (≤2 шт/паллету)
+
+    const keep = Math.floor(fill + tol);
+    let excess = fill - keep;
+    // keep ≥ 1 и хвост в пределах допуска → уже целое (с точностью до сливера) — не трогаем.
+    // Это и даёт идемпотентность повторного клика. При keep==0 (город < паллеты) — режем всё.
+    if (keep >= 1 && excess <= tol) return { kept, dropped };
+
+    // Снимаем хвост с наименее объёмного палетизируемого SKU первым.
+    const keys = Object.keys(kept)
+        .filter((k) => { const u = uppOf(k); return u != null && u > 0; })
+        .sort((a, b) => kept[a] - kept[b]);
+    for (const k of keys) {
+        if (excess <= EPS) break;
+        const upp = uppOf(k)!;
+        const takeFp = Math.min(kept[k] / upp, excess);
+        // ceil — снять не меньше хвоста, чтобы footprint стал ≤ keep (не выше целого).
+        const rm = Math.min(kept[k], Math.ceil(takeFp * upp - EPS));
+        if (rm > 0) {
+            kept[k] -= rm;
+            dropped[k] = (dropped[k] || 0) + rm;
+            excess -= rm / upp;
+            if (kept[k] <= 0) delete kept[k];
+        }
+    }
+    return { kept, dropped };
+}
+
 export interface MixedPalletInput {
     /** wh → (key=nm_id → units). units кратно ppb (целые короба). */
     byWhKey: Record<string, Record<string, number>>;

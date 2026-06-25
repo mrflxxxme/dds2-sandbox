@@ -499,6 +499,78 @@ async def test_commit_draft_two_sources_two_targets_pro_rata(db_session):
 
 
 @pytest.mark.asyncio
+async def test_commit_draft_explicit_supplies(db_session):
+    """supplies → заявки строятся РОВНО из явных отгрузок ФФ→склад (минуя pro-rata).
+    Режим «только целые паллеты»: фронт прислал одну целую отгрузку, остальное снято."""
+    from backend.schemas.assembly_draft import CommitSupply
+
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111,
+            barcode=TEST_BARCODE_1,
+            src={str(wh_a): 100, str(wh_b): 60},
+            tgt={"Электросталь": 100, "Казань": 60},
+        )
+    ]
+    payload = _build_payload([wh_a, wh_b], ["Электросталь", "Казань"], rows)
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    # Явно: только wh_a→Электросталь 80 шт (целое). Остальное (80) — снято, не едет.
+    supplies = [
+        CommitSupply(
+            source_ff_id=wh_a, target_wb_name="Электросталь", package_type="BOX",
+            items={TEST_BARCODE_1: 80},
+        )
+    ]
+    resp = await assembly_draft_service.commit_draft(
+        db_session, PROJECT_ID, draft.id, "BOX", None, supplies
+    )
+    assert len(resp.created_request_ids) == 1
+
+    res = await db_session.execute(
+        select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids))
+    )
+    req = res.scalar_one()
+    assert req.warehouse_id == wh_a
+    assert req.wb_warehouse_name_manual == "Электросталь"
+    item_q = await db_session.execute(
+        text("SELECT SUM(quantity) FROM assembly_request_items WHERE assembly_request_id = :rid"),
+        {"rid": req.id},
+    )
+    assert item_q.scalar() == 80  # ровно из supplies, не pro-rata 160
+
+
+@pytest.mark.asyncio
+async def test_commit_draft_supplies_reject_inflation(db_session):
+    """supplies с Σ по баркоду больше, чем в черновике → 400 (нельзя раздуть отгрузку)."""
+    from backend.schemas.assembly_draft import CommitSupply
+
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111, barcode=TEST_BARCODE_1,
+            src={str(wh_a): 100}, tgt={"Электросталь": 100},
+        )
+    ]
+    payload = _build_payload([wh_a], ["Электросталь"], rows)
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    supplies = [
+        CommitSupply(
+            source_ff_id=wh_a, target_wb_name="Электросталь", package_type="BOX",
+            items={TEST_BARCODE_1: 140},  # > 100 в черновике
+        )
+    ]
+    with pytest.raises(HTTPException) as ei:
+        await assembly_draft_service.commit_draft(
+            db_session, PROJECT_ID, draft.id, "BOX", None, supplies
+        )
+    assert ei.value.status_code == 400
+    assert "exceeds draft" in ei.value.detail
+
+
+@pytest.mark.asyncio
 async def test_commit_draft_validates_balance(db_session):
     """Row where sum(src) != sum(tgt) -> HTTPException(400)."""
     wh_a, _ = await _get_warehouse_ids(db_session)

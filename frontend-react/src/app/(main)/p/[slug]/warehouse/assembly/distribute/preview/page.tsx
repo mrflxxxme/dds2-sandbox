@@ -9,6 +9,7 @@ import KpiCard from '@/components/KpiCard';
 import type { AssemblyDraft, PackageType, Warehouse } from '@/types/api';
 import {
     buildPreviewLines,
+    trimLinesToWholePallets,
     groupByFf,
     groupByWb,
     sumQty,
@@ -20,7 +21,8 @@ import {
     PREVIEW_EXPORT_COLUMNS_FF,
     type PreviewLine,
 } from '@/lib/utils/assemblyPreview';
-import { palletsForLines, maxPalletHeightCm, parseBoxSize, type PalletCount } from '@/lib/utils/boxPallet';
+import { palletsForLines, maxPalletHeightCm, parseBoxSize, effectiveBoxesPerPallet, type PalletCount } from '@/lib/utils/boxPallet';
+import type { CommitSupply } from '@/types/api';
 
 const toggleInSet = (s: Set<string>, value: string): Set<string> => {
     const n = new Set(s);
@@ -83,6 +85,8 @@ export default function AssemblyPreviewPage() {
     const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
     const [viewMode, setViewMode] = useState<'cards' | 'table' | 'matrix'>('cards');
     const [matrixUnit, setMatrixUnit] = useState<'qty' | 'boxes' | 'pallets'>('qty');
+    // «Только целые паллеты»: срез каждой отгрузки (ФФ→склад) до целых паллет.
+    const [wholeOnly, setWholeOnly] = useState(false);
 
     const backToDistribute = useCallback(() => {
         if (draftId) router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draftId}`);
@@ -213,7 +217,51 @@ export default function AssemblyPreviewPage() {
         return rows.filter(r => (pkgTab === 'MONOPALLET' ? r.package_type === 'MONOPALLET' : r.package_type !== 'MONOPALLET'));
     }, [draft, pkgTab]);
 
-    const allLines = useMemo(() => buildPreviewLines(committableRows, newcomerNmIds), [committableRows, newcomerNmIds]);
+    const rawLines = useMemo(() => buildPreviewLines(committableRows, newcomerNmIds), [committableRows, newcomerNmIds]);
+
+    // Геометрия загружена? (нужна для «только целые паллеты»). nmPpb пуст до ответа.
+    const geomReady = nmPpb.size > 0;
+
+    // Штук в полной паллете SKU на складе-цели (короб: bpp×ppb; null — без габаритов).
+    const uppForCell = useCallback((nmId: number, wbName: string): number | null => {
+        const k = nmPpb.get(nmId);
+        const bpp = effectiveBoxesPerPallet(nmBoxSize.get(nmId) ?? null, maxPalletHeightCm(wbName), palletOverrides);
+        return bpp != null && k && k > 0 ? bpp * k : null;
+    }, [nmPpb, nmBoxSize, palletOverrides]);
+
+    // Срез до целых паллет на КАЖДУЮ отгрузку (ФФ→склад). Активен по кнопке.
+    const wholeTrim = useMemo(() => trimLinesToWholePallets(rawLines, uppForCell), [rawLines, uppForCell]);
+    const allLines = useMemo(() => (wholeOnly ? wholeTrim.kept : rawLines), [wholeOnly, wholeTrim, rawLines]);
+
+    // Явные отгрузки для commit (режим «только целые»): заявки создаются ровно из них.
+    const wholeSupplies = useMemo<CommitSupply[]>(() => {
+        if (!wholeOnly) return [];
+        const m = new Map<string, CommitSupply>();
+        for (const l of allLines) {
+            if (l.qty <= 0) continue;
+            const key = `${l.ffId}::${l.wbName}::${l.pkg}`;
+            let s = m.get(key);
+            if (!s) { s = { source_ff_id: l.ffId, target_wb_name: l.wbName, package_type: l.pkg, items: {} }; m.set(key, s); }
+            s.items[l.barcode] = (s.items[l.barcode] || 0) + l.qty;
+        }
+        return [...m.values()];
+    }, [wholeOnly, allLines]);
+
+    const toggleWholeOnly = useCallback(() => {
+        if (wholeOnly) { setWholeOnly(false); return; }
+        if (!geomReady) {
+            setToast({ message: 'Геометрия коробок ещё загружается — повторите через секунду', type: 'error' });
+            return;
+        }
+        setWholeOnly(true);
+        const parts: string[] = [];
+        if (wholeTrim.removedSupplies > 0) parts.push(`убрано отгрузок: ${wholeTrim.removedSupplies}`);
+        if (wholeTrim.droppedUnits > 0) parts.push(`снято ${formatNumber(wholeTrim.droppedUnits, 0)} шт`);
+        setToast({
+            message: parts.length ? `Только целые паллеты — ${parts.join(', ')}` : 'Все отгрузки уже целыми паллетами',
+            type: 'success',
+        });
+    }, [wholeOnly, geomReady, wholeTrim]);
 
     // Опции фильтров (Σ qty по всему срезу, по убыванию объёма) — общий билдер.
     // WB-цель / предмет / бренд считаются по allLines (как и WB-фильтр) и
@@ -492,7 +540,7 @@ export default function AssemblyPreviewPage() {
         if (!draftId) return;
         setCommitting(true);
         try {
-            const resp = await api.commitAssemblyDraft(draftId, pkgTab, palletCounts);
+            const resp = await api.commitAssemblyDraft(draftId, pkgTab, palletCounts, wholeOnly ? wholeSupplies : undefined);
             const ids = resp.created_request_ids || [];
             // Остался ли черновик (другой срез) — решаем, куда уйти.
             let leftoverRows = 0;
@@ -519,7 +567,7 @@ export default function AssemblyPreviewPage() {
             setToast({ message: e instanceof Error ? e.message : 'Ошибка создания сборок', type: 'error' });
             setCommitting(false);
         }
-    }, [draftId, pkgTab, palletCounts, router, slug]);
+    }, [draftId, pkgTab, palletCounts, wholeOnly, wholeSupplies, router, slug]);
 
     // ─── Render ──────────────────────────────────────────────────────────
     if (loading) {
@@ -593,10 +641,23 @@ export default function AssemblyPreviewPage() {
                         📥 Отдельно по складам
                     </button>
                     <button
+                        className={`btn ${wholeOnly ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={toggleWholeOnly}
+                        disabled={!geomReady}
+                        title={!geomReady
+                            ? 'Геометрия коробок ещё загружается…'
+                            : 'Оставить только ЦЕЛЫЕ паллеты на каждую отгрузку ФФ→склад: неполная отгрузка убирается полностью '
+                                + '(даже на 80%), у отгрузок с целыми паллетами неполный хвост снимается на ФФ. Заявки создаются только целыми.'}
+                    >
+                        🟫 Только целые паллеты{wholeOnly ? ' ✓' : ''}
+                    </button>
+                    <button
                         className="btn btn-primary"
                         onClick={handleCreate}
                         disabled={committing || totalAssemblies === 0}
-                        title="Создаёт весь срез (упаковка × тип товара). Поиск и фильтр по складам влияют только на отображение и выгрузку."
+                        title={wholeOnly
+                            ? 'Создаёт только целые паллеты на каждую отгрузку ФФ→склад (неполные убраны).'
+                            : 'Создаёт весь срез (упаковка × тип товара). Поиск и фильтр по складам влияют только на отображение и выгрузку.'}
                     >
                         {committing ? 'Создание…' : `✓ Создать ${totalAssemblies} заявок`}
                     </button>

@@ -131,7 +131,7 @@ async def commit_draft(
     `"{ff_id}::{wb_name}::{pkg}"`; иначе плоский `distribution.pallets_count`.
     """
     return await assembly_draft_service.commit_draft(
-        db, project.id, draft_id, package_type, options.pallet_counts,
+        db, project.id, draft_id, package_type, options.pallet_counts, options.supplies,
     )
 
 
