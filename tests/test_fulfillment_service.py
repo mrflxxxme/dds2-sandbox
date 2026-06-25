@@ -3418,6 +3418,52 @@ async def test_migfull_guid_barcode_override_seeds_stock_on_sync(
     assert seeded.nomenclature_id == nom.id
 
 
+@pytest.mark.asyncio
+async def test_migfull_assembly_detail_resolves_barcode_absent_from_mirror(
+    db_session, project, warehouse, connected_mig_key, monkeypatch
+):
+    """Отгрузка: товар с нулевым остатком не попал в зеркало, но карточка несёт ШК →
+    деталка дотягивает живой карточкой (как приёмка), а не оставляет «—». После
+    disconnect деталка всё ещё открывается из зеркала+raw (без живого добора)."""
+    bc = f"BC-{_uid()}"
+    p_zero = _mig_guid(150)  # есть в /products, остаток 0 → не карточится при синке
+    ship = _mig_guid(151)
+    await _make_nomenclature(db_session, project.id, bc, article="ART-SHIP")
+    shipment = _mig_shipment(
+        ship, status="ready", display="Собран", planned_total=4,
+        planned_lines=[_mig_line(p_zero, 4, name="Ковер отгрузка")],
+    )
+    calls: dict = {}
+    _mock_mig_fetches(
+        monkeypatch,
+        products=[_mig_product(p_zero, actual=0, locked=0)],
+        product_details={p_zero: {"barcodes": [{"value": bc, "is_primary": True}]}},
+        shipments=[shipment],
+        calls=calls,
+    )
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    stocks = await _ff_stocks(db_session, project.id, warehouse.id)
+    assert all(s.external_product_id != p_zero for s in stocks)  # zero-stock → не в зеркале
+    product_calls_after_sync = calls["product"]
+
+    rows = await fulfillment_service.list_requests(db_session, project.id, warehouse.id, "assembly")
+    ff_id = next(r["id"] for r in rows if r["external_id"] == ship)
+    row = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    # деталка отгрузки сходила в карточку (live-резолв) — раньше для отгрузки этого не было
+    assert calls["product"] > product_calls_after_sync
+    product = row["products"][0]
+    assert product["barcode"] == bc
+    assert product["nomenclature_id"] is not None
+    assert product["article_seller"] == "ART-SHIP"
+    assert product["qty"] == 4
+
+    # После disconnect деталка отгрузки всё ещё открывается (из зеркала+raw, без добора)
+    await fulfillment_service.disconnect(db_session, project.id, warehouse.id)
+    row2 = await fulfillment_service.get_request_detail(db_session, project.id, warehouse.id, ff_id)
+    assert row2 is not None
+    assert row2["products"][0]["barcode"] is None  # zero-stock + нет клиента → не опознан
+
+
 # ─── Авто-READY и классификатор (migfull) ────────────────────────────────────
 
 

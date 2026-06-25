@@ -4106,6 +4106,17 @@ async def get_request_detail(
                 _migfull_line_rows(raw.get("shipped_lines")),
                 fact_field="delivery_qty",
             )
+            # Best-effort live-добор ШК: товар с нулевым остатком в зеркало не попал,
+            # но его карточка может нести ШК короба → дотягиваем живьём, как для приёмки.
+            # Без ключа (disconnect) деталка работает из зеркала+raw как раньше.
+            key = await get_integration(db, project_id, warehouse_id)
+            if key:
+                tenant_guid = str((key.config or {}).get("tenant_guid") or "")
+                if tenant_guid:
+                    try:
+                        mig_client = MigfullClient(tenant_guid, _decrypt(key.encrypted_key), project_id=project_id)
+                    except ValueError:
+                        mig_client = None
         else:
             # Приёмки: состава в списке нет — ЖИВЫЕ lines/incoming + received
             key = await get_integration(db, project_id, warehouse_id)
