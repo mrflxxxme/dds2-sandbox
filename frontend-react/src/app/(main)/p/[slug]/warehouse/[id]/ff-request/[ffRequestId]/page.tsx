@@ -36,6 +36,12 @@ export default function FfRequestDetailPage() {
     const [toast, setToast] = useState('');
     const [notice, setNotice] = useState('');
 
+    // Ручной ШК для строки без номенклатуры (migfull: карточка без штрихкода)
+    const [skuModal, setSkuModal] = useState<{ guid: string; name: string } | null>(null);
+    const [skuBarcode, setSkuBarcode] = useState('');
+    const [skuSaving, setSkuSaving] = useState(false);
+    const [skuError, setSkuError] = useState('');
+
     useEffect(() => {
         const controller = new AbortController();
         setLoading(true);
@@ -156,6 +162,36 @@ export default function FfRequestDetailPage() {
         }
     };
 
+    // Перечитать деталку (после ручной привязки ШК — расхождение пересчитывается на бэке)
+    const reloadDetail = async () => {
+        try {
+            setDetail(await api.getFfRequestDetail(warehouseId, ffRequestId));
+        } catch { /* оставляем текущее состояние */ }
+    };
+
+    // Сохранить ручной ШК короба для строки без номенклатуры (по product_guid)
+    const handleSaveSku = async () => {
+        if (!skuModal) return;
+        const bc = skuBarcode.trim();
+        if (!/^\d{8,}$/.test(bc)) {
+            setSkuError('ШК — только цифры (короб ITF14 — 14, россыпь EAN13 — 13)');
+            return;
+        }
+        setSkuSaving(true);
+        setSkuError('');
+        try {
+            await api.setFfGuidBarcode(warehouseId, skuModal.guid, { barcode: bc });
+            setSkuModal(null);
+            setSkuBarcode('');
+            setToast('ШК сохранён — расхождение пересчитано');
+            await reloadDetail();
+        } catch (e: unknown) {
+            setSkuError(e instanceof Error ? e.message : 'Ошибка сохранения ШК');
+        } finally {
+            setSkuSaving(false);
+        }
+    };
+
     const hasMatch = d.match !== null;
 
     const productCols: Column[] = [
@@ -167,6 +203,16 @@ export default function FfRequestDetailPage() {
                     <span>{p.article_seller ?? p.vendor_code ?? '—'}</span>
                     {p.nomenclature_id === null && (
                         <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>нет в номенклатуре</span>
+                    )}
+                    {p.nomenclature_id === null && p.product_guid && (
+                        <button
+                            className="btn btn-sm btn-secondary"
+                            style={{ fontSize: 11, padding: '2px 8px' }}
+                            title="Привязать ШК короба/россыпи (карточка ФФ без штрихкода)"
+                            onClick={() => { setSkuModal({ guid: p.product_guid as string, name: p.name ?? '' }); setSkuBarcode(''); setSkuError(''); }}
+                        >
+                            Указать ШК
+                        </button>
                     )}
                 </span>
             ),
@@ -460,6 +506,41 @@ export default function FfRequestDetailPage() {
                         setLinkOpen(false);
                     }}
                 />
+            )}
+
+            {/* Модал «Указать ШК» — ручная привязка ШК короба/россыпи к строке без номенклатуры */}
+            {skuModal && (
+                <div
+                    style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+                    onClick={() => !skuSaving && setSkuModal(null)}
+                >
+                    <div className="glass-card" style={{ padding: 24, maxWidth: 460, width: '100%' }} onClick={e => e.stopPropagation()}>
+                        <h3 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>Указать ШК</h3>
+                        <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '0 0 12px' }}>
+                            Карточка товара у ФФ без штрихкода. Укажите ШК короба (ITF14, 14 цифр) — сведём к россыпи по «короб N шт.»; либо ШК россыпи (EAN13).
+                        </p>
+                        {skuModal.name && (
+                            <div style={{ fontSize: 13, marginBottom: 12 }}>
+                                Товар: <span style={{ fontWeight: 500 }}>{skuModal.name}</span>
+                            </div>
+                        )}
+                        <input
+                            type="text"
+                            inputMode="numeric"
+                            value={skuBarcode}
+                            onChange={e => setSkuBarcode(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') handleSaveSku(); }}
+                            placeholder="ШК короба (ITF14) или россыпи (EAN13)"
+                            autoFocus
+                            style={{ width: '100%', padding: '8px 12px', fontSize: 14, borderRadius: 8, border: '1px solid var(--color-border)', background: 'var(--color-bg-card)', color: 'var(--color-text)' }}
+                        />
+                        {skuError && <div style={{ color: 'var(--color-danger)', fontSize: 13, marginTop: 8 }}>{skuError}</div>}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                            <button className="btn btn-secondary" onClick={() => setSkuModal(null)} disabled={skuSaving}>Отмена</button>
+                            <button className="btn btn-primary" onClick={handleSaveSku} disabled={skuSaving}>{skuSaving ? '...' : 'Сохранить'}</button>
+                        </div>
+                    </div>
+                </div>
             )}
 
             {toast && <Toast message={toast} onClose={() => setToast('')} />}

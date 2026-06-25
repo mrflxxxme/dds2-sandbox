@@ -30,6 +30,8 @@ from backend.schemas.fulfillment import (
     FfCreateAssemblyResult,
     FfCreateFormResponse,
     FfCreateRequestPayload,
+    FfGuidBarcodePayload,
+    FfGuidBarcodeRow,
     FfLinkCandidatesResponse,
     FfLinkPayload,
     FfNomenclatureOption,
@@ -198,6 +200,51 @@ async def delete_box_override(
 ):
     """Снять ручное сопоставление короба — вернуть к авто-выводу."""
     return await fulfillment_service.delete_box_override(db, project.id, warehouse_id, box_barcode)
+
+
+# ─── Ручной ШК для товаров ФФ без штрихкода в карточке (по product_guid) ──────
+
+
+@wh_router.get("/guid-barcodes", response_model=list[FfGuidBarcodeRow])
+async def list_guid_barcodes(
+    warehouse_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Список ручных ШК (product_guid → ШК) — для товаров ФФ с пустой карточкой."""
+    return await fulfillment_service.list_guid_barcodes(db, project.id, warehouse_id)
+
+
+@wh_router.put(
+    "/guid-barcodes/{product_guid}", response_model=FfGuidBarcodeRow, dependencies=[Depends(rate_limit_write)]
+)
+async def set_guid_barcode(
+    warehouse_id: int,
+    product_guid: str,
+    payload: FfGuidBarcodePayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Привязать ручной ШК (короб ITF14 / россыпь EAN13) к товару ФФ без ШК в карточке."""
+    try:
+        return await fulfillment_service.set_guid_barcode(
+            db, project.id, warehouse_id, product_guid, payload.barcode, payload.note
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@wh_router.delete(
+    "/guid-barcodes/{product_guid}", status_code=204, dependencies=[Depends(rate_limit_write)]
+)
+async def delete_guid_barcode(
+    warehouse_id: int,
+    product_guid: str,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Снять ручной ШК — товар вернётся к карточке провайдера."""
+    await fulfillment_service.delete_guid_barcode(db, project.id, warehouse_id, product_guid)
 
 
 @wh_router.get("/requests", response_model=list[FfRequestRow])

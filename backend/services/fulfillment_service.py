@@ -48,6 +48,7 @@ from backend.integrations.wmscelicom_client import WmsCelicomApiError, WmsCelico
 from backend.models import (
     FfRequestKind,
     FulfillmentBoxOverride,
+    FulfillmentGuidBarcode,
     FulfillmentRequest,
     FulfillmentStatusEvent,
     FulfillmentStock,
@@ -636,6 +637,10 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
     box_overrides: dict[str, tuple[str, int]] = {}
     if provider == "migfull":
         box_overrides = await _load_box_overrides(db, project_id, warehouse_id)
+        # Ручной ШК для товаров с пустой карточкой (overlay поверх кэша остатков):
+        # делает guid «опознанным» → _resolve_migfull_barcodes не дёргает пустую
+        # карточку, а _normalize_migfull_stock выводит россыпь/штуки из «короб N шт.».
+        barcode_by_guid.update(await _load_guid_barcode_overrides(db, project_id, warehouse_id))
     await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
 
     human = _provider_human(provider)
@@ -2314,6 +2319,17 @@ async def _load_box_overrides(db: AsyncSession, project_id: int, warehouse_id: i
     return {bc: (base, units) for bc, base, units in result.all()}
 
 
+async def _load_guid_barcode_overrides(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[str, str]:
+    """{product_guid: barcode} ручных ШК для товаров ФФ без штрихкода в карточке."""
+    result = await db.execute(
+        select(FulfillmentGuidBarcode.product_guid, FulfillmentGuidBarcode.barcode).where(
+            FulfillmentGuidBarcode.project_id == project_id,
+            FulfillmentGuidBarcode.warehouse_id == warehouse_id,
+        )
+    )
+    return {guid: bc for guid, bc in result.all() if guid and bc}
+
+
 async def list_box_packs(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
     """Сопоставление короб→россыпь: все коробá склада (ITF14 или с base_barcode).
 
@@ -2496,6 +2512,83 @@ async def delete_box_override(db: AsyncSession, project_id: int, warehouse_id: i
         row.nomenclature_id = nom_id
     await db.commit()
     return await _box_pack_row(db, project_id, warehouse_id, box_barcode)
+
+
+async def list_guid_barcodes(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
+    """Ручные ШК (product_guid → barcode) склада — для управления списком."""
+    result = await db.execute(
+        select(FulfillmentGuidBarcode)
+        .where(
+            FulfillmentGuidBarcode.project_id == project_id,
+            FulfillmentGuidBarcode.warehouse_id == warehouse_id,
+        )
+        .order_by(FulfillmentGuidBarcode.updated_at.desc())
+        .limit(STOCKS_LIMIT)
+    )
+    return [
+        {"product_guid": r.product_guid, "barcode": r.barcode, "note": r.note}
+        for r in result.scalars().all()
+    ]
+
+
+async def set_guid_barcode(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    product_guid: str,
+    barcode: str,
+    note: str | None = None,
+) -> dict:
+    """Привязать ручной ШК к товару ФФ без штрихкода в карточке (по product_guid).
+
+    barcode — ШК короба (ITF14) или россыпи (EAN13). Применяется при следующем
+    синке (overlay на barcode_by_guid → авто-вывод россыпь/штук) и СРАЗУ в живой
+    деталке приёмки (overlay на guid_barcodes) — расхождение схлопывается без
+    пересинка. Остатки/«Сопоставление» подтянутся на ближайшем синке.
+    """
+    product_guid = (product_guid or "").strip()
+    barcode = (barcode or "").strip()
+    note = (note or "").strip() or None
+    if not product_guid:
+        raise ValueError("Не указан guid товара")
+    if not barcode.isdigit() or not (8 <= len(barcode) <= 100):
+        raise ValueError("ШК должен быть числом (короб ITF14 — 14 цифр, россыпь EAN13 — 13 цифр)")
+
+    existing = await db.execute(
+        select(FulfillmentGuidBarcode).where(
+            FulfillmentGuidBarcode.project_id == project_id,
+            FulfillmentGuidBarcode.warehouse_id == warehouse_id,
+            FulfillmentGuidBarcode.product_guid == product_guid,
+        )
+    )
+    override = existing.scalar_one_or_none()
+    if override is None:
+        override = FulfillmentGuidBarcode(
+            project_id=project_id,
+            warehouse_id=warehouse_id,
+            product_guid=product_guid,
+            barcode=barcode,
+            note=note,
+        )
+        db.add(override)
+    else:
+        override.barcode = barcode
+        override.note = note
+    await db.commit()
+    return {"product_guid": product_guid, "barcode": barcode, "note": note}
+
+
+async def delete_guid_barcode(db: AsyncSession, project_id: int, warehouse_id: int, product_guid: str) -> None:
+    """Снять ручной ШК — товар вернётся к карточке провайдера (вновь «не опознан»,
+    если карточка по-прежнему без ШК)."""
+    await db.execute(
+        delete(FulfillmentGuidBarcode).where(
+            FulfillmentGuidBarcode.project_id == project_id,
+            FulfillmentGuidBarcode.warehouse_id == warehouse_id,
+            FulfillmentGuidBarcode.product_guid == (product_guid or "").strip(),
+        )
+    )
+    await db.commit()
 
 
 async def _box_pack_row(db: AsyncSession, project_id: int, warehouse_id: int, box_barcode: str) -> dict | None:
@@ -4046,6 +4139,13 @@ async def get_request_detail(
         # остатков. Короб сводится к россыпи: ШК россыпи для матча, qty × units_per_box.
         line_guids = {p["guid"] for p in mig_products}
         guid_barcodes = await _migfull_guid_barcodes(db, project_id, warehouse_id, line_guids)
+        # Ручной ШК для товаров с пустой карточкой (overlay поверх зеркала и пустой
+        # карточки): короб (ITF14) сводим к россыпи по имени «короб N шт.», иначе ШК как есть.
+        guid_overrides = await _load_guid_barcode_overrides(db, project_id, warehouse_id)
+        name_by_guid = {p["guid"]: p.get("name") for p in mig_products}
+        for g, ob in guid_overrides.items():
+            if g in line_guids:
+                guid_barcodes[g] = _migfull_box_pack(ob, name_by_guid.get(g)) or (ob, 1)
         if mig_client is not None:
             # Приёмка: товар без остатка в зеркало не попал → ШК «не опознан».
             # Дотягиваем живой карточкой (commit — не держать транзакцию на HTTP).
@@ -4060,6 +4160,7 @@ async def get_request_detail(
             products.append(
                 {
                     "barcode": barcode,
+                    "product_guid": p["guid"],
                     "vendor_code": None,
                     "name": p.get("name"),
                     "nomenclature_id": nom_id,
