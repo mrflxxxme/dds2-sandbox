@@ -316,6 +316,30 @@ async def test_migfull_partial_guid_resolution_falls_back_not_false_positive(db_
 
 
 @pytest.mark.asyncio
+async def test_verdict_fallback_migfull_counts_units_not_boxes(db_session, project, warehouse):
+    """Флаг расхождения в фолбэке: ФФ migfull в ШТУКАХ (короба×штук), не коробах.
+    Раньше total_qty=коробá сравнивался с нашим итогом в штуках → ложный ⚠️."""
+    base_a, box_a = f"20{_uid()}", f"10{_uid()}"
+    guid_a, guid_b = f"g{_uid()}", f"g{_uid()}"
+    # guid_a — короб 10 шт в зеркале; guid_b НЕ в зеркале → состав неполный → фолбэк
+    await _add(
+        db_session,
+        FulfillmentStock(
+            project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+            barcode=box_a, base_barcode=base_a, units_per_box=10, external_product_id=guid_a,
+        ),
+    )
+    bc_b = f"20{_uid()}"
+    doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(base_a, 30), (bc_b, 2)])
+    await _make_ff(
+        db_session, project.id, warehouse.id, provider="migfull",
+        assembly_request_id=doc.id, raw=_migfull_raw([(guid_a, 3), (guid_b, 2)]), total_qty=5,
+    )
+    # ФФ в штуках: 3 кор ×10 + 2 ×1 = 32 == наш итог 32 → НЕ расхождение (старо: 5 коробов != 32 → ⚠️)
+    assert await _verdict(db_session, project.id, doc.id) is False
+
+
+@pytest.mark.asyncio
 async def test_archived_ff_excluded_from_verdict(db_session, project, warehouse):
     """Локально-архивная заявка ФФ не должна раздувать сводный состав (ложное расхождение)."""
     bc = f"20{_uid()}"
@@ -383,6 +407,69 @@ async def test_mismatch_detail_total_mode_for_skladbot(db_session, project, ware
     assert detail["mode"] == "total"
     assert detail["our_total"] == 10 and detail["ff_total"] == 14
     assert detail["rows"] == []  # по позициям состав недоступен
+
+
+@pytest.mark.asyncio
+async def test_mismatch_detail_total_mode_migfull_counts_units_not_boxes(db_session, project, warehouse):
+    """migfull-отгрузка в фолбэке mode=total: ФФ-итог в ШТУКАХ (короба × штук в коробе),
+    а НЕ в коробах из total_qty (баг: показывало кол-во коробов)."""
+    guid_a, guid_b = f"g{_uid()}", f"g{_uid()}"
+    base_a, box_a = f"20{_uid()}", f"10{_uid()}"
+    # зеркало: guid_a — короб 10 шт (units=10); guid_b НЕ в зеркале → состав неполный → mode=total
+    await _add(
+        db_session,
+        FulfillmentStock(
+            project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+            barcode=box_a, base_barcode=base_a, units_per_box=10, external_product_id=guid_a,
+        ),
+    )
+    doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(base_a, 30)])
+    await _make_ff(
+        db_session, project.id, warehouse.id, provider="migfull",
+        assembly_request_id=doc.id, raw=_migfull_raw([(guid_a, 3), (guid_b, 2)]), total_qty=5,
+    )
+    detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id)
+    assert detail["mode"] == "total"  # guid_b не разрезолвлен → состав неполный
+    # ФФ в ШТУКАХ: guid_a 3 кор ×10 = 30 + guid_b 2 ×1 = 2 → 32; НЕ 5 (коробов из total_qty)
+    assert detail["ff_total"] == 32
+    assert detail["our_total"] == 30
+
+
+@pytest.mark.asyncio
+async def test_mismatch_detail_live_resolves_migfull_units(db_session, project, warehouse, monkeypatch):
+    """live=True: отгрузка с ШК короба в карточке, но guid НЕ в зеркале → дотягиваем
+    живой карточкой → mode=barcode, ФФ-итог в штуках (короб × шт), а не фолбэк в коробах."""
+    from backend.integrations.migfull_client import MigfullClient
+
+    async def _ok(self):
+        return True
+
+    monkeypatch.setattr(MigfullClient, "test_connection", _ok)
+    await fulfillment_service.connect(
+        db_session, project.id, warehouse.id, "migfull", "tok", tenant_guid=str(uuid.uuid4())
+    )
+    box = "12046928659864"  # ШК короба (ITF14)
+    base = fulfillment_service._itf14_to_ean13(box)  # россыпь EAN13
+
+    async def _card(self, guid):
+        return {"name": "YY короб 15 шт.", "barcodes": [{"value": box, "is_primary": True}]}
+
+    monkeypatch.setattr(MigfullClient, "fetch_product", _card)
+
+    guid = f"g{_uid()}"
+    doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(base, 15)])
+    await _make_ff(
+        db_session, project.id, warehouse.id, provider="migfull",
+        assembly_request_id=doc.id, raw=_migfull_raw([(guid, 1)]), total_qty=1,
+    )
+    # без live: guid не в зеркале → фолбэк mode=total
+    d0 = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id)
+    assert d0["mode"] == "total"
+    # live: дотянули карточку → mode=barcode, ФФ = 1 кор × 15 = 15 шт, сошлось с нашим 15
+    d1 = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id, live=True)
+    assert d1["mode"] == "barcode"
+    assert d1["ff_total"] == 15 and d1["our_total"] == 15
+    assert d1["rows"] == []  # совпало по позициям
 
 
 @pytest.mark.asyncio
