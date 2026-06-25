@@ -3,6 +3,7 @@
 // Используется страницей distribute/preview.
 import type { AssemblyDraftRow, HandedUnit, PackageType } from '@/types/api';
 import type { ExcelExportColumn } from '@/lib/utils';
+import { snapToWholePallets } from './boxPallet';
 
 export interface PreviewLine {
     ffId: number;
@@ -68,6 +69,75 @@ export function buildPreviewLines(rows: AssemblyDraftRow[], newcomerNmIds: Set<n
         }
     }
     return out;
+}
+
+export interface TrimWholeResult {
+    /** Линии после среза до целых паллет (неполные отгрузки убраны). */
+    kept: PreviewLine[];
+    /** Штук, снятых с отгрузки (неполные хвосты/направления) — остаются на ФФ. */
+    droppedUnits: number;
+    /** Отгрузок (ФФ→склад), убранных целиком (не набирали целой паллеты). */
+    removedSupplies: number;
+}
+
+/**
+ * Срез линий предпросмотра до ЦЕЛЫХ паллет на КАЖДУЮ отгрузку (ФФ→склад).
+ *
+ * Заявка = одна отгрузка (ФФ-источник → WB-склад). Здесь, в отличие от среза по
+ * городу, каждая такая отгрузка приводится к целым паллетам: короб — смешанная
+ * паллета (Σ долей объёма SKU), моно/сейф — по-SKU. Неполный хвост снимается на ФФ;
+ * отгрузка, не набравшая целой паллеты, убирается полностью.
+ *
+ * `uppOf(nmId, wbName)` — штук в полной паллете SKU на складе-цели (или null — без
+ * габаритов/кратности). SKU без габаритов (б/габ) В СТРОГОМ РЕЖИМЕ ТОЖЕ СНИМАЮТСЯ:
+ * их нельзя посчитать в паллеты, поэтому в «только целые паллеты» они не едут (по
+ * требованию). Чистая функция.
+ */
+export function trimLinesToWholePallets(
+    lines: PreviewLine[],
+    uppOf: (nmId: number, wbName: string) => number | null,
+): TrimWholeResult {
+    // Группа = одна отгрузка по упаковке. Короб — смешанная паллета (все SKU вместе);
+    // моно/сейф — каждый SKU своей паллетой (микс запрещён) → отдельная под-группа.
+    const groups = new Map<string, { wb: string; km: Record<string, number>; meta: Map<number, PreviewLine> }>();
+    for (const l of lines) {
+        if (l.qty <= 0) continue;
+        const gk = l.pkg === 'BOX'
+            ? `${l.ffId}::${l.wbName}::BOX`
+            : `${l.ffId}::${l.wbName}::${l.pkg}::${l.nmId}`;
+        let g = groups.get(gk);
+        if (!g) { g = { wb: l.wbName, km: {}, meta: new Map() }; groups.set(gk, g); }
+        g.km[String(l.nmId)] = (g.km[String(l.nmId)] || 0) + l.qty;
+        g.meta.set(l.nmId, l);
+    }
+
+    const supplyKey = (l: PreviewLine) => `${l.ffId}::${l.wbName}::${l.pkg}`;
+    const before = new Set(lines.filter(l => l.qty > 0).map(supplyKey));
+
+    const kept: PreviewLine[] = [];
+    let droppedUnits = 0;
+    for (const g of groups.values()) {
+        // SKU без габаритов (upp=null) — снимаем целиком (нельзя посчитать в паллеты);
+        // палетизируемые режем до целых паллет.
+        const geomKm: Record<string, number> = {};
+        for (const [nmStr, u] of Object.entries(g.km)) {
+            const upp = uppOf(Number(nmStr), g.wb);
+            if (upp != null && upp > 0) geomKm[nmStr] = u;
+            else droppedUnits += u;
+        }
+        const { kept: kk, dropped } = snapToWholePallets(geomKm, (k) => uppOf(Number(k), g.wb));
+        for (const [nmStr, u] of Object.entries(kk)) {
+            if (u <= 0) continue;
+            kept.push({ ...g.meta.get(Number(nmStr))!, qty: u });
+        }
+        for (const u of Object.values(dropped)) droppedUnits += u;
+    }
+
+    const after = new Set(kept.map(supplyKey));
+    let removedSupplies = 0;
+    for (const k of before) if (!after.has(k)) removedSupplies += 1;
+
+    return { kept, droppedUnits, removedSupplies };
 }
 
 export const sumQty = (ls: PreviewLine[]) => ls.reduce((s, l) => s + l.qty, 0);

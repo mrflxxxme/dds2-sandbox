@@ -33,6 +33,7 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftRead,
     AssemblyDraftRow,
     AssemblyDraftUpdate,
+    CommitSupply,
     HandedUnit,
     HandedUnitItem,
     PackageTypeStr,
@@ -400,6 +401,7 @@ async def commit_draft(
     draft_id: int,
     package_type: str | None = None,
     pallet_counts: dict[str, int] | None = None,
+    supplies: list[CommitSupply] | None = None,
 ) -> AssemblyDraftCommitResponse:
     """
     Validate the distribution, then create one AssemblyRequest per
@@ -481,23 +483,58 @@ async def commit_draft(
     # pair_items[(src_id, wb_name, pkg)] -> {barcode: total_qty}
     pair_items: dict[tuple[int, str, str], dict[str, int]] = {}
     pair_has_newcomer: dict[tuple[int, str, str], bool] = {}
+
+    # Доступно по баркоду в выбранном срезе (Σ tgt) + баркод→nm — для валидации supplies.
+    draft_bc_total: dict[str, int] = {}
+    draft_bc_nm: dict[str, int] = {}
     for row in commit_rows:
         if not row.barcode:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Row {row.nm_id}: barcode is required",
-            )
-        alloc = _allocate_pairs(row.src, row.tgt)
-        pkg = row.package_type or "BOX"
-        is_new = row.nm_id in newcomer_nm_ids
-        for (src_id, wb_name), qty in alloc.items():
-            if qty <= 0:
+            raise HTTPException(status_code=400, detail=f"Row {row.nm_id}: barcode is required")
+        draft_bc_total[row.barcode] = draft_bc_total.get(row.barcode, 0) + sum(int(v or 0) for v in row.tgt.values())
+        draft_bc_nm[row.barcode] = row.nm_id
+
+    if supplies is not None:
+        # Явные отгрузки ФФ→склад (режим «только целые паллеты»): заявки строим ровно
+        # из них, минуя pro-rata. Берём только отгрузки выбранного среза упаковки.
+        supplied_bc: dict[str, int] = {}
+        for s in supplies:
+            spkg = (s.package_type or "BOX").strip().upper() or "BOX"
+            if not _pkg_selected(spkg):
                 continue
-            key = (src_id, wb_name, pkg)
+            key = (int(s.source_ff_id), s.target_wb_name, spkg)
             bucket = pair_items.setdefault(key, {})
-            bucket[row.barcode] = bucket.get(row.barcode, 0) + qty
-            if is_new:
-                pair_has_newcomer[key] = True
+            for bc, raw_qty in s.items.items():
+                qty = int(raw_qty or 0)
+                if qty <= 0:
+                    continue
+                if bc not in draft_bc_total:
+                    raise HTTPException(status_code=400, detail=f"Supply barcode not in draft: {bc}")
+                bucket[bc] = bucket.get(bc, 0) + qty
+                supplied_bc[bc] = supplied_bc.get(bc, 0) + qty
+                if draft_bc_nm.get(bc) in newcomer_nm_ids:
+                    pair_has_newcomer[key] = True
+        # Защита от раздувания: по каждому баркоду нельзя отгрузить больше, чем в черновике.
+        for bc, q in supplied_bc.items():
+            if q > draft_bc_total.get(bc, 0):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Supply qty for {bc} exceeds draft ({q} > {draft_bc_total.get(bc, 0)})",
+                )
+        # Убираем пустые корзины (могли остаться от нулевых отгрузок).
+        pair_items = {k: v for k, v in pair_items.items() if any(q > 0 for q in v.values())}
+    else:
+        for row in commit_rows:
+            alloc = _allocate_pairs(row.src, row.tgt)
+            pkg = row.package_type or "BOX"
+            is_new = row.nm_id in newcomer_nm_ids
+            for (src_id, wb_name), qty in alloc.items():
+                if qty <= 0:
+                    continue
+                key = (src_id, wb_name, pkg)
+                bucket = pair_items.setdefault(key, {})
+                bucket[row.barcode] = bucket.get(row.barcode, 0) + qty
+                if is_new:
+                    pair_has_newcomer[key] = True
 
     if not pair_items:
         raise HTTPException(status_code=400, detail="No (source, target) pairs with non-zero quantity")

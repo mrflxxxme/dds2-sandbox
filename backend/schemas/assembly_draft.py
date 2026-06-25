@@ -103,13 +103,33 @@ class AssemblyDraftRead(BaseModel):
     newcomer_nm_ids: list[int] = Field(default_factory=list)
 
 
+class CommitSupply(BaseModel):
+    """Явная отгрузка ФФ→склад: набор баркодов с количествами на ОДНУ заявку.
+
+    Когда фронт передаёт `supplies`, commit строит заявки ИЗ НИХ напрямую, минуя
+    pro-rata `_allocate_pairs`. Нужно для режима «только целые паллеты»: целые паллеты
+    на каждую отгрузку ФФ→склад нельзя выразить суммами строк (строка хранит Σ по ФФ и
+    Σ по складам раздельно, связку решает аллокатор), поэтому фронт считает конкретную
+    раскладку и присылает её. Бэкенд валидирует, что отгрузка не превышает черновик."""
+
+    source_ff_id: int
+    target_wb_name: str
+    package_type: str = "BOX"
+    items: dict[str, int]  # barcode -> qty
+
+
 class CommitDraftOptions(BaseModel):
     """Опции коммита черновика. `pallet_counts` — map `"{ff_id}::{wb_name}::{pkg}" →
     паллет`: число паллет, авто-проставляемое в каждую создаваемую заявку (считается
     на фронте из габаритов коробки). Ключ отсутствует → берётся плоский
-    `distribution.pallets_count` (старое поведение)."""
+    `distribution.pallets_count` (старое поведение).
+
+    `supplies` (опц.) — явные отгрузки ФФ→склад (режим «только целые паллеты»). Если
+    переданы — заявки создаются ровно из них (минуя pro-rata); неполные отгрузки фронт
+    уже убрал. Σ по баркоду не может превышать черновик (валидация на бэке)."""
 
     pallet_counts: dict[str, int] | None = None
+    supplies: list[CommitSupply] | None = None
 
 
 class AssemblyDraftCommitResponse(BaseModel):

@@ -7,6 +7,7 @@ import type {
     SupplyAcceptanceSlotsResponse,
     AssemblyDraft,
     AssemblyDraftCommitResponse,
+    CommitSupply,
     AssemblyDraftCreate,
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
@@ -537,15 +538,26 @@ export function addWarehouseMethods(api: ApiClient) {
             return api.request<void>('DELETE', `/api/v1/assembly/drafts/${id}`);
         },
         /** @param palletCounts map `"{ffId}::{wbName}::{pkg}" → паллет` — авто-проставляется
-         *  в каждую создаваемую заявку (иначе бэкенд берёт плоский pallets_count черновика). */
-        commitAssemblyDraft(id: number, packageType?: string, palletCounts?: Record<string, number>) {
+         *  в каждую создаваемую заявку (иначе бэкенд берёт плоский pallets_count черновика).
+         *  @param supplies явные отгрузки ФФ→склад (режим «только целые паллеты») — заявки
+         *  создаются ровно из них, минуя pro-rata. Иначе разбивка считается на бэке. */
+        commitAssemblyDraft(
+            id: number,
+            packageType?: string,
+            palletCounts?: Record<string, number>,
+            supplies?: CommitSupply[],
+        ) {
             const qs = new URLSearchParams();
             if (packageType) qs.set('package_type', packageType);
             const q = qs.toString();
-            const body =
-                palletCounts && Object.keys(palletCounts).length > 0
-                    ? { pallet_counts: palletCounts }
-                    : undefined;
+            const hasPallets = palletCounts && Object.keys(palletCounts).length > 0;
+            const hasSupplies = supplies && supplies.length > 0;
+            const body = hasPallets || hasSupplies
+                ? {
+                    ...(hasPallets ? { pallet_counts: palletCounts } : {}),
+                    ...(hasSupplies ? { supplies } : {}),
+                }
+                : undefined;
             return api.request<AssemblyDraftCommitResponse>(
                 'POST',
                 `/api/v1/assembly/drafts/${id}/commit${q ? `?${q}` : ''}`,
