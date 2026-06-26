@@ -10,7 +10,11 @@ interface Candidate {
     vendor: string;
     brand: string;
     subject: string;
+    /** Потребность WB (сколько надо). Для новинок — n/a (allocation-driven). */
     need: number;
+    /** Реально можно отгрузить сейчас: обычные — can_send (с учётом свободного ФФ,
+     *  в сборке, в пути), новинки — total_allocated (кап cold-start по свободному ФФ). */
+    canSend: number;
     free: number;
     isNew: boolean;
 }
@@ -75,20 +79,24 @@ export default function AddFromNeedPanel({
     const regularCandidates = useMemo<Candidate[]>(() => {
         const out: Candidate[] = [];
         for (const a of stockNeed?.articles ?? []) {
-            if (existingNmIds.has(a.nm_id) || a.total_need <= 0) continue;
+            // Только то, что РЕАЛЬНО можно сдать сейчас: can_send>0 (свободный ФФ под
+            // потребность за вычетом уже-в-сборке/в-пути). Потребность без отгружаемого
+            // остатка не показываем — её всё равно нельзя добавить в заявку.
+            if (existingNmIds.has(a.nm_id) || a.can_send <= 0) continue;
             const free = Object.values(a.rf_stocks || {}).reduce((s, v) => s + (v.available || 0), 0);
-            out.push({ nm: a.nm_id, vendor: a.vendor_code, brand: a.brand, subject: a.subject, need: a.total_need, free, isNew: false });
+            out.push({ nm: a.nm_id, vendor: a.vendor_code, brand: a.brand, subject: a.subject, need: a.total_need, canSend: a.can_send, free, isNew: false });
         }
-        return out.sort((x, y) => y.need - x.need);
+        return out.sort((x, y) => y.canSend - x.canSend);
     }, [stockNeed, existingNmIds]);
 
     const newcomerCandidates = useMemo<Candidate[]>(() => {
         const out: Candidate[] = [];
         for (const r of coldRows) {
+            // total_allocated — сколько cold-start реально отгружает (кап по свободному ФФ).
             if (existingNmIds.has(r.nm_id) || r.total_allocated <= 0) continue;
-            out.push({ nm: r.nm_id, vendor: r.article_seller || `nm:${r.nm_id}`, brand: r.brand || '', subject: r.subject || '', need: r.total_allocated, free: r.rf_qty, isNew: true });
+            out.push({ nm: r.nm_id, vendor: r.article_seller || `nm:${r.nm_id}`, brand: r.brand || '', subject: r.subject || '', need: r.total_allocated, canSend: r.total_allocated, free: r.rf_qty, isNew: true });
         }
-        return out.sort((x, y) => y.need - x.need);
+        return out.sort((x, y) => y.canSend - x.canSend);
     }, [coldRows, existingNmIds]);
 
     const baseCandidates = tab === 'regular' ? regularCandidates : newcomerCandidates;
@@ -183,7 +191,7 @@ export default function AddFromNeedPanel({
                 <button className="btn btn-secondary btn-sm" onClick={() => setOpen(o => !o)}>
                     {open ? '▾' : '▸'} ➕ Добавить из потребности
                 </button>
-                {!open && <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>обычные товары и новинки из «Потребности по складам», целыми паллетами</span>}
+                {!open && <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>обычные и новинки — только то, что реально можно отгрузить сейчас (свободный ФФ), целыми паллетами</span>}
                 {open && checkedCount > 0 && (
                     <button className="btn btn-primary btn-sm" onClick={handleAdd} disabled={adding}>
                         {adding ? 'Добавление…' : `Добавить отмеченные (${checkedCount})`}
@@ -236,8 +244,9 @@ export default function AddFromNeedPanel({
                                         </th>
                                         <th style={{ padding: '4px 8px', fontWeight: 600 }}>Артикул</th>
                                         <th style={{ padding: '4px 8px', fontWeight: 600 }}>Бренд · Категория</th>
-                                        <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }}>Потребность</th>
-                                        <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }}>Свободно ФФ</th>
+                                        <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title="Сколько надо WB (потребность)">Потребность</th>
+                                        <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title="Реально можно отгрузить сейчас — попадёт в заявку">✅ Можно отправить</th>
+                                        <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title="Свободный остаток на ФФ">Свободно ФФ</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -250,8 +259,9 @@ export default function AddFromNeedPanel({
                                                 {c.isNew && <span style={{ marginRight: 4, color: '#a855f7', fontWeight: 700 }}>🆕</span>}{c.vendor}
                                             </td>
                                             <td style={{ padding: '5px 8px', color: 'var(--color-text-muted)' }}>{[c.brand, c.subject].filter(Boolean).join(' · ')}</td>
-                                            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{formatNumber(c.need, 0)}</td>
-                                            <td style={{ padding: '5px 8px', textAlign: 'right', color: c.free > 0 ? 'var(--color-success)' : 'var(--color-text-muted)' }}>{formatNumber(c.free, 0)}</td>
+                                            <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--color-text-muted)' }}>{c.isNew ? '—' : formatNumber(c.need, 0)}</td>
+                                            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 700, color: 'var(--color-success)' }} title="Реально отгружаемое сейчас">{formatNumber(c.canSend, 0)}</td>
+                                            <td style={{ padding: '5px 8px', textAlign: 'right', color: c.free > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{formatNumber(c.free, 0)}</td>
                                         </tr>
                                     ))}
                                 </tbody>
