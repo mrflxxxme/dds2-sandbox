@@ -4,6 +4,7 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber, exportToExcel } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import CreatePaymentRequestModal from '../warehouse/logistics/components/CreatePaymentRequestModal';
+import { usePermissions } from '@/lib/hooks/usePermissions';
 import type {
     PaymentRequestRow,
     PaymentRequestDetail,
@@ -47,6 +48,10 @@ interface Props {
 // ─── Component ─────────────────────────────────────────────────────────────────
 
 export default function PaymentsPanel({ embedded = false }: Props) {
+    // Реальная запись платёжки в банк — только owner/admin (бэкенд тоже гейтит require_project_admin).
+    const { canManage } = usePermissions();
+    const canBankWrite = canManage();
+
     const [items, setItems] = useState<PaymentRequestRow[]>([]);
     const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(true);
@@ -352,8 +357,8 @@ export default function PaymentsPanel({ embedded = false }: Props) {
             {/* Layout: table + drawer */}
             <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                    {/* Bulk «создать оплаты в банке» */}
-                    {items.length > 0 && pendingIds.length > 0 && (
+                    {/* Bulk «создать оплаты в банке» — только admin/owner */}
+                    {canBankWrite && items.length > 0 && pendingIds.length > 0 && (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
                             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', color: 'var(--color-text-muted)' }}>
                                 <input type="checkbox" checked={allPendingSelected} onChange={toggleAllPending} style={{ cursor: 'pointer' }} />
@@ -402,7 +407,7 @@ export default function PaymentsPanel({ embedded = false }: Props) {
                                     key: '_sel', label: '', sortable: false, align: 'center' as const, width: '40px',
                                     exportValue: () => '',
                                     render: (_: unknown, row: PaymentRequestRow) => (
-                                        row.status === 'PENDING_REVIEW' ? (
+                                        canBankWrite && row.status === 'PENDING_REVIEW' ? (
                                             <input
                                                 type="checkbox"
                                                 checked={selected.has(row.id)}
@@ -515,8 +520,8 @@ export default function PaymentsPanel({ embedded = false }: Props) {
                                     </div>
                                 )}
 
-                                {/* Create draft button — only for PENDING_REVIEW */}
-                                {detail.status === 'PENDING_REVIEW' && (
+                                {/* Create draft button — only for PENDING_REVIEW, admin/owner */}
+                                {canBankWrite && detail.status === 'PENDING_REVIEW' && (
                                     <div style={{ marginBottom: 16 }}>
                                         {draftErrors.length > 0 && (
                                             <div style={{ padding: '8px 12px', marginBottom: 8, borderRadius: 8, background: 'rgba(239,68,68,0.08)', fontSize: 12, color: 'var(--color-danger)' }}>
