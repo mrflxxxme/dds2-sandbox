@@ -221,7 +221,24 @@ interface OrderCitiesStatus {
     last_updated: string | null;
 }
 
-export function WarehouseNeedView() {
+export interface WarehouseNeedViewProps {
+    /** id текущего черновика, когда вкладка встроена в страницу «Сборка».
+     *  Задан → «Создать заявку» доливает строки в этот черновик (без навигации). */
+    embeddedDraftId?: number;
+    /** nm_id, уже лежащие в черновике → скрыть из таблицы потребности и «Новинки». */
+    hiddenNmIds?: Set<number>;
+    /** Вызвать после долива строк в черновик → родитель переключит вкладку. */
+    onRowsAddedToDraft?: () => void;
+    /** На mount авто-проверить приёмку (обычные+новинки), cache-first. */
+    autoCheckAcceptance?: boolean;
+}
+
+export function WarehouseNeedView({
+    embeddedDraftId,
+    hiddenNmIds,
+    onRowsAddedToDraft,
+    autoCheckAcceptance,
+}: WarehouseNeedViewProps = {}) {
     const params = useParams();
     const router = useRouter();
     const slug = params?.slug as string | undefined;
@@ -283,6 +300,9 @@ export function WarehouseNeedView() {
     const [checkedIds, setCheckedIds] = useState<Set<number>>(new Set());
     const [assemblyWarehouseId, setAssemblyWarehouseId] = useState<number | null>(null);
     const hypoMenuRef = useRef<HTMLDivElement>(null);
+    /** One-shot гард авто-проверки приёмки (R3): не повторять при ре-рендере и в
+     *  StrictMode double-mount; авто-проверка — ровно один прогон на жизнь компонента. */
+    const autoAcceptanceRanRef = useRef(false);
 
     /* ── WB Acceptance check (доступность складов через WB API) ── */
     const [acceptanceLoading, setAcceptanceLoading] = useState(false);
@@ -1422,6 +1442,7 @@ export function WarehouseNeedView() {
         if (!data?.articles) return result;
         for (const a of data.articles) {
             if (newcomerSet.has(a.nm_id)) continue;
+            if (hiddenNmIds?.has(a.nm_id)) continue; // уже в черновике (embedded)
             result.all++;
             if (a.deficit > 0) result.deficit++;
             if (a.can_send > 0) result.can_send++;
@@ -1437,7 +1458,7 @@ export function WarehouseNeedView() {
             }
         }
         return result;
-    }, [data, newcomerSet]);
+    }, [data, newcomerSet, hiddenNmIds]);
 
     /** SKU имеет хотя бы один планируемый склад (need>0), куда WB принимает по
      *  options, но лимита приёмки нет (⌛: free+paid=0 / нет данных) — нужна
@@ -1502,6 +1523,8 @@ export function WarehouseNeedView() {
             // на основной таблице их скрываем. У них total_need=0 (нет orders),
             // в WB-колонках прочерки, создают визуальный шум.
             if (newcomerSet.has(a.nm_id)) return false;
+            // Встроенный режим: артикул уже в текущем черновике → скрываем из таблицы.
+            if (hiddenNmIds?.has(a.nm_id)) return false;
             if (brandFilter && a.brand !== brandFilter) return false;
             if (subjectFilter && a.subject !== subjectFilter) return false;
             if (searchQuery) {
@@ -1548,7 +1571,7 @@ export function WarehouseNeedView() {
             if (noLimitFilter && !skuHasNoLimitCell(a)) return false;
             return true;
         });
-    }, [data, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet, showAdvanced, getSendWithBump, noLimitFilter, skuHasNoLimitCell]);
+    }, [data, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet, showAdvanced, getSendWithBump, noLimitFilter, skuHasNoLimitCell, hiddenNmIds]);
 
     /** WB-колонки в матрице, отфильтрованные по packageFilter.
      *  При packageFilter='mono' — оставляем только склады где для хотя бы одного
@@ -1790,17 +1813,27 @@ export function WarehouseNeedView() {
     /* Cold-start: сортировка + ИТОГО (под колонками) */
     /** Cold-start строки под верхние фильтры (бренд / категория / поиск) — чтобы
      *  селект категории работал и на вкладке «Новинки» (рендер, итоги, «Выбрать все»). */
+    /** Кол-во новинок для бейджа вкладки «Новинки» — общий тотал (без brand/search
+     *  фильтров), но в embedded-режиме за вычетом уже добавленных в черновик. */
+    const coldStartRowsCount = useMemo(() => {
+        const rows = coldStartData?.rows ?? [];
+        if (!hiddenNmIds) return rows.length;
+        return rows.reduce((n, r) => n + (hiddenNmIds.has(r.nm_id) ? 0 : 1), 0);
+    }, [coldStartData, hiddenNmIds]);
+
     const filteredColdStartRows = useMemo(() => {
         if (!coldStartData) return [];
         const q = searchQuery.trim().toLowerCase();
         return coldStartData.rows.filter(r => {
+            // Встроенный режим: новинка уже в текущем черновике → скрываем.
+            if (hiddenNmIds?.has(r.nm_id)) return false;
             if (brandFilter && r.brand !== brandFilter) return false;
             if (subjectFilter && r.subject !== subjectFilter) return false;
             if (q && !(r.article_seller || '').toLowerCase().includes(q)) return false;
             if (noLimitFilter && !coldStartHasNoLimit(r)) return false;
             return true;
         });
-    }, [coldStartData, brandFilter, subjectFilter, searchQuery, noLimitFilter, coldStartHasNoLimit]);
+    }, [coldStartData, brandFilter, subjectFilter, searchQuery, noLimitFilter, coldStartHasNoLimit, hiddenNmIds]);
 
     /** Колонки-склады для таблицы новинок. При активном «Нет лимита» оставляем
      *  только склады, где у видимой новинки есть ⌛ (план>0, нет лимита приёмки) —
@@ -2285,6 +2318,16 @@ export function WarehouseNeedView() {
                 ? [...usedSourceIds]
                 : (assemblyWarehouseId != null ? [assemblyWarehouseId] : []);
 
+            // Встроенный режим (вкладка «Потребность» на странице «Сборка»):
+            // вместо создания нового черновика+навигации доливаем строки в текущий
+            // черновик и просим родителя переключить вкладку. Backend мёржит по
+            // (nm_id, pkg) и делает union складов — package_type/ключ строки сохраняются.
+            if (embeddedDraftId != null) {
+                await api.addAssemblyDraftRows(embeddedDraftId, draftRows);
+                onRowsAddedToDraft?.();
+                return;
+            }
+
             const draft = await api.createAssemblyDraft({
                 distribution: {
                     source_warehouse_ids: sourceIdsList,
@@ -2306,7 +2349,8 @@ export function WarehouseNeedView() {
             setCreatingAssembly(false);
         }
     }, [data, assemblyWarehouseId, checkedIds, router, slug, acceptanceMap, packageFilter,
-        coldStartData, newcomerBoxedAlloc, resolveSkuLevelPpb, regularShipmentAlloc]);
+        coldStartData, newcomerBoxedAlloc, resolveSkuLevelPpb, regularShipmentAlloc,
+        embeddedDraftId, onRowsAddedToDraft]);
 
     /* (cold-start новинки идут через тот же handleCreateAssembly — box-кратно) */
 
@@ -2453,6 +2497,24 @@ export function WarehouseNeedView() {
             setAcceptanceLoading(false);
         }
     }, [data, slug, coldStartData, coldStartQtyOverrides, coldStartMinPack, coldStartShipPct, coldStartShipFloor, analysisDays]);
+
+    /* ── R3: авто-проверка приёмки на mount (embedded-режим) ──
+     *  Один прогон на жизнь компонента (useRef-гард от StrictMode double-mount),
+     *  cache-first (handleCheckAcceptance шлёт force=false пока acceptanceMap пуст →
+     *  читает Redis-кэш, не дёргает WB сверх лимита). Ждём загрузки data; если
+     *  acceptance уже восстановлен из localStorage (свежий F5) — не дублируем запрос.
+     *  Рендер таблицы не блокируется: проверка идёт фоном. */
+    useEffect(() => {
+        if (!autoCheckAcceptance) return;
+        if (autoAcceptanceRanRef.current) return;
+        if (!data?.articles?.length || !data.warehouses?.length) return; // ждём data
+        if (acceptanceMap.size > 0) {           // уже есть результат (LS-restore) — force не нужен
+            autoAcceptanceRanRef.current = true;
+            return;
+        }
+        autoAcceptanceRanRef.current = true;
+        void handleCheckAcceptance();
+    }, [autoCheckAcceptance, data, acceptanceMap, handleCheckAcceptance]);
 
     const handleResetAcceptance = useCallback(() => {
         setAcceptanceMap(new Map());
@@ -2797,7 +2859,7 @@ export function WarehouseNeedView() {
                     onClick={() => setColdStartMode(v => !v)}
                     title="Новинки с остатком (нет данных для автоматической локализации): распределить по бенчмарку проекта"
                 >
-                    🆕 Новинки ({coldStartData?.rows.length ?? '…'})
+                    🆕 Новинки ({coldStartData ? formatNumber(coldStartRowsCount, 0) : '…'})
                 </button>
                 <button
                     className={`btn btn-sm ${palletMode ? 'btn-primary' : 'btn-secondary'}`}

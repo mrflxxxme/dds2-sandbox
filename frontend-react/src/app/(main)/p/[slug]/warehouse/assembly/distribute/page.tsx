@@ -7,9 +7,13 @@ import { dropCommittedRows } from '@/lib/utils/assemblyDraftReconcile';
 import { parseBoxSize } from '@/lib/utils/boxPallet';
 import { consolidatePalletsInDraftRows } from '@/lib/utils/assemblyPalletConsolidate';
 import { Toast } from '@/components';
+import TabLayout from '@/components/TabLayout';
 import DraftPreview from './components/DraftPreview';
 import AddFromNeedPanel from './components/AddFromNeedPanel';
 import AddByBarcodePanel from './components/AddByBarcodePanel';
+import { WarehouseNeedView } from '../../analytics/components/WarehouseNeedView';
+import { BoxMultiplicityView } from '../../box-multiplicity/BoxMultiplicityView';
+import { PalletSizesView } from '../../pallet-sizes/PalletSizesView';
 import type {
     AssemblyDraft,
     AssemblyDraftDistribution,
@@ -20,6 +24,14 @@ import type {
 } from '@/types/api';
 
 const AUTOSAVE_DEBOUNCE_MS = 5000;
+
+type AssemblyTab = 'draft' | 'need' | 'box' | 'pallets';
+const TABS: { key: AssemblyTab; label: string }[] = [
+    { key: 'draft', label: '📝 Черновик сборки' },
+    { key: 'need', label: '🏬 Потребность по складам' },
+    { key: 'box', label: '📦 Кратность' },
+    { key: 'pallets', label: '🚚 Паллеты' },
+];
 
 /** Схлопнуть дубли строк по nm_id+упаковка, оставляя первую. */
 function dedupeRows(rows: AssemblyDraftRow[]): AssemblyDraftRow[] {
@@ -32,16 +44,27 @@ function dedupeRows(rows: AssemblyDraftRow[]): AssemblyDraftRow[] {
     });
 }
 
-/** Единая страница «Черновик сборки»: лёгкий редактор строк + предпросмотр и
- *  создание заявок на одном экране (матрица «Распределение» удалена). */
+/** Единая страница «Сборка»: вкладки Черновик / Потребность по складам / Кратность /
+ *  Паллеты. Черновик — синглтон проекта (getOrCreateCurrentDraft), редактор строк +
+ *  предпросмотр и создание заявок на одном экране. */
 export default function AssemblyDraftPage() {
     const params = useParams();
     const router = useRouter();
     const searchParams = useSearchParams();
     const slug = params.slug as string;
 
-    const draftIdParam = searchParams.get('draft');
-    const draftId = draftIdParam ? Number(draftIdParam) : null;
+    // Активная вкладка ← из ?tab=. useSearchParams пуст на 1-м рендере — дефолт 'draft'.
+    const tabParam = searchParams.get('tab');
+    const activeTab: AssemblyTab =
+        tabParam === 'need' || tabParam === 'box' || tabParam === 'pallets' ? tabParam : 'draft';
+
+    const setTab = useCallback((key: string) => {
+        const sp = new URLSearchParams(searchParams.toString());
+        if (key === 'draft') sp.delete('tab');
+        else sp.set('tab', key);
+        const qs = sp.toString();
+        router.replace(qs ? `?${qs}` : `/p/${slug}/warehouse/assembly/distribute`, { scroll: false });
+    }, [searchParams, router, slug]);
 
     // ─── State ───────────────────────────────────────────────────────────
     const [loading, setLoading] = useState(true);
@@ -75,6 +98,9 @@ export default function AssemblyDraftPage() {
     const lastSavedJsonRef = useRef<string>('');
     const initialLoadRef = useRef(false);
 
+    // id текущего черновика (синглтон). null до первой загрузки.
+    const draftId = draft?.id ?? null;
+
     const showToast = useCallback((message: string, type: 'success' | 'error') => setToast({ message, type }), []);
 
     // ─── Apply a draft payload into state (initial load + reload after commit) ─
@@ -94,20 +120,15 @@ export default function AssemblyDraftPage() {
         lastSavedJsonRef.current = JSON.stringify(d.distribution);
     }, []);
 
-    // ─── Load draft + reference data ─────────────────────────────────────
+    // ─── Load current draft (singleton) + reference data ─────────────────
     useEffect(() => {
-        if (!draftId) {
-            setError('Не указан ID черновика');
-            setLoading(false);
-            return;
-        }
         let cancelled = false;
         const load = async () => {
             setLoading(true);
             setError(null);
             try {
                 const [draftResp, whs, stockNeedResp] = await Promise.all([
-                    api.getAssemblyDraft(draftId),
+                    api.getOrCreateCurrentDraft(),
                     api.getWarehouses(),
                     api.getStockNeed(14, 14, 'actual').catch(() => null) as Promise<StockNeedResponse | null>,
                 ]);
@@ -124,7 +145,7 @@ export default function AssemblyDraftPage() {
         };
         load();
         return () => { cancelled = true; };
-    }, [draftId, applyDraft]);
+    }, [applyDraft]);
 
     // Кратность короба + размер + предмет/бренд per nm (для редактора и предпросмотра).
     useEffect(() => {
@@ -220,14 +241,13 @@ export default function AssemblyDraftPage() {
 
     const ensureSaved = useCallback(() => saveDraft(true), [saveDraft]);
 
-    // Перезагрузить черновик после партиального commit (whole-only оставил строки).
+    // Перезагрузить текущий черновик (после партиального commit или долива из потребности).
     const reloadDraft = useCallback(async () => {
-        if (!draftId) return;
         try {
-            const d = await api.getAssemblyDraft(draftId);
+            const d = await api.getOrCreateCurrentDraft();
             applyDraft(d);
         } catch { /* ignore */ }
-    }, [draftId, applyDraft]);
+    }, [applyDraft]);
 
     // Дозалив строк из панелей A/B: сперва флашим локальные правки редактора (иначе
     // серверный merge сел бы на устаревший черновик и reload затёр бы их), затем
@@ -239,6 +259,13 @@ export default function AssemblyDraftPage() {
         await api.addAssemblyDraftRows(draftId, newRows);
         await reloadDraft();
     }, [draftId, ensureSaved, reloadDraft]);
+
+    // Долив строк из встроенной вкладки «Потребность» → перезагрузить черновик и
+    // переключиться на вкладку 'draft', чтобы пользователь увидел добавленное.
+    const handleRowsAdded = useCallback(async () => {
+        await reloadDraft();
+        setTab('draft');
+    }, [reloadDraft, setTab]);
 
     // ─── Autosave: debounce 5s after any change ──────────────────────────
     useEffect(() => {
@@ -321,6 +348,13 @@ export default function AssemblyDraftPage() {
         return s;
     }, [rows, handedUnits]);
 
+    // nm_id строк черновика — скрыть из таблицы потребности во встроенной вкладке.
+    const draftNmIds = useMemo(() => {
+        const s = new Set<number>();
+        for (const r of rows) s.add(r.nm_id);
+        return s;
+    }, [rows]);
+
     const geomReady = geomState === 'ready';
     const backToList = useCallback(() => router.push(`/p/${slug}/warehouse/assembly`), [router, slug]);
 
@@ -332,11 +366,11 @@ export default function AssemblyDraftPage() {
             </div>
         );
     }
-    if (error || !draftId) {
+    if (error || !draft) {
         return (
             <div className="animate-in">
                 <div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>
-                    {error || 'Не указан ID черновика'}
+                    {error || 'Не удалось загрузить черновик'}
                     <div style={{ marginTop: 12 }}>
                         <button className="btn btn-secondary btn-sm" onClick={backToList}>← К заявкам на сборку</button>
                     </div>
@@ -353,7 +387,7 @@ export default function AssemblyDraftPage() {
             <div className="page-header" style={{ marginBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, flexWrap: 'wrap' }}>
                     <button className="btn btn-secondary btn-sm" onClick={backToList}>← Назад</button>
-                    <h1 className="page-title" style={{ margin: 0 }}>Черновик сборки</h1>
+                    <h1 className="page-title" style={{ margin: 0 }}>Сборка</h1>
                     {editingName ? (
                         <input
                             className="form-input"
@@ -372,55 +406,82 @@ export default function AssemblyDraftPage() {
                             ✏️ {name || 'Без названия'}
                         </button>
                     )}
-                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{saving ? 'Сохранение…' : 'Автосохранение включено'}</span>
-                    <div style={{ flex: 1 }} />
-                    <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={handleConsolidatePallets}
-                        disabled={!geomReady}
-                        title={geomReady
-                            ? 'Слить недогруженные города одного округа на приоритетный склад до целых паллет (без перезавоза; хвост <20% остаётся на ФФ).'
-                            : 'Геометрия коробок ещё загружается…'}
-                    >
-                        📦 Дозабить паллеты
-                    </button>
+                    {activeTab === 'draft' && (
+                        <>
+                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{saving ? 'Сохранение…' : 'Автосохранение включено'}</span>
+                            <div style={{ flex: 1 }} />
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={handleConsolidatePallets}
+                                disabled={!geomReady}
+                                title={geomReady
+                                    ? 'Слить недогруженные города одного округа на приоритетный склад до целых паллет (без перезавоза; хвост <20% остаётся на ФФ).'
+                                    : 'Геометрия коробок ещё загружается…'}
+                            >
+                                📦 Дозабить паллеты
+                            </button>
+                        </>
+                    )}
                 </div>
             </div>
 
-            <AddFromNeedPanel
-                stockNeed={stockNeed}
-                existingNmIds={existingNmIds}
-                nmPpb={nmPpb}
-                nmBoxSize={nmBoxSize}
-                palletOverrides={palletOverrides}
-                districtMap={districtRecord}
-                onAddRows={handleAddRows}
-                onToast={showToast}
-            />
-            <AddByBarcodePanel
-                nmPpb={nmPpb}
-                nmBoxSize={nmBoxSize}
-                palletOverrides={palletOverrides}
-                districtMap={districtRecord}
-                onAddRows={handleAddRows}
-                onToast={showToast}
-            />
+            <TabLayout tabs={TABS} active={activeTab} onChange={setTab} />
 
-            <DraftPreview
-                slug={slug}
-                draftId={draftId}
-                rows={rows}
-                newcomerNmIds={newcomerNmIds}
-                warehouses={warehouses}
-                nmPpb={nmPpb}
-                nmMeta={nmMeta}
-                nmBoxSize={nmBoxSize}
-                palletOverrides={palletOverrides}
-                geomReady={geomReady}
-                ensureSaved={ensureSaved}
-                onToast={showToast}
-                onReloadDraft={reloadDraft}
-            />
+            {/* Вкладка «Черновик сборки» — редактор строк + предпросмотр + commit */}
+            {activeTab === 'draft' && (
+                <>
+                    <AddFromNeedPanel
+                        stockNeed={stockNeed}
+                        existingNmIds={existingNmIds}
+                        nmPpb={nmPpb}
+                        nmBoxSize={nmBoxSize}
+                        palletOverrides={palletOverrides}
+                        districtMap={districtRecord}
+                        onAddRows={handleAddRows}
+                        onToast={showToast}
+                    />
+                    <AddByBarcodePanel
+                        nmPpb={nmPpb}
+                        nmBoxSize={nmBoxSize}
+                        palletOverrides={palletOverrides}
+                        districtMap={districtRecord}
+                        onAddRows={handleAddRows}
+                        onToast={showToast}
+                    />
+
+                    <DraftPreview
+                        slug={slug}
+                        draftId={draft.id}
+                        rows={rows}
+                        newcomerNmIds={newcomerNmIds}
+                        warehouses={warehouses}
+                        nmPpb={nmPpb}
+                        nmMeta={nmMeta}
+                        nmBoxSize={nmBoxSize}
+                        palletOverrides={palletOverrides}
+                        geomReady={geomReady}
+                        ensureSaved={ensureSaved}
+                        onToast={showToast}
+                        onReloadDraft={reloadDraft}
+                    />
+                </>
+            )}
+
+            {/* Вкладка «Потребность по складам» — встроенный WarehouseNeedView */}
+            {activeTab === 'need' && (
+                <WarehouseNeedView
+                    embeddedDraftId={draft.id}
+                    hiddenNmIds={draftNmIds}
+                    onRowsAddedToDraft={handleRowsAdded}
+                    autoCheckAcceptance
+                />
+            )}
+
+            {/* Вкладка «Кратность» */}
+            {activeTab === 'box' && <BoxMultiplicityView />}
+
+            {/* Вкладка «Паллеты» */}
+            {activeTab === 'pallets' && <PalletSizesView />}
         </div>
     );
 }
