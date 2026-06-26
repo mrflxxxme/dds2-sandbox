@@ -20,7 +20,11 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from backend.scheduler.jobs.ai_digest import send_daily_digests
-from backend.scheduler.jobs.fbo_supplies import enrich_all_projects_fbo_supplies, sync_all_projects_fbo_supplies
+from backend.scheduler.jobs.fbo_supplies import (
+    enrich_all_projects_fbo_supplies,
+    refresh_all_projects_assemblies_from_fbo,
+    sync_all_projects_fbo_supplies,
+)
 from backend.scheduler.jobs.fulfillment_sync import sync_all_fulfillment_warehouses
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
@@ -236,6 +240,18 @@ def start_scheduler():
         id="fbo_supplies_enrich",
         name="FBO supplies enrich (every 3h)",
         replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # Assembly FBO auto-refresh: every 1 hour — фоновая «Из FBO» для активных
+    # сборок (расхождение наполнения обновляется без ручного клика в заявку).
+    _scheduler.add_job(
+        refresh_all_projects_assemblies_from_fbo,
+        trigger=IntervalTrigger(hours=1),
+        id="assembly_fbo_autorefresh",
+        name="Assembly FBO auto-refresh (every 1h)",
+        replace_existing=True,
+        max_instances=1,
         misfire_grace_time=600,
     )
 

@@ -230,6 +230,52 @@ def test_start_scheduler_disabled_without_ff_starts_nothing(monkeypatch):
         sched_mod._scheduler = original
 
 
+# ─── Прод-конфиг FF-тиринга (дефолты backend/config.py) ──────────────────────
+
+
+def test_prod_ff_fast_covers_natali_wms_wms2():
+    """натали(1)/wms(2)/wms 2(12) синкаются КАЖДЫЕ 10 МИН (контур FAST).
+
+    Репро бага: wms(2) сидел в SLOW(30мин), wms 2(12) вообще не был перечислен →
+    падал в DEFAULT(60мин). Источник истины — дефолты config.py (FAST=5,1,2,12).
+    """
+    from backend.config import settings
+    from backend.scheduler import _parse_warehouse_ids
+
+    fast = set(_parse_warehouse_ids(settings.FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS))
+    slow = set(_parse_warehouse_ids(settings.FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS))
+
+    # натали(1), wms(2), wms 2(12) — в FAST.
+    assert {1, 2, 12} <= fast, f"FAST={fast} должен включать натали(1)/wms(2)/wms2(12)"
+    # интервал FAST = 10 минут.
+    assert settings.FULFILLMENT_SYNC_FAST_INTERVAL_MINUTES == 10
+    # эти склады не должны параллельно сидеть в SLOW (иначе синк дважды/разнобой).
+    assert not ({1, 2, 12} & slow), f"SLOW={slow} не должен пересекаться с натали/wms/wms2"
+
+
+def test_prod_ff_tiering_registers_10min_fast_job(monkeypatch):
+    """Сквозная проверка: с дефолтами прод-конфига планировщик регистрирует
+    FAST-джобу на 10 мин, покрывающую натали/wms/wms2, а DEFAULT их исключает."""
+    from backend.config import settings
+
+    jobs = _ff_jobs(
+        monkeypatch,
+        include_default=True,
+        fast=settings.FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS,
+        fast_min=settings.FULFILLMENT_SYNC_FAST_INTERVAL_MINUTES,
+        slow=settings.FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS,
+        slow_min=settings.FULFILLMENT_SYNC_SLOW_INTERVAL_MINUTES,
+        default_min=settings.FULFILLMENT_SYNC_INTERVAL_MINUTES,
+    )
+    assert "fulfillment_sync_fast" in jobs
+    fast_ids = set(jobs["fulfillment_sync_fast"]["kwargs"]["warehouse_ids"])
+    assert {1, 2, 12} <= fast_ids
+    assert jobs["fulfillment_sync_fast"]["trigger"].interval == timedelta(minutes=10)
+    # DEFAULT-контур исключает приоритетные склады (не синкаем дважды).
+    excluded = set(jobs["fulfillment_sync"]["kwargs"]["exclude_warehouse_ids"])
+    assert {1, 2, 12} <= excluded
+
+
 def test_get_scheduler_info_when_not_running():
     """get_scheduler_info returns running=False when scheduler is None."""
     import backend.scheduler as sched_mod

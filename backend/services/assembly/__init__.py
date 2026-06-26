@@ -10,7 +10,7 @@ Modules:
   - analytics: FBO sync and logistics analytics
 """
 
-from .analytics import get_logistics_analytics, refresh_from_fbo
+from .analytics import get_logistics_analytics, refresh_active_assemblies_from_fbo, refresh_from_fbo
 from .crud import (
     _build_items_with_stock,
     _build_response,
@@ -73,5 +73,6 @@ __all__ = [
     "unassign_vehicle",
     # analytics
     "get_logistics_analytics",
+    "refresh_active_assemblies_from_fbo",
     "refresh_from_fbo",
 ]
