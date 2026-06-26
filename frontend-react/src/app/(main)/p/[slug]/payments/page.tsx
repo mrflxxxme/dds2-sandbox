@@ -1,7 +1,5 @@
 'use client';
-import PaymentsPanel, { PAYMENT_STATUS_MAP } from './PaymentsPanel';
-
-export { PAYMENT_STATUS_MAP };
+import PaymentsPanel from './PaymentsPanel';
 
 export default function PaymentsPage() {
     return <PaymentsPanel />;
