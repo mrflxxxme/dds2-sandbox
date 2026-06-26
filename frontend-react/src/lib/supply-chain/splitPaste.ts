@@ -134,8 +134,8 @@ export interface PriceOverwrite {
 export const buildPriceOverwrites = (
     rows: PriceOverwriteRow[],
     foisByBarcode: Record<string, AvailableItem[]>,
+    consumed: Record<number, number> = {},
 ): PriceOverwrite[] => {
-    const consumed: Record<number, number> = {};
     const updates: PriceOverwrite[] = [];
     for (const r of rows) {
         const price = parseFloat(r.priceRaw) || 0;
@@ -154,6 +154,73 @@ export const buildPriceOverwrites = (
             if (Math.abs(price - oldPrice) > 0.0001) {
                 updates.push({ factory_order_item_id: s.factory_order_item_id, new_price_cny: r.priceRaw });
             }
+        }
+    }
+    return updates;
+};
+
+/**
+ * Price overwrites for the «!» (exceeded → extend_plan) basket.
+ *
+ * Mirrors the exceeded branch of the vehicle paste-add EXACTLY — plain FIFO consume
+ * across the barcode's FOIs (NOT matching-first; the overflow basket grows whatever
+ * line exists), then the leftover extends `fois[0]`. Every FOI that receives qty
+ * (including the extend target) whose current price differs from the paste row is
+ * repriced, so the FOIs the add books onto and the FOIs we reprice are the same set.
+ *
+ * Why this exists (prod incident V-0031): when a paste row's qty EXCEEDS the order
+ * line's remaining, the row lands in the «!» basket, which `buildPriceOverwrites`
+ * (fed only ✓ valid rows) never saw. The qty got booked via extend_plan but the
+ * pasted price was never written to the FactoryOrderItem → the new vehicle line
+ * snapshotted `price_cny = 0`. 16 carpet lines (858 pcs) landed at 0 ¥ because the
+ * pasted qty 108/102 exceeded the order line's planned 100.
+ *
+ * `consumed` MUST be the SAME map already populated by `buildPriceOverwrites` for
+ * the ✓ valid rows of this batch — the add books valid first, then exceeded, so
+ * cumulative consumption across both baskets has to line up (a FOI partly eaten by
+ * a valid row has less room for the exceeded overflow).
+ *
+ * Only writes when overwrite was chosen AND the price actually differs: a paste row
+ * whose price already equals the FOI price produces no update (no silent re-write).
+ */
+export const buildExceededPriceOverwrites = (
+    rows: PriceOverwriteRow[],
+    foisByBarcode: Record<string, AvailableItem[]>,
+    consumed: Record<number, number> = {},
+): PriceOverwrite[] => {
+    const updates: PriceOverwrite[] = [];
+    const repriced = new Set<number>();
+    const reprice = (foi: AvailableItem | undefined, priceRaw: string, price: number): void => {
+        if (!foi || repriced.has(foi.id)) return;
+        const oldPrice = parseFloat(foi.price_cny || '0') || 0;
+        if (Math.abs(price - oldPrice) > 0.0001) {
+            updates.push({ factory_order_item_id: foi.id, new_price_cny: priceRaw });
+            repriced.add(foi.id);
+        }
+    };
+    for (const r of rows) {
+        const price = parseFloat(r.priceRaw) || 0;
+        if (price <= 0 || r.qty <= 0) continue;
+        const fois = foisByBarcode[r.barcode] || [];
+        if (fois.length === 0) continue;
+        let left = r.qty;
+        for (const foi of fois) {
+            if (left <= 0) break;
+            const already = consumed[foi.id] || 0;
+            const avail = Math.max(0, foi.remaining_qty - already);
+            const take = Math.min(left, avail);
+            if (take > 0) {
+                reprice(foi, r.priceRaw, price);
+                consumed[foi.id] = already + take;
+                left -= take;
+            }
+        }
+        // Overflow → extend_plan on fois[0]: that line also receives qty, so reprice it
+        // too (covers the case where every FOI was already exhausted and the whole row
+        // lands on the extend target).
+        if (left > 0) {
+            reprice(fois[0], r.priceRaw, price);
+            consumed[fois[0].id] = (consumed[fois[0].id] || 0) + left;
         }
     }
     return updates;

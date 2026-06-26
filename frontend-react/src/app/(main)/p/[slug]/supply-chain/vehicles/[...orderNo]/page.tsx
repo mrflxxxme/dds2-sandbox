@@ -23,7 +23,7 @@ import type {
 } from '@/types/api';
 import { FactoryQtyExceededError } from '@/types/api';
 import { CONTAINERS } from '@/app/(main)/p/[slug]/container-loader/lib/packer';
-import { buildBoxOverrides, buildPriceOverwrites, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
+import { buildBoxOverrides, buildExceededPriceOverwrites, buildPriceOverwrites, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
 import { LanguageProvider, useT, LanguageToggle } from '../../i18n';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -2150,13 +2150,27 @@ function AddItemsSection({ vehicleOrderNo, onAdded, onPartialAdded, isPostShipme
                 }
             }
 
-            // 2. ⚠ «мои значения» → переписать цены в заказе перед добавлением
+            // 2. ⚠ «мои значения» → переписать цены в заказе перед добавлением.
+            // Цены пишутся И для ✓ valid (mismatch), И для ! exceeded (корзина «!»),
+            // когда пользователь добавляет overflow: иначе extend_plan-строки садятся
+            // на FOI со старой ценой (часто 0) → позиция машины снимает price 0
+            // (прод-инцидент V-0031: 16 ковров / 858 шт встали по 0 ¥, т.к. вставленное
+            // 108/102 превысило план 100). Общий `consumed`: add бронирует valid → exceeded,
+            // reprice обязан повторить ту же последовательность потребления.
             const overwrite = choices.mismatchMode === 'overwrite';
-            if (mismatchRows.length > 0 && overwrite) {
-                const priceUpdates = buildPriceOverwrites(
-                    validRows.map(r => ({ barcode: r.barcode.trim(), qty: parseInt(r.qty) || 0, priceRaw: r.price, boxRaw: r.box_size || '', pcsPerBox: parseInt(r.pcs_per_box) || 0 })),
-                    foisByBarcode,
-                );
+            const exceededReprice = choices.includeExceeded && exceededRows.length > 0;
+            if (overwrite && (mismatchRows.length > 0 || exceededReprice)) {
+                const toRow = (r: PasteRow) => ({ barcode: r.barcode.trim(), qty: parseInt(r.qty) || 0, priceRaw: r.price, boxRaw: r.box_size || '', pcsPerBox: parseInt(r.pcs_per_box) || 0 });
+                const consumed: Record<number, number> = {};
+                const validUpdates = buildPriceOverwrites(validRows.map(toRow), foisByBarcode, consumed);
+                const exceededUpdates = exceededReprice
+                    ? buildExceededPriceOverwrites(exceededRows.map(toRow), foisByBarcode, consumed)
+                    : [];
+                // Один баркод может попасть в обе корзины → один FOI в обоих списках.
+                // Дедуп по FOI (все апдейты несут цену своей строки, last-wins).
+                const byFoi = new Map<number, { factory_order_item_id: number; new_price_cny: string }>();
+                for (const u of [...validUpdates, ...exceededUpdates]) byFoi.set(u.factory_order_item_id, u);
+                const priceUpdates = [...byFoi.values()];
                 if (priceUpdates.length > 0) await api.bulkUpdateFactoryItemPrices(priceUpdates);
             }
 
