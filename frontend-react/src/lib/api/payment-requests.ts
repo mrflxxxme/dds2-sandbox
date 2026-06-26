@@ -40,6 +40,11 @@ export function addPaymentRequestMethods(api: ApiClient) {
             return api.request<PaymentRequestDetail>('GET', `/api/v1/payment-requests/${id}`);
         },
 
+        /** GET /api/v1/payment-requests/banks/{bic} — БИК → корр. счёт + название (авто-заполнение). 404 если нет. */
+        getBankByBic(bic: string): Promise<{ bic: string; corr_account: string; name: string }> {
+            return api.request('GET', `/api/v1/payment-requests/banks/${encodeURIComponent(bic)}`);
+        },
+
         /** GET /api/v1/payment-requests/shippable — отгруженные/сданные заборы */
         listShippable(search?: string, hasRequest?: boolean, archived?: boolean): Promise<ShippableShipmentRow[]> {
             const qs = new URLSearchParams();
