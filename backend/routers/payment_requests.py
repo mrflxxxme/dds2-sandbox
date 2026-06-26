@@ -32,6 +32,7 @@ from backend.integrations.faktura_api import FakturaApiError
 from backend.models import Project, User
 from backend.models.payment_request import PaymentRequest
 from backend.project_context import get_current_project
+from backend.rbac import require_role
 from backend.schemas.payment_request import (
     ALLOWED_PR_DOC_TYPES,
     ArchiveShipmentsRequest,
@@ -358,7 +359,7 @@ async def cancel_payment_request(
 @router.post(
     "/{request_id}/create-draft",
     response_model=PaymentRequestDetail,
-    dependencies=[Depends(rate_limit_write)],
+    dependencies=[Depends(rate_limit_write), Depends(require_role("admin"))],
 )
 async def create_payment_draft_endpoint(
     request_id: int,
@@ -389,7 +390,7 @@ async def create_payment_draft_endpoint(
 @router.post(
     "/create-drafts",
     response_model=CreateDraftsResponse,
-    dependencies=[Depends(rate_limit_write)],
+    dependencies=[Depends(rate_limit_write), Depends(require_role("admin"))],
 )
 async def create_payment_drafts_bulk(
     body: CreateDraftsRequest,

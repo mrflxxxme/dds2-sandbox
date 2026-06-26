@@ -179,3 +179,46 @@ async def test_create_draft_without_faktura_key_fails_cleanly(client, auth_heade
     assert resp.status_code == 400
     msg = resp.json()["error"]["message"].lower()
     assert "ключ" in msg or "faktura" in msg
+
+
+@pytest.mark.asyncio
+async def test_create_draft_blocked_for_non_admin(client, auth_headers, db_session):
+    """Реальная запись платёжки в банк (create-draft) — только owner/admin; ниже → 403."""
+    from sqlalchemy import text
+
+    headers = await _project_headers(client, auth_headers)
+    project_id = int(headers["X-Project-Id"])
+    pr = (await _create_manual(client, headers)).json()
+    # Понижаем роль вызывающего до editor (ниже admin в иерархии rbac).
+    await db_session.execute(
+        text("UPDATE project_members SET role = 'editor' WHERE project_id = :p"),
+        {"p": project_id},
+    )
+    await db_session.commit()
+    resp = await client.post(
+        f"/api/v1/payment-requests/{pr['id']}/create-draft",
+        json={"confirm": True},
+        headers=headers,
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_create_drafts_bulk_blocked_for_non_admin(client, auth_headers, db_session):
+    """Массовая запись в банк (create-drafts) — тоже только owner/admin."""
+    from sqlalchemy import text
+
+    headers = await _project_headers(client, auth_headers)
+    project_id = int(headers["X-Project-Id"])
+    pr = (await _create_manual(client, headers)).json()
+    await db_session.execute(
+        text("UPDATE project_members SET role = 'editor' WHERE project_id = :p"),
+        {"p": project_id},
+    )
+    await db_session.commit()
+    resp = await client.post(
+        "/api/v1/payment-requests/create-drafts",
+        json={"ids": [pr["id"]], "confirm": True},
+        headers=headers,
+    )
+    assert resp.status_code == 403

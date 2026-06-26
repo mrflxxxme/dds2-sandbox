@@ -18,6 +18,7 @@ Faktura payment-draft creation — «Создать оплату» для зая
 import logging
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_cache
@@ -98,6 +99,19 @@ async def create_payment_draft(
     changed_by: str = "user",
 ) -> PaymentRequest:
     """Build + validate + save a real payment draft in the bank, then flip status → DRAFT_CREATED."""
+    # Анти-double-spend: лочим строку заявки FOR UPDATE и работаем с перечитанным
+    # инстансом. Конкурентный запрос/двойной клик дождётся лока и переиспользует ТОТ ЖЕ
+    # bank_guid (банк идемпотентен по guid → второго реального черновика не возникнет).
+    locked = (
+        await db.execute(
+            select(PaymentRequest)
+            .where(PaymentRequest.id == pr.id, PaymentRequest.project_id == project_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if locked is None:
+        raise ValueError("Заявка на оплату не найдена")
+    pr = locked
     if pr.status != PaymentRequestStatus.PENDING_REVIEW.value:
         raise ValueError("Создать оплату можно только для заявки на проверке (PENDING_REVIEW)")
     if not (pr.payee_inn and pr.payee_account and pr.payee_bik and pr.amount and pr.amount > 0):
@@ -130,8 +144,9 @@ async def create_payment_draft(
             await db.commit()
 
         result = await client.save_payment(payment)
-        logger.info("Faktura /payments/save raw response (pr=%d): %s", pr.id, result)
         pr.bank_doc_id = str(result.get("id") or result.get("docId") or result.get("guid") or "") or None
+        # НЕ логируем сырой ответ банка — в нём финансовые PII (реквизиты/номера). Только doc id.
+        logger.info("Faktura /payments/save ok (pr=%d, doc=%s)", pr.id, pr.bank_doc_id)
 
     prs.apply_transition(
         db, pr, PaymentRequestStatus.DRAFT_CREATED, changed_by=changed_by,
