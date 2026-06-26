@@ -25,6 +25,8 @@ from backend.schemas.warehouse import (
     AcceptanceCheckRequest,
     AcceptanceCheckResponse,
     AcceptanceLimitsResponse,
+    BarcodeEligibilityRequest,
+    BarcodeEligibilityResponse,
     CostPriceUpdate,
     DefectBulkOperation,
     DefectBulkResponse,
@@ -50,6 +52,7 @@ from backend.schemas.warehouse import (
     WarehouseUpdate,
 )
 from backend.services import (
+    barcode_eligibility_service,
     box_multiplicity_service,
     supply_acceptance_slots_service,
     warehouse_acceptance_service,
@@ -231,6 +234,36 @@ async def get_supply_acceptance_slots(
             db,
             project.id,
             force=force,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post(
+    "/barcode-eligibility",
+    response_model=BarcodeEligibilityResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def get_barcode_eligibility(
+    body: BarcodeEligibilityRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-barcode: eligible WB-склады (по приёмке) + свободный ФФ-остаток.
+
+    Для каждого баркода возвращает (1) WB-склады, куда его можно сдать
+    (canBox/canMonopallet/canSupersafe из acceptance/options; `no_limit`=⌛
+    предзаявка если публичный лимит закрыт), и (2) свободный остаток по
+    ФФ-складам-источникам (`available = quantity − резерв активных сборок`).
+    Неизвестные баркоды (без Nomenclature) возвращаются в `unknown`, запрос не
+    падает. Eligibility переиспользует кэш WB-приёмки (5 мин, rate limit
+    6 req/min).
+    """
+    try:
+        return await barcode_eligibility_service.get_barcode_eligibility(
+            db,
+            project.id,
+            body.barcodes,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

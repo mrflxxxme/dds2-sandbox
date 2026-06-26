@@ -105,6 +105,18 @@ from backend.models.order_city import (
     OrderCityMap,
 )
 
+# Payment Requests (заявки на оплату перевозчику)
+from backend.models.payment_request import (
+    PAYMENT_REQUEST_TRANSITIONS,
+    PaymentRequest,
+    PaymentRequestDocType,
+    PaymentRequestDocument,
+    PaymentRequestEvent,
+    PaymentRequestSource,
+    PaymentRequestStatus,
+    PaymentShipmentArchive,
+)
+
 # Planning
 from backend.models.planning import (
     BrandPlan,
@@ -302,6 +314,15 @@ __all__ = [
     "WbApiKey",
     # Order City
     "OrderCityMap",
+    # Payment Requests
+    "PaymentRequest",
+    "PaymentRequestDocument",
+    "PaymentRequestEvent",
+    "PaymentRequestStatus",
+    "PaymentRequestSource",
+    "PaymentRequestDocType",
+    "PaymentShipmentArchive",
+    "PAYMENT_REQUEST_TRANSITIONS",
     # WB Tariffs
     "WbTariff",
     # Telegram bot

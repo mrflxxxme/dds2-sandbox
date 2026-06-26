@@ -123,8 +123,7 @@ export default function AssemblyMergePage() {
         setError('');
         try {
             const merged = await api.mergeAssemblyDrafts(draftIds);
-            const qs = new URLSearchParams({ draft: String(merged.id), pkg: 'BOX', type: 'all' });
-            router.push(`/p/${slug}/warehouse/assembly/distribute/preview?${qs.toString()}`);
+            router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${merged.id}`);
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка объединения');
             setMerging(false);

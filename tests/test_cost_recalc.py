@@ -152,7 +152,9 @@ class TestAutoRecalcOnDutyRule:
         order_no = f"RC-RULE-{pid}"
         # area lives on nomenclature; recalc falls back to it
         await _seed_order_item(db_session, pid, order_no=order_no, barcode="BC-R", subject="Ковры", article="ART-R")
-        nom = (await db_session.execute(select(Nomenclature).where(Nomenclature.barcode == "BC-R"))).scalar_one()
+        nom = (await db_session.execute(
+            select(Nomenclature).where(Nomenclature.barcode == "BC-R", Nomenclature.project_id == pid)
+        )).scalar_one()
         nom.area_m2 = Decimal("2")
         await db_session.commit()
 
@@ -182,7 +184,9 @@ class TestAutoRecalcOnException:
         pid = project.id
         order_no = f"RC-EXC-{pid}"
         await _seed_order_item(db_session, pid, order_no=order_no, barcode="BC-E", subject="Ковры", article="ART-E")
-        nom = (await db_session.execute(select(Nomenclature).where(Nomenclature.barcode == "BC-E"))).scalar_one()
+        nom = (await db_session.execute(
+            select(Nomenclature).where(Nomenclature.barcode == "BC-E", Nomenclature.project_id == pid)
+        )).scalar_one()
         nom.area_m2 = Decimal("2")
         await db_session.commit()
         # category rule AREA → duty 76

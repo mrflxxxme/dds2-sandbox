@@ -448,12 +448,15 @@ async def accept_receipt_ff(
         raise ValueError(f"Нельзя принять приёмку в статусе {locked_status}")
 
     # Идемпотентность: если приход уже проведён для этой приёмки — не дублируем.
+    # Сужаем до приходных типов (как accept_receipt): прочие движения по этой
+    # приёмке (напр. INBOUND_CANCEL) не должны ложно блокировать приём.
     already = await db.execute(
         select(StockMovement.id)
         .where(
             StockMovement.project_id == project_id,
             StockMovement.reference_type == "RECEIPT",
             StockMovement.reference_id == receipt_id,
+            StockMovement.movement_type.in_([MovementType.INBOUND, MovementType.DEFECT_RECEIVE]),
         )
         .limit(1)
     )

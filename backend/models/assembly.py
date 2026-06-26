@@ -249,7 +249,7 @@ class AssemblyDraft(Base, TimestampMixin, SoftDeleteMixin):
     unique source/target pair). Soft-deleted afterwards. Persisted in DB so
     the user can reopen across devices and survive accidental tab close.
 
-    distribution JSON shape:
+    distribution JSON shape (see schemas/assembly_draft.AssemblyDraftDistribution):
     {
       "source_warehouse_ids": [int, ...],   # selected RF warehouses
       "target_warehouse_names": [str, ...], # selected WB warehouse names
@@ -260,6 +260,23 @@ class AssemblyDraft(Base, TimestampMixin, SoftDeleteMixin):
           "vendor_code": str,
           "src": {"<warehouse_id>": qty, ...},  # how much to take per FF
           "tgt": {"<wb_warehouse_name>": qty, ...},  # how much to ship per WB
+          "package_type": "BOX" | "MONOPALLET" | "SUPERSAFE",  # acceptance pkg
+        },
+        ...
+      ],
+      "pallets_count": int,        # default 1
+      "pallet_weight_kg": float,   # default 0.0
+      "estimated_ready_date": "YYYY-MM-DD" | null,
+      # Cold-start доли по WB-складам (warehouse_name -> доля 0..1) | null.
+      "cold_start_shares": {"<wb_warehouse_name>": float, ...} | null,
+      # Замороженные заявки-юниты, переданные на ФФ (вырезаны из rows).
+      "handed_units": [
+        {
+          "source_ff_id": int,
+          "target_wb_name": str,
+          "package_type": "BOX" | "MONOPALLET" | "SUPERSAFE",
+          "status": "handed" | "draft",
+          "items": [{"nm_id": int, "barcode": str, "vendor_code": str, "qty": int}, ...],
         },
         ...
       ]

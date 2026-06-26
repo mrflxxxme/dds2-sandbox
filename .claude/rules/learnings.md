@@ -47,5 +47,7 @@ paths:
 - Force-pull mutable external fields: `_try_force_enrich_*` с try/except, не кэшировать
 - Idempotent seed: `SELECT ... GROUP BY project_id` → INSERT только для новых
 - TanStack sort + pagination: ≤5k строк → без пагинации; >5k → server-side sort
+- Обогащение «исторической привязкой» НЕ гейтить на активность ключа интеграции. `_enrich_ff_links` (список сборок) раньше показывал `ff_request_number`/`ff_links` только для складов с `IntegrationKey.is_active` → в локалке (sync-prod гасит ключи) и после отключения интеграции номер ФФ-заявки пропадал, хотя связь `fulfillment_requests.assembly_request_id` физически есть. Номер заявки — исторический факт привязки, не «живые» данные провайдера; берём одним индексированным запросом по FK (`ix_fulfillment_requests_assembly_request_id`, project-scoped), без гейта. Гейт по активному ключу — только там, где реально нужен HTTP к провайдеру
+- «Висит N дн» на карточке логиста (`daysStuck`) — ПРИБЛИЖЕНИЕ аномалии `stuck_shipment`: фронт берёт `actual_ready_date` (полночь) + `floor(дни)>=2`, аналитика — точное время перехода в READY из истории + дробное `>2.0`. Расхождение <1 сут (карточка может зажечься на ~полдня раньше/позже, чем строка в «Анализе сборки»). Точного времени перехода на списке сборок НЕТ → паритет недостижим без расширения list-API; принято как допустимое (оба — информативные сигналы, порог=2 дн совпадает)
 
 <!-- Антипаттерны (SELECT *, .scalars().all() без .limit(), except Exception без CancelledError, ilike-экранирование) — в CLAUDE.md и backend.md, не дублируем здесь. -->

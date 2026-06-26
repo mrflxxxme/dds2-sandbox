@@ -16,6 +16,7 @@ from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.assembly_draft import (
+    AssemblyDraftAddRows,
     AssemblyDraftCommitResponse,
     AssemblyDraftCreate,
     AssemblyDraftMergeRequest,
@@ -75,6 +76,24 @@ async def update_draft(
 ) -> AssemblyDraftRead:
     """Update mutable fields of a draft."""
     draft = await assembly_draft_service.update_draft(db, project.id, draft_id, payload)
+    return await assembly_draft_service.to_read_model(db, project.id, draft)
+
+
+@router.post("/{draft_id}/rows", response_model=AssemblyDraftRead, dependencies=[Depends(rate_limit_write)])
+async def add_rows_to_draft(
+    draft_id: int,
+    payload: AssemblyDraftAddRows,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftRead:
+    """Дозалить пачку строк в существующий черновик, не теряя ручных правок.
+
+    В отличие от PUT (full-replace, затирает handed_units), строки сливаются с
+    `distribution.rows`: совпадающий (nm_id, package_type) суммируется поэлементно,
+    новые ключи дописываются. source/target склады объединяются; handed_units,
+    cold_start_shares, pallets_* не трогаются. 404 если черновик не найден.
+    """
+    draft = await assembly_draft_service.add_rows_to_draft(db, project.id, draft_id, payload.rows)
     return await assembly_draft_service.to_read_model(db, project.id, draft)
 
 

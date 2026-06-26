@@ -331,8 +331,8 @@ export default function AssemblyDistributionPage() {
                                             </div>
                                             <button
                                                 className="btn btn-secondary btn-sm"
-                                                onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute/preview?draft=${draft.id}&pkg=BOX&type=all`)}
-                                                title="Открыть предпросмотр заявок — там кнопка «Создать»"
+                                                onClick={() => router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draft.id}`)}
+                                                title="Открыть черновик сборки — редактор и создание заявок"
                                             >
                                                 Открыть →
                                             </button>

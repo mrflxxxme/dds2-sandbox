@@ -8,6 +8,7 @@ import uuid
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -279,3 +280,25 @@ async def test_normal_user_blocked_from_ff_portal(auth_headers, client: AsyncCli
 async def test_normal_user_allowed_on_main_api(auth_headers, client: AsyncClient):
     resp = await client.get("/api/v1/projects", headers=auth_headers)
     assert resp.status_code == 200
+
+
+# ─── WB-возврат на портальный склад: переотгрузка заблокирована до приёмки ────
+
+
+async def test_reship_blocked_until_portal_return_accepted(ff_env):
+    """Возврат на портальный ФФ-склад создаётся EXPECTED (сток не вернулся) →
+    reopen_for_reship должен падать, пока оператор не примет возврат."""
+    from backend.services.assembly.status import reopen_for_reship
+
+    db = ff_env.db
+    req = (await db.execute(select(AssemblyRequest).where(AssemblyRequest.id == ff_env.asmA))).scalar_one()
+    req.status = AssemblyStatus.RETURNED.value
+    ret = InboundReceipt(
+        project_id=ff_env.pA.id, warehouse_id=ff_env.whA, number=f"IN-RET-{req.id}",
+        status=InboundStatus.EXPECTED.value, assembly_request_id=req.id, assembly_attempt_no=1,
+    )
+    db.add(ret)
+    await db.commit()
+
+    with pytest.raises(ValueError, match="не принят"):
+        await reopen_for_reship(db, ff_env.pA.id, ff_env.asmA)

@@ -1644,22 +1644,22 @@ class TestFfLinkEnrichment:
         assert by_id[unlinked.id].ff_request_id is None
         assert by_id[unlinked.id].ff_request_number is None
 
-    async def test_enrich_skips_non_ff_warehouse(self, db_session):
-        """Заявки склада БЕЗ активной ФФ-интеграции остаются с ff_* = null,
-        даже если зеркало ФФ-заявки физически существует."""
+    async def test_enrich_populates_without_active_integration(self, db_session):
+        """Номер ФФ-заявки — историческая привязка: подтягивается по реальной связи
+        fulfillment_requests.assembly_request_id, даже если ключ интеграции склада НЕ
+        активен (раньше гейт это скрывал; теперь номер виден всегда, в т.ч. локально)."""
         from backend.routers.assembly import _enrich_ff_links
 
         wh_id = await _get_fulfillment_wh_id(db_session)
-        # ФФ-интеграцию НЕ подключаем для этого склада.
+        # ФФ-интеграцию НЕ подключаем — но физическая привязка ФФ-заявки есть.
         linked = await _create_test_request(db_session)
-        await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
+        ff = await _link_ff_request(db_session, assembly_request_id=linked.id, warehouse_id=wh_id)
 
         items, _total = await list_assembly_requests(db_session, PROJECT_ID)
         responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
         await _enrich_ff_links(db_session, PROJECT_ID, items, responses)
 
         by_id = {r.id: r for r in responses}
-        assert by_id[linked.id].ff_request_id is None
-        assert by_id[linked.id].ff_request_number is None
-        assert by_id[linked.id].ff_stage_title is None
-        assert by_id[linked.id].ff_warehouse_id is None
+        assert by_id[linked.id].ff_request_id == ff.id
+        assert by_id[linked.id].ff_request_number == ff.number
+        assert by_id[linked.id].ff_warehouse_id == wh_id

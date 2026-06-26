@@ -615,12 +615,32 @@ async def reopen_for_reship(
 ) -> AssemblyRequest:
     """RETURNED -> READY: переотгрузка. Заявка снова «готова» — пользователь
     привязывает НОВУЮ FBW-поставку и назначает нового водителя, затем отгружает
-    (следующая попытка). Сток уже вернулся при возврате, заново ничего не двигаем."""
+    (следующая попытка).
+
+    Сток обычно уже вернулся при возврате — кроме возврата на ПОРТАЛЬНЫЙ ФФ-склад:
+    там приёмка-возврат создаётся EXPECTED и сток вернётся только когда оператор её
+    примет (accept_receipt_ff). Пока приёмка не принята — переотгрузка запрещена,
+    иначе ship списал бы недоступный сток (нехватка или двойное списание)."""
     from .crud import get_assembly_request
 
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
+
+    pending_return = (
+        await db.execute(
+            select(InboundReceipt.id)
+            .where(
+                InboundReceipt.assembly_request_id == req.id,
+                InboundReceipt.project_id == project_id,
+                InboundReceipt.status == InboundStatus.EXPECTED,
+                InboundReceipt.is_deleted == False,  # noqa: E712
+            )
+            .limit(1)
+        )
+    ).first()
+    if pending_return is not None:
+        raise ValueError("Возврат ещё не принят оператором ФФ — переотгрузка недоступна")
 
     _check_transition(AssemblyStatus(req.status), AssemblyStatus.READY)
     old = req.status

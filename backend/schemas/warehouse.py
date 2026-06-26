@@ -6,7 +6,7 @@ Warehouse schemas: request/response models for warehouse module.
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # ─── Warehouse ──────────────────────────────────────────────────────────────
 
@@ -532,3 +532,74 @@ class SupplyAcceptanceSlotsResponse(BaseModel):
     rows: list[SupplyAcceptanceSlotRow]
     dates: list[str]
     fetched_at: datetime
+
+
+# ─── Barcode Eligibility (POST /warehouse/barcode-eligibility) ──────────────
+
+
+class BarcodeEligibilityRequest(BaseModel):
+    """Body for POST /warehouse/barcode-eligibility.
+
+    Caller passes a flat list of barcodes; we return per-barcode the eligible
+    WB target warehouses (by acceptance options/limits) и свободный ФФ-остаток
+    по складам-источникам. Reuses the cached WB acceptance layer.
+
+    `max_length` ограничивает фан-аут в WB acceptance/options (≤150 баркодов/чанк,
+    бюджет WB 6 req/min): без капа большой paste каталога раздул бы один запрос в
+    несколько живых WB-вызовов и выжег лимит приёмки на весь проект.
+    """
+
+    barcodes: list[str] = Field(..., max_length=500)
+
+
+class BarcodeEligibilityTarget(BaseModel):
+    """Один WB-склад, куда баркод можно сдать (по options/лимитам приёмки).
+
+    Склад считается eligible если хотя бы один из can_box/can_monopallet/
+    can_supersafe = True. `no_limit` — eligible по options, но публичный лимит
+    закрыт на все ближайшие дни (free_days_14 == 0 И paid_days_14 == 0): сдавать
+    можно только предзаявкой (UI рисует ⌛). free/paid_days_14 — лучшие метрики
+    среди трёх типов упаковки (для tooltip).
+    """
+
+    wb_name: str
+    can_box: bool
+    can_monopallet: bool
+    can_supersafe: bool
+    free_days_14: int = 0
+    paid_days_14: int = 0
+    no_limit: bool = False
+
+
+class BarcodeFfStock(BaseModel):
+    """Свободный остаток баркода на одном ФФ-складе-источнике.
+
+    available = quantity − in_assembly_reserved (зарезервировано активными
+    сборками с этого склада). Возвращаются только склады с available > 0.
+    """
+
+    ff_id: int
+    ff_name: str
+    available: int
+
+
+class BarcodeEligibilityItem(BaseModel):
+    """Результат по одному резолвленному баркоду."""
+
+    nm_id: int
+    vendor_code: str
+    barcode: str
+    targets: list[BarcodeEligibilityTarget]
+    ff_stock: list[BarcodeFfStock]
+
+
+class BarcodeEligibilityResponse(BaseModel):
+    """Response for POST /warehouse/barcode-eligibility.
+
+    `items` — по одному на резолвленный баркод; `unknown` — баркоды без
+    Nomenclature в проекте (не падаем, просто перечисляем).
+    """
+
+    items: list[BarcodeEligibilityItem]
+    unknown: list[str]
+    checked_at: datetime

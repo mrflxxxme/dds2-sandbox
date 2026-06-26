@@ -12,6 +12,8 @@ import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, Logis
 import LogisticsCostByPallets from './components/LogisticsCostByPallets';
 import LogisticsCarriers from './components/LogisticsCarriers';
 import LogisticsAnomalies from './components/LogisticsAnomalies';
+import CreatePaymentRequestModal from './components/CreatePaymentRequestModal';
+import ShipmentPaymentsTab from './components/ShipmentPaymentsTab';
 
 // Сегменты аналитики истории отправок.
 type AnalyticsView = 'overview' | 'pallets' | 'carriers' | 'anomalies' | 'matrix';
@@ -54,6 +56,32 @@ function forecastFor(model: CostForecastResponse | null, warehouse: string | nul
     return { total: cpp * pallets, cpp, low: low * pallets, high: high * pallets, basis, sample };
 }
 
+// ─── «Висит N дн»: заявка готова, но не отгружается (как аномалия stuck_shipment) ──
+const STUCK_THRESHOLD_DAYS = 2;   // порог из аналитики сборки (stuck_shipment = 2 дн)
+
+/** Сколько дней заявка «висит» готовой/с машиной, но не отгружена. null — не применимо.
+ *  ПРИБЛИЖЕНИЕ аномалии stuck_shipment: считаем от actual_ready_date (полночь),
+ *  тогда как аналитика берёт точное время перехода в READY из истории (на списке его нет).
+ *  Возможно расхождение <1 сут с экраном «Анализ сборки» — допустимо (оба — сигналы, порог общий). */
+function daysStuck(item: AssemblyRequest): number | null {
+    if (item.status !== 'READY' && item.status !== 'VEHICLE_ASSIGNED') return null;
+    if (!item.actual_ready_date) return null;
+    const ready = new Date(`${item.actual_ready_date}T00:00:00`);
+    if (Number.isNaN(ready.getTime())) return null;
+    const days = Math.floor((Date.now() - ready.getTime()) / 86_400_000);
+    return days >= 0 ? days : null;
+}
+
+/** Номера привязанных заявок ФФ (несколько для migfull/«Натали»). */
+function ffRequestNumbers(item: AssemblyRequest): string[] {
+    const links = item.ff_links;
+    if (links && links.length > 0) {
+        const nums = links.map(l => l.ff_request_number).filter((n): n is string => !!n);
+        if (nums.length) return nums;
+    }
+    return item.ff_request_number ? [item.ff_request_number] : [];
+}
+
 // ─── Status config ──────────────────────────────────────────────────────────
 
 const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
@@ -89,7 +117,7 @@ export default function LogisticsPage() {
     const [error, setError] = useState('');
 
     // Tab
-    const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
+    const [activeTab, setActiveTab] = useState<'active' | 'history' | 'payments'>('active');
     // History tab — построчные отправки (источник для сортируемой таблицы)
     const [shipmentRows, setShipmentRows] = useState<LogisticsShipmentRow[]>([]);
     const [shipmentsTotal, setShipmentsTotal] = useState(0);
@@ -137,6 +165,10 @@ export default function LogisticsPage() {
 
     // Checkboxes for bulk selection
     const [checkedIds, setCheckedIds] = useState<Set<number>>(new Set());
+
+    // Payment request modal
+    const [paymentShipmentId, setPaymentShipmentId] = useState<number | undefined>(undefined);
+    const [showPaymentModal, setShowPaymentModal] = useState(false);
 
     // Vehicle modal
     const [showVehicleModal, setShowVehicleModal] = useState(false);
@@ -427,7 +459,9 @@ export default function LogisticsPage() {
     const handleExport = () => {
         const data = items.map(i => ({
             '№': i.number,
+            'Заявка ФФ': ffRequestNumbers(i).join(', '),
             'Статус': STATUS_MAP[i.status]?.label || i.status,
+            'Висит дн': daysStuck(i) ?? '',
             'Склад': i.warehouse_name || '',
             'Склад WB': i.effective_wb_warehouse || '',
             'Поставка FBO': i.wb_supply_name || '',
@@ -498,9 +532,16 @@ export default function LogisticsPage() {
                     <button
                         className={`btn ${activeTab === 'history' ? 'btn-primary' : 'btn-secondary'}`}
                         onClick={() => setActiveTab('history')}
-                        style={{ borderRadius: '0 8px 8px 0' }}
+                        style={{ borderRadius: 0 }}
                     >
                         История отправок
+                    </button>
+                    <button
+                        className={`btn ${activeTab === 'payments' ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setActiveTab('payments')}
+                        style={{ borderRadius: '0 8px 8px 0' }}
+                    >
+                        💳 Оплаты
                     </button>
                 </div>
                 {activeTab === 'active' && (
@@ -533,7 +574,9 @@ export default function LogisticsPage() {
                 </div>
             )}
 
-            {activeTab === 'active' ? (
+            {activeTab === 'payments' ? (
+                <ShipmentPaymentsTab />
+            ) : activeTab === 'active' ? (
                 <>
                     {/* Filters */}
                     <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
@@ -665,12 +708,16 @@ export default function LogisticsPage() {
                                                 const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
                                                 const canCheck = item.status === 'READY';
                                                 const isChecked = checkedIds.has(item.id);
+                                                const stuck = daysStuck(item);
+                                                const isStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS;
+                                                const veryStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS * 2;
+                                                const ffNums = ffRequestNumbers(item);
                                                 return (
                                                     <tr
                                                         key={item.id}
                                                         style={{
                                                             cursor: 'pointer',
-                                                            background: isChecked ? 'rgba(59, 130, 246, 0.06)' : undefined,
+                                                            background: isChecked ? 'rgba(59, 130, 246, 0.06)' : veryStuck ? 'rgba(239,68,68,0.06)' : isStuck ? 'rgba(245,158,11,0.06)' : undefined,
                                                         }}
                                                         onClick={() => canCheck && toggleChecked(item.id)}
                                                     >
@@ -691,6 +738,11 @@ export default function LogisticsPage() {
                                                             >
                                                                 {item.number}
                                                             </Link>
+                                                            {ffNums.length > 0 && (
+                                                                <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--color-text-muted)' }} title="Номер(а) заявки ФФ">
+                                                                    ФФ: {ffNums.join(', ')}
+                                                                </div>
+                                                            )}
                                                         </td>
                                                         <td style={{ fontSize: 12 }}>{item.brands || '\u2014'}</td>
                                                         <td style={{ color: 'var(--color-text-muted)' }}>{item.warehouse_name || '\u2014'}</td>
@@ -706,7 +758,16 @@ export default function LogisticsPage() {
                                                                 ? <span style={{ color: 'var(--color-accent)', fontWeight: 600 }} title={`~${formatNumber(f.cpp, 0)} ₽/пал · ${formatNumber(f.low, 0)}–${formatNumber(f.high, 0)} ₽ · ${f.basis}`}>~{formatNumber(f.total, 0)}</span>
                                                                 : <span style={{ color: 'var(--color-text-muted)' }}>{'—'}</span>;
                                                         })()}</td>
-                                                        <td><span className={`badge ${statusCfg.className}`}>{statusCfg.label}</span></td>
+                                                        <td>
+                                                            <span className={`badge ${statusCfg.className}`}>{statusCfg.label}</span>
+                                                            {isStuck && (
+                                                                <div style={{ marginTop: 2 }}>
+                                                                    <span className={`badge ${veryStuck ? 'badge-danger' : 'badge-warning'}`} style={{ fontSize: 10 }}>
+                                                                        ⏱ висит {formatNumber(stuck as number, 0)} дн
+                                                                    </span>
+                                                                </div>
+                                                            )}
+                                                        </td>
                                                         <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
                                                             {item.status === 'READY' && (
                                                                 <button
@@ -762,6 +823,15 @@ export default function LogisticsPage() {
                                             const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
                                             const isChecked = checkedIds.has(item.id);
                                             const canCheck = item.status === 'READY';
+                                            const stuck = daysStuck(item);
+                                            const isStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS;
+                                            const veryStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS * 2;
+                                            const ffNums = ffRequestNumbers(item);
+                                            const borderColor = isChecked
+                                                ? 'var(--color-primary)'
+                                                : veryStuck ? 'var(--color-danger)'
+                                                : isStuck ? 'var(--color-warning)'
+                                                : undefined;
 
                                             return (
                                                 <div
@@ -770,7 +840,7 @@ export default function LogisticsPage() {
                                                     style={{
                                                         padding: 16,
                                                         opacity: soon ? 0.5 : 1,
-                                                        border: isChecked ? '2px solid var(--color-primary)' : undefined,
+                                                        border: borderColor ? `2px solid ${borderColor}` : undefined,
                                                         cursor: canCheck ? 'pointer' : undefined,
                                                     }}
                                                     onClick={canCheck ? () => toggleChecked(item.id) : undefined}
@@ -801,6 +871,18 @@ export default function LogisticsPage() {
                                                         </span>
                                                     </div>
 
+                                                    {isStuck && (
+                                                        <div style={{ marginBottom: 8 }}>
+                                                            <span
+                                                                className={`badge ${veryStuck ? 'badge-danger' : 'badge-warning'}`}
+                                                                style={{ fontSize: 11 }}
+                                                                title="Готово, но не отгружается — как в аномалиях «Анализа сборки»"
+                                                            >
+                                                                ⏱ висит {formatNumber(stuck as number, 0)} дн
+                                                            </span>
+                                                        </div>
+                                                    )}
+
                                                     <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
                                                         {item.warehouse_name && (
                                                             <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 2 }}>{item.warehouse_name}</div>
@@ -812,6 +894,11 @@ export default function LogisticsPage() {
                                                         <div>Позиций: {item.items?.length || 0}</div>
                                                         {item.wb_supply_id_wb && (
                                                             <div style={{ fontFamily: 'monospace', fontSize: 12 }}>Поставка: {item.wb_supply_id_wb}</div>
+                                                        )}
+                                                        {ffNums.length > 0 && (
+                                                            <div style={{ fontFamily: 'monospace', fontSize: 12 }} title="Номер(а) привязанной заявки ФФ">
+                                                                Заявка ФФ: {ffNums.join(', ')}
+                                                            </div>
                                                         )}
                                                         {item.effective_wb_warehouse && (
                                                             <div>WB: {item.effective_wb_warehouse}</div>
@@ -1046,6 +1133,15 @@ export default function LogisticsPage() {
                             columns={[
                                 { key: 'status', label: 'Статус', sortable: true, render: (_v: string, row: LogisticsShipmentRow) => { const cfg = STATUS_MAP[row.status as AssemblyStatus] || { label: row.status || '—', className: '' }; return <span className={`badge ${cfg.className}`}>{cfg.label}</span>; }},
                                 { key: 'assembly_number', label: '№', sortable: true, render: (v: string) => <span style={{ fontWeight: 500 }}>{v || '—'}</span> },
+                                { key: 'shipment_id', label: '', sortable: false, render: (_v: number, row: LogisticsShipmentRow) => row.status === 'SHIPPED' ? (
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        style={{ whiteSpace: 'nowrap', fontSize: 11 }}
+                                        onClick={e => { e.stopPropagation(); setPaymentShipmentId(row.shipment_id); setShowPaymentModal(true); }}
+                                    >
+                                        💳 Оплата
+                                    </button>
+                                ) : null },
                                 { key: 'brands', label: 'Бренд', sortable: true, render: (v: string) => <span style={{ fontSize: 12 }}>{v || '—'}</span> },
                                 { key: 'carrier_name', label: 'Подрядчик', sortable: true, render: (v: string | null, row: LogisticsShipmentRow) => v ? <span title={row.carrier_inn || ''} style={{ fontSize: 12 }}>{v}</span> : <span style={{ color: 'var(--color-text-muted)' }}>{'—'}</span> },
                                 { key: 'wb_supply_id', label: 'Поставка WB', sortable: true, render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v || '—'}</span> },
@@ -1113,6 +1209,14 @@ export default function LogisticsPage() {
                         Назначить машину
                     </button>
                 </div>
+            )}
+
+            {/* Payment request modal */}
+            {showPaymentModal && (
+                <CreatePaymentRequestModal
+                    initialShipmentId={paymentShipmentId}
+                    onClose={() => { setShowPaymentModal(false); setPaymentShipmentId(undefined); }}
+                />
             )}
 
             {/* Vehicle modal */}

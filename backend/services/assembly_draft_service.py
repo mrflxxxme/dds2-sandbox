@@ -49,23 +49,84 @@ NEWCOMER_COMMENT_PREFIX = "🆕 Новинки"
 
 
 def _dedupe_rows(rows: list[AssemblyDraftRow]) -> list[AssemblyDraftRow]:
-    """Схлопнуть дубли строк по (nm_id, package_type), оставляя ПЕРВУЮ.
+    """Схлопнуть дубли строк по (nm_id, package_type, barcode), оставляя ПЕРВУЮ.
 
     Старая генерация черновика (до перехода на Set уникальных nm_id) могла
     обработать один SKU дважды → дублирующиеся строки. Дубль спурьёзный: первая
     строка несёт полную аллокацию, повторная — остаток истощённого FF-пула.
     Суммировать нельзя — commit_draft складывает qty по баркоду в корзину
     (ФФ, WB, упаковка) и задвоил бы отгрузку. Поэтому keep-first.
+
+    ⚠ Ключ включает `barcode`: одна WB-карточка (nm_id) может иметь НЕСКОЛЬКО
+    баркодов (размерные варианты); карточка без `article_wb` уходит в nm_id=0.
+    Без barcode в ключе разные баркоды одного nm_id схлопнулись бы в один →
+    commit отгрузил бы чужой физический товар (потеря/мисаттрибуция). Истинный
+    спурьёзный дубль (тот же баркод) по-прежнему схлопывается keep-first.
     """
-    seen: set[tuple[int, str]] = set()
+    seen: set[tuple[int, str, str]] = set()
     out: list[AssemblyDraftRow] = []
     for r in rows:
-        key = (r.nm_id, r.package_type or "BOX")
+        key = (r.nm_id, r.package_type or "BOX", r.barcode or "")
         if key in seen:
             continue
         seen.add(key)
         out.append(r)
     return out
+
+
+def _merge_rows(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    """Слить два списка строк распределения по ключу (nm_id, package_type, barcode).
+
+    Строки одного ключа суммируются поэлементно: `src` (по ff-id-строке) и `tgt`
+    (по wb-имени). `vendor_code` берётся от ПЕРВОЙ увиденной непустой строки.
+    Порядок `existing` сохраняется, новые ключи `incoming` дописываются в конце.
+    Возвращает новый список dict-строк, по одной на уникальный ключ.
+
+    ⚠ Ключ включает `barcode` (см. `_dedupe_rows`): одна WB-карточка (nm_id)
+    может нести несколько баркодов (размерные варианты), а карточка без
+    `article_wb` — nm_id=0. Без barcode в ключе разные физические товары одного
+    nm_id (или все nm_id=0) схлопнулись бы в одну строку → commit отгрузил бы
+    чужой товар / молча потерял количество. С barcode в ключе одинаковые баркоды
+    по-прежнему суммируются (истинный merge), разные — остаются раздельными.
+
+    Чистый помощник без БД — общий код для `merge_drafts` (слияние черновиков) и
+    `add_rows_to_draft` (дозалив строк в существующий черновик). Складывает (не
+    keep-first, в отличие от `_dedupe_rows`): наивный append того же ключа без
+    суммирования молча терял бы количество.
+    """
+
+    def _key(r: dict) -> tuple[int, str, str]:
+        return (
+            int(r.get("nm_id") or 0),
+            str(r.get("package_type") or "BOX"),
+            str(r.get("barcode") or ""),
+        )
+
+    by_key: dict[tuple[int, str, str], dict] = {}
+    order: list[tuple[int, str, str]] = []
+    for src_list in (existing, incoming):
+        for row in src_list:
+            key = _key(row)
+            cur = by_key.get(key)
+            if cur is None:
+                # Глубокая копия src/tgt — не делим mutable-словари с входом.
+                by_key[key] = {
+                    "nm_id": key[0],
+                    "barcode": key[2],
+                    "vendor_code": row.get("vendor_code") or "",
+                    "src": {str(k): int(v or 0) for k, v in (row.get("src") or {}).items()},
+                    "tgt": {str(k): int(v or 0) for k, v in (row.get("tgt") or {}).items()},
+                    "package_type": key[1],
+                }
+                order.append(key)
+                continue
+            for wh, qty in (row.get("src") or {}).items():
+                cur["src"][str(wh)] = cur["src"].get(str(wh), 0) + int(qty or 0)
+            for wb, qty in (row.get("tgt") or {}).items():
+                cur["tgt"][str(wb)] = cur["tgt"].get(str(wb), 0) + int(qty or 0)
+            if not cur["vendor_code"] and row.get("vendor_code"):
+                cur["vendor_code"] = row["vendor_code"]
+    return [by_key[k] for k in order]
 
 
 async def fetch_newcomer_nm_ids(
@@ -251,8 +312,9 @@ async def merge_drafts(
     # 3. Merge all distributions into survivor
     merged = AssemblyDraftDistribution.model_validate(survivor.distribution or {})
 
-    # Rows keyed by (nm_id, package_type). Preserve survivor's insertion order.
-    rows_by_key: dict[tuple[int, str], AssemblyDraftRow] = {(r.nm_id, r.package_type or "BOX"): r for r in merged.rows}
+    # Rows merged element-wise by (nm_id, package_type) via the shared helper.
+    # Start from survivor's rows; fold each other draft in, preserving order.
+    merged_rows: list[dict] = [r.model_dump() for r in merged.rows]
 
     # Handed units keyed by (ff, wb, pkg). Preserve survivor's order.
     def _handed_key(u: HandedUnit) -> tuple[int, str, str]:
@@ -280,24 +342,8 @@ async def merge_drafts(
                 tgt_names.append(name)
                 tgt_names_set.add(name)
 
-        # Merge rows
-        for row in other_dist.rows:
-            key = (row.nm_id, row.package_type or "BOX")
-            existing = rows_by_key.get(key)
-            if existing is None:
-                # New SKU+pkg: deep-copy and append (avoids sharing mutable dicts)
-                rows_by_key[key] = row.model_copy(deep=True)
-            else:
-                # Same (nm_id, pkg): sum src/tgt element-wise
-                for wh, qty in row.src.items():
-                    existing.src[wh] = existing.src.get(wh, 0) + qty
-                for wb, qty in row.tgt.items():
-                    existing.tgt[wb] = existing.tgt.get(wb, 0) + qty
-                # Fill blank barcode / vendor_code if survivor's row was empty
-                if not existing.barcode and row.barcode:
-                    existing.barcode = row.barcode
-                if not existing.vendor_code and row.vendor_code:
-                    existing.vendor_code = row.vendor_code
+        # Merge rows: sum (nm_id, pkg) element-wise, append new keys.
+        merged_rows = _merge_rows(merged_rows, [r.model_dump() for r in other_dist.rows])
 
         # Merge handed_units: carry into survivor (merge would otherwise drop them).
         # Same key → sum items by barcode; 'handed' beats 'draft' (part is at FF).
@@ -319,7 +365,7 @@ async def merge_drafts(
                 if unit.status == "handed":
                     existing_unit.status = "handed"
 
-    merged.rows = list(rows_by_key.values())
+    merged.rows = [AssemblyDraftRow.model_validate(r) for r in merged_rows]
     merged.handed_units = list(handed_by_key.values())
     merged.source_warehouse_ids = src_ids
     merged.target_warehouse_names = tgt_names
@@ -339,6 +385,64 @@ async def merge_drafts(
         raise HTTPException(status_code=500, detail=f"Ошибка объединения черновиков: {e}") from None
 
     return survivor
+
+
+async def add_rows_to_draft(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    rows: list[AssemblyDraftRow],
+) -> AssemblyDraft:
+    """Дозалить пачку строк в СУЩЕСТВУЮЩИЙ черновик, не теряя ручных правок.
+
+    В отличие от `update_draft` (full-replace, затирает `handed_units`), здесь
+    строки сливаются с `distribution['rows']` через `_merge_rows`: совпадающий
+    (nm_id, package_type) суммируется поэлементно (наивный append того же nm_id
+    в `_dedupe_rows` молча терял бы количество). `source_warehouse_ids` и
+    `target_warehouse_names` объединяются с ключами входящих src/tgt.
+    `handed_units`, `cold_start_shares`, `pallets_*` не трогаются.
+
+    404, если черновик не найден / soft-deleted. Кэш не инвалидируется
+    (черновики читаются живьём — как в `update_draft`).
+    """
+    draft = await get_draft(db, project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+    distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
+
+    incoming = [r.model_dump() for r in rows]
+    existing = [r.model_dump() for r in distribution.rows]
+    merged_rows = _merge_rows(existing, incoming)
+    distribution.rows = [AssemblyDraftRow.model_validate(r) for r in merged_rows]
+
+    # Union source_warehouse_ids (из ключей src входящих строк, как int).
+    src_ids: list[int] = list(distribution.source_warehouse_ids)
+    src_ids_set: set[int] = set(src_ids)
+    for r in incoming:
+        for wid in (r.get("src") or {}):
+            iwid = int(wid)
+            if iwid not in src_ids_set:
+                src_ids.append(iwid)
+                src_ids_set.add(iwid)
+    distribution.source_warehouse_ids = src_ids
+
+    # Union target_warehouse_names (из ключей tgt входящих строк).
+    tgt_names: list[str] = list(distribution.target_warehouse_names)
+    tgt_names_set: set[str] = set(tgt_names)
+    for r in incoming:
+        for name in (r.get("tgt") or {}):
+            sname = str(name)
+            if sname not in tgt_names_set:
+                tgt_names.append(sname)
+                tgt_names_set.add(sname)
+    distribution.target_warehouse_names = tgt_names
+
+    # Persist JSONB как в update_draft (reassign — модель сериализуем целиком).
+    draft.distribution = distribution.model_dump(mode="json")
+    await db.commit()
+    await db.refresh(draft)
+    return draft
 
 
 # ─── Commit (draft -> N AssemblyRequests) ───────────────────────────────────

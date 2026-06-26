@@ -64,6 +64,52 @@ export class ApiClient {
         return !!this.getToken();
     }
 
+    /** Decode the JWT payload of the current access token (no signature check). */
+    private decodeToken(): Record<string, unknown> | null {
+        const token = this.getToken();
+        if (!token) return null;
+        const parts = token.split('.');
+        if (parts.length !== 3) return null;
+        try {
+            let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            const pad = b64.length % 4;
+            if (pad) b64 += '='.repeat(4 - pad);
+            return JSON.parse(atob(b64)) as Record<string, unknown>;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * True when the stored token belongs to an external fulfillment account
+     * (`ext` claim). Such a token is allowed ONLY at /api/v1/ff/* by the backend
+     * choke-point middleware — on the main portal it 403s everything.
+     */
+    isExternalToken(): boolean {
+        return !!this.decodeToken()?.ext;
+    }
+
+    /**
+     * Guard for the main-portal client: it serves ONLY main endpoints, which the
+     * backend blocks for external accounts. If an `ext` token lands here (stale
+     * session, or an FF operator who used the main login form) the requests are
+     * doomed — they 403, and cross-origin they fail CORS and never surface a
+     * readable status, leaving the page stuck on "Failed to fetch". Bounce to the
+     * FF portal before firing anything. Returns true when it redirected so callers
+     * abort.
+     *
+     * Deliberately does NOT clearToken(): the dashboard fires many requests in
+     * parallel, and clearing here makes the in-flight siblings see a tokenless
+     * state, 401, and redirect to /login — racing over our /ff redirect. Leaving
+     * the (inert, main-portal-blocked) token lets every sibling bounce to /ff
+     * identically. To use the main app, an admin logs in at /login, overwriting it.
+     */
+    private bounceExternalToFf(): boolean {
+        if (!this.isExternalToken()) return false;
+        if (typeof window !== 'undefined') window.location.href = '/ff';
+        return true;
+    }
+
     getProjectId(): number | null {
         const pid = safeGetItem('dds_project_id');
         return pid ? parseInt(pid) : null;
@@ -120,6 +166,10 @@ export class ApiClient {
         path: string,
         body?: unknown,
     ): Promise<T> {
+        if (this.bounceExternalToFf()) {
+            throw new Error('Внешний аккаунт фулфилмента: доступ только к ФФ-порталу');
+        }
+
         const headers: Record<string, string> = {
             'Content-Type': 'application/json',
         };
@@ -181,6 +231,10 @@ export class ApiClient {
      * Helper for FormData uploads — shared by all upload methods.
      */
     async uploadFormData<T>(path: string, formData: FormData): Promise<T> {
+        if (this.bounceExternalToFf()) {
+            throw new Error('Внешний аккаунт фулфилмента: доступ только к ФФ-порталу');
+        }
+
         const headers: Record<string, string> = {};
         const token = this.getToken();
         if (token) headers['Authorization'] = `Bearer ${token}`;

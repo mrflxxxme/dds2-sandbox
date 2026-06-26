@@ -82,6 +82,11 @@ class Counterparty(Base, TimestampMixin, SoftDeleteMixin):
         ARRAY(String(20)), nullable=True, default=list, server_default="{}"
     )
     kpp: Mapped[str | None] = mapped_column(String(9), nullable=True)
+    # Banking requisites (для «заявок на оплату» — авто-заполнение реквизитов перевозчика)
+    bank_account: Mapped[str | None] = mapped_column(String(20), nullable=True)  # расчётный счёт
+    bik: Mapped[str | None] = mapped_column(String(9), nullable=True)
+    bank_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    corr_account: Mapped[str | None] = mapped_column(String(20), nullable=True)  # корр. счёт
     contract_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     contacts: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

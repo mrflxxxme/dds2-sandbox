@@ -39,6 +39,7 @@ from backend.scheduler.jobs.wb_finance import (
     sync_all_projects_wb_finance,
     sync_all_projects_wb_finance_daily,
 )
+from backend.scheduler.jobs.faktura_statement_sync import sync_all_projects_faktura_statements
 from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
 from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_stocks
@@ -268,6 +269,19 @@ def start_scheduler():
         misfire_grace_time=3600,
     )
 
+    # Faktura.ru (ВБ Банк) statement auto-sync: 4×/day — 06/12/18/23 MSK.
+    # Тянет выписку по обоим расчётным счетам и заливает в тот же ETL, что и
+    # ручной импорт (/p/<slug>/import). Дедуп по txn_id → перекрытие окна безопасно.
+    _scheduler.add_job(
+        sync_all_projects_faktura_statements,
+        trigger=CronTrigger(hour="6,12,18,23", minute=0, timezone=MSK),
+        id="faktura_statement_sync",
+        name="Faktura statement sync (06/12/18/23 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
     # AI morning digest: daily at 7:00 MSK
     _scheduler.add_job(
         send_daily_digests,
@@ -358,6 +372,18 @@ def start_scheduler():
         trigger=DateTrigger(run_date=datetime.now(MSK) + timedelta(seconds=90)),
         id="wb_goods_returns_catchup",
         name="WB goods returns catch-up (startup)",
+        replace_existing=True,
+        misfire_grace_time=60,
+    )
+
+    # Startup catch-up: Faktura statement sync 120s after start (cron fires only
+    # 4×/day, so without this a worker restart leaves the statement stale до
+    # следующего слота — до 6 часов).
+    _scheduler.add_job(
+        sync_all_projects_faktura_statements,
+        trigger=DateTrigger(run_date=datetime.now(MSK) + timedelta(seconds=120)),
+        id="faktura_statement_catchup",
+        name="Faktura statement catch-up (startup)",
         replace_existing=True,
         misfire_grace_time=60,
     )

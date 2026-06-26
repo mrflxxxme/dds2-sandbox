@@ -24,7 +24,7 @@ export default function FfRootLayout({ children }: { children: React.ReactNode }
                     rel="stylesheet"
                 />
             </head>
-            <body className="ff-body">{children}</body>
+            <body>{children}</body>
         </html>
     );
 }

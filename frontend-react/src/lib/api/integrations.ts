@@ -1,6 +1,6 @@
 /** Integrations API methods */
 import { ApiClient } from './client';
-import type { IntegrationKey, MessageResponse } from '@/types/api';
+import type { IntegrationKey, MessageResponse, FakturaStatus, SyncLog } from '@/types/api';
 
 export function addIntegrationMethods(api: ApiClient) {
     return {
@@ -26,6 +26,18 @@ export function addIntegrationMethods(api: ApiClient) {
                 started_at: string; finished_at: string | null;
                 rows_fetched: number; rows_inserted: number; error_msg: string | null;
             }>>('GET', '/api/v1/integrations/sync_log');
+        },
+        /** GET /api/v1/integrations/faktura/status — настроена ли Faktura + последняя выписка */
+        getFakturaStatus() {
+            return api.request<FakturaStatus>('GET', '/api/v1/integrations/faktura/status');
+        },
+        /** POST /api/v1/integrations/faktura/sync — ручная выгрузка выписки ВБ Банка по API */
+        syncFaktura(lookbackDays?: number) {
+            return api.request<SyncLog>(
+                'POST',
+                '/api/v1/integrations/faktura/sync',
+                lookbackDays != null ? { lookback_days: lookbackDays } : undefined,
+            );
         },
     };
 }

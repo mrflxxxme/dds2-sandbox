@@ -1,7 +1,9 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { api } from '@/lib/api';
 import { usePermissions } from '@/lib/hooks/usePermissions';
+import { formatNumber, formatDateTime } from '@/lib/utils';
+import type { FakturaStatus, SyncLog } from '@/types/api';
 
 const importTypes = [
     { id: 'VTB_RUB_MAIN', label: 'ВТБ Рубли Основной (.xlsx)', icon: '🏦', requiresAccount: true },
@@ -82,6 +84,8 @@ export default function ImportPage() {
                 </div>
             </div>
 
+            <FakturaSyncCard canEdit={canEdit()} />
+
             <div className="glass-card" style={{ marginBottom: 24 }}>
                 <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>📥 Загрузить файл</h3>
 
@@ -155,6 +159,107 @@ export default function ImportPage() {
                             </div>
                         </div>
                     </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+function FakturaSyncCard({ canEdit }: { canEdit: boolean }) {
+    const [status, setStatus] = useState<FakturaStatus | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [syncing, setSyncing] = useState(false);
+    const [result, setResult] = useState<SyncLog | null>(null);
+
+    const loadStatus = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            setStatus(await api.getFakturaStatus());
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка загрузки статуса');
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => { loadStatus(); }, [loadStatus]);
+
+    const handleSync = async () => {
+        setSyncing(true);
+        setError('');
+        setResult(null);
+        try {
+            const log = await api.syncFaktura();
+            setResult(log);
+            await loadStatus();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка синхронизации');
+        } finally {
+            setSyncing(false);
+        }
+    };
+
+    const lastRun = result ?? status?.last_run ?? null;
+
+    return (
+        <div className="glass-card" style={{ marginBottom: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+                <div>
+                    <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>🏦 Faktura — выписка ВБ Банка</h3>
+                    <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: 0 }}>
+                        Прямая выгрузка по API банка (помимо файла .xls). Синхронизируется автоматически 4×/день.
+                    </p>
+                </div>
+                {canEdit && status?.configured && (
+                    <button className="btn btn-primary" onClick={handleSync} disabled={syncing}>
+                        {syncing ? '⏳ Обновление...' : '🔄 Обновить выписку'}
+                    </button>
+                )}
+            </div>
+
+            {loading ? (
+                <div style={{ fontSize: 13, color: 'var(--color-text-dim)', marginTop: 12 }}>Загрузка статуса...</div>
+            ) : error ? (
+                <div className="auth-error" style={{ marginTop: 12 }}>
+                    {error}
+                    <span style={{ float: 'right', cursor: 'pointer' }} onClick={() => setError('')}>✕</span>
+                </div>
+            ) : !status?.configured ? (
+                <div style={{ fontSize: 13, color: 'var(--color-text-dim)', marginTop: 12 }}>
+                    Faktura не настроена. Добавьте ключ через <code>scripts/setup_faktura_account.py</code>.
+                </div>
+            ) : (
+                <div style={{ marginTop: 12, display: 'flex', gap: 24, flexWrap: 'wrap', fontSize: 13 }}>
+                    <div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Логин</div>
+                        <div style={{ fontFamily: 'monospace' }}>{status.login ?? '—'}</div>
+                    </div>
+                    <div>
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Последняя синхронизация</div>
+                        <div>{status.last_sync_at ? formatDateTime(status.last_sync_at) : '— ещё не было'}</div>
+                    </div>
+                    {lastRun && (
+                        <div>
+                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Последний запуск</div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                <span className={`badge ${lastRun.status === 'OK' ? 'badge-success' : lastRun.status === 'ERROR' ? 'badge-danger' : 'badge-secondary'}`}>
+                                    {lastRun.status === 'OK' ? '✅ OK' : lastRun.status === 'ERROR' ? '✕ Ошибка' : lastRun.status}
+                                </span>
+                                {lastRun.status === 'OK' && (
+                                    <span style={{ color: 'var(--color-text-muted)' }}>
+                                        получено {formatNumber(lastRun.rows_fetched, 0)}, добавлено {formatNumber(lastRun.rows_inserted, 0)}
+                                    </span>
+                                )}
+                                {lastRun.status === 'ERROR' && lastRun.error_msg && (
+                                    <span style={{ color: 'var(--color-danger)' }} title={lastRun.error_msg}>
+                                        {lastRun.error_msg.length > 60 ? `${lastRun.error_msg.slice(0, 60)}…` : lastRun.error_msg}
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
         </div>

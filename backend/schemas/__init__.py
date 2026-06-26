@@ -41,6 +41,7 @@ from backend.schemas.imports import (
 
 # Integrations
 from backend.schemas.integrations import (
+    FakturaStatusSchema,
     IntegrationKeySchema,
     SyncLogSchema,
 )
@@ -93,6 +94,31 @@ from backend.schemas.refs import (
     OverrideSchema,
     ProductTagMappingPayload,
     ProductTagSchema,
+)
+
+# Payment Requests (заявки на оплату)
+from backend.schemas.payment_request import (
+    ArchiveShipmentsRequest,
+    ArchiveTxnsRequest,
+    CancelRequest,
+    CounterpartyReconciliation,
+    CreateDraftRequest,
+    CreateDraftResult,
+    CreateDraftsRequest,
+    CreateDraftsResponse,
+    LinkShipmentsRequest,
+    PaymentRequestCreate,
+    PaymentRequestDetail,
+    PaymentRequestDocumentResponse,
+    PaymentRequestEventResponse,
+    PaymentRequestListResponse,
+    PaymentRequestRow,
+    PaymentRequestStatusPoll,
+    PaymentRequestUpdate,
+    ReconciliationPaymentRow,
+    ShippableShipmentRow,
+    SubmitRequest,
+    UnlinkShipmentsRequest,
 )
 
 # Reports
@@ -188,6 +214,28 @@ __all__ = [
     "CategoryRefCreate",
     "ProductTagSchema",
     "ProductTagMappingPayload",
+    # Payment Requests
+    "PaymentRequestCreate",
+    "PaymentRequestUpdate",
+    "PaymentRequestRow",
+    "PaymentRequestDetail",
+    "PaymentRequestListResponse",
+    "PaymentRequestDocumentResponse",
+    "PaymentRequestEventResponse",
+    "PaymentRequestStatusPoll",
+    "ShippableShipmentRow",
+    "SubmitRequest",
+    "CancelRequest",
+    "CreateDraftRequest",
+    "CreateDraftsRequest",
+    "CreateDraftResult",
+    "CreateDraftsResponse",
+    "ArchiveShipmentsRequest",
+    "ArchiveTxnsRequest",
+    "ReconciliationPaymentRow",
+    "CounterpartyReconciliation",
+    "LinkShipmentsRequest",
+    "UnlinkShipmentsRequest",
     # Transactions
     "AutoRuleCreate",
     "TransactionSchema",
@@ -240,6 +288,7 @@ __all__ = [
     "VatRateUpdate",
     "CostOrderCreate",
     # Integrations
+    "FakturaStatusSchema",
     "IntegrationKeySchema",
     "SyncLogSchema",
     # Localization

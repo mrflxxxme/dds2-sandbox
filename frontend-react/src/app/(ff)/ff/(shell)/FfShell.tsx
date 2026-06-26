@@ -6,17 +6,17 @@ import Link from 'next/link';
 import { ffIsAuthenticated, ffMe, ffLogout, FfApiError } from '@/lib/api/ff';
 
 const NAV = [
-    { label: 'Приёмки', icon: '📥', href: '/ff/acceptances' },
-    { label: 'Заявки', icon: '📦', href: '/ff/assemblies' },
-    { label: 'Остатки', icon: '🏷️', href: '/ff/stock' },
+    { label: 'Приёмки', href: '/ff/acceptances' },
+    { label: 'Заявки на сборку', href: '/ff/assemblies' },
+    { label: 'Остатки', href: '/ff/stock' },
 ];
 
 type GateState = 'checking' | 'ok' | 'denied' | 'error';
 
 /**
- * Shell for the FF portal sections: top bar + bottom nav + auth/role gate.
- * Auth: unauthenticated → redirect to /ff/login. On mount calls ffMe();
- * a 403 means the user is not a fulfillment operator → access-denied screen.
+ * Shell for the FF portal sections: fixed glass top bar + sticky pill nav +
+ * auth/role gate. Auth: unauthenticated → redirect to /ff/login. On mount calls
+ * ffMe(); a 403 means the user is not a fulfillment operator → access-denied.
  */
 export default function FfShell({ children }: { children: React.ReactNode }) {
     const pathname = usePathname();
@@ -54,8 +54,8 @@ export default function FfShell({ children }: { children: React.ReactNode }) {
     if (state === 'checking') {
         return (
             <div className="ff-shell">
-                <div className="ff-card">
-                    <div className="ff-muted">Загрузка…</div>
+                <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                    Загрузка…
                 </div>
             </div>
         );
@@ -64,10 +64,10 @@ export default function FfShell({ children }: { children: React.ReactNode }) {
     if (state === 'denied') {
         return (
             <div className="ff-shell">
-                <div className="ff-card">
-                    <div className="ff-section-title">Нет доступа</div>
-                    <p className="ff-section-sub">Доступ только для фулфилмента.</p>
-                    <button className="btn btn-danger" onClick={ffLogout} style={{ width: '100%' }}>
+                <div className="glass-card">
+                    <h1 className="page-title">Нет доступа</h1>
+                    <p className="page-subtitle">Доступ только для фулфилмента.</p>
+                    <button className="btn btn-danger" onClick={ffLogout} style={{ marginTop: 16 }}>
                         Выйти
                     </button>
                 </div>
@@ -78,14 +78,16 @@ export default function FfShell({ children }: { children: React.ReactNode }) {
     if (state === 'error') {
         return (
             <div className="ff-shell">
-                <div className="ff-error">
-                    <span>{errorMsg}</span>
-                    <button className="btn btn-secondary btn-sm" onClick={() => router.refresh()}>
-                        Повторить
-                    </button>
-                    <button className="btn btn-danger btn-sm" onClick={ffLogout}>
-                        Выйти
-                    </button>
+                <div className="glass-card">
+                    <div style={{ color: 'var(--color-danger)', marginBottom: 16 }}>{errorMsg}</div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-secondary btn-sm" onClick={() => router.refresh()}>
+                            Повторить
+                        </button>
+                        <button className="btn btn-danger btn-sm" onClick={ffLogout}>
+                            Выйти
+                        </button>
+                    </div>
                 </div>
             </div>
         );
@@ -93,30 +95,30 @@ export default function FfShell({ children }: { children: React.ReactNode }) {
 
     return (
         <>
-            <header className="ff-topbar">
-                <span className="ff-topbar-title">ФФ-портал</span>
+            <header className="ff-topbar glass-card" style={{ padding: '10px 16px', borderRadius: 0 }}>
+                <span className="page-title" style={{ fontSize: 20 }}>ФФ-портал</span>
                 <button className="btn btn-secondary btn-sm" onClick={ffLogout}>
                     Выйти
                 </button>
             </header>
 
-            <div className="ff-shell">{children}</div>
-
-            <nav className="ff-bottom-nav">
-                {NAV.map((item) => {
-                    const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-                    return (
-                        <Link
-                            key={item.href}
-                            href={item.href}
-                            className={`ff-nav-item${active ? ' active' : ''}`}
-                        >
-                            <span className="ff-nav-icon">{item.icon}</span>
-                            <span>{item.label}</span>
-                        </Link>
-                    );
-                })}
-            </nav>
+            <div className="ff-shell">
+                <nav className="ff-nav">
+                    {NAV.map((item) => {
+                        const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+                        return (
+                            <Link
+                                key={item.href}
+                                href={item.href}
+                                className={`sc-status-pill${active ? ' sc-status-pill-active' : ''}`}
+                            >
+                                {item.label}
+                            </Link>
+                        );
+                    })}
+                </nav>
+                {children}
+            </div>
         </>
     );
 }

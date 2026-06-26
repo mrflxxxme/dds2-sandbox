@@ -8,11 +8,21 @@ import CounterpartyTypeBadge, { TYPE_CONFIG } from '@/components/CounterpartyTyp
 import CurrencySplitStats from '@/components/CurrencySplitStats';
 import DocumentUploader from '@/components/DocumentUploader';
 import TabLayout from '@/components/TabLayout';
+import ReconciliationTab from './ReconciliationTab';
 import type {
     CounterpartyDetail, CounterpartyDocument, DocType,
     CounterpartyUpdate, CounterpartyTransactionItem, CounterpartyType,
-    AssemblyRequest,
+    AssemblyRequest, PaymentRequestRow,
 } from '@/types/api';
+
+const PAY_STATUS: Record<string, { label: string; cls: string }> = {
+    DRAFT: { label: 'Черновик', cls: 'badge-secondary' },
+    PENDING_REVIEW: { label: 'На проверке', cls: 'badge-warning' },
+    DRAFT_CREATED: { label: 'Платёжка создана', cls: 'badge-info' },
+    PAID: { label: 'Оплачено', cls: 'badge-success' },
+    REJECTED: { label: 'Отклонено', cls: 'badge-danger' },
+    CANCELLED: { label: 'Отменено', cls: 'badge-secondary' },
+};
 
 const TODAY = new Date().toISOString().slice(0, 10);
 const HALF_YEAR_AGO = new Date(Date.now() - 180 * 24 * 3600 * 1000).toISOString().slice(0, 10);
@@ -23,6 +33,8 @@ const DOC_TYPE_LABELS: Record<DocType, string> = {
     INVOICE: 'Счёт',
     OTHER: 'Прочее',
 };
+
+type TabKey = 'stats' | 'docs' | 'payments' | 'recon' | 'deliveries';
 
 const ASM_STATUS: Record<string, { label: string; cls: string }> = {
     PENDING: { label: 'В сборке', cls: 'badge-info' },
@@ -46,9 +58,11 @@ export default function CounterpartyDetailPage() {
     const [txTotal, setTxTotal] = useState(0);
     const [deliveries, setDeliveries] = useState<AssemblyRequest[]>([]);
     const [deliveriesLoading, setDeliveriesLoading] = useState(false);
+    const [payments, setPayments] = useState<PaymentRequestRow[]>([]);
+    const [paymentsLoading, setPaymentsLoading] = useState(false);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [activeTab, setActiveTab] = useState(0);
+    const [activeKey, setActiveKey] = useState<TabKey>('stats');
 
     // Carrier role shows the «Доставки» tab even with zero linked requests.
     // We still fetch deliveries for every counterparty so the tab also appears
@@ -103,6 +117,20 @@ export default function CounterpartyDetailPage() {
     }, [id]);
 
     useEffect(() => { if (detail) loadDeliveries(); }, [detail, loadDeliveries]);
+
+    const loadPayments = useCallback(async () => {
+        setPaymentsLoading(true);
+        try {
+            const resp = await api.listPaymentRequests({ counterparty_id: id, limit: 500 });
+            setPayments(resp.items);
+        } catch {
+            setPayments([]);
+        } finally {
+            setPaymentsLoading(false);
+        }
+    }, [id]);
+
+    useEffect(() => { if (detail) loadPayments(); }, [detail, loadPayments]);
 
     const handleDelete = async () => {
         if (!confirm(`Удалить контрагента "${detail?.name}"?`)) return;
@@ -160,10 +188,16 @@ export default function CounterpartyDetailPage() {
 
     if (!detail) return null;
 
-    const tabs = [
-        { label: 'Статистика', icon: '📊' },
-        { label: `Документы (${detail.docs_count})`, icon: '📎' },
-        ...((isCarrier || deliveries.length > 0) ? [{ label: `Доставки (${deliveries.length})`, icon: '🚚' }] : []),
+    const tabs: { key: TabKey; label: string; icon: string }[] = [
+        { key: 'stats', label: 'Статистика', icon: '📊' },
+        { key: 'docs', label: `Документы (${detail.docs_count})`, icon: '📎' },
+        { key: 'payments', label: `Оплаты (${payments.length})`, icon: '💳' },
+        ...((isCarrier || deliveries.length > 0)
+            ? [
+                { key: 'recon' as TabKey, label: 'Сверка оплат', icon: '🔗' },
+                { key: 'deliveries' as TabKey, label: `Доставки (${deliveries.length})`, icon: '🚚' },
+            ]
+            : []),
     ];
 
     return (
@@ -187,6 +221,13 @@ export default function CounterpartyDetailPage() {
                                 ИНН: {detail.inn} {detail.kpp ? `/ КПП: ${detail.kpp}` : ''}
                             </div>
                         )}
+                        {(detail.bank_account || detail.bik) && (
+                            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', fontFamily: 'monospace', marginTop: 2 }}>
+                                {detail.bank_account ? `р/с ${detail.bank_account}` : ''}
+                                {detail.bik ? `   БИК ${detail.bik}` : ''}
+                                {detail.bank_name ? `  ·  ${detail.bank_name}` : ''}
+                            </div>
+                        )}
                     </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -200,6 +241,10 @@ export default function CounterpartyDetailPage() {
                                 kpp: detail.kpp,
                                 contract_number: detail.contract_number,
                                 notes: detail.notes,
+                                bank_account: detail.bank_account,
+                                bik: detail.bik,
+                                bank_name: detail.bank_name,
+                                corr_account: detail.corr_account,
                             });
                             setEditing(true);
                         }}
@@ -249,6 +294,22 @@ export default function CounterpartyDetailPage() {
                         <div className="form-group">
                             <label className="form-label">Контракт</label>
                             <input className="form-input" value={editForm.contract_number ?? ''} onChange={e => setEditForm(f => ({ ...f, contract_number: e.target.value || null }))} />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Расчётный счёт</label>
+                            <input className="form-input" value={editForm.bank_account ?? ''} onChange={e => setEditForm(f => ({ ...f, bank_account: e.target.value || null }))} placeholder="20 цифр" maxLength={20} />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">БИК</label>
+                            <input className="form-input" value={editForm.bik ?? ''} onChange={e => setEditForm(f => ({ ...f, bik: e.target.value || null }))} placeholder="9 цифр" maxLength={9} />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Банк</label>
+                            <input className="form-input" value={editForm.bank_name ?? ''} onChange={e => setEditForm(f => ({ ...f, bank_name: e.target.value || null }))} placeholder="Сбербанк / ВТБ..." />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Корр. счёт</label>
+                            <input className="form-input" value={editForm.corr_account ?? ''} onChange={e => setEditForm(f => ({ ...f, corr_account: e.target.value || null }))} placeholder="20 цифр" maxLength={20} />
                         </div>
                         <div className="form-group" style={{ gridColumn: '1/-1' }}>
                             <label className="form-label">Примечания</label>
@@ -325,12 +386,12 @@ export default function CounterpartyDetailPage() {
             {/* Tabs */}
             <div>
                 {/* Tab navigation */}
-                <div style={{ display: 'flex', gap: 4, marginBottom: 16 }}>
-                    {tabs.map((t, i) => (
+                <div style={{ display: 'flex', gap: 4, marginBottom: 16, flexWrap: 'wrap' }}>
+                    {tabs.map((t) => (
                         <button
-                            key={i}
-                            className={`btn ${activeTab === i ? 'btn-primary' : 'btn-secondary'} btn-sm`}
-                            onClick={() => setActiveTab(i)}
+                            key={t.key}
+                            className={`btn ${activeKey === t.key ? 'btn-primary' : 'btn-secondary'} btn-sm`}
+                            onClick={() => setActiveKey(t.key)}
                         >
                             {t.icon} {t.label}
                         </button>
@@ -338,7 +399,7 @@ export default function CounterpartyDetailPage() {
                 </div>
 
                 {/* Статистика */}
-                {activeTab === 0 && (
+                {activeKey === 'stats' && (
                     <div>
                         {transactions.length === 0 ? (
                             <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>
@@ -411,7 +472,7 @@ export default function CounterpartyDetailPage() {
                 )}
 
                 {/* Документы */}
-                {activeTab === 1 && (
+                {activeKey === 'docs' && (
                     <div>
                         <div className="glass-card" style={{ marginBottom: 16 }}>
                             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Загрузить документ</div>
@@ -468,8 +529,78 @@ export default function CounterpartyDetailPage() {
                     </div>
                 )}
 
+                {/* Оплаты — заявки на оплату по этому контрагенту (связанные логистом) */}
+                {activeKey === 'payments' && (
+                    <div>
+                        {paymentsLoading ? (
+                            <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>Загрузка...</div>
+                        ) : payments.length === 0 ? (
+                            <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>
+                                Заявок на оплату по этому контрагенту нет.
+                                <div style={{ fontSize: 12, marginTop: 6 }}>Создаются логистом из листа логиста по заборам.</div>
+                            </div>
+                        ) : (
+                            <div className="glass-card">
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                    <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Заявки на оплату ({payments.length})</h3>
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => exportToExcel(
+                                            payments.map(p => ({
+                                                '№': p.number,
+                                                Статус: PAY_STATUS[p.status]?.label ?? p.status,
+                                                Сумма: Number(p.amount),
+                                                'Дата забора': p.pickup_date ? formatDate(p.pickup_date) : '',
+                                                Документов: p.doc_count,
+                                                Создана: formatDate(p.created_at),
+                                            })),
+                                            'counterparty_payments',
+                                        )}
+                                    >
+                                        Excel
+                                    </button>
+                                </div>
+                                <div style={{ overflowX: 'auto' }}>
+                                    <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+                                        <thead>
+                                            <tr style={{ borderBottom: '1px solid var(--color-border)', textAlign: 'left' }}>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Статус</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>№</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', textAlign: 'right' }}>Сумма</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Дата забора</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', textAlign: 'right' }}>Доки</th>
+                                                <th style={{ padding: '8px 8px', fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>Создана</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {payments.map(p => {
+                                                const st = PAY_STATUS[p.status] ?? { label: p.status, cls: 'badge-secondary' };
+                                                return (
+                                                    <tr key={p.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                                        <td style={{ padding: '8px 8px' }}><span className={`badge ${st.cls}`}>{st.label}</span></td>
+                                                        <td style={{ padding: '8px 8px', fontWeight: 500 }}>{p.number}</td>
+                                                        <td style={{ padding: '8px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{formatNumber(Number(p.amount), 2)} ₽</td>
+                                                        <td style={{ padding: '8px 8px', whiteSpace: 'nowrap' }}>{p.pickup_date ? formatDate(p.pickup_date) : '—'}</td>
+                                                        <td style={{ padding: '8px 8px', textAlign: 'right' }}>{p.doc_count}</td>
+                                                        <td style={{ padding: '8px 8px', whiteSpace: 'nowrap' }}>{p.created_at ? formatDate(p.created_at) : '—'}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Сверка оплат — заборы (оплачено/не оплачено) + платежи без забора */}
+                {activeKey === 'recon' && (
+                    <ReconciliationTab counterpartyId={id} />
+                )}
+
                 {/* Доставки — заявки, где этот контрагент является перевозчиком */}
-                {activeTab === 2 && (
+                {activeKey === 'deliveries' && (
                     <div>
                         {deliveriesLoading ? (
                             <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)' }}>

@@ -26,7 +26,7 @@ export default function FfLoginPage() {
     return (
         <div className="auth-page">
             <div className="auth-card animate-in">
-                <div className="auth-logo">ФФ</div>
+                <div className="auth-logo">DDS</div>
                 <div className="auth-title">ФФ-портал</div>
                 <div className="auth-subtitle">Вход для оператора фулфилмента</div>
 

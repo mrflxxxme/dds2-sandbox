@@ -372,11 +372,19 @@ export interface SyncLog {
   integration_id: number;
   service: string;
   sync_type: string;
-  started_at: string;
+  started_at?: string;
   finished_at?: string;
   status: string;
   rows_fetched: number;
-  error_message?: string;
+  rows_inserted: number;
+  error_msg?: string | null;
+}
+
+export interface FakturaStatus {
+  configured: boolean;
+  login?: string | null;
+  last_sync_at?: string | null;
+  last_run?: SyncLog | null;
 }
 
 // ─── Funnel ──────────────────────────────────────────────────────────────────
@@ -2206,6 +2214,159 @@ export interface CostForecastResponse {
   warehouses: CostForecastWarehouse[];
 }
 
+// ─── Payment Requests ──────────────────────────────────────────────────────
+
+export type PaymentRequestStatus = 'DRAFT' | 'PENDING_REVIEW' | 'DRAFT_CREATED' | 'PAID' | 'REJECTED' | 'CANCELLED';
+export type PaymentRequestSource = 'MANUAL' | 'COUNTERPARTY';
+export type PaymentRequestDocType = 'INVOICE' | 'ACT';
+
+export interface PaymentRequestRow {
+  id: number;
+  number: string;
+  status: PaymentRequestStatus;
+  payee_name: string | null;
+  payee_inn: string | null;
+  amount: string;
+  currency: string;
+  pickup_date: string | null;
+  matched_transaction_id: number | null;
+  doc_count: number;
+  created_at: string;
+}
+
+export interface PaymentRequestDocument {
+  id: number;
+  payment_request_id: number;
+  doc_type: PaymentRequestDocType;
+  original_filename: string | null;
+  file_size: number | null;
+  mime_type: string | null;
+  uploaded_at: string;
+}
+
+export interface PaymentRequestEvent {
+  id: number;
+  old_status: PaymentRequestStatus | null;
+  new_status: PaymentRequestStatus;
+  changed_at: string;
+  changed_by: string | null;
+  comment: string | null;
+}
+
+export interface PaymentRequestDetail extends PaymentRequestRow {
+  source: PaymentRequestSource;
+  counterparty_id: number | null;
+  outbound_shipment_id: number | null;
+  assembly_request_id: number | null;
+  payee_account: string | null;
+  payee_bik: string | null;
+  payee_bank_name: string | null;
+  payee_corr_account: string | null;
+  payee_kpp: string | null;
+  purpose: string | null;
+  bank_doc_id: string | null;
+  matched_at: string | null;
+  shipment_numbers: string[];
+  shipment_count: number;
+  documents: PaymentRequestDocument[];
+  events: PaymentRequestEvent[];
+}
+
+export interface CreateDraftResult {
+  id: number;
+  ok: boolean;
+  bank_doc_id?: string | null;
+  error?: string | null;
+}
+
+export interface CreateDraftsResponse {
+  results: CreateDraftResult[];
+  created: number;
+  failed: number;
+}
+
+export interface PaymentRequestListResponse {
+  items: PaymentRequestRow[];
+  total: number;
+}
+
+export interface ShippableShipmentRow {
+  outbound_shipment_id: number;
+  assembly_request_id: number | null;
+  number: string;
+  destination: string | null;
+  shipped_date: string | null;
+  pickup_cost: string | null;
+  counterparty_id: number | null;
+  carrier_inn: string | null;
+  carrier_name: string | null;
+  carrier_kpp: string | null;
+  carrier_bank_account: string | null;
+  carrier_bik: string | null;
+  carrier_bank_name: string | null;
+  carrier_corr_account: string | null;
+  already_requested: boolean;
+  request_id: number | null;
+  request_status: PaymentRequestStatus | null;
+  matched_transaction_id: number | null;
+  matched_at: string | null;
+  matched_txn_date: string | null;
+  pallets_count: number | null;
+  pickup_date: string | null;
+  source_warehouse: string | null;
+  wb_supply_number: string | null;
+}
+
+export interface ReconciliationPaymentRow {
+  transaction_id: number;
+  date: string;
+  amount: string;
+  purpose: string | null;
+  account: string | null;
+  counterparty_name: string | null;
+  inn: string | null;
+  archived: boolean;
+  linked_shipment_ids: number[];
+  linked_count: number;
+  linked_sum: string;
+  diff: string;
+}
+
+export interface CounterpartyReconciliation {
+  shipments: ShippableShipmentRow[];
+  payments: ReconciliationPaymentRow[];
+  matched_count: number;
+  unpaid_count: number;
+  payment_count: number;
+  unlinked_payment_count: number;
+  payments_truncated: boolean;
+}
+
+export interface PaymentRequestCreate {
+  source: PaymentRequestSource;
+  outbound_shipment_id?: number;
+  outbound_shipment_ids?: number[];
+  counterparty_id?: number;
+  payee_inn?: string;
+  payee_account?: string;
+  payee_bik?: string;
+  payee_bank_name?: string;
+  payee_corr_account?: string;
+  payee_kpp?: string;
+  payee_name?: string;
+  amount?: string;
+  currency?: string;
+  pickup_date?: string;
+  purpose?: string;
+}
+
+export interface PaymentRequestStatusPoll {
+  id: number;
+  status: PaymentRequestStatus;
+  matched_transaction_id: number | null;
+  matched_at: string | null;
+}
+
 // ─── Anomalies ──────────────────────────────────────────────────────────────
 
 export interface AnomalyMetrics {
@@ -3021,6 +3182,10 @@ export interface CounterpartyListItem {
   contract_number: string | null;
   notes?: string | null;
   contacts?: CounterpartyContacts | null;
+  bank_account?: string | null;
+  bik?: string | null;
+  bank_name?: string | null;
+  corr_account?: string | null;
   created_by_import: boolean;
   created_at: string | null;
   updated_at: string | null;
@@ -3063,6 +3228,10 @@ export interface CounterpartyUpdate {
   contract_number?: string | null;
   notes?: string | null;
   contacts?: CounterpartyContacts | null;
+  bank_account?: string | null;
+  bik?: string | null;
+  bank_name?: string | null;
+  corr_account?: string | null;
 }
 
 export interface CounterpartyDocument {
@@ -3535,6 +3704,111 @@ export interface CommitSupply {
 export interface AssemblyDraftMergeRequest {
   /** IDs of drafts to merge (≥2 distinct values). */
   draft_ids: number[];
+}
+
+// ─── Barcode eligibility (приёмка WB по баркоду: типы упаковки + лимиты + ФФ-остаток) ───
+
+/** Доступность одного WB-склада для баркода: разрешённые типы упаковки + слоты приёмки. */
+export interface BarcodeEligibilityTarget {
+  wb_name: string;
+  can_box: boolean;
+  can_monopallet: boolean;
+  can_supersafe: boolean;
+  free_days_14: number;
+  paid_days_14: number;
+  no_limit: boolean;
+}
+
+/** Остаток баркода на конкретном ФФ-складе (источник отгрузки). */
+export interface BarcodeFfStock {
+  ff_id: number;
+  ff_name: string;
+  available: number;
+}
+
+export interface BarcodeEligibilityItem {
+  nm_id: number;
+  vendor_code: string;
+  barcode: string;
+  targets: BarcodeEligibilityTarget[];
+  ff_stock: BarcodeFfStock[];
+}
+
+export interface BarcodeEligibilityResponse {
+  items: BarcodeEligibilityItem[];
+  /** Баркоды, не найденные в номенклатуре проекта. */
+  unknown: string[];
+  /** ISO-таймстамп проверки лимитов приёмки WB. */
+  checked_at: string;
+}
+
+// ─── Stock need (потребность по складам) — shared, для «добавить из потребности» ───
+// Бэкенд-ответ /warehouse/stock-need. Локальные копии живут в WarehouseNeedView.tsx;
+// эти экспортируемые версии переиспользует панель «добавить из потребности».
+
+export interface StockNeedRfWarehouse {
+  id: number;
+  name: string;
+  assembly_days: number;
+}
+
+export interface StockNeedArticleRfStock {
+  stock: number;
+  available: number;
+}
+
+export interface StockNeedArticle {
+  nm_id: number;
+  vendor_code: string;
+  barcode: string;
+  brand: string;
+  subject: string;
+  total_need: number;
+  revenue_30d: number;
+  rf_stocks: Record<number, StockNeedArticleRfStock>;
+  in_assembly: number;
+  in_transit: number;
+  in_transit_date: string | null;
+  can_send: number;
+  deficit: number;
+  stocks_wb: number;
+  /** Per-WB-склад: сколько уже в сборке на этот склад (не учтено в need). */
+  asm_by_warehouse?: Record<string, number>;
+  /** Per-WB-склад: сколько уже едет на этот склад транзитом. */
+  transit_by_warehouse?: Record<string, number>;
+}
+
+export interface StockNeedWbWarehouse {
+  name: string;
+  total_need: number;
+  articles: Record<number, { need: number; stock: number; avg_daily: number }>;
+  /** Ключ ФО (central|south_caucasus|volga|ural|far_east_siberia|northwest|abroad|unknown).
+   *  Backend заполняет через `warehouse_to_district`. UI рендерит label под названием. */
+  district_key?: string;
+}
+
+export interface StockNeedSummary {
+  total_need: number;
+  total_can_send: number;
+  total_deficit: number;
+  avg_delivery_days: number;
+  deficit_count: number;
+  can_send_count: number;
+  no_wb_count: number;
+}
+
+export interface StockNeedResponse {
+  warehouses: StockNeedWbWarehouse[];
+  articles: StockNeedArticle[];
+  rf_warehouses: StockNeedRfWarehouse[];
+  brands: string[];
+  subjects: string[];
+  supply_days: number;
+  analysis_days: number;
+  mode: string;
+  total_warehouses: number;
+  total_articles: number;
+  summary: StockNeedSummary;
 }
 
 // Cold-start table — сегмент SKU «новинки + без продаж за 14д с остатком»

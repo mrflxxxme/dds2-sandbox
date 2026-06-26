@@ -30,6 +30,7 @@ import { addCounterpartyMethods } from './api/counterparty';
 import { addLoanMethods } from './api/loans';
 import { addWbReturnsMethods } from './api/wb-returns';
 import { addLocalizationMethods } from './api/localization';
+import { addPaymentRequestMethods } from './api/payment-requests';
 
 const client = new ApiClient();
 
@@ -55,4 +56,5 @@ export const api = Object.assign(client, {
     ...addLoanMethods(client),
     ...addWbReturnsMethods(client),
     ...addLocalizationMethods(client),
+    ...addPaymentRequestMethods(client),
 });

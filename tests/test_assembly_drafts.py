@@ -22,6 +22,7 @@ from sqlalchemy import select, text
 
 from backend.models.assembly import AssemblyDraft, AssemblyRequest, AssemblyRequestItem
 from backend.schemas.assembly_draft import (
+    AssemblyDraftAddRows,
     AssemblyDraftCreate,
     AssemblyDraftDistribution,
     AssemblyDraftMergeRequest,
@@ -2029,3 +2030,191 @@ async def test_commit_draft_dedupes_stale_duplicate_rows(db_session):
     items = item_q.all()
     assert len(items) == 1
     assert items[0].quantity == 10  # дубль схлопнут (НЕ 20)
+
+
+# ─── Tests: add_rows_to_draft (дозалив строк в существующий черновик) ─────────
+
+
+@pytest.mark.asyncio
+async def test_add_rows_appends_new_nm_pkg(db_session):
+    """Дозалив строки с НОВЫМ (nm_id, package_type) → она появляется в черновике,
+    исходные строки сохраняются, source/target склады объединяются."""
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+    payload = _build_payload(
+        [wh_a],
+        ["Электросталь"],
+        [
+            AssemblyDraftRow(
+                nm_id=111,
+                barcode=TEST_BARCODE_1,
+                src={str(wh_a): 5},
+                tgt={"Электросталь": 5},
+                package_type="BOX",
+            )
+        ],
+    )
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    new_rows = AssemblyDraftAddRows(
+        rows=[
+            AssemblyDraftRow(
+                nm_id=222,
+                barcode=TEST_BARCODE_2,
+                src={str(wh_b): 3},
+                tgt={"Казань": 3},
+                package_type="BOX",
+            )
+        ]
+    )
+    updated = await assembly_draft_service.add_rows_to_draft(db_session, PROJECT_ID, draft.id, new_rows.rows)
+    dist = AssemblyDraftDistribution.model_validate(updated.distribution)
+    by_key = {(r.nm_id, r.package_type or "BOX"): r for r in dist.rows}
+    assert set(by_key) == {(111, "BOX"), (222, "BOX")}
+    # Исходная строка нетронута, новая добавлена.
+    assert by_key[(111, "BOX")].src == {str(wh_a): 5}
+    assert by_key[(222, "BOX")].tgt == {"Казань": 3}
+    # Склады объединены.
+    assert set(dist.source_warehouse_ids) == {wh_a, wh_b}
+    assert set(dist.target_warehouse_names) == {"Электросталь", "Казань"}
+
+
+@pytest.mark.asyncio
+async def test_add_rows_sums_existing_nm_pkg(db_session):
+    """Дозалив строки с СУЩЕСТВУЮЩИМ (nm_id, package_type) → src/tgt СУММИРУЮТСЯ
+    поэлементно (не отброшены keep-first, не заменены full-replace)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    payload = _build_payload(
+        [wh_a],
+        ["Электросталь"],
+        [
+            AssemblyDraftRow(
+                nm_id=111,
+                barcode=TEST_BARCODE_1,
+                src={str(wh_a): 100},
+                tgt={"Электросталь": 100},
+                package_type="BOX",
+            )
+        ],
+    )
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111,
+            barcode=TEST_BARCODE_1,
+            src={str(wh_a): 50},
+            tgt={"Электросталь": 30, "Казань": 20},
+            package_type="BOX",
+        )
+    ]
+    updated = await assembly_draft_service.add_rows_to_draft(db_session, PROJECT_ID, draft.id, rows)
+    dist = AssemblyDraftDistribution.model_validate(updated.distribution)
+    assert len(dist.rows) == 1  # тот же ключ → одна строка
+    row = dist.rows[0]
+    assert row.nm_id == 111
+    assert row.src[str(wh_a)] == 150  # 100 + 50 (просуммировано)
+    assert row.tgt["Электросталь"] == 130  # 100 + 30
+    assert row.tgt["Казань"] == 20  # новый wb-ключ добавлен
+    assert "Казань" in dist.target_warehouse_names
+
+
+@pytest.mark.asyncio
+async def test_add_rows_distinct_barcodes_same_nm_not_collapsed(db_session):
+    """Один nm_id с РАЗНЫМИ баркодами (размерные варианты / nm_id=0 у карточек без
+    article_wb) НЕ схлопывается в одну строку: каждый баркод остаётся отдельной
+    строкой со своим qty. Иначе commit отгрузил бы чужой физический товар.
+    Ключ merge/dedupe = (nm_id, package_type, barcode)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    payload = _build_payload(
+        [wh_a],
+        ["Электросталь"],
+        [
+            AssemblyDraftRow(
+                nm_id=111,
+                barcode=TEST_BARCODE_1,
+                src={str(wh_a): 50},
+                tgt={"Электросталь": 50},
+                package_type="BOX",
+            )
+        ],
+    )
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111,  # тот же nm_id…
+            barcode=TEST_BARCODE_2,  # …но ДРУГОЙ баркод
+            src={str(wh_a): 30},
+            tgt={"Электросталь": 30},
+            package_type="BOX",
+        )
+    ]
+    updated = await assembly_draft_service.add_rows_to_draft(db_session, PROJECT_ID, draft.id, rows)
+    dist = AssemblyDraftDistribution.model_validate(updated.distribution)
+    assert len(dist.rows) == 2  # два баркода → две строки, НЕ схлопнуты
+    by_bc = {r.barcode: r for r in dist.rows}
+    assert by_bc[TEST_BARCODE_1].src[str(wh_a)] == 50
+    assert by_bc[TEST_BARCODE_1].tgt["Электросталь"] == 50
+    assert by_bc[TEST_BARCODE_2].src[str(wh_a)] == 30
+    assert by_bc[TEST_BARCODE_2].tgt["Электросталь"] == 30
+
+
+@pytest.mark.asyncio
+async def test_add_rows_preserves_handed_units(db_session):
+    """Черновик с handed_units → дозалив строк не трогает замороженные юниты,
+    cold_start_shares и pallets_count тоже не изменяются."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    handed = [
+        HandedUnit(
+            source_ff_id=wh_a,
+            target_wb_name="Электросталь",
+            package_type="BOX",
+            status="handed",
+            items=[HandedUnitItem(nm_id=1, barcode="HX", vendor_code="V", qty=10)],
+        )
+    ]
+    rows = [
+        AssemblyDraftRow(
+            nm_id=222,
+            barcode=TEST_BARCODE_2,
+            src={str(wh_a): 4},
+            tgt={"Казань": 4},
+            package_type="BOX",
+        )
+    ]
+    create = AssemblyDraftCreate(
+        name="With Handed",
+        distribution=AssemblyDraftDistribution(
+            source_warehouse_ids=[wh_a],
+            target_warehouse_names=["Электросталь", "Казань"],
+            rows=rows,
+            handed_units=handed,
+            cold_start_shares={"Электросталь": 0.6, "Казань": 0.4},
+            pallets_count=3,
+        ),
+    )
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, create)
+
+    new_rows = [
+        AssemblyDraftRow(
+            nm_id=333,
+            barcode=TEST_BARCODE_1,
+            src={str(wh_a): 7},
+            tgt={"Казань": 7},
+            package_type="BOX",
+        )
+    ]
+    updated = await assembly_draft_service.add_rows_to_draft(db_session, PROJECT_ID, draft.id, new_rows)
+    dist = AssemblyDraftDistribution.model_validate(updated.distribution)
+
+    # handed_units нетронуты.
+    assert len(dist.handed_units) == 1
+    u = dist.handed_units[0]
+    assert u.status == "handed"
+    assert u.target_wb_name == "Электросталь"
+    assert sum(it.qty for it in u.items) == 10
+    # cold_start_shares и pallets_count сохранены.
+    assert dist.cold_start_shares == {"Электросталь": 0.6, "Казань": 0.4}
+    assert dist.pallets_count == 3
+    # Новая строка добавлена к существующей.
+    assert {(r.nm_id, r.package_type or "BOX") for r in dist.rows} == {(222, "BOX"), (333, "BOX")}

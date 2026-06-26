@@ -14,27 +14,24 @@ export default function FfStockPage() {
     const [barcode, setBarcode] = useState('');
     const [search, setSearch] = useState('');
 
-    const load = useCallback(
-        (term: string, signal?: AbortSignal) => {
-            setLoading(true);
-            setError('');
-            ffListStock({ barcode: term || undefined, limit: 100 })
-                .then((res) => {
-                    if (signal?.aborted) return;
-                    setRows(res.items);
-                    setTotalQty(res.total_quantity);
-                })
-                .catch((err: unknown) => {
-                    if (signal?.aborted) return;
-                    setError(err instanceof Error ? err.message : 'Не удалось загрузить остатки');
-                })
-                .finally(() => {
-                    if (signal?.aborted) return;
-                    setLoading(false);
-                });
-        },
-        [],
-    );
+    const load = useCallback((term: string, signal?: AbortSignal) => {
+        setLoading(true);
+        setError('');
+        ffListStock({ barcode: term || undefined, limit: 100 })
+            .then((res) => {
+                if (signal?.aborted) return;
+                setRows(res.items);
+                setTotalQty(res.total_quantity);
+            })
+            .catch((err: unknown) => {
+                if (signal?.aborted) return;
+                setError(err instanceof Error ? err.message : 'Не удалось загрузить остатки');
+            })
+            .finally(() => {
+                if (signal?.aborted) return;
+                setLoading(false);
+            });
+    }, []);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -49,38 +46,36 @@ export default function FfStockPage() {
 
     return (
         <div>
-            <h1 className="ff-section-title">Остатки</h1>
-            <p className="ff-section-sub">
-                Всего на складах: {formatNumber(totalQty, 0)} шт
-            </p>
-
-            <form onSubmit={onSearch} className="ff-form-grid" style={{ borderTop: 'none' }}>
-                <div className="form-group" style={{ gridColumn: '1 / 2' }}>
-                    <label className="form-label">Поиск по штрихкоду</label>
-                    <input
-                        className="form-input"
-                        type="text"
-                        inputMode="numeric"
-                        placeholder="Штрихкод"
-                        value={barcode}
-                        onChange={(e) => setBarcode(e.target.value)}
-                    />
+            <div className="page-header">
+                <div>
+                    <h1 className="page-title">Остатки</h1>
+                    <p className="page-subtitle">Всего на складах: {formatNumber(totalQty, 0)} шт</p>
                 </div>
+            </div>
+
+            <form onSubmit={onSearch} style={{ display: 'flex', gap: 8, marginBottom: 16, maxWidth: 360 }}>
+                <input
+                    className="form-input"
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="Поиск по штрихкоду"
+                    style={{ flex: 1 }}
+                    value={barcode}
+                    onChange={(e) => setBarcode(e.target.value)}
+                />
                 <button type="submit" className="btn btn-primary">
                     Найти
                 </button>
             </form>
 
-            <div style={{ height: 12 }} />
-
             {loading && (
-                <div className="ff-card">
-                    <div className="ff-muted">Загрузка…</div>
+                <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                    Загрузка…
                 </div>
             )}
 
             {!loading && error && (
-                <div className="ff-error">
+                <div className="auth-error" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                     <span>{error}</span>
                     <button className="btn btn-secondary btn-sm" onClick={() => load(search)}>
                         Повторить
@@ -89,38 +84,39 @@ export default function FfStockPage() {
             )}
 
             {!loading && !error && rows.length === 0 && (
-                <div className="ff-card">
-                    <div className="ff-muted">Остатков не найдено</div>
+                <div className="glass-card">
+                    <div className="empty-state">
+                        <div className="empty-state-text">Остатков не найдено</div>
+                    </div>
                 </div>
             )}
 
             {!loading && !error && rows.length > 0 && (
-                <div className="ff-card ff-stock-scroll">
-                    <table className="ff-stock-table">
+                <div className="glass-card" style={{ overflow: 'auto', padding: 0 }}>
+                    <table className="data-table" style={{ fontSize: 13 }}>
                         <thead>
                             <tr>
+                                <th>Проект</th>
+                                <th>Склад</th>
+                                <th>ШК</th>
                                 <th>Товар</th>
-                                <th className="num">Всего</th>
-                                <th className="num">Дост.</th>
-                                <th className="num">Резерв</th>
-                                <th className="num">Брак</th>
+                                <th style={{ textAlign: 'right' }}>Остаток</th>
+                                <th style={{ textAlign: 'right' }}>Доступно</th>
+                                <th style={{ textAlign: 'right' }}>Резерв</th>
+                                <th style={{ textAlign: 'right' }}>Брак</th>
                             </tr>
                         </thead>
                         <tbody>
                             {rows.map((row) => (
                                 <tr key={`${row.project_slug}-${row.warehouse_id}-${row.barcode}`}>
-                                    <td>
-                                        <div style={{ marginBottom: 4 }}>
-                                            <ProjectBadge name={row.project_name} />
-                                        </div>
-                                        <div>{row.product_name || '—'}</div>
-                                        <div className="ff-item-bc">{row.barcode}</div>
-                                        <div className="ff-item-bc">{row.warehouse_name}</div>
-                                    </td>
-                                    <td className="num">{formatNumber(row.quantity, 0)}</td>
-                                    <td className="num">{formatNumber(row.available, 0)}</td>
-                                    <td className="num">{formatNumber(row.reserved, 0)}</td>
-                                    <td className="num">{formatNumber(row.defect_quantity, 0)}</td>
+                                    <td><ProjectBadge name={row.project_name} /></td>
+                                    <td>{row.warehouse_name}</td>
+                                    <td style={{ color: 'var(--color-text-dim)' }}>{row.barcode}</td>
+                                    <td>{row.product_name || '—'}</td>
+                                    <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{formatNumber(row.quantity, 0)}</td>
+                                    <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{formatNumber(row.available, 0)}</td>
+                                    <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{formatNumber(row.reserved, 0)}</td>
+                                    <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{formatNumber(row.defect_quantity, 0)}</td>
                                 </tr>
                             ))}
                         </tbody>

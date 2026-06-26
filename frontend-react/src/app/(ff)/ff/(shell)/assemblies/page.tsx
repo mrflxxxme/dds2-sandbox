@@ -17,7 +17,7 @@ export default function FfAssembliesPage() {
     const [error, setError] = useState('');
     const [busyId, setBusyId] = useState<number | null>(null);
     const [expandedId, setExpandedId] = useState<number | null>(null);
-    const [readyId, setReadyId] = useState<number | null>(null);
+    const [readyRow, setReadyRow] = useState<FfAssemblyRow | null>(null);
     const [pallets, setPallets] = useState('');
     const [weight, setWeight] = useState('');
     const [readyError, setReadyError] = useState('');
@@ -77,10 +77,11 @@ export default function FfAssembliesPage() {
         setReadyError('');
         setPallets(row.pallets_count != null ? String(row.pallets_count) : '');
         setWeight(row.pallet_weight_kg != null ? String(Number(row.pallet_weight_kg)) : '');
-        setReadyId(row.id);
+        setReadyRow(row);
     };
 
-    const submitReady = async (row: FfAssemblyRow) => {
+    const submitReady = async () => {
+        if (!readyRow) return;
         const pc = Number(pallets);
         const pw = Number(weight);
         if (!(pc > 0) || !(pw > 0)) {
@@ -88,14 +89,14 @@ export default function FfAssembliesPage() {
             return;
         }
         setReadyError('');
-        setBusyId(row.id);
+        setBusyId(readyRow.id);
         try {
-            const updated = await ffReadyAssembly(row.id, {
+            const updated = await ffReadyAssembly(readyRow.id, {
                 pallets_count: pc,
                 pallet_weight_kg: pw,
             });
             replaceRow(updated);
-            setReadyId(null);
+            setReadyRow(null);
         } catch (err: unknown) {
             setReadyError(err instanceof Error ? err.message : 'Ошибка');
         } finally {
@@ -105,17 +106,21 @@ export default function FfAssembliesPage() {
 
     return (
         <div>
-            <h1 className="ff-section-title">Заявки на сборку</h1>
-            <p className="ff-section-sub">Сборка и отгрузка поставок</p>
+            <div className="page-header">
+                <div>
+                    <h1 className="page-title">Заявки на сборку</h1>
+                    <p className="page-subtitle">Сборка и отгрузка поставок</p>
+                </div>
+            </div>
 
             {loading && (
-                <div className="ff-card">
-                    <div className="ff-muted">Загрузка…</div>
+                <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                    Загрузка…
                 </div>
             )}
 
             {!loading && error && (
-                <div className="ff-error">
+                <div className="auth-error" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                     <span>{error}</span>
                     <button className="btn btn-secondary btn-sm" onClick={() => load()}>
                         Повторить
@@ -124,124 +129,79 @@ export default function FfAssembliesPage() {
             )}
 
             {!loading && !error && rows.length === 0 && (
-                <div className="ff-card">
-                    <div className="ff-muted">Нет заявок</div>
+                <div className="glass-card">
+                    <div className="empty-state">
+                        <div className="empty-state-text">Нет заявок</div>
+                    </div>
                 </div>
             )}
 
-            {!loading && !error &&
-                rows.map((row) => {
-                    const expanded = expandedId === row.id;
-                    const readyOpen = readyId === row.id;
-                    return (
-                        <div key={row.id} className="ff-card">
-                            <div className="ff-row-head">
-                                <ProjectBadge name={row.project_name} />
-                                <AssemblyStatusBadge status={row.status} />
-                            </div>
-                            <div className="ff-number">№ {row.number}</div>
-                            <div className="ff-meta">
-                                <strong>{row.warehouse_name}</strong>
-                                {row.wb_warehouse_name ? ` → ${row.wb_warehouse_name}` : ''}
-                            </div>
-                            <div className="ff-meta">
-                                {row.package_type && <>Упаковка: {row.package_type} · </>}
-                                Позиций: {formatNumber(row.items.length, 0)}
-                            </div>
-                            {row.pallets_count != null && (
-                                <div className="ff-meta">
-                                    Паллет: {formatNumber(row.pallets_count, 0)}
-                                    {row.pallet_weight_kg != null && (
-                                        <> · {formatNumber(Number(row.pallet_weight_kg), 0)} кг/паллета</>
-                                    )}
+            {!loading && !error && rows.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    {rows.map((row) => {
+                        const expanded = expandedId === row.id;
+                        return (
+                            <div key={row.id} className="glass-card">
+                                <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+                                    <span style={{ fontSize: 16, fontWeight: 700 }}>№ {row.number}</span>
+                                    <ProjectBadge name={row.project_name} />
+                                    <AssemblyStatusBadge status={row.status} />
                                 </div>
-                            )}
-                            <div className="ff-meta">
-                                {row.actual_ready_date
-                                    ? `Готово: ${formatDate(row.actual_ready_date)}`
-                                    : row.estimated_ready_date
-                                      ? `Ожид. готовность: ${formatDate(row.estimated_ready_date)}`
-                                      : ''}
-                            </div>
-
-                            <button
-                                className="ff-disclosure"
-                                onClick={() => setExpandedId(expanded ? null : row.id)}
-                            >
-                                {expanded ? 'Скрыть состав' : `Показать состав (${formatNumber(row.items.length, 0)})`}
-                            </button>
-                            {expanded && (
-                                <div>
-                                    {row.items.map((it) => (
-                                        <div key={it.barcode} className="ff-item-line">
-                                            <span className="ff-item-name">
-                                                {it.product_name || '—'}
-                                                <br />
-                                                <span className="ff-item-bc">{it.barcode}</span>
-                                            </span>
-                                            <span className="ff-item-qty">
-                                                {formatNumber(it.quantity, 0)} шт
-                                            </span>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-
-                            {/* Ready form */}
-                            {readyOpen && (
-                                <div style={{ marginTop: 8 }}>
-                                    <div className="ff-form-grid">
-                                        <div className="form-group">
-                                            <label className="form-label">Паллет, шт</label>
-                                            <input
-                                                className="form-input"
-                                                type="number"
-                                                min={1}
-                                                inputMode="numeric"
-                                                value={pallets}
-                                                onChange={(e) => setPallets(e.target.value)}
-                                            />
-                                        </div>
-                                        <div className="form-group">
-                                            <label className="form-label">Вес паллеты, кг</label>
-                                            <input
-                                                className="form-input"
-                                                type="number"
-                                                min={0}
-                                                step="0.1"
-                                                inputMode="decimal"
-                                                value={weight}
-                                                onChange={(e) => setWeight(e.target.value)}
-                                            />
-                                        </div>
+                                <div style={{ color: 'var(--color-text-muted)', fontSize: 14, lineHeight: 1.6 }}>
+                                    <div>
+                                        <span style={{ color: 'var(--color-text)', fontWeight: 600 }}>{row.warehouse_name}</span>
+                                        {row.wb_warehouse_name ? ` → ${row.wb_warehouse_name}` : ''}
                                     </div>
-                                    {readyError && (
-                                        <div className="ff-hint-warn" style={{ marginTop: 4 }}>
-                                            {readyError}
+                                    <div>
+                                        {row.package_type && <>Упаковка: {row.package_type} · </>}
+                                        Позиций: {formatNumber(row.items.length, 0)}
+                                    </div>
+                                    {row.pallets_count != null && (
+                                        <div>
+                                            Паллет: {formatNumber(row.pallets_count, 0)}
+                                            {row.pallet_weight_kg != null && (
+                                                <> · {formatNumber(Number(row.pallet_weight_kg), 0)} кг/паллета</>
+                                            )}
                                         </div>
                                     )}
-                                    <div className="ff-actions">
-                                        <button
-                                            className="btn btn-primary"
-                                            disabled={busyId === row.id}
-                                            onClick={() => submitReady(row)}
-                                        >
-                                            {busyId === row.id ? 'Сохранение…' : 'Подтвердить готовность'}
-                                        </button>
-                                        <button
-                                            className="btn btn-secondary"
-                                            disabled={busyId === row.id}
-                                            onClick={() => setReadyId(null)}
-                                        >
-                                            Отмена
-                                        </button>
-                                    </div>
+                                    {row.actual_ready_date ? (
+                                        <div>Готово: {formatDate(row.actual_ready_date)}</div>
+                                    ) : row.estimated_ready_date ? (
+                                        <div>Ожид. готовность: {formatDate(row.estimated_ready_date)}</div>
+                                    ) : null}
                                 </div>
-                            )}
 
-                            {/* Status-driven actions */}
-                            {!readyOpen && (
-                                <div className="ff-actions">
+                                {expanded && (
+                                    <div style={{ overflowX: 'auto', marginTop: 12 }}>
+                                        <table className="data-table" style={{ fontSize: 13 }}>
+                                            <thead>
+                                                <tr>
+                                                    <th>Товар</th>
+                                                    <th style={{ textAlign: 'right' }}>Кол-во</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {row.items.map((it) => (
+                                                    <tr key={it.barcode}>
+                                                        <td>
+                                                            <div>{it.product_name || '—'}</div>
+                                                            <div style={{ color: 'var(--color-text-dim)', fontSize: 11 }}>{it.barcode}</div>
+                                                        </td>
+                                                        <td style={{ textAlign: 'right' }}>{formatNumber(it.quantity, 0)}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+                                    <button
+                                        className="btn btn-secondary"
+                                        onClick={() => setExpandedId(expanded ? null : row.id)}
+                                    >
+                                        {expanded ? 'Скрыть состав' : `Показать состав (${formatNumber(row.items.length, 0)})`}
+                                    </button>
                                     {row.status === 'PENDING' && (
                                         <button
                                             className="btn btn-primary"
@@ -257,33 +217,76 @@ export default function FfAssembliesPage() {
                                         </button>
                                     )}
                                     {row.status === 'READY' && (
-                                        <button
-                                            className="btn btn-secondary"
-                                            disabled
-                                            title="Ждём назначения машины логистикой"
-                                        >
+                                        <button className="btn btn-secondary" disabled title="Ждём назначения машины логистикой">
                                             Ждём машину
                                         </button>
                                     )}
                                     {row.status === 'VEHICLE_ASSIGNED' && (
                                         <button
-                                            className="btn btn-primary"
+                                            className="btn btn-success"
                                             disabled={busyId === row.id || !row.vehicle_assigned}
-                                            title={
-                                                row.vehicle_assigned
-                                                    ? undefined
-                                                    : 'Ждём назначения машины логистикой'
-                                            }
+                                            title={row.vehicle_assigned ? undefined : 'Ждём назначения машины логистикой'}
                                             onClick={() => handleShip(row)}
                                         >
                                             {busyId === row.id ? '…' : 'Отгрузил'}
                                         </button>
                                     )}
                                 </div>
-                            )}
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+
+            {readyRow && (
+                <div className="modal-overlay" onClick={() => setReadyRow(null)}>
+                    <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+                        <h2 className="modal-title">Готовность № {readyRow.number}</h2>
+                        <div className="form-group" style={{ marginBottom: 16 }}>
+                            <label className="form-label">Паллет, шт</label>
+                            <input
+                                className="form-input"
+                                type="number"
+                                min={1}
+                                inputMode="numeric"
+                                value={pallets}
+                                onChange={(e) => setPallets(e.target.value)}
+                            />
                         </div>
-                    );
-                })}
+                        <div className="form-group">
+                            <label className="form-label">Вес паллеты, кг</label>
+                            <input
+                                className="form-input"
+                                type="number"
+                                min={0}
+                                step="0.1"
+                                inputMode="decimal"
+                                value={weight}
+                                onChange={(e) => setWeight(e.target.value)}
+                            />
+                        </div>
+                        {readyError && (
+                            <div className="auth-error" style={{ marginTop: 16 }}>{readyError}</div>
+                        )}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 24 }}>
+                            <button
+                                className="btn btn-secondary"
+                                disabled={busyId === readyRow.id}
+                                onClick={() => setReadyRow(null)}
+                            >
+                                Отмена
+                            </button>
+                            <button
+                                className="btn btn-primary"
+                                disabled={busyId === readyRow.id}
+                                onClick={submitReady}
+                            >
+                                {busyId === readyRow.id ? 'Сохранение…' : 'Готово'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
