@@ -11,6 +11,25 @@ _INN = "7700000001"
 _PDF = b"%PDF-1.4\n%test invoice\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF"
 
 
+@pytest.fixture(autouse=True)
+def _mock_minio(monkeypatch):
+    """CI has no reachable MinIO → get_minio() returns None → uploads 503.
+
+    Mock the storage client so successful document uploads work without a live
+    MinIO. Rejection tests (mime/size) bail out before get_minio, so the mock is
+    harmless there. (test_counterparties_api only exercises rejection paths, which
+    is why it stayed green in CI without this.)
+    """
+    class _FakeMinio:
+        async def put_object(self, *args, **kwargs):
+            return None
+
+    async def _fake_get_minio():
+        return _FakeMinio()
+
+    monkeypatch.setattr("backend.services.payment_request_documents.get_minio", _fake_get_minio)
+
+
 async def _project_headers(client, auth_headers) -> dict:
     resp = await client.post("/api/v1/projects", json={"name": "PayReq Test"}, headers=auth_headers)
     return {**auth_headers, "X-Project-Id": str(resp.json()["id"])}
