@@ -30,3 +30,12 @@ class SyncLogSchema(BaseModel):
     rows_fetched: int = 0
     rows_inserted: int = 0
     error_msg: Optional[str] = None
+
+
+class FakturaStatusSchema(BaseModel):
+    """Status of the Faktura.ru (ВБ Банк) statement sync for a project."""
+
+    configured: bool = False
+    login: Optional[str] = None
+    last_sync_at: Optional[datetime] = None
+    last_run: Optional[SyncLogSchema] = None

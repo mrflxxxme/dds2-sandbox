@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.models.fulfillment import FulfillmentRequest
-from backend.models.integrations import IntegrationKey
 from backend.project_context import get_current_project
 from backend.schemas.assembly import (
     AssemblyAttempt,
@@ -111,39 +110,20 @@ async def _enrich_ff_links(
     items: list,
     response_items: list[AssemblyRequestResponse],
 ) -> None:
-    """BATCH-обогащение списка полями привязанной ФФ-заявки.
+    """BATCH-обогащение списка полями привязанной ФФ-заявки (номер, этап, расхождение).
 
-    Без per-row запросов: максимум две выборки —
-    (1) какие из складов страницы имеют активную интеграцию ФФ;
-    (2) ФФ-заявки, привязанные к нашим заявкам этих складов.
-    Деталочный эндпоинт делает то же per-row через
-    fulfillment_service.get_ff_link_for_assembly — его НЕ трогаем.
+    Один индексированный запрос по `fulfillment_requests.assembly_request_id` —
+    БЕЗ гейта на активность ключа интеграции: номер ФФ-заявки это историческая
+    привязка и должен показываться даже при отключённом/ещё-не-активированном ключе
+    (в т.ч. в локальной среде, где ключи неактивны). Деталочный эндпоинт делает то же
+    per-row через fulfillment_service.get_ff_link_for_assembly — его НЕ трогаем.
     """
     if not items:
         return
 
-    warehouse_ids = {req.warehouse_id for req in items}
-
-    # (1) Склады страницы с активной ФФ-интеграцией.
-    ff_wh_rows = await db.execute(
-        select(IntegrationKey.warehouse_id)
-        .where(
-            IntegrationKey.project_id == project_id,
-            IntegrationKey.warehouse_id.in_(warehouse_ids),
-            IntegrationKey.service.in_(fulfillment_service.FF_SERVICES),
-            IntegrationKey.is_active.is_(True),
-            IntegrationKey.is_deleted == False,  # noqa: E712
-        )
-        .distinct()
-    )
-    ff_warehouse_ids = {row[0] for row in ff_wh_rows.all()}
-    if not ff_warehouse_ids:
-        return
-
-    # (2) ФФ-заявки, привязанные к нашим заявкам ФФ-складов (один запрос).
-    assembly_ids = [req.id for req in items if req.warehouse_id in ff_warehouse_ids]
-    if not assembly_ids:
-        return
+    # ФФ-заявки, привязанные к заявкам страницы (один запрос по индексу
+    # ix_fulfillment_requests_assembly_request_id).
+    assembly_ids = [req.id for req in items]
 
     link_rows = await db.execute(
         select(

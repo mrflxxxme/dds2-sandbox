@@ -13,6 +13,7 @@
 | Сборка | заявки на сборку FBO, статусы, AssemblyDraft | [DOMAIN_ASSEMBLY.md](DOMAIN_ASSEMBLY.md) |
 | Поставки | FactoryOrder → Vehicle → Таможня → Склад | [DOMAIN_SUPPLY_CHAIN.md](DOMAIN_SUPPLY_CHAIN.md) |
 | Контрагенты | upsert по ИНН, мультивалюта, займы, обороты | [DOMAIN_COUNTERPARTY.md](DOMAIN_COUNTERPARTY.md) |
+| Заявки на оплату | оплата перевозчику по отгрузке: реквизиты + счёт/акт → черновик платёжки в банк (Faktura write) → авто-матч выписки → PAID | [DOMAIN_PAYMENT_REQUEST.md](DOMAIN_PAYMENT_REQUEST.md) |
 | Планирование | плановые показатели, платежи, таможня, кэшфлоу | [DOMAIN_PLANNING.md](DOMAIN_PLANNING.md) |
 | Локализация | индекс ИЛ / ИРП, региональные продажи, cold-start | [DOMAIN_LOCALIZATION.md](DOMAIN_LOCALIZATION.md) |
 | Telegram | бот + Telegram Mini App, авторизация, дайджест | [DOMAIN_TELEGRAM.md](DOMAIN_TELEGRAM.md) |

@@ -24,6 +24,8 @@ from backend.etl.sync_payments import (
     sync_customs_topup as _sync_customs_topup,
     sync_plan_payments as _sync_plan_payments,
 )
+from backend.etl.sync_payment_requests import sync_payment_requests as _sync_payment_requests
+from backend.etl.sync_shipment_payments import sync_shipment_payments as _sync_shipment_payments
 from backend.etl.sync_wb_payouts import sync_wb_payouts as _sync_wb_payouts
 from backend.models import (
     Account,
@@ -158,6 +160,7 @@ def _ensure_account(db: Session, account_no: str, source_type: str, project_id: 
         "VTB_CNY": ("VTB", "CNY", "VTB CNY", False),
         "WB_MAIN": ("WB", "RUB", "WB RUB Основной", False),
         "WB_PAYOUT": ("WB", "RUB", "WB RUB Транзит", False),
+        "FAKTURA_WB_BANK": ("WB_BANK", "RUB", "ВБ Банк (Faktura)", False),
     }
     bank, currency, name, is_customs = bank_map.get(source_type, ("UNKNOWN", "RUB", account_no, False))
     acc = Account(
@@ -200,6 +203,153 @@ def _load_refs(db: Session, project_id: int) -> tuple:
     overrides = {o.txn_id: {"cat_lvl1": o.cat_lvl1, "cat_lvl2": o.cat_lvl2} for o in overrides_db}
 
     return our_accounts, customs_accounts, cp_categories, overrides
+
+
+def _invalidate_reports_sync(project_id: int) -> None:
+    """Invalidate cached project reports from a sync (executor-thread) context.
+
+    Runs both from the manual file import and the Faktura.ru API auto-sync —
+    both execute inside ``loop.run_in_executor`` (no running loop), so the
+    ``except RuntimeError`` branch (``asyncio.run``) is the normal path.
+    """
+    try:
+        import asyncio
+
+        from backend.cache import invalidate_project_reports
+
+        async def _invalidate_all():
+            await invalidate_project_reports(project_id)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_invalidate_all())
+        except RuntimeError:
+            asyncio.run(_invalidate_all())
+    except Exception as e:
+        logger.warning("Cache invalidation skipped: %s", e)
+
+
+def persist_df(db: Session, df, project_id: int, account_no: str) -> tuple[int, int]:
+    """Persist a normalized NORM_COLS dataframe → transactions + distribution syncs.
+
+    Shared core of the import pipeline, reused by both the manual file import
+    (``import_statement``) and the Faktura.ru API auto-sync
+    (``services/faktura_service.py``):
+    master logic → counterparty upsert → dedup by ``txn_id`` → bulk insert
+    Transaction → customs/plan/wb-payout reconciliation.
+
+    Does NOT commit and does NOT invalidate caches — the caller owns commit
+    (cache invalidation must run AFTER commit). Returns ``(inserted, skipped)``.
+    """
+    # 1. Master logic (txn_id, cp_key, is_internal, event_type2, categories)
+    our_accounts, customs_accounts, cp_categories, overrides = _load_refs(db, project_id)
+    df = apply_master_logic(df, our_accounts, customs_accounts, cp_categories, overrides)
+
+    # 2. Auto-upsert Counterparty by INN + build (inn -> cp_id) / (cp_id -> active_loan_id) maps
+    inn_to_cp_id, cp_id_to_loan_id = _upsert_counterparties_from_df(db, df, project_id)
+
+    # 3. Bulk upsert (dedup by txn_id, scoped to project)
+    inserted = 0
+    skipped = 0
+
+    txn_ids = df["txn_id"].tolist()
+    if txn_ids:
+        existing_txn_ids = set(
+            row[0]
+            for row in db.execute(
+                text("SELECT txn_id FROM transactions WHERE txn_id = ANY(:ids) AND project_id = :pid"),
+                {"ids": txn_ids, "pid": project_id},
+            )
+        )
+    else:
+        existing_txn_ids = set()
+
+    def safe_dec(val):
+        try:
+            return Decimal(str(val)) if val is not None and str(val) != "nan" else Decimal("0")
+        except Exception as e:
+            logger.warning("Invalid decimal value %r converted to 0: %s", val, e)
+            return Decimal("0")
+
+    def safe_str(val):
+        if val is None:
+            return None
+        s = str(val).strip()
+        return s if s and s != "nan" else None
+
+    batch = []
+    for row in df.to_dict("records"):
+        txn_id = row["txn_id"]
+        if txn_id in existing_txn_ids:
+            skipped += 1
+            continue
+        # Within-batch dedup: одна выписка может содержать ДВЕ идентичные строки
+        # (напр. две банковские комиссии 15₽ в один день с тем же назначением → один
+        # txn_id). Без этого второй INSERT падает на transactions_txn_id_key и
+        # откатывает ВЕСЬ импорт. Помечаем принятый txn_id как «существующий».
+        existing_txn_ids.add(txn_id)
+
+        row_inn = safe_str(row.get("inn"))
+        cp_id = inn_to_cp_id.get(row_inn) if row_inn else None
+        loan_payment_type = safe_str(row.get("loan_payment_type"))
+        # Auto-match loan_id only if counterparty has exactly one active loan
+        loan_id = cp_id_to_loan_id.get(cp_id) if (cp_id and loan_payment_type) else None
+        batch.append(
+            Transaction(
+                project_id=project_id,
+                date=row["date"],
+                bank=safe_str(row["bank"]) or "UNKNOWN",
+                account=safe_str(row["account"]) or account_no,
+                currency=safe_str(row["currency"]) or "RUB",
+                counterparty=safe_str(row.get("counterparty")),
+                inn=row_inn,
+                counterparty_account=safe_str(row.get("counterparty_account")),
+                purpose=safe_str(row.get("purpose")),
+                income=safe_dec(row.get("income", 0)),
+                expense=safe_dec(row.get("expense", 0)),
+                txn_id=txn_id,
+                cp_key=safe_str(row.get("cp_key")),
+                net=safe_dec(row.get("net", 0)),
+                is_internal=bool(row.get("is_internal", 0)),
+                is_fx=bool(row.get("is_fx", 0)),
+                event_type2=safe_str(row.get("event_type2")) or "OPER",
+                is_cashflow2=int(row.get("is_cashflow2", 1)),
+                cat_lvl1_2=safe_str(row.get("cat_lvl1_2")),
+                cat_lvl2_2=safe_str(row.get("cat_lvl2_2")),
+                status=safe_str(row.get("status")) or "UNASSIGNED",
+                account_text=safe_str(row.get("account_text")),
+                purpose_tag=safe_str(row.get("purpose_tag")),
+                invoice_id=safe_str(row.get("invoice_id")),
+                annex_id=safe_str(row.get("annex_id")),
+                counterparty_id=cp_id,
+                contract_number=safe_str(row.get("contract_number")),
+                unk_number=safe_str(row.get("unk_number")),
+                loan_id=loan_id,
+                loan_payment_type=loan_payment_type,
+            )
+        )
+
+    if batch:
+        db.add_all(batch)
+        inserted = len(batch)
+
+    db.flush()
+
+    # 4-6. Distribution syncs (idempotent: customs topup, plan payments, WB payouts)
+    _sync_customs_topup(db, project_id)
+    _sync_plan_payments(db, project_id)
+    _sync_wb_payouts(db, project_id)
+    # Авто-матч заявок на оплату с выпиской (DRAFT_CREATED → PAID по ИНН+сумма).
+    _sync_payment_requests(db, project_id)
+    # Прямая связка заборов с дебетом выписки (ИНН перевозчика + pickup_cost) —
+    # ПОСЛЕ заявок: явная заявка забирает транзакцию первой.
+    _sync_shipment_payments(db, project_id)
+    # Реквизиты контрагентов из выписки (р/с) + тег CARRIER по отгрузкам.
+    from backend.services.counterparty_enrich import enrich_counterparty_requisites
+
+    enrich_counterparty_requisites(db, project_id)
+
+    return inserted, skipped
 
 
 def import_statement(
@@ -281,106 +431,10 @@ def import_statement(
             log_ctx.info("etl.import.done", status="OK", inserted=0, note="empty_file")
             return log
 
-        # 2. Master logic
-        our_accounts, customs_accounts, cp_categories, overrides = _load_refs(db, project_id)
-        df = apply_master_logic(df, our_accounts, customs_accounts, cp_categories, overrides)
-        log_ctx.info("etl.master_logic.done", rows=len(df))
-
-        # 2.5. Auto-upsert Counterparty by INN + build (inn -> cp_id) / (cp_id -> active_loan_id) maps
-        inn_to_cp_id, cp_id_to_loan_id = _upsert_counterparties_from_df(db, df, project_id)
-        log_ctx.info("etl.counterparty_upsert.done", count=len(inn_to_cp_id))
-
-        # 3. Bulk upsert
-        inserted = 0
-        skipped = 0
-
-        txn_ids = df["txn_id"].tolist()
-        if txn_ids:
-            existing_txn_ids = set(
-                row[0]
-                for row in db.execute(
-                    text("SELECT txn_id FROM transactions WHERE txn_id = ANY(:ids) AND project_id = :pid"),
-                    {"ids": txn_ids, "pid": project_id},
-                )
-            )
-        else:
-            existing_txn_ids = set()
-
-        def safe_dec(val):
-            try:
-                return Decimal(str(val)) if val is not None and str(val) != "nan" else Decimal("0")
-            except Exception as e:
-                logger.warning("Invalid decimal value %r converted to 0: %s", val, e)
-                return Decimal("0")
-
-        def safe_str(val):
-            if val is None:
-                return None
-            s = str(val).strip()
-            return s if s and s != "nan" else None
-
-        batch = []
-        for row in df.to_dict("records"):
-            txn_id = row["txn_id"]
-            if txn_id in existing_txn_ids:
-                skipped += 1
-                continue
-
-            row_inn = safe_str(row.get("inn"))
-            cp_id = inn_to_cp_id.get(row_inn) if row_inn else None
-            loan_payment_type = safe_str(row.get("loan_payment_type"))
-            # Auto-match loan_id only if counterparty has exactly one active loan
-            loan_id = cp_id_to_loan_id.get(cp_id) if (cp_id and loan_payment_type) else None
-            batch.append(
-                Transaction(
-                    project_id=project_id,
-                    date=row["date"],
-                    bank=safe_str(row["bank"]) or "UNKNOWN",
-                    account=safe_str(row["account"]) or account_no,
-                    currency=safe_str(row["currency"]) or "RUB",
-                    counterparty=safe_str(row.get("counterparty")),
-                    inn=row_inn,
-                    counterparty_account=safe_str(row.get("counterparty_account")),
-                    purpose=safe_str(row.get("purpose")),
-                    income=safe_dec(row.get("income", 0)),
-                    expense=safe_dec(row.get("expense", 0)),
-                    txn_id=txn_id,
-                    cp_key=safe_str(row.get("cp_key")),
-                    net=safe_dec(row.get("net", 0)),
-                    is_internal=bool(row.get("is_internal", 0)),
-                    is_fx=bool(row.get("is_fx", 0)),
-                    event_type2=safe_str(row.get("event_type2")) or "OPER",
-                    is_cashflow2=int(row.get("is_cashflow2", 1)),
-                    cat_lvl1_2=safe_str(row.get("cat_lvl1_2")),
-                    cat_lvl2_2=safe_str(row.get("cat_lvl2_2")),
-                    status=safe_str(row.get("status")) or "UNASSIGNED",
-                    account_text=safe_str(row.get("account_text")),
-                    purpose_tag=safe_str(row.get("purpose_tag")),
-                    invoice_id=safe_str(row.get("invoice_id")),
-                    annex_id=safe_str(row.get("annex_id")),
-                    counterparty_id=cp_id,
-                    contract_number=safe_str(row.get("contract_number")),
-                    unk_number=safe_str(row.get("unk_number")),
-                    loan_id=loan_id,
-                    loan_payment_type=loan_payment_type,
-                )
-            )
-
-        if batch:
-            db.add_all(batch)
-            inserted = len(batch)
-            log_ctx.info("etl.bulk_insert.done", inserted=inserted, skipped=skipped)
-
-        db.flush()
-
-        # 4. Sync customs_topup
-        _sync_customs_topup(db, project_id)
-
-        # 5. Sync plan payments
-        _sync_plan_payments(db, project_id)
-
-        # 6. Reconcile WB payouts
-        _sync_wb_payouts(db, project_id)
+        # 2-6. Persist: master logic → counterparty upsert → dedup insert → distribution syncs.
+        # Shared core with the Faktura.ru API auto-sync (services/faktura_service.py).
+        inserted, skipped = persist_df(db, df, project_id, account_no)
+        log_ctx.info("etl.persist.done", inserted=inserted, skipped=skipped)
 
         log.rows_inserted = inserted
         log.rows_skipped = skipped + parse_skipped
@@ -396,22 +450,8 @@ def import_statement(
             skipped=skipped + parse_skipped,
         )
 
-        # 7. Invalidate caches
-        try:
-            import asyncio
-
-            from backend.cache import invalidate_project_reports
-
-            async def _invalidate_all():
-                await invalidate_project_reports(project_id)
-
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_invalidate_all())
-            except RuntimeError:
-                asyncio.run(_invalidate_all())
-        except Exception as e:
-            logger.warning("Cache invalidation skipped: %s", e)
+        # 7. Invalidate caches (after commit)
+        _invalidate_reports_sync(project_id)
 
     except Exception as e:
         db.rollback()

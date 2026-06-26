@@ -39,6 +39,11 @@ class CounterpartyBase(BaseModel):
     contract_number: str | None = Field(None, max_length=100)
     notes: str | None = None
     contacts: dict | None = None
+    # Банковские реквизиты (мягкая валидация — карточка показывает/правит, выписка заполняет автоматом)
+    bank_account: str | None = Field(None, max_length=20)
+    bik: str | None = Field(None, max_length=9)
+    bank_name: str | None = Field(None, max_length=255)
+    corr_account: str | None = Field(None, max_length=20)
 
     @field_validator("primary_type")
     @classmethod
@@ -73,6 +78,10 @@ class CounterpartyUpdate(BaseModel):
     contract_number: str | None = Field(None, max_length=100)
     notes: str | None = None
     contacts: dict | None = None
+    bank_account: str | None = Field(None, max_length=20)
+    bik: str | None = Field(None, max_length=9)
+    bank_name: str | None = Field(None, max_length=255)
+    corr_account: str | None = Field(None, max_length=20)
 
     @field_validator("primary_type")
     @classmethod

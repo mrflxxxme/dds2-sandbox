@@ -137,10 +137,10 @@ export default function AssemblyFfPage() {
     }, [nmPpb]);
     const unitBoxes = useCallback((u: DraftUnit) => u.items.reduce((s, it) => s + boxesOf(it.nmId, it.qty), 0), [boxesOf]);
 
-    const backToPreview = useCallback(() => {
-        const qs = new URLSearchParams({ draft: String(draftId ?? ''), pkg: pkgTab });
-        router.push(`/p/${slug}/warehouse/assembly/distribute/preview?${qs.toString()}`);
-    }, [draftId, pkgTab, router, slug]);
+    const backToDraft = useCallback(() => {
+        if (draftId) router.push(`/p/${slug}/warehouse/assembly/distribute?draft=${draftId}`);
+        else router.push(`/p/${slug}/warehouse/assembly`);
+    }, [draftId, router, slug]);
 
     const openUnit = useCallback((u: DraftUnit) => {
         const qs = new URLSearchParams({
@@ -215,7 +215,7 @@ export default function AssemblyFfPage() {
         return (
             <div className="animate-in"><div className="glass-card" style={{ padding: 32, color: 'var(--color-danger)' }}>
                 {error || 'Не указан склад'}
-                <div style={{ marginTop: 12 }}><button className="btn btn-secondary btn-sm" onClick={backToPreview}>← К предпросмотру</button></div>
+                <div style={{ marginTop: 12 }}><button className="btn btn-secondary btn-sm" onClick={backToDraft}>← К черновику</button></div>
             </div></div>
         );
     }
@@ -235,7 +235,7 @@ export default function AssemblyFfPage() {
 
             <div className="page-header" style={{ marginBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1 }}>
-                    <button className="btn btn-secondary btn-sm" onClick={backToPreview}>← Назад</button>
+                    <button className="btn btn-secondary btn-sm" onClick={backToDraft}>← Назад</button>
                     <div>
                         <h1 className="page-title" style={{ margin: 0 }}>📦 {ffName}</h1>
                         <p className="page-subtitle" style={{ margin: 0 }}>
@@ -264,7 +264,7 @@ export default function AssemblyFfPage() {
             {units.length === 0 ? (
                 <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-text-muted)' }}>
                     Нет заявок этого склада в выбранном срезе.
-                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 8 }} onClick={backToPreview}>← К предпросмотру</button>
+                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 8 }} onClick={backToDraft}>← К черновику</button>
                 </div>
             ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

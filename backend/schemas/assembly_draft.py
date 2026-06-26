@@ -86,6 +86,17 @@ class AssemblyDraftUpdate(BaseModel):
     comment: str | None = None
 
 
+class AssemblyDraftAddRows(BaseModel):
+    """Request body for POST /assembly/drafts/{id}/rows.
+
+    Merge a batch of rows INTO an existing draft, preserving handed_units and
+    manual edits. Rows with matching (nm_id, package_type) are summed
+    element-wise (src per ff-id-string, tgt per wb-name); new keys appended.
+    """
+
+    rows: list[AssemblyDraftRow] = Field(default_factory=list)
+
+
 class AssemblyDraftRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

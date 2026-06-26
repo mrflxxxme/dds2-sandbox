@@ -3,9 +3,11 @@
  *
  * Self-contained on purpose — it does NOT reuse the main `ApiClient` instance
  * because FF endpoints aggregate cross-project server-side and must NEVER send
- * the `X-Project-Id` header. Token STORAGE, however, is shared: the same
- * localStorage keys as `lib/api/client.ts` (`dds_token` / `dds_refresh_token`)
- * are read/written so refresh stays consistent if the user also uses the main app.
+ * the `X-Project-Id` header. Token STORAGE is ALSO separate: its own localStorage
+ * keys (`dds_ff_token` / `dds_ff_refresh_token`), distinct from the main app's
+ * `dds_token`. Sharing the key meant an FF login (external operator) clobbered an
+ * admin's main-portal session and vice versa — and the new ext-isolation
+ * middleware then 403'd every main API call, hanging the dashboard.
  *
  * 401 handling: try a single refresh; on failure clear tokens and redirect to
  * `/ff/login`. Non-OK responses throw with the server-provided message.
@@ -26,8 +28,8 @@ import type {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
-const TOKEN_KEY = 'dds_token';
-const REFRESH_KEY = 'dds_refresh_token';
+const TOKEN_KEY = 'dds_ff_token';
+const REFRESH_KEY = 'dds_ff_refresh_token';
 
 const isBrowser =
     typeof window !== 'undefined' && typeof window.document !== 'undefined';

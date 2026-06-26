@@ -110,6 +110,12 @@ async def ws_sync(
         await websocket.close(code=4001, reason="Invalid token")
         return
 
+    # External fulfillment accounts (FF-портал) may not subscribe to project sync —
+    # the HTTP block_external_users middleware doesn't run on the WS scope, so gate here.
+    if payload.get("ext"):
+        await websocket.close(code=4003, reason="External account")
+        return
+
     async with AsyncSessionLocal() as db:
         member = await db.scalar(
             select(ProjectMember).where(

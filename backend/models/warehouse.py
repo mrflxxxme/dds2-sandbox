@@ -226,6 +226,16 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
     pallets_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pallet_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
 
+    # ─── Связка забора с банковской выпиской ───────────────────────────────
+    # «Этот забор оплачен транзакцией X» БЕЗ заявки на оплату: авто (матчер
+    # etl/sync_shipment_payments по ИНН перевозчика + pickup_cost, 1:1) ИЛИ вручную
+    # (привязка нескольких заборов к одной агрегированной оплате — N заборов → 1 txn).
+    # Защита от двойного авто-матча — consumed-set матчера (не БД-уникальность).
+    matched_transaction_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("transactions.id", ondelete="SET NULL"), nullable=True
+    )
+    matched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Relationships
     warehouse: Mapped["Warehouse"] = relationship(back_populates="shipments")
     items: Mapped[list["OutboundShipmentItem"]] = relationship(
@@ -239,6 +249,8 @@ class OutboundShipment(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_outbound_shipments_assembly_request_id", "assembly_request_id"),
         Index("ix_outbound_shipments_wb_fbo_supply_id", "wb_fbo_supply_id"),
         Index("ix_outbound_shipments_counterparty_id", "counterparty_id"),
+        Index("ix_outbound_shipments_matched_transaction_id", "matched_transaction_id"),
+        # Partial-unique (matched_transaction_id WHERE not null AND not deleted) — в миграции.
     )
 
 

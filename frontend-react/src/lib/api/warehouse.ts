@@ -7,6 +7,8 @@ import type {
     SupplyAcceptanceSlotsResponse,
     AssemblyDraft,
     AssemblyDraftCommitResponse,
+    AssemblyDraftRow,
+    BarcodeEligibilityResponse,
     CommitSupply,
     AssemblyDraftCreate,
     AssemblyDraftUnitRef,
@@ -593,6 +595,15 @@ export function addWarehouseMethods(api: ApiClient) {
          *  Возвращает survivor (черновик с наибольшим числом строк). */
         mergeAssemblyDrafts(draftIds: number[]) {
             return api.request<AssemblyDraft>('POST', '/api/v1/assembly/drafts/merge', { draft_ids: draftIds });
+        },
+        /** Дописать строки в черновик («добавить из потребности» / по баркоду):
+         *  мёржит по (nm_id, pkg), union складов; возвращает обновлённый черновик. */
+        addAssemblyDraftRows(draftId: number, rows: AssemblyDraftRow[]) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${draftId}/rows`, { rows });
+        },
+        /** Проверка приёмки WB по баркодам: типы упаковки + лимиты + остаток на ФФ. */
+        getBarcodeEligibility(barcodes: string[]) {
+            return api.request<BarcodeEligibilityResponse>('POST', '/api/v1/warehouse/barcode-eligibility', { barcodes });
         },
 
         // ─── Box-multiplicity (кратность коробки) ────────────────────────

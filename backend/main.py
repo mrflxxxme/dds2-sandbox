@@ -33,9 +33,11 @@ from backend.routers import (
     funnel,
     import_txn,
     integrations,
+    integrations_faktura,
     loans,
     localization,
     monitoring,
+    payment_requests,
     planning,
     projects,
     refs,
@@ -284,14 +286,20 @@ async def block_external_users(request: Request, call_next):
     (require_role is unused; pages are frontend-only).
     """
     path = request.url.path
-    if path.startswith("/api/") and not (
-        path.startswith("/api/v1/ff") or path.startswith("/api/v1/auth")
-    ):
+    ff_allowed = (
+        path == "/api/v1/ff"
+        or path.startswith("/api/v1/ff/")
+        or path == "/api/v1/auth"
+        or path.startswith("/api/v1/auth/")
+    )
+    if path.startswith("/api/") and not ff_allowed:
         auth_header = request.headers.get("authorization", "")
         if auth_header.startswith("Bearer "):
-            try:
-                import jwt
+            # python-jose is a hard dependency (used in backend/auth.py) — decoding
+            # here can't ImportError-and-fail-open the way a bare `import jwt` could.
+            from jose import jwt
 
+            try:
                 payload = jwt.decode(auth_header[7:], settings.SECRET_KEY, algorithms=["HS256"])
             except Exception:
                 payload = None  # invalid/expired → let the endpoint's auth return 401
@@ -490,6 +498,12 @@ app.include_router(
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
+    payment_requests.router,
+    prefix="/api/v1",
+    tags=["Payment Requests"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
     cost.router,
     prefix="/api/v1",
     tags=["Cost"],
@@ -497,6 +511,12 @@ app.include_router(
 )
 app.include_router(
     integrations.router,
+    prefix="/api/v1",
+    tags=["Integrations"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    integrations_faktura.router,
     prefix="/api/v1",
     tags=["Integrations"],
     dependencies=[Depends(get_current_user)],

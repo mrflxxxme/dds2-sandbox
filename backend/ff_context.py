@@ -100,19 +100,19 @@ async def get_ff_context(
     if not projects:
         raise HTTPException(403, "Не найдены проекты фулфилмента для этого аккаунта")
 
-    # Configured warehouse ids per project (from ProjectSetting).
+    # Configured warehouse ids per project (from ProjectSetting) — one batched query.
+    key = ff_warehouses_key(user.id)
+    setting_rows = await db.execute(
+        select(ProjectSetting.project_id, ProjectSetting.value).where(
+            ProjectSetting.project_id.in_(list(projects)),
+            ProjectSetting.key == key,
+        )
+    )
+    raw_by_pid = {pid: val for pid, val in setting_rows.all()}
     configured: dict[int, list[int]] = {}
     all_ids: set[int] = set()
     for pid in projects:
-        row = (
-            await db.execute(
-                select(ProjectSetting.value).where(
-                    ProjectSetting.project_id == pid,
-                    ProjectSetting.key == ff_warehouses_key(user.id),
-                )
-            )
-        ).scalar_one_or_none()
-        ids = _parse_id_list(row)
+        ids = _parse_id_list(raw_by_pid.get(pid))
         configured[pid] = ids
         all_ids.update(ids)
 
