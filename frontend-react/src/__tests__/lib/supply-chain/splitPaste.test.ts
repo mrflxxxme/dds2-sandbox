@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AvailableItem } from '@/types/api';
-import { buildBoxOverrides, buildPriceOverwrites, matchesPasteParams, normalizeBox, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
+import { buildBoxOverrides, buildExceededPriceOverwrites, buildPriceOverwrites, matchesPasteParams, normalizeBox, splitRowAcrossFois } from '@/lib/supply-chain/splitPaste';
 
 const foi = (over: Partial<AvailableItem>): AvailableItem => ({
     id: 1,
@@ -385,5 +385,103 @@ describe('buildPriceOverwrites — multi-source price overwrite (sc20.3)', () =>
         };
         expect(buildPriceOverwrites([{ barcode: 'BC', qty: 24, priceRaw: '', boxRaw: '', pcsPerBox: 0 }], foisByBarcode)).toEqual([]);
         expect(buildPriceOverwrites([{ barcode: 'BC', qty: 0, priceRaw: '43', boxRaw: '', pcsPerBox: 0 }], foisByBarcode)).toEqual([]);
+    });
+});
+
+describe('buildExceededPriceOverwrites — «!» basket reprice (prod incident V-0031)', () => {
+    it('reproduces V-0031: paste 108 > order line 100 (price 0) → reprices the extended FOI', () => {
+        // Real prod scenario (project 4, V-0031, barcode 2052073634727, FO #85):
+        // FOI 1739 had qty=100, price=0; user pasted qty=108 at price=30.6. The row went
+        // into the «!» basket (exceeded), booked 100 + extend_plan 8, but its price was
+        // never written → the vehicle line snapshotted price 0.
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            '2052073634727': [
+                foi({ id: 1739, barcode: '2052073634727', remaining_qty: 100, price_cny: '0.0000', box_size: '', pcs_per_box: 0 }),
+            ],
+        };
+        const updates = buildExceededPriceOverwrites(
+            [{ barcode: '2052073634727', qty: 108, priceRaw: '30.6', boxRaw: '60x40x50', pcsPerBox: 18 }],
+            foisByBarcode,
+        );
+        expect(updates).toEqual([{ factory_order_item_id: 1739, new_price_cny: '30.6' }]);
+    });
+
+    it('reprices the extend target even when every FOI is already exhausted (remaining 0)', () => {
+        // The whole row lands on fois[0] via extend_plan — it must still be repriced.
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            BC: [foi({ id: 7, barcode: 'BC', remaining_qty: 0, price_cny: '0.0000', box_size: '', pcs_per_box: 0 })],
+        };
+        const updates = buildExceededPriceOverwrites(
+            [{ barcode: 'BC', qty: 50, priceRaw: '30.6', boxRaw: '', pcsPerBox: 0 }],
+            foisByBarcode,
+        );
+        expect(updates).toEqual([{ factory_order_item_id: 7, new_price_cny: '30.6' }]);
+    });
+
+    it('does NOT reprice when the pasted price already equals the FOI price', () => {
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            BC: [foi({ id: 1, barcode: 'BC', remaining_qty: 100, price_cny: '30.60', box_size: '', pcs_per_box: 0 })],
+        };
+        const updates = buildExceededPriceOverwrites(
+            [{ barcode: 'BC', qty: 108, priceRaw: '30.6', boxRaw: '', pcsPerBox: 0 }],
+            foisByBarcode,
+        );
+        expect(updates).toEqual([]);
+    });
+
+    it('shares consumed with the valid-row pass so cumulative qty across baskets lines up', () => {
+        // Same barcode in two paste rows: one ✓ valid (fits), one ! exceeded. The add
+        // books valid first; the exceeded reprice must see the FOI already partly eaten.
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            BC: [foi({ id: 9, barcode: 'BC', remaining_qty: 100, price_cny: '0.0000', box_size: '', pcs_per_box: 0 })],
+        };
+        const consumed: Record<number, number> = {};
+        const validUpdates = buildPriceOverwrites(
+            [{ barcode: 'BC', qty: 60, priceRaw: '30.6', boxRaw: '', pcsPerBox: 0 }],
+            foisByBarcode,
+            consumed,
+        );
+        const exceededUpdates = buildExceededPriceOverwrites(
+            [{ barcode: 'BC', qty: 80, priceRaw: '30.6', boxRaw: '', pcsPerBox: 0 }],
+            foisByBarcode,
+            consumed,
+        );
+        // Both passes reprice FOI 9 (the exceeded pass recomputes the diff against the
+        // unmutated input price, so it re-emits the same update — the call site dedups
+        // by FOI). What MUST be shared is `consumed`: 60 (valid) + 40 avail + 40 extend = 140.
+        expect(validUpdates).toEqual([{ factory_order_item_id: 9, new_price_cny: '30.6' }]);
+        expect(exceededUpdates).toEqual([{ factory_order_item_id: 9, new_price_cny: '30.6' }]);
+        expect(consumed[9]).toBe(140);
+        // The call-site dedup (Map by FOI) collapses the duplicate to a single update.
+        const byFoi = new Map<number, { factory_order_item_id: number; new_price_cny: string }>();
+        for (const u of [...validUpdates, ...exceededUpdates]) byFoi.set(u.factory_order_item_id, u);
+        expect([...byFoi.values()]).toEqual([{ factory_order_item_id: 9, new_price_cny: '30.6' }]);
+    });
+
+    it('FIFO consumes across multiple FOIs then extends the first (reprices each touched)', () => {
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            BC: [
+                foi({ id: 1, barcode: 'BC', remaining_qty: 40, price_cny: '0.0000', box_size: '', pcs_per_box: 0 }),
+                foi({ id: 2, barcode: 'BC', remaining_qty: 30, price_cny: '0.0000', box_size: '', pcs_per_box: 0 }),
+            ],
+        };
+        // qty 100 > 70 total → 40 from #1, 30 from #2, overflow 30 extends #1.
+        const updates = buildExceededPriceOverwrites(
+            [{ barcode: 'BC', qty: 100, priceRaw: '45', boxRaw: '', pcsPerBox: 0 }],
+            foisByBarcode,
+        );
+        expect(updates).toEqual([
+            { factory_order_item_id: 1, new_price_cny: '45' },
+            { factory_order_item_id: 2, new_price_cny: '45' },
+        ]);
+    });
+
+    it('skips rows with no price or zero qty / empty fois', () => {
+        const foisByBarcode: Record<string, AvailableItem[]> = {
+            BC: [foi({ id: 1, barcode: 'BC', remaining_qty: 100, price_cny: '0.0000' })],
+        };
+        expect(buildExceededPriceOverwrites([{ barcode: 'BC', qty: 108, priceRaw: '', boxRaw: '', pcsPerBox: 0 }], foisByBarcode)).toEqual([]);
+        expect(buildExceededPriceOverwrites([{ barcode: 'BC', qty: 0, priceRaw: '30.6', boxRaw: '', pcsPerBox: 0 }], foisByBarcode)).toEqual([]);
+        expect(buildExceededPriceOverwrites([{ barcode: 'ZZZ', qty: 108, priceRaw: '30.6', boxRaw: '', pcsPerBox: 0 }], foisByBarcode)).toEqual([]);
     });
 });
