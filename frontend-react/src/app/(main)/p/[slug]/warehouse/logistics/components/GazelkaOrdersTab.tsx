@@ -189,6 +189,11 @@ function LinkCell({ row, onUnmatch, onQuickMatch, onOpenPicker, matchBusy }: Lin
                 <span className="badge badge-success" style={{ fontSize: 11 }} title="Связанная сборка">
                     наша {row.linked_assembly_number}
                 </span>
+                {row.linked_assembly_status && (
+                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)', whiteSpace: 'nowrap' }} title="Статус нашей сборки — где она находится">
+                        · {row.linked_assembly_status}
+                    </span>
+                )}
                 <button
                     onClick={() => onUnmatch(planId)}
                     disabled={busy}

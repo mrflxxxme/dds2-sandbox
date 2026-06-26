@@ -388,6 +388,25 @@ def _status_label(code: object) -> str:
     return _STATUS_LABELS.get(str(code or ""), f"Статус {code}")
 
 
+# Статусы НАШЕЙ сборки (AssemblyRequest) — «где заявка находится»
+_ASSEMBLY_STATUS_LABELS = {
+    "PENDING": "Ожидает",
+    "IN_PROGRESS": "В сборке",
+    "READY": "Готова",
+    "VEHICLE_ASSIGNED": "Машина назначена",
+    "SHIPPED": "Отгружена",
+    "DELIVERED": "Доставлена",
+    "CANCELLED": "Отменена",
+    "CLOSED": "Закрыта",
+}
+
+
+def _assembly_status_label(code: object) -> str | None:
+    if not code:
+        return None
+    return _ASSEMBLY_STATUS_LABELS.get(str(code), str(code))
+
+
 def _u(v: object) -> str | None:
     """HTML-unescape строкового значения портала; пусто/не-строка → None."""
     if not isinstance(v, str):
@@ -436,13 +455,18 @@ def _marketplace_name(mid: object, marketplaces: list[dict]) -> str | None:
     return None
 
 
-async def _linked_map(db: AsyncSession, project_id: int) -> dict[str, tuple[int | None, str | None]]:
-    """gazelka_ref → (assembly_id, assembly_number): отправленные (SENT) + сматченные (MATCHED).
+async def _linked_map(db: AsyncSession, project_id: int) -> dict[str, tuple[int, str | None, str | None]]:
+    """gazelka_ref → (assembly_id, assembly_number, assembly_status): SENT + MATCHED.
 
     Сортировка по id → последняя запись побеждает (ручной матч поверх старой отправки).
     """
     rows = await db.execute(
-        select(GazelkaOrder.gazelka_ref, GazelkaOrder.assembly_request_id, AssemblyRequest.number)
+        select(
+            GazelkaOrder.gazelka_ref,
+            GazelkaOrder.assembly_request_id,
+            AssemblyRequest.number,
+            AssemblyRequest.status,
+        )
         .join(AssemblyRequest, AssemblyRequest.id == GazelkaOrder.assembly_request_id, isouter=True)
         .where(
             GazelkaOrder.project_id == project_id,
@@ -451,17 +475,17 @@ async def _linked_map(db: AsyncSession, project_id: int) -> dict[str, tuple[int 
         )
         .order_by(GazelkaOrder.id)
     )
-    out: dict[str, tuple[int | None, str | None]] = {}
-    for ref, aid, number in rows.all():
+    out: dict[str, tuple[int, str | None, str | None]] = {}
+    for ref, aid, number, status in rows.all():
         if ref and aid is not None:
-            out[str(ref)] = (aid, number)
+            out[str(ref)] = (aid, number, status)
     return out
 
 
 def _row_from_plan(
     plan: dict,
     marketplaces: list[dict],
-    linked: dict[str, tuple[int | None, str | None]],
+    linked: dict[str, tuple[int, str | None, str | None]],
     *,
     editable: bool,
     joins: dict[str, dict[str, dict]] | None = None,
@@ -491,6 +515,7 @@ def _row_from_plan(
         editable=editable,
         linked_assembly_id=link[0] if link else None,
         linked_assembly_number=link[1] if link else None,
+        linked_assembly_status=_assembly_status_label(link[2]) if link else None,
     )
     if joins:
         route = joins["routes"].get(str(plan.get("route_id") or ""))
@@ -783,7 +808,7 @@ async def list_match_candidates(
     """Наши сборки — кандидаты на ручное сопоставление (поиск по номеру/№ поставки)."""
     linked = await _linked_map(db, project_id)
     assembly_to_gazelka: dict[int, str] = {}
-    for gref, (aid, _num) in linked.items():
+    for gref, (aid, _num, _status) in linked.items():
         if aid is not None:
             assembly_to_gazelka[aid] = gref
 

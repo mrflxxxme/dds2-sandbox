@@ -1194,7 +1194,12 @@ export default function LogisticsPage() {
                         <TanStackDataTable
                             columns={[
                                 { key: 'status', label: 'Статус', sortable: true, render: (_v: string, row: LogisticsShipmentRow) => { const cfg = STATUS_MAP[row.status as AssemblyStatus] || { label: row.status || '—', className: '' }; return <span className={`badge ${cfg.className}`}>{cfg.label}</span>; }},
-                                { key: 'assembly_number', label: '№', sortable: true, render: (v: string) => <span style={{ fontWeight: 500 }}>{v || '—'}</span> },
+                                { key: 'assembly_number', label: '№', sortable: true, render: (v: string, row: LogisticsShipmentRow) => (
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+                                        <span style={{ fontWeight: 500 }}>{v || '—'}</span>
+                                        {row.via_gazelka && <span className="badge badge-info" style={{ fontSize: 10 }} title="Отправлено через Газельку (интеграция)">🚚 Газелька</span>}
+                                    </span>
+                                ) },
                                 { key: 'shipment_id', label: '', sortable: false, render: (_v: number, row: LogisticsShipmentRow) => row.status === 'SHIPPED' ? (
                                     <button
                                         className="btn btn-secondary btn-sm"
