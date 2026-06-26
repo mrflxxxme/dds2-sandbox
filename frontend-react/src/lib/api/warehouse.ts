@@ -682,5 +682,64 @@ export function addWarehouseMethods(api: ApiClient) {
                 {},
             );
         },
+
+        // ─── Gazelka ──────────────────────────────────────────────────────────
+        getGazelkaConfig() {
+            return api.request<import('@/types/api').GazelkaConfig>('GET', '/api/v1/gazelka/config');
+        },
+        getGazelkaDraft(assemblyId: number) {
+            return api.request<import('@/types/api').GazelkaDraft>('GET', `/api/v1/gazelka/assembly/${assemblyId}/draft`);
+        },
+        sendToGazelka(assemblyId: number, body: import('@/types/api').GazelkaSendRequest) {
+            return api.request<import('@/types/api').GazelkaSendResult>('POST', `/api/v1/gazelka/assembly/${assemblyId}/send`, body);
+        },
+        getGazelkaPlanned() {
+            return api.request<import('@/types/api').GazelkaOrderList>('GET', '/api/v1/gazelka/planned');
+        },
+        getGazelkaActive() {
+            return api.request<import('@/types/api').GazelkaOrderList>('GET', '/api/v1/gazelka/active');
+        },
+        getGazelkaEditDraft(planId: number) {
+            return api.request<import('@/types/api').GazelkaEditDraft>('GET', `/api/v1/gazelka/order/${planId}/edit`);
+        },
+        saveGazelkaEdit(planId: number, body: import('@/types/api').GazelkaSendRequest) {
+            return api.request<import('@/types/api').GazelkaSendResult>('POST', `/api/v1/gazelka/order/${planId}/edit`, body);
+        },
+        /** ТТН требует авторизацию — открываем через авторизованный fetch, затем blob-URL. */
+        async openGazelkaTtn(planId: number): Promise<void> {
+            const token = api.getToken();
+            const res = await fetch(`/api/v1/gazelka/order/${planId}/ttn`, {
+                headers: token ? { Authorization: `Bearer ${token}` } : {},
+            });
+            if (!res.ok) {
+                const text = await res.text().catch(() => '');
+                throw new Error(`Ошибка ТТН: ${res.status}${text ? ' — ' + text.slice(0, 200) : ''}`);
+            }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            window.open(url, '_blank');
+        },
+        getGazelkaMatchCandidates(search?: string) {
+            const qs = new URLSearchParams();
+            if (search) qs.set('search', search);
+            const tail = qs.toString();
+            return api.request<import('@/types/api').GazelkaMatchCandidate[]>(
+                'GET',
+                `/api/v1/gazelka/match-candidates${tail ? `?${tail}` : ''}`,
+            );
+        },
+        matchGazelkaOrder(planId: number, assemblyId: number) {
+            return api.request<import('@/types/api').GazelkaMatchResult>(
+                'POST',
+                `/api/v1/gazelka/order/${planId}/match`,
+                { assembly_id: assemblyId },
+            );
+        },
+        unmatchGazelkaOrder(planId: number) {
+            return api.request<import('@/types/api').GazelkaUnmatchResult>(
+                'DELETE',
+                `/api/v1/gazelka/order/${planId}/match`,
+            );
+        },
     };
 }

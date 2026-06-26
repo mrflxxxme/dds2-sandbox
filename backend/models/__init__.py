@@ -195,6 +195,12 @@ from backend.models.warehouse import (
     WarehouseType,
 )
 
+# Gazelka (gazelka.space) — отправка заявки логиста перевозчику
+from backend.models.gazelka import (
+    GazelkaOrder,
+    GazelkaOrderStatus,
+)
+
 # WB FBO Supplies
 from backend.models.wb_fbo import (
     FboAuditAction,
@@ -358,6 +364,9 @@ __all__ = [
     "WbFboSupply",
     "WbFboSupplyItem",
     "WbSupplyStatus",
+    # Gazelka (gazelka.space)
+    "GazelkaOrder",
+    "GazelkaOrderStatus",
     # Supply Chain
     "FactoryOrder",
     "FactoryOrderHistory",
