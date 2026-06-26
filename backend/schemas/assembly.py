@@ -415,6 +415,7 @@ class LogisticsShipmentRow(BaseModel):
     shipped_date: date | None = None
     shipped_at: datetime | None = None
     anomaly_type: Literal["no_cost", "overpriced", "underpriced"] | None = None
+    via_gazelka: bool = False  # отгрузка ушла через интеграцию с Газелькой
 
 
 class LogisticsShipmentListResponse(BaseModel):

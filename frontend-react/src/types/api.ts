@@ -1781,6 +1781,7 @@ export interface GazelkaOrderRow {
   editable: boolean;
   linked_assembly_id: number | null;
   linked_assembly_number: string | null;
+  linked_assembly_status: string | null;
   suggested_assembly_id: number | null;
   suggested_assembly_number: string | null;
   route_number: string | null;
@@ -2329,6 +2330,7 @@ export interface LogisticsShipmentRow {
   shipped_date: string | null;
   shipped_at: string | null;
   anomaly_type: LogisticsAnomalyType | null;
+  via_gazelka: boolean;
 }
 
 export interface LogisticsShipmentListResponse {

@@ -148,6 +148,7 @@ class GazelkaOrderRow(BaseModel):
     # Связь с нашей сборкой (если заявку создавали из DDS или сматчили вручную)
     linked_assembly_id: int | None = None
     linked_assembly_number: str | None = None
+    linked_assembly_status: str | None = None  # статус нашей сборки («где она находится»)
     # Авто-подсказка для матчинга по № поставки WB (если ещё не связана)
     suggested_assembly_id: int | None = None
     suggested_assembly_number: str | None = None

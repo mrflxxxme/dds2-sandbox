@@ -32,6 +32,7 @@ from backend.models.warehouse import (
     OutboundStatus,
     Warehouse,
 )
+from backend.models.gazelka import GazelkaOrder, GazelkaOrderStatus
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem
 from backend.schemas.assembly import AssemblyItemResponse, RefreshFromFboResponse
 from backend.services.warehouse_service import _resolve_barcode
@@ -884,6 +885,22 @@ async def get_logistics_shipments(
                 acc.setdefault(rid, set()).add(brand)
         brands_by_req = {rid: ", ".join(sorted(bs)) for rid, bs in acc.items()}
 
+    # Отгрузки, ушедшие через Газельку (есть SENT/MATCHED-связь у сборки) — бейдж «Газелька».
+    gazelka_req_ids: set[int] = set()
+    if req_ids:
+        gz_rows = (
+            await db.execute(
+                select(GazelkaOrder.assembly_request_id)
+                .where(
+                    GazelkaOrder.project_id == project_id,
+                    GazelkaOrder.assembly_request_id.in_(set(req_ids)),
+                    GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.MATCHED]),
+                )
+                .distinct()
+            )
+        ).all()
+        gazelka_req_ids = {rid for (rid,) in gz_rows if rid is not None}
+
     # Робастная статистика ₽/паллета по складам (как в аналитике) — для флага аномалии.
     cpp_by_dest: dict[str, list[float]] = {}
     all_cpp: list[float] = []
@@ -934,6 +951,7 @@ async def get_logistics_shipments(
                 "shipped_date": r.shipped_date,
                 "shipped_at": r.shipped_at,
                 "anomaly_type": anomaly_type,
+                "via_gazelka": r.assembly_request_id in gazelka_req_ids,
             }
         )
 
