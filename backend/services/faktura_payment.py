@@ -95,6 +95,27 @@ def _resolve_payer(accounts: list[dict], payer_account_id: str | None) -> dict:
     return rub[0]
 
 
+def _extract_doc_id(result: object) -> str | None:
+    """Достать id созданного документа из ответа банка на /payments/save.
+
+    Формат ответа /save контрактом НЕ зафиксирован (первый живой запуск показал, что
+    id не в id/docId/guid). Пробуем типовые поля и вложенные контейнеры; если не нашли —
+    вызывающий логирует ключи ответа, чтобы добить точечно."""
+    if not isinstance(result, dict):
+        return None
+    containers: list[dict] = [result]
+    for key in ("data", "document", "result", "doc", "payment"):
+        nested = result.get(key)
+        if isinstance(nested, dict):
+            containers.append(nested)
+    for container in containers:
+        for field in ("id", "docId", "documentId", "document_id", "doc_id", "number", "guid", "uid"):
+            value = container.get(field)
+            if value:
+                return str(value)
+    return None
+
+
 async def create_payment_draft(
     db: AsyncSession,
     project_id: int,
@@ -149,7 +170,12 @@ async def create_payment_draft(
             await db.commit()
 
         result = await client.save_payment(payment)
-        pr.bank_doc_id = str(result.get("id") or result.get("docId") or result.get("guid") or "") or None
+        pr.bank_doc_id = _extract_doc_id(result)
+        if pr.bank_doc_id is None:
+            # id документа не нашёлся в ожидаемых полях — логируем ТОЛЬКО ключи ответа
+            # (без значений → без PII), чтобы по факту добить точное поле.
+            keys = sorted(result.keys()) if isinstance(result, dict) else type(result).__name__
+            logger.warning("Faktura /payments/save: id документа не найден в ответе; ключи=%s", keys)
         # НЕ логируем сырой ответ банка — в нём финансовые PII (реквизиты/номера). Только doc id.
         logger.info("Faktura /payments/save ok (pr=%d, doc=%s)", pr.id, pr.bank_doc_id)
 
