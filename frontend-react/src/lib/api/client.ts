@@ -228,6 +228,47 @@ export class ApiClient {
     }
 
     /**
+     * GET, возвращающий Blob (для скачивания/печати: ТТН, выгрузки).
+     * Зеркалит request(): base URL (API_URL), Authorization, X-Project-Id, рефреш на 401.
+     * Сырой fetch без этого ломается на проде (api на отдельном origin + нужен проектный контекст).
+     */
+    async requestBlob(path: string): Promise<Blob> {
+        if (this.bounceExternalToFf()) {
+            throw new Error('Внешний аккаунт фулфилмента: доступ только к ФФ-порталу');
+        }
+
+        const headers: Record<string, string> = {};
+        const token = this.getToken();
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const projectId = this.getProjectId();
+        if (projectId) headers['X-Project-Id'] = String(projectId);
+
+        let res = await fetch(`${API_URL}${path}`, { headers });
+
+        if (res.status === 401) {
+            const refreshResult = await this.tryRefresh();
+            if (refreshResult === 'ok') {
+                headers['Authorization'] = `Bearer ${this.getToken()}`;
+                res = await fetch(`${API_URL}${path}`, { headers });
+            } else if (refreshResult === 'unavailable') {
+                throw new Error('Сервер временно недоступен. Попробуйте через минуту.');
+            }
+            if (res.status === 401) {
+                this.clearToken();
+                if (typeof window !== 'undefined') window.location.href = '/login';
+                throw new Error('Unauthorized');
+            }
+        }
+
+        if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            throw new Error(`Ошибка загрузки (${res.status})${text ? ': ' + text.slice(0, 200) : ''}`);
+        }
+
+        return res.blob();
+    }
+
+    /**
      * Helper for FormData uploads — shared by all upload methods.
      */
     async uploadFormData<T>(path: string, formData: FormData): Promise<T> {

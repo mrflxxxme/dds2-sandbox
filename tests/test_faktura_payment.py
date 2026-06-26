@@ -86,6 +86,19 @@ def test_resolve_payer_no_accounts_raises():
         _resolve_payer([], None)
 
 
+def test_extract_doc_id_various_shapes():
+    from backend.services.faktura_payment import _extract_doc_id
+
+    assert _extract_doc_id({"id": "123"}) == "123"
+    assert _extract_doc_id({"docId": 456}) == "456"
+    assert _extract_doc_id({"documentId": "D-1"}) == "D-1"
+    assert _extract_doc_id({"data": {"id": "nested-7"}}) == "nested-7"
+    assert _extract_doc_id({"document": {"number": "WH-9"}}) == "WH-9"
+    assert _extract_doc_id({"status": "ok"}) is None  # ни одного известного поля
+    assert _extract_doc_id(None) is None
+    assert _extract_doc_id("not-a-dict") is None
+
+
 def test_resolve_payer_dict_currency_rur():
     """Faktura отдаёт currency СЛОВАРЁМ с кодом RUR (не строкой RUB) — не падать, матчить."""
     accs = [

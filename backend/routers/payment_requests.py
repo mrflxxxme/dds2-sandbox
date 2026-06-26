@@ -33,6 +33,7 @@ from backend.models import Project, User
 from backend.models.payment_request import PaymentRequest
 from backend.project_context import get_current_project
 from backend.rbac import require_role
+from backend.services.bank_directory import resolve_bank
 from backend.schemas.payment_request import (
     ALLOWED_PR_DOC_TYPES,
     ArchiveShipmentsRequest,
@@ -90,6 +91,16 @@ def _actor(user: User) -> str:
 
 
 # ─── Reads ────────────────────────────────────────────────────────────────────
+
+
+@router.get("/banks/{bic}")
+async def get_bank_by_bic(bic: str, _user: User = Depends(get_current_user)) -> dict[str, str]:
+    """БИК → {bic, corr_account, name} из справочника — для авто-заполнения реквизитов
+    получателя. 404, если банка нет в наборе (тогда к/с вводится вручную)."""
+    bank = resolve_bank(bic)
+    if bank is None:
+        raise HTTPException(status_code=404, detail="Банк по БИК не найден в справочнике")
+    return bank
 
 
 @router.get("", response_model=PaymentRequestListResponse)

@@ -207,6 +207,17 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
         try { setCreated(await api.getPaymentRequest(id)); } catch { /* ignore */ }
     }, []);
 
+    // ─── Авто-подстановка корр. счёта + банка по БИК (банк требует к/с; вводить вручную лень) ──
+    const handleBikBlur = useCallback(async () => {
+        const bik = payeeBik.trim();
+        if (!/^\d{9}$/.test(bik) || payeeCorrAccount.trim()) return;  // не перетираем введённое
+        try {
+            const bank = await api.getBankByBic(bik);
+            setPayeeCorrAccount(prev => prev.trim() ? prev : bank.corr_account);
+            setPayeeBankName(prev => prev.trim() ? prev : bank.name);
+        } catch { /* банка нет в справочнике — к/с вводится вручную */ }
+    }, [payeeBik, payeeCorrAccount]);
+
     // ─── Client-side requisites validation (понятные сообщения вместо сырого 422) ──
     const validateRequisites = (): string | null => {
         if (!payeeName.trim()) return 'Укажите наименование получателя';
@@ -394,7 +405,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
             </div>
             <div className="form-group" style={{ margin: 0 }}>
                 <label className="form-label">БИК *</label>
-                <input className="form-input" value={payeeBik} onChange={e => setPayeeBik(e.target.value)} placeholder="9 цифр" maxLength={9} />
+                <input className="form-input" value={payeeBik} onChange={e => setPayeeBik(e.target.value)} onBlur={handleBikBlur} placeholder="9 цифр" maxLength={9} />
             </div>
             <div className="form-group" style={{ margin: 0, gridColumn: '1 / -1' }}>
                 <label className="form-label">Наименование банка</label>
