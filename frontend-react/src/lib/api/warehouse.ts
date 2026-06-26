@@ -705,17 +705,10 @@ export function addWarehouseMethods(api: ApiClient) {
         saveGazelkaEdit(planId: number, body: import('@/types/api').GazelkaSendRequest) {
             return api.request<import('@/types/api').GazelkaSendResult>('POST', `/api/v1/gazelka/order/${planId}/edit`, body);
         },
-        /** ТТН требует авторизацию — открываем через авторизованный fetch, затем blob-URL. */
+        /** ТТН требует авторизацию + проектный контекст — через requestBlob (правильный base URL,
+         *  Authorization, X-Project-Id, рефреш). Сырой fetch падал на проде «Failed to fetch». */
         async openGazelkaTtn(planId: number): Promise<void> {
-            const token = api.getToken();
-            const res = await fetch(`/api/v1/gazelka/order/${planId}/ttn`, {
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
-            });
-            if (!res.ok) {
-                const text = await res.text().catch(() => '');
-                throw new Error(`Ошибка ТТН: ${res.status}${text ? ' — ' + text.slice(0, 200) : ''}`);
-            }
-            const blob = await res.blob();
+            const blob = await api.requestBlob(`/api/v1/gazelka/order/${planId}/ttn`);
             const url = URL.createObjectURL(blob);
             window.open(url, '_blank');
         },
