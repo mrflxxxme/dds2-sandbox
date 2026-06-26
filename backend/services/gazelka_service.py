@@ -1,0 +1,824 @@
+# ruff: noqa: RUF002, RUF003
+"""
+Service: Gazelka (gazelka.space) — передача заявки логиста перевозчику.
+
+Источник — ``AssemblyRequest`` (готовая сборка, склад «Натали»). Креды интеграции
+лежат в ``IntegrationKey`` (service="gazelka"): ``encrypted_key`` = Fernet-пароль,
+``config={"login", "customer_id", "host"?}``, ``warehouse_id`` = склад Газельки
+(гейт: кнопку показываем только для отгрузок с него).
+
+build_draft  — логин + снятие справочников ИХ формы + предзаполнение из сборки.
+send_order   — РЕАЛЬНОЕ создание заявки во внешнем сервисе (необратимо), пишет
+               audit-строку ``GazelkaOrder`` с исходом и выдержкой ответа.
+"""
+
+import html as _html
+import re
+from datetime import date
+from decimal import Decimal, InvalidOperation
+
+import httpx
+import structlog
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from backend.integrations.gazelka_client import (
+    BASE_URL,
+    ApplyForm,
+    GazelkaApiError,
+    GazelkaClient,
+)
+from backend.integrations.resilience import CircuitOpenError
+from backend.models import GazelkaOrder, GazelkaOrderStatus, IntegrationKey, Warehouse
+from backend.models.assembly import AssemblyRequest
+from backend.models.wb_fbo import WbFboSupply
+from backend.schemas.gazelka import (
+    GazelkaConfigResponse,
+    GazelkaDraftResponse,
+    GazelkaEditDraft,
+    GazelkaFormOptions,
+    GazelkaMatchCandidate,
+    GazelkaMatchResult,
+    GazelkaOrderList,
+    GazelkaOrderRow,
+    GazelkaPrefill,
+    GazelkaSelectOption,
+    GazelkaSendRequest,
+    GazelkaSendResult,
+)
+from backend.utils.crypto import decrypt as _decrypt
+
+logger = structlog.get_logger("dds.gazelka_service")
+
+GAZELKA_SERVICE = "gazelka"
+
+# Маркеры WB в названиях маркетплейсов Газельки (для дефолта marketplace_id)
+_WB_MARKERS = ("wildberries", "вайлдберриз", "вб")
+
+
+class GazelkaServiceError(Exception):
+    """Доменная ошибка отправки (роутер мапит в HTTPException)."""
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+# ─── Креды / клиент ──────────────────────────────────────────────────────────
+
+
+async def _get_key_or_none(db: AsyncSession, project_id: int) -> IntegrationKey | None:
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == GAZELKA_SERVICE,
+            IntegrationKey.is_active.is_(True),
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _get_key(db: AsyncSession, project_id: int) -> IntegrationKey:
+    key = await _get_key_or_none(db, project_id)
+    if key is None:
+        raise GazelkaServiceError(
+            "Газелька: интеграция не настроена (scripts/setup_gazelka_account.py)", status_code=400
+        )
+    return key
+
+
+def _client_from_key(key: IntegrationKey) -> GazelkaClient:
+    cfg = key.config or {}
+    login = cfg.get("login") or key.label or ""
+    customer_id = cfg.get("customer_id")
+    if not login or not customer_id:
+        raise GazelkaServiceError("Газелька: в ключе не задан login/customer_id (config)", status_code=500)
+    return GazelkaClient(
+        login=login,
+        password=_decrypt(key.encrypted_key),
+        customer_id=str(customer_id),
+        project_id=key.project_id,
+        host=cfg.get("host") or BASE_URL,
+    )
+
+
+# ─── Config (для гейта кнопки на фронте) ─────────────────────────────────────
+
+
+async def get_config(db: AsyncSession, project_id: int) -> GazelkaConfigResponse:
+    key = await _get_key_or_none(db, project_id)
+    if key is None:
+        return GazelkaConfigResponse(configured=False)
+    wh_name: str | None = None
+    if key.warehouse_id is not None:
+        wh_name = await db.scalar(select(Warehouse.name).where(Warehouse.id == key.warehouse_id))
+    return GazelkaConfigResponse(configured=True, warehouse_id=key.warehouse_id, warehouse_name=wh_name)
+
+
+# ─── Загрузка сборки ─────────────────────────────────────────────────────────
+
+
+async def _load_assembly(db: AsyncSession, project_id: int, assembly_id: int) -> AssemblyRequest | None:
+    result = await db.execute(
+        select(AssemblyRequest)
+        .where(
+            AssemblyRequest.id == assembly_id,
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted.is_(False),
+        )
+        .options(selectinload(AssemblyRequest.wb_fbo_supply))
+    )
+    return result.scalar_one_or_none()
+
+
+# ─── Справочники / предзаполнение ────────────────────────────────────────────
+
+
+def _opt_list(form: ApplyForm, name: str, skip: tuple[str, ...] = ()) -> list[GazelkaSelectOption]:
+    """Опции их select → схема, без плейсхолдеров и дублей по value."""
+    out: list[GazelkaSelectOption] = []
+    seen: set[str] = set()
+    for value, label in form.selects.get(name, []):
+        if value in skip or not label or value in seen:
+            continue
+        seen.add(value)
+        out.append(GazelkaSelectOption(value=value, label=label))
+    return out
+
+
+def _options_from_form(form: ApplyForm) -> GazelkaFormOptions:
+    return GazelkaFormOptions(
+        entities=_opt_list(form, "entity_id", skip=("",)),
+        price_lists=_opt_list(form, "price_id", skip=("",)),
+        marketplaces=_opt_list(form, "marketplace_id", skip=("", "0")),
+        delivery_warehouses=_opt_list(form, "delivery_address", skip=("",)),
+        supply_types=_opt_list(form, "monomix", skip=("", "0")),
+        timeslots=_opt_list(form, "daily_delivery_timeslot", skip=("",)),
+    )
+
+
+def _match_warehouse(wb_name: str | None, options: GazelkaFormOptions) -> str | None:
+    """Сматчить WB-склад назначения с их dropdown (value == label у delivery_address)."""
+    if not wb_name:
+        return None
+    low = wb_name.strip().lower()
+    for opt in options.delivery_warehouses:
+        if opt.label.strip().lower() == low:
+            return opt.value
+    for opt in options.delivery_warehouses:
+        if low in opt.label.strip().lower() or opt.label.strip().lower() in low:
+            return opt.value
+    return None
+
+
+def _default_marketplace(options: GazelkaFormOptions) -> str | None:
+    for opt in options.marketplaces:
+        if opt.label.strip().lower() in _WB_MARKERS:
+            return opt.value
+    return None
+
+
+def _prefill_from_assembly(
+    ar: AssemblyRequest, form: ApplyForm, options: GazelkaFormOptions
+) -> GazelkaPrefill:
+    supply = ar.wb_fbo_supply
+    wb_name = (supply.warehouse_name if supply else None) or ar.wb_warehouse_name_manual
+    total_weight: Decimal | None = None
+    if ar.pallets_count and ar.pallet_weight_kg is not None:
+        total_weight = Decimal(ar.pallets_count) * ar.pallet_weight_kg
+    return GazelkaPrefill(
+        customer_phone=form.inputs.get("customer_phone") or None,
+        delivery_address=_match_warehouse(wb_name, options),
+        delivery_address_x2=wb_name,
+        departure_date=ar.pickup_date,
+        delivery_date=ar.delivery_date,
+        delivery_contact=None,
+        daily_delivery_timeslot=None,
+        supply_id=(supply.wb_supply_id if supply else None),
+        marketplace_id=_default_marketplace(options),
+        pallets=ar.pallets_count or 0,
+        boxes=0,
+        weight=total_weight,
+        notes=None,
+    )
+
+
+async def _last_sent(db: AsyncSession, project_id: int, assembly_id: int) -> tuple[bool, str | None]:
+    row = await db.execute(
+        select(GazelkaOrder)
+        .where(
+            GazelkaOrder.project_id == project_id,
+            GazelkaOrder.assembly_request_id == assembly_id,
+            GazelkaOrder.status == GazelkaOrderStatus.SENT,
+        )
+        .order_by(GazelkaOrder.created_at.desc())
+        .limit(1)
+    )
+    order = row.scalar_one_or_none()
+    if order is None:
+        return False, None
+    return True, order.gazelka_ref
+
+
+# ─── Draft (диалог) ──────────────────────────────────────────────────────────
+
+
+async def build_draft(db: AsyncSession, project_id: int, assembly_id: int) -> GazelkaDraftResponse:
+    key = await _get_key(db, project_id)
+    ar = await _load_assembly(db, project_id, assembly_id)
+    if ar is None:
+        raise GazelkaServiceError("Сборка не найдена", status_code=404)
+
+    eligible = key.warehouse_id is not None and ar.warehouse_id == key.warehouse_id
+
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            form = await client.fetch_apply_form()
+    except GazelkaApiError as e:
+        raise GazelkaServiceError(str(e), status_code=e.status_code) from e
+    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        raise GazelkaServiceError(f"Газелька недоступна: {e}", status_code=502) from e
+
+    options = _options_from_form(form)
+    prefill = _prefill_from_assembly(ar, form, options)
+    already_sent, sent_ref = await _last_sent(db, project_id, assembly_id)
+    return GazelkaDraftResponse(
+        eligible=eligible,
+        already_sent=already_sent,
+        sent_ref=sent_ref,
+        options=options,
+        prefill=prefill,
+    )
+
+
+# ─── Send (реальное создание заявки) ─────────────────────────────────────────
+
+
+def _s(v: object) -> str | None:
+    return None if v is None else str(v)
+
+
+def _payload_from_request(req: GazelkaSendRequest) -> dict[str, object]:
+    """GazelkaSendRequest → поля их формы (action=save_plan добавит клиент)."""
+    payload: dict[str, object] = {
+        "entity_id": req.entity_id,
+        "payer_id": req.payer_id,
+        "price_id": req.price_id,
+        "is_marketplace": req.is_marketplace or "",
+        "marketplace_id": req.marketplace_id,
+        "supply_id": req.supply_id,
+        "delivery_address": req.delivery_address,
+        "delivery_address_x2": req.delivery_address_x2,
+        "departure_date": req.departure_date.isoformat() if req.departure_date else None,
+        "delivery_date": req.delivery_date.isoformat() if req.delivery_date else None,
+        "delivery_time": req.delivery_time,
+        "daily_delivery_timeslot": req.daily_delivery_timeslot,
+        "delivery_contact": req.delivery_contact,
+        "customer_phone": req.customer_phone,
+        "monomix": req.monomix,
+        "pallets": str(req.pallets),
+        "boxes": str(req.boxes),
+        "weight2": _s(req.weight2),
+        "weight": _s(req.weight),
+        "volume": _s(req.volume),
+        "length": str(req.length),
+        "height": str(req.height),
+        "width": str(req.width),
+        "notes": req.notes,
+    }
+    if req.palleting:
+        payload["palleting"] = "1"
+    return {k: v for k, v in payload.items() if v is not None}
+
+
+async def send_order(
+    db: AsyncSession,
+    project_id: int,
+    assembly_id: int,
+    req: GazelkaSendRequest,
+    actor: str | None = None,
+) -> GazelkaSendResult:
+    key = await _get_key(db, project_id)
+    ar = await _load_assembly(db, project_id, assembly_id)
+    if ar is None:
+        raise GazelkaServiceError("Сборка не найдена", status_code=404)
+    if key.warehouse_id is None or ar.warehouse_id != key.warehouse_id:
+        raise GazelkaServiceError("Эта сборка не со склада Газельки — отправка недоступна", status_code=400)
+
+    # Идемпотентность: повторная отправка той же сборки = вторая реальная заявка.
+    # Без явного force_resend отказываем (защита от дабл-клика/stale-вкладки/retry).
+    if not req.force_resend:
+        already_sent, _ = await _last_sent(db, project_id, assembly_id)
+        if already_sent:
+            raise GazelkaServiceError(
+                "Заявка для этой сборки уже отправлена в Газельку. Подтвердите повторную отправку.",
+                status_code=409,
+            )
+
+    login = (key.config or {}).get("login") or ""
+
+    def _scrub(text: str) -> str:
+        return text.replace(login, "[login]") if login else text
+
+    payload = _payload_from_request(req)
+    status = GazelkaOrderStatus.FAILED
+    ref: str | None = None
+    message = ""
+    excerpt: str | None = None
+    error: str | None = None
+
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            result = await client.create_order(payload)
+        status = GazelkaOrderStatus.SENT if result.ok else GazelkaOrderStatus.UNCERTAIN
+        ref = result.ref
+        message = result.message
+        excerpt = result.excerpt
+    except GazelkaApiError as e:
+        message = _scrub(str(e))
+        error = message
+    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        # Сбой во время/после POST — заявка МОГЛА создаться. Не ретраим, просим сверить.
+        message = _scrub(f"Ошибка связи с Газелькой: {e}. Сверьте в кабинете перед повтором.")
+        error = message
+
+    order = GazelkaOrder(
+        project_id=project_id,
+        assembly_request_id=ar.id,
+        status=status,
+        gazelka_ref=ref,
+        payload=payload,
+        response_excerpt=excerpt,
+        error=error,
+        created_by=actor,
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+
+    logger.info(
+        "gazelka.send",
+        project_id=project_id,
+        assembly_id=assembly_id,
+        status=status,
+        gazelka_ref=ref,
+    )
+    return GazelkaSendResult(
+        ok=(status == GazelkaOrderStatus.SENT),
+        ref=ref,
+        message=message,
+        gazelka_order_id=order.id,
+    )
+
+
+# ─── Списки заявок из портала (read) ─────────────────────────────────────────
+
+# Коды статусов портала (best-effort; неизвестные показываем как «Статус N»)
+_STATUS_LABELS = {"2": "Запланирована", "3": "Принята в работу", "31": "В маршруте"}
+_MONO_LABELS = {
+    "1": "Моно", "2": "Микс", "3": "Суперсейф", "4": "КГТ", "5": "FBS", "6": "Транзит", "7": "Питание",
+}
+
+
+def _status_label(code: object) -> str:
+    return _STATUS_LABELS.get(str(code or ""), f"Статус {code}")
+
+
+def _u(v: object) -> str | None:
+    """HTML-unescape строкового значения портала; пусто/не-строка → None."""
+    if not isinstance(v, str):
+        return None
+    s = _html.unescape(v).strip()
+    return s or None
+
+
+def _to_int(v: object) -> int:
+    try:
+        return int(str(v or 0))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _clean_date(v: object) -> str | None:
+    s = str(v or "").strip()[:10]
+    return None if (not s or s.startswith("1970")) else s
+
+
+def _date_or_none(v: object) -> date | None:
+    s = str(v or "").strip()[:10]
+    if not s or s.startswith("1970"):
+        return None
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _dec_or_none(v: object) -> Decimal | None:
+    s = str(v or "").strip()
+    if not s:
+        return None
+    try:
+        return Decimal(s)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _marketplace_name(mid: object, marketplaces: list[dict]) -> str | None:
+    sid = str(mid or "")
+    for m in marketplaces:
+        if str(m.get("id")) == sid:
+            return _u(m.get("name"))
+    return None
+
+
+async def _linked_map(db: AsyncSession, project_id: int) -> dict[str, tuple[int | None, str | None]]:
+    """gazelka_ref → (assembly_id, assembly_number): отправленные (SENT) + сматченные (MATCHED).
+
+    Сортировка по id → последняя запись побеждает (ручной матч поверх старой отправки).
+    """
+    rows = await db.execute(
+        select(GazelkaOrder.gazelka_ref, GazelkaOrder.assembly_request_id, AssemblyRequest.number)
+        .join(AssemblyRequest, AssemblyRequest.id == GazelkaOrder.assembly_request_id, isouter=True)
+        .where(
+            GazelkaOrder.project_id == project_id,
+            GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.MATCHED]),
+            GazelkaOrder.gazelka_ref.isnot(None),
+        )
+        .order_by(GazelkaOrder.id)
+    )
+    out: dict[str, tuple[int | None, str | None]] = {}
+    for ref, aid, number in rows.all():
+        if ref and aid is not None:
+            out[str(ref)] = (aid, number)
+    return out
+
+
+def _row_from_plan(
+    plan: dict,
+    marketplaces: list[dict],
+    linked: dict[str, tuple[int | None, str | None]],
+    *,
+    editable: bool,
+    joins: dict[str, dict[str, dict]] | None = None,
+) -> GazelkaOrderRow:
+    gid = str(plan.get("id") or "")
+    link = linked.get(gid)
+    row = GazelkaOrderRow(
+        gazelka_id=gid,
+        status=str(plan.get("status") or ""),
+        status_label=_status_label(plan.get("status")),
+        application_date=_u(plan.get("application_date")),
+        departure_date=_clean_date(plan.get("departure_date")),
+        departure_time=_u(plan.get("departure_time")),
+        departure_address=_u(plan.get("departure_address")),
+        delivery_date=_clean_date(plan.get("delivery_date")),
+        delivery_time=_u(plan.get("delivery_time")),
+        delivery_address=_u(plan.get("delivery_address")),
+        marketplace=_marketplace_name(plan.get("marketplace_id"), marketplaces),
+        monomix=_MONO_LABELS.get(str(plan.get("monomix") or "")),
+        pallets=_to_int(plan.get("pallets")),
+        boxes=_to_int(plan.get("boxes")),
+        weight=_u(plan.get("weight")),
+        supply_id=_u(plan.get("supply_id")),
+        rate=_u(plan.get("rate")),
+        entity=_u(plan.get("entity")),
+        notes=_u(plan.get("notes")),
+        editable=editable,
+        linked_assembly_id=link[0] if link else None,
+        linked_assembly_number=link[1] if link else None,
+    )
+    if joins:
+        route = joins["routes"].get(str(plan.get("route_id") or ""))
+        if route:
+            row.route_number = str(route.get("id") or "") or None
+            row.route_date = _clean_date(route.get("date"))
+            row.finish_time = _u(route.get("finish_time"))
+            drv = joins["drivers"].get(str(route.get("driver_id") or ""))
+            if drv:
+                row.driver_name = _u(drv.get("name"))
+                row.driver_phone = _u(drv.get("phone"))
+                row.driver_passport = _u(drv.get("passport"))
+            veh = joins["vehicles"].get(str(route.get("vehicle_id") or ""))
+            if veh:
+                parts = [_u(veh.get("vehicle_make")), _u(veh.get("vehicle_number"))]
+                row.vehicle = " ".join(p for p in parts if p) or None
+            car = joins["carriers"].get(str(route.get("carrier_id") or ""))
+            if car:
+                row.carrier = _u(car.get("organization"))
+    return row
+
+
+async def list_planned(db: AsyncSession, project_id: int) -> GazelkaOrderList:
+    key = await _get_key(db, project_id)
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            data = await client.fetch_planned()
+    except GazelkaApiError as e:
+        raise GazelkaServiceError(str(e), status_code=e.status_code) from e
+    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        raise GazelkaServiceError(f"Газелька недоступна: {e}", status_code=502) from e
+
+    linked = await _linked_map(db, project_id)
+    supply_idx = await _assembly_supply_index(db, project_id)
+    mkts = data.get("marketplaces") or []
+    rows = []
+    for p in data.get("plans") or []:
+        row = _row_from_plan(p, mkts, linked, editable=True)
+        _attach_suggestion(row, p, supply_idx)
+        rows.append(row)
+    return GazelkaOrderList(items=rows, count=len(rows))
+
+
+async def list_active(db: AsyncSession, project_id: int) -> GazelkaOrderList:
+    key = await _get_key(db, project_id)
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            data = await client.fetch_active()
+    except GazelkaApiError as e:
+        raise GazelkaServiceError(str(e), status_code=e.status_code) from e
+    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        raise GazelkaServiceError(f"Газелька недоступна: {e}", status_code=502) from e
+
+    linked = await _linked_map(db, project_id)
+    supply_idx = await _assembly_supply_index(db, project_id)
+    mkts = data.get("marketplaces") or []
+    joins = {
+        k: {str(r.get("id")): r for r in (data.get(k) or [])}
+        for k in ("routes", "drivers", "vehicles", "carriers", "places")
+    }
+    rows = []
+    for p in data.get("plans") or []:
+        row = _row_from_plan(p, mkts, linked, editable=False, joins=joins)
+        _attach_suggestion(row, p, supply_idx)
+        rows.append(row)
+    return GazelkaOrderList(items=rows, count=len(rows))
+
+
+async def get_ttn(db: AsyncSession, project_id: int, plan_id: str) -> tuple[bytes, str]:
+    key = await _get_key(db, project_id)
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            return await client.fetch_ttn(plan_id)
+    except GazelkaApiError as e:
+        raise GazelkaServiceError(str(e), status_code=e.status_code) from e
+    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        raise GazelkaServiceError(f"Газелька недоступна: {e}", status_code=502) from e
+
+
+# ─── Редактирование заявки ───────────────────────────────────────────────────
+
+
+def _values_from_plan(p: dict) -> GazelkaSendRequest:
+    """Текущие значения заявки портала → форма (для предзаполнения редактирования)."""
+    mid = str(p.get("marketplace_id") or "")
+    return GazelkaSendRequest(
+        entity_id=str(p.get("entity_id") or "") or "0",
+        payer_id=str(p.get("payer_id") or "") or "0",
+        price_id=str(p.get("price_id") or "") or "0",
+        is_marketplace="yes" if mid not in ("", "0") else "no",
+        marketplace_id=mid if mid not in ("", "0") else None,
+        supply_id=_u(p.get("supply_id")),
+        delivery_address=_u(p.get("delivery_address")),
+        delivery_address_x2=_u(p.get("delivery_address")),
+        departure_date=_date_or_none(p.get("departure_date")),
+        delivery_date=_date_or_none(p.get("delivery_date")),
+        delivery_time=_u(p.get("delivery_time")),
+        daily_delivery_timeslot=None,
+        delivery_contact=_u(p.get("delivery_contact")),
+        customer_phone=_u(p.get("customer_phone")),
+        monomix=str(p.get("monomix") or "") or None,
+        pallets=_to_int(p.get("pallets")),
+        boxes=_to_int(p.get("boxes")),
+        weight=_dec_or_none(p.get("weight")),
+        weight2=None,
+        volume=_dec_or_none(p.get("volume")),
+        length=_to_int(p.get("length")) or 60,
+        height=_to_int(p.get("height")) or 40,
+        width=_to_int(p.get("width")) or 40,
+        palleting=str(p.get("palleting") or "f") == "t",
+        notes=_u(p.get("notes")),
+    )
+
+
+async def build_edit_draft(db: AsyncSession, project_id: int, plan_id: str) -> GazelkaEditDraft:
+    key = await _get_key(db, project_id)
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            planned = await client.fetch_planned()
+            form = await client.fetch_edit_form(plan_id)
+    except GazelkaApiError as e:
+        raise GazelkaServiceError(str(e), status_code=e.status_code) from e
+    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        raise GazelkaServiceError(f"Газелька недоступна: {e}", status_code=502) from e
+
+    plan = next((p for p in planned.get("plans") or [] if str(p.get("id")) == str(plan_id)), None)
+    if plan is None:
+        raise GazelkaServiceError("Заявка не найдена среди запланированных", status_code=404)
+    return GazelkaEditDraft(
+        gazelka_id=str(plan_id),
+        options=_options_from_form(form),
+        values=_values_from_plan(plan),
+    )
+
+
+async def save_edit(
+    db: AsyncSession,
+    project_id: int,
+    plan_id: str,
+    req: GazelkaSendRequest,
+    actor: str | None = None,
+) -> GazelkaSendResult:
+    key = await _get_key(db, project_id)
+    login = (key.config or {}).get("login") or ""
+
+    def _scrub(text: str) -> str:
+        return text.replace(login, "[login]") if login else text
+
+    payload = _payload_from_request(req)
+    status = GazelkaOrderStatus.FAILED
+    message = ""
+    excerpt: str | None = None
+    error: str | None = None
+
+    try:
+        async with _client_from_key(key) as client:
+            await client.authenticate()
+            result = await client.update_order(plan_id, payload)
+        status = GazelkaOrderStatus.SENT if result.ok else GazelkaOrderStatus.UNCERTAIN
+        message = result.message
+        excerpt = result.excerpt
+    except GazelkaApiError as e:
+        message = _scrub(str(e))
+        error = message
+    except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        message = _scrub(f"Ошибка связи с Газелькой: {e}. Сверьте в кабинете.")
+        error = message
+
+    linked = await _linked_map(db, project_id)
+    aid = (linked.get(str(plan_id)) or (None, None))[0]
+    order = GazelkaOrder(
+        project_id=project_id,
+        assembly_request_id=aid,
+        status=status,
+        gazelka_ref=str(plan_id),
+        payload={**payload, "_edit": True},
+        response_excerpt=excerpt,
+        error=error,
+        created_by=actor,
+    )
+    db.add(order)
+    await db.commit()
+    await db.refresh(order)
+
+    return GazelkaSendResult(
+        ok=(status == GazelkaOrderStatus.SENT),
+        ref=str(plan_id),
+        message=message or "Изменения сохранены",
+        gazelka_order_id=order.id,
+    )
+
+
+# ─── Матчинг существующих заявок портала ↔ наши сборки ───────────────────────
+
+_WB_NUM_RE = re.compile(r"\d{6,}")  # № поставки WB — длинные числовые серии
+
+
+def _extract_wb_numbers(supply_id: object) -> list[str]:
+    """Длинные числовые серии из supply_id портала (там бывает «Казань 40299154 PVB-…»)."""
+    s = _html.unescape(supply_id) if isinstance(supply_id, str) else ""
+    return _WB_NUM_RE.findall(s)
+
+
+async def _assembly_supply_index(db: AsyncSession, project_id: int) -> dict[str, tuple[int, str]]:
+    """№ поставки WB → (assembly_id, number) — для авто-подсказки матчинга."""
+    rows = await db.execute(
+        select(AssemblyRequest.id, AssemblyRequest.number, WbFboSupply.wb_supply_id)
+        .join(WbFboSupply, WbFboSupply.id == AssemblyRequest.wb_fbo_supply_id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted.is_(False),
+            WbFboSupply.wb_supply_id.isnot(None),
+        )
+    )
+    out: dict[str, tuple[int, str]] = {}
+    for aid, number, sup in rows.all():
+        if sup:
+            out[str(sup)] = (aid, number)
+    return out
+
+
+def _attach_suggestion(row: GazelkaOrderRow, plan: dict, supply_idx: dict[str, tuple[int, str]]) -> None:
+    """Если строка не связана — подсказать сборку по № поставки WB из supply_id."""
+    if row.linked_assembly_id is not None:
+        return
+    for num in _extract_wb_numbers(plan.get("supply_id")):
+        hit = supply_idx.get(num)
+        if hit:
+            row.suggested_assembly_id, row.suggested_assembly_number = hit
+            return
+
+
+async def match_order(
+    db: AsyncSession, project_id: int, plan_id: str, assembly_id: int, actor: str | None = None
+) -> GazelkaMatchResult:
+    """Связать существующую заявку портала с нашей сборкой (ручной матч)."""
+    await _get_key(db, project_id)  # интеграция должна быть настроена
+    ar = await _load_assembly(db, project_id, assembly_id)
+    if ar is None:
+        raise GazelkaServiceError("Сборка не найдена", status_code=404)
+
+    # Одна ручная связь на заявку портала — убираем прежние MATCHED для этого gazelka_ref
+    existing = await db.execute(
+        select(GazelkaOrder).where(
+            GazelkaOrder.project_id == project_id,
+            GazelkaOrder.gazelka_ref == str(plan_id),
+            GazelkaOrder.status == GazelkaOrderStatus.MATCHED,
+        )
+    )
+    for old in existing.scalars():
+        await db.delete(old)  # no-soft-delete-check: GazelkaOrder — audit/link без SoftDeleteMixin
+
+    db.add(
+        GazelkaOrder(
+            project_id=project_id,
+            assembly_request_id=ar.id,
+            status=GazelkaOrderStatus.MATCHED,
+            gazelka_ref=str(plan_id),
+            payload={"_match": True},
+            created_by=actor,
+        )
+    )
+    await db.commit()
+    logger.info("gazelka.match", project_id=project_id, gazelka_id=plan_id, assembly_id=ar.id)
+    return GazelkaMatchResult(ok=True, linked_assembly_id=ar.id, linked_assembly_number=ar.number)
+
+
+async def unmatch_order(db: AsyncSession, project_id: int, plan_id: str) -> GazelkaMatchResult:
+    """Снять ручную связь заявки портала со сборкой (SENT-записи не трогаем)."""
+    rows = await db.execute(
+        select(GazelkaOrder).where(
+            GazelkaOrder.project_id == project_id,
+            GazelkaOrder.gazelka_ref == str(plan_id),
+            GazelkaOrder.status == GazelkaOrderStatus.MATCHED,
+        )
+    )
+    for old in rows.scalars():
+        await db.delete(old)  # no-soft-delete-check: GazelkaOrder — audit/link без SoftDeleteMixin
+    await db.commit()
+    return GazelkaMatchResult(ok=True)
+
+
+async def list_match_candidates(
+    db: AsyncSession, project_id: int, search: str | None = None, limit: int = 50
+) -> list[GazelkaMatchCandidate]:
+    """Наши сборки — кандидаты на ручное сопоставление (поиск по номеру/№ поставки)."""
+    linked = await _linked_map(db, project_id)
+    assembly_to_gazelka: dict[int, str] = {}
+    for gref, (aid, _num) in linked.items():
+        if aid is not None:
+            assembly_to_gazelka[aid] = gref
+
+    query = (
+        select(
+            AssemblyRequest.id,
+            AssemblyRequest.number,
+            Warehouse.name,
+            WbFboSupply.wb_supply_id,
+            AssemblyRequest.delivery_date,
+            AssemblyRequest.pallets_count,
+            AssemblyRequest.status,
+        )
+        .join(Warehouse, Warehouse.id == AssemblyRequest.warehouse_id, isouter=True)
+        .join(WbFboSupply, WbFboSupply.id == AssemblyRequest.wb_fbo_supply_id, isouter=True)
+        .where(AssemblyRequest.project_id == project_id, AssemblyRequest.is_deleted.is_(False))
+        .order_by(AssemblyRequest.id.desc())
+        .limit(limit)
+    )
+    if search:
+        esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{esc}%"
+        query = query.where(or_(AssemblyRequest.number.ilike(like), WbFboSupply.wb_supply_id.ilike(like)))
+
+    rows = await db.execute(query)
+    return [
+        GazelkaMatchCandidate(
+            assembly_id=aid,
+            number=number,
+            warehouse_name=wh,
+            wb_supply_id=sup,
+            delivery_date=ddate,
+            pallets_count=pallets,
+            status=status,
+            already_linked_to=assembly_to_gazelka.get(aid),
+        )
+        for aid, number, wh, sup, ddate, pallets, status in rows.all()
+    ]

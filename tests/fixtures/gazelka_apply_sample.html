@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head><title>Создание заявки</title></head>
+<body>
+<form class="form form-section" method="post" id="apply-form">
+  <input type="hidden" name="j927b4gtyf0m" value="abc123def456token">
+  <input type="hidden" name="action" value="save_plan">
+  <label>Ваш телефон</label>
+  <input type="text" name="customer_phone" value="+79203491330">
+  <select class="select" name="entity_id">
+    <option value="">Выбор организации</option>
+    <option value="6596">ПЛЮС ВАЙБ ООО</option>
+  </select>
+  <select class="select" name="payer_id">
+    <option value="">Выбор организации</option>
+    <option value="6596">ПЛЮС ВАЙБ ООО</option>
+  </select>
+  <select name="price_id">
+    <option value="5">Симферополь</option>
+    <option value="1">Иваново</option>
+  </select>
+  <select name="marketplace_id">
+    <option value="0">Выбрать Маркетплейс</option>
+    <option value="1">Ozon</option>
+    <option value="4">WildBerries</option>
+  </select>
+  <select name="delivery_address">
+    <option value="">На какой склад доставка?</option>
+    <option value="Тула">Тула</option>
+    <option value="Казань">Казань</option>
+    <option value="Казань">Казань</option>
+  </select>
+  <select name="monomix">
+    <option value="0">Тип поставки</option>
+    <option value="1">Моно</option>
+    <option value="2">Микс</option>
+  </select>
+  <select name="daily_delivery_timeslot">
+    <option value="">Время доставки</option>
+    <option value="Утром-Днём">Утром-Днём</option>
+    <option value="Вечером">Вечером</option>
+  </select>
+  <input type="number" name="pallets" value="0">
+  <input type="checkbox" name="palleting" value="">
+  <input type="submit" value="Сохранить" name="dosubmit">
+</form>
+<form action="" method="POST" id="pickupForm">
+  <input type="hidden" name="OTHER_TOKEN" value="should_not_leak">
+  <select name="entity_id"><option value="999">WRONG_FORM</option></select>
+</form>
+</body>
+</html>

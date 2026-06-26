@@ -1676,6 +1676,155 @@ export interface AssemblyListResponse {
   total: number;
 }
 
+// ─── Gazelka integration ─────────────────────────────────────────────────────
+
+export interface GazelkaConfig {
+  configured: boolean;
+  warehouse_id: number | null;
+  warehouse_name: string | null;
+}
+
+export interface GazelkaSelectOption {
+  value: string;
+  label: string;
+}
+
+export interface GazelkaFormOptions {
+  entities: GazelkaSelectOption[];
+  price_lists: GazelkaSelectOption[];
+  marketplaces: GazelkaSelectOption[];
+  delivery_warehouses: GazelkaSelectOption[];
+  supply_types: GazelkaSelectOption[];
+  timeslots: GazelkaSelectOption[];
+}
+
+export interface GazelkaPrefill {
+  customer_phone: string | null;
+  delivery_address: string | null;
+  delivery_address_x2: string | null;
+  departure_date: string | null;
+  delivery_date: string | null;
+  delivery_contact: string | null;
+  daily_delivery_timeslot: string | null;
+  supply_id: string | null;
+  marketplace_id: string | null;
+  pallets: number;
+  boxes: number;
+  weight: string | null;
+  notes: string | null;
+}
+
+export interface GazelkaDraft {
+  eligible: boolean;
+  already_sent: boolean;
+  sent_ref: string | null;
+  options: GazelkaFormOptions;
+  prefill: GazelkaPrefill;
+}
+
+export interface GazelkaSendRequest {
+  entity_id: string;
+  payer_id: string;
+  price_id: string;
+  is_marketplace: string;
+  marketplace_id?: string | null;
+  supply_id?: string | null;
+  delivery_address?: string | null;
+  delivery_address_x2?: string | null;
+  departure_date?: string | null;
+  delivery_date?: string | null;
+  delivery_time?: string | null;
+  daily_delivery_timeslot?: string | null;
+  delivery_contact?: string | null;
+  customer_phone?: string | null;
+  monomix?: string | null;
+  pallets: number;
+  boxes: number;
+  weight2?: string | null;
+  weight?: string | null;
+  volume?: string | null;
+  length: number;
+  height: number;
+  width: number;
+  palleting: boolean;
+  notes?: string | null;
+  force_resend?: boolean;
+}
+
+export interface GazelkaSendResult {
+  ok: boolean;
+  ref: string | null;
+  message: string | null;
+  gazelka_order_id: number | null;
+}
+
+export interface GazelkaOrderRow {
+  gazelka_id: string;
+  status: string;
+  status_label: string;
+  application_date: string | null;
+  departure_date: string | null;
+  departure_time: string | null;
+  departure_address: string | null;
+  delivery_date: string | null;
+  delivery_time: string | null;
+  delivery_address: string | null;
+  marketplace: string | null;
+  monomix: string | null;
+  pallets: number;
+  boxes: number;
+  weight: string | null;
+  supply_id: string | null;
+  rate: string | null;
+  entity: string | null;
+  notes: string | null;
+  editable: boolean;
+  linked_assembly_id: number | null;
+  linked_assembly_number: string | null;
+  suggested_assembly_id: number | null;
+  suggested_assembly_number: string | null;
+  route_number: string | null;
+  route_date: string | null;
+  carrier: string | null;
+  driver_name: string | null;
+  driver_phone: string | null;
+  driver_passport: string | null;
+  vehicle: string | null;
+  finish_time: string | null;
+}
+
+export interface GazelkaOrderList {
+  items: GazelkaOrderRow[];
+  count: number;
+}
+
+export interface GazelkaEditDraft {
+  gazelka_id: string;
+  options: GazelkaFormOptions;
+  values: GazelkaSendRequest;
+}
+
+export interface GazelkaMatchCandidate {
+  assembly_id: number;
+  number: string;
+  warehouse_name: string | null;
+  wb_supply_id: string | null;
+  delivery_date: string | null;
+  pallets_count: number | null;
+  status: string | null;
+  already_linked_to: string | null;
+}
+
+export interface GazelkaMatchResult {
+  ok: boolean;
+  linked_assembly_id: number | null;
+  linked_assembly_number: string | null;
+}
+
+export interface GazelkaUnmatchResult {
+  ok: boolean;
+}
+
 export interface CreatedRequestBrief {
   id: number;
   number: string;

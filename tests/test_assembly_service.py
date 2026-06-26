@@ -693,6 +693,82 @@ class TestRefreshFromFbo:
 
 
 @pytest.mark.asyncio
+class TestAutoRefreshActiveAssembliesFromFbo:
+    """Фоновый авто-рефреш состава активных сборок из FBO (раз в час из планировщика).
+
+    Зеркалит ручную «Из FBO», но без клика — чтобы «Расхождение наполнения»
+    обновлялось само.
+    """
+
+    async def test_autorefresh_updates_active_assembly_composition(self, db_session):
+        """Активная сборка с привязкой к FBO авто-обновляется из свежих goods WB."""
+        from unittest.mock import AsyncMock, patch
+
+        from backend.services.assembly.analytics import refresh_active_assemblies_from_fbo
+
+        req = await _create_test_request(db_session)  # IN_PROGRESS, TEST_BARCODE_1 = 5
+        # wb_supply_id числовой — иначе int() в enrich-хелпере пропустит WB-вызов.
+        fbo_id = await _get_fbo_supply_id(db_session)
+        supply = (await db_session.execute(select(WbFboSupply).where(WbFboSupply.id == fbo_id))).scalar_one()
+        supply.wb_supply_id = "40012237"
+        await db_session.commit()
+
+        # WB-состав изменился: TEST_BARCODE_1 → 10 и новый TEST_BARCODE_2 = 7.
+        mock_client = AsyncMock()
+        mock_client.get_fbw_supply_detail.return_value = {"warehouseName": "Электросталь", "quantity": 17, "statusID": 1}
+        mock_client.get_fbw_supply_goods.return_value = [
+            {"barcode": TEST_BARCODE_1, "vendorCode": "ART1", "nmID": 1, "quantity": 10, "acceptedQuantity": 0},
+            {"barcode": TEST_BARCODE_2, "vendorCode": "ART2", "nmID": 2, "quantity": 7, "acceptedQuantity": 0},
+        ]
+
+        # Глушим троттл-паузу (11s между detail/goods) — без неё тест мгновенный.
+        with patch("backend.services.assembly.crud.asyncio.sleep", new=AsyncMock()):
+            result = await refresh_active_assemblies_from_fbo(db_session, PROJECT_ID, api_client=mock_client)
+
+        assert result["processed"] >= 1
+        assert result["refreshed"] >= 1
+        assert result["supplies"] == 1  # дедуп по поставке
+        assert mock_client.get_fbw_supply_goods.called, "фон обязан перетянуть goods из WB"
+        # goods для одной поставки тянутся ровно один раз (а не на каждую сборку).
+        assert mock_client.get_fbw_supply_goods.call_count == 1
+
+        loaded = await get_assembly_request(db_session, PROJECT_ID, req.id)
+        qty_by_bc = {i.barcode: i.quantity for i in loaded.items}
+        assert qty_by_bc.get(TEST_BARCODE_1) == 10  # 5 → 10
+        assert qty_by_bc.get(TEST_BARCODE_2) == 7  # добавлен
+
+    async def test_autorefresh_skips_shipped(self, db_session):
+        """SHIPPED-сборки (refresh для них запрещён) в авто-рефреш не попадают."""
+        from unittest.mock import AsyncMock
+
+        from backend.services.assembly.analytics import refresh_active_assemblies_from_fbo
+
+        req = await _create_test_request(db_session)
+        await mark_ready(db_session, PROJECT_ID, req.id)
+        await assign_vehicle(
+            db_session,
+            PROJECT_ID,
+            req.id,
+            AssignVehicle(
+                vehicle_info="Truck X",
+                vehicle_brand="GAZ",
+                driver_phone="+79991234567",
+                pickup_date="2026-03-22",
+                pickup_time_slot="08:00-12:00",
+                pickup_cost=1,
+                delivery_date="2026-03-23",
+            ),
+        )
+        await ship_request(db_session, PROJECT_ID, req.id)
+
+        mock_client = AsyncMock()
+        result = await refresh_active_assemblies_from_fbo(db_session, PROJECT_ID, api_client=mock_client)
+
+        assert result["processed"] == 0  # активных сборок с привязкой нет
+        assert not mock_client.get_fbw_supply_goods.called
+
+
+@pytest.mark.asyncio
 class TestLifecycle:
     """Test 8-9: Full lifecycle and invalid transitions."""
 

@@ -227,3 +227,30 @@ async def test_link_flips_ready_when_single_ff_ready(db_session, project, wareho
     )
     await db_session.refresh(doc)
     assert doc.status == AssemblyStatus.READY.value
+
+
+@pytest.mark.asyncio
+async def test_link_ready_sends_telegram_notify(db_session, project, warehouse):
+    """Авто-READY на привязке шлёт Telegram-уведомление «✅ Сборка готова».
+
+    Регресс c09e87d: notify_ff_events жил только в sync-пути, а link_request
+    переводил сборку в READY молча → уведомление терялось навсегда (синк уже-READY
+    не подхватывает). Теперь привязка шлёт его best-effort, как синк.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    doc = await _make_assembly(db_session, project.id, warehouse.id)
+    ff = await _make_ff(db_session, project.id, warehouse.id, stage_code="ready")
+
+    with patch("backend.services.fulfillment_notify.notify_ff_events", new=AsyncMock()) as mock_notify:
+        await fulfillment_service.link_request(
+            db_session, project.id, ff.id, assembly_request_id=doc.id, warehouse_id=warehouse.id
+        )
+
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.READY.value  # авто-READY сработал
+    assert mock_notify.called, "уведомление о готовности должно уйти и при привязке"
+    # notify_ff_events(db, project_id, [item]) — item про нашу сборку
+    items = mock_notify.call_args.args[2]
+    assert len(items) == 1
+    assert str(doc.number) in str(items[0]["text"])

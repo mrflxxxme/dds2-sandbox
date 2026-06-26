@@ -31,6 +31,7 @@ from backend.routers import (
     ff_portal,
     fulfillment,
     funnel,
+    gazelka,
     import_txn,
     integrations,
     integrations_faktura,
@@ -501,6 +502,12 @@ app.include_router(
     payment_requests.router,
     prefix="/api/v1",
     tags=["Payment Requests"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    gazelka.router,
+    prefix="/api/v1",
+    tags=["Gazelka"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

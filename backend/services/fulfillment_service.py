@@ -254,6 +254,66 @@ def _transition_assembly_to_ready(
     )
 
 
+def _ready_notify_payload(doc: AssemblyRequest, ff_req: FulfillmentRequest) -> dict[str, object]:
+    """Снимок примитивов для Telegram-уведомления о готовности сборки.
+
+    Берётся ДО commit: после него ORM-атрибуты протухают (expired), а уведомление
+    шлётся уже после commit (best-effort, своей логикой).
+    """
+    return {
+        "warehouse_id": ff_req.warehouse_id,
+        "assembly_number": doc.number,
+        "ff_id": ff_req.id,
+        "ff_number": ff_req.number or ff_req.external_id,
+        "dest": ff_req.dest_warehouse,
+        "qty": ff_req.total_qty,
+        "wb_fbo_supply_id": doc.wb_fbo_supply_id,
+    }
+
+
+async def _notify_ready_offsync(db: AsyncSession, project_id: int, payload: dict[str, object]) -> None:
+    """Best-effort Telegram «✅ Сборка готова» для авто-READY ВНЕ синка.
+
+    notify_ff_events исторически жил ТОЛЬКО в sync_warehouse, а link_request и
+    create_assembly_from_ff переводят сборку IN_PROGRESS→READY по сигналу ФФ МОЛЧА
+    (синк её потом уже не подхватит — фильтр status==IN_PROGRESS) → уведомление
+    терялось. Здесь зеркалим построение sync-пути. Никогда не бросает — не валит
+    привязку/создание.
+    """
+    try:
+        from backend.models.auth import Project
+        from backend.services.fulfillment_notify import build_ready_item, notify_ff_events
+
+        proj = await db.get(Project, project_id)
+        wh_id_raw = payload["warehouse_id"]
+        wh_id: int | None = wh_id_raw if isinstance(wh_id_raw, int) else None
+        wh = await db.get(Warehouse, wh_id) if wh_id is not None else None
+        wb_number = None
+        supply_id = payload.get("wb_fbo_supply_id")
+        if supply_id is not None:
+            supply = await db.get(WbFboSupply, supply_id)
+            wb_number = supply.wb_supply_id if supply else None
+        item = build_ready_item(
+            proj.slug if proj else None,
+            wh_id,
+            payload["ff_id"],
+            payload["assembly_number"],
+            payload["ff_number"],
+            payload["dest"],
+            payload["qty"],
+            warehouse_name=wh.name if wh else None,
+            wb_number=wb_number,
+        )
+        await notify_ff_events(db, project_id, [item])
+    except Exception as exc:
+        logger.warning(
+            "FF ready-notify (offsync) failed: project=%s ff=%s: %s",
+            project_id,
+            payload.get("ff_id"),
+            exc,
+        )
+
+
 async def _other_linked_ff_all_ready(
     db: AsyncSession,
     project_id: int,
@@ -4432,6 +4492,7 @@ async def link_request(
     inbound_map: dict[int, tuple] = {}
     marked_ready = False
     accept_inbound = False
+    ready_notify: dict[str, object] | None = None
 
     if assembly_request_id is not None:
         if req.kind != FfRequestKind.ASSEMBLY.value:
@@ -4479,6 +4540,7 @@ async def link_request(
         ):
             _transition_assembly_to_ready(db, project_id, doc, req)
             marked_ready = True
+            ready_notify = _ready_notify_payload(doc, req)
         assembly_map = {doc.id: (doc.number, doc.status)}  # после перехода — статус уже новый
     else:
         if req.kind != FfRequestKind.INBOUND.value:
@@ -4522,6 +4584,8 @@ async def link_request(
     await db.commit()
     if marked_ready:
         await invalidate_cache("reports:assembly_flow")
+        if ready_notify is not None:
+            await _notify_ready_offsync(db, project_id, ready_notify)
     # Приём — после commit связи, отдельной сессией; ошибку не даём свалить линк
     # (best-effort, ровно как авто-ACCEPT в синке). При успехе правим статус в
     # ответе на ACCEPTED, чтобы UI сразу увидел принятую приёмку.
@@ -5054,6 +5118,7 @@ async def create_assembly_from_ff(
     # Авто-READY как в link_request: стадия ФФ уже «готов» → созданную
     # IN_PROGRESS-сборку переводим сразу, не дожидаясь ежечасного синка
     marked_ready = False
+    ready_notify: dict[str, object] | None = None
     if (
         not req.archived
         and not req.expired
@@ -5063,9 +5128,12 @@ async def create_assembly_from_ff(
     ):
         _transition_assembly_to_ready(db, project_id, doc, req)
         marked_ready = True
+        ready_notify = _ready_notify_payload(doc, req)
     await db.commit()
     if marked_ready:
         await invalidate_cache("reports:assembly_flow")
+        if ready_notify is not None:
+            await _notify_ready_offsync(db, project_id, ready_notify)
 
     return {
         "request": _request_to_dict(req, {doc.id: (doc.number, doc.status)}),

@@ -60,7 +60,11 @@ class Settings(BaseSettings):
     #           всех = шторм ошибок. Пустые FAST/SLOW → один DEFAULT для всех
     #           (прежнее прод-поведение, без изменений).
     FULFILLMENT_SYNC_INTERVAL_MINUTES: int = 60  # DEFAULT-контур (остальные склады)
-    FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS: str = ""
+    # Прод-приоритет (источник истины — здесь, не в compose-env): склады с
+    # активной FF-интеграцией, которым нужен частый синк. id глобально уникальны:
+    #   1 = натали (migfull), 2 = wms (wmscelicom), 12 = wms 2 (wmscelicom),
+    #   5 = Газпром (skladbot). Все четыре синкаются каждые 10 минут.
+    FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS: str = "5,1,2,12"
     FULFILLMENT_SYNC_FAST_INTERVAL_MINUTES: int = 10
     FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS: str = ""
     FULFILLMENT_SYNC_SLOW_INTERVAL_MINUTES: int = 30

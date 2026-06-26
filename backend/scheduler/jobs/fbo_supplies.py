@@ -186,3 +186,58 @@ async def enrich_all_projects_fbo_supplies():
                 str(e),
                 exc_info=True,
             )
+
+
+async def refresh_all_projects_assemblies_from_fbo():
+    """Авто-рефреш состава активных сборок из привязанных FBO-поставок (все проекты).
+
+    Зеркалит ручную кнопку «Из FBO» в фоне: без неё «Расхождение наполнения» с
+    заявками ФФ обновлялось только при ручном клике в заявку. Один WB-клиент на
+    проект. Called by APScheduler every 1 hour.
+    """
+    logger.info("Assembly FBO auto-refresh: starting for all projects")
+    project_ids = await get_sync_project_ids()
+
+    if not project_ids:
+        logger.info("Assembly FBO auto-refresh: no projects with WB keys, skipping")
+        return
+
+    from backend.integrations.wb_api import WBApiClient
+    from backend.services.assembly.analytics import refresh_active_assemblies_from_fbo
+    from backend.services.integrations_service import _get_wb_key
+
+    for project_id in project_ids:
+        try:
+            async with AsyncSessionLocal() as db:
+                try:
+                    _key, api_key = await _get_wb_key(db, project_id)
+                except ValueError:
+                    logger.debug("Assembly FBO auto-refresh: project %d has no WB key, skipping", project_id)
+                    continue
+
+                api_client = WBApiClient(api_key, project_id=project_id)
+                # 1800s: троттлинг WB (~22 c/поставку) × кап 60 поставок ≈ 22 мин.
+                result = await asyncio.wait_for(
+                    refresh_active_assemblies_from_fbo(db, project_id, api_client),
+                    timeout=1800,
+                )
+                logger.info(
+                    "Assembly FBO auto-refresh: project %d — %d supplies, %d processed, %d refreshed, %d errors",
+                    project_id,
+                    result["supplies"],
+                    result["processed"],
+                    result["refreshed"],
+                    result["errors"],
+                )
+
+        except TimeoutError:
+            logger.error("Assembly FBO auto-refresh: project %d — TIMEOUT (600s)", project_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(
+                "Assembly FBO auto-refresh: project %d failed — %s",
+                project_id,
+                str(e),
+                exc_info=True,
+            )

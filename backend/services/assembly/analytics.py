@@ -6,6 +6,7 @@ Part of the assembly service package. See backend/DOMAIN_ASSEMBLY.md for spec.
 One-way dependency: analytics -> crud (never crud -> analytics).
 """
 
+import asyncio
 import logging
 import statistics
 from datetime import date, datetime, time, timedelta
@@ -46,6 +47,9 @@ async def refresh_from_fbo(
     project_id: int,
     request_id: int,
     api_client: Any = None,
+    *,
+    skip_force_enrich: bool = False,
+    invalidate: bool = True,
 ) -> RefreshFromFboResponse:
     """
     Re-sync items from linked WbFboSupply.
@@ -55,6 +59,13 @@ async def refresh_from_fbo(
     иначе диф идёт по устаревшему локальному зеркалу WbFboSupplyItem и не видит
     позиций, добавленных в кабинете WB после создания поставки. api_client —
     инъекция для тестов (в проде строится из WB-ключа внутри enrich-хелпера).
+
+    skip_force_enrich=True — НЕ дёргать WB (зеркало уже обновлено вызывающим);
+    диф идёт по локальному WbFboSupplyItem. Используется фоновой пачкой
+    refresh_active_assemblies_from_fbo, которая перетягивает goods по поставке
+    один раз на все её сборки (дедуп WB-вызовов + троттлинг).
+    invalidate=False — не инвалидировать кэши здесь; пачка делает это один раз
+    после всех сборок (иначе N×2 инвалидаций на прогон).
     """
     from .crud import get_assembly_request
 
@@ -83,9 +94,10 @@ async def refresh_from_fbo(
     # WbFboSupplyItem отражало текущий состав в кабинете WB (а не застрявший
     # снимок). Best-effort: при отсутствии ключа/ошибке WB diff пойдёт по тому,
     # что уже лежит в БД.
-    from .crud import _try_force_enrich_supply
+    if not skip_force_enrich:
+        from .crud import _try_force_enrich_supply
 
-    await _try_force_enrich_supply(db, project_id, supply, force=True, with_goods=True, api_client=api_client)
+        await _try_force_enrich_supply(db, project_id, supply, force=True, with_goods=True, api_client=api_client)
     if supply.warehouse_name and req.wb_warehouse_name_manual != supply.warehouse_name:
         req.wb_warehouse_name_manual = supply.warehouse_name
 
@@ -154,8 +166,9 @@ async def refresh_from_fbo(
 
     await db.commit()
     await db.refresh(req, ["items"])
-    await invalidate_cache("reports:assembly_flow")
-    await invalidate_cache("reports:assembly_link_anomalies")
+    if invalidate:
+        await invalidate_cache("reports:assembly_flow")
+        await invalidate_cache("reports:assembly_link_anomalies")
 
     return RefreshFromFboResponse(
         added=added,
@@ -172,6 +185,126 @@ async def refresh_from_fbo(
             for item in req.items
         ],
     )
+
+
+# Статусы, для которых фоновый авто-рефреш из FBO имеет смысл — состав ещё может
+# меняться и сверяется с заявками ФФ (зеркало _MISMATCH_STATUSES в link_anomalies;
+# SHIPPED/закрытые refresh_from_fbo всё равно отвергает).
+_FBO_AUTOREFRESH_STATUSES: tuple[str, ...] = (
+    AssemblyStatus.IN_PROGRESS.value,
+    AssemblyStatus.READY.value,
+    AssemblyStatus.VEHICLE_ASSIGNED.value,
+)
+# Кап поставок за один прогон. WB-лимит 6 req/min: с троттлингом ~2 вызова/поставку
+# выходит ~22 c/поставку, т.е. 60 поставок ≈ 22 мин (укладывается в timeout джобы).
+# Остаток подхватит следующий часовой прогон.
+_FBO_AUTOREFRESH_MAX_SUPPLIES = 60
+
+
+async def refresh_active_assemblies_from_fbo(
+    db: AsyncSession,
+    project_id: int,
+    api_client: Any = None,
+) -> dict[str, int]:
+    """Фоновый авто-рефреш состава активных сборок из привязанных FBO-поставок.
+
+    Зеркалит ручную кнопку «Из FBO» (refresh_from_fbo), но без клика и для ВСЕХ
+    активных сборок проекта с привязкой к WbFboSupply — чтобы «Расхождение
+    наполнения» с заявками ФФ обновлялось само (планировщик зовёт раз в час).
+
+    WB-вызовы дедуплицируются по поставке (несколько сборок на один wb_fbo_supply_id
+    тянут goods один раз) и троттлятся (FBW_RATE_LIMIT_DELAY между detail/goods и
+    между поставками) — иначе 429-шторм на лимите 6 req/min и голодание плановых
+    fbo-джоб того же ключа. Кэши отчётов инвалидируются один раз в конце.
+
+    Best-effort: ошибка по поставке/сборке не валит остальные (session.rollback,
+    идём дальше). api_client — один на проект (инъекция; в проде строится из
+    WB-ключа в джобе), чтобы не дёргать ключ на каждую сборку.
+
+    Returns: {processed, refreshed, errors, supplies}.
+    """
+    from backend.services.fbo_supply.mappers import FBW_RATE_LIMIT_DELAY
+
+    from .crud import _try_force_enrich_supply
+
+    rows = (
+        await db.execute(
+            select(AssemblyRequest.id, AssemblyRequest.wb_fbo_supply_id)
+            .where(
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.is_deleted == False,  # noqa: E712
+                AssemblyRequest.status.in_(_FBO_AUTOREFRESH_STATUSES),
+                AssemblyRequest.wb_fbo_supply_id.is_not(None),
+            )
+            .order_by(AssemblyRequest.wb_fbo_supply_id, AssemblyRequest.id)
+            .limit(2000)  # активных сборок с FBO-привязкой — десятки; кап как страховка
+        )
+    ).all()
+
+    # Группируем сборки по поставке — WB-вызовы делаем один раз на поставку.
+    by_supply: dict[int, list[int]] = {}
+    for aid, sid in rows:
+        by_supply.setdefault(sid, []).append(aid)
+    supply_ids = list(by_supply)[:_FBO_AUTOREFRESH_MAX_SUPPLIES]
+    if len(by_supply) > _FBO_AUTOREFRESH_MAX_SUPPLIES:
+        logger.info(
+            "assembly.fbo_autorefresh_capped",
+            extra={"project_id": project_id, "total": len(by_supply), "cap": _FBO_AUTOREFRESH_MAX_SUPPLIES},
+        )
+
+    processed = 0
+    refreshed = 0
+    errors = 0
+    any_change = False
+
+    for i, supply_id in enumerate(supply_ids):
+        # 1) Один троттлёный force-pull goods на поставку (для всех её сборок).
+        supply = (
+            await db.execute(
+                select(WbFboSupply).where(
+                    WbFboSupply.id == supply_id,
+                    WbFboSupply.project_id == project_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if supply is not None and api_client is not None:
+            if i > 0:
+                await asyncio.sleep(FBW_RATE_LIMIT_DELAY)
+            try:
+                await _try_force_enrich_supply(
+                    db, project_id, supply, force=True, with_goods=True, api_client=api_client, throttle=True
+                )
+                await db.commit()
+            except Exception as e:
+                await db.rollback()
+                logger.warning(
+                    "assembly.fbo_autorefresh_enrich_failed",
+                    extra={"project_id": project_id, "supply_id": supply_id, "error": str(e)[:200]},
+                )
+
+        # 2) Диффим каждую сборку по уже свежему локальному зеркалу (без WB).
+        for aid in by_supply[supply_id]:
+            processed += 1
+            try:
+                res = await refresh_from_fbo(
+                    db, project_id, aid, skip_force_enrich=True, invalidate=False
+                )
+                if res.added or res.removed or res.changed:
+                    refreshed += 1
+                    any_change = True
+            except Exception as e:
+                errors += 1
+                await db.rollback()
+                logger.warning(
+                    "assembly.fbo_autorefresh_failed",
+                    extra={"project_id": project_id, "assembly_id": aid, "error": str(e)[:200]},
+                )
+
+    if any_change:
+        await invalidate_cache("reports:assembly_flow")
+        await invalidate_cache("reports:assembly_link_anomalies")
+
+    return {"processed": processed, "refreshed": refreshed, "errors": errors, "supplies": len(supply_ids)}
 
 
 # --- Logistics Analytics ---------------------------------------------------

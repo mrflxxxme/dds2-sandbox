@@ -5,6 +5,7 @@ Assembly Request service — CRUD operations and helpers.
 Part of the assembly service package. See backend/DOMAIN_ASSEMBLY.md for spec.
 """
 
+import asyncio
 import logging
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -53,6 +54,7 @@ async def _try_force_enrich_supply(
     force: bool = False,
     with_goods: bool = False,
     api_client: Any = None,
+    throttle: bool = False,
 ) -> None:
     """
     On-demand force-pull from WB when supply is linked to an assembly but periodic
@@ -67,12 +69,21 @@ async def _try_force_enrich_supply(
     отдельный вызов. Без него зеркало item-ов застревает на старом наполнении, и
     кнопка «Из FBO» по непринятой поставке не видит новых ШК (расхождение с WB/ФФ).
 
+    throttle=True — выдержать FBW_RATE_LIMIT_DELAY между detail и goods (оба
+    эндпоинта лимитированы 6 req/min). Для ручной «Из FBO» (1 поставка) не нужен;
+    для фоновой пачки (refresh_active_assemblies_from_fbo) — обязателен, иначе
+    429-шторм. Зеркалит троттлинг планового enrich_fbo_supplies.
+
     api_client — инъекция для тестов; если None, строится из WB-ключа проекта.
     """
     if not force and supply.warehouse_name:
         return
     try:
-        from backend.services.fbo_supply.mappers import _update_supply_from_fbw_detail, _upsert_supply_items_fbw
+        from backend.services.fbo_supply.mappers import (
+            FBW_RATE_LIMIT_DELAY,
+            _update_supply_from_fbw_detail,
+            _upsert_supply_items_fbw,
+        )
 
         client = api_client
         if client is None:
@@ -90,6 +101,8 @@ async def _try_force_enrich_supply(
         if detail:
             _update_supply_from_fbw_detail(supply, detail)
         if with_goods:
+            if throttle:
+                await asyncio.sleep(FBW_RATE_LIMIT_DELAY)
             goods = await client.get_fbw_supply_goods(wb_id_int, limit=100, offset=0)
             if goods:
                 await _upsert_supply_items_fbw(db, project_id, supply.id, wb_id_int, goods)

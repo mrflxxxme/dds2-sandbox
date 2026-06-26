@@ -8,12 +8,14 @@ import { formatDate, formatNumber, exportToExcel } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import KpiCard from '@/components/KpiCard';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, LogisticsRouteStat, LogisticsShipmentRow, LogisticsAnomalyType, CostForecastResponse, CostForecastWarehouse } from '@/types/api';
+import type { AssemblyRequest, AssemblyStatus, LogisticsAnalyticsResponse, LogisticsRouteStat, LogisticsShipmentRow, LogisticsAnomalyType, CostForecastResponse, CostForecastWarehouse, GazelkaConfig } from '@/types/api';
 import LogisticsCostByPallets from './components/LogisticsCostByPallets';
 import LogisticsCarriers from './components/LogisticsCarriers';
 import LogisticsAnomalies from './components/LogisticsAnomalies';
 import CreatePaymentRequestModal from './components/CreatePaymentRequestModal';
 import ShipmentPaymentsTab from './components/ShipmentPaymentsTab';
+import GazelkaModal from './components/GazelkaModal';
+import GazelkaOrdersTab from './components/GazelkaOrdersTab';
 
 // Сегменты аналитики истории отправок.
 type AnalyticsView = 'overview' | 'pallets' | 'carriers' | 'anomalies' | 'matrix';
@@ -117,7 +119,7 @@ export default function LogisticsPage() {
     const [error, setError] = useState('');
 
     // Tab
-    const [activeTab, setActiveTab] = useState<'active' | 'history' | 'payments'>('active');
+    const [activeTab, setActiveTab] = useState<'active' | 'history' | 'payments' | 'gazelka'>('active');
     // History tab — построчные отправки (источник для сортируемой таблицы)
     const [shipmentRows, setShipmentRows] = useState<LogisticsShipmentRow[]>([]);
     const [shipmentsTotal, setShipmentsTotal] = useState(0);
@@ -166,6 +168,12 @@ export default function LogisticsPage() {
     // Checkboxes for bulk selection
     const [checkedIds, setCheckedIds] = useState<Set<number>>(new Set());
 
+    // Gazelka
+    const [gazelkaConfig, setGazelkaConfig] = useState<GazelkaConfig | null>(null);
+    const [gazelkaAssemblyId, setGazelkaAssemblyId] = useState<number | null>(null);
+    const [gazelkaAssemblyNumber, setGazelkaAssemblyNumber] = useState<string>('');
+    const [showGazelkaModal, setShowGazelkaModal] = useState(false);
+
     // Payment request modal
     const [paymentShipmentId, setPaymentShipmentId] = useState<number | undefined>(undefined);
     const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -188,6 +196,22 @@ export default function LogisticsPage() {
         delivery_date: string;
     }
     const [perRequestParams, setPerRequestParams] = useState<Record<number, PerRequestParams>>({});
+
+    /** Показывать кнопку «Отправить в Газельку» только если:
+     *  - Газелька настроена
+     *  - склад заявки совпадает со складом Газельки
+     *  - статус READY или VEHICLE_ASSIGNED */
+    const isGazelkaEligible = (item: AssemblyRequest): boolean => {
+        if (!gazelkaConfig?.configured) return false;
+        if (item.warehouse_name !== gazelkaConfig.warehouse_name) return false;
+        return item.status === 'READY' || item.status === 'VEHICLE_ASSIGNED';
+    };
+
+    const openGazelkaModal = (item: AssemblyRequest) => {
+        setGazelkaAssemblyId(item.id);
+        setGazelkaAssemblyNumber(item.number);
+        setShowGazelkaModal(true);
+    };
 
     // ─── Load data ────────────────────────────────────────────────────────
 
@@ -245,6 +269,15 @@ export default function LogisticsPage() {
 
     // Прогнозная модель грузится один раз (не зависит от фильтров).
     useEffect(() => { api.getCostForecast().then(setForecast).catch(() => {}); }, []);
+
+    // Конфиг Газельки — один раз при маунте.
+    useEffect(() => {
+        let aborted = false;
+        api.getGazelkaConfig().then(cfg => {
+            if (!aborted) setGazelkaConfig(cfg);
+        }).catch(() => {});
+        return () => { aborted = true; };
+    }, []);
 
     // ─── Load shipments (построчная история отправок за период) ──────────────
     // Грузим ВЕСЬ набор за период — клиентская сортировка идёт по всему периоду,
@@ -539,9 +572,16 @@ export default function LogisticsPage() {
                     <button
                         className={`btn ${activeTab === 'payments' ? 'btn-primary' : 'btn-secondary'}`}
                         onClick={() => setActiveTab('payments')}
-                        style={{ borderRadius: '0 8px 8px 0' }}
+                        style={{ borderRadius: 0 }}
                     >
                         💳 Оплаты
+                    </button>
+                    <button
+                        className={`btn ${activeTab === 'gazelka' ? 'btn-primary' : 'btn-secondary'}`}
+                        onClick={() => setActiveTab('gazelka')}
+                        style={{ borderRadius: '0 8px 8px 0' }}
+                    >
+                        🚚 Газелька
                     </button>
                 </div>
                 {activeTab === 'active' && (
@@ -574,7 +614,9 @@ export default function LogisticsPage() {
                 </div>
             )}
 
-            {activeTab === 'payments' ? (
+            {activeTab === 'gazelka' ? (
+                <GazelkaOrdersTab />
+            ) : activeTab === 'payments' ? (
                 <ShipmentPaymentsTab />
             ) : activeTab === 'active' ? (
                 <>
@@ -769,33 +811,43 @@ export default function LogisticsPage() {
                                                             )}
                                                         </td>
                                                         <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
-                                                            {item.status === 'READY' && (
-                                                                <button
-                                                                    className="btn btn-primary btn-sm"
-                                                                    onClick={() => openVehicleModal([item.id])}
-                                                                    disabled={actionLoading}
-                                                                >
-                                                                    Назначить машину
-                                                                </button>
-                                                            )}
-                                                            {item.status === 'VEHICLE_ASSIGNED' && (
-                                                                <div style={{ display: 'flex', gap: 4 }}>
-                                                                    <button
-                                                                        className="btn btn-secondary btn-sm"
-                                                                        onClick={() => handleUnassignVehicle(item.id)}
-                                                                        disabled={actionLoading}
-                                                                    >
-                                                                        Отменить
-                                                                    </button>
+                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                                                {item.status === 'READY' && (
                                                                     <button
                                                                         className="btn btn-primary btn-sm"
-                                                                        onClick={() => handleShip(item.id)}
+                                                                        onClick={() => openVehicleModal([item.id])}
                                                                         disabled={actionLoading}
                                                                     >
-                                                                        Отгрузить
+                                                                        Назначить машину
                                                                     </button>
-                                                                </div>
-                                                            )}
+                                                                )}
+                                                                {item.status === 'VEHICLE_ASSIGNED' && (
+                                                                    <div style={{ display: 'flex', gap: 4 }}>
+                                                                        <button
+                                                                            className="btn btn-secondary btn-sm"
+                                                                            onClick={() => handleUnassignVehicle(item.id)}
+                                                                            disabled={actionLoading}
+                                                                        >
+                                                                            Отменить
+                                                                        </button>
+                                                                        <button
+                                                                            className="btn btn-primary btn-sm"
+                                                                            onClick={() => handleShip(item.id)}
+                                                                            disabled={actionLoading}
+                                                                        >
+                                                                            Отгрузить
+                                                                        </button>
+                                                                    </div>
+                                                                )}
+                                                                {isGazelkaEligible(item) && (
+                                                                    <button
+                                                                        className="btn btn-secondary btn-sm"
+                                                                        onClick={() => openGazelkaModal(item)}
+                                                                    >
+                                                                        Газелька
+                                                                    </button>
+                                                                )}
+                                                            </div>
                                                         </td>
                                                     </tr>
                                                 );
@@ -911,41 +963,51 @@ export default function LogisticsPage() {
                                                     {renderForecastCard(item)}
 
                                                     {!soon && (
-                                                        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                                                            {item.status === 'READY' && (
-                                                                <button
-                                                                    className="btn btn-primary btn-sm"
-                                                                    onClick={() => openVehicleModal([item.id])}
-                                                                    disabled={actionLoading}
-                                                                >
-                                                                    Назначить машину
-                                                                </button>
-                                                            )}
-                                                            {item.status === 'VEHICLE_ASSIGNED' && (
-                                                                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
-                                                                    {(item.vehicle_info || item.driver_phone) && (
-                                                                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.4 }}>
-                                                                            {item.vehicle_info}
-                                                                            {item.driver_phone && <div>{item.driver_phone}</div>}
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+                                                            <div style={{ display: 'flex', gap: 8 }}>
+                                                                {item.status === 'READY' && (
+                                                                    <button
+                                                                        className="btn btn-primary btn-sm"
+                                                                        onClick={() => openVehicleModal([item.id])}
+                                                                        disabled={actionLoading}
+                                                                    >
+                                                                        Назначить машину
+                                                                    </button>
+                                                                )}
+                                                                {item.status === 'VEHICLE_ASSIGNED' && (
+                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
+                                                                        {(item.vehicle_info || item.driver_phone) && (
+                                                                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.4 }}>
+                                                                                {item.vehicle_info}
+                                                                                {item.driver_phone && <div>{item.driver_phone}</div>}
+                                                                            </div>
+                                                                        )}
+                                                                        <div style={{ display: 'flex', gap: 8 }}>
+                                                                            <button
+                                                                                className="btn btn-secondary btn-sm"
+                                                                                onClick={(e) => { e.stopPropagation(); handleUnassignVehicle(item.id); }}
+                                                                                disabled={actionLoading}
+                                                                            >
+                                                                                Отменить
+                                                                            </button>
+                                                                            <button
+                                                                                className="btn btn-primary btn-sm"
+                                                                                onClick={(e) => { e.stopPropagation(); handleShip(item.id); }}
+                                                                                disabled={actionLoading}
+                                                                            >
+                                                                                Отгрузить
+                                                                            </button>
                                                                         </div>
-                                                                    )}
-                                                                    <div style={{ display: 'flex', gap: 8 }}>
-                                                                        <button
-                                                                            className="btn btn-secondary btn-sm"
-                                                                            onClick={(e) => { e.stopPropagation(); handleUnassignVehicle(item.id); }}
-                                                                            disabled={actionLoading}
-                                                                        >
-                                                                            Отменить
-                                                                        </button>
-                                                                        <button
-                                                                            className="btn btn-primary btn-sm"
-                                                                            onClick={(e) => { e.stopPropagation(); handleShip(item.id); }}
-                                                                            disabled={actionLoading}
-                                                                        >
-                                                                            Отгрузить
-                                                                        </button>
                                                                     </div>
-                                                                </div>
+                                                                )}
+                                                            </div>
+                                                            {isGazelkaEligible(item) && (
+                                                                <button
+                                                                    className="btn btn-secondary btn-sm"
+                                                                    onClick={(e) => { e.stopPropagation(); openGazelkaModal(item); }}
+                                                                >
+                                                                    Отправить в Газельку
+                                                                </button>
                                                             )}
                                                         </div>
                                                     )}
@@ -1318,6 +1380,19 @@ export default function LogisticsPage() {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* ─── Gazelka modal ─── */}
+            {showGazelkaModal && gazelkaAssemblyId !== null && (
+                <GazelkaModal
+                    assemblyId={gazelkaAssemblyId}
+                    assemblyNumber={gazelkaAssemblyNumber}
+                    onClose={() => setShowGazelkaModal(false)}
+                    onSuccess={() => {
+                        setShowGazelkaModal(false);
+                        load();
+                    }}
+                />
             )}
         </div>
     );
