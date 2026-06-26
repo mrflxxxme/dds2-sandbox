@@ -270,6 +270,7 @@ function PlannedTable({ items, onTtn, onEdit, ttnLoading, linkProps }: PlannedTa
             <table className="data-table" style={{ fontSize: 13 }}>
                 <thead>
                     <tr>
+                        <th>№ Газельки</th>
                         <th>Статус</th>
                         <th>Сборка</th>
                         <th>Отправка</th>
@@ -289,6 +290,9 @@ function PlannedTable({ items, onTtn, onEdit, ttnLoading, linkProps }: PlannedTa
                 <tbody>
                     {items.map(row => (
                         <tr key={row.gazelka_id}>
+                            <td style={{ whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                {row.gazelka_id}
+                            </td>
                             <td style={{ whiteSpace: 'nowrap' }}>
                                 <span className={`badge ${statusBadgeClass(row.status_label || row.status)}`}>
                                     {row.status_label || row.status}
@@ -381,6 +385,7 @@ function ActiveTable({ items, onTtn, ttnLoading, linkProps }: ActiveTableProps) 
             <table className="data-table" style={{ fontSize: 13 }}>
                 <thead>
                     <tr>
+                        <th>№ Газельки</th>
                         <th>Статус</th>
                         <th>Сборка</th>
                         <th>Маршрут</th>
@@ -395,6 +400,9 @@ function ActiveTable({ items, onTtn, ttnLoading, linkProps }: ActiveTableProps) 
                 <tbody>
                     {items.map(row => (
                         <tr key={row.gazelka_id}>
+                            <td style={{ whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                {row.gazelka_id}
+                            </td>
                             <td style={{ whiteSpace: 'nowrap' }}>
                                 <span className={`badge ${statusBadgeClass(row.status_label || row.status)}`}>
                                     {row.status_label || row.status}
