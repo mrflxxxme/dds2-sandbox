@@ -54,6 +54,25 @@ async def create_draft(
     return await assembly_draft_service.to_read_model(db, project.id, draft)
 
 
+@router.post("/current", response_model=AssemblyDraftRead, dependencies=[Depends(rate_limit_write)])
+async def get_or_create_current_draft(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftRead:
+    """Единственный «текущий» черновик проекта (синглтон).
+
+    Лениво консолидирует: нет → создаёт пустой; один → возвращает его; несколько →
+    объединяет все в один (merge_drafts) и возвращает survivor. Единая страница
+    «Сборка» зовёт это на входе — гарантия ровно одного активного черновика.
+
+    POST (не GET): может создавать/сливать/soft-delete'ить черновики → честнее по
+    семантике + покрыт `rate_limit_write`. Идемпотентен в установившемся состоянии
+    (один черновик → тот же объект).
+    """
+    draft = await assembly_draft_service.get_or_create_current_draft(db, project.id)
+    return await assembly_draft_service.to_read_model(db, project.id, draft)
+
+
 @router.get("/{draft_id}", response_model=AssemblyDraftRead)
 async def get_draft(
     draft_id: int,

@@ -601,6 +601,11 @@ export function addWarehouseMethods(api: ApiClient) {
         addAssemblyDraftRows(draftId: number, rows: AssemblyDraftRow[]) {
             return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${draftId}/rows`, { rows });
         },
+        /** Единственный «текущий» черновик проекта (синглтон): нет — создаёт пустой,
+         *  несколько — объединяет в один. Единая страница «Сборка» зовёт на входе. */
+        getOrCreateCurrentDraft() {
+            return api.request<AssemblyDraft>('POST', '/api/v1/assembly/drafts/current');
+        },
         /** Проверка приёмки WB по баркодам: типы упаковки + лимиты + остаток на ФФ. */
         getBarcodeEligibility(barcodes: string[]) {
             return api.request<BarcodeEligibilityResponse>('POST', '/api/v1/warehouse/barcode-eligibility', { barcodes });

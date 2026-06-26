@@ -165,6 +165,101 @@ async def test_create_draft_happy_path(db_session):
 
 
 @pytest.mark.asyncio
+async def test_current_draft_creates_when_none(db_session):
+    """get_or_create_current_draft: пусто → создаёт пустой; повторный вызов → тот же (не плодим)."""
+    draft = await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+    assert draft.id is not None
+    assert draft.project_id == PROJECT_ID
+    assert draft.is_deleted is False
+
+    again = await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+    assert again.id == draft.id  # один черновик → возвращается тот же
+
+
+@pytest.mark.asyncio
+async def test_current_draft_returns_single(db_session):
+    """Один существующий черновик возвращается как есть (без merge)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    created = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5})],
+        ),
+    )
+    current = await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+    assert current.id == created.id
+
+
+@pytest.mark.asyncio
+async def test_current_draft_merges_multiple(db_session):
+    """Несколько черновиков → синглтон: остаётся ровно один активный со всеми строками."""
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+    d1 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5})],
+        ),
+    )
+    d2 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_b],
+            ["Казань"],
+            [AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_b): 3}, tgt={"Казань": 3})],
+        ),
+    )
+    current = await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+
+    # Ровно один активный черновик (остальные слиты и soft-deleted)
+    actives = await assembly_draft_service.list_drafts(db_session, PROJECT_ID)
+    assert len(actives) == 1
+    assert actives[0].id == current.id
+    assert current.id in {d1.id, d2.id}
+
+    # Объединённый черновик держит строки ОБОИХ
+    dist = AssemblyDraftDistribution.model_validate(current.distribution)
+    assert {r.nm_id for r in dist.rows} == {111, 222}
+
+
+@pytest.mark.asyncio
+async def test_current_draft_merges_multiple_multitenancy(db_session):
+    """Синглтон-консолидация не задевает чужой проект."""
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+    await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 1}, tgt={"Электросталь": 1})],
+        ),
+    )
+    await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_b],
+            ["Казань"],
+            [AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_b): 1}, tgt={"Казань": 1})],
+        ),
+    )
+    # Чужой проект со своим черновиком
+    other = await assembly_draft_service.create_draft(db_session, OTHER_PROJECT_ID, _build_payload([], ["Тула"], []))
+
+    await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+
+    other_actives = await assembly_draft_service.list_drafts(db_session, OTHER_PROJECT_ID)
+    assert {d.id for d in other_actives} == {other.id}  # чужой проект нетронут
+
+
+@pytest.mark.asyncio
 async def test_list_drafts_excludes_deleted(db_session):
     """list_drafts must hide soft-deleted drafts."""
     wh_a, _ = await _get_warehouse_ids(db_session)

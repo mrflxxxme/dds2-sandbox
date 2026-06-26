@@ -387,6 +387,33 @@ async def merge_drafts(
     return survivor
 
 
+async def get_or_create_current_draft(
+    db: AsyncSession,
+    project_id: int,
+) -> AssemblyDraft:
+    """Вернуть единственный «текущий» черновик проекта (синглтон).
+
+    Политика «всегда ровно один активный черновик» для единой страницы «Сборка»:
+    - нет черновиков → создать пустой;
+    - один → вернуть его (не плодим);
+    - несколько → объединить все в один (merge_drafts) и вернуть survivor.
+
+    Так «Создать заявку из потребности», редактор и автосейв всегда работают над
+    одним и тем же черновиком, а ранее накопленные параллельные черновики (прод)
+    лениво консолидируются при первом входе.
+    """
+    drafts = await list_drafts(db, project_id)
+    if not drafts:
+        return await create_draft(
+            db,
+            project_id,
+            AssemblyDraftCreate(distribution=AssemblyDraftDistribution()),
+        )
+    if len(drafts) == 1:
+        return drafts[0]
+    return await merge_drafts(db, project_id, [d.id for d in drafts])
+
+
 async def add_rows_to_draft(
     db: AsyncSession,
     project_id: int,
