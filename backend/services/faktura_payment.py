@@ -80,7 +80,12 @@ def _resolve_payer(accounts: list[dict], payer_account_id: str | None) -> dict:
             if str(acc.get("id")) == str(payer_account_id) or str(acc.get("number")) == str(payer_account_id):
                 return acc
         raise ValueError(f"Счёт-плательщик {payer_account_id} не найден среди счетов интеграции")
-    rub = [a for a in accounts if (a.get("currency") or "RUB").upper() == "RUB"] or accounts
+    # Faktura отдаёт currency словарём ({"code": "RUR", ...}), код — RUR (не RUB).
+    def _cur_code(a: dict) -> str:
+        c = a.get("currency")
+        return str((c.get("code") if isinstance(c, dict) else c) or "").upper()
+
+    rub = [a for a in accounts if _cur_code(a) in ("RUB", "RUR", "643")] or accounts
     if len(rub) > 1:
         opts = ", ".join(f"{a.get('number')} (id={a.get('id')})" for a in rub)
         raise ValueError(

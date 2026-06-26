@@ -84,3 +84,18 @@ def test_resolve_payer_single_account_ok():
 def test_resolve_payer_no_accounts_raises():
     with pytest.raises(ValueError):
         _resolve_payer([], None)
+
+
+def test_resolve_payer_dict_currency_rur():
+    """Faktura отдаёт currency СЛОВАРЁМ с кодом RUR (не строкой RUB) — не падать, матчить."""
+    accs = [
+        {"id": "271554598943", "number": "40702810800000001893", "currency": {"shortName": "р.", "code": "RUR"}},
+        {"id": "271554598912", "number": "40702810500001001752", "currency": {"shortName": "р.", "code": "RUR"}},
+    ]
+    # два рублёвых счёта без явного id — не угадываем (но и не падаем на dict-валюте)
+    with pytest.raises(ValueError):
+        _resolve_payer(accs, None)
+    # с явным payer_account_id — выбирает нужный
+    assert _resolve_payer(accs, "271554598943")["id"] == "271554598943"
+    # одиночный dict-RUR счёт — ок
+    assert _resolve_payer([accs[0]], None)["id"] == "271554598943"
