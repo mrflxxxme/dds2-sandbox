@@ -623,9 +623,16 @@ export default function AssemblyDetailPage() {
             );
         }
 
-        // Migfull-портал («Натали»): кнопка только если интеграция настроена и её
-        // склад совпадает со складом сборки.
-        if (migfullConfig?.configured && migfullConfig.warehouse_id === assembly.warehouse_id) {
+        // Migfull-портал («Натали»): кнопка только если интеграция настроена, её склад
+        // совпадает со складом сборки И у сборки ещё НЕТ заявки в ФФ «Натали». Создание
+        // необратимо (нет delete/cancel) → не предлагаем создать дубль; существующие
+        // заявки ФФ показаны блоком ниже. Учитываем и наш send, и read-синк/ручной матч.
+        const nataliWhId = migfullConfig?.configured ? migfullConfig.warehouse_id : null;
+        const hasNataliRequest = nataliWhId != null && (
+            (assembly.ff_links?.some((lk) => lk.ff_warehouse_id === nataliWhId) ?? false)
+            || assembly.ff_warehouse_id === nataliWhId
+        );
+        if (nataliWhId != null && nataliWhId === assembly.warehouse_id && !hasNataliRequest) {
             buttons.push(
                 <button key="migfull" className="btn btn-secondary" onClick={() => setShowMigfullModal(true)} disabled={actionLoading}
                     title="Создать заявку на отгрузку в ФФ «Натали» (migfull-портал) из состава этой сборки">
