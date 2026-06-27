@@ -163,7 +163,11 @@ export default function AddFromNeedPanel({
                     const ffStock: Record<number, number> = {};
                     for (const [ff, q] of Object.entries(nc.rf_by_warehouse || {})) if ((q || 0) > 0) ffStock[Number(ff)] = q;
                     if (Object.keys(target).length === 0 || Object.keys(ffStock).length === 0) continue;
-                    skus.push({ nm_id: nm, barcode: nc.barcode || '', vendor_code: nc.article_seller || `nm:${nm}`, target, ffStock, ppb: nmPpb.get(nm), box_size: nmBoxSize.get(nm), packageType: 'BOX' });
+                    // Новинку добавляем РОССЫПЬЮ (ppb=null) — без коробочного ограничения:
+                    // cold-start даёт мало на склад, целым коробом часто не набирается → строка
+                    // бы выпала. Паллетизацию (микс с обычными / срез б/габ) делает предпросмотр
+                    // по геометрии-картам (nmPpb), а не по этой строке.
+                    skus.push({ nm_id: nm, barcode: nc.barcode || '', vendor_code: nc.article_seller || `nm:${nm}`, target, ffStock, ppb: null, box_size: nmBoxSize.get(nm), packageType: 'BOX' });
                     addedNewcomer = true;
                 }
             }
