@@ -353,6 +353,18 @@ async def recalculate_order_items(db: AsyncSession, project_id: int, order_no: s
                 sib_area[it.barcode] = a
 
     for item in items:
+        # Self-heal предмет/артикул из номенклатуры, если снимок пуст. Новый SKU мог
+        # попасть в машину до появления карточки ВБ (subject/article_seller легли NULL);
+        # карточку подтянул суточный синк позже — без этого предмет/артикул и пошлина
+        # навсегда остаются пустыми (recalc матчит правило пошлины по subject). Уже
+        # заполненный снимок (ручная правка / значение из заказа) не перетираем.
+        nom_meta = nom_map.get(item.barcode)
+        if nom_meta:
+            if not item.subject and nom_meta.subject:
+                item.subject = nom_meta.subject
+            if not item.article_seller and nom_meta.article_seller:
+                item.article_seller = nom_meta.article_seller
+
         # For Russia, price_cny is stored in RUB (rate_cny is forced to 1 anyway)
         cost_rub_unit = Decimal(str(item.price_cny or 0)) if is_russia else item.price_cny * order.rate_cny
 
