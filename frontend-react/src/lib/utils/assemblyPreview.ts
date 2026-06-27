@@ -89,9 +89,9 @@ export interface TrimWholeResult {
  * отгрузка, не набравшая целой паллеты, убирается полностью.
  *
  * `uppOf(nmId, wbName)` — штук в полной паллете SKU на складе-цели (или null — без
- * габаритов/кратности). SKU без габаритов (б/габ) В СТРОГОМ РЕЖИМЕ ТОЖЕ СНИМАЮТСЯ:
- * их нельзя посчитать в паллеты, поэтому в «только целые паллеты» они не едут (по
- * требованию). Чистая функция.
+ * габаритов/кратности). SKU без габаритов: ОБЫЧНЫЕ снимаются (в паллету не положить),
+ * НОВИНКИ остаются РОССЫПЬЮ (cold-start засев — новинку надо отгрузить даже без
+ * геометрии; видна в предпросмотре). Чистая функция.
  */
 export function trimLinesToWholePallets(
     lines: PreviewLine[],
@@ -117,12 +117,16 @@ export function trimLinesToWholePallets(
     const kept: PreviewLine[] = [];
     let droppedUnits = 0;
     for (const g of groups.values()) {
-        // SKU без габаритов (upp=null) — снимаем целиком (нельзя посчитать в паллеты);
-        // палетизируемые режем до целых паллет.
+        // Палетизируемые (upp!=null) режем до целых паллет. Без габаритов:
+        //  • НОВИНКА — НЕ срезаем, едет РОССЫПЬЮ (cold-start засев: новинку часто
+        //    нельзя посчитать в паллеты, но отгрузить её надо — видна в предпросмотре);
+        //  • обычный SKU — снимаем целиком (в паллету не положить).
         const geomKm: Record<string, number> = {};
         for (const [nmStr, u] of Object.entries(g.km)) {
             const upp = uppOf(Number(nmStr), g.wb);
-            if (upp != null && upp > 0) geomKm[nmStr] = u;
+            if (upp != null && upp > 0) { geomKm[nmStr] = u; continue; }
+            const line = g.meta.get(Number(nmStr));
+            if (line?.isNew) kept.push({ ...line, qty: u });
             else droppedUnits += u;
         }
         const { kept: kk, dropped } = snapToWholePallets(geomKm, (k) => uppOf(Number(k), g.wb));
