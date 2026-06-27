@@ -57,11 +57,6 @@ async def list_fbo_supplies(
     limit: int = Query(50, le=500),
     offset: int = Query(0, ge=0),
     exclude_with_assembly: bool = Query(False, description="Exclude supplies with active assembly requests"),
-    exclude_assembly_warehouse_id: int | None = Query(
-        None,
-        description="С exclude_with_assembly: исключать только поставки, занятые сборкой ЭТОГО склада-источника "
-        "(совместная поставка — оставляем доступной для другого ФФ)",
-    ),
     without_assembly: bool = Query(False, description="Only supplies without any assembly request"),
     partial_only: bool = Query(False, description="Only supplies with partial acceptance (accepted_qty < total_qty)"),
     excess_only: bool = Query(
@@ -88,7 +83,6 @@ async def list_fbo_supplies(
         limit=limit,
         offset=offset,
         exclude_with_assembly=exclude_with_assembly,
-        exclude_assembly_warehouse_id=exclude_assembly_warehouse_id,
         without_assembly=without_assembly,
         partial_only=partial_only,
         excess_only=excess_only,

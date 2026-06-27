@@ -114,20 +114,8 @@ async def _ff_composition_mismatch(db: AsyncSession, project_id: int, warehouse_
 
     wh_names = await _warehouse_names(db, project_id, {asm_by_id[aid].warehouse_id for aid in diverging_ids})
 
-    # Совместные сборки делят расхождение на группу (сверка по сумме) → одна строка
-    # на группу с объединённой подписью (detail.assembly_number = «ASM-1, ASM-2»),
-    # иначе обе сборки дали бы дубль-строки с одинаковыми combined-итогами.
-    joint_members = await fulfillment_service._joint_members_for_assemblies(db, project_id, set(diverging_ids))
-    seen_groups: set[frozenset[int]] = set()
-
     rows: list[dict] = []
     for aid in diverging_ids:
-        members = joint_members.get(aid)
-        if members:
-            key = frozenset(members)
-            if key in seen_groups:
-                continue
-            seen_groups.add(key)
         asm = asm_by_id[aid]
         detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db, project_id, aid)
         if detail is None:
@@ -137,7 +125,7 @@ async def _ff_composition_mismatch(db: AsyncSession, project_id: int, warehouse_
         rows.append(
             {
                 "assembly_id": aid,
-                "number": detail.get("assembly_number") or asm.number,
+                "number": asm.number,
                 "status": asm.status,
                 "warehouse_id": asm.warehouse_id,
                 "warehouse_name": wh_names.get(asm.warehouse_id),

@@ -1640,10 +1640,6 @@ export interface AssemblyRequest {
   ff_links?: FfLinkInfo[] | null;
   /** состав сборки расходится с привязанной заявкой(ами) ФФ по наполнению (true — расхождение, null — неизвестно) */
   ff_mismatch?: boolean | null;
-  /** совместная поставка: эта сборка делит WB FBO-поставку с другими (≥2 сборок на одну поставку, по одной на ФФ-источник) */
-  joint_supply?: boolean;
-  /** другие сборки той же совместной поставки (для бейджа «Совместная» и тултипа) */
-  joint_siblings?: JointSibling[] | null;
 }
 
 export interface FfLinkInfo {
@@ -1651,15 +1647,6 @@ export interface FfLinkInfo {
   ff_request_number?: string | null;
   ff_stage_title?: string | null;
   ff_warehouse_id?: number | null;
-}
-
-/** соседняя сборка той же совместной WB-поставки (другой ФФ-источник) */
-export interface JointSibling {
-  assembly_id: number;
-  number: string;
-  warehouse_id: number;
-  warehouse_name?: string | null;
-  status: string;
 }
 
 /** Расходящаяся позиция: наш qty vs суммарный qty привязанных заявок ФФ */

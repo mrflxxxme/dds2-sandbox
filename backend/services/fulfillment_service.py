@@ -3888,52 +3888,6 @@ def _mirror_ff_composition(req: FulfillmentRequest, mig_guid_map: dict[str, tupl
     return None  # skladbot — состав только в живой деталке
 
 
-async def _joint_members_for_assemblies(
-    db: AsyncSession, project_id: int, assembly_ids: set[int]
-) -> dict[int, list[int]]:
-    """{input_aid: [все активные сборки её WB-поставки]} — только для СОВМЕСТНЫХ поставок.
-
-    Совместная = одна WB FBO-поставка несёт ≥2 активных сборок (не удалена, не
-    CANCELLED — тот же предикат, что у ix_assembly_requests_fbo_wh_unique).
-    Одиночные сборки в результат не попадают. Нужна, чтобы считать расхождение
-    наполнения по СУММЕ сборок совместной поставки (а не каждую отдельно — каждая
-    несёт лишь свою долю общего состава поставки).
-    """
-    if not assembly_ids:
-        return {}
-    rows = (
-        await db.execute(
-            select(AssemblyRequest.id, AssemblyRequest.wb_fbo_supply_id).where(
-                AssemblyRequest.project_id == project_id,
-                AssemblyRequest.id.in_(assembly_ids),
-                AssemblyRequest.wb_fbo_supply_id.is_not(None),
-            )
-        )
-    ).all()
-    supply_of = {aid: sid for aid, sid in rows}
-    supply_ids = set(supply_of.values())
-    if not supply_ids:
-        return {}
-    mrows = (
-        await db.execute(
-            select(AssemblyRequest.id, AssemblyRequest.wb_fbo_supply_id).where(
-                AssemblyRequest.project_id == project_id,
-                AssemblyRequest.wb_fbo_supply_id.in_(supply_ids),
-                AssemblyRequest.is_deleted == False,  # noqa: E712
-                AssemblyRequest.status != AssemblyStatus.CANCELLED,
-            )
-        )
-    ).all()
-    members_by_supply: dict[int, list[int]] = {}
-    for aid, sid in mrows:
-        members_by_supply.setdefault(sid, []).append(aid)
-    return {
-        aid: members_by_supply[sid]
-        for aid, sid in supply_of.items()
-        if len(members_by_supply.get(sid, [])) >= 2
-    }
-
-
 async def compute_doc_ff_mismatch(
     db: AsyncSession,
     project_id: int,
@@ -3951,11 +3905,6 @@ async def compute_doc_ff_mismatch(
     суммарному кол-ву (FF total_qty vs наш итог). При N:1 (migfull) берётся
     ОБЪЕДИНЁННЫЙ состав ВСЕХ привязанных к документу заявок ФФ. Документы без
     привязанных заявок в результат не попадают.
-
-    Совместная WB-поставка (≥2 сборок на одну поставку, напр. wms + wms2): сверка
-    идёт по СУММЕ всех сборок поставки против объединённого состава всех их заявок
-    ФФ — каждая сборка несёт лишь свою долю общего состава, поэтому раздельная
-    сверка дала бы ложное расхождение. Все сборки группы получают один вердикт.
     """
     assembly_ids = set(assembly_ids or ())
     inbound_ids = set(inbound_ids or ())
@@ -3963,17 +3912,9 @@ async def compute_doc_ff_mismatch(
     if not assembly_ids and not inbound_ids:
         return out
 
-    # Совместные поставки: для сборок, делящих WB-поставку (≥2 активных), расхождение
-    # считаем по СУММЕ группы → расширяем выборку состава/ФФ на ВСЕХ её членов
-    # (включая не входящих во входной набор, напр. сестру с другой страницы списка).
-    joint_members = await _joint_members_for_assemblies(db, project_id, assembly_ids)
-    asm_query_ids: set[int] = set(assembly_ids)
-    for members in joint_members.values():
-        asm_query_ids.update(members)
-
     # 1) наш состав по документам {doc_id: {barcode: qty}}
     our_asm: dict[int, dict[str, int]] = {}
-    if asm_query_ids:
+    if assembly_ids:
         rows = await db.execute(
             select(
                 AssemblyRequestItem.assembly_request_id,
@@ -3982,7 +3923,7 @@ async def compute_doc_ff_mismatch(
             )
             .where(
                 AssemblyRequestItem.project_id == project_id,
-                AssemblyRequestItem.assembly_request_id.in_(asm_query_ids),
+                AssemblyRequestItem.assembly_request_id.in_(assembly_ids),
             )
             .group_by(AssemblyRequestItem.assembly_request_id, AssemblyRequestItem.barcode)
         )
@@ -4008,8 +3949,8 @@ async def compute_doc_ff_mismatch(
     # active-set запросы: иначе отменённая/архивная заявка раздувает сводный состав
     # и даёт ложное расхождение.
     conds = []
-    if asm_query_ids:
-        conds.append(FulfillmentRequest.assembly_request_id.in_(asm_query_ids))
+    if assembly_ids:
+        conds.append(FulfillmentRequest.assembly_request_id.in_(assembly_ids))
     if inbound_ids:
         conds.append(FulfillmentRequest.inbound_receipt_id.in_(inbound_ids))
     ff_result = await db.execute(
@@ -4024,7 +3965,7 @@ async def compute_doc_ff_mismatch(
     ff_by_asm: dict[int, list[FulfillmentRequest]] = {}
     ff_by_inb: dict[int, list[FulfillmentRequest]] = {}
     for r in ff_reqs:
-        if r.assembly_request_id in asm_query_ids:
+        if r.assembly_request_id in assembly_ids:
             ff_by_asm.setdefault(r.assembly_request_id, []).append(r)
         elif r.inbound_receipt_id in inbound_ids:
             ff_by_inb.setdefault(r.inbound_receipt_id, []).append(r)
@@ -4064,26 +4005,8 @@ async def compute_doc_ff_mismatch(
         ff_units = sum(_ff_unit_total(r, mig_maps.get(r.warehouse_id, {})) for r in reqs)
         return ff_units != sum(our_comp.values())
 
-    # Совместные: сумма позиций ВСЕХ сборок группы vs объединённый состав ВСЕХ их
-    # заявок ФФ → один вердикт каждой сборке группы (сверка «с двух заявок в ДДС и
-    # от ФФ»). Группа без единой заявки ФФ → None (нечего сверять).
-    handled: set[int] = set()
-    for aid in assembly_ids:
-        grp = joint_members.get(aid)
-        if not grp:
-            continue
-        combined_our: dict[str, int] = {}
-        for m in grp:
-            for bc, q in our_asm.get(m, {}).items():
-                combined_our[bc] = combined_our.get(bc, 0) + q
-        combined_reqs = [r for m in grp for r in ff_by_asm.get(m, [])]
-        out[("assembly", aid)] = _verdict(combined_our, combined_reqs) if combined_reqs else None
-        handled.add(aid)
-    # Несовместные — по своей заявке(ам) ФФ (как раньше). Сёстры из расширенной
-    # выборки, не входящие во входной набор, в результат не кладём.
     for aid, reqs in ff_by_asm.items():
-        if aid in assembly_ids and aid not in handled:
-            out[("assembly", aid)] = _verdict(our_asm.get(aid, {}), reqs)
+        out[("assembly", aid)] = _verdict(our_asm.get(aid, {}), reqs)
     for rid, reqs in ff_by_inb.items():
         out[("inbound", rid)] = _verdict(our_inb.get(rid, {}), reqs)
     return out
@@ -4124,35 +4047,11 @@ async def get_assembly_ff_mismatch_detail(
     if asm is None:
         return None
 
-    # Совместная поставка (≥2 сборок на одну WB-поставку): сверяем по СУММЕ всех
-    # сборок группы против объединённого состава всех их заявок ФФ. Иначе одна
-    # сборка (своя доля) ложно расходится. Одиночная → группа из неё самой.
-    jm = await _joint_members_for_assemblies(db, project_id, {assembly_request_id})
-    member_ids = jm.get(assembly_request_id) or [assembly_request_id]
-    if len(member_ids) > 1:
-        member_numbers = list(
-            (
-                await db.execute(
-                    select(AssemblyRequest.number)
-                    .where(
-                        AssemblyRequest.project_id == project_id,
-                        AssemblyRequest.id.in_(member_ids),
-                    )
-                    .order_by(AssemblyRequest.number)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        assembly_number_label = ", ".join(member_numbers)
-    else:
-        assembly_number_label = asm.number
-
     our_rows = await db.execute(
         select(AssemblyRequestItem.barcode, func.sum(AssemblyRequestItem.quantity))
         .where(
             AssemblyRequestItem.project_id == project_id,
-            AssemblyRequestItem.assembly_request_id.in_(member_ids),
+            AssemblyRequestItem.assembly_request_id == assembly_request_id,
         )
         .group_by(AssemblyRequestItem.barcode)
     )
@@ -4164,7 +4063,7 @@ async def get_assembly_ff_mismatch_detail(
             await db.execute(
                 select(FulfillmentRequest).where(
                     FulfillmentRequest.project_id == project_id,
-                    FulfillmentRequest.assembly_request_id.in_(member_ids),
+                    FulfillmentRequest.assembly_request_id == assembly_request_id,
                     FulfillmentRequest.archived == False,
                     FulfillmentRequest.local_archived == False,
                 )
@@ -4208,7 +4107,7 @@ async def get_assembly_ff_mismatch_detail(
     comps = [_mirror_ff_composition(r, mig_maps.get(r.warehouse_id, {})) for r in ff_reqs]
     base = {
         "assembly_id": assembly_request_id,
-        "assembly_number": assembly_number_label,
+        "assembly_number": asm.number,
         "our_total": our_total,
         "ff_request_numbers": ff_numbers,
     }

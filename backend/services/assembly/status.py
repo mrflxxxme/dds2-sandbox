@@ -394,9 +394,7 @@ async def cancel_request(db: AsyncSession, project_id: int, request_id: int) -> 
             )
         )
         fbo_supply = fbo_result.scalar_one_or_none()
-        # Совместная поставка: чистим указатель отгрузки поставки только если он наш
-        # (для 1:1 это всегда так — no-op; не затираем отгрузку сестринской сборки).
-        if fbo_supply and fbo_supply.outbound_shipment_id == req.outbound_shipment_id:
+        if fbo_supply:
             fbo_supply.outbound_shipment_id = None
 
         # Soft-delete OutboundShipment
@@ -580,10 +578,7 @@ async def return_to_warehouse(
         fbo_supply.return_processed_at = utcnow()
         fbo_supply.return_type = "GOODS"
         fbo_supply.return_qty = sum(it.quantity for it in req.items)
-        # Указатель отгрузки чистим только если он наш (совместная поставка: не
-        # затираем отгрузку сестринской сборки; для 1:1 — no-op).
-        if fbo_supply.outbound_shipment_id == req.outbound_shipment_id:
-            fbo_supply.outbound_shipment_id = None
+        fbo_supply.outbound_shipment_id = None
 
     # 4. Статус → RETURNED. Снимок попытки уже на OutboundShipment — очищаем зеркало
     #    заявки, чтобы её можно было пере-связать с новой FBW-поставкой при переотгрузке.

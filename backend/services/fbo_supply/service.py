@@ -287,7 +287,6 @@ async def list_fbo_supplies(
     limit: int = 50,
     offset: int = 0,
     exclude_with_assembly: bool = False,
-    exclude_assembly_warehouse_id: int | None = None,
     without_assembly: bool = False,
     partial_only: bool = False,
     excess_only: bool = False,
@@ -361,20 +360,13 @@ async def list_fbo_supplies(
         # wb_fbo_supply_id.is_not(None): Postgres NOT IN with NULL in subquery
         # makes every comparison NULL (i.e. false), so an active AR with
         # wb_fbo_supply_id=NULL would silently zero out the entire supply list.
-        active_assembly_q = select(AssemblyRequest.wb_fbo_supply_id).where(
+        active_assembly_ids = select(AssemblyRequest.wb_fbo_supply_id).where(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.status.in_(active_statuses),
             AssemblyRequest.wb_fbo_supply_id.is_not(None),
         )
-        # Совместная поставка: при выборе поставки для сборки конкретного склада
-        # исключаем только поставки, уже занятые сборкой ЭТОГО ЖЕ склада-источника
-        # — поставку с сборкой другого ФФ (напр. wms) оставляем доступной для wms2.
-        if exclude_assembly_warehouse_id is not None:
-            active_assembly_q = active_assembly_q.where(
-                AssemblyRequest.warehouse_id == exclude_assembly_warehouse_id
-            )
-        base_query = base_query.where(WbFboSupply.id.not_in(active_assembly_q))
+        base_query = base_query.where(WbFboSupply.id.not_in(active_assembly_ids))
 
     # Supplies that WB already ACCEPTED but have NO assembly request in DDS.
     # Non-final statuses (ACTIVE/IN_PROGRESS/CANCELLED) are excluded: they are
