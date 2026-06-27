@@ -29,8 +29,10 @@ interface AddFromNeedPanelProps {
     palletOverrides: Record<string, number>;
     /** WB-склад → ключ округа (для кросс-SKU палет-консолидации в buildDraftRows). */
     districtMap: Record<string, string>;
-    /** Дозалить строки в черновик (родитель сначала флашит правки, потом merge+reload). */
-    onAddRows: (rows: AssemblyDraftRow[]) => Promise<void>;
+    /** Дозалить строки в черновик (родитель сначала флашит правки, потом merge+reload).
+     *  `opts.consolidate` — после merge дособрать смешанные паллеты по округам (для новинок:
+     *  доезжают в паллетах с тем, что уже в черновике). */
+    onAddRows: (rows: AssemblyDraftRow[], opts?: { consolidate?: boolean }) => Promise<void>;
     onToast: (message: string, type: 'success' | 'error') => void;
 }
 
@@ -138,6 +140,7 @@ export default function AddFromNeedPanel({
         setAdding(true);
         try {
             const skus: DraftSkuInput[] = [];
+            let addedNewcomer = false;  // новинки → россыпь + черновик-aware консолидация
             for (const nm of checked) {
                 const reg = regularByNm.get(nm);
                 if (reg) {
@@ -161,12 +164,17 @@ export default function AddFromNeedPanel({
                     for (const [ff, q] of Object.entries(nc.rf_by_warehouse || {})) if ((q || 0) > 0) ffStock[Number(ff)] = q;
                     if (Object.keys(target).length === 0 || Object.keys(ffStock).length === 0) continue;
                     skus.push({ nm_id: nm, barcode: nc.barcode || '', vendor_code: nc.article_seller || `nm:${nm}`, target, ffStock, ppb: nmPpb.get(nm), box_size: nmBoxSize.get(nm), packageType: 'BOX' });
+                    addedNewcomer = true;
                 }
             }
             if (skus.length === 0) { onToast('Нет свободного стока/потребности у выбранных SKU', 'error'); setAdding(false); return; }
-            const rows = buildDraftRows({ skus, wholePalletsOnly: wholePallets, warehouseToDistrict: districtMap, palletOverrides });
+            // Новинки в одиночку редко набирают целую паллету (cold-start размазывает тонко) —
+            // кладём их box-multiple РОССЫПЬЮ, а смешанные паллеты с обычными дособирает
+            // черновик-aware консолидация в родителе (onAddRows consolidate).
+            const wholeForBatch = addedNewcomer ? false : wholePallets;
+            const rows = buildDraftRows({ skus, wholePalletsOnly: wholeForBatch, warehouseToDistrict: districtMap, palletOverrides });
             if (rows.length === 0) {
-                onToast(wholePallets ? 'Не набралось целых паллет — снимите «только целые» или добавьте больше SKU' : 'Не удалось разложить выбранные SKU', 'error');
+                onToast(wholeForBatch ? 'Не набралось целых паллет — снимите «только целые» или добавьте больше SKU' : 'Не удалось разложить выбранные SKU (нет свободного ФФ под потребность)', 'error');
                 setAdding(false);
                 return;
             }
@@ -175,7 +183,7 @@ export default function AddFromNeedPanel({
             // Сообщаем счётчик и оставляем их отмеченными (не теряем выбор молча).
             const addedKeys = new Set(rows.map(r => `${r.nm_id}::${r.barcode}`));
             const droppedNms = skus.filter(s => !addedKeys.has(`${s.nm_id}::${s.barcode}`)).map(s => s.nm_id);
-            await onAddRows(rows);
+            await onAddRows(rows, { consolidate: addedNewcomer });
             onToast(`Добавлено строк: ${formatNumber(rows.length, 0)} · Σ ${formatNumber(units, 0)} шт${droppedNms.length > 0 ? ` · ${formatNumber(droppedNms.length, 0)} пропущено (< целой паллеты)` : ''}`, 'success');
             setChecked(new Set(droppedNms));
         } catch (e: unknown) {

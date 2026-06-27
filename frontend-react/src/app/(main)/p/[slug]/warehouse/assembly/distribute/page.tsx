@@ -252,13 +252,35 @@ export default function AssemblyDraftPage() {
     // Дозалив строк из панелей A/B: сперва флашим локальные правки редактора (иначе
     // серверный merge сел бы на устаревший черновик и reload затёр бы их), затем
     // merge на бэке и перезагрузка свежего состояния. Бросает — панель ловит и тостит.
-    const handleAddRows = useCallback(async (newRows: AssemblyDraftRow[]) => {
+    const handleAddRows = useCallback(async (newRows: AssemblyDraftRow[], opts?: { consolidate?: boolean }) => {
         if (!draftId) return;
         const ok = await ensureSaved();
         if (!ok) throw new Error('Не удалось сохранить текущие правки перед добавлением');
         await api.addAssemblyDraftRows(draftId, newRows);
+        // Черновик-aware (новинки): после merge дособираем смешанные паллеты по округам —
+        // новинки доезжают в паллетах с тем, что УЖЕ в черновике (как «Дозабить»). minFill:0 —
+        // сирот не дропаем (остаются россыпью). Best-effort: сбой не блокирует добавление.
+        if (opts?.consolidate && geomState === 'ready') {
+            const districtMap = new Map<string, string>();
+            for (const w of stockNeed?.warehouses ?? []) if (w.district_key) districtMap.set(w.name, w.district_key);
+            if (districtMap.size > 0) {
+                try {
+                    const fresh = await api.getAssemblyDraft(draftId);
+                    const res = consolidatePalletsInDraftRows(fresh.distribution.rows, {
+                        ppbOf: nm => nmPpb.get(nm),
+                        boxSizeOf: nm => nmBoxSize.get(nm) ?? null,
+                        districtOf: wb => districtMap.get(wb) || 'unknown',
+                        overrides: palletOverrides,
+                        minFill: 0,
+                    });
+                    if (res.changed) {
+                        await api.updateAssemblyDraft(draftId, { distribution: { ...fresh.distribution, rows: res.rows } });
+                    }
+                } catch { /* консолидация best-effort */ }
+            }
+        }
         await reloadDraft();
-    }, [draftId, ensureSaved, reloadDraft]);
+    }, [draftId, ensureSaved, reloadDraft, geomState, stockNeed, nmPpb, nmBoxSize, palletOverrides]);
 
     // Долив строк из встроенной вкладки «Потребность» → перезагрузить черновик и
     // переключиться на вкладку 'draft', чтобы пользователь увидел добавленное.
