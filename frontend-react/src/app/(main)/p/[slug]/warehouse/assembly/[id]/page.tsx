@@ -7,8 +7,9 @@ import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchBlock } from '@/components/FfMismatchModal';
+import MigfullModal from './MigfullModal';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, RefreshFromFboResponse, Warehouse, WbFboSupply } from '@/types/api';
+import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply } from '@/types/api';
 
 // Статусы, в которых заявку имеет смысл отправлять на ФФ (до отгрузки нашей стороной).
 const FF_PUSH_STATUSES: ReadonlySet<AssemblyStatus> = new Set<AssemblyStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED']);
@@ -77,6 +78,10 @@ export default function AssemblyDetailPage() {
     const [pushDeliveryType, setPushDeliveryType] = useState<'straight' | 'cross_dock'>('straight');
     const [pushComment, setPushComment] = useState('');
     const [pushResult, setPushResult] = useState<FfPushAssemblyResult | null>(null);
+
+    // Migfull-портал (ФФ «Натали») — создать заявку на отгрузку из сборки.
+    const [migfullConfig, setMigfullConfig] = useState<MigfullPortalConfig | null>(null);
+    const [showMigfullModal, setShowMigfullModal] = useState(false);
 
     // Refresh from FBO result
     const [refreshResult, setRefreshResult] = useState<RefreshFromFboResponse | null>(null);
@@ -150,6 +155,16 @@ export default function AssemblyDetailPage() {
                 setPpbByBarcode(m);
             })
             .catch(() => { /* best-effort */ });
+        return () => { cancelled = true; };
+    }, []);
+
+    // Конфиг migfull-портала («Натали») — грузим один раз; кнопку показываем,
+    // только если интеграция настроена и её склад совпадает со складом сборки.
+    useEffect(() => {
+        let cancelled = false;
+        api.migfullPortalConfig()
+            .then(c => { if (!cancelled) setMigfullConfig(c); })
+            .catch(() => { if (!cancelled) setMigfullConfig(null); });
         return () => { cancelled = true; };
     }, []);
 
@@ -604,6 +619,17 @@ export default function AssemblyDetailPage() {
                 <button key="push-ff" className="btn btn-secondary" onClick={openPushModal} disabled={actionLoading}
                     title="Создать заявку «Доставка на склад МП» у фулфилмента из состава этой сборки">
                     📦 Создать заявку на ФФ
+                </button>,
+            );
+        }
+
+        // Migfull-портал («Натали»): кнопка только если интеграция настроена и её
+        // склад совпадает со складом сборки.
+        if (migfullConfig?.configured && migfullConfig.warehouse_id === assembly.warehouse_id) {
+            buttons.push(
+                <button key="migfull" className="btn btn-secondary" onClick={() => setShowMigfullModal(true)} disabled={actionLoading}
+                    title="Создать заявку на отгрузку в ФФ «Натали» (migfull-портал) из состава этой сборки">
+                    📦 Создать заявку в ФФ Натали
                 </button>,
             );
         }
@@ -1238,6 +1264,16 @@ export default function AssemblyDetailPage() {
                         )}
                     </div>
                 </div>
+            )}
+
+            {/* Migfull-портал («Натали») — заявка на отгрузку из сборки */}
+            {showMigfullModal && assembly && (
+                <MigfullModal
+                    assemblyId={assembly.id}
+                    assemblyNumber={assembly.number}
+                    onClose={() => setShowMigfullModal(false)}
+                    onSuccess={() => { load(); }}
+                />
             )}
 
             {/* Ship confirmation modal */}

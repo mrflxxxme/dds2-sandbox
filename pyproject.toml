@@ -70,6 +70,7 @@ ignore_errors = true
 module = [
     "anthropic.*",
     "jose.*",
+    "openpyxl.*",
     "passlib.*",
     "pandas.*",
 ]

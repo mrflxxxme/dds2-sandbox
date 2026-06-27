@@ -1,0 +1,76 @@
+# ruff: noqa: RUF002, RUF003
+"""
+Router: /migfull-portal — создание заявки на отгрузку в портале ФФ «Натали» (migfull).
+
+HTTP + валидация; логика — в services/migfull_portal_service. У migfull нет write-API:
+интеграция ходит как браузер (Livewire-сессия). `send` — РЕАЛЬНОЕ создание заявки
+(НЕОБРАТИМО, у клиента портала нет delete/cancel), под rate_limit_write.
+
+НЕ путать с read-only API migfull (вкладка остатков/заявок ФФ).
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.auth import get_current_user
+from backend.database import get_db
+from backend.models import Project, User
+from backend.project_context import get_current_project
+from backend.schemas.migfull_portal import (
+    MigfullDraftResponse,
+    MigfullPortalConfigResponse,
+    MigfullSendRequest,
+    MigfullSendResult,
+)
+from backend.services import migfull_portal_service
+from backend.services.migfull_portal_service import MigfullPortalServiceError
+from backend.utils.rate_limit import rate_limit_write
+
+router = APIRouter(prefix="/migfull-portal", tags=["MigfullPortal"])
+
+
+def _actor(user: User) -> str:
+    return getattr(user, "email", None) or f"user:{user.id}"
+
+
+@router.get("/config", response_model=MigfullPortalConfigResponse)
+async def migfull_portal_config(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullPortalConfigResponse:
+    """Настроена ли интеграция и к какому складу (Натали) привязана."""
+    return await migfull_portal_service.get_config(db, project.id)
+
+
+@router.get("/assembly/{assembly_id}/draft", response_model=MigfullDraftResponse)
+async def migfull_portal_draft(
+    assembly_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullDraftResponse:
+    """Превью заявки для модалки: шапка-prefill + строки описи (короб/россыпь)."""
+    try:
+        return await migfull_portal_service.build_draft(db, project.id, assembly_id)
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+
+
+@router.post(
+    "/assembly/{assembly_id}/send",
+    response_model=MigfullSendResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def migfull_portal_send(
+    assembly_id: int,
+    payload: MigfullSendRequest,
+    project: Project = Depends(get_current_project),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MigfullSendResult:
+    """РЕАЛЬНОЕ создание заявки в ФФ «Натали» (НЕОБРАТИМО). Пишет audit-строку."""
+    try:
+        return await migfull_portal_service.send_shipment(db, project.id, assembly_id, payload, actor=_actor(user))
+    except MigfullPortalServiceError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e

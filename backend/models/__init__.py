@@ -201,6 +201,12 @@ from backend.models.gazelka import (
     GazelkaOrderStatus,
 )
 
+# migfull-портал (plusvb.migfull.app) — создание заявки на отгрузку у ФФ «Натали»
+from backend.models.migfull_portal import (
+    MigfullShipmentOrder,
+    MigfullShipmentStatus,
+)
+
 # WB FBO Supplies
 from backend.models.wb_fbo import (
     FboAuditAction,
@@ -367,6 +373,9 @@ __all__ = [
     # Gazelka (gazelka.space)
     "GazelkaOrder",
     "GazelkaOrderStatus",
+    # migfull-портал (plusvb.migfull.app)
+    "MigfullShipmentOrder",
+    "MigfullShipmentStatus",
     # Supply Chain
     "FactoryOrder",
     "FactoryOrderHistory",

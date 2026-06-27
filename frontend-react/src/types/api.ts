@@ -1826,6 +1826,68 @@ export interface GazelkaUnmatchResult {
   ok: boolean;
 }
 
+// ─── Migfull-portal integration (ФФ «Натали») ────────────────────────────────
+
+export interface MigfullPortalConfig {
+  configured: boolean;
+  warehouse_id: number | null;
+  warehouse_name: string | null;
+}
+
+export interface MigfullDeliveryTypeOption {
+  value: string;
+  label: string;
+}
+
+export interface MigfullShipmentPrefill {
+  number: string | null;                       // № поставки WB
+  shipment_date: string | null;                // YYYY-MM-DD
+  filter_delivery_type: 'direct' | 'transit' | 'pickup';
+  notes: string | null;
+  wb_warehouse_name: string | null;            // инфо: куда отгрузка (WB-склад)
+  assembly_number: string | null;
+}
+
+export interface MigfullOpisLine {
+  barcode: string;          // ШК короба (ITF14) или товара (EAN13)
+  name: string | null;
+  size: string | null;
+  color: string | null;
+  quantity: number;         // КОРОБОВ (для коробов) или ШТУК (россыпь)
+  is_box: boolean;          // короб?
+  units_per_box: number;
+  pieces: number;           // всего штук (инфо)
+}
+
+export interface MigfullDraftResponse {
+  eligible: boolean;                    // склад сборки == склад интеграции
+  already_sent: boolean;                // уже отправляли эту сборку
+  sent_guid: string | null;
+  sent_number: string | null;
+  prefill: MigfullShipmentPrefill;
+  delivery_types: MigfullDeliveryTypeOption[];
+  opis_lines: MigfullOpisLine[];
+  total_boxes: number;
+  total_pieces: number;
+  warnings: string[];                   // напр. «кол-во не кратно коробу»
+}
+
+export interface MigfullSendRequest {
+  filter_delivery_type: 'direct' | 'transit' | 'pickup';
+  number: string | null;
+  shipment_date: string | null;
+  notes: string | null;
+  force_resend: boolean;
+}
+
+export interface MigfullSendResult {
+  ok: boolean;
+  shipment_guid: string | null;
+  shipment_number: string | null;
+  message: string | null;
+  order_id: number | null;
+}
+
 export interface CreatedRequestBrief {
   id: number;
   number: string;
