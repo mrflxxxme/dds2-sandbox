@@ -734,5 +734,40 @@ export function addWarehouseMethods(api: ApiClient) {
                 `/api/v1/gazelka/order/${planId}/match`,
             );
         },
+
+        // ─── Migfull-portal (ФФ «Натали») ──────────────────────────────────────
+        migfullPortalConfig() {
+            return api.request<import('@/types/api').MigfullPortalConfig>('GET', '/api/v1/migfull-portal/config');
+        },
+        migfullPortalDraft(assemblyId: number) {
+            return api.request<import('@/types/api').MigfullDraftResponse>(
+                'GET',
+                `/api/v1/migfull-portal/assembly/${assemblyId}/draft`,
+            );
+        },
+        /**
+         * Отправка заявки в портал ФФ «Натали».
+         * Повторная отправка без force_resend → backend отвечает HTTP 409. request()
+         * схлопывает статус в текст ошибки, поэтому здесь тегируем 409 в .code='conflict',
+         * чтобы модалка показала подтверждение и переслала с force_resend=true.
+         */
+        async migfullPortalSend(assemblyId: number, body: import('@/types/api').MigfullSendRequest) {
+            try {
+                return await api.request<import('@/types/api').MigfullSendResult>(
+                    'POST',
+                    `/api/v1/migfull-portal/assembly/${assemblyId}/send`,
+                    body,
+                );
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : '';
+                // Бэк на повторную отправку без force_resend отдаёт 409 с понятным detail.
+                if (!body.force_resend && /уже\s+(отправ|созда)|already|409|конфликт/i.test(msg)) {
+                    const err = new Error(msg || 'Заявка уже создавалась') as Error & { code?: string };
+                    err.code = 'conflict';
+                    throw err;
+                }
+                throw e;
+            }
+        },
     };
 }

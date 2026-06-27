@@ -37,6 +37,7 @@ from backend.routers import (
     integrations_faktura,
     loans,
     localization,
+    migfull_portal,
     monitoring,
     payment_requests,
     planning,
@@ -508,6 +509,12 @@ app.include_router(
     gazelka.router,
     prefix="/api/v1",
     tags=["Gazelka"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    migfull_portal.router,
+    prefix="/api/v1",
+    tags=["MigfullPortal"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
