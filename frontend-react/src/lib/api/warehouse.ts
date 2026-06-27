@@ -216,6 +216,8 @@ export function addWarehouseMethods(api: ApiClient) {
             date_from?: string; date_to?: string;
             sort_by?: string; sort_order?: string; limit?: number; offset?: number;
             exclude_with_assembly?: boolean;
+            /** с exclude_with_assembly: исключать только поставки, занятые сборкой этого склада-источника (совместная поставка) */
+            exclude_assembly_warehouse_id?: number;
             without_assembly?: boolean;
             partial_only?: boolean;
             excess_only?: boolean;
@@ -349,6 +351,7 @@ export function addWarehouseMethods(api: ApiClient) {
             warehouse_id?: number; counterparty_id?: number; draft_id?: number; status?: string; search?: string;
             date_from?: string; date_to?: string; brand?: string;
             ff_link?: 'none' | 'linked';
+            joint_only?: boolean;
             limit?: number; offset?: number;
         }) {
             const query = new URLSearchParams();

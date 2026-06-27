@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -157,6 +158,12 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
         server_default=PackageType.BOX.value,
     )
 
+    # FF-портал: архив заявки оператором — прячет из активного списка, не меняя
+    # статус и не удаляя (ортогонально is_deleted/status).
+    is_archived: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+
     # ─── Relationships ──────────────────────────────────────────────────
 
     warehouse: Mapped["Warehouse"] = relationship()
@@ -172,13 +179,19 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_assembly_requests_project_id", "project_id"),
         Index("ix_assembly_requests_warehouse_id", "warehouse_id"),
         Index("ix_assembly_requests_status", "status"),
+        Index("ix_assembly_requests_is_archived", "is_archived"),
         Index("ix_assembly_requests_counterparty_id", "counterparty_id"),
         Index("ix_assembly_requests_source_draft_id", "source_draft_id"),
-        # Partial unique: allow new request for same FBO after cancel
+        # Partial unique по (поставка, склад-источник): одна WB FBO-поставка
+        # («Совместный номер») может нести НЕСКОЛЬКО сборок — по одной на каждый
+        # ФФ-источник (напр. wms + wms2 → одна совместная поставка). Двух активных
+        # сборок С ОДНОГО склада на одну поставку быть не может. CANCELLED/deleted
+        # освобождают слот. Признак «совместная» = ≥2 строк под этим же предикатом.
         Index(
-            "ix_assembly_requests_fbo_unique",
+            "ix_assembly_requests_fbo_wh_unique",
             "project_id",
             "wb_fbo_supply_id",
+            "warehouse_id",
             unique=True,
             postgresql_where="is_deleted = false AND status != 'CANCELLED' AND wb_fbo_supply_id IS NOT NULL",
         ),

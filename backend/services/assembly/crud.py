@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from backend.cache import invalidate_cache
 from backend.models.assembly import (
@@ -469,6 +469,7 @@ async def list_assembly_requests(
     date_to: date | None = None,
     brand: str | None = None,
     ff_link: str | None = None,
+    joint_only: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[AssemblyRequest], int]:
@@ -478,6 +479,10 @@ async def list_assembly_requests(
     ff_link: "none" — только заявки БЕЗ привязанной ФФ-заявки; "linked" — только
     с привязанной; None — без фильтра. Привязка живёт в
     FulfillmentRequest.assembly_request_id (project-scoped).
+
+    joint_only: True — только «совместные» сборки (делят WB FBO-поставку с ≥1
+    другой активной сборкой, т.е. ≥2 сборок на одну поставку под тем же
+    предикатом, что у partial-unique индекса: не удалена, не CANCELLED).
     """
     base = select(AssemblyRequest).where(
         AssemblyRequest.project_id == project_id,
@@ -540,6 +545,27 @@ async def list_assembly_requests(
             .exists()
         )
         base = base.where(ff_exists if ff_link == "linked" else ~ff_exists)
+
+    if joint_only:
+        # «Совместные»: на той же WB-поставке есть ≥2 активных сборок (та же
+        # выборка, что у ix_assembly_requests_fbo_wh_unique). Коррелированный
+        # COUNT по сёстрам-сборкам той же поставки.
+        sib = aliased(AssemblyRequest)
+        joint_cnt = (
+            select(func.count(sib.id))
+            .where(
+                sib.project_id == project_id,
+                sib.wb_fbo_supply_id == AssemblyRequest.wb_fbo_supply_id,
+                sib.is_deleted == False,  # noqa: E712
+                sib.status != AssemblyStatus.CANCELLED,
+            )
+            .correlate(AssemblyRequest)
+            .scalar_subquery()
+        )
+        base = base.where(
+            AssemblyRequest.wb_fbo_supply_id.is_not(None),
+            joint_cnt >= 2,
+        )
 
     # Total count
     count_q = select(func.count()).select_from(base.subquery())
@@ -717,11 +743,14 @@ async def create_assembly_request(
         if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY", "IN_PROGRESS", "ACCEPTED"):
             raise ValueError("FBO supply must be ACTIVE, ON_DELIVERY, IN_PROGRESS or ACCEPTED")
 
-        # Check no active assembly request for this FBO supply
+        # Совместная поставка: одна WB-поставка может нести несколько сборок —
+        # по одной на ФФ-источник (warehouse_id). Блокируем только повтор С ТОГО ЖЕ
+        # склада (это и гарантирует partial-unique ix_assembly_requests_fbo_wh_unique).
         existing_result = await db.execute(
             select(AssemblyRequest)
             .where(
                 AssemblyRequest.wb_fbo_supply_id == payload.wb_fbo_supply_id,
+                AssemblyRequest.warehouse_id == payload.warehouse_id,
                 AssemblyRequest.project_id == project_id,
                 AssemblyRequest.is_deleted == False,  # noqa: E712
                 AssemblyRequest.status != AssemblyStatus.CANCELLED,
@@ -729,7 +758,7 @@ async def create_assembly_request(
             .limit(1)
         )
         if existing_result.scalar_one_or_none():
-            raise ValueError("FBO supply already has an active assembly request")
+            raise ValueError("На этой FBO-поставке уже есть активная сборка с этого склада-источника")
 
     # 3. Generate number
     number = await _next_number(db, project_id, "ASM", AssemblyRequest)
@@ -849,11 +878,15 @@ async def update_assembly_request(
         if fbo_supply.wb_status not in ("ACTIVE", "ON_DELIVERY", "IN_PROGRESS", "ACCEPTED"):
             raise ValueError("FBO supply must be ACTIVE, ON_DELIVERY, IN_PROGRESS or ACCEPTED")
 
-        # Check no other active assembly request for this FBO supply (except current)
+        # Совместная поставка: блокируем только повтор С ТОГО ЖЕ склада-источника
+        # (см. create_assembly_request). Эффективный склад = новый из payload, если
+        # его меняют тем же PATCH (warehouse_id ставится ниже), иначе текущий.
+        effective_wh_id = payload.warehouse_id if payload.warehouse_id is not None else req.warehouse_id
         existing_result = await db.execute(
             select(AssemblyRequest)
             .where(
                 AssemblyRequest.wb_fbo_supply_id == payload.wb_fbo_supply_id,
+                AssemblyRequest.warehouse_id == effective_wh_id,
                 AssemblyRequest.project_id == project_id,
                 AssemblyRequest.is_deleted == False,  # noqa: E712
                 AssemblyRequest.status != AssemblyStatus.CANCELLED,
@@ -862,7 +895,7 @@ async def update_assembly_request(
             .limit(1)
         )
         if existing_result.scalar_one_or_none():
-            raise ValueError("FBO supply already has an active assembly request")
+            raise ValueError("На этой FBO-поставке уже есть активная сборка с этого склада-источника")
 
         req.wb_fbo_supply_id = payload.wb_fbo_supply_id
         # Force-pull WB detail if supply.warehouse_name is missing (race window).
