@@ -376,6 +376,9 @@ export default function AssemblyListPage() {
     // Filters
     const [warehouseId, setWarehouseId] = useState<number | ''>('');
     const [statusFilter, setStatusFilter] = useState('');
+    // Вид списка: по умолчанию «Активные» — скрываем уже принятые ВБ / закрытые /
+    // отменённые сборки (чище список). «Архив» — только они; «Все» — без фильтра.
+    const [view, setView] = useState<'active' | 'archived' | 'all'>('active');
     const [dateFrom, setDateFrom] = useState('');
     const [dateTo, setDateTo] = useState('');
     const [searchInput, setSearchInput] = useState('');
@@ -428,6 +431,7 @@ export default function AssemblyListPage() {
             const resp = await api.getAssemblyRequests({
                 warehouse_id: warehouseId || undefined,
                 status: statusFilter || undefined,
+                view,
                 search: search || undefined,
                 date_from: dateFrom || undefined,
                 date_to: dateTo || undefined,
@@ -445,7 +449,7 @@ export default function AssemblyListPage() {
         } finally {
             if (seq === loadSeq.current) setLoading(false);
         }
-    }, [warehouseId, statusFilter, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly]);
+    }, [warehouseId, statusFilter, view, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -794,6 +798,18 @@ export default function AssemblyListPage() {
                             onChange={e => setSearchInput(e.target.value)}
                             onKeyDown={handleSearchKeyDown}
                         />
+                    </div>
+                    <div className="form-group">
+                        <select
+                            className="form-input"
+                            value={view}
+                            onChange={e => { setView(e.target.value as 'active' | 'archived' | 'all'); }}
+                            title="Принятые ВБ, закрытые и отменённые сборки уходят в архив"
+                        >
+                            <option value="active">Активные</option>
+                            <option value="archived">Архив</option>
+                            <option value="all">Все</option>
+                        </select>
                     </div>
                     <div className="form-group">
                         <select

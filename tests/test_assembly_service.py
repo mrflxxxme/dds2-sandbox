@@ -426,6 +426,38 @@ class TestListAssemblyRequests:
         other_items, _ = await list_assembly_requests(db_session, PROJECT_ID, counterparty_id=other.id)
         assert req.id not in [r.id for r in other_items]
 
+    async def test_list_view_archives_terminal_statuses(self, db_session):
+        """view='active' скрывает Принято ВБ/Закрыта/Отменена; 'archived' — только их.
+
+        DELIVERED ставится автоматически при приёмке WB → принятые сборки уходят
+        из активного списка (чище список). Явный status имеет приоритет над view.
+        """
+        req = await _create_test_request(db_session)  # IN_PROGRESS → активна
+
+        active_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="active"))[0]]
+        arch_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="archived"))[0]]
+        assert req.id in active_ids and req.id not in arch_ids
+
+        # Приёмка WB → DELIVERED: уходит в архив, пропадает из активного списка.
+        req.status = AssemblyStatus.DELIVERED
+        await db_session.commit()
+
+        active_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="active"))[0]]
+        arch_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="archived"))[0]]
+        assert req.id not in active_ids and req.id in arch_ids
+
+        # view='all' и None → без фильтра по статусу.
+        all_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="all"))[0]]
+        none_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID))[0]]
+        assert req.id in all_ids and req.id in none_ids
+
+        # Явный status имеет приоритет над view='active'.
+        explicit_ids = [
+            r.id
+            for r in (await list_assembly_requests(db_session, PROJECT_ID, status="DELIVERED", view="active"))[0]
+        ]
+        assert req.id in explicit_ids
+
 
 @pytest.mark.asyncio
 class TestUpdateAssemblyRequest:

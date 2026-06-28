@@ -351,6 +351,8 @@ export function addWarehouseMethods(api: ApiClient) {
             warehouse_id?: number; counterparty_id?: number; draft_id?: number; status?: string; search?: string;
             date_from?: string; date_to?: string; brand?: string;
             ff_link?: 'none' | 'linked';
+            /** active — скрыть Принято ВБ/Закрыта/Отменена; archived — только их; all — все */
+            view?: 'active' | 'archived' | 'all';
             joint_only?: boolean;
             limit?: number; offset?: number;
         }) {
