@@ -27,11 +27,13 @@ async def get_markup(
     category: str | None = Query(None),
     search: str | None = Query(None),
     min_orders: int = Query(0, ge=0),
+    only_in_stock: bool = Query(False),
     group_by: str = Query("category"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Наценка по артикулам. group_by: category (дерево) | sku (плоский список)."""
+    """Наценка по артикулам. group_by: category (дерево) | sku (плоский) | anomaly (аномалии)."""
+    gb = group_by if group_by in ("sku", "anomaly", "category") else "category"
     return await markup_service.get_markup_analytics(
         db,
         project.id,
@@ -41,7 +43,8 @@ async def get_markup(
         category=category,
         search=search,
         min_orders=min_orders,
-        group_by="sku" if group_by == "sku" else "category",
+        only_in_stock=only_in_stock,
+        group_by=gb,
     )
 
 

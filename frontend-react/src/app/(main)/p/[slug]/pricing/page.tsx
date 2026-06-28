@@ -36,7 +36,8 @@ export default function PricingPage() {
     const [category, setCategory] = useState('');
     const [search, setSearch] = useState('');
     const [minOrders, setMinOrders] = useState(0);
-    const [groupBy, setGroupBy] = useState<'category' | 'sku'>('category');
+    const [onlyInStock, setOnlyInStock] = useState(true);
+    const [groupBy, setGroupBy] = useState<'category' | 'sku' | 'anomaly'>('category');
 
     const [categoryOptions, setCategoryOptions] = useState<string[]>([]);
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -56,6 +57,7 @@ export default function PricingPage() {
                 category: category || undefined,
                 search: search || undefined,
                 min_orders: minOrders || undefined,
+                only_in_stock: onlyInStock || undefined,
                 group_by: groupBy,
             });
             if (reqRef.current !== myReq) return; // пришёл ответ не последнего запроса — игнор
@@ -70,7 +72,7 @@ export default function PricingPage() {
         } finally {
             if (reqRef.current === myReq) setLoading(false);
         }
-    }, [dateFrom, dateTo, brand, category, search, minOrders, groupBy]);
+    }, [dateFrom, dateTo, brand, category, search, minOrders, onlyInStock, groupBy]);
 
     useEffect(() => {
         const t = setTimeout(loadData, 250); // debounce фильтров
@@ -102,7 +104,7 @@ export default function PricingPage() {
 
     const flatRows: PricingRow[] = useMemo(() => {
         if (!resp) return [];
-        return resp.group_by === 'category' ? resp.data_groups.flatMap((g) => g.children) : resp.data_rows;
+        return resp.group_by === 'sku' ? resp.data_rows : resp.data_groups.flatMap((g) => g.children);
     }, [resp]);
 
     const doExport = () => {
@@ -126,6 +128,11 @@ export default function PricingPage() {
             'Прибыль': r.profit,
             'Маржа %': r.margin_pct,
             'Чистая наценка %': r.net_markup_pct,
+            'Остаток ВБ': r.wb_stock,
+            'Дней до исчерпания': r.days_left,
+            'Заморожено (себест)': r.stock_value_cost,
+            'Потенц. прибыль остатка': r.stock_potential_profit,
+            'Аномалия': r.anomaly || '',
         }));
         exportToExcel(rows, 'Ценообразование');
     };
@@ -184,6 +191,10 @@ export default function PricingPage() {
                         style={{ width: 64 }}
                     />
                 </label>
+                <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={onlyInStock} onChange={(e) => setOnlyInStock(e.target.checked)} />
+                    только с остатком ВБ
+                </label>
                 <div style={{ flex: 1 }} />
                 <div style={{ display: 'flex', gap: 4 }}>
                     <button
@@ -197,6 +208,12 @@ export default function PricingPage() {
                         onClick={() => setGroupBy('sku')}
                     >
                         По артикулам
+                    </button>
+                    <button
+                        className={`btn btn-sm ${groupBy === 'anomaly' ? 'btn-danger' : 'btn-secondary'}`}
+                        onClick={() => setGroupBy('anomaly')}
+                    >
+                        ⚠ Аномалии{s?.anomalies ? ` (${s.anomalies})` : ''}
                     </button>
                 </div>
                 <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={flatRows.length === 0}>
@@ -216,6 +233,9 @@ export default function PricingPage() {
                     <Kpi label="Выручка за период" value={fmtMoney(s.revenue) + ' ₽'} />
                     <Kpi label="Прибыль за период" value={fmtMoney(s.profit) + ' ₽'} color={pctColor(s.profit)} />
                     <Kpi label="Маржа" value={fmtPct(s.margin_pct)} color={pctColor(s.margin_pct)} />
+                    <Kpi label="Остаток ВБ, шт" value={fmtInt(s.wb_stock_units)} />
+                    <Kpi label="Заморожено в остатке" value={fmtMoney(s.stock_value_cost) + ' ₽'} sub="по себестоимости" />
+                    <Kpi label="Аномалии" value={fmtInt(s.anomalies)} color={s.anomalies > 0 ? 'var(--color-danger)' : 'var(--color-success)'} />
                 </div>
             )}
 
@@ -245,6 +265,9 @@ export default function PricingPage() {
                                 <th style={th}>СПП %</th>
                                 <th style={th}>Покупателю</th>
                                 <th style={th}>Заказы</th>
+                                <th style={th}>Остаток ВБ</th>
+                                <th style={th}>Дней</th>
+                                <th style={th}>Заморожено</th>
                                 <th style={th}>Выручка</th>
                                 <th style={th}>Расходы ВБ</th>
                                 <th style={th}>Прибыль</th>
@@ -253,11 +276,17 @@ export default function PricingPage() {
                             </tr>
                         </thead>
                         <tbody>
-                            {groupBy === 'category'
-                                ? resp!.data_groups.map((g) => (
-                                      <GroupRows key={g.category} group={g} open={expanded.has(g.category)} onToggle={() => toggle(g.category)} />
-                                  ))
-                                : resp!.data_rows.map((r) => <SkuRow key={r.nm_id} r={r} showCategory />)}
+                            {resp!.group_by === 'sku'
+                                ? resp!.data_rows.map((r) => <SkuRow key={r.nm_id} r={r} showCategory />)
+                                : resp!.data_groups.map((g) => (
+                                      <GroupRows
+                                          key={g.category}
+                                          group={g}
+                                          open={expanded.has(g.category)}
+                                          onToggle={() => toggle(g.category)}
+                                          anomalyMode={resp!.group_by === 'anomaly'}
+                                      />
+                                  ))}
                         </tbody>
                     </table>
                 </div>
@@ -276,13 +305,13 @@ function Kpi({ label, value, sub, color }: { label: string; value: string; sub?:
     );
 }
 
-function GroupRows({ group, open, onToggle }: { group: PricingGroup; open: boolean; onToggle: () => void }) {
+function GroupRows({ group, open, onToggle, anomalyMode }: { group: PricingGroup; open: boolean; onToggle: () => void; anomalyMode?: boolean }) {
     return (
         <>
             <tr style={{ borderBottom: '1px solid var(--color-border)', cursor: 'pointer', background: 'var(--color-bg-card)' }} onClick={onToggle}>
-                <td style={{ ...tdL, fontWeight: 600 }}>
+                <td style={{ ...tdL, fontWeight: 600, color: anomalyMode ? 'var(--color-danger)' : 'var(--color-text)' }}>
                     <span style={{ marginRight: 6 }}>{open ? '▾' : '▸'}</span>
-                    {group.category}
+                    {anomalyMode ? '⚠ ' : ''}{group.category}
                     <span style={{ color: 'var(--color-text-dim)', fontWeight: 400, marginLeft: 8, fontSize: 12 }}>
                         {fmtInt(group.articles)} арт. · с ценой {fmtInt(group.priced_articles)}
                     </span>
@@ -297,18 +326,21 @@ function GroupRows({ group, open, onToggle }: { group: PricingGroup; open: boole
                 <td style={td}>—</td>
                 <td style={td}>—</td>
                 <td style={td}>—</td>
+                <td style={{ ...td, fontWeight: 600 }}>{fmtInt(group.wb_stock)}</td>
+                <td style={td}>—</td>
+                <td style={td}>{fmtMoney(group.stock_value_cost)}</td>
                 <td style={td}>{fmtMoney(group.revenue)}</td>
                 <td style={td}>{fmtMoney(group.wb_expenses)}</td>
                 <td style={{ ...td, color: pctColor(group.profit) }}>{fmtMoney(group.profit)}</td>
                 <td style={{ ...td, color: pctColor(group.margin_pct) }}>{fmtPct(group.margin_pct)}</td>
                 <td style={td}>—</td>
             </tr>
-            {open && group.children.map((r) => <SkuRow key={r.nm_id} r={r} indent />)}
+            {open && group.children.map((r) => <SkuRow key={r.nm_id} r={r} indent hideAnomaly={anomalyMode} showCategory={anomalyMode} />)}
         </>
     );
 }
 
-function SkuRow({ r, indent, showCategory }: { r: PricingRow; indent?: boolean; showCategory?: boolean }) {
+function SkuRow({ r, indent, showCategory, hideAnomaly }: { r: PricingRow; indent?: boolean; showCategory?: boolean; hideAnomaly?: boolean }) {
     return (
         <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
             <td style={{ ...tdL, paddingLeft: indent ? 28 : 10 }}>
@@ -317,7 +349,9 @@ function SkuRow({ r, indent, showCategory }: { r: PricingRow; indent?: boolean; 
                     {r.nm_id}{showCategory ? ` · ${r.category}` : ''}
                 </span>
                 {!r.has_price && <span style={{ color: 'var(--color-warning)', fontSize: 11, marginLeft: 6 }}>нет цены</span>}
-                {!r.has_cost && <span style={{ color: 'var(--color-warning)', fontSize: 11, marginLeft: 6 }}>нет себест.</span>}
+                {r.anomaly && !hideAnomaly && (
+                    <span style={{ color: 'var(--color-danger)', fontSize: 11, marginLeft: 6, fontWeight: 600 }}>⚠ {r.anomaly}</span>
+                )}
             </td>
             <td style={{ ...td, color: 'var(--color-text-dim)' }}>{fmtMoney(r.base_price)}</td>
             <td style={{ ...td, color: 'var(--color-text-dim)' }}>{r.discount == null ? '—' : formatNumber(r.discount, 0) + '%'}</td>
@@ -329,6 +363,9 @@ function SkuRow({ r, indent, showCategory }: { r: PricingRow; indent?: boolean; 
             <td style={td}>{fmtPct(r.spp_rate)}</td>
             <td style={td}>{fmtMoney(r.buyer_price)}</td>
             <td style={td}>{fmtInt(r.orders_count)}</td>
+            <td style={{ ...td, fontWeight: 600 }}>{fmtInt(r.wb_stock)}</td>
+            <td style={td}>{r.days_left == null ? '—' : formatNumber(r.days_left, 0)}</td>
+            <td style={td}>{fmtMoney(r.stock_value_cost)}</td>
             <td style={td}>{fmtMoney(r.revenue)}</td>
             <td style={td}>{fmtMoney(r.wb_expenses)}</td>
             <td style={{ ...td, color: pctColor(r.profit) }}>{fmtMoney(r.profit)}</td>

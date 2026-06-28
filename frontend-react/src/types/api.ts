@@ -546,6 +546,11 @@ export interface PricingRow {
   profit: number;
   margin_pct: number;
   net_markup_pct: number | null;
+  wb_stock: number;
+  stock_value_cost: number | null;
+  stock_potential_profit: number | null;
+  days_left: number | null;
+  anomaly: string | null;
 }
 
 export interface PricingGroup {
@@ -560,6 +565,8 @@ export interface PricingGroup {
   cost_total: number;
   wb_expenses: number;
   margin_pct: number;
+  wb_stock: number;
+  stock_value_cost: number;
   children: PricingRow[];
 }
 
@@ -574,6 +581,9 @@ export interface PricingSummary {
   markup_pct: number | null;
   cost_share_pct: number | null;
   margin_pct: number;
+  wb_stock_units: number;
+  stock_value_cost: number;
+  anomalies: number;
 }
 
 export interface PricingResponse {

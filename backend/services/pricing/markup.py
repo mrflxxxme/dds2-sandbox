@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
-from backend.models import Nomenclature, Project, WarehouseStock, WbPrice
+from backend.models import Nomenclature, Project, WarehouseStock, WbPrice, WbWarehouseStock
 from backend.schemas.pricing import PricingGroup, PricingResponse, PricingRow, PricingSummary
 from backend.services import funnel as funnel_service
 from backend.services import refs_service
@@ -29,6 +29,17 @@ logger = logging.getLogger("dds.pricing")
 
 UNCATEGORIZED = "Без категории"
 _MAX_ROWS = 50000
+
+# Пороги аномалий
+_THIN_MARKUP_PCT = 30.0  # наценка ниже — «низкая наценка»
+_SUSPICIOUS_COST_SHARE_PCT = 5.0  # себест < 5% цены — вероятно ошибка данных
+
+ANOMALY_PRICE_BELOW_COST = "Цена ниже себестоимости"
+ANOMALY_LOSS = "Убыток после расходов ВБ"
+ANOMALY_NO_COST = "Нет себестоимости"
+ANOMALY_SUSPICIOUS_COST = "Подозрительная себестоимость"
+ANOMALY_THIN_MARKUP = "Низкая наценка"
+ANOMALY_DEAD_STOCK = "Залежавшийся остаток"
 
 
 async def _load_tax_info(db: AsyncSession, pid: int) -> dict:
@@ -89,6 +100,34 @@ def _resolve_cost(nm_id: int, meta: dict, avg_costs: dict[str, float], overrides
     return wh if wh and wh > 0 else None
 
 
+async def _load_wb_stock_map(db: AsyncSession, pid: int) -> dict[int, int]:
+    """nm_id → остаток на складах ВБ (Σ quantity_full, включая товар в пути)."""
+    rows = await db.execute(
+        select(WbWarehouseStock.nm_id, func.sum(WbWarehouseStock.quantity_full).label("qty"))
+        .where(WbWarehouseStock.project_id == pid)
+        .group_by(WbWarehouseStock.nm_id)
+        .limit(_MAX_ROWS)
+    )
+    return {r.nm_id: int(r.qty or 0) for r in rows}
+
+
+def _classify_anomaly(r: PricingRow) -> str | None:
+    """Метка аномалии (самое серьёзное первым) или None для нормальной строки."""
+    if r.has_price and r.has_cost and r.current_price is not None and r.cost_price is not None and r.current_price < r.cost_price:
+        return ANOMALY_PRICE_BELOW_COST
+    if r.orders_count > 0 and r.profit < 0:
+        return ANOMALY_LOSS
+    if r.has_price and not r.has_cost:
+        return ANOMALY_NO_COST
+    if r.cost_share_pct is not None and r.cost_share_pct < _SUSPICIOUS_COST_SHARE_PCT:
+        return ANOMALY_SUSPICIOUS_COST
+    if r.markup_pct is not None and 0 <= r.markup_pct < _THIN_MARKUP_PCT:
+        return ANOMALY_THIN_MARKUP
+    if r.wb_stock > 0 and r.orders_count == 0:
+        return ANOMALY_DEAD_STOCK
+    return None
+
+
 def _build_row(
     nm_id: int,
     price: WbPrice | None,
@@ -96,6 +135,8 @@ def _build_row(
     cost: float | None,
     cat_overrides: dict[int, str],
     meta: dict | None,
+    wb_stock: int = 0,
+    period_days: int = 30,
 ) -> PricingRow:
     f = funnel or {}
     m = meta or {}
@@ -130,8 +171,18 @@ def _build_row(
     cost_total = float(f.get("cost_total") or 0)
     profit = float(f.get("profit") or 0)
     net_markup_pct = round(profit / cost_total * 100, 2) if cost_total > 0 else None
+    orders_count = int(f.get("orders_count") or 0)
 
-    return PricingRow(
+    # Остаток ВБ и производные
+    stock_value_cost = round(wb_stock * cost_price, 2) if has_cost and cost_price is not None else None
+    profit_per_unit = (profit / orders_count) if orders_count > 0 else None
+    stock_potential_profit = (
+        round(wb_stock * profit_per_unit, 2) if profit_per_unit is not None and wb_stock > 0 else None
+    )
+    avg_daily = orders_count / period_days if period_days > 0 else 0
+    days_left = round(wb_stock / avg_daily, 1) if avg_daily > 0 and wb_stock > 0 else None
+
+    row = PricingRow(
         nm_id=nm_id,
         vendor_code=vendor_code,
         brand=brand,
@@ -148,7 +199,7 @@ def _build_row(
         cost_share_pct=cost_share_pct,
         spp_rate=round(spp_rate, 2),
         buyer_price=buyer_price,
-        orders_count=int(f.get("orders_count") or 0),
+        orders_count=orders_count,
         revenue=round(revenue, 2),
         wb_expenses=wb_expenses,
         adv_sum=round(float(f.get("adv_sum") or 0), 2),
@@ -157,13 +208,26 @@ def _build_row(
         profit=round(profit, 2),
         margin_pct=round(float(f.get("margin") or 0), 2),
         net_markup_pct=net_markup_pct,
+        wb_stock=wb_stock,
+        stock_value_cost=stock_value_cost,
+        stock_potential_profit=stock_potential_profit,
+        days_left=days_left,
     )
+    row.anomaly = _classify_anomaly(row)
+    return row
 
 
 def _apply_filters(
-    rows: list[PricingRow], brand: str | None, category: str | None, search: str | None, min_orders: int
+    rows: list[PricingRow],
+    brand: str | None,
+    category: str | None,
+    search: str | None,
+    min_orders: int,
+    only_in_stock: bool = False,
 ) -> list[PricingRow]:
     out = rows
+    if only_in_stock:
+        out = [r for r in out if r.wb_stock > 0]
     if brand:
         out = [r for r in out if (r.brand or "") == brand]
     if category:
@@ -216,10 +280,60 @@ def _group_by_category(rows: list[PricingRow]) -> list[PricingGroup]:
                 cost_total=round(sum(r.cost_total for r in items), 2),
                 wb_expenses=round(sum(r.wb_expenses for r in items), 2),
                 margin_pct=round(profit / revenue * 100, 2) if revenue > 0 else 0,
+                wb_stock=sum(r.wb_stock for r in items),
+                stock_value_cost=round(sum(r.stock_value_cost or 0 for r in items), 2),
                 children=items,
             )
         )
     groups.sort(key=lambda g: g.revenue, reverse=True)
+    return groups
+
+
+# Порядок аномалий в выдаче (от критичных к информационным)
+_ANOMALY_ORDER = [
+    ANOMALY_PRICE_BELOW_COST,
+    ANOMALY_LOSS,
+    ANOMALY_NO_COST,
+    ANOMALY_SUSPICIOUS_COST,
+    ANOMALY_THIN_MARKUP,
+    ANOMALY_DEAD_STOCK,
+]
+
+
+def _group_by_anomaly(rows: list[PricingRow]) -> list[PricingGroup]:
+    """Только аномальные строки, сгруппированные по типу аномалии."""
+    buckets: dict[str, list[PricingRow]] = defaultdict(list)
+    for r in rows:
+        if r.anomaly:
+            buckets[r.anomaly].append(r)
+
+    groups: list[PricingGroup] = []
+    for label in _ANOMALY_ORDER:
+        items = buckets.get(label)
+        if not items:
+            continue
+        coef, pct, share = _portfolio_markup(items)
+        revenue = sum(r.revenue for r in items)
+        profit = sum(r.profit for r in items)
+        items.sort(key=lambda r: (r.wb_stock, -(r.profit or 0)), reverse=True)
+        groups.append(
+            PricingGroup(
+                category=label,
+                articles=len(items),
+                priced_articles=sum(1 for r in items if r.has_price),
+                markup_coef=coef,
+                markup_pct=pct,
+                cost_share_pct=share,
+                revenue=round(revenue, 2),
+                profit=round(profit, 2),
+                cost_total=round(sum(r.cost_total for r in items), 2),
+                wb_expenses=round(sum(r.wb_expenses for r in items), 2),
+                margin_pct=round(profit / revenue * 100, 2) if revenue > 0 else 0,
+                wb_stock=sum(r.wb_stock for r in items),
+                stock_value_cost=round(sum(r.stock_value_cost or 0 for r in items), 2),
+                children=items,
+            )
+        )
     return groups
 
 
@@ -238,6 +352,9 @@ def _build_summary(rows: list[PricingRow]) -> PricingSummary:
         markup_pct=pct,
         cost_share_pct=share,
         margin_pct=round(profit / revenue * 100, 2) if revenue > 0 else 0,
+        wb_stock_units=sum(r.wb_stock for r in rows),
+        stock_value_cost=round(sum(r.stock_value_cost or 0 for r in rows), 2),
+        anomalies=sum(1 for r in rows if r.anomaly),
     )
 
 
@@ -269,14 +386,33 @@ async def _compute_rows(
     overrides = await load_cost_overrides(db, project_id)
     meta_map = await _load_meta_map(db, project_id)
     cat_overrides = await refs_service.get_category_overrides(db, project_id)
+    wb_stock_map = await _load_wb_stock_map(db, project_id)
 
-    nm_ids = set(price_by_nm) | set(funnel_by_nm)
+    # длина периода (для темпа продаж / дней до исчерпания)
+    period_days = 30
+    if date_from and date_to:
+        try:
+            period_days = max(1, (_date.fromisoformat(date_to) - _date.fromisoformat(date_from)).days + 1)
+        except ValueError:
+            period_days = 30
+
+    # универсум: с ценой ∪ продававшиеся ∪ с остатком на ВБ
+    nm_ids = set(price_by_nm) | set(funnel_by_nm) | set(wb_stock_map)
     rows = []
     for nm_id in nm_ids:
         meta = meta_map.get(nm_id) or {}
         cost = _resolve_cost(nm_id, meta, avg_costs, overrides)
         rows.append(
-            _build_row(nm_id, price_by_nm.get(nm_id), funnel_by_nm.get(nm_id), cost, cat_overrides, meta).model_dump()
+            _build_row(
+                nm_id,
+                price_by_nm.get(nm_id),
+                funnel_by_nm.get(nm_id),
+                cost,
+                cat_overrides,
+                meta,
+                wb_stock=wb_stock_map.get(nm_id, 0),
+                period_days=period_days,
+            ).model_dump()
         )
 
     return {
@@ -296,16 +432,18 @@ async def get_markup_analytics(
     category: str | None = None,
     search: str | None = None,
     min_orders: int = 0,
+    only_in_stock: bool = False,
     group_by: str = "category",
 ) -> dict:
     """Наценка по артикулам: текущая цена ВБ + себестоимость + расходы ВБ.
 
-    Универсум строк = все артикулы с ценой (WbPrice) ∪ продававшиеся за период
-    (воронка). Метрики наценки = «—» для строк без цены/себестоимости.
+    Универсум строк = артикулы с ценой (WbPrice) ∪ продававшиеся за период
+    (воронка) ∪ с остатком на ВБ. only_in_stock=True оставляет только остаток>0.
+    group_by: category | sku | anomaly (только аномальные, по типу).
     """
     raw = await _compute_rows(db, project_id, date_from=date_from, date_to=date_to)
     rows = [PricingRow(**r) for r in raw["rows"]]
-    rows = _apply_filters(rows, brand, category, search, min_orders)
+    rows = _apply_filters(rows, brand, category, search, min_orders, only_in_stock)
     summary = _build_summary(rows)
     synced = raw["price_synced_at"]
     has_bdr = raw["has_bdr"]
@@ -315,6 +453,11 @@ async def get_markup_analytics(
         resp = PricingResponse(
             group_by="sku", data_rows=rows, data_groups=[], summary=summary,
             price_synced_at=synced, has_bdr=has_bdr,
+        )
+    elif group_by == "anomaly":
+        resp = PricingResponse(
+            group_by="anomaly", data_rows=[], data_groups=_group_by_anomaly(rows),
+            summary=summary, price_synced_at=synced, has_bdr=has_bdr,
         )
     else:
         resp = PricingResponse(

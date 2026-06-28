@@ -45,6 +45,13 @@ class PricingRow(BaseModel):
     margin_pct: float = 0  # прибыль / выручка × 100
     net_markup_pct: float | None = None  # прибыль / себестоимость × 100 (наценка после расходов ВБ)
 
+    # Остатки ВБ и производные
+    wb_stock: int = 0  # остаток на складах ВБ (quantity_full)
+    stock_value_cost: float | None = None  # остаток × себест — заморожено в товаре, ₽
+    stock_potential_profit: float | None = None  # остаток × прибыль/ед — потенциальная прибыль остатка, ₽
+    days_left: float | None = None  # дней до исчерпания (по темпу продаж за период)
+    anomaly: str | None = None  # метка аномалии (или None если строка нормальная)
+
 
 class PricingGroup(BaseModel):
     """Группа по категории: агрегаты + дочерние артикулы."""
@@ -61,6 +68,8 @@ class PricingGroup(BaseModel):
     cost_total: float = 0
     wb_expenses: float = 0
     margin_pct: float = 0
+    wb_stock: int = 0
+    stock_value_cost: float = 0
     children: list[PricingRow] = []
 
 
@@ -75,6 +84,9 @@ class PricingSummary(BaseModel):
     markup_pct: float | None = None  # портфельная (Σ цена / Σ себест)
     cost_share_pct: float | None = None
     margin_pct: float = 0
+    wb_stock_units: int = 0  # суммарный остаток ВБ (шт)
+    stock_value_cost: float = 0  # заморожено в остатке по себест, ₽
+    anomalies: int = 0  # число аномальных артикулов
 
 
 class PricingResponse(BaseModel):

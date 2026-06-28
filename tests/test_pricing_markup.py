@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.integrations.wb_api import parse_wb_prices
-from backend.models import WbPrice
+from backend.models import WbPrice, WbWarehouseStock
 from backend.services.funnel.cost_overrides import set_cost_override
 from backend.services.pricing.markup import _build_row, get_markup_analytics
 from backend.utils.time import utcnow
@@ -120,6 +120,15 @@ async def _add_price(db: AsyncSession, pid: int, nm_id: int, price: float, vendo
             discount=Decimal("0"),
             currency="RUB",
             synced_at=utcnow(),
+        )
+    )
+    await db.commit()
+
+
+async def _add_wb_stock(db: AsyncSession, pid: int, nm_id: int, qty: int):
+    db.add(
+        WbWarehouseStock(
+            project_id=pid, nm_id=nm_id, warehouse_name="Тест", quantity=qty, quantity_full=qty
         )
     )
     await db.commit()
@@ -238,3 +247,49 @@ class TestMarkupAnalytics:
         res = await get_markup_analytics(db_session, project.id, group_by="sku", min_orders=1)
         nm_ids = {r["nm_id"] for r in res["data_rows"]}
         assert nm_ids == {3004}
+
+
+class TestStockAndAnomalies:
+    @pytest.mark.asyncio
+    async def test_only_in_stock_filter(self, db_session: AsyncSession, project):
+        await _add_price(db_session, project.id, 4001, 1000.0)  # без остатка
+        await _add_price(db_session, project.id, 4002, 1000.0)
+        await _add_wb_stock(db_session, project.id, 4002, 50)
+
+        res = await get_markup_analytics(db_session, project.id, only_in_stock=True, group_by="sku")
+        nm = {r["nm_id"] for r in res["data_rows"]}
+        assert nm == {4002}
+        assert res["data_rows"][0]["wb_stock"] == 50
+
+    @pytest.mark.asyncio
+    async def test_stock_value_cost(self, db_session: AsyncSession, project):
+        await _add_price(db_session, project.id, 4003, 1000.0)
+        await set_cost_override(db_session, project.id, nm_id=4003, cost_price=200.0)
+        await _add_wb_stock(db_session, project.id, 4003, 10)
+
+        res = await get_markup_analytics(db_session, project.id, only_in_stock=True, group_by="sku")
+        row = next(r for r in res["data_rows"] if r["nm_id"] == 4003)
+        assert row["stock_value_cost"] == 2000.0  # 10 × 200
+        assert res["summary"]["wb_stock_units"] == 10
+
+    @pytest.mark.asyncio
+    async def test_anomaly_suspicious_cost(self, db_session: AsyncSession, project):
+        await _add_price(db_session, project.id, 4004, 10000.0)
+        await set_cost_override(db_session, project.id, nm_id=4004, cost_price=100.0)  # 1% от цены
+        await _add_wb_stock(db_session, project.id, 4004, 5)
+
+        res = await get_markup_analytics(db_session, project.id, only_in_stock=True, group_by="anomaly")
+        labels = {g["category"] for g in res["data_groups"]}
+        assert "Подозрительная себестоимость" in labels
+
+    @pytest.mark.asyncio
+    async def test_anomaly_dead_stock(self, db_session: AsyncSession, project):
+        # цена/себест нормальные, остаток есть, продаж нет → залежавшийся
+        await _add_price(db_session, project.id, 4005, 1000.0)
+        await set_cost_override(db_session, project.id, nm_id=4005, cost_price=500.0)
+        await _add_wb_stock(db_session, project.id, 4005, 30)
+
+        res = await get_markup_analytics(db_session, project.id, only_in_stock=True, group_by="anomaly")
+        dead = next((g for g in res["data_groups"] if g["category"] == "Залежавшийся остаток"), None)
+        assert dead is not None
+        assert 4005 in {r["nm_id"] for r in dead["children"]}
