@@ -7,7 +7,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import select, func, and_, or_, text
+from sqlalchemy import select, func, and_, or_, text, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Transaction, Account, OpeningBalance
@@ -15,6 +15,111 @@ from backend.models.planning import Order, PlannedPayment
 from backend.cache import cached
 
 logger = logging.getLogger("dds.dashboard")
+
+# ─── Income-type split (marketplace / financing / other) ─────────────────────
+# Categorizes each cashflow income row so the dashboard can show real marketplace
+# payouts separately from financing inflows (loan tranches) and everything else.
+# Marketplace is detected first by the counterparty→category mapping (e.g. РВБ
+# carries «Маркетплейсы»); the name/purpose regex is a bootstrap fallback for
+# rows not yet categorized via /refs.
+# Short tokens are word-anchored (\m…\M) so they don't match inside unrelated
+# names (e.g. «озон» must not fire on «МОРОЗОН»); long unambiguous names are left
+# un-anchored. \m/\M are Postgres word boundaries (POSIX ARE).
+_MARKETPLACE_RE = r"вайлдберриз|wildberries|\mрвб\M|\mозон\M|\mozon\M|\mяндекс|\myandex"
+_FINANCING_RE = r"транш|займ|заём|заем|кредит"
+_INCOME_TYPE_KEYS = ("marketplace", "financing", "other")
+_INCOME_TYPE_LABELS = {"marketplace": "Маркетплейс", "financing": "Финансирование", "other": "Прочее"}
+
+
+def _income_type_case():
+    """SQL CASE → 'marketplace' | 'financing' | 'other' for an income row."""
+    cat_lower = func.lower(func.coalesce(Transaction.cat_lvl1_2, ""))
+    return case(
+        (
+            or_(
+                cat_lower.like("маркетплейс%"),
+                func.coalesce(Transaction.counterparty, "").op("~*")(_MARKETPLACE_RE),
+            ),
+            "marketplace",
+        ),
+        (
+            or_(
+                Transaction.loan_payment_type == "DISBURSEMENT",
+                func.coalesce(Transaction.purpose, "").op("~*")(_FINANCING_RE),
+                cat_lower.in_(("займы", "финансирование", "кредиты")),
+            ),
+            "financing",
+        ),
+        else_="other",
+    )
+
+
+async def _compute_income_by_type(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+    date_to: date,
+    rates_map: dict,
+    fallback_rate: Optional[float],
+) -> tuple[list[dict], list[dict]]:
+    """Daily income split into marketplace/financing/other (CNY→RUB converted).
+
+    Returns ``(daily_income_by_type, income_by_type)``. Uses the same
+    ``is_cashflow2 == 1`` filter as the rest of the dashboard, so inter-account
+    transfers (money moved between own accounts) are already excluded.
+    """
+    from backend.services import fx_service
+
+    itype = _income_type_case().label("itype")
+    result = await db.execute(
+        select(
+            func.date(Transaction.date).label("day"),
+            itype,
+            Transaction.currency,
+            func.coalesce(func.sum(Transaction.income), 0).label("income"),
+            func.count().label("cnt"),
+        )
+        .where(
+            Transaction.project_id == project_id,
+            Transaction.date >= date_from,
+            Transaction.date <= date_to,
+            Transaction.is_cashflow2 == 1,
+            Transaction.income > 0,
+        )
+        .group_by(func.date(Transaction.date), itype, Transaction.currency)
+        .order_by(func.date(Transaction.date))
+    )
+
+    daily: dict[str, dict] = {}
+    totals: dict[str, dict] = {k: {"value": 0.0, "count": 0} for k in _INCOME_TYPE_KEYS}
+    for row in result:
+        day_val = row.day
+        day_str = day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val)
+        day_date = day_val if isinstance(day_val, date) else date.fromisoformat(day_str)
+        val = float(row.income)
+        if row.currency == "CNY":
+            rate = fx_service.find_rate_for_date(rates_map, day_date) or fallback_rate or 1.0
+            val *= rate
+        key = row.itype if row.itype in _INCOME_TYPE_KEYS else "other"
+        daily.setdefault(day_str, {k: 0.0 for k in _INCOME_TYPE_KEYS})
+        daily[day_str][key] += val
+        totals[key]["value"] += val
+        totals[key]["count"] += row.cnt
+
+    daily_income_by_type = [
+        {"date": d, **{k: round(v[k], 2) for k in _INCOME_TYPE_KEYS}} for d, v in sorted(daily.items())
+    ]
+    income_by_type = [
+        {
+            "key": k,
+            "name": _INCOME_TYPE_LABELS[k],
+            "value": round(totals[k]["value"], 2),
+            "count": totals[k]["count"],
+        }
+        for k in _INCOME_TYPE_KEYS
+        if totals[k]["count"] > 0
+    ]
+    return daily_income_by_type, income_by_type
 
 
 @cached(prefix="reports:dashboard", ttl=300)
@@ -261,6 +366,11 @@ async def get_dashboard_summary(
             "count": row.cnt,
         })
 
+    # 9. Income split by type — marketplace / financing / other (daily + totals)
+    daily_income_by_type, income_by_type = await _compute_income_by_type(
+        db, project_id, date_from, date_to, rates_map, fallback_rate
+    )
+
     return {
         "balance_rub": balance_rub,
         "balance_cny": balance_cny,
@@ -279,6 +389,8 @@ async def get_dashboard_summary(
         "inbox_count": inbox_count,
         "accounts_count": len(balances),
         "daily_cashflow": daily_cashflow,
+        "daily_income_by_type": daily_income_by_type,
+        "income_by_type": income_by_type,
         "expense_by_category": expense_by_category,
         "income_counterparties": income_counterparties,
         "date_from": date_from.isoformat(),

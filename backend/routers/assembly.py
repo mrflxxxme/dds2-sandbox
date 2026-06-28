@@ -74,6 +74,9 @@ async def list_assembly_requests(
     counterparty_id: int | None = Query(None, description="Filter by carrier counterparty"),
     draft_id: int | None = Query(None),
     status: str | None = Query(None),
+    view: str | None = Query(
+        None, description='Вид списка: "active" (скрыть Принято ВБ/Закрыта/Отменена) | "archived" | "all"'
+    ),
     search: str | None = Query(None),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -93,6 +96,7 @@ async def list_assembly_requests(
         counterparty_id=counterparty_id,
         draft_id=draft_id,
         status=status,
+        view=view,
         search=search,
         date_from=date_from,
         date_to=date_to,

@@ -331,6 +331,7 @@ async def _build_items_with_stock(
                 "barcode": item.barcode,
                 "quantity": item.quantity,
                 "product_name": product_name,
+                "article": (nom.article_seller if nom else None),
                 "brand": nom.brand if nom else None,
                 "stock_quantity": stock_map.get(item.nomenclature_id, 0),
             }
@@ -597,6 +598,17 @@ async def list_wb_warehouses(
 # --- CRUD -------------------------------------------------------------------
 
 
+# Статусы, при которых сборка авто-уходит в «Архив» основного списка заявок:
+# «Принято ВБ» (DELIVERED) / «Закрыта» (CLOSED) / «Отменена» (CANCELLED) — в
+# активном списке они не нужны (зеркало _AUTO_ARCHIVE_STATUSES FF-портала + CLOSED).
+# Переход в DELIVERED ставится автоматически при приёмке WB (fbo_supply/sync.py).
+_LIST_ARCHIVED_STATUSES = (
+    AssemblyStatus.DELIVERED.value,
+    AssemblyStatus.CLOSED.value,
+    AssemblyStatus.CANCELLED.value,
+)
+
+
 async def list_assembly_requests(
     db: AsyncSession,
     project_id: int,
@@ -605,6 +617,7 @@ async def list_assembly_requests(
     counterparty_id: int | None = None,
     draft_id: int | None = None,
     status: str | None = None,
+    view: str | None = None,
     search: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
@@ -620,6 +633,11 @@ async def list_assembly_requests(
     ff_link: "none" — только заявки БЕЗ привязанной ФФ-заявки; "linked" — только
     с привязанной; None — без фильтра. Привязка живёт в
     FulfillmentRequest.assembly_request_id (project-scoped).
+
+    view: "active" — скрыть авто-архивные терминальные статусы (Принято ВБ /
+    Закрыта / Отменена); "archived" — только их; "all"/None — без фильтра.
+    Явный `status` имеет приоритет над `view` (выбор конкретного статуса
+    показывает его независимо от вида).
 
     joint_only: True — только «совместные» сборки (делят WB FBO-поставку с ≥1
     другой активной сборкой, т.е. ≥2 сборок на одну поставку под тем же
@@ -642,6 +660,10 @@ async def list_assembly_requests(
             base = base.where(AssemblyRequest.status == statuses[0])
         else:
             base = base.where(AssemblyRequest.status.in_(statuses))
+    elif view == "active":
+        base = base.where(AssemblyRequest.status.notin_(_LIST_ARCHIVED_STATUSES))
+    elif view == "archived":
+        base = base.where(AssemblyRequest.status.in_(_LIST_ARCHIVED_STATUSES))
     if date_from is not None:
         base = base.where(AssemblyRequest.created_at >= date_from)
     if date_to is not None:

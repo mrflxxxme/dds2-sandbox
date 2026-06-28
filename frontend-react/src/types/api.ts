@@ -633,6 +633,20 @@ export interface ExpenseCategoryPie {
   count?: number;
 }
 
+export interface DailyIncomeByType {
+  date: string;
+  marketplace: number;
+  financing: number;
+  other: number;
+}
+
+export interface IncomeTypeSlice {
+  key: string;   // 'marketplace' | 'financing' | 'other'
+  name: string;  // localized label
+  value: number;
+  count: number;
+}
+
 export interface IncomeCounterparty {
   name: string;
   key: string;
@@ -652,6 +666,8 @@ export interface DashboardSummary {
   inbox_count: number;
   accounts_count: number;
   daily_cashflow: DailyCashflowRow[];
+  daily_income_by_type: DailyIncomeByType[];
+  income_by_type: IncomeTypeSlice[];
   expense_by_category: ExpenseCategoryPie[];
   income_counterparties: IncomeCounterparty[];
   date_from: string;
@@ -1587,6 +1603,7 @@ export interface AssemblyRequestItem {
   barcode: string;
   quantity: number;
   product_name?: string;
+  article?: string | null;
   brand?: string;
   stock_quantity: number;
 }
