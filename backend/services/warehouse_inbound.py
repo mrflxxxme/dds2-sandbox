@@ -123,6 +123,22 @@ async def create_receipt(db: AsyncSession, project_id: int, warehouse_id: int, p
 
     await db.commit()
     await db.refresh(receipt, ["items"])
+
+    # Best-effort: уведомить ФФ-оператора (портал, напр. Хамза) о новой приёмке на
+    # его складе. CancelledError (BaseException) пробрасывается, прочее — глушим.
+    try:
+        from backend.services import fulfillment_notify
+
+        await fulfillment_notify.notify_new_ff_acceptance(
+            db,
+            project_id,
+            warehouse_id,
+            warehouse_name=wh.name,
+            items_count=len(merged),
+            total_qty=sum(int(v["expected_qty"]) for v in merged.values()),
+        )
+    except Exception:
+        logger.warning("new-ff-acceptance notify failed", exc_info=True)
     return receipt
 
 

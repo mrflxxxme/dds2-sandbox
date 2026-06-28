@@ -593,6 +593,11 @@ export default function AssemblyListPage() {
             render: (_v, row: AssemblyRequest) => (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 500 }}>{row.number}</span>
+                    {row.ff_review_pending && (
+                        <span className="badge badge-warning" style={{ fontSize: 11 }} title="ФФ предложил правку состава — требуется согласование">
+                            ⏳ ФФ
+                        </span>
+                    )}
                     {row.joint_supply && (
                         <span className="badge badge-info" style={{ fontSize: 11 }} title={jointTitle(row)}>
                             Совместная

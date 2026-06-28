@@ -302,3 +302,94 @@ async def notify_ff_request_pushed(
         raise
     except Exception as exc:
         logger.warning("ff-request-pushed notify error (project=%s): %s", project_id, exc)
+
+
+# --- Уведомление ФФ-оператора (портал, напр. Хамза) о НОВОЙ работе ---
+#
+# Когда продавец создаёт сборку/приёмку на склад ФФ-оператора, шлём пуш в чаты,
+# привязанные к этому складу (ff_board_warehouse_id == warehouse_id) — оператор
+# сразу видит новую задачу. Доставка из web-процесса (httpx через analytics-бота).
+# Best-effort: звать ПОСЛЕ commit, в транзакцию не бросает.
+
+
+def build_new_assembly_text(
+    assembly_number: object,
+    warehouse_name: object = None,
+    qty: int | None = None,
+    wb_number: object = None,
+) -> str:
+    """HTML «новая сборка» для чата склада ФФ-оператора (портал)."""
+    e = html.escape
+    lines = ["🆕 <b>Новая сборка</b>", ""]
+    if assembly_number:
+        lines.append(f"🏷 Заявка: <b>{e(str(assembly_number))}</b>")
+    if warehouse_name:
+        lines.append(f"🏢 Склад: {e(str(warehouse_name))}")
+    if wb_number:
+        lines.append(f"🚚 Поставка ВБ: <code>{e(str(wb_number))}</code>")
+    if qty:
+        lines.append(f"📦 Кол-во: <b>{_fmt_qty_n(int(qty))} шт</b>")
+    return "\n".join(lines)
+
+
+def build_new_acceptance_text(
+    warehouse_name: object = None,
+    items_count: int = 0,
+    total_qty: int = 0,
+) -> str:
+    """HTML «новая приёмка» для чата склада ФФ-оператора (портал)."""
+    e = html.escape
+    lines = ["🆕 <b>Новая приёмка</b>", ""]
+    if warehouse_name:
+        lines.append(f"🏢 Склад: {e(str(warehouse_name))}")
+    lines.append(f"📦 Позиций: <b>{items_count}</b> · {_fmt_qty_n(total_qty)} шт")
+    return "\n".join(lines)
+
+
+async def _notify_ff_warehouse_chats(db: AsyncSession, project_id: int, warehouse_id: int, text: str) -> None:
+    """Отправить текст в чаты, привязанные к данному складу ФФ (ff_board_warehouse_id
+    == warehouse_id). Пустой список → ранний выход (горячий путь создания заявки).
+    Никогда не бросает в вызывающую транзакцию.
+    """
+    try:
+        bindings = await telegram_service.list_warehouse_linked_bindings(db, project_id)
+        chat_ids = [b.chat_id for b in bindings if b.ff_board_warehouse_id == warehouse_id]
+        if not chat_ids:
+            return
+        await asyncio.gather(
+            *[telegram_service.send_analytics_message(chat_id, text) for chat_id in chat_ids],
+            return_exceptions=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("ff warehouse-chat notify error (project=%s wh=%s): %s", project_id, warehouse_id, exc)
+
+
+async def notify_new_ff_assembly(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    *,
+    assembly_number: object,
+    warehouse_name: object = None,
+    qty: int | None = None,
+    wb_number: object = None,
+) -> None:
+    """Уведомить чат склада ФФ о новой созданной сборке (для оператора-портала)."""
+    text = build_new_assembly_text(assembly_number, warehouse_name, qty, wb_number)
+    await _notify_ff_warehouse_chats(db, project_id, warehouse_id, text)
+
+
+async def notify_new_ff_acceptance(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    *,
+    warehouse_name: object = None,
+    items_count: int = 0,
+    total_qty: int = 0,
+) -> None:
+    """Уведомить чат склада ФФ о новой созданной приёмке (для оператора-портала)."""
+    text = build_new_acceptance_text(warehouse_name, items_count, total_qty)
+    await _notify_ff_warehouse_chats(db, project_id, warehouse_id, text)

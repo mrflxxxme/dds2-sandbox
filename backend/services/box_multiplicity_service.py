@@ -816,6 +816,74 @@ async def resolve_effective_ppb_for_assembly(
     return None, True
 
 
+async def resolve_box_qty_map(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    barcodes: list[str],
+) -> dict[str, int | None]:
+    """Batch-резолв кратности коробки для МНОГИХ barcode на ОДНОМ ФФ-складе.
+
+    Та же цепочка приоритетов, что и `resolve_effective_ppb_for_assembly`
+    (machine → manual → default → none), но без перестроения всей таблицы
+    проекта: ровно три батч-запроса —
+      1. машинный резолв (`_resolve_machine_box_qty`, сам батчевый),
+      2. ручные per-ФФ строки (`BoxQtyPerWarehouse`) для (warehouse_id, barcodes),
+      3. `Nomenclature` (box_qty_override + use_box_multiplicity) по barcodes.
+
+    Возвращает {barcode: box_qty}. Когда эффективный `use_box_multiplicity`
+    выключен для пары (barcode, ФФ) — кратность подавляется (None). Barcode без
+    кратности → None. Без N+1: per-barcode резолвер в цикле НЕ вызывается.
+    """
+    uniq = sorted({bc for bc in barcodes if bc})
+    if not uniq:
+        return {}
+
+    # 1. Машинный резолв (батч) — пары (barcode, warehouse_id) → {box_qty, ...}.
+    machine_map = await _resolve_machine_box_qty(db, project_id, uniq)
+
+    # 2. Ручные per-ФФ строки для этого склада.
+    manual_rows = await db.execute(
+        select(BoxQtyPerWarehouse).where(
+            BoxQtyPerWarehouse.project_id == project_id,
+            BoxQtyPerWarehouse.warehouse_id == warehouse_id,
+            BoxQtyPerWarehouse.barcode.in_(uniq),
+        )
+    )
+    manual_by_bc: dict[str, BoxQtyPerWarehouse] = {r.barcode: r for r in manual_rows.scalars().all()}
+
+    # 3. SKU-уровень: box_qty_override + use_box_multiplicity (один barcode → одна карточка).
+    nom_rows = await db.execute(
+        select(Nomenclature.barcode, Nomenclature.box_qty_override, Nomenclature.use_box_multiplicity).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.barcode.in_(uniq),
+        )
+    )
+    nom_by_bc: dict[str, tuple[int | None, bool]] = {
+        bc: (override, bool(use)) for bc, override, use in nom_rows.all()
+    }
+
+    out: dict[str, int | None] = {}
+    for bc in uniq:
+        manual = manual_by_bc.get(bc)
+        override, sku_use = nom_by_bc.get(bc, (None, True))
+        # use-флаг: per-ФФ строка важнее SKU-уровня (зеркало table-builder).
+        use_flag = manual.use_box_multiplicity if manual is not None else sku_use
+        if not use_flag:
+            out[bc] = None
+            continue
+        machine = machine_map.get((bc, warehouse_id))
+        if machine is not None:
+            out[bc] = machine["box_qty"]
+        elif manual is not None and manual.box_qty is not None:
+            out[bc] = manual.box_qty
+        elif override is not None:
+            out[bc] = override
+        else:
+            out[bc] = None
+    return out
+
+
 async def bulk_update_by_barcode(
     db: AsyncSession,
     project_id: int,

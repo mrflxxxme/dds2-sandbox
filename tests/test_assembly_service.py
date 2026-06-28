@@ -1751,6 +1751,133 @@ class TestFfLinkEnrichment:
 
 
 @pytest.mark.asyncio
+class TestFfProposalReview:
+    """Согласование/отклонение предложенной ФФ правки состава (review_ff_proposal).
+
+    ФФ-оператор правит состав в портале → правка кладётся ПРЕДЛОЖЕНИЕМ на сборку
+    (ff_proposed_items), не применяется. В DDS approve применяет её (канонический
+    сток/резерв-валидатор), reject отбрасывает.
+    """
+
+    async def _set_proposal(self, db_session, request_id: int, items: list[dict]) -> None:
+        """Положить предложение ФФ на сборку (как делает ФФ-портал).
+
+        Грузит заявку по id, проставляет ff_proposed_*, коммитит и expire_all()
+        (чтобы сервис читал свежую строку). Вызывать с КАПТУРЕННЫМ id, не с
+        атрибутом ранее созданного объекта — он после expire_all станет стейл.
+        """
+        req = await get_assembly_request(db_session, PROJECT_ID, request_id)
+        assert req is not None
+        req.ff_proposed_items = items
+        req.ff_proposed_at = utcnow()
+        req.ff_proposed_by = "Хамза"
+        await db_session.commit()
+        db_session.expire_all()
+
+    async def test_build_response_exposes_pending_proposal(self, db_session):
+        """_build_response отдаёт ff_review_pending + resolved позиции предложения."""
+        req = await _create_test_request(db_session)  # TEST_BARCODE_1 = 5
+        req_id = req.id  # захватываем ДО expire_all (иначе sync lazy-load в async)
+        await self._set_proposal(db_session, req_id, [{"barcode": TEST_BARCODE_2, "quantity": 9}])
+
+        loaded = await get_assembly_request(db_session, PROJECT_ID, req_id)
+        resp = AssemblyRequestResponse.model_validate(await _build_response(db_session, loaded))
+
+        assert resp.ff_review_pending is True
+        assert resp.ff_proposed_by == "Хамза"
+        assert resp.ff_proposed_at is not None
+        assert resp.ff_proposed_items is not None
+        assert len(resp.ff_proposed_items) == 1
+        assert resp.ff_proposed_items[0].barcode == TEST_BARCODE_2
+        assert resp.ff_proposed_items[0].quantity == 9
+
+    async def test_build_response_no_proposal(self, db_session):
+        """Без предложения → pending False, ff_proposed_items None."""
+        req = await _create_test_request(db_session)
+        loaded = await get_assembly_request(db_session, PROJECT_ID, req.id)
+        resp = AssemblyRequestResponse.model_validate(await _build_response(db_session, loaded))
+
+        assert resp.ff_review_pending is False
+        assert resp.ff_proposed_items is None
+        assert resp.ff_proposed_at is None
+        assert resp.ff_proposed_by is None
+
+    async def test_approve_applies_proposal_and_clears_pending(self, db_session):
+        """approve: состав заявки = предложение, предложение снято."""
+        from backend.services.assembly.crud import review_ff_proposal
+
+        req = await _create_test_request(db_session)  # TEST_BARCODE_1 = 5
+        req_id = req.id  # захватываем ДО expire_all
+        # Предложение: тот же ШК → 8 + новый ШК = 4 (оба в пределах стока 100).
+        await self._set_proposal(
+            db_session,
+            req_id,
+            [{"barcode": TEST_BARCODE_1, "quantity": 8}, {"barcode": TEST_BARCODE_2, "quantity": 4}],
+        )
+
+        updated = await review_ff_proposal(db_session, PROJECT_ID, req_id, approve=True)
+
+        # Предложение применено к составу.
+        qty_by_bc = {i.barcode: i.quantity for i in updated.items}
+        assert qty_by_bc == {TEST_BARCODE_1: 8, TEST_BARCODE_2: 4}
+        # Предложение снято.
+        assert updated.ff_proposed_items is None
+        assert updated.ff_proposed_at is None
+        assert updated.ff_proposed_by is None
+
+        # И в БД действительно очищено + состав обновлён.
+        reloaded = await get_assembly_request(db_session, PROJECT_ID, req_id)
+        assert reloaded.ff_proposed_items is None
+        assert {i.barcode: i.quantity for i in reloaded.items} == {TEST_BARCODE_1: 8, TEST_BARCODE_2: 4}
+
+    async def test_reject_clears_pending_keeps_items(self, db_session):
+        """reject: предложение снято, состав НЕ изменён."""
+        from backend.services.assembly.crud import review_ff_proposal
+
+        req = await _create_test_request(db_session)  # TEST_BARCODE_1 = 5
+        req_id = req.id  # захватываем ДО expire_all
+        await self._set_proposal(db_session, req_id, [{"barcode": TEST_BARCODE_2, "quantity": 9}])
+
+        updated = await review_ff_proposal(db_session, PROJECT_ID, req_id, approve=False)
+
+        # Состав остался прежним (предложение отброшено).
+        assert {i.barcode: i.quantity for i in updated.items} == {TEST_BARCODE_1: 5}
+        assert updated.ff_proposed_items is None
+        assert updated.ff_proposed_at is None
+        assert updated.ff_proposed_by is None
+
+    async def test_review_without_proposal_raises(self, db_session):
+        """Нет предложения на согласование → ValueError (роутер → 400)."""
+        from backend.services.assembly.crud import review_ff_proposal
+
+        req = await _create_test_request(db_session)
+        with pytest.raises(ValueError, match="Нет предложения ФФ"):
+            await review_ff_proposal(db_session, PROJECT_ID, req.id, approve=True)
+        with pytest.raises(ValueError, match="Нет предложения ФФ"):
+            await review_ff_proposal(db_session, PROJECT_ID, req.id, approve=False)
+
+    async def test_approve_exceeding_stock_raises_deficit(self, db_session):
+        """approve предложения сверх доступного стока → дефицит → ValueError.
+
+        На складе 100 шт TEST_BARCODE_1; предложение на 250 → недостаточно.
+        Предложение при этом НЕ снимается (фейл валидации откатывает применение).
+        """
+        from backend.services.assembly.crud import review_ff_proposal
+
+        req = await _create_test_request(db_session)
+        req_id = req.id  # захватываем ДО expire_all
+        await self._set_proposal(db_session, req_id, [{"barcode": TEST_BARCODE_1, "quantity": 250}])
+
+        with pytest.raises(ValueError, match="Недостаточно"):
+            await review_ff_proposal(db_session, PROJECT_ID, req_id, approve=True)
+
+        # Состав не тронут, предложение всё ещё ждёт согласования.
+        reloaded = await get_assembly_request(db_session, PROJECT_ID, req_id)
+        assert {i.barcode: i.quantity for i in reloaded.items} == {TEST_BARCODE_1: 5}
+        assert reloaded.ff_proposed_items is not None
+
+
+@pytest.mark.asyncio
 class TestJointFboSupply:
     """Совместная WB FBO-поставка: одна поставка («Совместный номер») несёт ≥2
     сборок — по одной на ФФ-источник (напр. wms + wms2)."""
@@ -1940,10 +2067,10 @@ class TestListBuildBatched:
             event.remove(test_engine.sync_engine, "before_cursor_execute", _before)
 
     async def _seed_two_requests(self, db_session):
-        """req1: wh1 + перевозчик; req2: wh2 + своя FBO.
+        """req1: wh1 + перевозчик; req2: wh2 + своя FBO + ожидающая ФФ-правка.
 
         Покрывает все per-row пути prefetch: номенклатура, остатки (2 склада),
-        контрагент-перевозчик.
+        контрагент-перевозчик, ФФ-предложение по баркоду.
         """
         from backend.models.counterparty import Counterparty
 
@@ -1978,6 +2105,7 @@ class TestListBuildBatched:
             status=AssemblyStatus.IN_PROGRESS,
             pallets_count=1,
             pallet_weight_kg=Decimal("10.00"),
+            ff_proposed_items=[{"barcode": TEST_BARCODE_2, "quantity": 3}],
         )
         db_session.add(req2)
         await db_session.flush()

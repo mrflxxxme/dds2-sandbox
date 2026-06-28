@@ -34,6 +34,7 @@ from backend.models.warehouse import (
 )
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import (
+    AssemblyItemCreate,
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
 )
@@ -344,16 +345,17 @@ async def _build_response(
     nom_map: dict[int, Nomenclature] | None = None,
     stock_by_wh_nom: dict[tuple[int, int], int] | None = None,
     cp_map: dict[int, Any] | None = None,
+    prop_nom_map: dict[str, Nomenclature] | None = None,
 ) -> dict:
     """
     Build AssemblyRequestResponse dict from ORM model.
     Loads warehouse.name, wb_fbo_supply.name, wb_fbo_supply.warehouse_name.
     Computes total_weight_kg = pallets_count * pallet_weight_kg.
 
-    Optional lookup maps (nom_map / stock_by_wh_nom / cp_map) are pre-fetched
-    once for the whole list by prefetch_list_maps; when provided this function
-    makes NO DB round-trips per row (kills the list N+1). Single-row callers
-    omit them and each lookup falls back to a scoped query.
+    Optional lookup maps (nom_map / stock_by_wh_nom / cp_map / prop_nom_map) are
+    pre-fetched once for the whole list by prefetch_list_maps; when provided this
+    function makes NO DB round-trips per row (kills the list N+1). Single-row
+    callers omit them and each lookup falls back to a scoped query.
     """
     # Relationships are pre-loaded via selectinload in list/get queries.
     # Refresh only for direct calls (e.g. after create/update).
@@ -380,6 +382,36 @@ async def _build_response(
         if cp_row is not None:
             carrier_inn = cp_row.inn
             carrier_name = cp_row.name
+
+    # Предложенная ФФ-оператором правка состава (ожидает согласования в DDS).
+    # ff_proposed_items не None ⇒ pending; резолвим имя/артикул из номенклатуры
+    # по ШК одним батч-запросом (как наполнение в _build_items_with_stock).
+    ff_proposed_out: list[dict] | None = None
+    proposal = request.ff_proposed_items
+    if proposal is not None:
+        proposal_barcodes = [str(i["barcode"]) for i in proposal if i.get("barcode")]
+        if prop_nom_map is None:
+            prop_nom_map = {}
+            if proposal_barcodes:
+                prop_nom_result = await db.execute(
+                    select(Nomenclature).where(
+                        Nomenclature.project_id == request.project_id,
+                        Nomenclature.barcode.in_(proposal_barcodes),
+                    )
+                )
+                prop_nom_map = {n.barcode: n for n in prop_nom_result.scalars().all()}
+        ff_proposed_out = []
+        for i in proposal:
+            bc = str(i["barcode"])
+            nom = prop_nom_map.get(bc)
+            ff_proposed_out.append(
+                {
+                    "barcode": bc,
+                    "quantity": int(i["quantity"]),
+                    "product_name": (nom.subject or nom.article_seller or bc) if nom else None,
+                    "article": nom.article_seller if nom else None,
+                }
+            )
 
     return {
         "id": request.id,
@@ -427,6 +459,10 @@ async def _build_response(
         "brands": ", ".join(sorted({i["brand"] for i in items if i.get("brand")})) or None,
         "created_at": request.created_at,
         "updated_at": request.updated_at,
+        "ff_review_pending": proposal is not None,
+        "ff_proposed_items": ff_proposed_out,
+        "ff_proposed_at": request.ff_proposed_at,
+        "ff_proposed_by": request.ff_proposed_by,
     }
 
 
@@ -441,12 +477,13 @@ async def prefetch_list_maps(
     Returns kwargs for `_build_response(...)` so the per-row build loop makes
     zero DB round-trips. Без этого роутер делал на КАЖДУЮ сборку запросы
     контрагента + номенклатуры + остатков (N+1 на ~400 строк = сотни запросов
-    через PgBouncer → тормоза списка/фильтров/поиска). `requests[*].items` уже
+    через PgBouncer → тормоза списка/фильтров). `requests[*].items` уже
     eager-loaded через selectinload в list_assembly_requests.
     """
     nom_ids: set[int] = set()
     wh_ids: set[int] = set()
     cp_ids: set[int] = set()
+    proposal_barcodes: set[str] = set()
     for req in requests:
         if req.warehouse_id:
             wh_ids.add(req.warehouse_id)
@@ -455,6 +492,11 @@ async def prefetch_list_maps(
         for item in req.items:
             if item.nomenclature_id:
                 nom_ids.add(item.nomenclature_id)
+        proposal = req.ff_proposed_items
+        if proposal:
+            for i in proposal:
+                if i.get("barcode"):
+                    proposal_barcodes.add(str(i["barcode"]))
 
     nom_map: dict[int, Nomenclature] = {}
     if nom_ids:
@@ -488,10 +530,21 @@ async def prefetch_list_maps(
         )
         cp_map = {row.id: row for row in res.all()}
 
+    prop_nom_map: dict[str, Nomenclature] = {}
+    if proposal_barcodes:
+        res = await db.execute(
+            select(Nomenclature).where(
+                Nomenclature.project_id == project_id,
+                Nomenclature.barcode.in_(proposal_barcodes),
+            )
+        )
+        prop_nom_map = {n.barcode: n for n in res.scalars().all()}
+
     return {
         "nom_map": nom_map,
         "stock_by_wh_nom": stock_by_wh_nom,
         "cp_map": cp_map,
+        "prop_nom_map": prop_nom_map,
     }
 
 
@@ -918,6 +971,23 @@ async def create_assembly_request(
     await db.refresh(assembly_req)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+
+    # Best-effort: уведомить ФФ-оператора (портал, напр. Хамза) о новой сборке на
+    # его складе. CancelledError (BaseException) пробрасывается, прочее — глушим.
+    try:
+        from backend.services import fulfillment_notify
+
+        await fulfillment_notify.notify_new_ff_assembly(
+            db,
+            project_id,
+            payload.warehouse_id,
+            assembly_number=assembly_req.number,
+            warehouse_name=wh.name,
+            qty=sum(int(i.quantity) for i in resolved_items),
+            wb_number=(fbo_supply.wb_supply_id if fbo_supply else None),
+        )
+    except Exception:
+        logger.warning("new-ff-assembly notify failed", exc_info=True)
     return assembly_req
 
 
@@ -1139,6 +1209,66 @@ async def update_assembly_request(
     db.expunge_all()
     updated = await get_assembly_request(db, project_id, req.id)
     assert updated is not None, "Assembly request disappeared after update"
+    return updated
+
+
+async def review_ff_proposal(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+    approve: bool,
+) -> AssemblyRequest:
+    """Согласовать или отклонить предложенную ФФ-оператором правку состава.
+
+    ФФ хранит правку как ПРЕДЛОЖЕНИЕ на сборке (ff_proposed_items), не применяя её.
+    approve=True — применяем предложение через канонический update_assembly_request
+    (тот же сток/резерв-валидатор: дефицит → ValueError → 400 у роутера), затем чистим
+    ff_proposed_*. approve=False — просто чистим предложение, состав не трогаем.
+
+    Нет предложения (ff_proposed_items is None) → ValueError (роутер → 400).
+    """
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+    if req.ff_proposed_items is None:
+        raise ValueError("Нет предложения ФФ на согласование")
+
+    if approve:
+        proposal = req.ff_proposed_items
+        # Применяем как обычное редактирование состава: канонический путь с
+        # валидацией доступного стока/резерва. Дефицит поднимет ValueError —
+        # откатываем незакоммиченные DELETE/INSERT позиций, чтобы сессия осталась
+        # чистой (предложение и старый состав не тронуты), и пробрасываем.
+        try:
+            await update_assembly_request(
+                db,
+                project_id,
+                request_id,
+                AssemblyRequestUpdate(
+                    items=[
+                        AssemblyItemCreate(barcode=str(i["barcode"]), quantity=int(i["quantity"]))
+                        for i in proposal
+                    ]
+                ),
+            )
+        except ValueError:
+            await db.rollback()
+            raise
+        # update_assembly_request делает expunge_all + commit; перечитываем заявку,
+        # чтобы снять предложение на свежем объекте.
+        req = await get_assembly_request(db, project_id, request_id)
+        assert req is not None, "Assembly request disappeared after applying FF proposal"
+
+    req.ff_proposed_items = None
+    req.ff_proposed_at = None
+    req.ff_proposed_by = None
+    await db.commit()
+    await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
+
+    db.expunge_all()
+    updated = await get_assembly_request(db, project_id, request_id)
+    assert updated is not None, "Assembly request disappeared after FF review"
     return updated
 
 

@@ -129,6 +129,21 @@ class AssemblyItemResponse(BaseModel):
     stock_quantity: int = 0
 
 
+class FfProposedItem(BaseModel):
+    """Позиция предложенной ФФ-оператором правки состава (ожидает согласования)."""
+
+    barcode: str
+    quantity: int
+    product_name: str | None = None
+    article: str | None = None
+
+
+class FfReviewAction(BaseModel):
+    """Решение по предложенной ФФ правке состава: применить или отклонить."""
+
+    action: Literal["approve", "reject"]
+
+
 class AssemblyRequestResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -182,6 +197,12 @@ class AssemblyRequestResponse(BaseModel):
     # Состав сборки расходится с привязанной заявкой(ами) ФФ по наполнению
     # (True — расхождение, False — совпадает, None — определить нельзя)
     ff_mismatch: bool | None = None
+    # ФФ предложил правку состава, ожидает согласования в DDS («Согласовать»/«Отказать»).
+    # ff_proposed_items не None ⇒ «ожидает согласования».
+    ff_review_pending: bool = False
+    ff_proposed_items: list[FfProposedItem] | None = None
+    ff_proposed_at: datetime | None = None
+    ff_proposed_by: str | None = None
     # Совместная поставка: эта сборка делит WB FBO-поставку с другими сборками
     # (≥2 сборок на одну поставку, по одной на ФФ-источник). joint_siblings —
     # ДРУГИЕ сборки той же поставки (для бейджа «Совместная» и тултипа).

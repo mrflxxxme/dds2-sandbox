@@ -28,6 +28,7 @@ from backend.schemas.assembly import (
     CostForecastResponse,
     CreatedGroupResponse,
     FfLinkInfo,
+    FfReviewAction,
     JointSibling,
     LinkAnomaliesResponse,
     LogisticsAnalyticsResponse,
@@ -46,6 +47,7 @@ from backend.services.assembly.analytics import (
     get_cost_forecast,
     get_logistics_shipments,
 )
+from backend.services.assembly.crud import review_ff_proposal
 from backend.services.assembly.link_anomalies import get_link_anomalies
 from backend.services.assembly.stock_distribution import get_stock_distribution, get_stock_distribution_history
 from backend.utils.rate_limit import rate_limit_write
@@ -100,9 +102,9 @@ async def list_assembly_requests(
         limit=limit,
         offset=offset,
     )
-    # Pre-fetch all per-row lookups (номенклатура/остатки/контрагенты) одним
-    # набором батч-запросов → build-loop без N+1 (раньше на ~400 строк это были
-    # сотни запросов через PgBouncer и тормозило список/фильтры/поиск).
+    # Pre-fetch all per-row lookups (номенклатура/остатки/контрагенты/ФФ-правки)
+    # одним набором батч-запросов → build-loop без N+1 (раньше на ~400 строк это
+    # были сотни запросов через PgBouncer и тормозило список/фильтры/поиск).
     prefetch = await assembly_service.prefetch_list_maps(db, project.id, items)
     response_items = []
     for req in items:
@@ -485,6 +487,27 @@ async def assembly_ff_mismatch(
     if data is None:
         raise HTTPException(404, "Assembly request not found")
     return data
+
+
+@router.post(
+    "/{request_id}/ff-review", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)]
+)
+async def review_ff_proposed_composition(
+    request_id: int,
+    payload: FfReviewAction,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Согласовать («approve» — применить) или отклонить («reject» — отбросить)
+    предложенную ФФ-оператором правку состава сборки (ff_proposed_items).
+
+    approve прогоняет канонический валидатор стока/резерва; дефицит → 400.
+    Нет предложения на согласование → 400."""
+    try:
+        req = await review_ff_proposal(db, project.id, request_id, approve=payload.action == "approve")
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
 
 
 # --- Update -----------------------------------------------------------------

@@ -1640,10 +1640,22 @@ export interface AssemblyRequest {
   ff_links?: FfLinkInfo[] | null;
   /** состав сборки расходится с привязанной заявкой(ами) ФФ по наполнению (true — расхождение, null — неизвестно) */
   ff_mismatch?: boolean | null;
+  /** ФФ предложил правку состава, ожидает согласования в DDS («Согласовать»/«Отказать») */
+  ff_review_pending?: boolean;
+  ff_proposed_items?: FfProposedItem[] | null;
+  ff_proposed_at?: string | null;
+  ff_proposed_by?: string | null;
   /** совместная поставка: эта сборка делит WB FBO-поставку с другими (≥2 сборок на одну поставку, по одной на ФФ-источник) */
   joint_supply?: boolean;
   /** другие сборки той же совместной поставки (для бейджа «Совместная» и тултипа) */
   joint_siblings?: JointSibling[] | null;
+}
+
+export interface FfProposedItem {
+  barcode: string;
+  quantity: number;
+  product_name?: string | null;
+  article?: string | null;
 }
 
 export interface FfLinkInfo {

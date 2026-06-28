@@ -164,6 +164,13 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
         Boolean, default=False, server_default="false", nullable=False
     )
 
+    # FF-портал: предложенная оператором правка состава, ожидающая согласования в DDS.
+    # Пока не NULL — заявка «ожидает согласования ФФ»; в основном приложении кнопки
+    # «Согласовать» (применить к составу) / «Отказать» (отбросить, оставить наш состав).
+    ff_proposed_items: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    ff_proposed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ff_proposed_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
     # ─── Relationships ──────────────────────────────────────────────────
 
     warehouse: Mapped["Warehouse"] = relationship()
