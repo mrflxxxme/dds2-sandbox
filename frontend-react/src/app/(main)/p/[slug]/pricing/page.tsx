@@ -111,6 +111,8 @@ export default function PricingPage() {
             'nm_id': r.nm_id,
             'Категория': r.category,
             'Бренд': r.brand || '',
+            'Базовая цена': r.base_price,
+            'Скидка продавца %': r.discount,
             'Цена витрины': r.current_price,
             'Себестоимость': r.cost_price,
             'Наценка коэф': r.markup_coef,
@@ -233,6 +235,8 @@ export default function PricingPage() {
                         <thead>
                             <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
                                 <th style={thL}>{groupBy === 'category' ? 'Категория / Артикул' : 'Артикул'}</th>
+                                <th style={th}>База</th>
+                                <th style={th}>Скидка</th>
                                 <th style={th}>Цена ВБ</th>
                                 <th style={th}>Себест.</th>
                                 <th style={th}>Коэф.</th>
@@ -285,6 +289,8 @@ function GroupRows({ group, open, onToggle }: { group: PricingGroup; open: boole
                 </td>
                 <td style={td}>—</td>
                 <td style={td}>—</td>
+                <td style={td}>—</td>
+                <td style={td}>—</td>
                 <td style={{ ...td, fontWeight: 600 }}>{fmtCoef(group.markup_coef)}</td>
                 <td style={{ ...td, fontWeight: 600, color: pctColor(group.markup_pct) }}>{fmtPct(group.markup_pct)}</td>
                 <td style={td}>{fmtPct(group.cost_share_pct)}</td>
@@ -313,6 +319,8 @@ function SkuRow({ r, indent, showCategory }: { r: PricingRow; indent?: boolean; 
                 {!r.has_price && <span style={{ color: 'var(--color-warning)', fontSize: 11, marginLeft: 6 }}>нет цены</span>}
                 {!r.has_cost && <span style={{ color: 'var(--color-warning)', fontSize: 11, marginLeft: 6 }}>нет себест.</span>}
             </td>
+            <td style={{ ...td, color: 'var(--color-text-dim)' }}>{fmtMoney(r.base_price)}</td>
+            <td style={{ ...td, color: 'var(--color-text-dim)' }}>{r.discount == null ? '—' : formatNumber(r.discount, 0) + '%'}</td>
             <td style={td}>{fmtMoney(r.current_price)}</td>
             <td style={td}>{fmtMoney(r.cost_price)}</td>
             <td style={{ ...td, fontWeight: 600 }}>{fmtCoef(r.markup_coef)}</td>
