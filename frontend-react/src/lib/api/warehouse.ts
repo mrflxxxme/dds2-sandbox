@@ -376,6 +376,10 @@ export function addWarehouseMethods(api: ApiClient) {
         updateAssemblyRequest(id: number, data: AssemblyRequestUpdate) {
             return api.request<AssemblyRequest>('PUT', `/api/v1/warehouse/assembly/${id}`, data);
         },
+        /** Решение по предложенной ФФ правке состава: применить («approve») или отклонить («reject»). */
+        assemblyFfReview(id: number, action: 'approve' | 'reject') {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ff-review`, { action });
+        },
         startAssembly(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/start`);
         },

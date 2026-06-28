@@ -374,6 +374,8 @@ export default function AssemblyListPage() {
     const [search, setSearch] = useState('');
     const [brandFilter, setBrandFilter] = useState('');
     const [ffLinkFilter, setFfLinkFilter] = useState<'' | 'none' | 'linked'>('');
+    // Монотонный счётчик запросов списка — отбрасываем устаревшие ответы (см. load)
+    const loadSeq = useRef(0);
     // Пагинация/сортировка/экспорт — клиентские, через TanStackDataTable: грузим весь
     // отфильтрованный набор. Потолок = серверный кап эндпоинта (limit ≤ 500; _build_response
     // делает per-row запросы, потому кап и стоит). Если набор больше — показываем подсказку
@@ -408,6 +410,9 @@ export default function AssemblyListPage() {
     // ─── Load data ────────────────────────────────────────────────────────
 
     const load = useCallback(async () => {
+        // Гонка: debounce-поиск + смена фильтров могут пускать перекрывающиеся
+        // запросы; считаем только последний, иначе устаревший ответ перетрёт свежий.
+        const seq = ++loadSeq.current;
         setLoading(true);
         setError('');
         try {
@@ -421,15 +426,27 @@ export default function AssemblyListPage() {
                 ff_link: ffLinkFilter || undefined,
                 limit: LOAD_LIMIT,
             });
+            if (seq !== loadSeq.current) return;
             setItems(resp.items);
             setTotal(resp.total);
         } catch (e: unknown) {
+            if (seq !== loadSeq.current) return;
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+        } finally {
+            if (seq === loadSeq.current) setLoading(false);
         }
-        setLoading(false);
     }, [warehouseId, statusFilter, search, dateFrom, dateTo, brandFilter, ffLinkFilter]);
 
     useEffect(() => { load(); }, [load]);
+
+    // Автопоиск: применяем ввод через 350 мс после остановки набора — как
+    // выпадающие фильтры (мгновенно), без обязательного Enter. Enter всё ещё
+    // запускает поиск сразу (см. handleSearchKeyDown).
+    useEffect(() => {
+        if (searchInput === search) return;
+        const t = setTimeout(() => setSearch(searchInput), 350);
+        return () => clearTimeout(t);
+    }, [searchInput, search]);
 
     const handleSearchKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
@@ -563,7 +580,16 @@ export default function AssemblyListPage() {
     const cols: Column[] = [
         {
             key: 'number', label: '№',
-            render: (_v, row: AssemblyRequest) => <span style={{ fontWeight: 500 }}>{row.number}</span>,
+            render: (_v, row: AssemblyRequest) => (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <span style={{ fontWeight: 500 }}>{row.number}</span>
+                    {row.ff_review_pending && (
+                        <span className="badge badge-warning" style={{ fontSize: 11 }} title="ФФ предложил правку состава — требуется согласование">
+                            ⏳ ФФ
+                        </span>
+                    )}
+                </span>
+            ),
             exportValue: (row: AssemblyRequest) => row.number,
         },
         {
@@ -748,7 +774,7 @@ export default function AssemblyListPage() {
                     <div className="form-group" style={{ flex: 1, minWidth: 200 }}>
                         <input
                             className="form-input"
-                            placeholder="Поиск по номеру или поставке WB... (Enter)"
+                            placeholder="Поиск по номеру заявки или поставке WB…"
                             value={searchInput}
                             onChange={e => setSearchInput(e.target.value)}
                             onKeyDown={handleSearchKeyDown}

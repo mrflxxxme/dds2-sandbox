@@ -1,41 +1,340 @@
-/* ─── FF portal — LAYOUT ONLY ─────────────────────────────────────────────────
- * The FF portal must look IDENTICAL to the main app — all visual styling comes
- * from globals.css system classes (glass-card, btn, badge, data-table, modal-*,
- * page-*, empty-state, sc-status-pill, …). This file holds ONLY the structural
- * bits the design system does not provide: a mobile content width and the
- * fixed/sticky positioning of the portal's top bar + nav. No colors, no shadows,
- * no radii, no typography here.
+/* ─── FF portal — minimal layout glue ─────────────────────────────────────────
+ * The FF portal mirrors the MAIN APP (desktop): its visual language is the
+ * globals.css system — .sidebar / .sidebar-* / .main-content / .page-header /
+ * .glass-card / .data-table / .modal-* / .badge / .btn / .stat-card / .empty-state.
+ *
+ * This file holds ONLY what the system doesn't provide: the loading skeleton and
+ * a small responsive rule that collapses the fixed sidebar into a top strip on
+ * narrow screens (desktop is primary; this just keeps a phone from breaking).
+ * Every value uses --color-* tokens and the system radius scale.
  */
 
-/* Mobile-first content column + room for the fixed top bar. */
-.ff-shell {
-    max-width: 720px;
-    margin: 0 auto;
-    padding: 16px 16px 48px;
-    padding-top: 64px;
+/* Loading skeleton (used in the shell gate + pages before data arrives). */
+.ff-feed {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
 }
 
-/* Fixed top bar — visual glass comes from .glass-card on the element. */
-.ff-topbar {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    z-index: 90;
+.ff-skeleton {
+    height: 96px;
+    border-radius: 20px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-card);
+    position: relative;
+    overflow: hidden;
+}
+
+.ff-skeleton::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        var(--color-bg-hover) 50%,
+        transparent 100%
+    );
+    animation: ffShimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes ffShimmer {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(100%); }
+}
+
+/* ── Responsive: collapse the fixed desktop sidebar into a top strip on phones ──
+   Desktop (>900px) uses the system .sidebar (fixed 260px) + .main-content
+   (margin-left:260px) unchanged. Below 900px the sidebar becomes a horizontal
+   bar at the top and the content spans full width. */
+@media (max-width: 900px) {
+    .ff-sidebar {
+        position: static;
+        width: 100%;
+        height: auto;
+        flex-direction: row;
+        align-items: center;
+        gap: 8px;
+        overflow-x: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--color-border);
+    }
+
+    .ff-sidebar .sidebar-logo {
+        padding: 16px;
+    }
+
+    .ff-sidebar .sidebar-nav {
+        flex-direction: row;
+        padding: 0;
+        flex: 1;
+    }
+
+    .ff-sidebar .sidebar-user {
+        border-top: none;
+        padding: 12px 16px;
+    }
+
+    .ff-main {
+        margin-left: 0;
+        padding: 24px 16px 48px;
+    }
+}
+
+/* ─── Toolbar: поиск + фильтры над таблицами ──────────────────────────────── */
+.ff-toolbar {
     display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.ff-toolbar-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.ff-toolbar-field label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--color-text-dim);
+    padding-left: 2px;
+}
+
+.ff-toolbar input,
+.ff-toolbar select {
+    height: 38px;
+    padding: 0 12px;
+    border-radius: 12px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-card);
+    color: var(--color-text);
+    font-size: 14px;
+    min-width: 160px;
+}
+
+.ff-toolbar input:focus,
+.ff-toolbar select:focus {
+    outline: none;
+    border-color: var(--color-accent);
+}
+
+.ff-toolbar-spacer {
+    flex: 1;
+}
+
+/* ─── Сортируемые заголовки таблицы ───────────────────────────────────────── */
+.ff-th-sort {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.ff-th-sort:hover {
+    color: var(--color-accent);
+}
+
+.ff-th-label {
+    display: inline-flex;
     align-items: center;
+    gap: 4px;
+}
+
+.ff-th-arrow {
+    font-size: 10px;
+    width: 10px;
+    display: inline-block;
+    color: var(--color-accent);
+}
+
+.ff-th-active {
+    color: var(--color-accent);
+}
+
+.ff-num {
+    text-align: right;
+}
+
+/* Кликабельная строка → открыть деталь */
+.ff-row-link {
+    cursor: pointer;
+}
+
+.ff-row-link:hover {
+    background: var(--color-bg-hover);
+}
+
+/* ─── Сегментные табы (проекты остатков / переключатель архива) ───────────── */
+.ff-tabs {
+    display: inline-flex;
+    gap: 4px;
+    padding: 4px;
+    border-radius: 14px;
+    background: var(--color-bg-hover);
+    border: 1px solid var(--color-border);
+    margin-bottom: 16px;
+}
+
+.ff-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    font-size: 14px;
+    font-weight: 500;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.ff-tab:hover {
+    color: var(--color-text);
+}
+
+.ff-tab-active {
+    background: var(--color-bg-card);
+    color: var(--color-accent);
+    box-shadow: var(--shadow-glass);
+}
+
+.ff-tab-count {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 24px;
+    background: var(--color-bg-hover);
+    color: var(--color-text-dim);
+}
+
+.ff-tab-active .ff-tab-count {
+    color: var(--color-accent);
+}
+
+/* ─── Деталь-страница (заявка / приёмка) ──────────────────────────────────── */
+.ff-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    color: var(--color-text-muted);
+    margin-bottom: 16px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+}
+
+.ff-back:hover {
+    color: var(--color-accent);
+}
+
+.ff-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.ff-kv {
+    display: flex;
     justify-content: space-between;
     gap: 12px;
-    padding: 10px 16px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 14px;
 }
 
-/* Sticky pill nav directly under the top bar. */
-.ff-nav {
-    position: sticky;
-    top: 56px;
-    z-index: 80;
+.ff-kv:last-child {
+    border-bottom: none;
+}
+
+.ff-kv-key {
+    color: var(--color-text-dim);
+}
+
+.ff-kv-val {
+    color: var(--color-text);
+    font-weight: 500;
+    text-align: right;
+}
+
+/* Карточка доставки — акцентная рамка, когда назначена машина */
+.ff-delivery {
+    border-left: 3px solid var(--color-accent);
+}
+
+/* ─── Таймлайн статусов («где была / где сейчас») ─────────────────────────── */
+.ff-timeline {
     display: flex;
-    gap: 8px;
-    padding: 12px 0;
-    overflow-x: auto;
+    flex-direction: column;
+}
+
+.ff-timeline-item {
+    display: flex;
+    gap: 12px;
+    padding-bottom: 16px;
+    position: relative;
+}
+
+.ff-timeline-item:not(:last-child)::before {
+    content: '';
+    position: absolute;
+    left: 5px;
+    top: 14px;
+    bottom: 0;
+    width: 2px;
+    background: var(--color-border);
+}
+
+.ff-timeline-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--color-border);
+    margin-top: 2px;
+    flex-shrink: 0;
+    z-index: 1;
+}
+
+.ff-timeline-now .ff-timeline-dot {
+    background: var(--color-accent);
+    box-shadow: 0 0 0 4px var(--color-bg-hover);
+}
+
+.ff-timeline-body {
+    font-size: 14px;
+}
+
+.ff-timeline-when {
+    font-size: 12px;
+    color: var(--color-text-dim);
+}
+
+/* ─── Sticky action-бар на детали ─────────────────────────────────────────── */
+.ff-actionbar {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+    padding: 16px 0;
+    background: linear-gradient(to top, var(--color-bg-card) 60%, transparent);
+}
+
+/* ─── Счётчик в навигации сайдбара (что требует действия) ─────────────────── */
+.ff-nav-count {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 700;
+    min-width: 18px;
+    text-align: center;
+    padding: 1px 6px;
+    border-radius: 24px;
+    background: var(--color-bg-hover);
+    color: var(--color-accent);
 }

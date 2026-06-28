@@ -29,8 +29,11 @@ export type FfAssemblyStatus =
 
 export interface FfAssemblyItem {
     barcode: string;
+    article: string | null;
     product_name: string | null;
     quantity: number;
+    box_qty: number | null;
+    stock: number;
 }
 
 export interface FfAssemblyRow {
@@ -42,6 +45,8 @@ export interface FfAssemblyRow {
     number: string;
     status: FfAssemblyStatus;
     wb_warehouse_name: string | null;
+    fbo_supply_number: string | null;
+    brands: string | null;
     package_type: string | null;
     pallets_count: number | null;
     /** Decimal — arrives as a string from the API. */
@@ -49,6 +54,7 @@ export interface FfAssemblyRow {
     estimated_ready_date: string | null;
     actual_ready_date: string | null;
     vehicle_assigned: boolean;
+    is_archived: boolean;
     items: FfAssemblyItem[];
     created_at: string;
 }
@@ -58,12 +64,47 @@ export interface FfAssemblyListResponse {
     total: number;
 }
 
+export interface FfStatusEvent {
+    status: FfAssemblyStatus;
+    changed_at: string;
+    comment: string | null;
+}
+
+/** Full assembly card for the detail page (`GET /ff/assemblies/{id}`). */
+export interface FfAssemblyDetail extends FfAssemblyRow {
+    editable: boolean;
+    vehicle_info: string | null;
+    vehicle_brand: string | null;
+    driver_phone: string | null;
+    carrier_name: string | null;
+    pickup_date: string | null;
+    pickup_time_slot: string | null;
+    delivery_date: string | null;
+    vehicle_assigned_at: string | null;
+    via_gazelka: boolean;
+    fbo_supply_name: string | null;
+    fbo_supply_wb_id: string | null;
+    fbo_supply_status: string | null;
+    fbo_supply_planned_date: string | null;
+    history: FfStatusEvent[];
+    ff_review_pending: boolean;
+    proposed_items: FfAssemblyItem[];
+    ff_proposed_at: string | null;
+}
+
+/** Body item for `PUT /ff/assemblies/{id}/items`. Barcode-only (resolved server-side). */
+export interface FfAssemblyItemInput {
+    barcode: string;
+    quantity: number;
+}
+
 export type FfAcceptanceKind = 'inbound' | 'return';
 export type FfAcceptanceStatus = 'EXPECTED' | 'ACCEPTED';
 
 export interface FfAcceptanceItem {
     item_id: number;
     barcode: string;
+    article: string | null;
     product_name: string | null;
     expected_qty: number;
     actual_qty: number;
@@ -84,6 +125,7 @@ export interface FfAcceptanceRow {
     planned_date: string | null;
     actual_date: string | null;
     comment: string | null;
+    is_archived: boolean;
     items: FfAcceptanceItem[];
     created_at: string;
 }
@@ -105,6 +147,7 @@ export interface FfAcceptItemInput {
 export interface FfReadyInput {
     pallets_count: number;
     pallet_weight_kg: number;
+    estimated_ready_date?: string | null;
 }
 
 export interface FfStockRow {
@@ -113,6 +156,7 @@ export interface FfStockRow {
     warehouse_id: number;
     warehouse_name: string;
     barcode: string;
+    article: string | null;
     product_name: string | null;
     quantity: number;
     defect_quantity: number;

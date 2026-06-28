@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -157,6 +158,19 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
         server_default=PackageType.BOX.value,
     )
 
+    # FF-портал: архив заявки оператором — прячет из активного списка, не меняя
+    # статус и не удаляя (ортогонально is_deleted/status).
+    is_archived: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+
+    # FF-портал: предложенная оператором правка состава, ожидающая согласования в DDS.
+    # Пока не NULL — заявка «ожидает согласования ФФ»; в основном приложении кнопки
+    # «Согласовать» (применить к составу) / «Отказать» (отбросить, оставить наш состав).
+    ff_proposed_items: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    ff_proposed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ff_proposed_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
     # ─── Relationships ──────────────────────────────────────────────────
 
     warehouse: Mapped["Warehouse"] = relationship()
@@ -172,6 +186,7 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_assembly_requests_project_id", "project_id"),
         Index("ix_assembly_requests_warehouse_id", "warehouse_id"),
         Index("ix_assembly_requests_status", "status"),
+        Index("ix_assembly_requests_is_archived", "is_archived"),
         Index("ix_assembly_requests_counterparty_id", "counterparty_id"),
         Index("ix_assembly_requests_source_draft_id", "source_draft_id"),
         # Partial unique: allow new request for same FBO after cancel

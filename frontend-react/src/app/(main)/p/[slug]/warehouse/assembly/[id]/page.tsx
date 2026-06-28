@@ -86,6 +86,9 @@ export default function AssemblyDetailPage() {
     // Refresh from FBO result
     const [refreshResult, setRefreshResult] = useState<RefreshFromFboResponse | null>(null);
 
+    // Согласование предложенной ФФ правки состава (approve = применить, reject = отклонить).
+    const [ffReviewLoading, setFfReviewLoading] = useState<'approve' | 'reject' | null>(null);
+
     // History
     const [history, setHistory] = useState<AssemblyHistoryEntry[]>([]);
 
@@ -423,6 +426,23 @@ export default function AssemblyDetailPage() {
         setActionLoading(false);
     };
 
+    // Решение по предложенной ФФ правке состава: применить (approve — может вернуть 400
+    // при дефиците остатка) или отклонить (reject). На успехе перечитываем заявку, чтобы
+    // блок согласования исчез и обновился состав.
+    const handleFfReview = async (action: 'approve' | 'reject') => {
+        if (!assembly) return;
+        if (action === 'approve' && !confirm('Применить состав ФФ к заявке?')) return;
+        setFfReviewLoading(action);
+        setError('');
+        try {
+            const updated = await api.assemblyFfReview(id, action);
+            setAssembly(updated);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка согласования');
+        }
+        setFfReviewLoading(null);
+    };
+
     // Мета-поля (склад WB, плановая дата, палеты, вес, комментарий) редактируемы
     // в любом не-CANCELLED статусе, включая SHIPPED/DELIVERED/CLOSED — backend это
     // допускает (не двигает остатки). Структурные поля (позиции, склад-источник,
@@ -652,11 +672,24 @@ export default function AssemblyDetailPage() {
                     <Link href={`/p/${slug}/warehouse/assembly`} style={{ color: 'var(--color-text-muted)', textDecoration: 'none', fontSize: 14 }}>
                         &larr; Заявки на сборку
                     </Link>
-                    <h1 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <h1 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                         {assembly.number}
                         <span className={`badge ${status.className}`} style={assembly.status === 'SHIPPED' ? { opacity: 0.6 } : undefined}>
                             {status.label}
                         </span>
+                        {assembly.ff_review_pending && (
+                            <span
+                                className="badge badge-warning"
+                                style={{ fontSize: 12 }}
+                                title={
+                                    assembly.ff_proposed_by || assembly.ff_proposed_at
+                                        ? `Изменил ${assembly.ff_proposed_by || 'ФФ'}${assembly.ff_proposed_at ? `, ${formatDate(assembly.ff_proposed_at)}` : ''}`
+                                        : 'ФФ предложил правку состава — требуется согласование'
+                                }
+                            >
+                                ⏳ Ожидает согласования ФФ
+                            </span>
+                        )}
                     </h1>
                 </div>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -983,6 +1016,111 @@ export default function AssemblyDetailPage() {
                     </div>
                 </div>
             )}
+
+            {/* ФФ предлагает изменить состав — согласование (применить/отклонить). Отдельный
+                блок, не путать с «Расхождением наполнения» ниже (то — справочное сравнение). */}
+            {assembly.ff_review_pending && (() => {
+                // Объединяем наш текущий состав (barcode→qty) с предложением ФФ (barcode→qty);
+                // строки = union баркодов, сортировка по |разница| убыв.
+                const ours = new Map<string, { qty: number; name: string }>();
+                for (const it of assembly.items || []) {
+                    ours.set(it.barcode, { qty: it.quantity, name: it.product_name || '' });
+                }
+                const proposed = new Map<string, { qty: number; name: string; article: string }>();
+                for (const it of assembly.ff_proposed_items || []) {
+                    proposed.set(it.barcode, { qty: it.quantity, name: it.product_name || '', article: it.article || '' });
+                }
+                const barcodes = Array.from(new Set([...ours.keys(), ...proposed.keys()]));
+                const rows = barcodes.map(bc => {
+                    const o = ours.get(bc);
+                    const p = proposed.get(bc);
+                    const ourQty = o?.qty ?? 0;
+                    const ffQty = p?.qty ?? 0;
+                    return {
+                        barcode: bc,
+                        name: o?.name || p?.name || p?.article || '',
+                        ourQty,
+                        ffQty,
+                        diff: ffQty - ourQty,
+                    };
+                }).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+                const ourTotal = rows.reduce((s, r) => s + r.ourQty, 0);
+                const ffTotal = rows.reduce((s, r) => s + r.ffQty, 0);
+                const totalDiff = ffTotal - ourTotal;
+                const diffColor = (d: number) => (d > 0 ? 'var(--color-warning)' : 'var(--color-danger)');
+                const signed = (n: number) => `${n > 0 ? '+' : ''}${formatNumber(n, 0)}`;
+                return (
+                    <div className="glass-card animate-in" style={{ marginTop: 16, borderLeft: '3px solid var(--color-warning)' }}>
+                        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <span className="badge badge-warning" style={{ fontSize: 11, padding: '2px 8px' }}>⏳</span>
+                            ФФ предлагает изменить состав
+                        </h3>
+                        <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                            {(assembly.ff_proposed_by || assembly.ff_proposed_at) && (
+                                <>Изменил <b style={{ color: 'var(--color-text)' }}>{assembly.ff_proposed_by || 'ФФ'}</b>
+                                {assembly.ff_proposed_at ? <>, {formatDate(assembly.ff_proposed_at)}</> : ''}. </>
+                            )}
+                            Наш итог: <b style={{ color: 'var(--color-text)' }}>{formatNumber(ourTotal, 0)}</b> шт ·
+                            {' '}ФФ: <b style={{ color: 'var(--color-text)' }}>{formatNumber(ffTotal, 0)}</b> шт
+                            {' '}(разница <b style={{ color: diffColor(totalDiff) }}>{signed(totalDiff)}</b>)
+                        </p>
+                        <div style={{ overflowX: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                                <thead>
+                                    <tr style={{ textAlign: 'left', color: 'var(--color-text-muted)', borderBottom: '1px solid var(--color-border)' }}>
+                                        <th style={{ padding: '8px 12px' }}>Товар</th>
+                                        <th style={{ padding: '8px 12px' }}>ШК</th>
+                                        <th style={{ padding: '8px 12px', textAlign: 'right' }}>Наш</th>
+                                        <th style={{ padding: '8px 12px', textAlign: 'right' }}>Предлагает ФФ</th>
+                                        <th style={{ padding: '8px 12px', textAlign: 'right' }}>Разница</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {rows.map(r => (
+                                        <tr key={r.barcode} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                            <td style={{ padding: '8px 12px' }}>{r.name || '—'}</td>
+                                            <td style={{ padding: '8px 12px', fontFamily: 'monospace' }}>{r.barcode}</td>
+                                            <td style={{ padding: '8px 12px', textAlign: 'right' }}>{formatNumber(r.ourQty, 0)}</td>
+                                            <td style={{ padding: '8px 12px', textAlign: 'right' }}>{formatNumber(r.ffQty, 0)}</td>
+                                            <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 600, color: r.diff === 0 ? 'var(--color-text-muted)' : diffColor(r.diff) }}>
+                                                {r.diff === 0 ? '0' : signed(r.diff)}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                                <tfoot>
+                                    <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600 }}>
+                                        <td style={{ padding: '8px 12px' }}>Итого</td>
+                                        <td style={{ padding: '8px 12px' }} />
+                                        <td style={{ padding: '8px 12px', textAlign: 'right' }}>{formatNumber(ourTotal, 0)}</td>
+                                        <td style={{ padding: '8px 12px', textAlign: 'right' }}>{formatNumber(ffTotal, 0)}</td>
+                                        <td style={{ padding: '8px 12px', textAlign: 'right', color: totalDiff === 0 ? 'var(--color-text-muted)' : diffColor(totalDiff) }}>
+                                            {totalDiff === 0 ? '0' : signed(totalDiff)}
+                                        </td>
+                                    </tr>
+                                </tfoot>
+                            </table>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16, flexWrap: 'wrap' }}>
+                            <button
+                                className="btn btn-secondary"
+                                onClick={() => handleFfReview('reject')}
+                                disabled={ffReviewLoading !== null}
+                                style={{ color: 'var(--color-danger)' }}
+                            >
+                                {ffReviewLoading === 'reject' ? 'Отклонение...' : 'Отказать'}
+                            </button>
+                            <button
+                                className="btn btn-primary"
+                                onClick={() => handleFfReview('approve')}
+                                disabled={ffReviewLoading !== null}
+                            >
+                                {ffReviewLoading === 'approve' ? 'Применение...' : 'Согласовать'}
+                            </button>
+                        </div>
+                    </div>
+                );
+            })()}
 
             {/* Расхождение наполнения с ФФ — отдельным блоком (без клика) */}
             {assembly.ff_mismatch === true && <FfMismatchBlock assemblyId={assembly.id} />}

@@ -41,3 +41,35 @@ export function InWorkBadge() {
 export function ReturnBadge() {
     return <span className="badge badge-warning">Возврат WB</span>;
 }
+
+const STUCK_THRESHOLD_DAYS = 2;
+
+/**
+ * Days an assembly has been waiting in its current state, or null if not applicable.
+ * IN_PROGRESS/PENDING → since created_at; READY → since actual_ready_date (it's been
+ * assembled and is waiting for a vehicle). Date-only floor approximation, consistent
+ * with the logist card's «висит N дн».
+ */
+export function assemblyStuckDays(
+    status: FfAssemblyStatus,
+    createdAt: string | null,
+    actualReadyDate: string | null,
+): number | null {
+    let base: string | null = null;
+    if (status === 'PENDING' || status === 'IN_PROGRESS') base = createdAt;
+    else if (status === 'READY') base = actualReadyDate ?? createdAt;
+    if (!base) return null;
+    const ms = Date.now() - new Date(base).getTime();
+    if (Number.isNaN(ms) || ms < 0) return null;
+    return Math.floor(ms / 86_400_000);
+}
+
+/** «⚠ висит N дн» — shown when an assembly is stuck ≥ threshold in IN_PROGRESS/READY. */
+export function StuckBadge({ days }: { days: number | null }) {
+    if (days == null || days < STUCK_THRESHOLD_DAYS) return null;
+    return (
+        <span className={`badge ${days >= 5 ? 'badge-danger' : 'badge-warning'}`}>
+            ⚠ висит {days}&nbsp;дн
+        </span>
+    );
+}

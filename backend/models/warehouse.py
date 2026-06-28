@@ -141,6 +141,12 @@ class InboundReceipt(Base, TimestampMixin, SoftDeleteMixin):
     )
     work_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # FF-портал: архив приёмки оператором — прячет из активного списка
+    # (ортогонально is_deleted/status).
+    is_archived: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+
     # Relationships
     warehouse: Mapped["Warehouse"] = relationship(back_populates="receipts")
     items: Mapped[list["InboundReceiptItem"]] = relationship(
@@ -152,6 +158,7 @@ class InboundReceipt(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_inbound_receipts_project_id", "project_id"),
         Index("ix_inbound_receipts_warehouse_id", "warehouse_id"),
         Index("ix_inbound_receipts_assembly_request_id", "assembly_request_id"),
+        Index("ix_inbound_receipts_is_archived", "is_archived"),
     )
 
 

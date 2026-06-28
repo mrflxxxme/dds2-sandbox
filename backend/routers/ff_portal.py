@@ -17,6 +17,9 @@ from backend.schemas.ff_portal import (
     FfAcceptanceListResponse,
     FfAcceptanceRow,
     FfAcceptPayload,
+    FfArchivePayload,
+    FfAssemblyDetail,
+    FfAssemblyItemsUpdate,
     FfAssemblyListResponse,
     FfAssemblyRow,
     FfMeResponse,
@@ -61,15 +64,69 @@ async def ff_me(ctx: FfContext = Depends(get_ff_context)):
 async def ff_list_assemblies(
     status: str | None = Query(None),
     warehouse_id: int | None = Query(None),
+    archived: bool = Query(False),
+    project_slug: str | None = Query(None),
     limit: int = Query(svc.DEFAULT_LIST_LIMIT, ge=1, le=svc.MAX_LIST_LIMIT),
     offset: int = Query(0, ge=0),
     ctx: FfContext = Depends(get_ff_context),
     db: AsyncSession = Depends(get_db),
 ):
     items, total = await svc.list_assemblies(
-        db, ctx, status=status, warehouse_id=warehouse_id, limit=limit, offset=offset
+        db, ctx, status=status, warehouse_id=warehouse_id, archived=archived,
+        project_slug=project_slug, limit=limit, offset=offset,
     )
     return FfAssemblyListResponse(items=items, total=total)
+
+
+@router.get("/assemblies/{assembly_id}", response_model=FfAssemblyDetail)
+async def ff_assembly_detail(
+    assembly_id: int,
+    ctx: FfContext = Depends(get_ff_context),
+    db: AsyncSession = Depends(get_db),
+):
+    req = await svc.get_scoped_assembly(db, ctx, assembly_id)
+    return await svc.assembly_detail(db, ctx, req)
+
+
+@router.put(
+    "/assemblies/{assembly_id}/items", response_model=FfAssemblyDetail, dependencies=[Depends(rate_limit_write)]
+)
+async def ff_update_assembly_items(
+    assembly_id: int,
+    payload: FfAssemblyItemsUpdate,
+    ctx: FfContext = Depends(get_ff_context),
+    db: AsyncSession = Depends(get_db),
+):
+    req = await svc.get_scoped_assembly(db, ctx, assembly_id)
+    return await svc.update_assembly_items(db, ctx, req, payload.items)
+
+
+@router.put(
+    "/assemblies/{assembly_id}/pallets", response_model=FfAssemblyDetail, dependencies=[Depends(rate_limit_write)]
+)
+async def ff_set_assembly_pallets(
+    assembly_id: int,
+    payload: FfReadyPayload,
+    ctx: FfContext = Depends(get_ff_context),
+    db: AsyncSession = Depends(get_db),
+):
+    req = await svc.get_scoped_assembly(db, ctx, assembly_id)
+    return await svc.set_assembly_pallets(
+        db, ctx, req, payload.pallets_count, payload.pallet_weight_kg, payload.estimated_ready_date
+    )
+
+
+@router.post(
+    "/assemblies/{assembly_id}/archive", response_model=FfAssemblyRow, dependencies=[Depends(rate_limit_write)]
+)
+async def ff_archive_assembly(
+    assembly_id: int,
+    payload: FfArchivePayload,
+    ctx: FfContext = Depends(get_ff_context),
+    db: AsyncSession = Depends(get_db),
+):
+    req = await svc.get_scoped_assembly(db, ctx, assembly_id)
+    return await svc.set_assembly_archived(db, ctx, req, payload.archived)
 
 
 @router.post("/assemblies/{assembly_id}/start", response_model=FfAssemblyRow, dependencies=[Depends(rate_limit_write)])
@@ -128,15 +185,41 @@ async def ff_ship_assembly(
 async def ff_list_acceptances(
     status: str | None = Query(None),
     warehouse_id: int | None = Query(None),
+    archived: bool = Query(False),
+    project_slug: str | None = Query(None),
     limit: int = Query(svc.DEFAULT_LIST_LIMIT, ge=1, le=svc.MAX_LIST_LIMIT),
     offset: int = Query(0, ge=0),
     ctx: FfContext = Depends(get_ff_context),
     db: AsyncSession = Depends(get_db),
 ):
     items, total = await svc.list_acceptances(
-        db, ctx, status=status, warehouse_id=warehouse_id, limit=limit, offset=offset
+        db, ctx, status=status, warehouse_id=warehouse_id, archived=archived,
+        project_slug=project_slug, limit=limit, offset=offset,
     )
     return FfAcceptanceListResponse(items=items, total=total)
+
+
+@router.get("/acceptances/{receipt_id}", response_model=FfAcceptanceRow)
+async def ff_acceptance_detail(
+    receipt_id: int,
+    ctx: FfContext = Depends(get_ff_context),
+    db: AsyncSession = Depends(get_db),
+):
+    receipt = await svc.get_scoped_receipt(db, ctx, receipt_id)
+    return await svc.acceptance_row(db, ctx, receipt)
+
+
+@router.post(
+    "/acceptances/{receipt_id}/archive", response_model=FfAcceptanceRow, dependencies=[Depends(rate_limit_write)]
+)
+async def ff_archive_acceptance(
+    receipt_id: int,
+    payload: FfArchivePayload,
+    ctx: FfContext = Depends(get_ff_context),
+    db: AsyncSession = Depends(get_db),
+):
+    receipt = await svc.get_scoped_receipt(db, ctx, receipt_id)
+    return await svc.set_acceptance_archived(db, ctx, receipt, payload.archived)
 
 
 @router.post(
@@ -180,12 +263,13 @@ async def ff_accept_acceptance(
 async def ff_list_stock(
     barcode: str | None = Query(None),
     warehouse_id: int | None = Query(None),
+    project_slug: str | None = Query(None),
     limit: int = Query(100, ge=1, le=svc.MAX_LIST_LIMIT),
     offset: int = Query(0, ge=0),
     ctx: FfContext = Depends(get_ff_context),
     db: AsyncSession = Depends(get_db),
 ):
     items, total, total_qty = await svc.list_stock(
-        db, ctx, barcode=barcode, warehouse_id=warehouse_id, limit=limit, offset=offset
+        db, ctx, barcode=barcode, warehouse_id=warehouse_id, project_slug=project_slug, limit=limit, offset=offset
     )
     return FfStockListResponse(items=items, total=total, total_quantity=total_qty)
