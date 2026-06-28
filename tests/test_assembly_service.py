@@ -17,14 +17,15 @@ Covers:
 13. Ship with insufficient stock -> ValueError with deficit details
 """
 
+from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 
-from backend.models.assembly import AssemblyRequest, AssemblyStatus
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.warehouse import InboundReceipt, OutboundShipment, WarehouseStock
 from backend.models.wb_fbo import WbFboSupply, WbSupplyStatus
 from backend.schemas.assembly import (
@@ -47,6 +48,7 @@ from backend.services.assembly_service import (
     get_logistics_analytics,
     list_assembly_requests,
     mark_ready,
+    prefetch_list_maps,
     reopen_for_reship,
     return_to_warehouse,
     ship_request,
@@ -1907,3 +1909,120 @@ class TestJointFboSupply:
 
         detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, PROJECT_ID, a1.id)
         assert detail["our_total"] == 8 and detail["ff_total"] == 10
+
+
+@pytest.mark.asyncio
+class TestListBuildBatched:
+    """Список сборок строит ответ батч-запросами, без per-row N+1.
+
+    Роутер раньше дёргал на КАЖДУЮ заявку контрагента + номенклатуру + остатки —
+    сотни запросов на ~400 строк через PgBouncer → тормоза списка/фильтров/поиска.
+    prefetch_list_maps собирает всё фиксированным числом запросов, а
+    _build_response с картами в БД не ходит. Покрываем: (1) ответ бит-в-бит равен
+    per-row сборке, (2) build-loop не масштабируется по числу строк.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _count_queries():
+        """Считает SQL-запросы через before_cursor_execute на sync-движке."""
+        from tests.conftest_api import test_engine
+
+        counter = {"n": 0}
+
+        def _before(conn, cursor, statement, params, context, executemany):
+            counter["n"] += 1
+
+        event.listen(test_engine.sync_engine, "before_cursor_execute", _before)
+        try:
+            yield counter
+        finally:
+            event.remove(test_engine.sync_engine, "before_cursor_execute", _before)
+
+    async def _seed_two_requests(self, db_session):
+        """req1: wh1 + перевозчик; req2: wh2 + своя FBO.
+
+        Покрывает все per-row пути prefetch: номенклатура, остатки (2 склада),
+        контрагент-перевозчик.
+        """
+        from backend.models.counterparty import Counterparty
+
+        carrier = Counterparty(project_id=PROJECT_ID, name="ИП Батч Тест", primary_type="CARRIER")
+        db_session.add(carrier)
+        await db_session.flush()
+        req1 = await _create_test_request(db_session)
+        req1.counterparty_id = carrier.id
+
+        wh2_id = await _create_second_fulfillment_wh(db_session, stock_for=[TEST_BARCODE_2])
+        fbo2 = WbFboSupply(
+            project_id=PROJECT_ID,
+            wb_supply_id="ASM-FBO-TEST-2",
+            wb_status=WbSupplyStatus.ACTIVE,
+            name="ASM_TEST FBO Supply 2",
+            warehouse_name="Тула",
+            created_at_wb=datetime(2026, 3, 21),
+        )
+        db_session.add(fbo2)
+        await db_session.flush()
+        nom2_id = (
+            await db_session.execute(
+                text("SELECT id FROM nomenclature WHERE project_id = :pid AND barcode = :bc"),
+                {"pid": PROJECT_ID, "bc": TEST_BARCODE_2},
+            )
+        ).scalar()
+        req2 = AssemblyRequest(
+            project_id=PROJECT_ID,
+            warehouse_id=wh2_id,
+            wb_fbo_supply_id=fbo2.id,
+            number="ASM-BATCH-TEST-2",
+            status=AssemblyStatus.IN_PROGRESS,
+            pallets_count=1,
+            pallet_weight_kg=Decimal("10.00"),
+        )
+        db_session.add(req2)
+        await db_session.flush()
+        db_session.add(
+            AssemblyRequestItem(
+                project_id=PROJECT_ID,
+                assembly_request_id=req2.id,
+                nomenclature_id=nom2_id,
+                barcode=TEST_BARCODE_2,
+                quantity=3,
+            )
+        )
+        await db_session.commit()
+        return req1, req2
+
+    async def test_batch_build_matches_per_row(self, db_session):
+        """Ответ с prefetch-картами бит-в-бит равен per-row сборке."""
+        await self._seed_two_requests(db_session)
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=500)
+        assert len(items) >= 2
+
+        prefetch = await prefetch_list_maps(db_session, PROJECT_ID, items)
+        for req in items:
+            per_row = await _build_response(db_session, req)
+            batched = await _build_response(db_session, req, **prefetch)
+            assert batched == per_row
+
+    async def test_build_loop_is_constant_queries(self, db_session):
+        """prefetch + build-loop не масштабируется по числу строк (нет N+1)."""
+        await self._seed_two_requests(db_session)
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=500)
+        assert len(items) >= 2
+
+        with self._count_queries() as c:
+            prefetch = await prefetch_list_maps(db_session, PROJECT_ID, items)
+            for req in items:
+                await _build_response(db_session, req, **prefetch)
+        batched = c["n"]
+
+        with self._count_queries() as c2:
+            for req in items:
+                await _build_response(db_session, req)
+        per_row = c2["n"]
+
+        # Батч-путь дешевле и ограничен константой (≤ число prefetch-запросов),
+        # per-row растёт с числом строк.
+        assert batched < per_row
+        assert batched <= 6

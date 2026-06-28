@@ -21,6 +21,7 @@ from .crud import (
     get_created_groups,
     list_assembly_requests,
     list_wb_warehouses,
+    prefetch_list_maps,
     update_assembly_request,
 )
 from .status import (
@@ -53,6 +54,7 @@ __all__ = [
     "get_created_groups",
     "list_assembly_requests",
     "list_wb_warehouses",
+    "prefetch_list_maps",
     "update_assembly_request",
     # status
     "_check_transition",

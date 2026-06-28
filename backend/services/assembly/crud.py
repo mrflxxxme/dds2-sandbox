@@ -280,25 +280,34 @@ def _format_deficit_error(deficits: list[dict]) -> str:
 async def _build_items_with_stock(
     db: AsyncSession,
     request: AssemblyRequest,
+    *,
+    nom_map: dict[int, Nomenclature] | None = None,
+    stock_by_wh_nom: dict[tuple[int, int], int] | None = None,
 ) -> list[dict]:
     """Build items list with product_name and stock_quantity.
 
-    Uses batch queries instead of per-item N+1 queries.
+    Single-row callers (create/update/get) pass no maps → batch queries scoped
+    to this one request. The list endpoint pre-fetches both maps across ALL
+    requests (см. prefetch_list_maps) and passes them in, so the per-row loop
+    issues zero DB round-trips — это и убирает N+1 на списке.
     """
     if not request.items:
         return []
 
     nom_ids = [item.nomenclature_id for item in request.items if item.nomenclature_id]
 
-    # Batch load nomenclature names
-    nom_map: dict[int, Nomenclature] = {}
-    if nom_ids:
-        nom_result = await db.execute(select(Nomenclature).where(Nomenclature.id.in_(nom_ids)))
-        nom_map = {n.id: n for n in nom_result.scalars().all()}
+    # Nomenclature names — prefetched map (batch) or scoped query (single-row)
+    if nom_map is None:
+        nom_map = {}
+        if nom_ids:
+            nom_result = await db.execute(select(Nomenclature).where(Nomenclature.id.in_(nom_ids)))
+            nom_map = {n.id: n for n in nom_result.scalars().all()}
 
-    # Batch load stock quantities
+    # Stock for THIS request's warehouse, keyed by nomenclature_id
     stock_map: dict[int, int] = {}
-    if nom_ids:
+    if stock_by_wh_nom is not None:
+        stock_map = {nid: stock_by_wh_nom.get((request.warehouse_id, nid), 0) for nid in nom_ids}
+    elif nom_ids:
         stock_result = await db.execute(
             select(WarehouseStock.nomenclature_id, WarehouseStock.quantity).where(
                 WarehouseStock.project_id == request.project_id,
@@ -331,11 +340,20 @@ async def _build_items_with_stock(
 async def _build_response(
     db: AsyncSession,
     request: AssemblyRequest,
+    *,
+    nom_map: dict[int, Nomenclature] | None = None,
+    stock_by_wh_nom: dict[tuple[int, int], int] | None = None,
+    cp_map: dict[int, Any] | None = None,
 ) -> dict:
     """
     Build AssemblyRequestResponse dict from ORM model.
     Loads warehouse.name, wb_fbo_supply.name, wb_fbo_supply.warehouse_name.
     Computes total_weight_kg = pallets_count * pallet_weight_kg.
+
+    Optional lookup maps (nom_map / stock_by_wh_nom / cp_map) are pre-fetched
+    once for the whole list by prefetch_list_maps; when provided this function
+    makes NO DB round-trips per row (kills the list N+1). Single-row callers
+    omit them and each lookup falls back to a scoped query.
     """
     # Relationships are pre-loaded via selectinload in list/get queries.
     # Refresh only for direct calls (e.g. after create/update).
@@ -351,13 +369,14 @@ async def _build_response(
     carrier_inn: str | None = None
     carrier_name: str | None = None
     if request.counterparty_id:
-        from backend.models.counterparty import Counterparty
-
-        cp_row = (
-            await db.execute(
-                select(Counterparty.inn, Counterparty.name).where(Counterparty.id == request.counterparty_id)
-            )
-        ).first()
+        if cp_map is not None:
+            cp_row = cp_map.get(request.counterparty_id)
+        else:
+            cp_row = (
+                await db.execute(
+                    select(Counterparty.inn, Counterparty.name).where(Counterparty.id == request.counterparty_id)
+                )
+            ).first()
         if cp_row is not None:
             carrier_inn = cp_row.inn
             carrier_name = cp_row.name
@@ -400,10 +419,79 @@ async def _build_response(
         "counterparty_id": request.counterparty_id,
         "carrier_inn": carrier_inn,
         "carrier_name": carrier_name,
-        "items": (items := await _build_items_with_stock(db, request)),
+        "items": (
+            items := await _build_items_with_stock(
+                db, request, nom_map=nom_map, stock_by_wh_nom=stock_by_wh_nom
+            )
+        ),
         "brands": ", ".join(sorted({i["brand"] for i in items if i.get("brand")})) or None,
         "created_at": request.created_at,
         "updated_at": request.updated_at,
+    }
+
+
+async def prefetch_list_maps(
+    db: AsyncSession,
+    project_id: int,
+    requests: list[AssemblyRequest],
+) -> dict[str, Any]:
+    """Pre-fetch every per-row lookup the list response needs, in a fixed number
+    of batch queries (independent of len(requests)).
+
+    Returns kwargs for `_build_response(...)` so the per-row build loop makes
+    zero DB round-trips. Без этого роутер делал на КАЖДУЮ сборку запросы
+    контрагента + номенклатуры + остатков (N+1 на ~400 строк = сотни запросов
+    через PgBouncer → тормоза списка/фильтров/поиска). `requests[*].items` уже
+    eager-loaded через selectinload в list_assembly_requests.
+    """
+    nom_ids: set[int] = set()
+    wh_ids: set[int] = set()
+    cp_ids: set[int] = set()
+    for req in requests:
+        if req.warehouse_id:
+            wh_ids.add(req.warehouse_id)
+        if req.counterparty_id:
+            cp_ids.add(req.counterparty_id)
+        for item in req.items:
+            if item.nomenclature_id:
+                nom_ids.add(item.nomenclature_id)
+
+    nom_map: dict[int, Nomenclature] = {}
+    if nom_ids:
+        res = await db.execute(select(Nomenclature).where(Nomenclature.id.in_(nom_ids)))
+        nom_map = {n.id: n for n in res.scalars().all()}
+
+    # Keyed by (warehouse_id, nomenclature_id): stock is per-warehouse, and rows
+    # of the list may span several warehouses. Summed per key to mirror the
+    # single-row query (multiple WarehouseStock rows per (wh, nom)).
+    stock_by_wh_nom: dict[tuple[int, int], int] = {}
+    if nom_ids and wh_ids:
+        res = await db.execute(
+            select(
+                WarehouseStock.warehouse_id,
+                WarehouseStock.nomenclature_id,
+                WarehouseStock.quantity,
+            ).where(
+                WarehouseStock.project_id == project_id,
+                WarehouseStock.warehouse_id.in_(wh_ids),
+                WarehouseStock.nomenclature_id.in_(nom_ids),
+            )
+        )
+        for row in res.all():
+            key = (row.warehouse_id, row.nomenclature_id)
+            stock_by_wh_nom[key] = stock_by_wh_nom.get(key, 0) + row.quantity
+
+    cp_map: dict[int, Any] = {}
+    if cp_ids:
+        res = await db.execute(
+            select(Counterparty.id, Counterparty.inn, Counterparty.name).where(Counterparty.id.in_(cp_ids))
+        )
+        cp_map = {row.id: row for row in res.all()}
+
+    return {
+        "nom_map": nom_map,
+        "stock_by_wh_nom": stock_by_wh_nom,
+        "cp_map": cp_map,
     }
 
 
