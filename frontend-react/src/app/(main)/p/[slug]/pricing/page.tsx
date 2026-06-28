@@ -130,9 +130,15 @@ export default function PricingPage() {
             'Чистая наценка %': r.net_markup_pct,
             'Остаток ВБ': r.wb_stock,
             'Дней до исчерпания': r.days_left,
+            'Продаж/мес': r.sales_per_month,
             'Заморожено (себест)': r.stock_value_cost,
             'Потенц. прибыль остатка': r.stock_potential_profit,
+            'Потенц. выручка остатка': r.stock_potential_revenue,
+            'Мин. цена (безубыток)': r.breakeven_price,
+            'ДРР %': r.drr,
+            'ABC': r.abc || '',
             'Аномалия': r.anomaly || '',
+            'Рекомендация': r.recommendation,
         }));
         exportToExcel(rows, 'Ценообразование');
     };
@@ -273,6 +279,11 @@ export default function PricingPage() {
                                 <th style={th}>Прибыль</th>
                                 <th style={th}>Маржа %</th>
                                 <th style={th}>Чист. наценка</th>
+                                <th style={th}>Мин. цена</th>
+                                <th style={th}>ABC</th>
+                                <th style={th}>ДРР %</th>
+                                <th style={th}>Прод/мес</th>
+                                <th style={thL}>Рекомендация</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -334,6 +345,11 @@ function GroupRows({ group, open, onToggle, anomalyMode }: { group: PricingGroup
                 <td style={{ ...td, color: pctColor(group.profit) }}>{fmtMoney(group.profit)}</td>
                 <td style={{ ...td, color: pctColor(group.margin_pct) }}>{fmtPct(group.margin_pct)}</td>
                 <td style={td}>—</td>
+                <td style={td}>—</td>
+                <td style={td}>—</td>
+                <td style={td}>—</td>
+                <td style={td}>—</td>
+                <td style={tdL}>—</td>
             </tr>
             {open && group.children.map((r) => <SkuRow key={r.nm_id} r={r} indent hideAnomaly={anomalyMode} showCategory={anomalyMode} />)}
         </>
@@ -371,6 +387,11 @@ function SkuRow({ r, indent, showCategory, hideAnomaly }: { r: PricingRow; inden
             <td style={{ ...td, color: pctColor(r.profit) }}>{fmtMoney(r.profit)}</td>
             <td style={{ ...td, color: pctColor(r.margin_pct) }}>{fmtPct(r.margin_pct)}</td>
             <td style={{ ...td, color: pctColor(r.net_markup_pct) }}>{fmtPct(r.net_markup_pct)}</td>
+            <td style={td}>{fmtMoney(r.breakeven_price)}</td>
+            <td style={{ ...td, fontWeight: 600, color: r.abc === 'A' ? 'var(--color-success)' : r.abc === 'C' ? 'var(--color-text-dim)' : 'var(--color-text)' }}>{r.abc || '—'}</td>
+            <td style={td}>{fmtPct(r.drr)}</td>
+            <td style={td}>{r.sales_per_month == null ? '—' : formatNumber(r.sales_per_month, 1)}</td>
+            <td style={{ ...tdL, color: r.anomaly ? 'var(--color-danger)' : r.recommendation && r.recommendation !== 'OK' ? 'var(--color-warning)' : 'var(--color-text-dim)' }}>{r.recommendation}</td>
         </tr>
     );
 }

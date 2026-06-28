@@ -49,8 +49,16 @@ class PricingRow(BaseModel):
     wb_stock: int = 0  # остаток на складах ВБ (quantity_full)
     stock_value_cost: float | None = None  # остаток × себест — заморожено в товаре, ₽
     stock_potential_profit: float | None = None  # остаток × прибыль/ед — потенциальная прибыль остатка, ₽
+    stock_potential_revenue: float | None = None  # остаток × цена витрины — потенциальная выручка, ₽
     days_left: float | None = None  # дней до исчерпания (по темпу продаж за период)
+    sales_per_month: float | None = None  # оборачиваемость: продаж/мес (по темпу периода)
     anomaly: str | None = None  # метка аномалии (или None если строка нормальная)
+
+    # Доп. метрики для решений по цене
+    breakeven_price: float | None = None  # мин. цена витрины для нулевой прибыли (учёт СПП/комиссии/налога)
+    drr: float = 0  # ДРР: реклама / выручка × 100
+    abc: str | None = None  # ABC-класс по выручке (A/B/C)
+    recommendation: str = ""  # авто-рекомендация по цене/остатку
 
 
 class PricingGroup(BaseModel):

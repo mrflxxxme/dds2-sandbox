@@ -549,8 +549,14 @@ export interface PricingRow {
   wb_stock: number;
   stock_value_cost: number | null;
   stock_potential_profit: number | null;
+  stock_potential_revenue: number | null;
   days_left: number | null;
+  sales_per_month: number | null;
   anomaly: string | null;
+  breakeven_price: number | null;
+  drr: number;
+  abc: string | null;
+  recommendation: string;
 }
 
 export interface PricingGroup {

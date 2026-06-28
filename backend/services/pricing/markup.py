@@ -128,6 +128,26 @@ def _classify_anomaly(r: PricingRow) -> str | None:
     return None
 
 
+def _recommend(r: PricingRow) -> str:
+    """Короткая авто-рекомендация по цене/остатку на основе метрик строки."""
+    rec_by_anomaly = {
+        ANOMALY_PRICE_BELOW_COST: "Срочно поднять цену",
+        ANOMALY_LOSS: "Поднять цену / снизить затраты",
+        ANOMALY_NO_COST: "Заполнить себестоимость",
+        ANOMALY_SUSPICIOUS_COST: "Проверить себестоимость",
+        ANOMALY_THIN_MARKUP: "Поднять цену",
+        ANOMALY_DEAD_STOCK: "Распродать / снизить цену",
+    }
+    if r.anomaly:
+        return rec_by_anomaly.get(r.anomaly, "Проверить")
+    # без аномалии — сигналы по обороту
+    if r.days_left is not None and r.days_left < 14 and r.markup_pct is not None and r.markup_pct > 80:
+        return "Высокий спрос — поднять цену / пополнить"
+    if r.days_left is not None and r.days_left > 120:
+        return "Затоварено — снизить цену"
+    return "OK"
+
+
 def _build_row(
     nm_id: int,
     price: WbPrice | None,
@@ -173,14 +193,31 @@ def _build_row(
     net_markup_pct = round(profit / cost_total * 100, 2) if cost_total > 0 else None
     orders_count = int(f.get("orders_count") or 0)
 
+    adv_sum = round(float(f.get("adv_sum") or 0), 2)
+    tax = round(float(f.get("tax") or 0), 2)
+
     # Остаток ВБ и производные
     stock_value_cost = round(wb_stock * cost_price, 2) if has_cost and cost_price is not None else None
     profit_per_unit = (profit / orders_count) if orders_count > 0 else None
     stock_potential_profit = (
         round(wb_stock * profit_per_unit, 2) if profit_per_unit is not None and wb_stock > 0 else None
     )
+    stock_potential_revenue = (
+        round(wb_stock * current_price, 2) if has_price and current_price is not None and wb_stock > 0 else None
+    )
     avg_daily = orders_count / period_days if period_days > 0 else 0
     days_left = round(wb_stock / avg_daily, 1) if avg_daily > 0 and wb_stock > 0 else None
+    sales_per_month = round(avg_daily * 30, 1) if avg_daily > 0 else None
+
+    # ДРР и точка безубыточности
+    drr = round(adv_sum / revenue * 100, 2) if revenue > 0 else 0
+    # цена, при которой прибыль = 0: масштабируем текущую цену так, чтобы
+    # ценозависимый нетто-вклад (выручка − удержания ВБ − налог) покрыл fixed-затраты
+    # (себестоимость + реклама). Учитывает СПП/комиссию/налог через realized-доли.
+    net_contrib = revenue - wb_expenses - tax  # ≈ к перечислению минус налог
+    breakeven_price = None
+    if has_price and current_price is not None and revenue > 0 and net_contrib > 0:
+        breakeven_price = round(current_price * (cost_total + adv_sum) / net_contrib, 2)
 
     row = PricingRow(
         nm_id=nm_id,
@@ -202,8 +239,8 @@ def _build_row(
         orders_count=orders_count,
         revenue=round(revenue, 2),
         wb_expenses=wb_expenses,
-        adv_sum=round(float(f.get("adv_sum") or 0), 2),
-        tax=round(float(f.get("tax") or 0), 2),
+        adv_sum=adv_sum,
+        tax=tax,
         cost_total=round(cost_total, 2),
         profit=round(profit, 2),
         margin_pct=round(float(f.get("margin") or 0), 2),
@@ -211,9 +248,14 @@ def _build_row(
         wb_stock=wb_stock,
         stock_value_cost=stock_value_cost,
         stock_potential_profit=stock_potential_profit,
+        stock_potential_revenue=stock_potential_revenue,
         days_left=days_left,
+        sales_per_month=sales_per_month,
+        drr=drr,
+        breakeven_price=breakeven_price,
     )
     row.anomaly = _classify_anomaly(row)
+    row.recommendation = _recommend(row)
     return row
 
 
@@ -254,6 +296,23 @@ def _portfolio_markup(items: list[PricingRow]) -> tuple[float | None, float | No
 
 def _sort_by_markup(items: list[PricingRow]) -> None:
     items.sort(key=lambda r: r.markup_pct if r.markup_pct is not None else -1e18, reverse=True)
+
+
+def _assign_abc(rows: list[PricingRow]) -> None:
+    """ABC-класс по доле выручки (Парето): A ≤80%, B ≤95%, остальное C."""
+    total = sum(r.revenue for r in rows)
+    if total <= 0:
+        for r in rows:
+            r.abc = None
+        return
+    cum = 0.0
+    for r in sorted(rows, key=lambda x: x.revenue, reverse=True):
+        if r.revenue <= 0:
+            r.abc = "C"
+            continue
+        cum += r.revenue
+        share = cum / total
+        r.abc = "A" if share <= 0.8 else ("B" if share <= 0.95 else "C")
 
 
 def _group_by_category(rows: list[PricingRow]) -> list[PricingGroup]:
@@ -444,6 +503,7 @@ async def get_markup_analytics(
     raw = await _compute_rows(db, project_id, date_from=date_from, date_to=date_to)
     rows = [PricingRow(**r) for r in raw["rows"]]
     rows = _apply_filters(rows, brand, category, search, min_orders, only_in_stock)
+    _assign_abc(rows)  # ABC по текущему (отфильтрованному) срезу
     summary = _build_summary(rows)
     synced = raw["price_synced_at"]
     has_bdr = raw["has_bdr"]
