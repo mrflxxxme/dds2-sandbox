@@ -9,6 +9,8 @@ import type {
     ProductTagMappingPayload,
     ProductStatusPayload,
     ProductStatusBulkPayload,
+    ProductSubcategory,
+    DetectedSize,
     FunnelProductsResponse,
 } from '@/types/api';
 
@@ -65,6 +67,27 @@ export function addRefMethods(api: ApiClient) {
         // IMT Aliases
         getImtAliases() { return api.request<Record<string, string>>('GET', '/api/v1/refs/imt-aliases'); },
         setImtAlias(data: { imt_id: number; name: string }) { return api.request<MessageResponse>('PATCH', '/api/v1/refs/imt-aliases', data); },
+
+        // Sizes (overrides + aliases): размер = оверрайд → парсинг артикула → «Без размера», затем алиас
+        getSizes() { return api.request<DetectedSize[]>('GET', '/api/v1/refs/sizes'); },
+        getSizeOverrides() { return api.request<Record<string, string>>('GET', '/api/v1/refs/size-overrides'); },
+        bulkSetSizeOverride(nmIds: number[], sizeValue: string) { return api.request<MessageResponse>('POST', '/api/v1/refs/size-overrides', { nm_ids: nmIds, size_value: sizeValue }); },
+        getSizeAliases() { return api.request<Record<string, string>>('GET', '/api/v1/refs/size-aliases'); },
+        setSizeAlias(rawSize: string, displayName: string) { return api.request<MessageResponse>('PATCH', '/api/v1/refs/size-aliases', { raw_size: rawSize, display_name: displayName }); },
+
+        // Category overrides: категория = оверрайд → предмет WB (subject) → «Без категории»
+        getCategoryOverrides() { return api.request<Record<string, string>>('GET', '/api/v1/refs/category-overrides'); },
+        bulkSetCategoryOverride(nmIds: number[], categoryValue: string) { return api.request<MessageResponse>('POST', '/api/v1/refs/category-overrides', { nm_ids: nmIds, category_value: categoryValue }); },
+
+        // Barcode → nm_id map (массовая привязка размер/под-кат/категория по баркодам из Excel)
+        getBarcodeMap() { return api.request<Record<string, number>>('GET', '/api/v1/refs/barcode-map'); },
+
+        // Sub-categories (винтаж/обычные — одна на товар)
+        getSubcategories() { return api.request<ProductSubcategory[]>('GET', '/api/v1/refs/subcategories'); },
+        upsertSubcategory(data: Partial<ProductSubcategory>) { return api.request<ProductSubcategory>('POST', '/api/v1/refs/subcategories', data); },
+        deleteSubcategory(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/refs/subcategories/${id}`); },
+        getSubcategoryMapping() { return api.request<Record<string, number>>('GET', '/api/v1/refs/subcategories/mapping'); },
+        bulkSetSubcategory(nmIds: number[], subcategoryId: number | null) { return api.request<MessageResponse>('POST', '/api/v1/refs/subcategories/mapping', { nm_ids: nmIds, subcategory_id: subcategoryId }); },
 
         // Funnel Products (for tag/status assignment)
         getFunnelProducts() { return api.request<FunnelProductsResponse>('GET', '/api/v1/funnel/products'); },

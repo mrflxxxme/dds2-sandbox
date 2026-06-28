@@ -586,6 +586,74 @@ async def build_size_resolver(db: AsyncSession, project_id: int) -> tuple[dict[i
     return await get_size_overrides(db, project_id), await get_size_aliases(db, project_id)
 
 
+# ─── Category overrides (ручной перенос товара в категорию) ───────────────────
+
+
+async def get_category_overrides(db: AsyncSession, project_id: int) -> dict[int, str]:
+    """Get {nm_id: category_value} mapping."""
+    from backend.models.refs import CategoryOverride
+
+    result = await db.execute(
+        select(CategoryOverride.nm_id, CategoryOverride.category_value).where(
+            CategoryOverride.project_id == project_id
+        )
+    )
+    return {r.nm_id: r.category_value for r in result}
+
+
+async def bulk_set_category_override(
+    db: AsyncSession, project_id: int, nm_ids: list[int], category_value: str
+) -> bool:
+    """Bulk upsert категории для товаров; пустое значение → снять оверрайд (вернуть предмет WB)."""
+    from sqlalchemy import delete
+
+    from backend.models.refs import CategoryOverride
+
+    if not nm_ids:
+        return True
+
+    value = (category_value or "").strip()
+    if not value:
+        await db.execute(
+            delete(CategoryOverride).where(
+                CategoryOverride.project_id == project_id, CategoryOverride.nm_id.in_(nm_ids)
+            )
+        )
+        await db.commit()
+        return True
+
+    result = await db.execute(
+        select(CategoryOverride).where(
+            CategoryOverride.project_id == project_id, CategoryOverride.nm_id.in_(nm_ids)
+        )
+    )
+    existing_map = {row.nm_id: row for row in result.scalars().all()}
+    for nm_id in nm_ids:
+        if nm_id in existing_map:
+            existing_map[nm_id].category_value = value
+        else:
+            db.add(CategoryOverride(project_id=project_id, nm_id=nm_id, category_value=value))
+    await db.commit()
+    return True
+
+
+async def build_category_resolver(db: AsyncSession, project_id: int) -> dict[int, str]:
+    """{nm_id: category} оверрайдов для группировки воронки (override → иначе предмет WB)."""
+    return await get_category_overrides(db, project_id)
+
+
+async def get_barcode_nm_map(db: AsyncSession, project_id: int) -> dict[str, int]:
+    """{barcode: nm_id (article_wb)} — резолв баркодов из Excel в товары (массовая привязка)."""
+    from backend.models.cost import Nomenclature
+
+    result = await db.execute(
+        select(Nomenclature.barcode, Nomenclature.article_wb)
+        .where(Nomenclature.project_id == project_id, Nomenclature.article_wb.isnot(None))
+        .limit(50000)
+    )
+    return {bc: nm for bc, nm in result if bc and nm is not None}
+
+
 # ─── Product sub-categories (винтаж / обычные — одна на товар) ─────────────────
 
 

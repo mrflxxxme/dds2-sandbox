@@ -131,6 +131,7 @@ from backend.models.planning import (
 # References
 from backend.models.refs import (
     Account,
+    CategoryOverride,  # noqa: F401
     CategoryRef,
     CounterpartyCategory,
     ImtAlias,  # noqa: F401

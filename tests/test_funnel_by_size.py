@@ -164,6 +164,35 @@ class TestGetFunnelByCategorySize:
         s200 = next(c for c in shtory["children"] if c["size"] == "200x300")
         assert {s["nm_id"] for s in s200["children"]} == {4}
 
+    @pytest.mark.asyncio
+    async def test_category_override_regroups_product(self):
+        from backend.services.funnel.queries_grouping import get_funnel_by_category_size
+
+        rows = [
+            _row(1, "200x300_бежевый", subject="Ковры"),
+            _row(2, "200x300_серый", subject="Ковры"),
+        ]
+        p1, p2 = _patch_maps({1: 100, 2: 100})
+        with p1, p2:
+            result = await get_funnel_by_category_size(
+                _db_with_scalars(rows),
+                PROJECT_ID,
+                TAX_INFO,
+                "2026-01-01",
+                "2026-12-31",
+                None,
+                None,
+                cat_override_map={1: "Ковры винтаж"},
+            )
+        # nm_id=1 ушёл в оверрайд-категорию, nm_id=2 остался в предмете WB
+        assert {r["subject"] for r in result} == {"Ковры", "Ковры винтаж"}
+        vintage = next(r for r in result if r["subject"] == "Ковры винтаж")
+        v200 = next(c for c in vintage["children"] if c["size"] == "200x300")
+        assert {s["nm_id"] for s in v200["children"]} == {1}
+        kovry = next(r for r in result if r["subject"] == "Ковры")
+        k200 = next(c for c in kovry["children"] if c["size"] == "200x300")
+        assert {s["nm_id"] for s in k200["children"]} == {2}
+
 
 class TestResolveColorFilter:
     @pytest.mark.asyncio

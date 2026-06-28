@@ -507,7 +507,15 @@ export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_cod
     subject?: string | null;
     tag?: string;
     imt_group?: string;
-    children?: FunnelSkuRow[];
+    size?: string;
+    subcategory?: string;
+    nm_id?: number;
+    vendor_code?: string;
+    children?: FunnelGroupRow[];
+}
+
+export interface FunnelColorsResponse {
+  colors: string[];
 }
 
 export interface FunnelSummary {
@@ -868,6 +876,18 @@ export interface ProductTag {
   color: string;
 }
 
+export interface ProductSubcategory {
+  id: number;
+  name: string;
+  color: string;
+}
+
+export interface DetectedSize {
+  raw_size: string;
+  display_name: string;
+  count: number;
+}
+
 export interface ProductTagMappingPayload {
   nm_ids: number[];
   add_tags: number[];
@@ -888,6 +908,7 @@ export interface FunnelProduct {
   nm_id: number;
   brand: string;
   vendor_code: string;
+  subject: string;
   imt_id: number | null;
 }
 

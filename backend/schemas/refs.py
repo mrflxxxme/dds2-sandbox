@@ -130,6 +130,13 @@ class SizeOverrideBulkPayload(BaseModel):
     size_value: str
 
 
+class CategoryOverrideBulkPayload(BaseModel):
+    """Назначить категорию товарам вручную; пустое значение = снять оверрайд (вернуть предмет WB)."""
+
+    nm_ids: list[int]
+    category_value: str
+
+
 class SubcategorySchema(BaseModel):
     """Output/upsert for ProductSubcategory."""
 

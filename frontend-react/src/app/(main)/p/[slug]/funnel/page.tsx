@@ -20,6 +20,50 @@ const daysColor = (d: number | undefined) => {
     return '#10b981';
 };
 
+// Ячейки метрик строки (воронка+реклама+финансы+конверсия+остатки) — общие для
+// всех уровней дерева «Категория → Размер → SKU».
+const metricCells = (r: FunnelGroupRow, extended: boolean) => (
+    <>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.open_card)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.add_to_cart)}</td>
+        <td style={{ textAlign: 'right', fontWeight: 600, borderBottom: '1px solid #f3f4f6' }}>{fmt(r.orders_count)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.orders_sum_rub)}</td>
+        <td style={{ textAlign: 'right', fontWeight: 500, borderBottom: '1px solid #f3f4f6', color: (r.revenue ?? 0) > 0 ? '#111827' : '#ef4444' }}>{fmt(r.revenue)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6', color: (r.adv_sum ?? 0) > 0 ? '#f97316' : '#9ca3af' }}>{fmt(r.adv_sum)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.adv_views)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.adv_clicks)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.ctr ?? 0) > 5 ? '#10b981' : (r.ctr ?? 0) > 2 ? '#374151' : '#f59e0b' }}>{fmtPct(r.ctr)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.cpc)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.cpm)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.drr ?? 0) > 30 ? '#ef4444' : (r.drr ?? 0) > 15 ? '#f59e0b' : (r.drr ?? 0) > 0 ? '#10b981' : '#9ca3af', fontWeight: (r.drr ?? 0) > 30 ? 600 : 400 }}>{fmtPct(r.drr)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6', color: (r.spp_rate || 0) > 40 ? '#ef4444' : (r.spp_rate || 0) > 20 ? '#f59e0b' : '#10b981', fontSize: 12 }}>{r.spp_rate ? fmtPct(r.spp_rate) : '—'}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', fontSize: 12 }}>{r.buyout_percent ? fmtPct(r.buyout_percent) : '—'}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: '#6b7280' }}>{fmt(r.tax)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.commission_rate ?? 0) > 0 ? '#6366f1' : '#9ca3af', fontSize: 12 }}>{(r.commission_rate ?? 0) > 0 ? fmtPct(r.commission_rate) : '—'}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.commission ?? 0) > 0 ? '#6366f1' : '#9ca3af', fontWeight: 500 }}>{(r.commission ?? 0) > 0 ? fmt(r.commission) : '—'}</td>
+        <td style={{ textAlign: 'right', fontWeight: 700, borderBottom: '1px solid #f3f4f6', color: (r.profit ?? 0) > 0 ? '#10b981' : '#ef4444', background: (r.profit ?? 0) > 0 ? '#f0fdf4' : (r.profit ?? 0) < 0 ? '#fef2f2' : undefined }}>{fmt(r.profit)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: (r.margin ?? 0) > 20 ? '#10b981' : (r.margin ?? 0) > 0 ? '#65a30d' : '#ef4444', fontWeight: (r.margin ?? 0) > 20 ? 600 : 400 }}>{fmtPct(r.margin)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.avg_price)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{fmtPct(r.add_to_cart_pct)}</td>
+        <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmtPct(r.cart_to_order_pct)}</td>
+        {extended && <td title={`${fmt(r.wb_stock_qty)} шт на WB`} style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', borderLeft: '1px solid #f3f4f6' }}>{fmt(r.wb_stock_cost)}</td>}
+        {extended && <td title={`${fmt(r.own_stock_qty)} шт на наших складах (с резервом, без брака)`} style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6' }}>{fmt(r.own_stock_cost)}</td>}
+        {extended && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', fontWeight: 600 }}>{fmt((r.wb_stock_cost ?? 0) + (r.own_stock_cost ?? 0))}</td>}
+        {extended && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: daysColor(r.stock_days_left), fontWeight: 600 }}>{fmtDays(r.stock_days_left)}</td>}
+    </>
+);
+
+// Листовая SKU-строка дерева размеров (используется на 3-м и 4-м уровнях)
+const sizeTreeSkuRow = (sku: FunnelGroupRow, extended: boolean, padLeft: number) => (
+    <tr key={'sku-' + sku.nm_id} style={{ background: '#ffffff', fontSize: 12, color: '#374151' }}>
+        <td style={{ position: 'sticky', left: 0, background: '#ffffff', zIndex: 2, padding: `6px 12px 6px ${padLeft}px`, borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', minWidth: 200 }}>
+            <div style={{ fontWeight: 500 }}>{sku.vendor_code || sku.nm_id}</div>
+            <div style={{ fontSize: 11, color: '#9ca3af' }}>{sku.brand}</div>
+        </td>
+        {metricCells(sku, extended)}
+    </tr>
+);
+
 /* ─── Main page ──────────────────────────────────────────────── */
 
 export default function FunnelPage() {
@@ -38,7 +82,7 @@ export default function FunnelPage() {
     const [hasBdr, setHasBdr] = useState(false);
 
     // Group by mode
-    const [groupBy, setGroupBy] = useState<'day' | 'sku' | 'brand' | 'subject' | 'tag' | 'imt' | 'abc'>('day');
+    const [groupBy, setGroupBy] = useState<'day' | 'sku' | 'brand' | 'subject' | 'tag' | 'imt' | 'size' | 'abc'>('day');
     const [skuData, setSkuData] = useState<FunnelSkuRow[]>([]);
     const [groupData, setGroupData] = useState<FunnelGroupRow[]>([]);
     const [abcData, setAbcData] = useState<FunnelAbcRow[]>([]);
@@ -53,6 +97,8 @@ export default function FunnelPage() {
     const [search, setSearch] = useState('');
     const [filterTag, setFilterTag] = useState('');
     const [filterImt, setFilterImt] = useState('');
+    const [filterColor, setFilterColor] = useState('');
+    const [splitSubcat, setSplitSubcat] = useState(false); // «разбить по под-категории» на вкладке «По размеру»
     const [extended, setExtended] = useState(false);
     const [minOrders, setMinOrders] = useState(0);
     // Сортировка складских колонок (клик по заголовку: ↓ → ↑ → сброс)
@@ -81,6 +127,7 @@ export default function FunnelPage() {
     }, [stockSort, extended]);
     const [tagOptions, setTagOptions] = useState<{ id: number; name: string }[]>([]);
     const [imtOptions, setImtOptions] = useState<{ id: string; name: string }[]>([]);
+    const [colorOptions, setColorOptions] = useState<string[]>([]);
 
     // Which charts to display (multiple selection)
     const [chartFields, setChartFields] = useState<{ field: string; label: string; color: string }[]>([
@@ -106,7 +153,17 @@ export default function FunnelPage() {
         } catch { return null; }
     }, []);
 
-    const loadData = useCallback(async (df?: string, dt?: string, gb?: 'day' | 'sku' | 'brand' | 'subject' | 'tag' | 'imt' | 'abc') => {
+    // Цвета для фильтра — в рамках выбранной категории/бренда (сбрасываем выбранный, если исчез)
+    const loadColors = useCallback(async (subj?: string, br?: string) => {
+        try {
+            const res = await api.getFunnelColors(subj ?? subject, br ?? brand);
+            const cols = res?.colors || [];
+            setColorOptions(cols);
+            setFilterColor(prev => (prev && !cols.includes(prev) ? '' : prev));
+        } catch { /* optional filter */ }
+    }, [subject, brand]);
+
+    const loadData = useCallback(async (df?: string, dt?: string, gb?: 'day' | 'sku' | 'brand' | 'subject' | 'tag' | 'imt' | 'size' | 'abc') => {
         const from = df || dateFrom;
         const to = dt || dateTo;
         const mode = gb || groupBy;
@@ -114,7 +171,7 @@ export default function FunnelPage() {
         setLoading(true);
         try {
             const [res, sum] = await Promise.all([
-                api.getFunnelData({ date_from: from, date_to: to, brand, vendor_code: search, subject, group_by: mode, extended, min_orders: minOrders, tag: filterTag, imt: filterImt }),
+                api.getFunnelData({ date_from: from, date_to: to, brand, vendor_code: search, subject, group_by: mode, extended, min_orders: minOrders, tag: filterTag, imt: filterImt, color: filterColor, subcat: splitSubcat }),
                 api.getFunnelSummary(from, to, brand, subject),
             ]);
             if (mode === 'abc') {
@@ -127,7 +184,7 @@ export default function FunnelPage() {
                 setData([]);
                 setGroupData([]);
                 setAbcData([]);
-            } else if (mode === 'brand' || mode === 'subject' || mode === 'tag' || mode === 'imt') {
+            } else if (mode === 'brand' || mode === 'subject' || mode === 'tag' || mode === 'imt' || mode === 'size') {
                 setGroupData((res.data || []) as FunnelGroupRow[]);
                 setData([]);
                 setSkuData([]);
@@ -148,7 +205,7 @@ export default function FunnelPage() {
         } finally {
             setLoading(false);
         }
-    }, [dateFrom, dateTo, brand, subject, search, groupBy, extended, minOrders, filterTag, filterImt]);
+    }, [dateFrom, dateTo, brand, subject, search, groupBy, extended, minOrders, filterTag, filterImt, filterColor, splitSubcat]);
 
     const loadSyncStatus = useCallback(async () => {
         try {
@@ -178,6 +235,7 @@ export default function FunnelPage() {
                 const imtEntries = Object.entries(imtRes || {}).map(([id, name]) => ({ id, name: String(name) }));
                 setImtOptions(imtEntries);
             } catch { /* optional filters */ }
+            await loadColors();
             if (f?.min_date && f?.max_date) {
                 // Default: last 30 days excluding today (funnel data for today is incomplete)
                 const today = new Date();
@@ -196,7 +254,9 @@ export default function FunnelPage() {
         })();
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    useEffect(() => { if (initDone && dateFrom && dateTo) loadData(); }, [dateFrom, dateTo, brand, subject, search, extended, minOrders, filterTag, filterImt]);
+    useEffect(() => { if (initDone && dateFrom && dateTo) loadData(); }, [dateFrom, dateTo, brand, subject, search, extended, minOrders, filterTag, filterImt, filterColor, splitSubcat]);
+    // Цвета зависят от выбранной категории/бренда
+    useEffect(() => { if (initDone) loadColors(); }, [subject, brand]); // eslint-disable-line react-hooks/exhaustive-deps
 
 
     // Summary card definitions
@@ -229,7 +289,7 @@ export default function FunnelPage() {
     // Excel-экспорт текущей сводки. Значения — сырые числа (Excel сам считает/сортирует);
     // '' для пустых rate-полей (как «—» в таблице). Колонки повторяют активную вкладку.
     const handleExportFunnel = () => {
-        const labels = { day: 'По дням', sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям', tag: 'По ярлыкам', imt: 'По склейкам', abc: 'ABC анализ' } as const;
+        const labels = { day: 'По дням', sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям', size: 'По размеру', tag: 'По ярлыкам', imt: 'По склейкам', abc: 'ABC анализ' } as const;
         const range = dateFrom && dateTo ? `_${dateFrom}_${dateTo}` : '';
         const fname = `Воронка_${labels[groupBy]}${range}`;
 
@@ -271,6 +331,14 @@ export default function FunnelPage() {
         let rows: Record<string, string | number>[] = [];
         if (groupBy === 'sku') {
             rows = sortStockRows(skuData).map(r => ({ 'Бренд': r.brand || '', 'Артикул': r.vendor_code || '', 'WB ID': r.nm_id, 'Категория': r.subject || '', ...metricCols(r) }));
+        } else if (groupBy === 'size') {
+            // Дерево категория → размер: плоский экспорт строк-размеров
+            rows = [];
+            sortStockRows(groupData).forEach(cat => {
+                (cat.children || []).forEach(sz => {
+                    rows.push({ 'Категория': cat.subject || '—', 'Размер': sz.size || '—', ...metricCols(sz) });
+                });
+            });
         } else if (groupBy === 'brand' || groupBy === 'subject' || groupBy === 'tag' || groupBy === 'imt') {
             const colName = groupBy === 'brand' ? 'Бренд' : groupBy === 'tag' ? 'Ярлык' : groupBy === 'imt' ? 'Склейка' : 'Категория';
             rows = sortStockRows(groupData
@@ -388,6 +456,11 @@ export default function FunnelPage() {
                         <option value="">Все склейки</option>
                         {imtOptions.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
                     </select>
+                    <select value={filterColor} onChange={e => setFilterColor(e.target.value)}
+                        style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 6, padding: '4px 8px', color: 'var(--color-text)', fontSize: 13 }}>
+                        <option value="">Все цвета</option>
+                        {colorOptions.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
                 </div>
             )}
 
@@ -482,9 +555,18 @@ export default function FunnelPage() {
                     {/* Group by toggle */}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                         <h3 style={{ fontSize: 16, fontWeight: 600, color: '#111827', margin: 0 }}>
-                            {groupBy === 'day' ? 'Сводка по дням' : groupBy === 'sku' ? 'Сводка по товарам' : groupBy === 'brand' ? 'Сводка по брендам' : groupBy === 'tag' ? 'Сводка по ярлыкам' : groupBy === 'imt' ? 'Сводка по склейкам' : groupBy === 'abc' ? 'ABC анализ' : 'Сводка по категориям'}
+                            {groupBy === 'day' ? 'Сводка по дням' : groupBy === 'sku' ? 'Сводка по товарам' : groupBy === 'brand' ? 'Сводка по брендам' : groupBy === 'tag' ? 'Сводка по ярлыкам' : groupBy === 'imt' ? 'Сводка по склейкам' : groupBy === 'size' ? 'Сводка по размеру' : groupBy === 'abc' ? 'ABC анализ' : 'Сводка по категориям'}
                         </h3>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {groupBy === 'size' && (
+                            <button onClick={() => setSplitSubcat(v => !v)}
+                                title="Добавить уровень под-категории (винтаж/обычные) под размером"
+                                style={{
+                                    padding: '6px 14px', fontSize: 13, fontWeight: 500, whiteSpace: 'nowrap', cursor: 'pointer',
+                                    border: '1px solid ' + (splitSubcat ? '#8b5cf6' : '#e5e7eb'), borderRadius: 8,
+                                    background: splitSubcat ? '#8b5cf6' : '#fff', color: splitSubcat ? '#fff' : '#374151',
+                                }}>🏷️ Разбить по под-категории</button>
+                        )}
                         <button onClick={() => groupBy !== 'day' && setExtended(v => !v)}
                             disabled={groupBy === 'day'}
                             title={groupBy === 'day'
@@ -499,8 +581,8 @@ export default function FunnelPage() {
                             }}>📦 Расширенное</button>
                         <button onClick={handleExportFunnel} className="btn btn-secondary btn-sm" style={{ fontSize: 13, padding: '6px 14px', whiteSpace: 'nowrap' }}>📥 Excel</button>
                         <div style={{ display: 'flex', gap: 0, border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
-                            {(['day', 'sku', 'brand', 'subject', 'tag', 'imt', 'abc'] as const).map((mode, idx) => {
-                                const labels = { day: 'По дням', sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям', tag: 'По ярлыкам', imt: 'По склейкам', abc: 'ABC анализ' };
+                            {(['day', 'sku', 'brand', 'subject', 'size', 'tag', 'imt', 'abc'] as const).map((mode, idx) => {
+                                const labels = { day: 'По дням', sku: 'По артикулам', brand: 'По брендам', subject: 'По категориям', size: 'По размеру', tag: 'По ярлыкам', imt: 'По склейкам', abc: 'ABC анализ' };
                                 return (
                                     <button
                                         key={mode}
@@ -624,14 +706,14 @@ export default function FunnelPage() {
 
                     {/* Brand / Subject Group Table */}
                     {/* TODO: migrate to TanStackDataTable — complex table with rowSpan, colSpan, sticky columns, multi-row headers */}
-                    {(groupBy === 'brand' || groupBy === 'subject' || groupBy === 'tag' || groupBy === 'imt') && (
+                    {(groupBy === 'brand' || groupBy === 'subject' || groupBy === 'tag' || groupBy === 'imt' || groupBy === 'size') && (
                         <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                             <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 320px)' }}>
                                 {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> : (
                                     <table className="data-table" style={{ minWidth: 1600, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#ffffff' }}>
                                     <thead>
                                         <tr ref={headerRow1Ref}>
-                                            <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#ffffff', color: '#374151', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb', minWidth: 200, borderRight: '1px solid #e5e7eb', padding: '8px 12px', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.08)' }}>{groupBy === 'brand' ? 'БРЕНД' : groupBy === 'tag' ? 'ЯРЛЫК' : groupBy === 'imt' ? 'СКЛЕЙКА' : 'КАТЕГОРИЯ'}</th>
+                                            <th rowSpan={2} style={{ position: 'sticky', left: 0, top: 0, background: '#ffffff', color: '#374151', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb', minWidth: 200, borderRight: '1px solid #e5e7eb', padding: '8px 12px', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.08)' }}>{groupBy === 'brand' ? 'БРЕНД' : groupBy === 'tag' ? 'ЯРЛЫК' : groupBy === 'imt' ? 'СКЛЕЙКА' : groupBy === 'size' ? 'КАТЕГОРИЯ → РАЗМЕР' : 'КАТЕГОРИЯ'}</th>
                                             <th colSpan={5} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb' }}>ВОРОНКА ПРОДАЖ</th>
                                             <th colSpan={7} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ВНУТРЕННЯЯ РЕКЛАМА</th>
                                             <th colSpan={8} style={{ position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', borderLeft: '1px solid #e5e7eb' }}>ФИНАНСЫ</th>
@@ -673,7 +755,7 @@ export default function FunnelPage() {
                                                 Нет данных за выбранный период
                                             </td></tr>
                                         )}
-                                        {sortStockRows(groupData.filter(r => {
+                                        {groupBy !== 'size' && sortStockRows(groupData.filter(r => {
                                             if (filterTag && groupBy === 'tag' && r.tag !== filterTag) return false;
                                             if (filterImt && groupBy === 'imt' && r.imt_group !== filterImt) return false;
                                             return true;
@@ -755,6 +837,71 @@ export default function FunnelPage() {
                                                             {extended && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', fontWeight: 600 }}>{fmt((c.wb_stock_cost ?? 0) + (c.own_stock_cost ?? 0))}</td>}
                                                             {extended && <td style={{ textAlign: 'right', borderBottom: '1px solid #f3f4f6', color: daysColor(c.stock_days_left), fontWeight: 600 }}>{fmtDays(c.stock_days_left)}</td>}
                                                         </tr>
+                                                    );
+                                                })}
+                                                </React.Fragment>
+                                            );
+                                        })}
+                                        {groupBy === 'size' && sortStockRows(groupData).map((cat, ci) => {
+                                            const catLabel = cat.subject || '—';
+                                            const catKey = 'cat:' + catLabel;
+                                            const catOpen = expandedGroups.has(catKey);
+                                            const sizes = cat.children || [];
+                                            const catBg = ci % 2 === 0 ? '#ffffff' : '#f9fafb';
+                                            const toggle = (k: string) => setExpandedGroups(prev => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; });
+                                            return (
+                                                <React.Fragment key={catKey}>
+                                                <tr style={{ background: catBg, color: '#111827', cursor: 'pointer' }} onClick={() => toggle(catKey)}>
+                                                    <td style={{ position: 'sticky', left: 0, background: catBg, zIndex: 2, padding: '8px 12px', borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', minWidth: 200 }}>
+                                                        <div style={{ fontWeight: 600, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                            <span style={{ fontSize: 10, color: '#9ca3af', width: 14 }}>{catOpen ? '▼' : '▶'}</span>
+                                                            {catLabel}
+                                                            {sizes.length > 0 && <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400 }}>({sizes.length})</span>}
+                                                        </div>
+                                                    </td>
+                                                    {metricCells(cat, extended)}
+                                                </tr>
+                                                {catOpen && sortStockRows(sizes).map(sz => {
+                                                    const szLabel = sz.size || '—';
+                                                    const szKey = 'sz:' + catLabel + '|' + szLabel;
+                                                    const szOpen = expandedGroups.has(szKey);
+                                                    const skus = sz.children || [];
+                                                    return (
+                                                        <React.Fragment key={szKey}>
+                                                        <tr style={{ background: '#fbfbfd', color: '#1f2937', cursor: 'pointer' }} onClick={() => toggle(szKey)}>
+                                                            <td style={{ position: 'sticky', left: 0, background: '#fbfbfd', zIndex: 2, padding: '7px 12px 7px 30px', borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', minWidth: 200 }}>
+                                                                <div style={{ fontWeight: 500, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                                    <span style={{ fontSize: 9, color: '#9ca3af', width: 12 }}>{szOpen ? '▼' : '▶'}</span>
+                                                                    {szLabel}
+                                                                    {skus.length > 0 && <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400 }}>({skus.length})</span>}
+                                                                </div>
+                                                            </td>
+                                                            {metricCells(sz, extended)}
+                                                        </tr>
+                                                        {szOpen && (skus.length > 0 && skus[0].subcategory !== undefined
+                                                            ? sortStockRows(skus).map(sub => {
+                                                                const subLabel = sub.subcategory || '—';
+                                                                const subKey = 'sub:' + catLabel + '|' + szLabel + '|' + subLabel;
+                                                                const subOpen = expandedGroups.has(subKey);
+                                                                const subSkus = sub.children || [];
+                                                                return (
+                                                                    <React.Fragment key={subKey}>
+                                                                    <tr style={{ background: '#f6f5fb', color: '#1f2937', cursor: 'pointer' }} onClick={() => toggle(subKey)}>
+                                                                        <td style={{ position: 'sticky', left: 0, background: '#f6f5fb', zIndex: 2, padding: '6px 12px 6px 50px', borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', minWidth: 200 }}>
+                                                                            <div style={{ fontWeight: 500, fontSize: 12.5, display: 'flex', alignItems: 'center', gap: 6, color: '#6d28d9' }}>
+                                                                                <span style={{ fontSize: 9, color: '#9ca3af', width: 12 }}>{subOpen ? '▼' : '▶'}</span>
+                                                                                {subLabel}
+                                                                                {subSkus.length > 0 && <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400 }}>({subSkus.length})</span>}
+                                                                            </div>
+                                                                        </td>
+                                                                        {metricCells(sub, extended)}
+                                                                    </tr>
+                                                                    {subOpen && sortStockRows(subSkus).map(sku => sizeTreeSkuRow(sku, extended, 72))}
+                                                                    </React.Fragment>
+                                                                );
+                                                            })
+                                                            : sortStockRows(skus).map(sku => sizeTreeSkuRow(sku, extended, 52)))}
+                                                        </React.Fragment>
                                                     );
                                                 })}
                                                 </React.Fragment>

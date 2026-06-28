@@ -220,6 +220,23 @@ class SizeOverride(Base):
     )
 
 
+class CategoryOverride(Base):
+    """Manual category assignment per product (overrides WB subject in funnel grouping)."""
+
+    __tablename__ = "category_overrides"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    category_value: Mapped[str] = mapped_column(String(100), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "nm_id", name="uq_category_override_nm"),
+        Index("ix_category_overrides_project_nm_id", "project_id", "nm_id"),
+    )
+
+
 class ProductSubcategory(Base, SoftDeleteMixin):
     """Sub-category reference within sizes (e.g. винтаж / обычные)."""
 

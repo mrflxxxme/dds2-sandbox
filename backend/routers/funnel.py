@@ -346,6 +346,7 @@ async def get_funnel_data(
         from backend.services import refs_service
 
         override_map, alias_map = await refs_service.build_size_resolver(db, project.id)
+        cat_override_map = await refs_service.build_category_resolver(db, project.id)
         subcat_names = await refs_service.get_subcategory_names(db, project.id) if subcat else None
         data = await funnel_service.get_funnel_by_category_size(
             db,
@@ -359,6 +360,7 @@ async def get_funnel_data(
             nm_ids=nm_filter,
             override_map=override_map,
             alias_map=alias_map,
+            cat_override_map=cat_override_map,
             subcat_names=subcat_names,
             split_by_subcategory=subcat,
         )
@@ -848,6 +850,7 @@ async def get_funnel_products(
             WbFunnelDaily.nm_id,
             func.max(WbFunnelDaily.brand).label("brand"),
             func.max(WbFunnelDaily.vendor_code).label("vendor_code"),
+            func.max(WbFunnelDaily.subject).label("subject"),
         )
         .where(WbFunnelDaily.project_id == project.id)
         .group_by(WbFunnelDaily.nm_id)
@@ -860,6 +863,7 @@ async def get_funnel_products(
             subq.c.nm_id,
             subq.c.brand,
             subq.c.vendor_code,
+            subq.c.subject,
             Nomenclature.imt_id,
         )
         .outerjoin(
@@ -879,6 +883,7 @@ async def get_funnel_products(
                 "nm_id": r.nm_id,
                 "brand": r.brand or "Другое",
                 "vendor_code": r.vendor_code or str(r.nm_id),
+                "subject": r.subject or "",
                 "imt_id": r.imt_id,
             }
         )

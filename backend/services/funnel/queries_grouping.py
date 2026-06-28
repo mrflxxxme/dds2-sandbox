@@ -518,11 +518,14 @@ async def get_funnel_by_category_size(
     nm_ids: set[int] | None = None,
     override_map: dict[int, str] | None = None,
     alias_map: dict[str, str] | None = None,
+    cat_override_map: dict[int, str] | None = None,
     subcat_names: dict[int, str] | None = None,
     split_by_subcategory: bool = False,
 ) -> list[dict]:
     """Воронка деревом «Категория → Размер [→ Под-категория] → SKU».
 
+    Категория товара: ручной оверрайд (`cat_override_map[nm_id]`) → иначе предмет WB
+    (`subject`) → иначе «Без категории».
     Размер товара: ручной оверрайд (`override_map[nm_id]`) → иначе parse_size из
     vendor_code → иначе «Без размера»; затем алиас (`alias_map`, переименование/merge).
     Размеры замкнуты внутри категории. При `split_by_subcategory` под размером
@@ -536,6 +539,7 @@ async def get_funnel_by_category_size(
     has_bdr = bool(bdr_rates_map)
     overrides = override_map or {}
     aliases = alias_map or {}
+    cat_overrides = cat_override_map or {}
     subcats = subcat_names or {}
 
     def _eff_size(r: WbFunnelDaily) -> str:
@@ -550,7 +554,7 @@ async def get_funnel_by_category_size(
 
     for r in rows:
         nm_id = r.nm_id
-        cat = r.subject or "Без категории"
+        cat = cat_overrides.get(nm_id) or r.subject or "Без категории"
         size = _eff_size(r)
 
         ca = cat_agg[cat]

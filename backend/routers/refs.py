@@ -17,6 +17,7 @@ from backend.schemas import (
     OpeningBalanceSchema,
 )
 from backend.schemas.refs import (
+    CategoryOverrideBulkPayload,
     ExcludedWarehousesPayload,
     ForecastRfDefaultDaysPayload,
     ImtAliasPayload,
@@ -476,6 +477,38 @@ async def set_size_alias(
 ):
     await refs_service.set_size_alias(db, project.id, payload.raw_size, payload.display_name)
     return {"ok": True}
+
+
+# ─── Category overrides (ручной перенос товара в категорию) ───────────────────
+
+
+@router.get("/category-overrides")
+async def get_category_overrides(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {nm_id: category_value} mapping."""
+    return await refs_service.get_category_overrides(db, project.id)
+
+
+@router.post("/category-overrides")
+async def bulk_set_category_override(
+    payload: CategoryOverrideBulkPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    await refs_service.bulk_set_category_override(db, project.id, payload.nm_ids, payload.category_value)
+    return {"ok": True}
+
+
+@router.get("/barcode-map")
+async def get_barcode_map(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {barcode: nm_id} — для массовой привязки по баркодам (вставка из Excel)."""
+    return await refs_service.get_barcode_nm_map(db, project.id)
 
 
 # ─── Product sub-categories (винтаж / обычные) ────────────────────────────────
