@@ -478,3 +478,229 @@ async def set_imt_alias(db: AsyncSession, project_id: int, imt_id: int, name: st
         db.add(ImtAlias(project_id=project_id, imt_id=imt_id, name=name))
     await db.commit()
     return True
+
+
+# ─── Size aliases (переименование / объединение размеров) ─────────────────────
+
+
+async def get_size_aliases(db: AsyncSession, project_id: int) -> dict[str, str]:
+    """Get {raw_size: display_name} mapping."""
+    from backend.models.refs import SizeAlias
+
+    result = await db.execute(
+        select(SizeAlias.raw_size, SizeAlias.display_name).where(SizeAlias.project_id == project_id)
+    )
+    return {r.raw_size: r.display_name for r in result}
+
+
+async def set_size_alias(db: AsyncSession, project_id: int, raw_size: str, display_name: str) -> bool:
+    """Upsert size alias; пустое имя → снять алиас (вернуть исходное значение)."""
+    from sqlalchemy import delete
+
+    from backend.models.refs import SizeAlias
+
+    name = (display_name or "").strip()
+    result = await db.execute(
+        select(SizeAlias).where(SizeAlias.project_id == project_id, SizeAlias.raw_size == raw_size)
+    )
+    existing = result.scalar_one_or_none()
+    if not name:
+        if existing:
+            await db.execute(delete(SizeAlias).where(SizeAlias.id == existing.id))
+            await db.commit()
+        return True
+    if existing:
+        existing.display_name = name
+    else:
+        db.add(SizeAlias(project_id=project_id, raw_size=raw_size, display_name=name))
+    await db.commit()
+    return True
+
+
+# ─── Size overrides (ручной перенос товара в размер) ──────────────────────────
+
+
+async def get_size_overrides(db: AsyncSession, project_id: int) -> dict[int, str]:
+    """Get {nm_id: size_value} mapping."""
+    from backend.models.refs import SizeOverride
+
+    result = await db.execute(
+        select(SizeOverride.nm_id, SizeOverride.size_value).where(SizeOverride.project_id == project_id)
+    )
+    return {r.nm_id: r.size_value for r in result}
+
+
+async def bulk_set_size_override(db: AsyncSession, project_id: int, nm_ids: list[int], size_value: str) -> bool:
+    """Bulk upsert размера для товаров; пустое значение → снять оверрайд (вернуть парсинг)."""
+    from sqlalchemy import delete
+
+    from backend.models.refs import SizeOverride
+
+    if not nm_ids:
+        return True
+
+    value = (size_value or "").strip()
+    if not value:
+        await db.execute(
+            delete(SizeOverride).where(SizeOverride.project_id == project_id, SizeOverride.nm_id.in_(nm_ids))
+        )
+        await db.commit()
+        return True
+
+    result = await db.execute(
+        select(SizeOverride).where(SizeOverride.project_id == project_id, SizeOverride.nm_id.in_(nm_ids))
+    )
+    existing_map = {row.nm_id: row for row in result.scalars().all()}
+    for nm_id in nm_ids:
+        if nm_id in existing_map:
+            existing_map[nm_id].size_value = value
+        else:
+            db.add(SizeOverride(project_id=project_id, nm_id=nm_id, size_value=value))
+    await db.commit()
+    return True
+
+
+async def get_detected_sizes(db: AsyncSession, project_id: int) -> list[dict]:
+    """Список размеров (effective = оверрайд → парсинг → «Без размера») со счётчиками и алиасом."""
+    from backend.models.cost import Nomenclature
+    from backend.services.funnel.article_parser import parse_size
+
+    overrides = await get_size_overrides(db, project_id)
+    aliases = await get_size_aliases(db, project_id)
+    result = await db.execute(
+        select(Nomenclature.article_wb, Nomenclature.article_seller)
+        .where(Nomenclature.project_id == project_id, Nomenclature.article_wb.isnot(None))
+        .limit(50000)
+    )
+    counts: dict[str, int] = {}
+    for nm_id, article in result:
+        raw = overrides.get(nm_id) or parse_size(article) or "Без размера"
+        counts[raw] = counts.get(raw, 0) + 1
+    sizes = [{"raw_size": raw, "display_name": aliases.get(raw, raw), "count": cnt} for raw, cnt in counts.items()]
+    sizes.sort(key=lambda x: -x["count"])
+    return sizes
+
+
+async def build_size_resolver(db: AsyncSession, project_id: int) -> tuple[dict[int, str], dict[str, str]]:
+    """(override_map {nm_id: size}, alias_map {raw_size: display}) для группировки воронки."""
+    return await get_size_overrides(db, project_id), await get_size_aliases(db, project_id)
+
+
+# ─── Product sub-categories (винтаж / обычные — одна на товар) ─────────────────
+
+
+async def list_subcategories(db: AsyncSession, project_id: int) -> list:
+    """List all product sub-categories for a project."""
+    from backend.models.refs import ProductSubcategory
+
+    result = await db.execute(
+        select(ProductSubcategory)
+        .where(ProductSubcategory.project_id == project_id, ProductSubcategory.is_deleted == False)
+        .order_by(ProductSubcategory.name)
+    )
+    return result.scalars().all()
+
+
+async def upsert_subcategory(db: AsyncSession, project_id: int, payload: dict):
+    """Create or update a sub-category."""
+    from backend.models.refs import ProductSubcategory
+
+    if payload.get("id"):
+        result = await db.execute(
+            select(ProductSubcategory).where(
+                ProductSubcategory.id == payload["id"],
+                ProductSubcategory.project_id == project_id,
+                ProductSubcategory.is_deleted == False,
+            )
+        )
+        sub = result.scalar_one_or_none()
+        if sub:
+            for k, v in payload.items():
+                if k != "id":
+                    setattr(sub, k, v)
+            await db.commit()
+            await db.refresh(sub)
+            return sub
+
+    sub = ProductSubcategory(
+        project_id=project_id,
+        name=payload["name"],
+        color=payload.get("color", "#8B5CF6"),
+    )
+    db.add(sub)
+    await db.commit()
+    await db.refresh(sub)
+    return sub
+
+
+async def delete_subcategory(db: AsyncSession, project_id: int, subcategory_id: int) -> bool:
+    """Soft delete a sub-category (снимает её со всех товаров)."""
+    from sqlalchemy import delete
+
+    from backend.models.refs import ProductSubcategory, ProductSubcategoryMap
+
+    result = await db.execute(
+        select(ProductSubcategory).where(
+            ProductSubcategory.id == subcategory_id,
+            ProductSubcategory.project_id == project_id,
+            ProductSubcategory.is_deleted == False,
+        )
+    )
+    sub = result.scalar_one_or_none()
+    if not sub:
+        return False
+    sub.soft_delete()
+    await db.execute(delete(ProductSubcategoryMap).where(ProductSubcategoryMap.subcategory_id == subcategory_id))
+    await db.commit()
+    return True
+
+
+async def get_subcategory_mapping(db: AsyncSession, project_id: int) -> dict[int, int]:
+    """Get {nm_id: subcategory_id} mapping (single per product)."""
+    from backend.models.refs import ProductSubcategory, ProductSubcategoryMap
+
+    result = await db.execute(
+        select(ProductSubcategoryMap.nm_id, ProductSubcategoryMap.subcategory_id)
+        .join(ProductSubcategory, ProductSubcategory.id == ProductSubcategoryMap.subcategory_id)
+        .where(ProductSubcategoryMap.project_id == project_id, ProductSubcategory.is_deleted == False)
+    )
+    return {r.nm_id: r.subcategory_id for r in result}
+
+
+async def bulk_set_subcategory(
+    db: AsyncSession, project_id: int, nm_ids: list[int], subcategory_id: int | None
+) -> bool:
+    """Назначить ОДНУ под-категорию товарам (single-select); None → снять."""
+    from sqlalchemy import delete
+
+    from backend.models.refs import ProductSubcategoryMap
+
+    if not nm_ids:
+        return True
+
+    await db.execute(
+        delete(ProductSubcategoryMap).where(
+            ProductSubcategoryMap.project_id == project_id, ProductSubcategoryMap.nm_id.in_(nm_ids)
+        )
+    )
+    if subcategory_id is not None:
+        db.add_all(
+            [
+                ProductSubcategoryMap(project_id=project_id, subcategory_id=subcategory_id, nm_id=nm_id)
+                for nm_id in nm_ids
+            ]
+        )
+    await db.commit()
+    return True
+
+
+async def get_subcategory_names(db: AsyncSession, project_id: int) -> dict[int, str]:
+    """Get {nm_id: subcategory_name} для 4-го уровня дерева воронки."""
+    from backend.models.refs import ProductSubcategory, ProductSubcategoryMap
+
+    result = await db.execute(
+        select(ProductSubcategoryMap.nm_id, ProductSubcategory.name)
+        .join(ProductSubcategory, ProductSubcategory.id == ProductSubcategoryMap.subcategory_id)
+        .where(ProductSubcategoryMap.project_id == project_id, ProductSubcategory.is_deleted == False)
+    )
+    return {r.nm_id: r.name for r in result}

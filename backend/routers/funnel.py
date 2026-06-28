@@ -193,19 +193,22 @@ async def get_funnel_data(
     min_orders: int = Query(0, ge=0),
     tag: str | None = Query(None),
     imt: str | None = Query(None),
+    color: str | None = Query(None),
+    subcat: bool = Query(False),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get funnel data. Supports grouping by day, sku, or detailed (per article filter).
+    """Get funnel data. Supports grouping by day, sku, size, or detailed (per article filter).
 
-    extended=true добавляет складские поля (себестоимость остатков WB/свои, прогноз
-    исчерпания); min_orders скрывает строки с меньшим числом заказов за период
-    (оба — для всех группировок, кроме day). tag/imt — фильтр по ярлыку/склейке,
-    работает во ВСЕХ группировках, включая day.
+    extended=true добавляет складские поля; min_orders скрывает строки с меньшим
+    числом заказов (оба — для всех группировок, кроме day). tag/imt/color — фильтр
+    по ярлыку/склейке/цвету во ВСЕХ группировках. group_by=size — дерево
+    Категория→Размер→SKU (с оверрайдами/алиасами размеров); subcat=true добавляет
+    уровень под-категории.
     """
     tax_info = await _load_tax_info(db, project)
     bdr_rates_map = await _load_bdr_rates(db, project.id)
-    nm_filter = await funnel_service.resolve_filter_nm_ids(db, project.id, tag, imt)
+    nm_filter = await funnel_service.resolve_filter_nm_ids(db, project.id, tag, imt, color)
 
     if group_by == "abc":
         # Use full SKU data + ABC classification
@@ -339,6 +342,35 @@ async def get_funnel_data(
             "group_by": "subject",
         }
 
+    if group_by == "size" and not vendor_code:
+        from backend.services import refs_service
+
+        override_map, alias_map = await refs_service.build_size_resolver(db, project.id)
+        subcat_names = await refs_service.get_subcategory_names(db, project.id) if subcat else None
+        data = await funnel_service.get_funnel_by_category_size(
+            db,
+            project.id,
+            tax_info,
+            date_from,
+            date_to,
+            brand,
+            subject,
+            bdr_rates_map=bdr_rates_map,
+            nm_ids=nm_filter,
+            override_map=override_map,
+            alias_map=alias_map,
+            subcat_names=subcat_names,
+            split_by_subcategory=subcat,
+        )
+        data = await _postprocess_funnel_rows(db, project.id, data, "size", extended, min_orders)
+        return {
+            "data": data,
+            "tax_info": tax_info,
+            "has_bdr": bool(bdr_rates_map),
+            "detailed": False,
+            "group_by": "size",
+        }
+
     detailed = bool(vendor_code)
 
     if not detailed:
@@ -396,6 +428,17 @@ async def get_funnel_filters(
 ):
     """Get unique brands, subjects, dates for filter dropdowns."""
     return await funnel_service.get_filters(db, project.id)
+
+
+@router.get("/colors")
+async def get_funnel_colors(
+    subject: str | None = Query(None),
+    brand: str | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Цвета (распарсенные из артикулов) для фильтра, опционально по категории/бренду."""
+    return await funnel_service.get_color_options(db, project.id, subject, brand)
 
 
 # ─── Cost overrides ─────────────────────────────────────────────────────────

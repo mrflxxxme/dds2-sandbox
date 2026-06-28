@@ -245,6 +245,7 @@ def merge_stock_costs(rows: list[dict], stock_map: dict[int, dict], group_by: st
     """Мёрж складских полей в строки воронки (in-place).
 
     sku/abc — по nm_id строки; tag/imt — сумма по children;
+    size — дерево категория→размер[→под-категория]→sku (рекурсивно по листьям);
     brand/subject — атрибуция стока по его собственному brand/subject.
     """
     if group_by in ("sku", "abc"):
@@ -259,6 +260,27 @@ def merge_stock_costs(rows: list[dict], stock_map: dict[int, dict], group_by: st
             for child in children:
                 _merge_nm_ids(child, [child.get("nm_id")], stock_map)
             _merge_nm_ids(row, [c.get("nm_id") for c in children], stock_map)
+        return
+
+    if group_by == "size":
+        # Дерево произвольной глубины (cat→size→sku или cat→size→subcat→sku):
+        # лист = строка с nm_id, промежуточный узел = сумма nm_id потомков.
+        def _merge_node(node: dict) -> list[int]:
+            children = node.get("children") or []
+            if children and "nm_id" in children[0]:  # дети — листовые SKU
+                nm_ids = [c.get("nm_id") for c in children]
+                for c in children:
+                    _merge_nm_ids(c, [c.get("nm_id")], stock_map)
+                _merge_nm_ids(node, nm_ids, stock_map)
+                return nm_ids
+            nm_ids = []
+            for ch in children:
+                nm_ids.extend(_merge_node(ch))
+            _merge_nm_ids(node, nm_ids, stock_map)
+            return nm_ids
+
+        for row in rows:
+            _merge_node(row)
         return
 
     if group_by in ("brand", "subject"):

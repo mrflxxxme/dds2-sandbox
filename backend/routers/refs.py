@@ -26,6 +26,10 @@ from backend.schemas.refs import (
     ProductStatusPayload,
     ProductTagMappingPayload,
     ProductTagSchema,
+    SizeAliasPayload,
+    SizeOverrideBulkPayload,
+    SubcategoryBulkPayload,
+    SubcategorySchema,
 )
 from backend.services import refs_service
 from backend.utils.rate_limit import rate_limit_write
@@ -419,4 +423,110 @@ async def set_imt_alias(
     _: None = Depends(rate_limit_write),
 ):
     await refs_service.set_imt_alias(db, project.id, payload.imt_id, payload.name)
+    return {"ok": True}
+
+
+# ─── Sizes (overrides + aliases) ──────────────────────────────────────────────
+
+
+@router.get("/sizes")
+async def get_sizes(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Список размеров со счётчиками и текущим отображаемым именем (алиасом)."""
+    return await refs_service.get_detected_sizes(db, project.id)
+
+
+@router.get("/size-overrides")
+async def get_size_overrides(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {nm_id: size_value} mapping."""
+    return await refs_service.get_size_overrides(db, project.id)
+
+
+@router.post("/size-overrides")
+async def bulk_set_size_override(
+    payload: SizeOverrideBulkPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    await refs_service.bulk_set_size_override(db, project.id, payload.nm_ids, payload.size_value)
+    return {"ok": True}
+
+
+@router.get("/size-aliases")
+async def get_size_aliases(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {raw_size: display_name} mapping."""
+    return await refs_service.get_size_aliases(db, project.id)
+
+
+@router.patch("/size-aliases")
+async def set_size_alias(
+    payload: SizeAliasPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    await refs_service.set_size_alias(db, project.id, payload.raw_size, payload.display_name)
+    return {"ok": True}
+
+
+# ─── Product sub-categories (винтаж / обычные) ────────────────────────────────
+
+
+@router.get("/subcategories", response_model=list[SubcategorySchema])
+async def get_subcategories(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await refs_service.list_subcategories(db, project.id)
+
+
+@router.post("/subcategories", response_model=SubcategorySchema)
+async def upsert_subcategory(
+    payload: SubcategorySchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    return await refs_service.upsert_subcategory(db, project.id, payload.model_dump(exclude_unset=True))
+
+
+@router.delete("/subcategories/{subcategory_id}")
+async def delete_subcategory(
+    subcategory_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    deleted = await refs_service.delete_subcategory(db, project.id, subcategory_id)
+    if not deleted:
+        raise HTTPException(404, "Sub-category not found")
+    return {"ok": True}
+
+
+@router.get("/subcategories/mapping")
+async def get_subcategory_mapping(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {nm_id: subcategory_id} (одна на товар)."""
+    return await refs_service.get_subcategory_mapping(db, project.id)
+
+
+@router.post("/subcategories/mapping")
+async def bulk_set_subcategory(
+    payload: SubcategoryBulkPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    await refs_service.bulk_set_subcategory(db, project.id, payload.nm_ids, payload.subcategory_id)
     return {"ok": True}
