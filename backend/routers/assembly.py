@@ -100,9 +100,13 @@ async def list_assembly_requests(
         limit=limit,
         offset=offset,
     )
+    # Pre-fetch all per-row lookups (номенклатура/остатки/контрагенты) одним
+    # набором батч-запросов → build-loop без N+1 (раньше на ~400 строк это были
+    # сотни запросов через PgBouncer и тормозило список/фильтры/поиск).
+    prefetch = await assembly_service.prefetch_list_maps(db, project.id, items)
     response_items = []
     for req in items:
-        resp = await assembly_service._build_response(db, req)
+        resp = await assembly_service._build_response(db, req, **prefetch)
         response_items.append(AssemblyRequestResponse.model_validate(resp))
 
     await _enrich_ff_links(db, project.id, items, response_items)
