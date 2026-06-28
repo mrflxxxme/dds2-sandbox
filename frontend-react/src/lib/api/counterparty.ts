@@ -10,6 +10,7 @@ import type {
     CounterpartyType,
     CounterpartyTransactionsResponse,
     CounterpartySummaryResponse,
+    SetExpenseCategoryResponse,
     DocType,
 } from '@/types/api';
 
@@ -65,6 +66,11 @@ export function addCounterpartyMethods(api: ApiClient) {
 
         updateCounterparty(id: number, data: CounterpartyUpdate) {
             return api.request<CounterpartyDetail>('PATCH', `/api/v1/counterparties/${id}`, data);
+        },
+
+        /** Set/clear the counterparty's expense category (level-2); propagates to its transactions. */
+        setCounterpartyCategory(id: number, cat_lvl1: string | null, cat_lvl2: string | null) {
+            return api.request<SetExpenseCategoryResponse>('PUT', `/api/v1/counterparties/${id}/category`, { cat_lvl1, cat_lvl2 });
         },
 
         deleteCounterparty(id: number) {

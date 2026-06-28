@@ -36,9 +36,12 @@ from backend.schemas.counterparty import (
     CounterpartySummaryResponse,
     CounterpartyTransactionsResponse,
     CounterpartyUpdate,
+    SetExpenseCategoryRequest,
+    SetExpenseCategoryResponse,
 )
 from backend.services.counterparty_service import (
     CounterpartyConflictError,
+    CounterpartyNotFoundError,
     CounterpartyService,
 )
 from backend.utils.rate_limit import rate_limit_write
@@ -224,6 +227,33 @@ async def update_counterparty(
     except CounterpartyConflictError as e:
         raise HTTPException(status_code=409, detail=str(e)) from None
     return CounterpartyListItem.model_validate(cp)
+
+
+@router.put(
+    "/{counterparty_id}/category",
+    response_model=SetExpenseCategoryResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def set_counterparty_category(
+    counterparty_id: int,
+    body: SetExpenseCategoryRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set/clear the counterparty's expense category and propagate to its transactions."""
+    service = CounterpartyService(db)
+    try:
+        result = await service.set_expense_category(
+            counterparty_id=counterparty_id,
+            project_id=project.id,
+            cat_lvl1=body.cat_lvl1,
+            cat_lvl2=body.cat_lvl2,
+        )
+    except CounterpartyNotFoundError:
+        raise HTTPException(status_code=404, detail="Counterparty not found") from None
+    except CounterpartyConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from None
+    return SetExpenseCategoryResponse(**result)
 
 
 @router.delete(

@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import type {
     DashboardSummary, BalanceAccount, DashboardFunnelSummary,
-    DailyCashflowRow, ExpenseCategoryPie, IncomeCounterparty, IncomeTypeSlice,
+    DailyCashflowRow, ExpenseCategoryPie, ExpenseTypeGroup, IncomeCounterparty, IncomeTypeSlice,
     DashboardTransaction, CategoryCounterparty,
     ChartTooltipProps, ChartTooltipPayloadItem, PieLabelProps,
 } from '@/types/api';
@@ -127,6 +127,7 @@ export default function DashboardPage() {
     const [period,setPeriod]=useState<PeriodKey>('month');
     const [customFrom,setCustomFrom]=useState('');
     const [customTo,setCustomTo]=useState('');
+    const [expandedType,setExpandedType]=useState<string|null>(null);
 
     /* ─── Filter state ────────────────────────────────────────── */
     const [selectedCp,setSelectedCp]=useState<IncomeCounterparty|null>(null);
@@ -243,6 +244,7 @@ export default function DashboardPage() {
     ];
     const incomeCounterparties=data?.income_counterparties||[];
     const expensePie:ExpenseCategoryPie[]=data?.expense_by_category||[];
+    const expenseByType:ExpenseTypeGroup[]=data?.expense_by_type||[];
     const dailyChart=useMemo(()=>{
         const raw=filteredDaily||data?.daily_cashflow||[];
         return raw.map((d:DailyCashflowRow)=>({...d,label:shortDay(d.date)}));
@@ -376,6 +378,46 @@ export default function DashboardPage() {
                     </div>
                 )}
             </div>
+
+            {/* ─── Расходы: тип контрагента → категория (2 уровня) ── */}
+            {expenseByType.length>0&&(
+                <div className="glass-card" style={{marginTop:20}}>
+                    <div className="table-toolbar">
+                        <h3 style={{fontSize:16,fontWeight:600}}>🗂 Расходы по типам контрагентов</h3>
+                        <span style={{fontSize:12,color:C.muted}}>тип → категория · клик для раскрытия</span>
+                    </div>
+                    <table className="data-table"><thead><tr>
+                        <th>Тип / Категория</th><th style={{textAlign:'right'}}>Сумма</th><th style={{textAlign:'right'}}>Операций</th><th style={{textAlign:'right'}}>% от расходов</th>
+                    </tr></thead><tbody>
+                        {expenseByType.map((g:ExpenseTypeGroup,i:number)=>{
+                            const pct=data.month_expense>0?(g.value/data.month_expense*100):0;
+                            const key=g.type??'__none__';
+                            const isOpen=expandedType===key;
+                            return (<React.Fragment key={key}>
+                                <tr onClick={()=>setExpandedType(isOpen?null:key)} style={{cursor:'pointer',fontWeight:600}}>
+                                    <td style={{display:'flex',alignItems:'center',gap:8}}>
+                                        <span style={{width:10,height:10,borderRadius:3,display:'inline-block',background:PIE_COLORS[i%PIE_COLORS.length]}}/>
+                                        <span style={{display:'inline-block',width:14,fontSize:10,color:'#94a3b8'}}>{isOpen?'▼':'▶'}</span>
+                                        {g.type_label}
+                                    </td>
+                                    <td style={{textAlign:'right',color:'var(--color-danger)'}}>{formatNumber(g.value)} ₽</td>
+                                    <td style={{textAlign:'right'}}>{g.count}</td>
+                                    <td style={{textAlign:'right'}}><span className="badge badge-warning">{pct.toFixed(1)}%</span></td>
+                                </tr>
+                                {isOpen&&g.categories.map((c:ExpenseCategoryPie,j:number)=>{
+                                    const cpct=g.value>0?(c.value/g.value*100):0;
+                                    return (<tr key={j} style={{fontSize:13,background:'rgba(255,255,255,0.015)'}}>
+                                        <td style={{paddingLeft:48,color:c.name==='Без категории'?C.muted:'var(--color-text)'}}>{c.name}</td>
+                                        <td style={{textAlign:'right'}}>{formatNumber(c.value)} ₽</td>
+                                        <td style={{textAlign:'right'}}>{c.count??'—'}</td>
+                                        <td style={{textAlign:'right',color:C.muted,fontSize:12}}>{cpct.toFixed(0)}%</td>
+                                    </tr>);
+                                })}
+                            </React.Fragment>);
+                        })}
+                    </tbody></table>
+                </div>
+            )}
 
             {/* ─── Income counterparties (1-level: click → txn list) ── */}
             {/* TODO: migrate to TanStackDataTable — interactive drill-down table with click-to-expand transaction list */}
