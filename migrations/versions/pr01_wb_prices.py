@@ -1,7 +1,7 @@
 """wb_prices (текущая цена витрины ВБ по nm_id)
 
 Revision ID: pr01_wb_prices
-Revises: pay07_payment_request_general
+Revises: cogs01_category_ref_is_cogs
 Create Date: 2026-06-28
 
 Синк-зеркало цен из WB API «Цены и скидки» (discounts-prices, /api/v2/list/goods/filter):
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "pr01_wb_prices"
-down_revision = "pay07_payment_request_general"
+down_revision = "cogs01_category_ref_is_cogs"
 branch_labels = None
 depends_on = None
 
