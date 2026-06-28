@@ -1167,13 +1167,16 @@ async def resolve_filter_nm_ids(
     pid: int,
     tag: str | None = None,
     imt: str | None = None,
+    color: str | None = None,
 ) -> set[int] | None:
-    """nm_id, попадающие под фильтр по ярлыку и/или склейке.
+    """nm_id, попадающие под фильтр по ярлыку, склейке и/или цвету.
 
     None — фильтр не задан (не ограничивать). Пустое множество — ничего
     не подошло (запросы вернут пустой результат). imt — имя алиаса или "#<imt_id>".
+    Несколько фильтров комбинируются по AND (пересечение). Цвет парсится из
+    артикула (`Nomenclature.article_seller`, см. `article_parser.parse_color`).
     """
-    if not tag and not imt:
+    if not tag and not imt and not color:
         return None
     from backend.models.cost import Nomenclature
     from backend.models.refs import ImtAlias, ProductTag, ProductTagMap
@@ -1211,7 +1214,49 @@ async def resolve_filter_nm_ids(
             )
             imt_set = {r[0] for r in rows}
         result = imt_set if result is None else result & imt_set
+    if color:
+        from backend.services.funnel.article_parser import parse_color
+
+        rows = await db.execute(
+            select(Nomenclature.article_wb, Nomenclature.article_seller)
+            .where(
+                Nomenclature.project_id == pid,
+                Nomenclature.article_wb.isnot(None),
+            )
+            .limit(50000)
+        )
+        color_set = {aw for aw, art in rows if parse_color(art) == color}
+        result = color_set if result is None else result & color_set
     return result
+
+
+async def get_color_options(
+    db: AsyncSession, pid: int, subject: str | None = None, brand: str | None = None
+) -> dict:
+    """Список цветов (распарсенных из артикулов) для выпадающего фильтра.
+
+    Опционально сужается до выбранной категории/бренда. Источник —
+    `Nomenclature.article_seller` (тот же артикул, что в воронке).
+    """
+    from backend.models.cost import Nomenclature
+    from backend.services.funnel.article_parser import parse_color
+
+    q = select(Nomenclature.article_seller).where(
+        Nomenclature.project_id == pid,
+        Nomenclature.article_seller.isnot(None),
+    )
+    if subject:
+        q = q.where(Nomenclature.subject == subject)
+    if brand:
+        q = q.where(Nomenclature.brand == brand)
+    rows = await db.execute(q.distinct().limit(50000))
+
+    colors: set[str] = set()
+    for (article,) in rows:
+        c = parse_color(article)
+        if c:
+            colors.add(c)
+    return {"colors": sorted(colors)}
 
 
 async def get_filters(db: AsyncSession, pid: int) -> dict:

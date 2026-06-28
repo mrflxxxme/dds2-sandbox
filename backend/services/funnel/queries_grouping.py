@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
+from backend.services.funnel.article_parser import parse_size
 from backend.services.funnel.bdr_rates import BdrRatesLookup, compute_profit_bdr
 from backend.services.funnel.queries import _traffic_metrics
 from backend.services.tariff_service import get_avg_buyout_map, get_tariff_map
@@ -457,4 +458,141 @@ async def get_funnel_by_imt(
     result = _finalize_groups(grp_agg, tax_rate, "imt_group", limit)
     for group in result:
         group["children"] = _finalize_children(sku_agg.get(group["imt_group"], {}), tax_rate)
+    return result
+
+
+# ─── Group by Size (размер из артикула) ──────────────────────────────────────
+
+
+async def get_funnel_by_size(
+    db: AsyncSession,
+    pid: int,
+    tax_info: dict,
+    date_from: str | None,
+    date_to: str | None,
+    brand: str | None,
+    subject: str | None,
+    bdr_rates_map: BdrRatesLookup | None = None,
+    limit: int = 500,
+    nm_ids: set[int] | None = None,
+) -> list[dict]:
+    """Воронка, сгруппированная по размеру из артикула (плоско). Test-only fallback."""
+    rows = await _load_funnel_rows(db, pid, date_from, date_to, brand, subject, nm_ids=nm_ids)
+
+    tariff_map = await get_tariff_map(db, pid)
+    buyout_map = await get_avg_buyout_map(db, pid)
+    tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)
+    has_bdr = bool(bdr_rates_map)
+
+    grp_agg: dict = defaultdict(lambda: _new_group_agg(has_bdr))
+    sku_agg: dict[str, dict[int, dict]] = defaultdict(lambda: defaultdict(_new_child_agg))
+
+    for r in rows:
+        nm_id = r.nm_id
+        grp_key = parse_size(r.vendor_code) or "Без размера"
+        agg = grp_agg[grp_key]
+        if not agg["label"]:
+            agg["label"] = grp_key
+        _accumulate_row(agg, r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
+        _accumulate_child(sku_agg[grp_key][nm_id], r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
+
+    result = _finalize_groups(grp_agg, tax_rate, "size", limit)
+    for group in result:
+        group["children"] = _finalize_children(sku_agg.get(group["size"], {}), tax_rate)
+    return result
+
+
+# ─── Tree: Category → Size [→ Subcategory] → SKU ─────────────────────────────
+
+
+async def get_funnel_by_category_size(
+    db: AsyncSession,
+    pid: int,
+    tax_info: dict,
+    date_from: str | None,
+    date_to: str | None,
+    brand: str | None,
+    subject: str | None,
+    bdr_rates_map: BdrRatesLookup | None = None,
+    limit: int = 500,
+    nm_ids: set[int] | None = None,
+    override_map: dict[int, str] | None = None,
+    alias_map: dict[str, str] | None = None,
+    cat_override_map: dict[int, str] | None = None,
+    subcat_names: dict[int, str] | None = None,
+    split_by_subcategory: bool = False,
+) -> list[dict]:
+    """Воронка деревом «Категория → Размер [→ Под-категория] → SKU».
+
+    Категория товара: ручной оверрайд (`cat_override_map[nm_id]`) → иначе предмет WB
+    (`subject`) → иначе «Без категории».
+    Размер товара: ручной оверрайд (`override_map[nm_id]`) → иначе parse_size из
+    vendor_code → иначе «Без размера»; затем алиас (`alias_map`, переименование/merge).
+    Размеры замкнуты внутри категории. При `split_by_subcategory` под размером
+    добавляется уровень под-категории (`subcat_names[nm_id]` или «Без под-категории»).
+    """
+    rows = await _load_funnel_rows(db, pid, date_from, date_to, brand, subject, nm_ids=nm_ids)
+
+    tariff_map = await get_tariff_map(db, pid)
+    buyout_map = await get_avg_buyout_map(db, pid)
+    tax_rate = tax_info.get("usn_rate", 0) + tax_info.get("nds_rate", 0)
+    has_bdr = bool(bdr_rates_map)
+    overrides = override_map or {}
+    aliases = alias_map or {}
+    cat_overrides = cat_override_map or {}
+    subcats = subcat_names or {}
+
+    def _eff_size(r: WbFunnelDaily) -> str:
+        raw = overrides.get(r.nm_id) or parse_size(r.vendor_code) or "Без размера"
+        return aliases.get(raw, raw)
+
+    cat_agg: dict = defaultdict(lambda: _new_group_agg(has_bdr))
+    size_agg: dict = defaultdict(lambda: defaultdict(lambda: _new_group_agg(has_bdr)))
+    sub_agg: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: _new_group_agg(has_bdr))))
+    sku_agg: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(_new_child_agg)))
+    sku_sub_agg: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(_new_child_agg))))
+
+    for r in rows:
+        nm_id = r.nm_id
+        cat = cat_overrides.get(nm_id) or r.subject or "Без категории"
+        size = _eff_size(r)
+
+        ca = cat_agg[cat]
+        if not ca["label"]:
+            ca["label"] = cat
+        _accumulate_row(ca, r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
+
+        sa = size_agg[cat][size]
+        if not sa["label"]:
+            sa["label"] = size
+        _accumulate_row(sa, r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
+
+        if split_by_subcategory:
+            sub = subcats.get(nm_id) or "Без под-категории"
+            ga = sub_agg[cat][size][sub]
+            if not ga["label"]:
+                ga["label"] = sub
+            _accumulate_row(ga, r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
+            _accumulate_child(
+                sku_sub_agg[cat][size][sub][nm_id], r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info
+            )
+        else:
+            _accumulate_child(sku_agg[cat][size][nm_id], r, nm_id, bdr_rates_map, tariff_map, buyout_map, tax_info)
+
+    result = _finalize_groups(cat_agg, tax_rate, "subject", limit)
+    for catrow in result:
+        cat = catrow["subject"]
+        sizes = _finalize_groups(size_agg.get(cat, {}), tax_rate, "size", limit)
+        for sizerow in sizes:
+            sz = sizerow["size"]
+            if split_by_subcategory:
+                subs = _finalize_groups(sub_agg.get(cat, {}).get(sz, {}), tax_rate, "subcategory", limit)
+                for subrow in subs:
+                    subrow["children"] = _finalize_children(
+                        sku_sub_agg.get(cat, {}).get(sz, {}).get(subrow["subcategory"], {}), tax_rate
+                    )
+                sizerow["children"] = subs
+            else:
+                sizerow["children"] = _finalize_children(sku_agg.get(cat, {}).get(sz, {}), tax_rate)
+        catrow["children"] = sizes
     return result

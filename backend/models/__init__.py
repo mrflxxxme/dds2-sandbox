@@ -131,15 +131,20 @@ from backend.models.planning import (
 # References
 from backend.models.refs import (
     Account,
+    CategoryOverride,  # noqa: F401
     CategoryRef,
     CounterpartyCategory,
     ImtAlias,  # noqa: F401
     OpeningBalance,
     Override,
     ProductStatusMap,  # noqa: F401
+    ProductSubcategory,  # noqa: F401
+    ProductSubcategoryMap,  # noqa: F401
     ProductTag,  # noqa: F401
     ProductTagMap,  # noqa: F401
     ProjectSetting,
+    SizeAlias,  # noqa: F401
+    SizeOverride,  # noqa: F401
 )
 
 # Supply Chain

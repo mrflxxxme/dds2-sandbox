@@ -116,6 +116,43 @@ class ImtAliasPayload(BaseModel):
     name: str
 
 
+class SizeAliasPayload(BaseModel):
+    """Rename/merge a size: raw_size → display_name (пустое имя = снять алиас)."""
+
+    raw_size: str
+    display_name: str
+
+
+class SizeOverrideBulkPayload(BaseModel):
+    """Назначить размер товарам вручную; пустое значение = снять оверрайд."""
+
+    nm_ids: list[int]
+    size_value: str
+
+
+class CategoryOverrideBulkPayload(BaseModel):
+    """Назначить категорию товарам вручную; пустое значение = снять оверрайд (вернуть предмет WB)."""
+
+    nm_ids: list[int]
+    category_value: str
+
+
+class SubcategorySchema(BaseModel):
+    """Output/upsert for ProductSubcategory."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: int | None = None
+    name: str
+    color: str = "#8B5CF6"
+
+
+class SubcategoryBulkPayload(BaseModel):
+    """Назначить ОДНУ под-категорию товарам (single-select); null = снять."""
+
+    nm_ids: list[int]
+    subcategory_id: int | None = None
+
+
 class ExcludedWarehousesPayload(BaseModel):
     """Input payload for setting excluded warehouses."""
 
