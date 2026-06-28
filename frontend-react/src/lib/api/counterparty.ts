@@ -12,6 +12,7 @@ import type {
     CounterpartySummaryResponse,
     SetExpenseCategoryResponse,
     BulkCategoryResponse,
+    CounterpartyMergeResponse,
     DocType,
 } from '@/types/api';
 
@@ -77,6 +78,11 @@ export function addCounterpartyMethods(api: ApiClient) {
         /** Bulk-apply a type and/or expense category to many counterparties at once. */
         bulkSetCounterpartyCategory(ids: number[], opts: { cat_lvl1?: string | null; cat_lvl2?: string | null; primary_type?: string | null }) {
             return api.request<BulkCategoryResponse>('POST', '/api/v1/counterparties/bulk_category', { ids, ...opts });
+        },
+
+        /** Merge `sourceId` into `targetId` (target survives, source archived). */
+        mergeCounterparties(targetId: number, sourceId: number) {
+            return api.request<CounterpartyMergeResponse>('POST', `/api/v1/counterparties/${targetId}/merge`, { source_id: sourceId });
         },
 
         deleteCounterparty(id: number) {

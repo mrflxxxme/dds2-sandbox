@@ -74,6 +74,51 @@ def _extract_text(data: bytes, filename: str) -> str:
     return ""
 
 
+# ─── Фото счёта (vision) ──────────────────────────────────────────────────────────
+# Айфон/телефон снимает счёт фотографией. Текста извлечь нечего → отдаём картинку
+# vision-Claude тем же tool-схемой. HEIC (дефолт айфона) Claude не принимает →
+# конвертируем в JPEG через pillow-heif. Claude vision принимает jpeg/png/webp/gif.
+
+_IMAGE_EXT_MEDIA = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif",
+}
+_MAX_IMAGE_PIXELS = 40_000_000  # анти-pixel-bomb для HEIC-декода (счёт-фото ≪ 40 Мп)
+
+
+def _image_media_type(data: bytes, filename: str) -> str | None:
+    """Media-type изображения по расширению/магии; не картинка (PDF/Word/прочее) → None."""
+    name = (filename or "").lower()
+    for ext, mt in _IMAGE_EXT_MEDIA.items():
+        if name.endswith(ext):
+            return mt
+    head = data[:12]
+    if head[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if head[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[4:8] == b"ftyp" and data[8:12] in (b"heic", b"heif", b"mif1", b"msf1", b"hevc"):
+        return "image/heic"
+    return None
+
+
+def _convert_heic_to_jpeg(data: bytes) -> bytes:
+    """HEIC/HEIF → JPEG (Claude vision не принимает HEIC). Требует pillow-heif."""
+    import pillow_heif  # type: ignore  # ставится в образе; нет py.typed → глушим import-untyped
+    from PIL import Image
+
+    pillow_heif.register_heif_opener()
+    img = Image.open(io.BytesIO(data))  # ленивое открытие — пиксели ещё не декодированы
+    w, h = img.size
+    if w * h > _MAX_IMAGE_PIXELS:  # огромный холст HEIF → не аллоцируем гигабайты на convert
+        raise ValueError(f"image too large: {w}x{h}")
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
+
+
 # ─── Разбор реквизитов ──────────────────────────────────────────────────────────
 
 # ИНН у якоря: берём ЦЕЛЫЙ пробег цифр (граница `\b…\b`), длину 10 (юрлицо) / 12 (ИП)
@@ -402,9 +447,64 @@ async def extract_requisites_llm(text: str) -> InvoiceParseResult | None:
     return _finalize(data)
 
 
+async def extract_requisites_vision(image_data: bytes, media_type: str) -> InvoiceParseResult | None:
+    """Распознать реквизиты с ФОТО счёта vision-Claude (тот же tool, что и текстовый путь).
+    None → ключ не настроен (для фото regex-fallback невозможен — нет текста)."""
+    key = settings.ANTHROPIC_API_KEY
+    if not key or not key.isascii():  # пусто или masked-ключ (sync-prod маскирует)
+        return None
+    import base64
+
+    from backend.services.ai.llm_client import chat
+
+    b64 = base64.standard_b64encode(image_data).decode("ascii")
+    msg = await chat(
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                {"type": "text", "text": "Извлеки платёжные реквизиты ПОЛУЧАТЕЛЯ с этого счёта."},
+            ],
+        }],
+        tools=[_LLM_TOOL],
+        system=_LLM_SYSTEM,
+        model=_LLM_MODEL,
+        max_tokens=1024,
+        temperature=0,
+        tool_choice={"type": "tool", "name": "extract_requisites"},
+    )
+    block = next((b for b in msg.content if getattr(b, "type", None) == "tool_use"), None)
+    data = getattr(block, "input", None)  # ToolUseBlock.input — getattr обходит union-тип content-блоков
+    if not isinstance(data, dict):
+        return None
+    return _finalize(data)
+
+
+async def _parse_image_invoice(data: bytes, media_type: str) -> InvoiceParseResult:
+    """Фото счёта → реквизиты через vision. HEIC сперва конвертим в JPEG. Без ключа/ошибки —
+    мягкое предупреждение (regex по картинке невозможен), 500 не роняем."""
+    if media_type in ("image/heic", "image/heif"):
+        try:
+            data, media_type = _convert_heic_to_jpeg(data), "image/jpeg"
+        except Exception:
+            logger.warning("invoice parse: не удалось конвертировать HEIC", exc_info=True)
+            return InvoiceParseResult(warnings=["Не удалось обработать HEIC — приложите фото в JPEG/PNG или PDF"])
+    try:
+        vision = await extract_requisites_vision(data, media_type)
+    except Exception as e:  # API недоступен/refusal/таймаут — не роняем
+        logger.warning("invoice vision extract failed (%s)", type(e).__name__)
+        return InvoiceParseResult(warnings=["Не удалось распознать фото — введите реквизиты вручную"])
+    if vision is None:
+        return InvoiceParseResult(warnings=["Распознавание фото недоступно — введите реквизиты вручную или приложите PDF"])
+    return vision
+
+
 async def parse_invoice_async(data: bytes, filename: str) -> InvoiceParseResult:
-    """Файл счёта → реквизиты. Сначала текстовый Claude (надёжно на любых форматах: двухколоночные,
-    самозанятые); при отсутствии ключа/ошибке — детерминированный regex-fallback. Битый файл → не 500."""
+    """Файл счёта → реквизиты. Фото (jpg/png/webp/heic) → vision-Claude; PDF/Word → текстовый
+    Claude (надёжно на любых форматах) с regex-fallback. Битый файл → не 500."""
+    media_type = _image_media_type(data, filename)
+    if media_type is not None:  # фото счёта — текста нет, идём vision-путём
+        return await _parse_image_invoice(data, media_type)
     try:
         text = _extract_text(data, filename)
     except Exception:

@@ -2,7 +2,6 @@
 import { ApiClient } from './client';
 import type {
     Account,
-    CounterpartyCategory,
     CategoryRef,
     MessageResponse,
     ProductTag,
@@ -21,10 +20,7 @@ export function addRefMethods(api: ApiClient) {
         upsertAccount(data: Partial<Account>) { return api.request<Account>('POST', '/api/v1/refs/accounts', data); },
         deleteAccount(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/refs/accounts/${id}`); },
 
-        // CP Categories
-        getCpCategories() { return api.request<CounterpartyCategory[]>('GET', '/api/v1/refs/cp_categories'); },
-        upsertCpCategory(data: Partial<CounterpartyCategory>) { return api.request<CounterpartyCategory>('POST', '/api/v1/refs/cp_categories', data); },
-        deleteCpCategory(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/refs/cp_categories/${id}`); },
+        // Категории контрагентов ведутся на странице «Контрагенты» (counterparty.ts).
 
         // Overrides
         getOverrides() { return api.request<Array<{ id: number; field: string; pattern: string; value: string }>>('GET', '/api/v1/refs/overrides'); },
@@ -37,6 +33,7 @@ export function addRefMethods(api: ApiClient) {
         // Category reference
         getCategoryRef() { return api.request<CategoryRef[]>('GET', '/api/v1/refs/categories'); },
         addCategoryRef(data: Partial<CategoryRef>) { return api.request<CategoryRef>('POST', '/api/v1/refs/categories', data); },
+        updateCategoryRef(id: number, is_cogs: boolean) { return api.request<MessageResponse>('PATCH', `/api/v1/refs/categories/${id}`, { is_cogs }); },
         deleteCategoryRef(id: number) { return api.request<MessageResponse>('DELETE', `/api/v1/refs/categories/${id}`); },
 
         // WB Warehouses (all WB-side names: WAREHOUSE_COORDS + DB observed). NB: project FF warehouses are in warehouse.getWarehouses().

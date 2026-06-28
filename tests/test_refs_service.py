@@ -12,15 +12,13 @@ from backend.services.refs_service import (
     add_category,
     delete_account,
     delete_category,
-    delete_cp_category,
     delete_override,
     list_accounts,
     list_categories,
-    list_cp_categories,
     list_opening_balances,
     list_overrides,
+    update_category,
     upsert_account,
-    upsert_cp_category,
     upsert_opening_balance,
 )
 
@@ -124,55 +122,31 @@ class TestAccountsCrud:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Counterparty Categories
+# Category reference — COGS («себестоимость») toggle
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class TestCpCategoriesCrud:
+class TestCategoryRefCogs:
     @pytest.mark.asyncio
-    async def test_create_and_list(self, db_session, project):
-        cp_key = f"INN:{uuid.uuid4().hex[:10]}"
-        cpc = await upsert_cp_category(
-            db_session,
-            project.id,
-            {
-                "cp_key": cp_key,
-                "cat_lvl1": "Поставщики",
-            },
-        )
-        assert cpc.id is not None
-        categories = await list_cp_categories(db_session, project.id)
-        assert any(c.id == cpc.id for c in categories)
+    async def test_update_category_toggles_is_cogs(self, db_session, project):
+        cat = await add_category(db_session, project.id, "Таможня", None, direction="expense")
+        assert cat.is_cogs is False
+        ok = await update_category(db_session, cat.id, project.id, is_cogs=True)
+        assert ok is True
+        rows = await list_categories(db_session, project.id)
+        flagged = next(c for c in rows if c["id"] == cat.id)
+        assert flagged["is_cogs"] is True
 
     @pytest.mark.asyncio
-    async def test_soft_delete(self, db_session, project):
-        cp_key = f"INN:{uuid.uuid4().hex[:10]}"
-        cpc = await upsert_cp_category(
-            db_session,
-            project.id,
-            {
-                "cp_key": cp_key,
-                "cat_lvl1": "Temp",
-            },
-        )
-        result = await delete_cp_category(db_session, project.id, cpc.id)
-        assert result is True
-        categories = await list_cp_categories(db_session, project.id)
-        assert not any(c.id == cpc.id for c in categories)
+    async def test_update_category_missing_returns_false(self, db_session, project):
+        ok = await update_category(db_session, 999_999_999, project.id, is_cogs=True)
+        assert ok is False
 
     @pytest.mark.asyncio
-    async def test_project_isolation(self, db_session, project, other_project):
-        cp_key = f"INN:{uuid.uuid4().hex[:10]}"
-        cpc = await upsert_cp_category(
-            db_session,
-            project.id,
-            {
-                "cp_key": cp_key,
-                "cat_lvl1": "Isolated",
-            },
-        )
-        other_cats = await list_cp_categories(db_session, other_project.id)
-        assert not any(c.id == cpc.id for c in other_cats)
+    async def test_update_category_project_isolation(self, db_session, project, other_project):
+        cat = await add_category(db_session, project.id, "Логистика", None, direction="expense")
+        ok = await update_category(db_session, cat.id, other_project.id, is_cogs=True)
+        assert ok is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

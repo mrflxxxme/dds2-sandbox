@@ -56,6 +56,7 @@ class CategoryRefSchema(BaseModel):
     direction: str = "expense"
     cat_lvl1: str
     cat_lvl2: str | None = None
+    is_cogs: bool = False
 
 
 class CategoryRefCreate(BaseModel):
@@ -65,6 +66,13 @@ class CategoryRefCreate(BaseModel):
     cat_lvl2: str | None = None
     direction: str = "expense"
     sort_order: int = 0
+    is_cogs: bool = False
+
+
+class CategoryRefUpdate(BaseModel):
+    """Input: toggle the «себестоимость» (COGS) flag on a category."""
+
+    is_cogs: bool
 
 
 class ProductTagSchema(BaseModel):

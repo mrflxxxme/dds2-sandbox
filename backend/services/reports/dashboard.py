@@ -9,10 +9,12 @@ from typing import Optional
 
 from sqlalchemy import select, func, and_, or_, text, case
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from backend.models import Transaction, Account, OpeningBalance
 from backend.models.planning import Order, PlannedPayment
 from backend.cache import cached
+from backend.services.reports._cogs import cogs_include_clause, get_cogs_keys
 
 logger = logging.getLogger("dds.dashboard")
 
@@ -146,12 +148,14 @@ async def _compute_expense_by_type(
     date_from: date,
     date_to: date,
     avg_cny_rate: float,
+    cogs_incl: ColumnElement[bool],
 ) -> list[dict]:
     """Expenses grouped by counterparty type (level 1) → category (level 2).
 
     Level 1 = ``counterparty.primary_type`` (what the user sets on the card);
     level 2 = ``cat_lvl1_2``. Transactions with no linked counterparty fall under
     «Без контрагента». CNY→RUB via the period's average rate (as elsewhere here).
+    ``cogs_incl`` excludes «себестоимость»-категории (see _cogs.cogs_include_clause).
     """
     from backend.models.counterparty import Counterparty
 
@@ -181,6 +185,7 @@ async def _compute_expense_by_type(
             Transaction.date <= date_to,
             Transaction.expense > 0,
             Transaction.is_cashflow2 == 1,
+            cogs_incl,
         )
         .group_by(ptype, cat, Transaction.currency)
     )
@@ -234,6 +239,14 @@ async def get_dashboard_summary(
     if date_from is None:
         date_from = date_to.replace(day=1)
 
+    # COGS («себестоимость») exclusion — drop COGS-flagged expense categories from
+    # every expense aggregation below (income & balances are unaffected). Fetched
+    # once; applied via CASE in mixed income/expense sums and via WHERE in the
+    # expense-only breakdowns.
+    cogs_l1, cogs_pairs = await get_cogs_keys(db, project_id)
+    cogs_incl = cogs_include_clause(cogs_l1, cogs_pairs)
+    expense_sum = func.coalesce(func.sum(case((cogs_incl, Transaction.expense), else_=0)), 0)
+
     # 1. Balances (always current — reflects actual bank state)
     balances = await get_balance(db, project_id)
     balance_rub = sum(b["balance"] for b in balances if b["currency"] == "RUB")
@@ -252,7 +265,7 @@ async def get_dashboard_summary(
     rub_result = await db.execute(
         select(
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
-            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            expense_sum.label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= date_from,
@@ -270,7 +283,7 @@ async def get_dashboard_summary(
         select(
             func.date(Transaction.date).label("day"),
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
-            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            expense_sum.label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= date_from,
@@ -357,7 +370,7 @@ async def get_dashboard_summary(
         select(
             func.date(Transaction.date).label("day"),
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
-            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            expense_sum.label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= date_from,
@@ -376,7 +389,7 @@ async def get_dashboard_summary(
         select(
             func.date(Transaction.date).label("day"),
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
-            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            expense_sum.label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= date_from,
@@ -412,6 +425,7 @@ async def get_dashboard_summary(
             Transaction.date <= date_to,
             Transaction.expense > 0,
             Transaction.is_cashflow2 == 1,
+            cogs_incl,
         ).group_by(Transaction.cat_lvl1_2, Transaction.currency).order_by(
             func.sum(Transaction.expense).desc()
         )
@@ -468,7 +482,9 @@ async def get_dashboard_summary(
     )
 
     # 10. Expense structure — 2-level: counterparty type → category
-    expense_by_type = await _compute_expense_by_type(db, project_id, date_from, date_to, avg_cny_rate)
+    expense_by_type = await _compute_expense_by_type(
+        db, project_id, date_from, date_to, avg_cny_rate, cogs_incl
+    )
 
     return {
         "balance_rub": balance_rub,

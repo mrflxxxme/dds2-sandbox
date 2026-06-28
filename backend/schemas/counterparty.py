@@ -188,6 +188,23 @@ class BulkCategoryResponse(BaseModel):
     transactions: int
 
 
+class CounterpartyMergeRequest(BaseModel):
+    """Merge ``source_id`` into the target counterparty (target survives)."""
+
+    source_id: int
+
+
+class CounterpartyMergeResponse(BaseModel):
+    """Summary of a merge: rows re-pointed per table + field/category outcome."""
+
+    target_id: int
+    source_id: int
+    moved: dict[str, int] = Field(default_factory=dict)
+    fields_filled: list[str] = Field(default_factory=list)
+    inn_assigned: bool = False
+    category_action: str = "none"  # moved | kept_target | none
+
+
 class CounterpartyListResponse(BaseModel):
     """Paginated list response."""
 

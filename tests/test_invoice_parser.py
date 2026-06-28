@@ -16,6 +16,7 @@ from backend.services.bank_directory import resolve_bank
 from backend.services.invoice_parser import (
     _extract_text,
     _finalize,
+    _image_media_type,
     _valid_rs,
     extract_requisites_from_text,
 )
@@ -214,3 +215,51 @@ def test_extract_text_from_docx():
 
 def test_extract_text_unknown_type_returns_empty():
     assert _extract_text(b"plain text, not pdf or docx", "note.txt") == ""
+
+
+# ─── Фото счёта (vision) ──────────────────────────────────────────────────────────
+
+
+def test_image_media_type_by_magic():
+    """Детект изображения по магическим байтам (имя без расширения)."""
+    assert _image_media_type(b"\xff\xd8\xff\xe0blah", "scan") == "image/jpeg"
+    assert _image_media_type(b"\x89PNG\r\n\x1a\nblah", "scan") == "image/png"
+    assert _image_media_type(b"RIFF\x00\x00\x00\x00WEBPVP8 ", "scan") == "image/webp"
+    # HEIC: «ftypheic» на offset 4
+    assert _image_media_type(b"\x00\x00\x00\x18ftypheic", "scan") == "image/heic"
+
+
+def test_image_media_type_by_extension():
+    """Расширение приоритетнее магии (телефон шлёт .heic с произвольным контентом)."""
+    assert _image_media_type(b"whatever", "invoice.jpg") == "image/jpeg"
+    assert _image_media_type(b"whatever", "INVOICE.HEIC") == "image/heic"
+    assert _image_media_type(b"whatever", "scan.png") == "image/png"
+
+
+def test_image_media_type_none_for_pdf_and_docx():
+    assert _image_media_type(b"%PDF-1.7 ...", "invoice.pdf") is None
+    assert _image_media_type(b"PK\x03\x04 ...", "invoice.docx") is None
+    assert _image_media_type(b"plain", "note.txt") is None
+
+
+async def test_parse_invoice_async_image_without_key_is_graceful(monkeypatch):
+    """Фото без ANTHROPIC_API_KEY (regex по картинке невозможен) → мягкое предупреждение, не 500."""
+    from backend.config import settings
+    from backend.services import invoice_parser
+
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
+    r = await invoice_parser.parse_invoice_async(b"\xff\xd8\xff\xe0fake-jpeg", "scan.jpg")
+    assert r.payee_inn is None
+    assert r.fields_found == []
+    assert r.warnings  # подсказка «введите вручную / приложите PDF»
+
+
+async def test_parse_invoice_async_heic_conversion_failure_is_graceful(monkeypatch):
+    """Битый HEIC (или отсутствие pillow-heif) → понятное предупреждение, без падения."""
+    from backend.config import settings
+    from backend.services import invoice_parser
+
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
+    r = await invoice_parser.parse_invoice_async(b"\x00\x00\x00\x18ftypheicGARBAGE", "photo.heic")
+    assert r.fields_found == []
+    assert r.warnings
