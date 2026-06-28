@@ -113,6 +113,9 @@ class CategoryRef(Base, SoftDeleteMixin):
     cat_lvl1: Mapped[str] = mapped_column(String(100), nullable=False)
     cat_lvl2: Mapped[str] = mapped_column(String(100), nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    # «Себестоимость товара»: расходы с такой категорией исключаются из расходных
+    # отчётов (дашборд, ДДС) — они капитализируются в стоимость товара, не опер. расход.
+    is_cogs: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     __table_args__ = (UniqueConstraint("project_id", "direction", "cat_lvl1", "cat_lvl2", name="uq_cat_ref"),)
 

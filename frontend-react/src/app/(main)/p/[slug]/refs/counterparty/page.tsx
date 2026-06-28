@@ -67,6 +67,12 @@ export default function CounterpartyPage() {
     const [bulkSaving, setBulkSaving] = useState(false);
     const [bulkMsg, setBulkMsg] = useState('');
 
+    // Merge (select exactly 2 → pick which survives)
+    const [mergeOpen, setMergeOpen] = useState(false);
+    const [mergeTargetId, setMergeTargetId] = useState<number | null>(null);
+    const [merging, setMerging] = useState(false);
+    const [mergeMsg, setMergeMsg] = useState('');
+
     // Create form
     const [showCreate, setShowCreate] = useState(false);
     const [form, setForm] = useState<CounterpartyCreate>(emptyForm());
@@ -147,6 +153,31 @@ export default function CounterpartyPage() {
     });
     const selectAllVisible = () => setSelected(new Set(visibleItems.map(i => i.id)));
     const clearSel = () => setSelected(new Set());
+
+    const mergePair = items.filter(i => selected.has(i.id));
+    const openMerge = () => {
+        if (selected.size !== 2) return;
+        setMergeTargetId([...selected][0]);
+        setMergeMsg('');
+        setMergeOpen(true);
+    };
+    const handleMerge = async () => {
+        if (mergeTargetId == null) return;
+        const sourceId = [...selected].find(id => id !== mergeTargetId);
+        if (sourceId == null) return;
+        setMerging(true); setMergeMsg('');
+        try {
+            const res = await api.mergeCounterparties(mergeTargetId, sourceId);
+            setMergeOpen(false);
+            clearSel();
+            setBulkMsg(`✓ Объединено: перенесено операций ${res.moved.transactions ?? 0}`);
+            await load();
+        } catch (e: unknown) {
+            setMergeMsg(e instanceof Error ? e.message : 'Ошибка объединения');
+        } finally {
+            setMerging(false);
+        }
+    };
 
     const handleBulkApply = async () => {
         if (selected.size === 0) return;
@@ -412,8 +443,72 @@ export default function CounterpartyPage() {
                         <button className="btn btn-primary btn-sm" onClick={handleBulkApply} disabled={bulkSaving}>
                             {bulkSaving ? '…' : 'Применить к выбранным'}
                         </button>
+                        {selected.size === 2 && (
+                            <>
+                                <span style={{ color: 'var(--color-text-dim)' }}>|</span>
+                                <button className="btn btn-secondary btn-sm" onClick={openMerge} title="Объединить двух контрагентов в одного">
+                                    🔗 Объединить
+                                </button>
+                            </>
+                        )}
                     </div>
                     {bulkMsg && <div style={{ fontSize: 12, color: bulkMsg.startsWith('✓') ? 'var(--color-success)' : 'var(--color-danger)', marginTop: 8 }}>{bulkMsg}</div>}
+                </div>
+            )}
+
+            {/* Merge modal — pick which of the two selected survives */}
+            {mergeOpen && mergePair.length === 2 && (
+                <div
+                    onClick={() => !merging && setMergeOpen(false)}
+                    style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}
+                >
+                    <div className="glass-card" onClick={e => e.stopPropagation()} style={{ width: 560, maxWidth: '92vw', padding: 24 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                            <h3 style={{ fontSize: 17, fontWeight: 600, margin: 0 }}>Объединение контрагентов</h3>
+                            <button className="btn btn-secondary btn-sm" onClick={() => setMergeOpen(false)} disabled={merging}>✕</button>
+                        </div>
+                        <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 16 }}>
+                            Выберите <b>главную</b> запись. Вторая будет архивирована: все операции,
+                            идентификаторы, документы, категория и реквизиты перенесутся на главную.
+                            Действие необратимо.
+                        </p>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+                            {mergePair.map(cp => {
+                                const isTarget = mergeTargetId === cp.id;
+                                return (
+                                    <label
+                                        key={cp.id}
+                                        style={{
+                                            display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer',
+                                            padding: 12, borderRadius: 8,
+                                            border: isTarget ? '2px solid var(--color-accent)' : '1px solid var(--color-border)',
+                                            background: isTarget ? 'rgba(0,113,227,0.06)' : undefined,
+                                        }}
+                                    >
+                                        <input type="radio" name="merge-target" checked={isTarget} onChange={() => setMergeTargetId(cp.id)} style={{ marginTop: 3 }} />
+                                        <div style={{ flex: 1 }}>
+                                            <div style={{ fontWeight: 600, fontSize: 14 }}>{cp.name}</div>
+                                            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 2 }}>
+                                                <span>ИНН: {cp.inn || '—'}</span>
+                                                <span className={`badge ${cp.created_by_import ? 'badge-secondary' : 'badge-success'}`} style={{ fontSize: 10 }}>
+                                                    {cp.created_by_import ? 'импорт' : 'вручную'}
+                                                </span>
+                                                {cp.cat_lvl1 && <span>кат: {cp.cat_lvl1}</span>}
+                                            </div>
+                                        </div>
+                                        {isTarget && <span style={{ fontSize: 11, color: 'var(--color-accent)', fontWeight: 600 }}>останется</span>}
+                                    </label>
+                                );
+                            })}
+                        </div>
+                        {mergeMsg && <div style={{ fontSize: 13, color: 'var(--color-danger)', marginBottom: 12 }}>{mergeMsg}</div>}
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                            <button className="btn btn-secondary btn-sm" onClick={() => setMergeOpen(false)} disabled={merging}>Отмена</button>
+                            <button className="btn btn-primary btn-sm" onClick={handleMerge} disabled={merging || mergeTargetId == null}>
+                                {merging ? 'Объединение…' : 'Объединить'}
+                            </button>
+                        </div>
+                    </div>
                 </div>
             )}
 
