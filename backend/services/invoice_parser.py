@@ -106,7 +106,7 @@ def _image_media_type(data: bytes, filename: str) -> str | None:
 
 def _convert_heic_to_jpeg(data: bytes) -> bytes:
     """HEIC/HEIF → JPEG (Claude vision не принимает HEIC). Требует pillow-heif."""
-    import pillow_heif  # type: ignore[import-not-found]  # wheel ставится при сборке образа
+    import pillow_heif  # type: ignore  # ставится в образе; нет py.typed → глушим import-untyped
     from PIL import Image
 
     pillow_heif.register_heif_opener()
