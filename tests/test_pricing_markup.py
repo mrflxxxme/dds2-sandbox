@@ -103,6 +103,26 @@ class TestBuildRowExpenses:
         assert row.wb_expenses == 4020.0  # не -588000 (revenue − revenue×59.8)
         assert 0 <= row.wb_expenses <= row.revenue
 
+    def test_financial_metrics(self):
+        """GMROI / запас прочности / sell-through / точка безубыточности."""
+        price = WbPrice(
+            project_id=1, nm_id=1, price=Decimal("1000"), base_price=Decimal("1200"),
+            discount=Decimal("16"), currency="RUB", synced_at=utcnow(),
+        )
+        funnel = {
+            "nm_id": 1, "vendor_code": "X", "brand": "B", "subject": "S",
+            "revenue": 10000.0, "commission": 3000.0, "to_pay_rate": 70.0, "tax": 600.0,
+            "cost_total": 4000.0, "adv_sum": 500.0, "profit": 1900.0, "orders_count": 10,
+            "margin": 19.0, "spp_rate": 10.0,
+        }
+        row = _build_row(1, price, funnel, 400.0, {}, None, wb_stock=20, period_days=30)
+        assert row.stock_value_cost == 8000.0  # 20 × 400
+        assert row.gmroi == 0.75  # (10000 − 4000) / 8000
+        assert row.sell_through_pct == 33.3  # 10 / (10 + 20)
+        # breakeven = 1000 × (4000+500) / (10000−3000−600) = 703.13
+        assert row.breakeven_price == pytest.approx(703.13, abs=0.1)
+        assert row.safety_margin_pct == pytest.approx(29.69, abs=0.1)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helpers для сервис-тестов

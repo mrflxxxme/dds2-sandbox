@@ -11,19 +11,22 @@
 """
 
 import logging
+import math
 from collections import defaultdict
 from datetime import date as _date
+from datetime import timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
-from backend.models import Nomenclature, Project, WarehouseStock, WbPrice, WbWarehouseStock
+from backend.models import Nomenclature, Project, WarehouseStock, WbFunnelDaily, WbPrice, WbWarehouseStock
 from backend.schemas.pricing import PricingGroup, PricingResponse, PricingRow, PricingSummary
 from backend.services import funnel as funnel_service
 from backend.services import refs_service
 from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides, load_tax_settings
 from backend.services.funnel.bdr_rates import get_bdr_rates
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.pricing")
 
@@ -111,6 +114,65 @@ async def _load_wb_stock_map(db: AsyncSession, pid: int) -> dict[int, int]:
     return {r.nm_id: int(r.qty or 0) for r in rows}
 
 
+_ELASTICITY_DAYS = 90  # окно истории для оценки эластичности
+_ELASTICITY_MIN_POINTS = 6  # минимум дней с продажами и ценой
+_ELASTICITY_MIN_DISTINCT = 3  # минимум различных уровней цены
+_ELASTICITY_MIN_CV = 0.03  # минимальная вариация цены (коэф. вариации)
+
+
+async def _load_elasticity_map(db: AsyncSession, pid: int) -> dict[int, float]:
+    """nm_id → эластичность спроса по цене (оценка лог-лог OLS по дневной истории).
+
+    Берём последние 90 дней (price=avg_price, qty=orders_count). Считаем только
+    для артикулов с реальной вариацией цены (≥3 уровня, CV≥3%, ≥6 точек) — иначе
+    наклон не определён. E < 0 норма (спрос падает с ростом цены). Оценка грубая —
+    короткое окно и шумные данные ВБ; для направления решения, не для точного числа.
+    """
+    start = utcnow().date() - timedelta(days=_ELASTICITY_DAYS)
+    rows = await db.execute(
+        select(WbFunnelDaily.nm_id, WbFunnelDaily.avg_price, WbFunnelDaily.orders_count)
+        .where(
+            WbFunnelDaily.project_id == pid,
+            WbFunnelDaily.date >= start,
+            WbFunnelDaily.avg_price > 0,
+            WbFunnelDaily.orders_count > 0,
+        )
+        .limit(_MAX_ROWS * 4)
+    )
+    series: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    for r in rows:
+        series[r.nm_id].append((float(r.avg_price), float(r.orders_count)))
+
+    out: dict[int, float] = {}
+    for nm_id, pts in series.items():
+        if len(pts) < _ELASTICITY_MIN_POINTS:
+            continue
+        prices = [p for p, _ in pts]
+        if len({round(p) for p in prices}) < _ELASTICITY_MIN_DISTINCT:
+            continue
+        mean_p = sum(prices) / len(prices)
+        if mean_p <= 0:
+            continue
+        var_p = sum((p - mean_p) ** 2 for p in prices) / len(prices)
+        if (var_p**0.5) / mean_p < _ELASTICITY_MIN_CV:
+            continue
+        xs = [math.log(p) for p, _ in pts]
+        ys = [math.log(q) for _, q in pts]
+        mx = sum(xs) / len(xs)
+        my = sum(ys) / len(ys)
+        sxx = sum((x - mx) ** 2 for x in xs)
+        if sxx <= 0:
+            continue
+        sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        slope = sxy / sxx
+        # эластичность спроса нормально ОТРИЦАТЕЛЬНА; положительный наклон =
+        # смешение факторов (сезон/акции) → не используем как ценовой сигнал.
+        if slope >= 0:
+            continue
+        out[nm_id] = round(max(-20.0, slope), 2)  # клампим экстремум (шум короткого окна)
+    return out
+
+
 def _classify_anomaly(r: PricingRow) -> str | None:
     """Метка аномалии (самое серьёзное первым) или None для нормальной строки."""
     if r.has_price and r.has_cost and r.current_price is not None and r.cost_price is not None and r.current_price < r.cost_price:
@@ -140,7 +202,15 @@ def _recommend(r: PricingRow) -> str:
     }
     if r.anomaly:
         return rec_by_anomaly.get(r.anomaly, "Проверить")
-    # без аномалии — сигналы по обороту
+    # эластичность спроса → направление цены
+    if r.elasticity_label == "неэластичный":
+        return "Неэласт. спрос — поднять цену"
+    if r.optimal_price is not None and r.current_price:
+        if r.optimal_price > r.current_price * 1.05:
+            return "Поднять цену (эластичность)"
+        if r.optimal_price < r.current_price * 0.95:
+            return "Снизить цену (эластичность)"
+    # сигналы по обороту/остатку
     if r.days_left is not None and r.days_left < 14 and r.markup_pct is not None and r.markup_pct > 80:
         return "Высокий спрос — поднять цену / пополнить"
     if r.days_left is not None and r.days_left > 120:
@@ -157,6 +227,7 @@ def _build_row(
     meta: dict | None,
     wb_stock: int = 0,
     period_days: int = 30,
+    elasticity: float | None = None,
 ) -> PricingRow:
     f = funnel or {}
     m = meta or {}
@@ -219,6 +290,35 @@ def _build_row(
     if has_price and current_price is not None and revenue > 0 and net_contrib > 0:
         breakeven_price = round(current_price * (cost_total + adv_sum) / net_contrib, 2)
 
+    # Запас прочности по цене: насколько можно снижать до нулевой прибыли
+    safety_margin_pct = (
+        round((current_price - breakeven_price) / current_price * 100, 2)
+        if breakeven_price is not None and has_price and current_price
+        else None
+    )
+    # GMROI: валовая маржа за период / заморожено в остатке (бенчмарк ≥3)
+    gross_profit = revenue - cost_total
+    gmroi = round(gross_profit / stock_value_cost, 2) if stock_value_cost and stock_value_cost > 0 else None
+    # Sell-through: доля распроданного от (продано + остаток)
+    sold_plus_stock = orders_count + wb_stock
+    sell_through_pct = round(orders_count / sold_plus_stock * 100, 1) if sold_plus_stock > 0 else None
+
+    # Эластичность спроса → ярлык + оценка цены под макс. прибыль
+    elasticity_label = ""
+    optimal_price = None
+    if elasticity is not None:
+        ae = abs(elasticity)
+        if ae >= 1.0:
+            elasticity_label = "эластичный"
+            if breakeven_price is not None and ae > 1.0:
+                raw = breakeven_price * ae / (ae - 1.0)  # Лернер: опт. наценка над «ценой безубытка»
+                cap = current_price * 3 if has_price and current_price else raw
+                optimal_price = round(min(raw, cap), 2)
+        else:
+            elasticity_label = "неэластичный"  # спрос слабо реагирует → можно поднимать цену
+            if has_price and current_price:
+                optimal_price = round(current_price * 1.15, 2)
+
     row = PricingRow(
         nm_id=nm_id,
         vendor_code=vendor_code,
@@ -253,6 +353,12 @@ def _build_row(
         sales_per_month=sales_per_month,
         drr=drr,
         breakeven_price=breakeven_price,
+        safety_margin_pct=safety_margin_pct,
+        gmroi=gmroi,
+        sell_through_pct=sell_through_pct,
+        elasticity=elasticity,
+        elasticity_label=elasticity_label,
+        optimal_price=optimal_price,
     )
     row.anomaly = _classify_anomaly(row)
     row.recommendation = _recommend(row)
@@ -266,10 +372,13 @@ def _apply_filters(
     search: str | None,
     min_orders: int,
     only_in_stock: bool = False,
+    anomaly_only: bool = False,
 ) -> list[PricingRow]:
     out = rows
     if only_in_stock:
         out = [r for r in out if r.wb_stock > 0]
+    if anomaly_only:
+        out = [r for r in out if r.anomaly]
     if brand:
         out = [r for r in out if (r.brand or "") == brand]
     if category:
@@ -446,6 +555,7 @@ async def _compute_rows(
     meta_map = await _load_meta_map(db, project_id)
     cat_overrides = await refs_service.get_category_overrides(db, project_id)
     wb_stock_map = await _load_wb_stock_map(db, project_id)
+    elasticity_map = await _load_elasticity_map(db, project_id)
 
     # длина периода (для темпа продаж / дней до исчерпания)
     period_days = 30
@@ -471,6 +581,7 @@ async def _compute_rows(
                 meta,
                 wb_stock=wb_stock_map.get(nm_id, 0),
                 period_days=period_days,
+                elasticity=elasticity_map.get(nm_id),
             ).model_dump()
         )
 
@@ -492,6 +603,7 @@ async def get_markup_analytics(
     search: str | None = None,
     min_orders: int = 0,
     only_in_stock: bool = False,
+    anomaly_only: bool = False,
     group_by: str = "category",
 ) -> dict:
     """Наценка по артикулам: текущая цена ВБ + себестоимость + расходы ВБ.
@@ -502,7 +614,7 @@ async def get_markup_analytics(
     """
     raw = await _compute_rows(db, project_id, date_from=date_from, date_to=date_to)
     rows = [PricingRow(**r) for r in raw["rows"]]
-    rows = _apply_filters(rows, brand, category, search, min_orders, only_in_stock)
+    rows = _apply_filters(rows, brand, category, search, min_orders, only_in_stock, anomaly_only)
     _assign_abc(rows)  # ABC по текущему (отфильтрованному) срезу
     summary = _build_summary(rows)
     synced = raw["price_synced_at"]

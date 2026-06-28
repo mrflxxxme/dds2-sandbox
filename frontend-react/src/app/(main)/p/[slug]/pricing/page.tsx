@@ -3,15 +3,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDateTime, exportToExcel } from '@/lib/utils';
-import type { PricingResponse, PricingGroup, PricingRow } from '@/types/api';
+import TanStackDataTable from '@/components/TanStackDataTable';
+import type { Column } from '@/components/DataTable';
+import type { PricingResponse, PricingRow } from '@/types/api';
 
 // ─── format helpers ──────────────────────────────────────────────────────
-const fmtMoney = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 0));
-const fmtPct = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 1) + '%');
-const fmtCoef = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 2) + '×');
-const fmtInt = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 0));
-
-const pctColor = (n: number | null | undefined) =>
+const money = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 0));
+const pct = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 1) + '%');
+const int0 = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 0));
+const num2 = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 2));
+const signColor = (n: number | null | undefined) =>
     n == null ? 'var(--color-text-dim)' : n >= 0 ? 'var(--color-success)' : 'var(--color-danger)';
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -20,10 +21,9 @@ const monthStart = () => {
     return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10);
 };
 
-const th: React.CSSProperties = { padding: '8px 10px', textAlign: 'right', fontSize: 12, color: 'var(--color-text-dim)', whiteSpace: 'nowrap' };
-const thL: React.CSSProperties = { ...th, textAlign: 'left' };
-const td: React.CSSProperties = { padding: '7px 10px', textAlign: 'right', fontSize: 13, whiteSpace: 'nowrap' };
-const tdL: React.CSSProperties = { ...td, textAlign: 'left' };
+const R = (v: React.ReactNode, color?: string): React.ReactNode => (
+    <span style={color ? { color } : undefined}>{v}</span>
+);
 
 export default function PricingPage() {
     const [resp, setResp] = useState<PricingResponse | null>(null);
@@ -35,18 +35,16 @@ export default function PricingPage() {
     const [brand, setBrand] = useState('');
     const [category, setCategory] = useState('');
     const [search, setSearch] = useState('');
-    const [minOrders, setMinOrders] = useState(0);
     const [onlyInStock, setOnlyInStock] = useState(true);
-    const [groupBy, setGroupBy] = useState<'category' | 'sku' | 'anomaly'>('category');
+    const [anomalyOnly, setAnomalyOnly] = useState(false);
 
     const [categoryOptions, setCategoryOptions] = useState<string[]>([]);
-    const [expanded, setExpanded] = useState<Set<string>>(new Set());
     const [syncing, setSyncing] = useState(false);
     const [syncMsg, setSyncMsg] = useState('');
 
     const reqRef = useRef(0);
     const loadData = useCallback(async () => {
-        const myReq = ++reqRef.current; // защита от устаревших/перегоняющих ответов
+        const myReq = ++reqRef.current;
         setLoading(true);
         setError('');
         try {
@@ -56,15 +54,16 @@ export default function PricingPage() {
                 brand: brand || undefined,
                 category: category || undefined,
                 search: search || undefined,
-                min_orders: minOrders || undefined,
                 only_in_stock: onlyInStock || undefined,
-                group_by: groupBy,
+                anomaly_only: anomalyOnly || undefined,
+                group_by: 'sku',
             });
-            if (reqRef.current !== myReq) return; // пришёл ответ не последнего запроса — игнор
+            if (reqRef.current !== myReq) return;
             setResp(res);
-            // Категории для фильтра берём, только когда фильтр по категории не активен
-            if (!category && res.group_by === 'category') {
-                setCategoryOptions(res.data_groups.map((g) => g.category));
+            if (!category && !anomalyOnly) {
+                // полный список категорий берём из несуженного среза
+                const cats = Array.from(new Set(res.data_rows.map((r) => r.category))).sort();
+                if (cats.length) setCategoryOptions((prev) => (prev.length >= cats.length ? prev : cats));
             }
         } catch (e) {
             if (reqRef.current !== myReq) return;
@@ -72,10 +71,10 @@ export default function PricingPage() {
         } finally {
             if (reqRef.current === myReq) setLoading(false);
         }
-    }, [dateFrom, dateTo, brand, category, search, minOrders, onlyInStock, groupBy]);
+    }, [dateFrom, dateTo, brand, category, search, onlyInStock, anomalyOnly]);
 
     useEffect(() => {
-        const t = setTimeout(loadData, 250); // debounce фильтров
+        const t = setTimeout(loadData, 250);
         return () => clearTimeout(t);
     }, [loadData]);
 
@@ -84,7 +83,7 @@ export default function PricingPage() {
         setSyncMsg('');
         try {
             const r = await api.syncPricing();
-            setSyncMsg(r.status === 'OK' ? `Синхронизировано: ${fmtInt(r.rows)} цен` : `Ошибка: ${r.message || r.status}`);
+            setSyncMsg(r.status === 'OK' ? `Синхронизировано: ${int0(r.rows)} цен` : `Ошибка: ${r.message || r.status}`);
             await loadData();
         } catch (e) {
             setSyncMsg(e instanceof Error ? e.message : 'Ошибка синка');
@@ -93,65 +92,102 @@ export default function PricingPage() {
         }
     };
 
-    const toggle = (cat: string) => {
-        setExpanded((prev) => {
-            const next = new Set(prev);
-            if (next.has(cat)) next.delete(cat);
-            else next.add(cat);
-            return next;
-        });
-    };
-
-    const flatRows: PricingRow[] = useMemo(() => {
-        if (!resp) return [];
-        return resp.group_by === 'sku' ? resp.data_rows : resp.data_groups.flatMap((g) => g.children);
-    }, [resp]);
+    const rows = resp?.data_rows ?? [];
+    const s = resp?.summary;
 
     const doExport = () => {
-        const rows = flatRows.map((r) => ({
-            'Артикул': r.vendor_code || '',
-            'nm_id': r.nm_id,
-            'Категория': r.category,
-            'Бренд': r.brand || '',
-            'Базовая цена': r.base_price,
-            'Скидка продавца %': r.discount,
-            'Цена витрины': r.current_price,
-            'Себестоимость': r.cost_price,
-            'Наценка коэф': r.markup_coef,
-            'Наценка %': r.markup_pct,
-            'Доля себест %': r.cost_share_pct,
-            'СПП %': r.spp_rate,
-            'Цена покупателю': r.buyer_price,
-            'Заказы': r.orders_count,
-            'Выручка': r.revenue,
-            'Расходы ВБ': r.wb_expenses,
-            'Прибыль': r.profit,
-            'Маржа %': r.margin_pct,
-            'Чистая наценка %': r.net_markup_pct,
-            'Остаток ВБ': r.wb_stock,
-            'Дней до исчерпания': r.days_left,
-            'Продаж/мес': r.sales_per_month,
-            'Заморожено (себест)': r.stock_value_cost,
-            'Потенц. прибыль остатка': r.stock_potential_profit,
-            'Потенц. выручка остатка': r.stock_potential_revenue,
-            'Мин. цена (безубыток)': r.breakeven_price,
-            'ДРР %': r.drr,
-            'ABC': r.abc || '',
-            'Аномалия': r.anomaly || '',
-            'Рекомендация': r.recommendation,
+        const out = rows.map((r) => ({
+            'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Категория': r.category, 'ABC': r.abc || '',
+            'Бренд': r.brand || '', 'Базовая цена': r.base_price, 'Скидка продавца %': r.discount,
+            'Цена ВБ': r.current_price, 'Себестоимость': r.cost_price, 'Наценка коэф': r.markup_coef,
+            'Наценка %': r.markup_pct, 'Доля себест %': r.cost_share_pct, 'Маржа %': r.margin_pct,
+            'Мин. цена (безубыток)': r.breakeven_price, 'Запас прочности %': r.safety_margin_pct,
+            'Эластичность': r.elasticity, 'Тип спроса': r.elasticity_label, 'Реком. цена': r.optimal_price,
+            'СПП %': r.spp_rate, 'Цена покупателю': r.buyer_price, 'Заказы': r.orders_count,
+            'Остаток ВБ': r.wb_stock, 'Дней до исчерпания': r.days_left, 'Продаж/мес': r.sales_per_month,
+            'Sell-through %': r.sell_through_pct, 'GMROI': r.gmroi, 'Заморожено (себест)': r.stock_value_cost,
+            'Потенц. прибыль остатка': r.stock_potential_profit, 'Потенц. выручка остатка': r.stock_potential_revenue,
+            'Выручка': r.revenue, 'Расходы ВБ': r.wb_expenses, 'Реклама': r.adv_sum, 'Налог': r.tax,
+            'Прибыль': r.profit, 'Чист. наценка %': r.net_markup_pct, 'ДРР %': r.drr,
+            'Аномалия': r.anomaly || '', 'Рекомендация': r.recommendation,
         }));
-        exportToExcel(rows, 'Ценообразование');
+        exportToExcel(out, 'Ценообразование');
     };
 
-    const s = resp?.summary;
-    const isEmpty = !loading && !error && flatRows.length === 0;
+    const columns: Column[] = useMemo(() => [
+        {
+            key: 'vendor_code', label: 'Артикул', width: '230px', sortable: true,
+            getValue: (r: PricingRow) => r.vendor_code || String(r.nm_id),
+            render: (_v, r: PricingRow) => (
+                <div style={{ lineHeight: 1.3 }}>
+                    <div style={{ fontWeight: 500 }}>{r.vendor_code || r.nm_id}</div>
+                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
+                        {r.nm_id} · {r.category}
+                    </div>
+                    {r.anomaly && (
+                        <div style={{ fontSize: 11, color: 'var(--color-danger)', fontWeight: 600 }}>⚠ {r.anomaly}</div>
+                    )}
+                </div>
+            ),
+        },
+        {
+            key: 'abc', label: 'ABC', align: 'center', sortable: true,
+            render: (v: string | null) =>
+                R(v || '—', v === 'A' ? 'var(--color-success)' : v === 'C' ? 'var(--color-text-dim)' : undefined),
+        },
+        { key: 'current_price', label: 'Цена ВБ', align: 'right', sortable: true, render: (v) => money(v) },
+        { key: 'cost_price', label: 'Себест.', align: 'right', sortable: true, render: (v) => money(v) },
+        { key: 'markup_pct', label: 'Наценка %', align: 'right', sortable: true, render: (v) => pct(v) },
+        { key: 'margin_pct', label: 'Маржа %', align: 'right', sortable: true, render: (v) => R(pct(v), signColor(v)) },
+        { key: 'breakeven_price', label: 'Мин. цена', align: 'right', sortable: true, render: (v) => money(v) },
+        {
+            key: 'safety_margin_pct', label: 'Запас %', align: 'right', sortable: true,
+            render: (v: number | null) =>
+                R(pct(v), v == null ? undefined : v < 0 ? 'var(--color-danger)' : v < 15 ? 'var(--color-warning)' : 'var(--color-success)'),
+        },
+        {
+            key: 'elasticity', label: 'Эласт.', align: 'right', sortable: true,
+            render: (v: number | null, r: PricingRow) =>
+                v == null ? '—' : (
+                    <span title={r.elasticity_label} style={{ color: r.elasticity_label === 'эластичный' ? 'var(--color-warning)' : 'var(--color-text)' }}>
+                        {num2(v)}
+                    </span>
+                ),
+        },
+        {
+            key: 'optimal_price', label: 'Реком. цена', align: 'right', sortable: true,
+            render: (v: number | null, r: PricingRow) => {
+                if (v == null) return '—';
+                const c = r.current_price;
+                const color = c ? (v > c * 1.05 ? 'var(--color-success)' : v < c * 0.95 ? 'var(--color-danger)' : undefined) : undefined;
+                return R(money(v), color);
+            },
+        },
+        { key: 'wb_stock', label: 'Остаток', align: 'right', sortable: true, render: (v) => int0(v) },
+        { key: 'days_left', label: 'Дней', align: 'right', sortable: true, render: (v) => int0(v) },
+        { key: 'sell_through_pct', label: 'Sell-thr %', align: 'right', sortable: true, render: (v) => pct(v) },
+        {
+            key: 'gmroi', label: 'GMROI', align: 'right', sortable: true,
+            render: (v: number | null) =>
+                R(num2(v), v == null ? undefined : v >= 3 ? 'var(--color-success)' : v < 1 ? 'var(--color-warning)' : undefined),
+        },
+        { key: 'stock_value_cost', label: 'Заморожено', align: 'right', sortable: true, render: (v) => money(v) },
+        { key: 'revenue', label: 'Выручка', align: 'right', sortable: true, render: (v) => money(v) },
+        { key: 'profit', label: 'Прибыль', align: 'right', sortable: true, render: (v) => R(money(v), signColor(v)) },
+        { key: 'drr', label: 'ДРР %', align: 'right', sortable: true, render: (v) => pct(v) },
+        {
+            key: 'recommendation', label: 'Рекомендация', width: '210px', sortable: true,
+            render: (v: string, r: PricingRow) =>
+                R(v, r.anomaly ? 'var(--color-danger)' : v && v !== 'OK' ? 'var(--color-warning)' : 'var(--color-text-dim)'),
+        },
+    ], []);
 
     return (
         <div className="animate-in" style={{ padding: 24 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
                 <h1 style={{ fontSize: 28, fontWeight: 700, margin: 0 }}>💲 Ценообразование</h1>
                 <span style={{ color: 'var(--color-text-dim)', fontSize: 13 }}>
-                    Коэффициент наценки по артикулам: текущая цена ВБ ÷ себестоимость, с учётом расходов ВБ и СПП
+                    Наценка, юнит-экономика и сигналы для решений о цене по каждому артикулу
                 </span>
             </div>
             <div style={{ color: 'var(--color-text-dim)', fontSize: 12, marginTop: 6 }}>
@@ -168,63 +204,20 @@ export default function PricingPage() {
                 <input type="date" className="btn btn-sm" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
                 <select className="btn btn-sm" value={category} onChange={(e) => setCategory(e.target.value)}>
                     <option value="">Все категории</option>
-                    {categoryOptions.map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                    ))}
+                    {categoryOptions.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
-                <input
-                    className="btn btn-sm"
-                    placeholder="Бренд"
-                    value={brand}
-                    onChange={(e) => setBrand(e.target.value)}
-                    style={{ width: 120 }}
-                />
-                <input
-                    className="btn btn-sm"
-                    placeholder="🔍 Артикул / nm_id"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    style={{ width: 160 }}
-                />
-                <label style={{ fontSize: 12, color: 'var(--color-text-dim)', display: 'flex', gap: 4, alignItems: 'center' }}>
-                    мин. заказов
-                    <input
-                        type="number"
-                        min={0}
-                        className="btn btn-sm"
-                        value={minOrders}
-                        onChange={(e) => setMinOrders(Math.max(0, Number(e.target.value) || 0))}
-                        style={{ width: 64 }}
-                    />
-                </label>
+                <input className="btn btn-sm" placeholder="Бренд" value={brand} onChange={(e) => setBrand(e.target.value)} style={{ width: 110 }} />
+                <input className="btn btn-sm" placeholder="🔍 Артикул / nm_id" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 150 }} />
                 <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center', cursor: 'pointer' }}>
                     <input type="checkbox" checked={onlyInStock} onChange={(e) => setOnlyInStock(e.target.checked)} />
-                    только с остатком ВБ
+                    с остатком ВБ
+                </label>
+                <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center', cursor: 'pointer', color: anomalyOnly ? 'var(--color-danger)' : undefined }}>
+                    <input type="checkbox" checked={anomalyOnly} onChange={(e) => setAnomalyOnly(e.target.checked)} />
+                    ⚠ только аномалии{s?.anomalies ? ` (${s.anomalies})` : ''}
                 </label>
                 <div style={{ flex: 1 }} />
-                <div style={{ display: 'flex', gap: 4 }}>
-                    <button
-                        className={`btn btn-sm ${groupBy === 'category' ? 'btn-primary' : 'btn-secondary'}`}
-                        onClick={() => setGroupBy('category')}
-                    >
-                        По категориям
-                    </button>
-                    <button
-                        className={`btn btn-sm ${groupBy === 'sku' ? 'btn-primary' : 'btn-secondary'}`}
-                        onClick={() => setGroupBy('sku')}
-                    >
-                        По артикулам
-                    </button>
-                    <button
-                        className={`btn btn-sm ${groupBy === 'anomaly' ? 'btn-danger' : 'btn-secondary'}`}
-                        onClick={() => setGroupBy('anomaly')}
-                    >
-                        ⚠ Аномалии{s?.anomalies ? ` (${s.anomalies})` : ''}
-                    </button>
-                </div>
-                <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={flatRows.length === 0}>
-                    📥 Excel
-                </button>
+                <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={rows.length === 0}>📥 Excel</button>
                 <button className="btn btn-sm btn-primary" onClick={doSync} disabled={syncing}>
                     {syncing ? '⏳ Обновление…' : '🔄 Обновить цены'}
                 </button>
@@ -233,74 +226,28 @@ export default function PricingPage() {
             {/* KPI */}
             {s && (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8, marginBottom: 16 }}>
-                    <Kpi label="Артикулов" value={fmtInt(s.total_articles)} sub={`с ценой ${fmtInt(s.priced_articles)} · с себест. ${fmtInt(s.costed_articles)}`} />
-                    <Kpi label="Наценка (портфель)" value={fmtPct(s.markup_pct)} color={pctColor(s.markup_pct)} />
-                    <Kpi label="Доля себестоимости" value={fmtPct(s.cost_share_pct)} />
-                    <Kpi label="Выручка за период" value={fmtMoney(s.revenue) + ' ₽'} />
-                    <Kpi label="Прибыль за период" value={fmtMoney(s.profit) + ' ₽'} color={pctColor(s.profit)} />
-                    <Kpi label="Маржа" value={fmtPct(s.margin_pct)} color={pctColor(s.margin_pct)} />
-                    <Kpi label="Остаток ВБ, шт" value={fmtInt(s.wb_stock_units)} />
-                    <Kpi label="Заморожено в остатке" value={fmtMoney(s.stock_value_cost) + ' ₽'} sub="по себестоимости" />
-                    <Kpi label="Аномалии" value={fmtInt(s.anomalies)} color={s.anomalies > 0 ? 'var(--color-danger)' : 'var(--color-success)'} />
+                    <Kpi label="Артикулов" value={int0(s.total_articles)} sub={`с ценой ${int0(s.priced_articles)} · с себест. ${int0(s.costed_articles)}`} />
+                    <Kpi label="Наценка (портфель)" value={pct(s.markup_pct)} color={signColor(s.markup_pct)} />
+                    <Kpi label="Маржа" value={pct(s.margin_pct)} color={signColor(s.margin_pct)} />
+                    <Kpi label="Выручка" value={money(s.revenue) + ' ₽'} />
+                    <Kpi label="Прибыль" value={money(s.profit) + ' ₽'} color={signColor(s.profit)} />
+                    <Kpi label="Остаток ВБ, шт" value={int0(s.wb_stock_units)} />
+                    <Kpi label="Заморожено" value={money(s.stock_value_cost) + ' ₽'} sub="по себестоимости" />
+                    <Kpi label="Аномалии" value={int0(s.anomalies)} color={s.anomalies > 0 ? 'var(--color-danger)' : 'var(--color-success)'} />
                 </div>
             )}
 
-            {/* Состояния */}
-            {loading && <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>⏳ Загрузка…</div>}
             {error && <div style={{ padding: 16, color: 'var(--color-danger)' }}>❌ {error}</div>}
-            {isEmpty && (
-                <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>
-                    Нет данных. Убедитесь, что цены синхронизированы («Обновить цены») и заданы себестоимости в воронке.
-                </div>
-            )}
-
-            {/* Таблица */}
-            {!loading && !error && flatRows.length > 0 && (
-                <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
-                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                        <thead>
-                            <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                <th style={thL}>{groupBy === 'category' ? 'Категория / Артикул' : 'Артикул'}</th>
-                                <th style={th}>База</th>
-                                <th style={th}>Скидка</th>
-                                <th style={th}>Цена ВБ</th>
-                                <th style={th}>Себест.</th>
-                                <th style={th}>Коэф.</th>
-                                <th style={th}>Наценка %</th>
-                                <th style={th}>Доля себест.</th>
-                                <th style={th}>СПП %</th>
-                                <th style={th}>Покупателю</th>
-                                <th style={th}>Заказы</th>
-                                <th style={th}>Остаток ВБ</th>
-                                <th style={th}>Дней</th>
-                                <th style={th}>Заморожено</th>
-                                <th style={th}>Выручка</th>
-                                <th style={th}>Расходы ВБ</th>
-                                <th style={th}>Прибыль</th>
-                                <th style={th}>Маржа %</th>
-                                <th style={th}>Чист. наценка</th>
-                                <th style={th}>Мин. цена</th>
-                                <th style={th}>ABC</th>
-                                <th style={th}>ДРР %</th>
-                                <th style={th}>Прод/мес</th>
-                                <th style={thL}>Рекомендация</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {resp!.group_by === 'sku'
-                                ? resp!.data_rows.map((r) => <SkuRow key={r.nm_id} r={r} showCategory />)
-                                : resp!.data_groups.map((g) => (
-                                      <GroupRows
-                                          key={g.category}
-                                          group={g}
-                                          open={expanded.has(g.category)}
-                                          onToggle={() => toggle(g.category)}
-                                          anomalyMode={resp!.group_by === 'anomaly'}
-                                      />
-                                  ))}
-                        </tbody>
-                    </table>
-                </div>
+            {!error && (
+                <TanStackDataTable
+                    columns={columns}
+                    data={rows}
+                    loading={loading}
+                    emptyIcon="💲"
+                    emptyText="Нет данных. Проверьте, что цены синхронизированы и заданы себестоимости."
+                    pageSize={50}
+                    maxHeight={640}
+                />
             )}
         </div>
     );
@@ -313,85 +260,5 @@ function Kpi({ label, value, sub, color }: { label: string; value: string; sub?:
             <div style={{ fontSize: 22, fontWeight: 700, marginTop: 4, color: color || 'var(--color-text)' }}>{value}</div>
             {sub && <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 2 }}>{sub}</div>}
         </div>
-    );
-}
-
-function GroupRows({ group, open, onToggle, anomalyMode }: { group: PricingGroup; open: boolean; onToggle: () => void; anomalyMode?: boolean }) {
-    return (
-        <>
-            <tr style={{ borderBottom: '1px solid var(--color-border)', cursor: 'pointer', background: 'var(--color-bg-card)' }} onClick={onToggle}>
-                <td style={{ ...tdL, fontWeight: 600, color: anomalyMode ? 'var(--color-danger)' : 'var(--color-text)' }}>
-                    <span style={{ marginRight: 6 }}>{open ? '▾' : '▸'}</span>
-                    {anomalyMode ? '⚠ ' : ''}{group.category}
-                    <span style={{ color: 'var(--color-text-dim)', fontWeight: 400, marginLeft: 8, fontSize: 12 }}>
-                        {fmtInt(group.articles)} арт. · с ценой {fmtInt(group.priced_articles)}
-                    </span>
-                </td>
-                <td style={td}>—</td>
-                <td style={td}>—</td>
-                <td style={td}>—</td>
-                <td style={td}>—</td>
-                <td style={{ ...td, fontWeight: 600 }}>{fmtCoef(group.markup_coef)}</td>
-                <td style={{ ...td, fontWeight: 600, color: pctColor(group.markup_pct) }}>{fmtPct(group.markup_pct)}</td>
-                <td style={td}>{fmtPct(group.cost_share_pct)}</td>
-                <td style={td}>—</td>
-                <td style={td}>—</td>
-                <td style={td}>—</td>
-                <td style={{ ...td, fontWeight: 600 }}>{fmtInt(group.wb_stock)}</td>
-                <td style={td}>—</td>
-                <td style={td}>{fmtMoney(group.stock_value_cost)}</td>
-                <td style={td}>{fmtMoney(group.revenue)}</td>
-                <td style={td}>{fmtMoney(group.wb_expenses)}</td>
-                <td style={{ ...td, color: pctColor(group.profit) }}>{fmtMoney(group.profit)}</td>
-                <td style={{ ...td, color: pctColor(group.margin_pct) }}>{fmtPct(group.margin_pct)}</td>
-                <td style={td}>—</td>
-                <td style={td}>—</td>
-                <td style={td}>—</td>
-                <td style={td}>—</td>
-                <td style={td}>—</td>
-                <td style={tdL}>—</td>
-            </tr>
-            {open && group.children.map((r) => <SkuRow key={r.nm_id} r={r} indent hideAnomaly={anomalyMode} showCategory={anomalyMode} />)}
-        </>
-    );
-}
-
-function SkuRow({ r, indent, showCategory, hideAnomaly }: { r: PricingRow; indent?: boolean; showCategory?: boolean; hideAnomaly?: boolean }) {
-    return (
-        <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-            <td style={{ ...tdL, paddingLeft: indent ? 28 : 10 }}>
-                <span style={{ fontWeight: 500 }}>{r.vendor_code || r.nm_id}</span>
-                <span style={{ color: 'var(--color-text-dim)', fontSize: 11, marginLeft: 6 }}>
-                    {r.nm_id}{showCategory ? ` · ${r.category}` : ''}
-                </span>
-                {!r.has_price && <span style={{ color: 'var(--color-warning)', fontSize: 11, marginLeft: 6 }}>нет цены</span>}
-                {r.anomaly && !hideAnomaly && (
-                    <span style={{ color: 'var(--color-danger)', fontSize: 11, marginLeft: 6, fontWeight: 600 }}>⚠ {r.anomaly}</span>
-                )}
-            </td>
-            <td style={{ ...td, color: 'var(--color-text-dim)' }}>{fmtMoney(r.base_price)}</td>
-            <td style={{ ...td, color: 'var(--color-text-dim)' }}>{r.discount == null ? '—' : formatNumber(r.discount, 0) + '%'}</td>
-            <td style={td}>{fmtMoney(r.current_price)}</td>
-            <td style={td}>{fmtMoney(r.cost_price)}</td>
-            <td style={{ ...td, fontWeight: 600 }}>{fmtCoef(r.markup_coef)}</td>
-            <td style={{ ...td, fontWeight: 600, color: pctColor(r.markup_pct) }}>{fmtPct(r.markup_pct)}</td>
-            <td style={td}>{fmtPct(r.cost_share_pct)}</td>
-            <td style={td}>{fmtPct(r.spp_rate)}</td>
-            <td style={td}>{fmtMoney(r.buyer_price)}</td>
-            <td style={td}>{fmtInt(r.orders_count)}</td>
-            <td style={{ ...td, fontWeight: 600 }}>{fmtInt(r.wb_stock)}</td>
-            <td style={td}>{r.days_left == null ? '—' : formatNumber(r.days_left, 0)}</td>
-            <td style={td}>{fmtMoney(r.stock_value_cost)}</td>
-            <td style={td}>{fmtMoney(r.revenue)}</td>
-            <td style={td}>{fmtMoney(r.wb_expenses)}</td>
-            <td style={{ ...td, color: pctColor(r.profit) }}>{fmtMoney(r.profit)}</td>
-            <td style={{ ...td, color: pctColor(r.margin_pct) }}>{fmtPct(r.margin_pct)}</td>
-            <td style={{ ...td, color: pctColor(r.net_markup_pct) }}>{fmtPct(r.net_markup_pct)}</td>
-            <td style={td}>{fmtMoney(r.breakeven_price)}</td>
-            <td style={{ ...td, fontWeight: 600, color: r.abc === 'A' ? 'var(--color-success)' : r.abc === 'C' ? 'var(--color-text-dim)' : 'var(--color-text)' }}>{r.abc || '—'}</td>
-            <td style={td}>{fmtPct(r.drr)}</td>
-            <td style={td}>{r.sales_per_month == null ? '—' : formatNumber(r.sales_per_month, 1)}</td>
-            <td style={{ ...tdL, color: r.anomaly ? 'var(--color-danger)' : r.recommendation && r.recommendation !== 'OK' ? 'var(--color-warning)' : 'var(--color-text-dim)' }}>{r.recommendation}</td>
-        </tr>
     );
 }

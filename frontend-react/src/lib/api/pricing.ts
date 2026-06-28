@@ -10,6 +10,7 @@ export interface PricingMarkupParams {
     search?: string;
     min_orders?: number;
     only_in_stock?: boolean;
+    anomaly_only?: boolean;
     group_by?: 'category' | 'sku' | 'anomaly';
 }
 
@@ -24,6 +25,7 @@ export function addPricingMethods(api: ApiClient) {
             if (params?.search) q.set('search', params.search);
             if (params?.min_orders) q.set('min_orders', String(params.min_orders));
             if (params?.only_in_stock) q.set('only_in_stock', 'true');
+            if (params?.anomaly_only) q.set('anomaly_only', 'true');
             if (params?.group_by) q.set('group_by', params.group_by);
             return api.request<PricingResponse>('GET', `/api/v1/pricing/markup?${q.toString()}`);
         },

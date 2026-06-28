@@ -554,7 +554,13 @@ export interface PricingRow {
   sales_per_month: number | null;
   anomaly: string | null;
   breakeven_price: number | null;
+  safety_margin_pct: number | null;
   drr: number;
+  gmroi: number | null;
+  sell_through_pct: number | null;
+  elasticity: number | null;
+  elasticity_label: string;
+  optimal_price: number | null;
   abc: string | null;
   recommendation: string;
 }

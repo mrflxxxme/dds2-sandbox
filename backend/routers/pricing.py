@@ -28,6 +28,7 @@ async def get_markup(
     search: str | None = Query(None),
     min_orders: int = Query(0, ge=0),
     only_in_stock: bool = Query(False),
+    anomaly_only: bool = Query(False),
     group_by: str = Query("category"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -44,6 +45,7 @@ async def get_markup(
         search=search,
         min_orders=min_orders,
         only_in_stock=only_in_stock,
+        anomaly_only=anomaly_only,
         group_by=gb,
     )
 
