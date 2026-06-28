@@ -35,6 +35,8 @@ from backend.schemas.counterparty import (
     CounterpartyFilter,
     CounterpartyListItem,
     CounterpartyListResponse,
+    CounterpartyMergeRequest,
+    CounterpartyMergeResponse,
     CounterpartySummaryResponse,
     CounterpartyTransactionsResponse,
     CounterpartyUpdate,
@@ -282,6 +284,32 @@ async def bulk_set_category(
         primary_type=body.primary_type,
     )
     return BulkCategoryResponse(**result)
+
+
+@router.post(
+    "/{target_id}/merge",
+    response_model=CounterpartyMergeResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def merge_counterparties(
+    target_id: int,
+    body: CounterpartyMergeRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Merge ``source_id`` into the target counterparty (target survives)."""
+    service = CounterpartyService(db)
+    try:
+        result = await service.merge(
+            target_id=target_id,
+            source_id=body.source_id,
+            project_id=project.id,
+        )
+    except CounterpartyNotFoundError:
+        raise HTTPException(status_code=404, detail="Counterparty not found") from None
+    except CounterpartyConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from None
+    return CounterpartyMergeResponse(**result)
 
 
 @router.delete(

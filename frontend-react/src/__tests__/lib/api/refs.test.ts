@@ -58,12 +58,15 @@ describe('refs.deleteAccount', () => {
     });
 });
 
-describe('refs.getCpCategories', () => {
-    it('GETs /api/v1/refs/cp_categories', async () => {
-        const spy = mockFetch([{ id: 1, cp_key: 'WB', cat_lvl1: 'Расходы', cat_lvl2: 'Комиссия' }]);
+describe('refs.updateCategoryRef', () => {
+    it('PATCHes the is_cogs flag on a category', async () => {
+        const spy = mockFetch({ ok: true });
         const api = makeApi();
-        await api.getCpCategories();
-        expect(spy.mock.calls[0][0]).toContain('/api/v1/refs/cp_categories');
+        await api.updateCategoryRef(7, true);
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/refs/categories/7');
+        expect((init as RequestInit).method).toBe('PATCH');
+        expect(JSON.parse((init as RequestInit).body as string)).toEqual({ is_cogs: true });
     });
 });
 

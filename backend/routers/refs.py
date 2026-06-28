@@ -13,11 +13,11 @@ from backend.project_context import get_current_project
 from backend.schemas import (
     AccountSchema,
     CategoryRefCreate,
-    CounterpartyCategorySchema,
     OpeningBalanceSchema,
 )
 from backend.schemas.refs import (
     CategoryOverrideBulkPayload,
+    CategoryRefUpdate,
     ExcludedWarehousesPayload,
     ForecastRfDefaultDaysPayload,
     ImtAliasPayload,
@@ -72,38 +72,10 @@ async def delete_account(
     return {"ok": True}
 
 
-# ─── Counterparty Categories ──────────────────────────────────────────────────
-
-
-@router.get("/cp_categories")
-async def get_cp_categories(
-    project: Project = Depends(get_current_project),
-    db: AsyncSession = Depends(get_db),
-):
-    return await refs_service.list_cp_categories(db, project.id)
-
-
-@router.post("/cp_categories")
-async def upsert_cp_category(
-    payload: CounterpartyCategorySchema,
-    project: Project = Depends(get_current_project),
-    db: AsyncSession = Depends(get_db),
-    _: None = Depends(rate_limit_write),
-):
-    return await refs_service.upsert_cp_category(db, project.id, payload.model_dump(exclude_unset=True))
-
-
-@router.delete("/cp_categories/{cpc_id}")
-async def delete_cp_category(
-    cpc_id: int,
-    project: Project = Depends(get_current_project),
-    db: AsyncSession = Depends(get_db),
-    _: None = Depends(rate_limit_write),
-):
-    deleted = await refs_service.delete_cp_category(db, project.id, cpc_id)
-    if not deleted:
-        raise HTTPException(404, "Category not found")
-    return {"ok": True}
+# Категории контрагентов ведутся на странице «Контрагенты» (карточка/массово,
+# /counterparties/{id}/category и /counterparties/bulk_category) — отдельный
+# плоский CRUD `cp_categories` удалён. Маппинг cp_key→категория по-прежнему живёт
+# в таблице counterparty_categories и применяется в импорте (etl/service.py).
 
 
 # ─── Overrides ────────────────────────────────────────────────────────────────
@@ -178,8 +150,24 @@ async def add_category(
         payload.cat_lvl1.strip(),
         (payload.cat_lvl2 or "").strip() or None,
         direction=payload.direction.strip(),
+        is_cogs=payload.is_cogs,
     )
     return {"ok": True, "id": cat.id}
+
+
+@router.patch("/categories/{cat_id}")
+async def update_category(
+    cat_id: int,
+    payload: CategoryRefUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    """Toggle the «себестоимость» (COGS) flag on an expense category."""
+    updated = await refs_service.update_category(db, cat_id, project.id, is_cogs=payload.is_cogs)
+    if not updated:
+        raise HTTPException(404, "Category not found")
+    return {"ok": True}
 
 
 @router.delete("/categories/{cat_id}")
