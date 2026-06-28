@@ -89,6 +89,7 @@ from backend.models.integrations import (
     WbAdCampaignEvent,
     WbCostOverride,
     WbFunnelDaily,
+    WbPrice,
     WbStockSnapshot,
     WbWarehouseStock,
 )
@@ -308,6 +309,7 @@ __all__ = [
     "WbAdCampaign",
     "WbAdCampaignEvent",
     "WbCostOverride",
+    "WbPrice",
     "WbStockSnapshot",
     "WbWarehouseStock",
     # FX Rates

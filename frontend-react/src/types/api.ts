@@ -518,6 +518,72 @@ export interface FunnelColorsResponse {
   colors: string[];
 }
 
+// ─── Ценообразование (наценка по артикулам) ──────────────────────────────
+export interface PricingRow {
+  nm_id: number;
+  vendor_code: string | null;
+  brand: string | null;
+  subject: string | null;
+  category: string;
+  current_price: number | null;
+  base_price: number | null;
+  discount: number | null;
+  cost_price: number | null;
+  has_cost: boolean;
+  has_price: boolean;
+  markup_coef: number | null;
+  markup_pct: number | null;
+  cost_share_pct: number | null;
+  spp_rate: number;
+  buyer_price: number | null;
+  orders_count: number;
+  revenue: number;
+  wb_expenses: number;
+  adv_sum: number;
+  tax: number;
+  cost_total: number;
+  profit: number;
+  margin_pct: number;
+  net_markup_pct: number | null;
+}
+
+export interface PricingGroup {
+  category: string;
+  articles: number;
+  priced_articles: number;
+  markup_coef: number | null;
+  markup_pct: number | null;
+  cost_share_pct: number | null;
+  revenue: number;
+  profit: number;
+  cost_total: number;
+  wb_expenses: number;
+  margin_pct: number;
+  children: PricingRow[];
+}
+
+export interface PricingSummary {
+  total_articles: number;
+  priced_articles: number;
+  costed_articles: number;
+  revenue: number;
+  profit: number;
+  cost_total: number;
+  wb_expenses: number;
+  markup_pct: number | null;
+  cost_share_pct: number | null;
+  margin_pct: number;
+}
+
+export interface PricingResponse {
+  group_by: string;
+  data_groups: PricingGroup[];
+  data_rows: PricingRow[];
+  summary: PricingSummary;
+  price_synced_at: string | null;
+  has_bdr: boolean;
+}
+
 export interface FunnelSummary {
   opens: number;
   open_card?: number;

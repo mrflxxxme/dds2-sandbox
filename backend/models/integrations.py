@@ -182,6 +182,33 @@ class WbCostOverride(Base):
     __table_args__ = (UniqueConstraint("project_id", "nm_id", name="uq_cost_override_nm"),)
 
 
+class WbPrice(Base):
+    """Текущая цена витрины ВБ по nm_id (синк из API «Цены и скидки»).
+
+    Зеркало: один UPSERT-ряд на (project_id, nm_id). `price` — цена витрины
+    после seller-скидки (discountedPrice, то что видит покупатель ДО СПП);
+    `base_price` — цена до скидки (price); `discount` — seller-скидка %.
+    СПП тут НЕ хранится — его этот эндпоинт не отдаёт (берём из воронки).
+    """
+
+    __tablename__ = "wb_prices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    vendor_code: Mapped[str | None] = mapped_column(String(100))
+    base_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))  # price (до скидки)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))  # discountedPrice (витрина)
+    discount: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))  # seller-скидка %
+    currency: Mapped[str] = mapped_column(String(8), default="RUB")
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "nm_id", name="uq_wb_price_nm"),
+        Index("ix_wb_prices_project", "project_id"),
+    )
+
+
 class WbWarehouseStock(Base):
     """Per-warehouse stock levels from WB API supplier/stocks."""
 

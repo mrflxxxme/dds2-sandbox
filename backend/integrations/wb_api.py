@@ -41,6 +41,7 @@ WB_CONTENT_API_BASE = "https://content-api.wildberries.ru"
 WB_MARKETPLACE_API_BASE = "https://marketplace-api.wildberries.ru"
 WB_SUPPLIERS_API_BASE = "https://supplies-api.wildberries.ru"
 WB_SELLER_ANALYTICS_API_BASE = "https://seller-analytics-api.wildberries.ru"
+WB_PRICES_API_BASE = "https://discounts-prices-api.wildberries.ru"
 
 # Request timeout in seconds
 TIMEOUT = 30
@@ -567,6 +568,54 @@ class WBApiClient:
         logger.info("wb_api.cards_fetched", total=len(all_cards))
         return all_cards
 
+    # ─── Prices & Discounts (Discounts-Prices API) ──────────────────────────
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_prices(self, limit: int = 1000) -> list[dict]:
+        """
+        Текущие цены витрины по всем товарам (offset-пагинация).
+        Discounts-Prices API: GET /api/v2/list/goods/filter?limit=&offset=
+
+        Возвращает плоский список goods-объектов:
+          {"nmID": int, "vendorCode": str, "discount": int,
+           "sizes": [{"price": int, "discountedPrice": int, ...}],
+           "currencyIsoCode4217": "RUB", ...}
+        Повторяет запросы пока listGoods непустой (offset += limit).
+        """
+        all_goods: list[dict] = []
+        offset = 0
+
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            while True:
+                params = {"limit": limit, "offset": offset}
+                async with self._circuit:
+                    url = f"{WB_PRICES_API_BASE}/api/v2/list/goods/filter"
+                    logger.info("wb_api.request", method="GET", path="prices/list/goods/filter", offset=offset)
+                    response = await client.get(url, headers=self.headers, params=params)
+
+                    if response.status_code == 401:
+                        raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Цены и скидки»")
+                    if response.status_code == 429:
+                        retry_after = int(response.headers.get("Retry-After", "60"))
+                        raise RateLimitError("WB Prices API rate limited (429)", retry_after=retry_after)
+                    if response.status_code >= 500:
+                        raise ValueError(f"WB Prices API server error: HTTP {response.status_code}")
+                    if response.status_code != 200:
+                        raise ValueError(
+                            f"WB Prices API error: HTTP {response.status_code} — {response.text[:200]}"
+                        )
+
+                    data = response.json()
+                    goods = (data.get("data") or {}).get("listGoods") or []
+                    if not goods:
+                        break
+                    all_goods.extend(goods)
+                    if len(goods) < limit:
+                        break
+                    offset += limit
+
+        logger.info("wb_api.prices_fetched", total=len(all_goods))
+        return all_goods
+
     # ─── Goods Returns (Seller Analytics API) ───────────────────────────────
     @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
     async def get_goods_returns(self, date_from: date, date_to: date) -> list[dict]:
@@ -671,6 +720,52 @@ def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
                 )
 
     return nomenclature
+
+
+def parse_wb_prices(goods: list[dict]) -> list[dict]:
+    """
+    WB Discounts-Prices API goods → наш WbPrice-формат (один ряд на nm_id).
+
+    Цена/скидка лежат в sizes[]; для нашей цели (цена за nm_id) берём первый
+    размер с непустой ценой (у хозтоваров обычно один размер; у мультиразмерных
+    цена, как правило, одинаковая). `discountedPrice` — цена витрины (после
+    seller-скидки, ДО СПП) → наше `price`; `price` (база) → `base_price`.
+    """
+    out: list[dict] = []
+    seen: set[int] = set()
+
+    for g in goods:
+        nm_id = g.get("nmID")
+        if not nm_id or nm_id in seen:
+            continue
+
+        sizes = g.get("sizes") or []
+        base_price = None
+        price = None
+        for s in sizes:
+            disc = s.get("discountedPrice")
+            base = s.get("price")
+            if disc or base:
+                price = disc if disc else base
+                base_price = base
+                break
+
+        if price is None and base_price is None:
+            continue  # нет цены — пропускаем (артикул без цены не несёт смысла)
+
+        seen.add(nm_id)
+        out.append(
+            {
+                "nm_id": int(nm_id),
+                "vendor_code": (g.get("vendorCode") or "").strip() or None,
+                "base_price": base_price,
+                "price": price if price is not None else base_price,
+                "discount": g.get("discount"),
+                "currency": g.get("currencyIsoCode4217") or "RUB",
+            }
+        )
+
+    return out
 
 
 def parse_wb_sales_to_payouts(sales: list[dict]) -> list[dict]:
