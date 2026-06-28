@@ -547,6 +547,7 @@ export interface PricingRow {
   margin_pct: number;
   net_markup_pct: number | null;
   wb_stock: number;
+  is_new: boolean;
   stock_value_cost: number | null;
   stock_potential_profit: number | null;
   stock_potential_revenue: number | null;

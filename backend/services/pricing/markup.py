@@ -46,6 +46,7 @@ ANOMALY_THIN_MARKUP = "Низкая наценка"
 ANOMALY_DEAD_STOCK = "Залежавшийся остаток"
 
 _DEAD_STOCK_DAYS = 365  # >1 года до распродажи остатка = неликвид
+_NEW_PRODUCT_DAYS = 30  # first_sale_date пуст/в пределах N дней = новинка (раскачка, не неликвид)
 
 
 async def _load_tax_info(db: AsyncSession, pid: int) -> dict:
@@ -74,6 +75,7 @@ async def _load_meta_map(db: AsyncSession, pid: int) -> dict[int, dict]:
             func.max(Nomenclature.subject).label("subject"),
             func.max(Nomenclature.article_seller).label("article_seller"),
             func.max(WarehouseStock.cost_price).label("wh_cost"),
+            func.max(Nomenclature.first_sale_date).label("first_sale_date"),
         )
         .outerjoin(
             WarehouseStock,
@@ -89,6 +91,7 @@ async def _load_meta_map(db: AsyncSession, pid: int) -> dict[int, dict]:
             "subject": r.subject,
             "article_seller": r.article_seller,
             "wh_cost": float(r.wh_cost) if r.wh_cost else None,
+            "first_sale_date": r.first_sale_date,
         }
         for r in rows
     }
@@ -191,8 +194,13 @@ def _classify_anomaly(r: PricingRow) -> str | None:
         return ANOMALY_SUSPICIOUS_COST
     if r.markup_pct is not None and 0 <= r.markup_pct < _THIN_MARKUP_PCT:
         return ANOMALY_THIN_MARKUP
-    # неликвид: остаток есть, а продаж нет / распродажа дольше года
-    if r.wb_stock > 0 and (r.orders_count == 0 or (r.days_left is not None and r.days_left > _DEAD_STOCK_DAYS)):
+    # неликвид: остаток есть, а продаж нет / распродажа дольше года.
+    # Новинки исключаем — у них мало продаж из-за раскачки, а не из-за неликвида.
+    if (
+        not r.is_new
+        and r.wb_stock > 0
+        and (r.orders_count == 0 or (r.days_left is not None and r.days_left > _DEAD_STOCK_DAYS))
+    ):
         return ANOMALY_DEAD_STOCK
     return None
 
@@ -207,7 +215,7 @@ def _recommend(r: PricingRow) -> str:
     if a == ANOMALY_LOSS:
         # убыток не из-за рекламы: либо цена низкая, либо неликвид
         if r.wb_stock > 0 and (r.orders_count == 0 or (r.days_left is not None and r.days_left > _DEAD_STOCK_DAYS)):
-            return "Убыток + не продаётся → распродать/вывести"
+            return "Убыток + не продаётся → распродать скидкой на ВБ"
         if r.markup_pct is not None and r.markup_pct < _THIN_MARKUP_PCT:
             return "Поднять цену / снизить себест."
         return "Пересмотреть юнит-экономику"
@@ -218,7 +226,10 @@ def _recommend(r: PricingRow) -> str:
     if a == ANOMALY_THIN_MARKUP:
         return "Поднять цену"
     if a == ANOMALY_DEAD_STOCK:
-        return "Распродать / вывести из ассортимента"
+        return "Снизить цену / акция — распродать на ВБ"
+    # новинка без аномалий — раскачивать спрос, а не судить как неликвид
+    if r.is_new:
+        return "Новинка — раскачивать (реклама/контент/конкур. цена)"
     # эластичность спроса → направление цены
     if r.elasticity_label == "неэластичный":
         return "Неэласт. спрос — поднять цену"
@@ -245,6 +256,7 @@ def _build_row(
     wb_stock: int = 0,
     period_days: int = 30,
     elasticity: float | None = None,
+    today: _date | None = None,
 ) -> PricingRow:
     f = funnel or {}
     m = meta or {}
@@ -283,6 +295,11 @@ def _build_row(
 
     adv_sum = round(float(f.get("adv_sum") or 0), 2)
     tax = round(float(f.get("tax") or 0), 2)
+
+    # Новинка: first_sale_date пуст или в пределах окна раскачки (не неликвид)
+    fsd = m.get("first_sale_date")
+    _today = today or _date.today()
+    is_new = fsd is None or fsd >= _today - timedelta(days=_NEW_PRODUCT_DAYS)
 
     # Остаток ВБ и производные
     stock_value_cost = round(wb_stock * cost_price, 2) if has_cost and cost_price is not None else None
@@ -367,6 +384,7 @@ def _build_row(
         margin_pct=round(float(f.get("margin") or 0), 2),
         net_markup_pct=net_markup_pct,
         wb_stock=wb_stock,
+        is_new=is_new,
         stock_value_cost=stock_value_cost,
         stock_potential_profit=stock_potential_profit,
         stock_potential_revenue=stock_potential_revenue,
@@ -588,6 +606,7 @@ async def _compute_rows(
             period_days = 30
 
     # универсум: с ценой ∪ продававшиеся ∪ с остатком на ВБ
+    today = utcnow().date()
     nm_ids = set(price_by_nm) | set(funnel_by_nm) | set(wb_stock_map)
     rows = []
     for nm_id in nm_ids:
@@ -604,6 +623,7 @@ async def _compute_rows(
                 wb_stock=wb_stock_map.get(nm_id, 0),
                 period_days=period_days,
                 elasticity=elasticity_map.get(nm_id),
+                today=today,
             ).model_dump()
         )
 

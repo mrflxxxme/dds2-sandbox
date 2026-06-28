@@ -6,19 +6,21 @@
 цене/рекламе/остаткам. Переиспользует общий LLM-клиент (services/ai/llm_client).
 """
 
+import asyncio
 import logging
 from collections import Counter
 
+import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
-from backend.services.ai.llm_client import chat
+from backend.services.ai.llm_client import get_client
 from backend.services.pricing.markup import get_markup_analytics
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.pricing")
 
-MODEL = "claude-sonnet-4-6"  # стратегический анализ; актуальный Sonnet
+MODEL = "claude-opus-4-8"  # самый сильный для стратегического анализа
 _MAX_ITEMS = 50
 
 _SYSTEM = """Ты — старший аналитик юнит-экономики маркетплейса Wildberries.
@@ -26,9 +28,17 @@ _SYSTEM = """Ты — старший аналитик юнит-экономик�
 рекомендации: где поднять/снизить цену, где резать рекламу, что распродать/вывести.
 
 Жёсткие правила (не нарушай — иначе совет вредный):
+- ПРОДАЖИ ТОЛЬКО НА WILDBERRIES. У продавца НЕТ другого канала и некуда вывозить товар.
+  Ликвидация неликвида = ТОЛЬКО распродажа на ВБ (скидка/акция/участие в акциях ВБ,
+  продвижение, улучшение карточки). НИКОГДА не предлагай вернуть поставщику, вывезти со
+  склада, продать на другой площадке/офлайн — этого варианта не существует.
+- «Новинка» (поле новинка=true) → мало продаж из-за РАСКАЧКИ, а НЕ неликвид. Не предлагай
+  распродажу/ликвидацию новинок. Для них — стратегия запуска: реклама на трафик, хорошие
+  фото/контент карточки, конкурентная стартовая цена, сбор отзывов, мониторинг 2-4 недели.
 - «Реклама в минус» (ДРР высокий, без рекламы был бы плюс) → РЕЗАТЬ/оптимизировать рекламу, НЕ поднимать цену.
-- «Залежавшийся остаток» / неликвид (мало продаж, большой остаток) → распродать/снизить цену/вывести, НЕ поднимать цену.
-- «Низкая наценка» или неэластичный спрос (esticity ближе к 0) → можно поднять цену.
+- «Залежавшийся остаток» / неликвид (НЕ новинка, мало продаж, большой остаток) → распродать
+  НА ВБ скидкой/акцией, НЕ поднимать цену.
+- «Низкая наценка» или неэластичный спрос (эластичность ближе к 0) → можно поднять цену.
 - «Подозрительная/нет себестоимости» → сперва проверить данные, без выводов по цене.
 - Приоритет — по денежному эффекту: замороженный капитал, теряемая прибыль, потенциал роста.
 - Используй ТОЛЬКО числа из присланных данных, ничего не выдумывай. Суммы — в рублях.
@@ -37,7 +47,8 @@ _SYSTEM = """Ты — старший аналитик юнит-экономик�
 абзацы <p>, списки <ul><li>. Структура:
 1) <b>Картина портфеля</b> — 2-3 предложения диагностики.
 2) <b>Приоритетные действия</b> — 3-6 пунктов, каждый: что сделать, по каким артикулам/категориям, ожидаемый ₽-эффект.
-3) <b>Быстрые победы</b> — 2-4 коротких пункта.
+3) <b>Новинки</b> — если в данных есть новинки: как их раскачать/распродать на ВБ (2-4 пункта).
+4) <b>Быстрые победы</b> — 2-4 коротких пункта.
 Пиши кратко и по-деловому, по-русски."""
 
 
@@ -56,6 +67,7 @@ def _compact(r: dict) -> dict:
         "запас_прочн%": r.get("safety_margin_pct"),
         "эластичность": r.get("elasticity"),
         "остаток": r.get("wb_stock"),
+        "новинка": r.get("is_new"),
         "заморожено₽": r.get("stock_value_cost"),
         "выручка₽": r.get("revenue"),
         "прибыль₽": r.get("profit"),
@@ -76,6 +88,7 @@ def _select_items(rows: list[dict]) -> list[dict]:
 
     top(lambda r: r["adv_sum"], 12, lambda r: r["anomaly"] == "Реклама в минус")  # рекламные дыры
     top(lambda r: r["stock_value_cost"] or 0, 12, lambda r: r["anomaly"] == "Залежавшийся остаток")  # мёртвый капитал
+    top(lambda r: r["stock_value_cost"] or 0, 10, lambda r: r.get("is_new") and r["wb_stock"] > 0)  # новинки в раскачке
     top(lambda r: -(r["profit"] or 0), 8, lambda r: r["anomaly"] == "Убыток после расходов ВБ")  # худшие убытки
     top(lambda r: r["revenue"], 10)  # топ выручки
     top(lambda r: r["profit"], 8)  # топ прибыли
@@ -109,6 +122,7 @@ async def get_ai_recommendations(
     rows = data["data_rows"]
     summary = data["summary"]
     anomaly_counts = dict(Counter(r["anomaly"] for r in rows if r["anomaly"]))
+    new_count = sum(1 for r in rows if r.get("is_new"))
     items = _select_items(rows)
 
     import json
@@ -117,6 +131,7 @@ async def get_ai_recommendations(
         "период": {"с": date_from, "по": date_to, "только_с_остатком_ВБ": only_in_stock},
         "сводка": summary,
         "аномалии_по_типам": anomaly_counts,
+        "новинок_в_портфеле": new_count,
         "ключевые_артикулы": items,
     }
     user = (
@@ -125,14 +140,25 @@ async def get_ai_recommendations(
         + "\n\nДай рекомендации строго по правилам из системного промпта."
     )
 
-    msg = await chat(
-        messages=[{"role": "user", "content": user}],
-        system=_SYSTEM,
-        model=MODEL,
-        max_tokens=3000,
-        temperature=0.3,
-        enable_cache=False,
-    )
+    # Прямой вызов клиента: Opus 4.8 не принимает temperature (deprecated),
+    # а общий chat() его всегда шлёт. Лёгкий ретрай на транзиентных ошибках.
+    client = get_client()
+    msg = None
+    for attempt in range(3):
+        try:
+            msg = await client.messages.create(
+                model=MODEL,
+                max_tokens=3000,
+                system=_SYSTEM,
+                messages=[{"role": "user", "content": user}],
+            )
+            break
+        except (anthropic.RateLimitError, anthropic.InternalServerError, anthropic.APIConnectionError) as exc:
+            if attempt == 2:
+                raise
+            logger.warning("AI advisor retry %d: %s", attempt + 1, exc)
+            await asyncio.sleep(2.0 * (2**attempt))
+    assert msg is not None
     parts: list[str] = []
     for block in msg.content:
         if block.type == "text":

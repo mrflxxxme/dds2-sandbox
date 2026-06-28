@@ -38,6 +38,7 @@ export default function PricingPage() {
     const [search, setSearch] = useState('');
     const [onlyInStock, setOnlyInStock] = useState(true);
     const [anomalyOnly, setAnomalyOnly] = useState(false);
+    const [newOnly, setNewOnly] = useState(false);
 
     const [categoryOptions, setCategoryOptions] = useState<string[]>([]);
     const [syncing, setSyncing] = useState(false);
@@ -112,9 +113,10 @@ export default function PricingPage() {
 
     const rows = resp?.data_rows ?? [];
     const s = resp?.summary;
+    const tableRows = useMemo(() => (newOnly ? rows.filter((r) => r.is_new) : rows), [rows, newOnly]);
 
     const doExport = () => {
-        const out = rows.map((r) => ({
+        const out = tableRows.map((r) => ({
             'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Категория': r.category, 'ABC': r.abc || '',
             'Бренд': r.brand || '', 'Базовая цена': r.base_price, 'Скидка продавца %': r.discount,
             'Цена ВБ': r.current_price, 'Себестоимость': r.cost_price, 'Наценка коэф': r.markup_coef,
@@ -122,7 +124,7 @@ export default function PricingPage() {
             'Мин. цена (безубыток)': r.breakeven_price, 'Запас прочности %': r.safety_margin_pct,
             'Эластичность': r.elasticity, 'Тип спроса': r.elasticity_label, 'Реком. цена': r.optimal_price,
             'СПП %': r.spp_rate, 'Цена покупателю': r.buyer_price, 'Заказы': r.orders_count,
-            'Остаток ВБ': r.wb_stock, 'Дней до исчерпания': r.days_left, 'Продаж/мес': r.sales_per_month,
+            'Остаток ВБ': r.wb_stock, 'Новинка': r.is_new ? 'да' : '', 'Дней до исчерпания': r.days_left, 'Продаж/мес': r.sales_per_month,
             'Sell-through %': r.sell_through_pct, 'GMROI': r.gmroi, 'Заморожено (себест)': r.stock_value_cost,
             'Потенц. прибыль остатка': r.stock_potential_profit, 'Потенц. выручка остатка': r.stock_potential_revenue,
             'Выручка': r.revenue, 'Расходы ВБ': r.wb_expenses, 'Реклама': r.adv_sum, 'Налог': r.tax,
@@ -138,7 +140,10 @@ export default function PricingPage() {
             getValue: (r: PricingRow) => r.vendor_code || String(r.nm_id),
             render: (_v, r: PricingRow) => (
                 <div style={{ lineHeight: 1.3 }}>
-                    <div style={{ fontWeight: 500 }}>{r.vendor_code || r.nm_id}</div>
+                    <div style={{ fontWeight: 500 }}>
+                        {r.vendor_code || r.nm_id}
+                        {r.is_new && <span style={{ color: 'var(--color-accent)', fontSize: 11, marginLeft: 6 }}>🆕 новинка</span>}
+                    </div>
                     <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
                         {r.nm_id} · {r.category}
                     </div>
@@ -234,6 +239,10 @@ export default function PricingPage() {
                     <input type="checkbox" checked={anomalyOnly} onChange={(e) => setAnomalyOnly(e.target.checked)} />
                     ⚠ только аномалии{s?.anomalies ? ` (${s.anomalies})` : ''}
                 </label>
+                <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center', cursor: 'pointer', color: newOnly ? 'var(--color-accent)' : undefined }}>
+                    <input type="checkbox" checked={newOnly} onChange={(e) => setNewOnly(e.target.checked)} />
+                    🆕 только новинки
+                </label>
                 <div style={{ flex: 1 }} />
                 <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={rows.length === 0}>📥 Excel</button>
                 <button className="btn btn-sm btn-success" onClick={doAi} disabled={aiLoading || rows.length === 0}>
@@ -279,7 +288,7 @@ export default function PricingPage() {
             {!error && (
                 <TanStackDataTable
                     columns={columns}
-                    data={rows}
+                    data={tableRows}
                     loading={loading}
                     emptyIcon="💲"
                     emptyText="Нет данных. Проверьте, что цены синхронизированы и заданы себестоимости."

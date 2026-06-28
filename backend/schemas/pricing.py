@@ -47,6 +47,7 @@ class PricingRow(BaseModel):
 
     # Остатки ВБ и производные
     wb_stock: int = 0  # остаток на складах ВБ (quantity_full)
+    is_new: bool = False  # новинка (first_sale_date пуст или недавняя) — не неликвид, а раскачка
     stock_value_cost: float | None = None  # остаток × себест — заморожено в товаре, ₽
     stock_potential_profit: float | None = None  # остаток × прибыль/ед — потенциальная прибыль остатка, ₽
     stock_potential_revenue: float | None = None  # остаток × цена витрины — потенциальная выручка, ₽

@@ -169,6 +169,18 @@ async def _add_wb_stock(db: AsyncSession, pid: int, nm_id: int, qty: int):
     await db.commit()
 
 
+async def _add_nomenclature(db: AsyncSession, pid: int, nm_id: int, first_sale_date: str):
+    """Номенклатура с заданной датой первой продажи (для is_new-логики)."""
+    await db.execute(
+        text(
+            "INSERT INTO nomenclature (project_id, barcode, article_wb, first_sale_date, volume_l, updated_at) "
+            "VALUES (:pid, :bc, :nm, :fsd, 0, NOW())"
+        ),
+        {"pid": pid, "bc": f"BC{nm_id}", "nm": nm_id, "fsd": date.fromisoformat(first_sale_date)},
+    )
+    await db.commit()
+
+
 async def _add_funnel(db: AsyncSession, pid: int, nm_id: int, orders_sum: float, orders_count: int, vendor_code: str):
     await db.execute(
         text(
@@ -346,12 +358,26 @@ class TestStockAndAnomalies:
 
     @pytest.mark.asyncio
     async def test_anomaly_dead_stock(self, db_session: AsyncSession, project):
-        # цена/себест нормальные, остаток есть, продаж нет → залежавшийся
+        # НЕ новинка (старая дата первой продажи), цена/себест ок, остаток есть, продаж нет → залежавшийся
         await _add_price(db_session, project.id, 4005, 1000.0)
         await set_cost_override(db_session, project.id, nm_id=4005, cost_price=500.0)
         await _add_wb_stock(db_session, project.id, 4005, 30)
+        await _add_nomenclature(db_session, project.id, 4005, "2024-01-01")
 
         res = await get_markup_analytics(db_session, project.id, only_in_stock=True, group_by="anomaly")
         dead = next((g for g in res["data_groups"] if g["category"] == "Залежавшийся остаток"), None)
         assert dead is not None
         assert 4005 in {r["nm_id"] for r in dead["children"]}
+
+    @pytest.mark.asyncio
+    async def test_new_product_not_dead_stock(self, db_session: AsyncSession, project):
+        # новинка (без first_sale_date), остаток есть, продаж нет → НЕ «залежавшийся»
+        await _add_price(db_session, project.id, 4006, 1000.0)
+        await set_cost_override(db_session, project.id, nm_id=4006, cost_price=500.0)
+        await _add_wb_stock(db_session, project.id, 4006, 30)
+
+        res = await get_markup_analytics(db_session, project.id, only_in_stock=True, group_by="sku")
+        r = next(x for x in res["data_rows"] if x["nm_id"] == 4006)
+        assert r["is_new"] is True
+        assert r["anomaly"] != "Залежавшийся остаток"
+        assert "раскачивать" in r["recommendation"].lower()
