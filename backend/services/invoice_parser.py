@@ -334,6 +334,9 @@ _LLM_SYSTEM = (
     "ПОЛУЧАТЕЛЬ — это продавец / исполнитель / поставщик (КОМУ платят); его блок содержит "
     "«Банк получателя», «Сч. №», ИНН/КПП получателя.\n"
     "НЕ ПУТАЙ с ПОКУПАТЕЛЕМ / ЗАКАЗЧИКОМ / ПЛАТЕЛЬЩИКОМ (КТО платит) — его реквизиты НЕ нужны.\n"
+    "РАСЧЁТНЫЙ счёт получателя (payee_account) — 20 цифр, обычно начинается с 40 (напр. 40802…). "
+    "НЕ путай его с КОРРЕСПОНДЕНТСКИМ счётом банка (payee_corr_account) — тот начинается с 301. "
+    "На счёте часто два «Сч. №»: к/с (301…) в блоке банка и р/с (40…) в блоке получателя — верни оба.\n"
     "Если поля нет в счёте — верни null. Сумму верни числом с точкой (например 95750.00). "
     "Назначение — кратко из «Счёт на оплату №… от …» и предмета (товар/услуга).\n"
     "Вызови инструмент extract_requisites ровно один раз."
@@ -348,12 +351,13 @@ _LLM_TOOL: dict = {
             "payee_name": {"type": ["string", "null"], "description": "Наименование получателя (продавец/исполнитель). НЕ покупатель/заказчик."},
             "payee_inn": {"type": ["string", "null"], "description": "ИНН получателя (10 цифр юрлицо / 12 цифр ИП-самозанятый)."},
             "payee_kpp": {"type": ["string", "null"], "description": "КПП получателя (9 цифр; у ИП/самозанятых отсутствует)."},
-            "payee_account": {"type": ["string", "null"], "description": "Расчётный счёт получателя (20 цифр)."},
+            "payee_account": {"type": ["string", "null"], "description": "РАСЧЁТНЫЙ счёт получателя (20 цифр, обычно с 40, напр. 40802…). НЕ корреспондентский (тот с 301)."},
+            "payee_corr_account": {"type": ["string", "null"], "description": "Корреспондентский счёт банка (20 цифр, начинается с 301). Это НЕ расчётный счёт получателя."},
             "payee_bik": {"type": ["string", "null"], "description": "БИК банка получателя (9 цифр)."},
             "amount": {"type": ["string", "null"], "description": "Сумма к оплате числом, напр. 95750.00."},
             "purpose": {"type": ["string", "null"], "description": "Назначение платежа."},
         },
-        "required": ["payee_name", "payee_inn", "payee_kpp", "payee_account", "payee_bik", "amount", "purpose"],
+        "required": ["payee_name", "payee_inn", "payee_kpp", "payee_account", "payee_corr_account", "payee_bik", "amount", "purpose"],
     },
 }
 
@@ -393,14 +397,22 @@ def _finalize(payee: dict) -> InvoiceParseResult:
     elif bik:
         warnings.append("БИК распознан некорректно — проверьте реквизиты банка вручную")
 
-    acc = _digits(payee.get("payee_account"))
-    if acc and len(acc) == 20:
-        if r.payee_bik and _valid_rs(acc, r.payee_bik):  # контроль-ключ ЦБ (кросс-проверка р/с+БИК)
-            r.payee_account = acc
+    # Счета: на счёте два «Сч. №» (к/с банка 301… + р/с получателя 40…) — модель может их
+    # перепутать местами. Разносим по префиксу из ОБОИХ полей (как в текстовом _split_accounts):
+    # 301 = корреспондентский, 40… = расчётный; р/с surface'ится только пройдя контроль-ключ.
+    cand = [a for a in (_digits(payee.get("payee_account")), _digits(payee.get("payee_corr_account"))) if a and len(a) == 20]
+    rs = next((a for a in cand if a.startswith(_RS_PREFIXES) and not a.startswith("301")), None)
+    corr = next((a for a in cand if a.startswith("301")), None)
+    if corr and r.payee_corr_account is None:  # справочник по БИК мог не дать к/с
+        r.payee_corr_account = corr
+        found.append("payee_corr_account")
+    if rs:
+        if r.payee_bik and _valid_rs(rs, r.payee_bik):  # контроль-ключ ЦБ (кросс-проверка р/с+БИК)
+            r.payee_account = rs
             found.append("payee_account")
         else:
             warnings.append("Расчётный счёт не прошёл контроль-ключ по БИК — проверьте вручную")
-    elif acc:
+    elif cand:
         warnings.append("Расчётный счёт распознан некорректно — проверьте вручную")
 
     name = payee.get("payee_name")

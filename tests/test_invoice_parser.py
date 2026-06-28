@@ -263,3 +263,41 @@ async def test_parse_invoice_async_heic_conversion_failure_is_graceful(monkeypat
     r = await invoice_parser.parse_invoice_async(b"\x00\x00\x00\x18ftypheicGARBAGE", "photo.heic")
     assert r.fields_found == []
     assert r.warnings
+
+
+# ─── _finalize: разнесение р/с и к/с (фото-путь) ────────────────────────────────
+
+
+def test_finalize_picks_rs_by_prefix():
+    """Корректно поданные счета: р/с (40…) в payee_account, к/с (301…) в corr."""
+    r = _finalize({
+        "payee_inn": "7707083893", "payee_kpp": None, "payee_bik": _BIK,
+        "payee_account": _RS_VALID, "payee_corr_account": _CORR,
+        "amount": "1000.00", "purpose": None, "payee_name": "ООО Тест",
+    })
+    assert r.payee_account == _RS_VALID
+    assert r.payee_corr_account == _CORR
+    assert "payee_account" in r.fields_found
+
+
+def test_finalize_recovers_swapped_accounts():
+    """Модель перепутала местами: р/с положила в corr, к/с — в account. Разносим по префиксу."""
+    r = _finalize({
+        "payee_inn": "7707083893", "payee_kpp": None, "payee_bik": _BIK,
+        "payee_account": _CORR,           # на самом деле к/с
+        "payee_corr_account": _RS_VALID,  # на самом деле р/с
+        "amount": "1000.00", "purpose": None, "payee_name": "ООО Тест",
+    })
+    assert r.payee_account == _RS_VALID   # р/с восстановлен из перепутанного поля
+    assert r.payee_corr_account == _CORR
+
+
+def test_finalize_rs_fails_control_key_not_surfaced():
+    """Счёт, не прошедший контроль-ключ (OCR-ошибка в цифре) — не подставляется, есть warning."""
+    r = _finalize({
+        "payee_inn": "7707083893", "payee_kpp": None, "payee_bik": _BIK,
+        "payee_account": _RS_INVALID, "payee_corr_account": _CORR,
+        "amount": "1000.00", "purpose": None, "payee_name": "ООО Тест",
+    })
+    assert r.payee_account is None
+    assert any("контроль-ключ" in w for w in r.warnings)

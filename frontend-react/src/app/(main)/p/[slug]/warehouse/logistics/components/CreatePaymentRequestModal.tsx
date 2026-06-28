@@ -9,6 +9,7 @@ import type {
     PaymentRequestCategory,
     PaymentCategory,
     ShippableShipmentRow,
+    InvoiceParseResult,
 } from '@/types/api';
 
 const STATUS_LABEL: Record<PaymentRequestStatus, string> = {
@@ -50,6 +51,10 @@ interface Props {
     initialShipmentIds?: number[];
     /** Open an existing request to view (read-only) or edit (DRAFT) */
     editRequestId?: number;
+    /** Уже распознанный счёт (загружен на листе логиста) — добить пустые реквизиты без повторного парса. */
+    prefillParse?: InvoiceParseResult | null;
+    /** Файл счёта для авто-прикрепления как «Счёт» на шаге документов. */
+    prefillFile?: File | null;
     onClose: () => void;
     onSuccess?: (detail: PaymentRequestDetail) => void;
 }
@@ -57,7 +62,7 @@ interface Props {
 type Mode = 'COUNTERPARTY' | 'MANUAL';
 type Step = 'form' | 'docs' | 'done';
 
-export default function CreatePaymentRequestModal({ initialShipmentId, initialShipmentIds, editRequestId, onClose, onSuccess }: Props) {
+export default function CreatePaymentRequestModal({ initialShipmentId, initialShipmentIds, editRequestId, prefillParse, prefillFile, onClose, onSuccess }: Props) {
     const isEdit = editRequestId != null;
     const isMultiProp = (initialShipmentIds?.length ?? 0) > 0;
     const [mode, setMode] = useState<Mode>(initialShipmentId || isMultiProp ? 'COUNTERPARTY' : 'MANUAL');
@@ -287,37 +292,52 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
         } catch { /* банка нет в справочнике — к/с вводится вручную */ }
     }, [payeeBik, payeeCorrAccount]);
 
-    // ─── Загрузить счёт → распознать реквизиты (бэкенд парсит PDF/Word, фронт только подставляет) ──
+    // ─── Применить распознанный счёт к форме (общее для ручной загрузки и предзаполнения с листа) ──
+    // В потоке логиста (заявка из отгрузки) имя/ИНН/реквизиты перевозчика уже подставлены —
+    // распознанное ДОБИВАЕТ только пустые поля (fillEmptyOnly), чтобы не затереть данные контрагента.
+    const applyParsed = useCallback((r: InvoiceParseResult, fillEmptyOnly: boolean) => {
+        const fill = (val: string | null | undefined, setter: (v: (p: string) => string) => void) => {
+            if (!val) return;
+            setter(prev => (fillEmptyOnly && prev.trim()) ? prev : val);
+        };
+        fill(r.payee_name, setPayeeName);
+        fill(r.payee_inn, setPayeeInn);
+        fill(r.payee_account, setPayeeAccount);
+        fill(r.payee_bik, setPayeeBik);
+        fill(r.payee_bank_name, setPayeeBankName);
+        fill(r.payee_corr_account, setPayeeCorrAccount);
+        fill(r.payee_kpp, setPayeeKpp);
+        fill(r.amount != null ? String(r.amount) : null, setAmount);
+        fill(r.purpose, setPurpose);
+        const FIELD_RU: Record<string, string> = { payee_inn: 'ИНН', payee_bik: 'БИК', payee_account: 'р/с', payee_kpp: 'КПП', payee_name: 'получатель', amount: 'сумма', purpose: 'назначение', payee_corr_account: 'корр.счёт', payee_bank_name: 'банк' };
+        const found = r.fields_found.map(f => FIELD_RU[f] ?? f).join(', ');
+        setParseInfo(found ? `Распознано: ${found}.` + (r.warnings.length ? ' ⚠ ' + r.warnings.join('; ') : '') : (r.warnings.join('; ') || 'Не удалось распознать — заполните вручную'));
+    }, []);
+
+    // ─── Загрузить счёт → распознать реквизиты (бэкенд парсит PDF/Word/фото, фронт только подставляет) ──
     const handleParseInvoice = async (file: File) => {
         setParsing(true); setError(''); setParseInfo('');
         try {
             const r = await api.parseInvoice(file);
-            // В потоке логиста (заявка из отгрузки) имя/ИНН/реквизиты перевозчика уже подставлены —
-            // распознанное только ДОБИВАЕТ пустые поля, чтобы не затереть корректные данные контрагента.
-            const fillEmptyOnly = isShipmentContext;
-            const fill = (cur: string, val: string | null | undefined, setter: (v: string) => void) => {
-                if (!val) return;
-                if (fillEmptyOnly && cur.trim()) return;
-                setter(val);
-            };
-            fill(payeeName, r.payee_name, setPayeeName);
-            fill(payeeInn, r.payee_inn, setPayeeInn);
-            fill(payeeAccount, r.payee_account, setPayeeAccount);
-            fill(payeeBik, r.payee_bik, setPayeeBik);
-            fill(payeeBankName, r.payee_bank_name, setPayeeBankName);
-            fill(payeeCorrAccount, r.payee_corr_account, setPayeeCorrAccount);
-            fill(payeeKpp, r.payee_kpp, setPayeeKpp);
-            fill(amount, r.amount != null ? String(r.amount) : null, setAmount);
-            fill(purpose, r.purpose, setPurpose);
+            applyParsed(r, isShipmentContext);
             setInvoiceFile(file);  // тот же файл прикрепится как Счёт на шаге 2 — не грузить дважды
-            const FIELD_RU: Record<string, string> = { payee_inn: 'ИНН', payee_bik: 'БИК', payee_account: 'р/с', payee_kpp: 'КПП', payee_name: 'получатель', amount: 'сумма', purpose: 'назначение', payee_corr_account: 'корр.счёт', payee_bank_name: 'банк' };
-            const found = r.fields_found.map(f => FIELD_RU[f] ?? f).join(', ');
-            setParseInfo(found ? `Распознано: ${found}.` + (r.warnings.length ? ' ⚠ ' + r.warnings.join('; ') : '') : (r.warnings.join('; ') || 'Не удалось распознать — заполните вручную'));
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка распознавания счёта');
         }
         setParsing(false);
     };
+
+    // ─── Предзаполнение уже распознанным счётом (загружен на листе логиста) — после prefill из забора. ──
+    const prefillDoneRef = useRef(false);
+    useEffect(() => {
+        if (!prefillParse || prefillDoneRef.current) return;
+        // дождаться prefill реквизитов из выбранного забора, иначе пустые поля затрутся carrier-эффектом
+        if (initialShipmentId != null && !selectedShipment) return;
+        if (isMultiProp && multiShipments.length === 0) return;
+        prefillDoneRef.current = true;
+        applyParsed(prefillParse, true);
+        if (prefillFile) setInvoiceFile(prefillFile);
+    }, [prefillParse, prefillFile, selectedShipment, multiShipments, initialShipmentId, isMultiProp, applyParsed]);
 
     // ─── Client-side requisites validation (понятные сообщения вместо сырого 422) ──
     const validateRequisites = (): string | null => {
