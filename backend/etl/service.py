@@ -184,6 +184,21 @@ def _load_refs(db: Session, project_id: int) -> tuple:
     our_accounts = {a.account for a in accounts if a.is_our_account}
     customs_accounts = {a.account for a in accounts if a.is_customs_payee}
 
+    # Own-accounts whose statement we actually import ("statement owners"). Gates
+    # internal-transfer detection: an own-account we never sync (e.g. a WB transit
+    # account the bank API does not expose) must not hide income arriving from it.
+    # See apply_master_logic — is_internal.
+    synced_accounts = {
+        row[0]
+        for row in db.execute(
+            text(
+                "SELECT DISTINCT account FROM transactions "
+                "WHERE project_id = :pid AND account IS NOT NULL AND is_deleted = false"
+            ),
+            {"pid": project_id},
+        )
+    }
+
     cp_cats = (
         db.execute(
             select(CounterpartyCategory).where(
@@ -202,7 +217,7 @@ def _load_refs(db: Session, project_id: int) -> tuple:
     )
     overrides = {o.txn_id: {"cat_lvl1": o.cat_lvl1, "cat_lvl2": o.cat_lvl2} for o in overrides_db}
 
-    return our_accounts, customs_accounts, cp_categories, overrides
+    return our_accounts, customs_accounts, cp_categories, overrides, synced_accounts
 
 
 def _invalidate_reports_sync(project_id: int) -> None:
@@ -242,8 +257,10 @@ def persist_df(db: Session, df, project_id: int, account_no: str) -> tuple[int, 
     (cache invalidation must run AFTER commit). Returns ``(inserted, skipped)``.
     """
     # 1. Master logic (txn_id, cp_key, is_internal, event_type2, categories)
-    our_accounts, customs_accounts, cp_categories, overrides = _load_refs(db, project_id)
-    df = apply_master_logic(df, our_accounts, customs_accounts, cp_categories, overrides)
+    our_accounts, customs_accounts, cp_categories, overrides, synced_accounts = _load_refs(db, project_id)
+    df = apply_master_logic(
+        df, our_accounts, customs_accounts, cp_categories, overrides, synced_accounts=synced_accounts
+    )
 
     # 2. Auto-upsert Counterparty by INN + build (inn -> cp_id) / (cp_id -> active_loan_id) maps
     inn_to_cp_id, cp_id_to_loan_id = _upsert_counterparties_from_df(db, df, project_id)
@@ -467,7 +484,7 @@ def import_statement(
 
 def reapply_categories(db: Session, project_id: int):
     """Reapply categories to all cashflow transactions."""
-    _, _, cp_categories, overrides = _load_refs(db, project_id)
+    _, _, cp_categories, overrides, _ = _load_refs(db, project_id)
     txns = (
         db.execute(
             select(Transaction).where(
