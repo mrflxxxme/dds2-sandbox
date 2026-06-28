@@ -119,9 +119,24 @@ class TestBuildRowExpenses:
         assert row.stock_value_cost == 8000.0  # 20 × 400
         assert row.gmroi == 0.75  # (10000 − 4000) / 8000
         assert row.sell_through_pct == 33.3  # 10 / (10 + 20)
-        # breakeven = 1000 × (4000+500) / (10000−3000−600) = 703.13
-        assert row.breakeven_price == pytest.approx(703.13, abs=0.1)
-        assert row.safety_margin_pct == pytest.approx(29.69, abs=0.1)
+        # breakeven БЕЗ рекламы = 1000 × 4000 / (10000−3000−600) = 625.0
+        assert row.breakeven_price == pytest.approx(625.0, abs=0.1)
+        assert row.safety_margin_pct == pytest.approx(37.5, abs=0.1)
+
+    def test_anomaly_ad_bleed(self):
+        """Убыток из-за рекламы (без неё был бы плюс) → «Реклама в минус», не «поднять цену»."""
+        price = WbPrice(
+            project_id=1, nm_id=1, price=Decimal("2136"), base_price=Decimal("2136"),
+            discount=Decimal("0"), currency="RUB", synced_at=utcnow(),
+        )
+        funnel = {
+            "nm_id": 1, "vendor_code": "MRAMOR", "revenue": 2137.0, "commission": 722.0,
+            "to_pay_rate": 66.0, "tax": 470.0, "cost_total": 853.0, "adv_sum": 3594.0,
+            "profit": -3502.0, "orders_count": 1, "margin": -163.0, "spp_rate": 0.0,
+        }
+        row = _build_row(1, price, funnel, 846.0, {}, None, wb_stock=200, period_days=30)
+        assert row.anomaly == "Реклама в минус"  # не «Убыток после расходов ВБ»
+        assert "рекламу" in row.recommendation.lower()  # не «поднять цену»
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

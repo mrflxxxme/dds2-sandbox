@@ -38,11 +38,14 @@ _THIN_MARKUP_PCT = 30.0  # наценка ниже — «низкая нацен
 _SUSPICIOUS_COST_SHARE_PCT = 5.0  # себест < 5% цены — вероятно ошибка данных
 
 ANOMALY_PRICE_BELOW_COST = "Цена ниже себестоимости"
+ANOMALY_AD_BLEED = "Реклама в минус"
 ANOMALY_LOSS = "Убыток после расходов ВБ"
 ANOMALY_NO_COST = "Нет себестоимости"
 ANOMALY_SUSPICIOUS_COST = "Подозрительная себестоимость"
 ANOMALY_THIN_MARKUP = "Низкая наценка"
 ANOMALY_DEAD_STOCK = "Залежавшийся остаток"
+
+_DEAD_STOCK_DAYS = 365  # >1 года до распродажи остатка = неликвид
 
 
 async def _load_tax_info(db: AsyncSession, pid: int) -> dict:
@@ -178,6 +181,9 @@ def _classify_anomaly(r: PricingRow) -> str | None:
     if r.has_price and r.has_cost and r.current_price is not None and r.cost_price is not None and r.current_price < r.cost_price:
         return ANOMALY_PRICE_BELOW_COST
     if r.orders_count > 0 and r.profit < 0:
+        # реклама — причина убытка? (без рекламы юнит был бы в плюсе)
+        if r.profit + r.adv_sum > 0:
+            return ANOMALY_AD_BLEED
         return ANOMALY_LOSS
     if r.has_price and not r.has_cost:
         return ANOMALY_NO_COST
@@ -185,23 +191,34 @@ def _classify_anomaly(r: PricingRow) -> str | None:
         return ANOMALY_SUSPICIOUS_COST
     if r.markup_pct is not None and 0 <= r.markup_pct < _THIN_MARKUP_PCT:
         return ANOMALY_THIN_MARKUP
-    if r.wb_stock > 0 and r.orders_count == 0:
+    # неликвид: остаток есть, а продаж нет / распродажа дольше года
+    if r.wb_stock > 0 and (r.orders_count == 0 or (r.days_left is not None and r.days_left > _DEAD_STOCK_DAYS)):
         return ANOMALY_DEAD_STOCK
     return None
 
 
 def _recommend(r: PricingRow) -> str:
     """Короткая авто-рекомендация по цене/остатку на основе метрик строки."""
-    rec_by_anomaly = {
-        ANOMALY_PRICE_BELOW_COST: "Срочно поднять цену",
-        ANOMALY_LOSS: "Поднять цену / снизить затраты",
-        ANOMALY_NO_COST: "Заполнить себестоимость",
-        ANOMALY_SUSPICIOUS_COST: "Проверить себестоимость",
-        ANOMALY_THIN_MARKUP: "Поднять цену",
-        ANOMALY_DEAD_STOCK: "Распродать / снизить цену",
-    }
-    if r.anomaly:
-        return rec_by_anomaly.get(r.anomaly, "Проверить")
+    a = r.anomaly
+    if a == ANOMALY_PRICE_BELOW_COST:
+        return "Срочно поднять цену"
+    if a == ANOMALY_AD_BLEED:
+        return f"Сократить рекламу — ДРР {r.drr:.0f}%, ест прибыль"
+    if a == ANOMALY_LOSS:
+        # убыток не из-за рекламы: либо цена низкая, либо неликвид
+        if r.wb_stock > 0 and (r.orders_count == 0 or (r.days_left is not None and r.days_left > _DEAD_STOCK_DAYS)):
+            return "Убыток + не продаётся → распродать/вывести"
+        if r.markup_pct is not None and r.markup_pct < _THIN_MARKUP_PCT:
+            return "Поднять цену / снизить себест."
+        return "Пересмотреть юнит-экономику"
+    if a == ANOMALY_NO_COST:
+        return "Заполнить себестоимость"
+    if a == ANOMALY_SUSPICIOUS_COST:
+        return "Проверить себестоимость"
+    if a == ANOMALY_THIN_MARKUP:
+        return "Поднять цену"
+    if a == ANOMALY_DEAD_STOCK:
+        return "Распродать / вывести из ассортимента"
     # эластичность спроса → направление цены
     if r.elasticity_label == "неэластичный":
         return "Неэласт. спрос — поднять цену"
@@ -285,10 +302,14 @@ def _build_row(
     # цена, при которой прибыль = 0: масштабируем текущую цену так, чтобы
     # ценозависимый нетто-вклад (выручка − удержания ВБ − налог) покрыл fixed-затраты
     # (себестоимость + реклама). Учитывает СПП/комиссию/налог через realized-доли.
+    # Безубыток считаем БЕЗ рекламы: реклама — отдельный (дискреционный) рычаг,
+    # а не ценовая себестоимость единицы. Иначе на товаре с большим ДРР и парой
+    # продаж точка безубытка раздувается до абсурда. Это «ценовой пол»: цена,
+    # покрывающая себестоимость + удержания ВБ + налог.
     net_contrib = revenue - wb_expenses - tax  # ≈ к перечислению минус налог
     breakeven_price = None
     if has_price and current_price is not None and revenue > 0 and net_contrib > 0:
-        breakeven_price = round(current_price * (cost_total + adv_sum) / net_contrib, 2)
+        breakeven_price = round(current_price * cost_total / net_contrib, 2)
 
     # Запас прочности по цене: насколько можно снижать до нулевой прибыли
     safety_margin_pct = (
@@ -460,6 +481,7 @@ def _group_by_category(rows: list[PricingRow]) -> list[PricingGroup]:
 # Порядок аномалий в выдаче (от критичных к информационным)
 _ANOMALY_ORDER = [
     ANOMALY_PRICE_BELOW_COST,
+    ANOMALY_AD_BLEED,
     ANOMALY_LOSS,
     ANOMALY_NO_COST,
     ANOMALY_SUSPICIOUS_COST,
