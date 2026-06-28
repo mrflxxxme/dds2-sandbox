@@ -27,6 +27,8 @@ export function addReportMethods(api: ApiClient) {
                 debt_rub: number; debt_cny: number;
                 inbox_count: number; accounts_count: number;
                 daily_cashflow: Array<{ date: string; income: number; expense: number }>;
+                daily_income_by_type: Array<{ date: string; marketplace: number; financing: number; other: number }>;
+                income_by_type: Array<{ key: string; name: string; value: number; count: number }>;
                 expense_by_category: Array<{ name: string; value: number }>;
                 income_counterparties: Array<{ name: string; key: string; total: number; count: number }>;
                 date_from: string; date_to: string;
