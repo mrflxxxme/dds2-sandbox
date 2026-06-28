@@ -607,6 +607,14 @@ export interface PricingResponse {
   has_bdr: boolean;
 }
 
+export interface PricingAiResponse {
+  html: string;
+  model: string;
+  articles_analyzed: number;
+  items_sent?: number;
+  generated_at?: string;
+}
+
 export interface FunnelSummary {
   opens: number;
   open_card?: number;

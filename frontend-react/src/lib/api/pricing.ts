@@ -1,6 +1,6 @@
 /** Ценообразование (наценка по артикулам) API methods */
 import { ApiClient } from './client';
-import type { PricingResponse } from '@/types/api';
+import type { PricingResponse, PricingAiResponse } from '@/types/api';
 
 export interface PricingMarkupParams {
     date_from?: string;
@@ -34,6 +34,13 @@ export function addPricingMethods(api: ApiClient) {
                 'POST',
                 '/api/v1/pricing/sync',
             );
+        },
+        getPricingAiRecommendations(params?: { date_from?: string; date_to?: string; only_in_stock?: boolean }) {
+            const q = new URLSearchParams();
+            if (params?.date_from) q.set('date_from', params.date_from);
+            if (params?.date_to) q.set('date_to', params.date_to);
+            if (params?.only_in_stock) q.set('only_in_stock', 'true');
+            return api.request<PricingAiResponse>('POST', `/api/v1/pricing/ai-recommendations?${q.toString()}`);
         },
     };
 }

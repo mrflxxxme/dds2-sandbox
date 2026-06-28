@@ -10,6 +10,7 @@ from backend.cache import invalidate_cache
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.services.pricing import ai_advisor
 from backend.services.pricing import markup as markup_service
 from backend.services.pricing.sync import sync_wb_prices
 from backend.utils.rate_limit import rate_limit_write
@@ -47,6 +48,21 @@ async def get_markup(
         only_in_stock=only_in_stock,
         anomaly_only=anomaly_only,
         group_by=gb,
+    )
+
+
+@router.post("/ai-recommendations")
+async def ai_recommendations(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    only_in_stock: bool = Query(True),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(rate_limit_write),
+):
+    """AI-рекомендации по ценам/рекламе/остаткам (Claude по сводке метрик)."""
+    return await ai_advisor.get_ai_recommendations(
+        db, project.id, date_from=date_from, date_to=date_to, only_in_stock=only_in_stock
     )
 
 

@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/lib/api';
 import { formatNumber, formatDateTime, exportToExcel } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
+import { sanitizeAIHtml } from '@/lib/sanitize';
 import type { Column } from '@/components/DataTable';
 import type { PricingResponse, PricingRow } from '@/types/api';
 
@@ -41,6 +42,9 @@ export default function PricingPage() {
     const [categoryOptions, setCategoryOptions] = useState<string[]>([]);
     const [syncing, setSyncing] = useState(false);
     const [syncMsg, setSyncMsg] = useState('');
+    const [aiHtml, setAiHtml] = useState('');
+    const [aiLoading, setAiLoading] = useState(false);
+    const [aiErr, setAiErr] = useState('');
 
     const reqRef = useRef(0);
     const loadData = useCallback(async () => {
@@ -89,6 +93,20 @@ export default function PricingPage() {
             setSyncMsg(e instanceof Error ? e.message : 'Ошибка синка');
         } finally {
             setSyncing(false);
+        }
+    };
+
+    const doAi = async () => {
+        setAiLoading(true);
+        setAiErr('');
+        setAiHtml('');
+        try {
+            const r = await api.getPricingAiRecommendations({ date_from: dateFrom, date_to: dateTo, only_in_stock: onlyInStock });
+            setAiHtml(r.html);
+        } catch (e) {
+            setAiErr(e instanceof Error ? e.message : 'Ошибка AI');
+        } finally {
+            setAiLoading(false);
         }
     };
 
@@ -218,10 +236,30 @@ export default function PricingPage() {
                 </label>
                 <div style={{ flex: 1 }} />
                 <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={rows.length === 0}>📥 Excel</button>
+                <button className="btn btn-sm btn-success" onClick={doAi} disabled={aiLoading || rows.length === 0}>
+                    {aiLoading ? '🤖 Анализ…' : '🤖 AI-рекомендации'}
+                </button>
                 <button className="btn btn-sm btn-primary" onClick={doSync} disabled={syncing}>
                     {syncing ? '⏳ Обновление…' : '🔄 Обновить цены'}
                 </button>
             </div>
+
+            {/* AI-панель */}
+            {(aiLoading || aiHtml || aiErr) && (
+                <div className="glass-card animate-in" style={{ padding: 18, marginBottom: 16, borderLeft: '3px solid var(--color-success)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                        <span style={{ fontSize: 15, fontWeight: 600 }}>🤖 AI-рекомендации</span>
+                        {aiHtml && (
+                            <button className="btn btn-sm btn-secondary" style={{ marginLeft: 'auto' }} onClick={() => setAiHtml('')}>Скрыть</button>
+                        )}
+                    </div>
+                    {aiLoading && <div style={{ color: 'var(--color-text-dim)' }}>⏳ Claude анализирует портфель (10–20 сек)…</div>}
+                    {aiErr && <div style={{ color: 'var(--color-danger)' }}>❌ {aiErr}</div>}
+                    {aiHtml && (
+                        <div style={{ fontSize: 14, lineHeight: 1.55 }} dangerouslySetInnerHTML={{ __html: sanitizeAIHtml(aiHtml) }} />
+                    )}
+                </div>
+            )}
 
             {/* KPI */}
             {s && (

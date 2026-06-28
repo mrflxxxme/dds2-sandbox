@@ -284,6 +284,33 @@ class TestMarkupAnalytics:
         assert nm_ids == {3004}
 
 
+class TestAiAdvisorSelection:
+    """Отбор ключевых артикулов для AI (без вызова LLM)."""
+
+    def test_select_prioritizes_by_impact(self):
+        from backend.services.pricing.ai_advisor import _select_items
+
+        def row(nm, **kw):
+            base = dict(
+                nm_id=nm, vendor_code=f"A{nm}", category="C", anomaly=None,
+                adv_sum=0.0, stock_value_cost=0.0, profit=0.0, revenue=0.0,
+                optimal_price=None, current_price=100.0, cost_price=50.0,
+            )
+            base.update(kw)
+            return base
+
+        rows = [
+            row(1, anomaly="Реклама в минус", adv_sum=5000.0, profit=-100.0),
+            row(2, anomaly="Залежавшийся остаток", stock_value_cost=999999.0),
+            row(3, revenue=500000.0),
+        ] + [row(100 + i, revenue=float(i)) for i in range(80)]
+        sel = _select_items(rows)
+        arts = {it["арт"] for it in sel}
+        assert {"A1", "A2", "A3"} <= arts  # высокоимпактные попали
+        assert len(sel) <= 50  # кап соблюдён
+        assert all("аномалия" in it for it in sel)  # компактный формат
+
+
 class TestStockAndAnomalies:
     @pytest.mark.asyncio
     async def test_only_in_stock_filter(self, db_session: AsyncSession, project):
