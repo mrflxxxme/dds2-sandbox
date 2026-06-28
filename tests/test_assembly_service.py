@@ -292,12 +292,16 @@ class TestCreateAssemblyRequest:
         with pytest.raises(ValueError, match="FULFILLMENT"):
             await create_assembly_request(db_session, PROJECT_ID, payload)
 
-    async def test_create_already_linked_fbo(self, db_session):
-        """4. Create with already-linked FBO supply -> ValueError."""
+    async def test_create_already_linked_fbo_same_warehouse(self, db_session):
+        """4. Create 2nd request for same FBO supply FROM THE SAME warehouse -> ValueError.
+
+        Совместная поставка разрешает несколько сборок на поставку, но только с
+        РАЗНЫХ складов-источников; повтор с того же склада по-прежнему запрещён.
+        """
         # First create a request
         await _create_test_request(db_session)
 
-        # Try to create another for the same FBO supply
+        # Try to create another for the same FBO supply, same source warehouse
         wh_id = await _get_fulfillment_wh_id(db_session)
         fbo_id = await _get_fbo_supply_id(db_session)
         payload = AssemblyRequestCreate(
@@ -307,7 +311,7 @@ class TestCreateAssemblyRequest:
             pallet_weight_kg=Decimal("100.00"),
             items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=1)],
         )
-        with pytest.raises(ValueError, match="already has an active assembly request"):
+        with pytest.raises(ValueError, match="уже есть активная сборка"):
             await create_assembly_request(db_session, PROJECT_ID, payload)
 
     async def test_create_allows_accepted_fbo_supply(self, db_session):
@@ -1574,8 +1578,10 @@ class TestAvailableStockValidation:
 # --- FF link: ff_link filter + batch enrichment (R2) ------------------------
 
 
-async def _link_ff_request(db_session, *, assembly_request_id: int, warehouse_id: int):
-    """Helper: создать зеркало ФФ-заявки, привязанное к нашей заявке на сборку."""
+async def _link_ff_request(db_session, *, assembly_request_id: int, warehouse_id: int, total_qty: int | None = None):
+    """Helper: создать зеркало ФФ-заявки, привязанное к нашей заявке на сборку.
+
+    total_qty задаёт суммарное кол-во (skladbot → сверка расхождения «по итогам»)."""
     from backend.models.fulfillment import FulfillmentRequest
 
     ff = FulfillmentRequest(
@@ -1586,6 +1592,7 @@ async def _link_ff_request(db_session, *, assembly_request_id: int, warehouse_id
         number=f"WH-R-{assembly_request_id}",
         kind="assembly",
         stage_title="Приёмка",
+        total_qty=total_qty,
         assembly_request_id=assembly_request_id,
     )
     db_session.add(ff)
@@ -1739,3 +1746,164 @@ class TestFfLinkEnrichment:
         assert by_id[linked.id].ff_request_id == ff.id
         assert by_id[linked.id].ff_request_number == ff.number
         assert by_id[linked.id].ff_warehouse_id == wh_id
+
+
+@pytest.mark.asyncio
+class TestJointFboSupply:
+    """Совместная WB FBO-поставка: одна поставка («Совместный номер») несёт ≥2
+    сборок — по одной на ФФ-источник (напр. wms + wms2)."""
+
+    async def _make_joint_pair(self, db_session):
+        """Две сборки на одной FBO-поставке, но с РАЗНЫХ складов-источников."""
+        wh1 = await _get_fulfillment_wh_id(db_session)
+        wh2 = await _create_second_fulfillment_wh(db_session, stock_for=[TEST_BARCODE_1])
+        fbo_id = await _get_fbo_supply_id(db_session)
+        a1 = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh1,
+                wb_fbo_supply_id=fbo_id,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("100.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
+            ),
+        )
+        a2 = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh2,
+                wb_fbo_supply_id=fbo_id,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("100.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=3)],
+            ),
+        )
+        return a1, a2, fbo_id
+
+    async def test_two_warehouses_share_one_supply(self, db_session):
+        """Разные склады-источники → обе сборки привязаны к одной поставке (1:N)."""
+        a1, a2, fbo_id = await self._make_joint_pair(db_session)
+        assert a1.wb_fbo_supply_id == fbo_id
+        assert a2.wb_fbo_supply_id == fbo_id
+        assert a1.warehouse_id != a2.warehouse_id
+
+    async def test_joint_only_filter(self, db_session):
+        """joint_only=True возвращает только сборки совместных поставок."""
+        a1, a2, _fbo_id = await self._make_joint_pair(db_session)
+        # Одиночная сборка на ОТДЕЛЬНОЙ поставке — не совместная.
+        lone_supply = WbFboSupply(
+            project_id=PROJECT_ID,
+            wb_supply_id="ASM-FBO-TEST-LONE",
+            wb_status=WbSupplyStatus.ACTIVE,
+            name="Lone",
+            warehouse_name="Казань",
+            created_at_wb=datetime(2026, 3, 21),
+        )
+        db_session.add(lone_supply)
+        await db_session.flush()
+        wh1 = await _get_fulfillment_wh_id(db_session)
+        lone = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh1,
+                wb_fbo_supply_id=lone_supply.id,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("100.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=1)],
+            ),
+        )
+        items, total = await list_assembly_requests(db_session, PROJECT_ID, joint_only=True, limit=100)
+        ids = {r.id for r in items}
+        assert ids == {a1.id, a2.id}
+        assert lone.id not in ids
+        assert total == 2
+
+    async def test_enrich_joint_flag_and_siblings(self, db_session):
+        """_enrich_joint ставит joint_supply=True и siblings (другая сборка поставки)."""
+        from backend.routers.assembly import _enrich_joint
+
+        a1, a2, _fbo_id = await self._make_joint_pair(db_session)
+        items, _total = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
+        responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
+        await _enrich_joint(db_session, PROJECT_ID, items, responses)
+
+        by_id = {r.id: r for r in responses}
+        assert by_id[a1.id].joint_supply is True
+        assert by_id[a2.id].joint_supply is True
+        assert {s.assembly_id for s in (by_id[a1.id].joint_siblings or [])} == {a2.id}
+        assert by_id[a1.id].joint_siblings[0].warehouse_id == a2.warehouse_id
+
+    async def test_auto_deliver_delivers_all_shipped(self, db_session):
+        """ACCEPTED поставка → ВСЕ отгруженные сборки → DELIVERED (не только одна)."""
+        from backend.services.fbo_supply.sync import _auto_deliver_assembly
+
+        a1, a2, fbo_id = await self._make_joint_pair(db_session)
+        await db_session.execute(
+            text("UPDATE assembly_requests SET status = 'SHIPPED' WHERE id IN (:a, :b)"),
+            {"a": a1.id, "b": a2.id},
+        )
+        await db_session.commit()
+        db_session.expire_all()
+
+        changed = await _auto_deliver_assembly(db_session, PROJECT_ID, fbo_id)
+        await db_session.commit()
+        assert changed is True
+
+        rows = (
+            await db_session.execute(
+                text("SELECT status FROM assembly_requests WHERE id IN (:a, :b)"),
+                {"a": a1.id, "b": a2.id},
+            )
+        ).scalars().all()
+        assert set(rows) == {"DELIVERED"}
+
+    async def test_refresh_joint_non_destructive(self, db_session):
+        """«Из FBO» на совместной сборке НЕ перестраивает позиции (no error, состав цел).
+
+        Без guard refresh затянул бы весь состав поставки (BC1=10) в сборку (было 5).
+        """
+        from backend.services.assembly.analytics import refresh_from_fbo
+
+        a1, _a2, _fbo_id = await self._make_joint_pair(db_session)
+        before = {(i.barcode, i.quantity) for i in (await get_assembly_request(db_session, PROJECT_ID, a1.id)).items}
+        res = await refresh_from_fbo(db_session, PROJECT_ID, a1.id, skip_force_enrich=True)
+        assert res.added == 0 and res.removed == 0 and res.changed == 0
+        after = {(i.barcode, i.quantity) for i in (await get_assembly_request(db_session, PROJECT_ID, a1.id)).items}
+        assert before == after  # позиции совместной сборки не тронуты
+
+    async def test_combined_ff_mismatch_match(self, db_session):
+        """Расхождение совместной поставки = СУММА 2 сборок vs СУММА их заявок ФФ.
+
+        our: a1=5 + a2=3 = 8; ФФ: 5 + 3 = 8 → совпадает (False у обеих)."""
+        from backend.services import fulfillment_service
+
+        a1, a2, _fbo_id = await self._make_joint_pair(db_session)
+        await _link_ff_request(db_session, assembly_request_id=a1.id, warehouse_id=a1.warehouse_id, total_qty=5)
+        await _link_ff_request(db_session, assembly_request_id=a2.id, warehouse_id=a2.warehouse_id, total_qty=3)
+
+        m = await fulfillment_service.get_assembly_ff_mismatch_map(db_session, PROJECT_ID, {a1.id, a2.id})
+        assert m[a1.id] is False and m[a2.id] is False
+
+        detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, PROJECT_ID, a1.id)
+        assert detail["our_total"] == 8  # сумма обеих сборок ДДС
+        assert detail["ff_total"] == 8  # сумма обеих заявок ФФ
+        assert "," in (detail["assembly_number"] or "")  # объединённая подпись «ASM-…, ASM-…»
+
+    async def test_combined_ff_mismatch_detects_diff(self, db_session):
+        """Сумма ФФ ≠ сумме сборок → расхождение True у обеих (combined).
+
+        our: 5 + 3 = 8; ФФ: 5 + 5 = 10 → расхождение."""
+        from backend.services import fulfillment_service
+
+        a1, a2, _fbo_id = await self._make_joint_pair(db_session)
+        await _link_ff_request(db_session, assembly_request_id=a1.id, warehouse_id=a1.warehouse_id, total_qty=5)
+        await _link_ff_request(db_session, assembly_request_id=a2.id, warehouse_id=a2.warehouse_id, total_qty=5)
+
+        m = await fulfillment_service.get_assembly_ff_mismatch_map(db_session, PROJECT_ID, {a1.id, a2.id})
+        assert m[a1.id] is True and m[a2.id] is True
+
+        detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, PROJECT_ID, a1.id)
+        assert detail["our_total"] == 8 and detail["ff_total"] == 10

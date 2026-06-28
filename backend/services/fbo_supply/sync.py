@@ -561,6 +561,9 @@ async def _auto_deliver_assembly(
     assembly/status.py → после commit вызывающий обязан инвалидировать
     reports:assembly_flow).
     """
+    # Совместная поставка: одну WB-поставку могут нести НЕСКОЛЬКО сборок (по одной
+    # на ФФ-источник). При ACCEPTED переводим в DELIVERED ВСЕ отгруженные сборки
+    # поставки, а не одну (иначе scalar_one_or_none падал бы на двух строках).
     result = await db.execute(
         select(AssemblyRequest).where(
             AssemblyRequest.wb_fbo_supply_id == fbo_supply_id,
@@ -569,8 +572,8 @@ async def _auto_deliver_assembly(
             AssemblyRequest.status == AssemblyStatus.SHIPPED,
         )
     )
-    assembly_req = result.scalar_one_or_none()
-    if assembly_req:
+    assembly_reqs = list(result.scalars().all())
+    for assembly_req in assembly_reqs:
         assembly_req.status = AssemblyStatus.DELIVERED
         history = AssemblyStatusHistory(
             project_id=project_id,
@@ -586,8 +589,7 @@ async def _auto_deliver_assembly(
             "fbo_sync.auto_deliver_assembly",
             extra={"assembly_id": assembly_req.id, "project_id": project_id},
         )
-        return True
-    return False
+    return bool(assembly_reqs)
 
 
 # ─── Auto-ship helpers (WB ACCEPTED → VEHICLE_ASSIGNED → SHIPPED) ───────────

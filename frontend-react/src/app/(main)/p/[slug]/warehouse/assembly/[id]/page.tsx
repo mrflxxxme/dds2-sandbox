@@ -188,13 +188,16 @@ export default function AssemblyDetailPage() {
                 search: fboSearchInput || undefined,
                 limit: 100,
                 exclude_with_assembly: true,
+                // Совместная поставка: не прячем поставку, занятую сборкой ДРУГОГО склада
+                // — её можно привязать к сборке этого склада-источника (wms + wms2).
+                exclude_assembly_warehouse_id: assembly?.warehouse_id,
             });
             setFboSupplies(resp.items);
         } catch {
             setFboSupplies([]);
         }
         setLoadingFboList(false);
-    }, [fboSearchInput]);
+    }, [fboSearchInput, assembly?.warehouse_id]);
 
     useEffect(() => {
         if (!editingFbo) return;
@@ -683,6 +686,12 @@ export default function AssemblyDetailPage() {
                         <span>Удалено: {refreshResult.removed}</span>
                         <span>Изменено: {refreshResult.changed}</span>
                     </div>
+                    {assembly?.joint_supply && (
+                        <div style={{ marginTop: 8, fontSize: 13, color: 'var(--color-text-muted)' }}>
+                            Совместная поставка: данные WB обновлены, но позиции не перестраиваются (общий состав поставки
+                            делят несколько сборок). Расхождение считается по сумме всех сборок поставки.
+                        </div>
+                    )}
                     {refreshResult.skipped && refreshResult.skipped.length > 0 && (
                         <div style={{ marginTop: 8, fontSize: 13, color: 'var(--color-warning)' }}>
                             Пропущено (нет в номенклатуре): {refreshResult.skipped.join(', ')}
@@ -927,6 +936,28 @@ export default function AssemblyDetailPage() {
                             />
                         );
                     })()}
+                    {assembly.joint_supply && (
+                        <InfoField
+                            label="Совместная поставка"
+                            value={
+                                <span style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
+                                    <span className="badge badge-info" style={{ fontSize: 11, padding: '2px 8px' }} title="Эта WB-поставка собирается несколькими ФФ — по одной сборке на источник">
+                                        Совместная
+                                    </span>
+                                    {(assembly.joint_siblings || []).map(s => (
+                                        <Link
+                                            key={s.assembly_id}
+                                            href={`/p/${slug}/warehouse/assembly/${s.assembly_id}`}
+                                            title={`Сборка того же Совместного номера · ${s.warehouse_name || `Склад ${s.warehouse_id}`}`}
+                                            style={{ color: 'var(--color-accent)' }}
+                                        >
+                                            {s.number}{s.warehouse_name ? ` (${s.warehouse_name})` : ''} →
+                                        </Link>
+                                    ))}
+                                </span>
+                            }
+                        />
+                    )}
                     {assembly.comment && (
                         <div style={{ gridColumn: '1 / -1' }}>
                             <InfoField label="Комментарий" value={assembly.comment} />
