@@ -131,7 +131,8 @@ export interface CategoryRef {
   direction: string;
   cat_lvl1: string;
   cat_lvl2: string;
-  sort_order: number;
+  sort_order?: number;
+  is_cogs?: boolean;
 }
 
 // ─── Reports ─────────────────────────────────────────────────────────────────
@@ -3540,6 +3541,15 @@ export interface SetExpenseCategoryResponse {
 export interface BulkCategoryResponse {
   counterparties: number;
   transactions: number;
+}
+
+export interface CounterpartyMergeResponse {
+  target_id: number;
+  source_id: number;
+  moved: Record<string, number>;
+  fields_filled: string[];
+  inn_assigned: boolean;
+  category_action: string;
 }
 
 export type Counterparty = CounterpartyListItem;

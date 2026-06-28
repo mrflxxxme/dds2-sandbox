@@ -13,7 +13,6 @@ from backend.cache import invalidate_project_reports
 from backend.models import (
     Account,
     CategoryRef,
-    CounterpartyCategory,
     OpeningBalance,
     Override,
 )
@@ -75,64 +74,10 @@ async def delete_account(db: AsyncSession, project_id: int, account_id: int) -> 
     return True
 
 
-# ─── Counterparty Categories ────────────────────────────────────────────────
-
-
-async def list_cp_categories(db: AsyncSession, project_id: int) -> list:
-    """List all counterparty categories for a project."""
-    result = await db.execute(
-        select(CounterpartyCategory).where(
-            CounterpartyCategory.project_id == project_id,
-            CounterpartyCategory.is_deleted == False,
-        )
-    )
-    return result.scalars().all()
-
-
-async def upsert_cp_category(db: AsyncSession, project_id: int, payload: dict) -> CounterpartyCategory:
-    """Create or update a counterparty category."""
-    if payload.get("id"):
-        result = await db.execute(
-            select(CounterpartyCategory).where(
-                CounterpartyCategory.id == payload["id"],
-                CounterpartyCategory.project_id == project_id,
-                CounterpartyCategory.is_deleted == False,
-            )
-        )
-        cpc = result.scalar_one_or_none()
-        if cpc:
-            for k, v in payload.items():
-                if k != "id":
-                    setattr(cpc, k, v)
-            await db.commit()
-            await db.refresh(cpc)
-            return cpc
-
-    payload["project_id"] = project_id
-    cpc = CounterpartyCategory(**payload)
-    db.add(cpc)
-    await db.commit()
-    await db.refresh(cpc)
-    await invalidate_project_reports(project_id)
-    return cpc
-
-
-async def delete_cp_category(db: AsyncSession, project_id: int, cpc_id: int) -> bool:
-    """Delete a counterparty category. Returns True if deleted."""
-    result = await db.execute(
-        select(CounterpartyCategory).where(
-            CounterpartyCategory.id == cpc_id,
-            CounterpartyCategory.project_id == project_id,
-            CounterpartyCategory.is_deleted == False,
-        )
-    )
-    cpc = result.scalar_one_or_none()
-    if not cpc:
-        return False
-    cpc.soft_delete()
-    await db.commit()
-    await invalidate_project_reports(project_id)
-    return True
+# Категории контрагентов (counterparty_categories) теперь ведутся через
+# CounterpartyService.set_expense_category / bulk_set_expense_category (страница
+# «Контрагенты»). Плоский CRUD удалён — таблица осталась, импорт читает её
+# напрямую (etl/service.py).
 
 
 # ─── Overrides ───────────────────────────────────────────────────────────────
@@ -219,6 +164,7 @@ async def list_categories(db: AsyncSession, project_id: int) -> list[dict]:
             "direction": r.direction,
             "cat_lvl1": r.cat_lvl1,
             "cat_lvl2": r.cat_lvl2 or "",
+            "is_cogs": r.is_cogs,
         }
         for r in rows
     ]
@@ -230,6 +176,7 @@ async def add_category(
     cat_lvl1: str,
     cat_lvl2: str | None = None,
     direction: str | None = None,
+    is_cogs: bool = False,
 ) -> CategoryRef:
     """Add a category reference."""
     cat = CategoryRef(
@@ -237,11 +184,36 @@ async def add_category(
         direction=direction or "expense",
         cat_lvl1=cat_lvl1,
         cat_lvl2=cat_lvl2 or "",
+        is_cogs=is_cogs,
     )
     db.add(cat)
     await db.commit()
     await db.refresh(cat)
+    if is_cogs:
+        await invalidate_project_reports(project_id)
     return cat
+
+
+async def update_category(db: AsyncSession, cat_id: int, project_id: int, *, is_cogs: bool) -> bool:
+    """Toggle the COGS («себестоимость») flag on a category. Returns True if found.
+
+    Invalidates report caches — expense reports (dashboard, ДДС) read this flag to
+    exclude COGS spend, and those reports are ``@cached``.
+    """
+    result = await db.execute(
+        select(CategoryRef).where(
+            CategoryRef.id == cat_id,
+            CategoryRef.project_id == project_id,
+            CategoryRef.is_deleted == False,  # noqa: E712
+        )
+    )
+    cat = result.scalar_one_or_none()
+    if not cat:
+        return False
+    cat.is_cogs = is_cogs
+    await db.commit()
+    await invalidate_project_reports(project_id)
+    return True
 
 
 async def delete_category(db: AsyncSession, cat_id: int, project_id: int) -> bool:
@@ -256,8 +228,11 @@ async def delete_category(db: AsyncSession, cat_id: int, project_id: int) -> boo
     cat = result.scalar_one_or_none()
     if not cat:
         return False
+    was_cogs = cat.is_cogs
     cat.soft_delete()
     await db.commit()
+    if was_cogs:
+        await invalidate_project_reports(project_id)
     return True
 
 

@@ -84,33 +84,31 @@ async def test_accounts_require_auth(client):
     assert resp.status_code in (401, 403, 422)
 
 
-# ─── CP Categories ──────────────────────────────────────────────────────────
+# ─── Category reference + COGS toggle ───────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_create_and_list_cp_categories(client, auth_headers):
-    """Create a counterparty category and verify it appears in the list."""
+async def test_category_cogs_toggle(client, auth_headers):
+    """Create an expense category, flag it as «себестоимость» via PATCH, verify in list."""
     headers = await _project_headers(client, auth_headers)
-    uid = uuid.uuid4().hex[:8]
 
-    # Create
     resp = await client.post(
-        "/api/v1/refs/cp_categories",
-        json={
-            "cp_key": f"INN:{uid}",
-            "cp_name": "ООО Ромашка",  # noqa: RUF001
-            "cat_lvl1": "Расходы",
-            "cat_lvl2": "Зарплата",
-        },
+        "/api/v1/refs/categories",
+        json={"cat_lvl1": "Таможня", "cat_lvl2": "", "direction": "expense"},
         headers=headers,
     )
-    assert resp.status_code == 200, f"Create cp_category failed: {resp.text}"
+    assert resp.status_code == 200, f"Create category failed: {resp.text}"
+    cat_id = resp.json()["id"]
 
-    # List
-    resp = await client.get("/api/v1/refs/cp_categories", headers=headers)
+    resp = await client.patch(
+        f"/api/v1/refs/categories/{cat_id}", json={"is_cogs": True}, headers=headers
+    )
+    assert resp.status_code == 200, f"PATCH is_cogs failed: {resp.text}"
+
+    resp = await client.get("/api/v1/refs/categories", headers=headers)
     assert resp.status_code == 200
-    cats = resp.json()
-    assert isinstance(cats, list)
+    row = next(c for c in resp.json() if c["id"] == cat_id)
+    assert row["is_cogs"] is True
 
 
 # ─── Overrides ───────────────────────────────────────────────────────────────
