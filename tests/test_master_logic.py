@@ -172,6 +172,94 @@ class TestApplyMasterLogic:
         assert result.iloc[0]["is_cashflow2"] == 0
         assert result.iloc[0]["status"] == "NO_CASHFLOW"
 
+    def test_internal_skipped_for_unsynced_ghost_account(self):
+        """Income from an own-account we never sync must count as real cashflow.
+
+        Regression: WB пейауты приходили через транзитный счёт «WB2 транзитный»,
+        помеченный is_our_account=True, но без своей выписки (банк его не отдаёт).
+        Перевод с него выглядел «внутренним» и выпадал из прихода (28.1M ₽).
+        """
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2024, 1, 1),
+                    "bank": "WB_BANK",
+                    "account": "OUR_MAIN",
+                    "currency": "RUB",
+                    "counterparty": "РВБ ООО",
+                    "inn": "9714053621",
+                    "counterparty_account": "GHOST_TRANSIT",  # own, but never synced
+                    "purpose": "оплата по договору за товар",
+                    "income": 100000,
+                    "expense": 0,
+                }
+            ]
+        )
+
+        # Both registered as ours, but only OUR_MAIN has an imported statement.
+        result = apply_master_logic(
+            df, {"OUR_MAIN", "GHOST_TRANSIT"}, set(), {}, {}, synced_accounts={"OUR_MAIN"}
+        )
+
+        assert result.iloc[0]["is_internal"] == 0
+        assert result.iloc[0]["event_type2"] == "OPER"
+        assert result.iloc[0]["is_cashflow2"] == 1
+
+    def test_internal_kept_for_two_synced_accounts(self):
+        """A transfer between two genuinely-synced own accounts stays internal."""
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2024, 1, 1),
+                    "bank": "WB_BANK",
+                    "account": "OUR_MAIN",
+                    "currency": "RUB",
+                    "counterparty": "ПЛЮС ВАЙБ",
+                    "inn": None,
+                    "counterparty_account": "OUR_SECOND",
+                    "purpose": "Перемещение между счетами",
+                    "income": 100000,
+                    "expense": 0,
+                }
+            ]
+        )
+
+        result = apply_master_logic(
+            df, {"OUR_MAIN", "OUR_SECOND"}, set(), {}, {}, synced_accounts={"OUR_MAIN", "OUR_SECOND"}
+        )
+
+        assert result.iloc[0]["is_internal"] == 1
+        assert result.iloc[0]["event_type2"] == "INTERNAL_TRANSFER"
+        assert result.iloc[0]["is_cashflow2"] == 0
+
+    def test_internal_batch_owner_counts_as_synced(self):
+        """A counterparty own-account imported in THIS batch counts as synced.
+
+        On a first-ever import neither account is a historical statement owner yet,
+        but both legs are present in the batch → the movement is still internal.
+        """
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2024, 1, 1), "bank": "WB_BANK", "account": "ACC_A",
+                    "currency": "RUB", "counterparty": "self", "inn": None,
+                    "counterparty_account": "ACC_B", "purpose": "Перемещение",
+                    "income": 0, "expense": 5000,
+                },
+                {
+                    "date": datetime(2024, 1, 1), "bank": "WB_BANK", "account": "ACC_B",
+                    "currency": "RUB", "counterparty": "self", "inn": None,
+                    "counterparty_account": "ACC_A", "purpose": "Перемещение",
+                    "income": 5000, "expense": 0,
+                },
+            ]
+        )
+
+        # synced_accounts empty (nothing imported historically) — batch owners cover it.
+        result = apply_master_logic(df, {"ACC_A", "ACC_B"}, set(), {}, {}, synced_accounts=set())
+
+        assert list(result["is_internal"]) == [1, 1]
+
     def test_fx_buy(self):
         df = self._make_df(
             [
