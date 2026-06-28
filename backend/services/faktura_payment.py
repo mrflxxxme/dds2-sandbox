@@ -138,8 +138,8 @@ async def create_payment_draft(
     if locked is None:
         raise ValueError("Заявка на оплату не найдена")
     pr = locked
-    if pr.status != PaymentRequestStatus.PENDING_REVIEW.value:
-        raise ValueError("Создать оплату можно только для заявки на проверке (PENDING_REVIEW)")
+    if pr.status not in (PaymentRequestStatus.PENDING_REVIEW.value, PaymentRequestStatus.APPROVED.value):
+        raise ValueError("Создать оплату можно только для заявки на проверке или согласованной")
     if not (pr.payee_inn and pr.payee_account and pr.payee_bik and pr.amount and pr.amount > 0):
         raise ValueError("Неполные реквизиты получателя — нельзя создать платёжку")
 

@@ -706,8 +706,8 @@ export default function PaymentsPanel({ embedded = false }: Props) {
                                     </div>
                                 )}
 
-                                {/* Создать платёжку в банке — только логистика (Faktura), PENDING_REVIEW, админ */}
-                                {canBankWrite && detail.status === 'PENDING_REVIEW' && (detail.category === 'LOGISTICS' || detail.category == null) && (
+                                {/* Создать платёжку в банке (Faktura) — любая категория, «На проверке» ИЛИ «Согласовано», админ */}
+                                {canBankWrite && (detail.status === 'PENDING_REVIEW' || detail.status === 'APPROVED') && (
                                     <div style={{ marginBottom: 16 }}>
                                         {draftErrors.length > 0 && (
                                             <div style={{ padding: '8px 12px', marginBottom: 8, borderRadius: 8, background: 'rgba(239,68,68,0.08)', fontSize: 12, color: 'var(--color-danger)' }}>

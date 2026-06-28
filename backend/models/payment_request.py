@@ -11,8 +11,9 @@ Payment-request models: PaymentRequest, PaymentRequestDocument, PaymentRequestEv
     DRAFT ─submit─▶ PENDING_REVIEW ─согласовать─▶ APPROVED ─оплачено─▶ PAID
       │                 │   │                         │
       │                 │   └─«Создать оплату»─▶ DRAFT_CREATED ─выписка─▶ PAID
-      └─CANCELLED       └─REJECTED / CANCELLED        └─REJECTED / CANCELLED
-                        └─DRAFT (вернуть на правку)
+      │                 │                       ▲     └─REJECTED / CANCELLED
+      │                 │   APPROVED ─«Создать оплату»┘  (банк после ручного согласования)
+      └─CANCELLED       └─REJECTED / CANCELLED / DRAFT (вернуть на правку)
 
 PAID ставит ЛИБО админ вручную (APPROVED→PAID, оплата вне системы), ЛИБО матчер
 выписки (etl/sync_payment_requests) после DRAFT_CREATED — исходящий дебет с тем же
@@ -125,6 +126,7 @@ PAYMENT_REQUEST_TRANSITIONS: dict[PaymentRequestStatus, set[PaymentRequestStatus
         PaymentRequestStatus.CANCELLED,
     },
     PaymentRequestStatus.APPROVED: {
+        PaymentRequestStatus.DRAFT_CREATED,  # «Создать оплату» (платёжка в банк) и после согласования
         PaymentRequestStatus.PAID,           # отметить оплаченным вручную
         PaymentRequestStatus.REJECTED,
         PaymentRequestStatus.CANCELLED,
