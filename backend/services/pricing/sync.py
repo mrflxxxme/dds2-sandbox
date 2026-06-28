@@ -18,7 +18,7 @@ from backend.utils.time import utcnow
 logger = logging.getLogger("dds.pricing")
 
 
-def _to_decimal(value) -> Decimal | None:
+def _to_decimal(value: object) -> Decimal | None:
     if value is None:
         return None
     try:

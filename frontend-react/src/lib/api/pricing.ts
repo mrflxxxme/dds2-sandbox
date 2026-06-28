@@ -1,0 +1,35 @@
+/** Ценообразование (наценка по артикулам) API methods */
+import { ApiClient } from './client';
+import type { PricingResponse } from '@/types/api';
+
+export interface PricingMarkupParams {
+    date_from?: string;
+    date_to?: string;
+    brand?: string;
+    category?: string;
+    search?: string;
+    min_orders?: number;
+    group_by?: 'category' | 'sku';
+}
+
+export function addPricingMethods(api: ApiClient) {
+    return {
+        getPricingMarkup(params?: PricingMarkupParams) {
+            const q = new URLSearchParams();
+            if (params?.date_from) q.set('date_from', params.date_from);
+            if (params?.date_to) q.set('date_to', params.date_to);
+            if (params?.brand) q.set('brand', params.brand);
+            if (params?.category) q.set('category', params.category);
+            if (params?.search) q.set('search', params.search);
+            if (params?.min_orders) q.set('min_orders', String(params.min_orders));
+            if (params?.group_by) q.set('group_by', params.group_by);
+            return api.request<PricingResponse>('GET', `/api/v1/pricing/markup?${q.toString()}`);
+        },
+        syncPricing() {
+            return api.request<{ status: string; rows: number; synced_at: string | null; message: string | null }>(
+                'POST',
+                '/api/v1/pricing/sync',
+            );
+        },
+    };
+}
