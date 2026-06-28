@@ -263,6 +263,21 @@ async def _already_sent(db: AsyncSession, project_id: int, assembly_id: int) -> 
     return False, None, None
 
 
+# ─── Примечание для оператора Натали ─────────────────────────────────────────
+
+
+def _default_notes(ar: AssemblyRequest, supply: object | None) -> str:
+    """Примечание заявки в портале Натали — оператор видит это поле и связывает
+    заявку с нашей сборкой DDS. Пишем наш № сборки (ASM) и, если есть, № поставки WB.
+    Это дефолт-prefill; пользователь может изменить текст в модалке перед отправкой.
+    """
+    parts = [f"DDS · {ar.number}"] if ar.number else ["DDS"]
+    wb_supply = getattr(supply, "wb_supply_id", None) if supply is not None else None
+    if wb_supply:
+        parts.append(f"поставка ВБ {wb_supply}")
+    return " · ".join(parts)
+
+
 # ─── Draft (модалка) ─────────────────────────────────────────────────────────
 
 
@@ -281,7 +296,7 @@ async def build_draft(db: AsyncSession, project_id: int, assembly_id: int) -> Mi
         number=(supply.wb_supply_id if supply else None),
         shipment_date=ar.delivery_date or ar.pickup_date,
         filter_delivery_type="direct",
-        notes=ar.number,  # наш референс сборки в комментарий
+        notes=_default_notes(ar, supply),  # № сборки (+поставка ВБ) — оператор Натали видит связь
         wb_warehouse_name=(supply.warehouse_name if supply else None) or ar.wb_warehouse_name_manual,
         assembly_number=ar.number,
     )
@@ -424,7 +439,7 @@ async def send_shipment(
         "shipment_type": "fbo",
         "number": req.number or (supply.wb_supply_id if supply else None),
         "shipment_date": shipment_date.isoformat() if shipment_date else None,
-        "notes": req.notes or ar.number,
+        "notes": req.notes or _default_notes(ar, supply),
         "filter_delivery_type": req.filter_delivery_type,
     }
     xlsx = build_opis_xlsx(
