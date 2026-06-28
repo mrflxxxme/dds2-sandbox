@@ -1036,6 +1036,23 @@ async def create_assembly_request(
     await db.refresh(assembly_req)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+
+    # Best-effort: уведомить ФФ-оператора (портал, напр. Хамза) о новой сборке на
+    # его складе. CancelledError (BaseException) пробрасывается, прочее — глушим.
+    try:
+        from backend.services import fulfillment_notify
+
+        await fulfillment_notify.notify_new_ff_assembly(
+            db,
+            project_id,
+            payload.warehouse_id,
+            assembly_number=assembly_req.number,
+            warehouse_name=wh.name,
+            qty=sum(int(i.quantity) for i in resolved_items),
+            wb_number=(fbo_supply.wb_supply_id if fbo_supply else None),
+        )
+    except Exception:
+        logger.warning("new-ff-assembly notify failed", exc_info=True)
     return assembly_req
 
 

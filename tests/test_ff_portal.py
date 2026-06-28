@@ -717,3 +717,71 @@ async def test_acceptance_detail_and_archive(ff_env, client: AsyncClient):
 def _suffix(ff_env) -> str:
     """Extract the random suffix used by the ff_env fixture from project A slug (ffa-<s>)."""
     return ff_env.pA.slug.split("-", 1)[1]
+
+
+class TestFfNewWorkNotify:
+    """Telegram-пуш ФФ-оператору (портал, Хамза) о новой сборке/приёмке: текст и
+    адресация (только чаты, привязанные к складу заявки)."""
+
+    def test_build_new_assembly_text(self):
+        from backend.services.fulfillment_notify import build_new_assembly_text
+
+        text = build_new_assembly_text("ASM-42", warehouse_name="Хамза", qty=1416, wb_number="FBW-99")
+        assert "Новая сборка" in text
+        assert "ASM-42" in text and "Хамза" in text and "FBW-99" in text
+        assert "1 416 шт" in text  # _fmt_qty_n — пробел-разделитель тысяч
+
+    def test_build_new_acceptance_text(self):
+        from backend.services.fulfillment_notify import build_new_acceptance_text
+
+        text = build_new_acceptance_text(warehouse_name="Хамза", items_count=3, total_qty=120)
+        assert "Новая приёмка" in text and "Хамза" in text
+        assert "3" in text and "120" in text
+
+    @pytest.mark.asyncio
+    async def test_notify_targets_only_warehouse_chats(self, monkeypatch):
+        """Шлёт ТОЛЬКО в чаты с ff_board_warehouse_id == warehouse_id заявки."""
+        from backend.services import fulfillment_notify, telegram_service
+
+        WH = 7
+        bindings = [
+            SimpleNamespace(chat_id=111, ff_board_warehouse_id=WH),
+            SimpleNamespace(chat_id=222, ff_board_warehouse_id=999),
+        ]
+        sent: list[tuple[int, str]] = []
+
+        async def fake_list(db, project_id):
+            return bindings
+
+        async def fake_send(chat_id, text, *, reply_markup=None):
+            sent.append((chat_id, text))
+            return True
+
+        monkeypatch.setattr(telegram_service, "list_warehouse_linked_bindings", fake_list)
+        monkeypatch.setattr(telegram_service, "send_analytics_message", fake_send)
+
+        await fulfillment_notify.notify_new_ff_assembly(
+            None, 1, WH, assembly_number="ASM-7", warehouse_name="Хамза", qty=10
+        )
+        assert [c for c, _ in sent] == [111]
+        assert "ASM-7" in sent[0][1]
+
+    @pytest.mark.asyncio
+    async def test_notify_no_bindings_is_noop(self, monkeypatch):
+        """Нет привязанных чатов → send не зовётся (ранний выход на горячем пути)."""
+        from backend.services import fulfillment_notify, telegram_service
+
+        called = False
+
+        async def fake_list(db, project_id):
+            return []
+
+        async def fake_send(chat_id, text, *, reply_markup=None):
+            nonlocal called
+            called = True
+            return True
+
+        monkeypatch.setattr(telegram_service, "list_warehouse_linked_bindings", fake_list)
+        monkeypatch.setattr(telegram_service, "send_analytics_message", fake_send)
+        await fulfillment_notify.notify_new_ff_acceptance(None, 1, 7, warehouse_name="X", items_count=1, total_qty=5)
+        assert called is False
