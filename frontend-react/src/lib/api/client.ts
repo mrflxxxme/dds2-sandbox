@@ -282,9 +282,27 @@ export class ApiClient {
         const projectId = this.getProjectId();
         if (projectId) headers['X-Project-Id'] = String(projectId);
 
-        const res = await fetch(`${API_URL}${path}`, {
+        let res = await fetch(`${API_URL}${path}`, {
             method: 'POST', headers, body: formData,
         });
+
+        // На 401 — рефреш токена и повтор (зеркалит request()/requestBlob()). Без этого
+        // долгая форма (распознавание+подбор+выбор файла) → протухший токен → сырой Error 401.
+        if (res.status === 401) {
+            const refreshResult = await this.tryRefresh();
+            if (refreshResult === 'ok') {
+                headers['Authorization'] = `Bearer ${this.getToken()}`;
+                res = await fetch(`${API_URL}${path}`, { method: 'POST', headers, body: formData });
+            } else if (refreshResult === 'unavailable') {
+                throw new Error('Сервер временно недоступен. Попробуйте через минуту.');
+            }
+            if (res.status === 401) {
+                this.clearToken();
+                if (typeof window !== 'undefined') window.location.href = '/login';
+                throw new Error('Unauthorized');
+            }
+        }
+
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             const detail = err.detail;
