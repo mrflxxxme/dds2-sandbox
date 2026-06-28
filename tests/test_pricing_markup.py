@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.integrations.wb_api import parse_wb_prices
 from backend.models import WbPrice
 from backend.services.funnel.cost_overrides import set_cost_override
-from backend.services.pricing.markup import get_markup_analytics
+from backend.services.pricing.markup import _build_row, get_markup_analytics
 from backend.utils.time import utcnow
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -74,6 +74,34 @@ class TestParseWbPrices:
     def test_currency_fallback(self):
         out = parse_wb_prices([{"nmID": 555, "sizes": [{"discountedPrice": 100}]}])
         assert out[0]["currency"] == "RUB"
+
+
+class TestBuildRowExpenses:
+    """Регрессия: wb_expenses = commission (выручка − к перечислению), НЕ revenue×to_pay_rate.
+
+    to_pay_rate из воронки в ПРОЦЕНТАХ (×100) — старая формула давала дикий минус.
+    """
+
+    def test_wb_expenses_equals_commission(self):
+        funnel = {
+            "nm_id": 1,
+            "vendor_code": "X",
+            "brand": "B",
+            "subject": "S",
+            "revenue": 10000.0,
+            "commission": 4020.0,  # = выручка − к перечислению
+            "to_pay_rate": 59.8,  # ПРОЦЕНТ, не доля
+            "profit": 3000.0,
+            "cost_total": 2000.0,
+            "spp_rate": 20.0,
+            "margin": 30.0,
+            "adv_sum": 0.0,
+            "tax": 0.0,
+            "orders_count": 10,
+        }
+        row = _build_row(1, None, funnel, 300.0, {}, None)
+        assert row.wb_expenses == 4020.0  # не -588000 (revenue − revenue×59.8)
+        assert 0 <= row.wb_expenses <= row.revenue
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

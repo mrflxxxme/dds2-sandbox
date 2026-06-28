@@ -5,6 +5,9 @@
 (override → avg по закупкам → склад) + расходы ВБ/СПП/прибыль из воронки
 (get_funnel_by_sku) → коэффициент наценки, доля себестоимости, чистая маржа.
 Группировка по категории (CategoryOverride → subject), фильтры.
+
+Кэшируется тяжёлая загрузка (по project_id + период); фильтры/группировка —
+в памяти поверх кэша (дёшево, переиспользует один прогон на все фильтры).
 """
 
 import logging
@@ -39,14 +42,19 @@ async def _load_tax_info(db: AsyncSession, pid: int) -> dict:
     return tax_info
 
 
-async def _load_unit_cost_map(db: AsyncSession, pid: int) -> dict[int, float]:
-    """nm_id → себестоимость единицы (avg по закупкам → override → склад)."""
-    avg_costs = await load_avg_costs(db, pid)  # article_seller_lower → cost
-    overrides = await load_cost_overrides(db, pid)  # nm_id → cost
+async def _load_meta_map(db: AsyncSession, pid: int) -> dict[int, dict]:
+    """nm_id → {brand, subject, article_seller, wh_cost} одним сканом Nomenclature (+склад).
 
+    wh_cost = func.max(WarehouseStock.cost_price) по складам/баркодам карточки —
+    грубая верхняя оценка, используется ТОЛЬКО как 3-й приоритет себестоимости
+    (после avg по закупкам и ручного override). Один товар (article_wb) = много
+    баркодов × складов; max под group_by(article_wb) даёт ровно один ряд на nm_id.
+    """
     rows = await db.execute(
         select(
             Nomenclature.article_wb.label("nm_id"),
+            func.max(Nomenclature.brand).label("brand"),
+            func.max(Nomenclature.subject).label("subject"),
             func.max(Nomenclature.article_seller).label("article_seller"),
             func.max(WarehouseStock.cost_price).label("wh_cost"),
         )
@@ -58,43 +66,27 @@ async def _load_unit_cost_map(db: AsyncSession, pid: int) -> dict[int, float]:
         .group_by(Nomenclature.article_wb)
         .limit(_MAX_ROWS)
     )
-    out: dict[int, float] = {}
-    for r in rows:
-        nm_id = r.nm_id
-        article = (r.article_seller or "").lower()
-        cost = 0.0
-        if article and article in avg_costs:
-            cost = avg_costs[article]
-        elif overrides.get(nm_id, 0) > 0:
-            cost = overrides[nm_id]
-        elif r.wh_cost and float(r.wh_cost) > 0:
-            cost = float(r.wh_cost)
-        if cost > 0:
-            out[nm_id] = cost
-    # nm_id с override, но без строки номенклатуры
-    for nm_id, cost in overrides.items():
-        if nm_id not in out and cost > 0:
-            out[nm_id] = cost
-    return out
-
-
-async def _load_nom_map(db: AsyncSession, pid: int) -> dict[int, dict]:
-    """nm_id → {brand, subject, article_seller} для артикулов без строки воронки."""
-    rows = await db.execute(
-        select(
-            Nomenclature.article_wb.label("nm_id"),
-            func.max(Nomenclature.brand).label("brand"),
-            func.max(Nomenclature.subject).label("subject"),
-            func.max(Nomenclature.article_seller).label("article_seller"),
-        )
-        .where(Nomenclature.project_id == pid, Nomenclature.article_wb.isnot(None))
-        .group_by(Nomenclature.article_wb)
-        .limit(_MAX_ROWS)
-    )
     return {
-        r.nm_id: {"brand": r.brand, "subject": r.subject, "article_seller": r.article_seller}
+        r.nm_id: {
+            "brand": r.brand,
+            "subject": r.subject,
+            "article_seller": r.article_seller,
+            "wh_cost": float(r.wh_cost) if r.wh_cost else None,
+        }
         for r in rows
     }
+
+
+def _resolve_cost(nm_id: int, meta: dict, avg_costs: dict[str, float], overrides: dict[int, float]) -> float | None:
+    """Себестоимость единицы: avg по закупкам (article_seller) → override(nm) → склад."""
+    article = (meta.get("article_seller") or "").lower()
+    if article and article in avg_costs:
+        return avg_costs[article]
+    ov = overrides.get(nm_id, 0)
+    if ov > 0:
+        return ov
+    wh = meta.get("wh_cost")
+    return wh if wh and wh > 0 else None
 
 
 def _build_row(
@@ -103,15 +95,15 @@ def _build_row(
     funnel: dict | None,
     cost: float | None,
     cat_overrides: dict[int, str],
-    nom: dict | None,
+    meta: dict | None,
 ) -> PricingRow:
     f = funnel or {}
-    n = nom or {}
-    vendor_code = (price.vendor_code if price and price.vendor_code else None) or f.get("vendor_code") or n.get(
+    m = meta or {}
+    vendor_code = (price.vendor_code if price and price.vendor_code else None) or f.get("vendor_code") or m.get(
         "article_seller"
     )
-    brand = f.get("brand") or n.get("brand")
-    subject = f.get("subject") or n.get("subject")
+    brand = f.get("brand") or m.get("brand")
+    subject = f.get("subject") or m.get("subject")
     category = cat_overrides.get(nm_id) or subject or UNCATEGORIZED
 
     current_price = float(price.price) if price and price.price is not None else None
@@ -132,9 +124,9 @@ def _build_row(
     buyer_price = round(current_price * (1 - spp_rate / 100), 2) if has_price and current_price is not None else None
 
     revenue = float(f.get("revenue") or 0)
-    to_pay_rate = float(f.get("to_pay_rate") or 0)
-    commission = float(f.get("commission") or 0)
-    wb_expenses = round(revenue - revenue * to_pay_rate, 2) if to_pay_rate > 0 else round(commission, 2)
+    # commission из воронки = выручка − к перечислению = ВСЕ удержания ВБ
+    # (комиссия+логистика+хранение, по финотчёту в BDR-пути; только комиссия в легаси).
+    wb_expenses = round(float(f.get("commission") or 0), 2)
     cost_total = float(f.get("cost_total") or 0)
     profit = float(f.get("profit") or 0)
     net_markup_pct = round(profit / cost_total * 100, 2) if cost_total > 0 else None
@@ -250,6 +242,50 @@ def _build_summary(rows: list[PricingRow]) -> PricingSummary:
 
 
 @cached(prefix="reports:pricing_markup", ttl=300)
+async def _compute_rows(
+    db: AsyncSession, project_id: int, date_from: str | None = None, date_to: str | None = None
+) -> dict:
+    """Тяжёлая загрузка + построение ВСЕХ строк (без фильтров/группировки).
+
+    Кэшируется по (project_id, date_from, date_to) — фильтры применяются поверх
+    в памяти, поэтому смена бренда/категории/поиска не плодит прогоны.
+    """
+    tax_info = await _load_tax_info(db, project_id)
+    bdr_rates_map = await get_bdr_rates(db, project_id)
+
+    funnel_rows = await funnel_service.get_funnel_by_sku(
+        db, project_id, tax_info, date_from, date_to, None, None,
+        bdr_rates_map=bdr_rates_map, limit=_MAX_ROWS,
+    )
+    funnel_by_nm = {r["nm_id"]: r for r in funnel_rows}
+
+    price_rows = (
+        await db.execute(select(WbPrice).where(WbPrice.project_id == project_id).limit(_MAX_ROWS))
+    ).scalars().all()
+    price_by_nm = {p.nm_id: p for p in price_rows}
+    price_synced_at = max((p.synced_at for p in price_rows if p.synced_at), default=None)
+
+    avg_costs = await load_avg_costs(db, project_id)
+    overrides = await load_cost_overrides(db, project_id)
+    meta_map = await _load_meta_map(db, project_id)
+    cat_overrides = await refs_service.get_category_overrides(db, project_id)
+
+    nm_ids = set(price_by_nm) | set(funnel_by_nm)
+    rows = []
+    for nm_id in nm_ids:
+        meta = meta_map.get(nm_id) or {}
+        cost = _resolve_cost(nm_id, meta, avg_costs, overrides)
+        rows.append(
+            _build_row(nm_id, price_by_nm.get(nm_id), funnel_by_nm.get(nm_id), cost, cat_overrides, meta).model_dump()
+        )
+
+    return {
+        "rows": rows,
+        "price_synced_at": price_synced_at.isoformat() if price_synced_at else None,
+        "has_bdr": bool(bdr_rates_map),
+    }
+
+
 async def get_markup_analytics(
     db: AsyncSession,
     project_id: int,
@@ -267,57 +303,22 @@ async def get_markup_analytics(
     Универсум строк = все артикулы с ценой (WbPrice) ∪ продававшиеся за период
     (воронка). Метрики наценки = «—» для строк без цены/себестоимости.
     """
-    tax_info = await _load_tax_info(db, project_id)
-    bdr_rates_map = await get_bdr_rates(db, project_id)
-
-    funnel_rows = await funnel_service.get_funnel_by_sku(
-        db, project_id, tax_info, date_from, date_to, None, None,
-        bdr_rates_map=bdr_rates_map, limit=_MAX_ROWS,
-    )
-    funnel_by_nm = {r["nm_id"]: r for r in funnel_rows}
-
-    price_rows = (
-        await db.execute(select(WbPrice).where(WbPrice.project_id == project_id).limit(_MAX_ROWS))
-    ).scalars().all()
-    price_by_nm = {p.nm_id: p for p in price_rows}
-    price_synced_at = max((p.synced_at for p in price_rows if p.synced_at), default=None)
-
-    cost_map = await _load_unit_cost_map(db, project_id)
-    cat_overrides = await refs_service.get_category_overrides(db, project_id)
-    nom_map = await _load_nom_map(db, project_id)
-
-    nm_ids = set(price_by_nm) | set(funnel_by_nm)
-    rows = [
-        _build_row(
-            nm_id,
-            price_by_nm.get(nm_id),
-            funnel_by_nm.get(nm_id),
-            cost_map.get(nm_id),
-            cat_overrides,
-            nom_map.get(nm_id),
-        )
-        for nm_id in nm_ids
-    ]
+    raw = await _compute_rows(db, project_id, date_from=date_from, date_to=date_to)
+    rows = [PricingRow(**r) for r in raw["rows"]]
     rows = _apply_filters(rows, brand, category, search, min_orders)
-
     summary = _build_summary(rows)
+    synced = raw["price_synced_at"]
+    has_bdr = raw["has_bdr"]
+
     if group_by == "sku":
         _sort_by_markup(rows)
         resp = PricingResponse(
-            group_by="sku",
-            data_rows=rows,
-            data_groups=[],
-            summary=summary,
-            price_synced_at=price_synced_at,
-            has_bdr=bool(bdr_rates_map),
+            group_by="sku", data_rows=rows, data_groups=[], summary=summary,
+            price_synced_at=synced, has_bdr=has_bdr,
         )
     else:
         resp = PricingResponse(
-            group_by="category",
-            data_rows=[],
-            data_groups=_group_by_category(rows),
-            summary=summary,
-            price_synced_at=price_synced_at,
-            has_bdr=bool(bdr_rates_map),
+            group_by="category", data_rows=[], data_groups=_group_by_category(rows),
+            summary=summary, price_synced_at=synced, has_bdr=has_bdr,
         )
     return resp.model_dump(mode="json")

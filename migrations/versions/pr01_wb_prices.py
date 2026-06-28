@@ -30,7 +30,7 @@ def upgrade() -> None:
         sa.Column("price", sa.Numeric(18, 2), nullable=True),
         sa.Column("discount", sa.Numeric(5, 2), nullable=True),
         sa.Column("currency", sa.String(length=8), nullable=False, server_default="RUB"),
-        sa.Column("synced_at", sa.DateTime(), nullable=True),
+        sa.Column("synced_at", sa.DateTime(), nullable=False),
         sa.UniqueConstraint("project_id", "nm_id", name="uq_wb_price_nm"),
     )
     op.create_index("ix_wb_prices_project", "wb_prices", ["project_id"])

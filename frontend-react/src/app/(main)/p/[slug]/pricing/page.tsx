@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDateTime, exportToExcel } from '@/lib/utils';
 import type { PricingResponse, PricingGroup, PricingRow } from '@/types/api';
@@ -43,7 +43,9 @@ export default function PricingPage() {
     const [syncing, setSyncing] = useState(false);
     const [syncMsg, setSyncMsg] = useState('');
 
+    const reqRef = useRef(0);
     const loadData = useCallback(async () => {
+        const myReq = ++reqRef.current; // защита от устаревших/перегоняющих ответов
         setLoading(true);
         setError('');
         try {
@@ -56,15 +58,17 @@ export default function PricingPage() {
                 min_orders: minOrders || undefined,
                 group_by: groupBy,
             });
+            if (reqRef.current !== myReq) return; // пришёл ответ не последнего запроса — игнор
             setResp(res);
             // Категории для фильтра берём, только когда фильтр по категории не активен
             if (!category && res.group_by === 'category') {
                 setCategoryOptions(res.data_groups.map((g) => g.category));
             }
         } catch (e) {
+            if (reqRef.current !== myReq) return;
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         } finally {
-            setLoading(false);
+            if (reqRef.current === myReq) setLoading(false);
         }
     }, [dateFrom, dateTo, brand, category, search, minOrders, groupBy]);
 
