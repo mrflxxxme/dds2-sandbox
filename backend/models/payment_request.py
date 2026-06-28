@@ -29,6 +29,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -83,6 +84,31 @@ class PaymentRequestCategory(str, enum.Enum):
 class PaymentRequestDocType(str, enum.Enum):
     INVOICE = "INVOICE"  # счёт
     ACT = "ACT"          # акт
+
+
+class PaymentCategory(Base, SoftDeleteMixin):
+    """Справочник «Назначение оплаты» — редактируемый список категорий заявок.
+
+    `code` — стабильный ключ, хранится в `payment_requests.category` (НЕ меняется при
+    переименовании). `label` — отображение (редактируемое). `is_system` — встроенная
+    категория (7 дефолтов): можно переименовать, нельзя удалить (LOGISTICS/OTHER —
+    дефолты сервиса, LOGISTICS несёт спец-логику привязки к отгрузке/банку).
+    project_id NULL = глобальная (общая для всех брендов)."""
+
+    __tablename__ = "payment_categories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
+    code: Mapped[str] = mapped_column(String(30), nullable=False)
+    label: Mapped[str] = mapped_column(String(100), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    __table_args__ = (
+        Index("ix_payment_categories_project_id", "project_id"),
+        # partial-unique по коду — соблюдает SoftDeleteMixin (повторный INSERT после
+        # soft-delete не падает); создаётся в миграции как partial index WHERE NOT is_deleted.
+    )
 
 
 # Declarative state machine — single source of truth, mirrors ASSEMBLY_TRANSITIONS.

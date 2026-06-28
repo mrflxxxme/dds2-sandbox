@@ -21,6 +21,13 @@ FILE_SIGNATURES: dict[str, list[bytes]] = {
     ],
     ".pdf": [b"%PDF"],                            # PDF
     ".csv": [],                                   # Text format — no magic bytes
+    # Изображения (фото счёта). HEIC намеренно НЕ перечислен: его «ftyp…» лежит
+    # на offset 4, а здесь проверяется только префикс → валидируется при открытии
+    # через pillow-heif в invoice_parser.
+    ".jpg": [b"\xff\xd8\xff"],                    # JPEG
+    ".jpeg": [b"\xff\xd8\xff"],
+    ".png": [b"\x89PNG\r\n\x1a\n"],               # PNG
+    ".webp": [b"RIFF"],                           # WebP — RIFF-контейнер (WEBP на offset 8)
 }
 
 

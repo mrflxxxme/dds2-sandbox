@@ -13,11 +13,22 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ALLOWED_SOURCES = ["MANUAL", "COUNTERPARTY"]
 ALLOWED_PR_DOC_TYPES = ["INVOICE", "ACT"]
+# Системные коды категорий (сид pay08). Список «Назначение оплаты» теперь редактируемый
+# справочник (PaymentCategory) — существование кода проверяет сервис; здесь только формат.
 ALLOWED_CATEGORIES = ["LOGISTICS", "PHOTO_CONTENT", "CUSTOMS", "FULFILLMENT", "DESIGN", "HOUSEHOLD", "OTHER"]
 
 _INN_RE = r"^\d{10,12}$"
 _BIK_RE = r"^\d{9}$"
 _ACC_RE = r"^\d{20}$"
+_CATEGORY_CODE_RE = r"^[A-Z0-9_]{1,30}$"  # формат кода категории (существование — в сервисе)
+
+
+def _check_category_code(v: str | None) -> str | None:
+    import re
+
+    if v is not None and not re.match(_CATEGORY_CODE_RE, v):
+        raise ValueError("category: недопустимый код категории")
+    return v
 
 
 # ─── Write models ─────────────────────────────────────────────────────────────
@@ -64,9 +75,7 @@ class PaymentRequestCreate(BaseModel):
     @field_validator("category")
     @classmethod
     def _validate_category(cls, v: str | None) -> str | None:
-        if v is not None and v not in ALLOWED_CATEGORIES:
-            raise ValueError(f"category must be one of: {ALLOWED_CATEGORIES}")
-        return v
+        return _check_category_code(v)
 
 
 class PaymentRequestUpdate(BaseModel):
@@ -89,9 +98,35 @@ class PaymentRequestUpdate(BaseModel):
     @field_validator("category")
     @classmethod
     def _validate_category(cls, v: str | None) -> str | None:
-        if v is not None and v not in ALLOWED_CATEGORIES:
-            raise ValueError(f"category must be one of: {ALLOWED_CATEGORIES}")
-        return v
+        return _check_category_code(v)
+
+
+# ─── Справочник «Назначение оплаты» (PaymentCategory) ────────────────────────────
+
+
+class PaymentCategorySchema(BaseModel):
+    id: int
+    code: str
+    label: str
+    sort_order: int
+    is_system: bool
+    project_id: int | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaymentCategoryCreate(BaseModel):
+    """Добавление категории. code генерит сервис из label (стабильный, неизменяемый)."""
+
+    label: str = Field(min_length=1, max_length=100)
+    sort_order: int | None = None
+
+
+class PaymentCategoryUpdate(BaseModel):
+    """Переименование / смена порядка. code менять нельзя (на нём висят заявки)."""
+
+    label: str | None = Field(None, min_length=1, max_length=100)
+    sort_order: int | None = None
 
 
 class SubmitRequest(BaseModel):

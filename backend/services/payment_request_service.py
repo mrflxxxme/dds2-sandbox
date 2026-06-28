@@ -38,6 +38,7 @@ from backend.schemas.payment_request import (
     ShippableShipmentRow,
 )
 from backend.utils.time import utcnow
+from backend.services import payment_category_service as pcs
 from backend.services import payment_request_status as prs
 
 logger = logging.getLogger("dds.payment_request")
@@ -762,6 +763,8 @@ class PaymentRequestService:
             if covered_shipments
             else PaymentRequestCategory.OTHER.value
         )
+        if not await pcs.is_valid_code(self.db, project_id, category):
+            raise PaymentRequestValidationError([f"Неизвестная категория оплаты: {category}"])
 
         number = await self._next_number(project_id)
         pr = PaymentRequest(
@@ -810,6 +813,8 @@ class PaymentRequestService:
             PaymentRequestStatus.PENDING_REVIEW.value,
         ):
             raise ValueError("Редактировать можно только до создания платёжки в банке")
+        if data.category is not None and not await pcs.is_valid_code(self.db, project_id, data.category):
+            raise PaymentRequestValidationError([f"Неизвестная категория оплаты: {data.category}"])
         for field, value in data.model_dump(exclude_unset=True).items():
             if field in _EDITABLE_FIELDS:  # allowlist — не даём писать status/bank_*/matched_* при расширении схемы
                 setattr(pr, field, value)

@@ -1,5 +1,5 @@
 'use client';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
@@ -7,6 +7,7 @@ import type {
     PaymentRequestDetail,
     PaymentRequestStatus,
     PaymentRequestCategory,
+    PaymentCategory,
     ShippableShipmentRow,
 } from '@/types/api';
 
@@ -30,7 +31,8 @@ const STATUS_CLASS: Record<PaymentRequestStatus, string> = {
     CANCELLED: 'badge-secondary',
 };
 
-const CATEGORY_LABEL: Record<PaymentRequestCategory, string> = {
+// Фолбэк-лейблы/набор системных кодов — пока справочник не загрузился с API.
+const CATEGORY_LABEL: Record<string, string> = {
     LOGISTICS: 'Логистика',
     PHOTO_CONTENT: 'Фотоконтент',
     CUSTOMS: 'Таможенное оформление',
@@ -39,7 +41,7 @@ const CATEGORY_LABEL: Record<PaymentRequestCategory, string> = {
     HOUSEHOLD: 'Хозрасходы',
     OTHER: 'Другое',
 };
-const CATEGORY_OPTIONS: PaymentRequestCategory[] = ['PHOTO_CONTENT', 'DESIGN', 'FULFILLMENT', 'CUSTOMS', 'LOGISTICS', 'HOUSEHOLD', 'OTHER'];
+const CATEGORY_OPTIONS_FALLBACK: PaymentRequestCategory[] = ['PHOTO_CONTENT', 'DESIGN', 'FULFILLMENT', 'CUSTOMS', 'LOGISTICS', 'HOUSEHOLD', 'OTHER'];
 
 interface Props {
     /** Pre-selected outbound_shipment_id — when opened from a SHIPPED row */
@@ -93,6 +95,29 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     const [projects, setProjects] = useState<Array<{ id: number; name: string; slug: string }>>([]);
     const params = useParams();
     const slug = typeof params?.slug === 'string' ? params.slug : Array.isArray(params?.slug) ? params.slug[0] : '';
+
+    // ─── Справочник «Назначение оплаты» (динамический список для выпадающего меню) ──
+    const [categories, setCategories] = useState<PaymentCategory[]>([]);
+    useEffect(() => {
+        let aborted = false;
+        (async () => {
+            try { const cs = await api.listPaymentCategories(); if (!aborted) setCategories(cs); }
+            catch { /* справочник недоступен — останутся фолбэк-категории */ }
+        })();
+        return () => { aborted = true; };
+    }, []);
+    // Опции селекта; текущее значение гарантированно присутствует (удалённая кастомная при правке).
+    const categoryOptions = useMemo(() => {
+        const base = categories.length
+            ? categories.map(c => ({ code: c.code, label: c.label }))
+            : CATEGORY_OPTIONS_FALLBACK.map(c => ({ code: c, label: CATEGORY_LABEL[c] }));
+        if (category && !base.some(o => o.code === category)) {
+            base.unshift({ code: category, label: CATEGORY_LABEL[category] ?? category });
+        }
+        return base;
+    }, [categories, category]);
+    const catLabelOf = (code: string | null | undefined): string =>
+        (code ? (categories.find(c => c.code === code)?.label ?? CATEGORY_LABEL[code] ?? code) : '');
 
     // Список проектов для выбора (только для свободной заявки). Дефолт projectSel='' = текущий проект.
     useEffect(() => {
@@ -236,6 +261,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 setAmount(d.amount != null ? String(d.amount) : '');
                 setPickupDate(d.pickup_date || '');
                 setPurpose(d.purpose || '');
+                setCategory(d.category ?? 'OTHER');  // даём поправить ошибочно выбранное «Назначение»
                 setLiveStatus(d.status);
                 setReadOnly(d.status !== 'DRAFT' && d.status !== 'PENDING_REVIEW');  // редактировать можно до создания платёжки в банке
                 setStep('form');
@@ -266,15 +292,23 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
         setParsing(true); setError(''); setParseInfo('');
         try {
             const r = await api.parseInvoice(file);
-            if (r.payee_name) setPayeeName(r.payee_name);
-            if (r.payee_inn) setPayeeInn(r.payee_inn);
-            if (r.payee_account) setPayeeAccount(r.payee_account);
-            if (r.payee_bik) setPayeeBik(r.payee_bik);
-            if (r.payee_bank_name) setPayeeBankName(r.payee_bank_name);
-            if (r.payee_corr_account) setPayeeCorrAccount(r.payee_corr_account);
-            if (r.payee_kpp) setPayeeKpp(r.payee_kpp);
-            if (r.amount) setAmount(String(r.amount));
-            if (r.purpose) setPurpose(r.purpose);
+            // В потоке логиста (заявка из отгрузки) имя/ИНН/реквизиты перевозчика уже подставлены —
+            // распознанное только ДОБИВАЕТ пустые поля, чтобы не затереть корректные данные контрагента.
+            const fillEmptyOnly = isShipmentContext;
+            const fill = (cur: string, val: string | null | undefined, setter: (v: string) => void) => {
+                if (!val) return;
+                if (fillEmptyOnly && cur.trim()) return;
+                setter(val);
+            };
+            fill(payeeName, r.payee_name, setPayeeName);
+            fill(payeeInn, r.payee_inn, setPayeeInn);
+            fill(payeeAccount, r.payee_account, setPayeeAccount);
+            fill(payeeBik, r.payee_bik, setPayeeBik);
+            fill(payeeBankName, r.payee_bank_name, setPayeeBankName);
+            fill(payeeCorrAccount, r.payee_corr_account, setPayeeCorrAccount);
+            fill(payeeKpp, r.payee_kpp, setPayeeKpp);
+            fill(amount, r.amount != null ? String(r.amount) : null, setAmount);
+            fill(purpose, r.purpose, setPurpose);
             setInvoiceFile(file);  // тот же файл прикрепится как Счёт на шаге 2 — не грузить дважды
             const FIELD_RU: Record<string, string> = { payee_inn: 'ИНН', payee_bik: 'БИК', payee_account: 'р/с', payee_kpp: 'КПП', payee_name: 'получатель', amount: 'сумма', purpose: 'назначение', payee_corr_account: 'корр.счёт', payee_bank_name: 'банк' };
             const found = r.fields_found.map(f => FIELD_RU[f] ?? f).join(', ');
@@ -317,6 +351,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
             let detail: PaymentRequestDetail;
             if (isEdit && created) {
                 detail = await api.updatePaymentRequest(created.id, {
+                    category,  // даём исправить ошибочно выбранное «Назначение» (бэкенд PATCH это принимает)
                     payee_inn: payeeInn || undefined,
                     payee_name: payeeName || undefined,
                     payee_account: payeeAccount || undefined,
@@ -440,7 +475,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 {roRow('Банк', created.payee_bank_name)}
                 {roRow('Сумма', created.amount ? `${formatNumber(Number(created.amount), 2)} ${created.currency}` : null)}
                 {roRow('Дата забора', created.pickup_date ? formatDate(created.pickup_date) : null)}
-                {roRow('Категория', created.category ? CATEGORY_LABEL[created.category] : null)}
+                {roRow('Категория', created.category ? catLabelOf(created.category) : null)}
                 {roRow('Назначение', created.purpose)}
                 {created.bank_doc_id && roRow('ID платёжки', created.bank_doc_id)}
                 {created.documents.length > 0 && (
@@ -473,6 +508,18 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     // Shared requisites grid — used by both «Выбрать отгрузку» (pre-filled) and «Ввести вручную».
     const requisitesGrid = (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            {/* Распознавание из файла/фото счёта — доступно во всех потоках создания (в т.ч. у логиста);
+                в потоке отгрузки добивает только пустые реквизиты перевозчика (см. handleParseInvoice). */}
+            {!isEdit && (
+                <div style={{ gridColumn: '1 / -1' }}>
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => invoiceParseRef.current?.click()} disabled={parsing}>
+                        {parsing ? 'Распознаю...' : '📄 Загрузить счёт или фото → распознать реквизиты'}
+                    </button>
+                    <input ref={invoiceParseRef} type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,.heic" style={{ display: 'none' }}
+                        onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleParseInvoice(f); }} />
+                    {parseInfo && <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6 }}>{parseInfo}</div>}
+                </div>
+            )}
             <div className="form-group" style={{ margin: 0 }}>
                 <label className="form-label">Наименование получателя *</label>
                 <input className="form-input" value={payeeName} onChange={e => setPayeeName(e.target.value)} placeholder="ООО «Транспорт»" />
@@ -505,10 +552,13 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 <label className="form-label">Сумма (₽) *</label>
                 <input className="form-input" type="number" min={0} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.00" />
             </div>
-            <div className="form-group" style={{ margin: 0 }}>
-                <label className="form-label">Дата забора</label>
-                <input className="form-input" type="date" value={pickupDate} onChange={e => setPickupDate(e.target.value)} />
-            </div>
+            {/* «Дата забора» — поле логистики; для фото/дизайна/таможни и пр. оно не нужно. */}
+            {(isShipmentContext || category === 'LOGISTICS') && (
+                <div className="form-group" style={{ margin: 0 }}>
+                    <label className="form-label">Дата забора</label>
+                    <input className="form-input" type="date" value={pickupDate} onChange={e => setPickupDate(e.target.value)} />
+                </div>
+            )}
             <div className="form-group" style={{ margin: 0, gridColumn: '1 / -1' }}>
                 <label className="form-label">Назначение платежа</label>
                 <input className="form-input" value={purpose} onChange={e => setPurpose(e.target.value)} placeholder="Транспортные услуги по договору..." />
@@ -582,9 +632,10 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 {/* ══════════ STEP 1: FORM ══════════ */}
                 {step === 'form' && (
                     <>
-                        {/* Назначение оплаты + проект — только для свободной заявки (не из листа логиста). */}
-                        {!isEdit && !isShipmentContext && (
-                        <div style={{ display: 'grid', gridTemplateColumns: category !== 'LOGISTICS' ? '1fr 1fr' : '1fr', gap: 12, marginBottom: 16 }}>
+                        {/* Назначение оплаты + проект — для свободной заявки и при правке (проект меняем
+                            только при создании: бэкенд PATCH категорию принимает, project_id — нет). */}
+                        {!isShipmentContext && (
+                        <div style={{ display: 'grid', gridTemplateColumns: category !== 'LOGISTICS' && !isEdit ? '1fr 1fr' : '1fr', gap: 12, marginBottom: 16 }}>
                             <div className="form-group" style={{ margin: 0 }}>
                                 <label className="form-label">Назначение оплаты *</label>
                                 <select
@@ -597,10 +648,10 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                                         if (v !== 'LOGISTICS') { setMode('MANUAL'); setSelectedShipment(null); setMultiShipments([]); }
                                     }}
                                 >
-                                    {CATEGORY_OPTIONS.map(c => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}
+                                    {categoryOptions.map(o => <option key={o.code} value={o.code}>{o.label}</option>)}
                                 </select>
                             </div>
-                            {category !== 'LOGISTICS' && (
+                            {category !== 'LOGISTICS' && !isEdit && (
                                 <div className="form-group" style={{ margin: 0 }}>
                                     <label className="form-label">Проект</label>
                                     <select className="form-input" value={projectSel} onChange={e => setProjectSel(e.target.value)}>
@@ -611,18 +662,6 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                                 </div>
                             )}
                         </div>
-                        )}
-
-                        {/* Загрузить счёт → распознать (опциональный помощник; только свободная заявка) */}
-                        {!isEdit && !isShipmentContext && (
-                            <div style={{ marginBottom: 12 }}>
-                                <button type="button" className="btn btn-secondary btn-sm" onClick={() => invoiceParseRef.current?.click()} disabled={parsing}>
-                                    {parsing ? 'Распознаю...' : '📄 Загрузить счёт → распознать реквизиты'}
-                                </button>
-                                <input ref={invoiceParseRef} type="file" accept=".pdf,.doc,.docx" style={{ display: 'none' }}
-                                    onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleParseInvoice(f); }} />
-                                {parseInfo && <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6 }}>{parseInfo}</div>}
-                            </div>
                         )}
 
                         {/* Mode toggle — только для логистики (привязка к отгрузке); скрыт при правке/мульти */}

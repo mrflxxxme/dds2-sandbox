@@ -108,6 +108,7 @@ from backend.models.order_city import (
 # Payment Requests (заявки на оплату перевозчику)
 from backend.models.payment_request import (
     PAYMENT_REQUEST_TRANSITIONS,
+    PaymentCategory,
     PaymentRequest,
     PaymentRequestDocType,
     PaymentRequestDocument,
@@ -332,6 +333,7 @@ __all__ = [
     # Order City
     "OrderCityMap",
     # Payment Requests
+    "PaymentCategory",
     "PaymentRequest",
     "PaymentRequestDocument",
     "PaymentRequestEvent",

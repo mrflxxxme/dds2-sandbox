@@ -2517,7 +2517,19 @@ export interface CostForecastResponse {
 export type PaymentRequestStatus = 'DRAFT' | 'PENDING_REVIEW' | 'APPROVED' | 'DRAFT_CREATED' | 'PAID' | 'REJECTED' | 'CANCELLED';
 export type PaymentRequestSource = 'MANUAL' | 'COUNTERPARTY';
 export type PaymentRequestDocType = 'INVOICE' | 'ACT';
-export type PaymentRequestCategory = 'LOGISTICS' | 'PHOTO_CONTENT' | 'CUSTOMS' | 'FULFILLMENT' | 'DESIGN' | 'HOUSEHOLD' | 'OTHER';
+// «Назначение оплаты» — теперь редактируемый справочник (PaymentCategory), поэтому код — string.
+// LOGISTICS/OTHER остаются системными кодами со спец-логикой (привязка к отгрузке/банк, дефолт).
+export type PaymentRequestCategory = string;
+
+/** Строка справочника «Назначение оплаты» (управляется в модалке на странице Оплаты). */
+export interface PaymentCategory {
+  id: number;
+  code: string;
+  label: string;
+  sort_order: number;
+  is_system: boolean;
+  project_id: number | null;
+}
 
 export interface PaymentRequestRow {
   id: number;
