@@ -29,6 +29,14 @@ function ffLinksOf(row: AssemblyRequest): FfLinkInfo[] {
     return [];
 }
 
+// Подпись-тултип бейджа «Совместная»: другие сборки той же WB-поставки.
+function jointTitle(row: AssemblyRequest): string {
+    const sibs = row.joint_siblings || [];
+    if (!sibs.length) return 'Совместная WB-поставка (несколько сборок с разных ФФ)';
+    const parts = sibs.map(s => `${s.warehouse_name || `Склад ${s.warehouse_id}`} (${s.number})`);
+    return `Совместная WB-поставка · ещё: ${parts.join(', ')}`;
+}
+
 const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
     // PENDING — legacy: больше не используется при создании, но может встретиться в истории.
     PENDING:          { label: 'В сборке',          className: 'badge-info' },
@@ -374,6 +382,7 @@ export default function AssemblyListPage() {
     const [search, setSearch] = useState('');
     const [brandFilter, setBrandFilter] = useState('');
     const [ffLinkFilter, setFfLinkFilter] = useState<'' | 'none' | 'linked'>('');
+    const [jointOnly, setJointOnly] = useState(false);
     // Монотонный счётчик запросов списка — отбрасываем устаревшие ответы (см. load)
     const loadSeq = useRef(0);
     // Пагинация/сортировка/экспорт — клиентские, через TanStackDataTable: грузим весь
@@ -424,6 +433,7 @@ export default function AssemblyListPage() {
                 date_to: dateTo || undefined,
                 brand: brandFilter || undefined,
                 ff_link: ffLinkFilter || undefined,
+                joint_only: jointOnly || undefined,
                 limit: LOAD_LIMIT,
             });
             if (seq !== loadSeq.current) return;
@@ -435,7 +445,7 @@ export default function AssemblyListPage() {
         } finally {
             if (seq === loadSeq.current) setLoading(false);
         }
-    }, [warehouseId, statusFilter, search, dateFrom, dateTo, brandFilter, ffLinkFilter]);
+    }, [warehouseId, statusFilter, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -588,9 +598,14 @@ export default function AssemblyListPage() {
                             ⏳ ФФ
                         </span>
                     )}
+                    {row.joint_supply && (
+                        <span className="badge badge-info" style={{ fontSize: 11 }} title={jointTitle(row)}>
+                            Совместная
+                        </span>
+                    )}
                 </span>
             ),
-            exportValue: (row: AssemblyRequest) => row.number,
+            exportValue: (row: AssemblyRequest) => row.joint_supply ? `${row.number} (совместная)` : row.number,
         },
         {
             key: 'status', label: 'Статус',
@@ -824,6 +839,16 @@ export default function AssemblyListPage() {
                             <option value="">ФФ-связь: все</option>
                             <option value="none">Без связи</option>
                             <option value="linked">Со связью</option>
+                        </select>
+                    </div>
+                    <div className="form-group">
+                        <select
+                            className="form-input"
+                            value={jointOnly ? 'joint' : ''}
+                            onChange={e => { setJointOnly(e.target.value === 'joint'); }}
+                        >
+                            <option value="">Поставка: все</option>
+                            <option value="joint">Только совместные</option>
                         </select>
                     </div>
                     <div className="form-group">

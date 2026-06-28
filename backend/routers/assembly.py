@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models import Project
+from backend.models.assembly import AssemblyRequest, AssemblyStatus
 from backend.models.fulfillment import FulfillmentRequest
+from backend.models.warehouse import Warehouse
 from backend.project_context import get_current_project
 from backend.schemas.assembly import (
     AssemblyAttempt,
@@ -27,6 +29,7 @@ from backend.schemas.assembly import (
     CreatedGroupResponse,
     FfLinkInfo,
     FfReviewAction,
+    JointSibling,
     LinkAnomaliesResponse,
     LogisticsAnalyticsResponse,
     LogisticsShipmentListResponse,
@@ -76,6 +79,7 @@ async def list_assembly_requests(
     date_to: date | None = Query(None),
     brand: str | None = Query(None),
     ff_link: str | None = Query(None, description='Фильтр привязки ФФ: "none" | "linked"'),
+    joint_only: bool = Query(False, description="Только совместные сборки (≥2 на одну WB-поставку)"),
     limit: int = Query(50, le=500),
     offset: int = Query(0, ge=0),
     project: Project = Depends(get_current_project),
@@ -94,6 +98,7 @@ async def list_assembly_requests(
         date_to=date_to,
         brand=brand,
         ff_link=ff_link,
+        joint_only=joint_only,
         limit=limit,
         offset=offset,
     )
@@ -107,6 +112,7 @@ async def list_assembly_requests(
         response_items.append(AssemblyRequestResponse.model_validate(resp))
 
     await _enrich_ff_links(db, project.id, items, response_items)
+    await _enrich_joint(db, project.id, items, response_items)
     return AssemblyListResponse(items=response_items, total=total)
 
 
@@ -174,6 +180,73 @@ async def _enrich_ff_links(
             resp.ff_warehouse_id = first.ff_warehouse_id
             resp.ff_links = doc_links
             resp.ff_mismatch = mismatch_map.get(resp.id)
+
+
+async def _enrich_joint(
+    db: AsyncSession,
+    project_id: int,
+    items: list,
+    response_items: list[AssemblyRequestResponse],
+) -> None:
+    """BATCH-обогащение признаком «совместная поставка».
+
+    Совместная = WB FBO-поставка несёт ≥2 сборок (по одной на ФФ-источник, напр.
+    wms + wms2). Для таких ставим joint_supply=True и joint_siblings — ДРУГИЕ
+    сборки той же поставки (тот же предикат, что у ix_assembly_requests_fbo_wh_unique:
+    не удалена, не CANCELLED). Два запроса (сборки по поставкам + имена складов),
+    без N+1.
+    """
+    supply_ids = {req.wb_fbo_supply_id for req in items if req.wb_fbo_supply_id is not None}
+    if not supply_ids:
+        return
+
+    rows = (
+        await db.execute(
+            select(
+                AssemblyRequest.id,
+                AssemblyRequest.number,
+                AssemblyRequest.warehouse_id,
+                AssemblyRequest.status,
+                AssemblyRequest.wb_fbo_supply_id,
+            ).where(
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.wb_fbo_supply_id.in_(supply_ids),
+                AssemblyRequest.is_deleted == False,  # noqa: E712
+                AssemblyRequest.status != AssemblyStatus.CANCELLED,
+            )
+        )
+    ).all()
+
+    by_supply: dict[int, list] = {}
+    for row in rows:
+        by_supply.setdefault(row.wb_fbo_supply_id, []).append(row)
+
+    # Имена складов-источников всех участников (один запрос).
+    wh_ids = {row.warehouse_id for row in rows}
+    wh_names: dict[int, str] = {}
+    if wh_ids:
+        wh_rows = (await db.execute(select(Warehouse.id, Warehouse.name).where(Warehouse.id.in_(wh_ids)))).all()
+        wh_names = {wid: name for wid, name in wh_rows}
+
+    for resp in response_items:
+        sid = resp.wb_fbo_supply_id
+        if sid is None:
+            continue
+        group = by_supply.get(sid, [])
+        if len(group) < 2:
+            continue
+        resp.joint_supply = True
+        resp.joint_siblings = [
+            JointSibling(
+                assembly_id=row.id,
+                number=row.number,
+                warehouse_id=row.warehouse_id,
+                warehouse_name=wh_names.get(row.warehouse_id),
+                status=row.status,
+            )
+            for row in group
+            if row.id != resp.id
+        ]
 
 
 # --- Created groups (Предпросмотр созданных заявок) -------------------------
@@ -393,7 +466,9 @@ async def get_assembly_request(
         raise HTTPException(404, "Assembly request not found")
     data = await assembly_service._build_response(db, req)
     data.update(await fulfillment_service.get_ff_link_for_assembly(db, project.id, request_id) or {})
-    return AssemblyRequestResponse.model_validate(data)
+    resp = AssemblyRequestResponse.model_validate(data)
+    await _enrich_joint(db, project.id, [req], [resp])
+    return resp
 
 
 @router.get("/{request_id}/ff-mismatch", response_model=FfMismatchDetail)
