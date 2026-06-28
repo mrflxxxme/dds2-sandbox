@@ -8,13 +8,19 @@ Payment-request models: PaymentRequest, PaymentRequestDocument, PaymentRequestEv
 
 Жизненный цикл (status хранится как String(20), не pg-enum — анти-Alembic-churn):
 
-    DRAFT ──submit──▶ PENDING_REVIEW ──«Создать оплату»──▶ DRAFT_CREATED ──выписка──▶ PAID
-      │                    │                                    │
-      └─CANCELLED          ├─REJECTED / CANCELLED               ├─REJECTED / CANCELLED
-                           └─DRAFT (вернуть на правку)
+    DRAFT ─submit─▶ PENDING_REVIEW ─согласовать─▶ APPROVED ─оплачено─▶ PAID
+      │                 │   │                         │
+      │                 │   └─«Создать оплату»─▶ DRAFT_CREATED ─выписка─▶ PAID
+      └─CANCELLED       └─REJECTED / CANCELLED        └─REJECTED / CANCELLED
+                        └─DRAFT (вернуть на правку)
 
-PAID ставит АВТОМАТИЧЕСКИ матчер выписки (etl/sync_payment_requests) — исходящий
-дебет с тем же ИНН и суммой. См. backend/DOMAIN_PAYMENT_REQUEST.md.
+PAID ставит ЛИБО админ вручную (APPROVED→PAID, оплата вне системы), ЛИБО матчер
+выписки (etl/sync_payment_requests) после DRAFT_CREATED — исходящий дебет с тем же
+ИНН и суммой. См. backend/DOMAIN_PAYMENT_REQUEST.md.
+
+`project_id` nullable: заявка может быть БЕЗ проекта («общая» — её подаёт любой
+пользователь, видна в едином инбоксе согласования). `category` — назначение оплаты
+(логистика/фотоконтент/таможня/другое).
 """
 
 import enum
@@ -41,7 +47,7 @@ from backend.models.mixins import SoftDeleteMixin, TimestampMixin
 from backend.utils.time import utcnow
 
 if TYPE_CHECKING:
-    pass
+    from backend.models.auth import Project
 
 
 # ─── Enums (stored as String to avoid Alembic enum churn) ────────────────────
@@ -50,6 +56,7 @@ if TYPE_CHECKING:
 class PaymentRequestStatus(str, enum.Enum):
     DRAFT = "DRAFT"
     PENDING_REVIEW = "PENDING_REVIEW"
+    APPROVED = "APPROVED"          # согласовано админом (оплата вне системы)
     DRAFT_CREATED = "DRAFT_CREATED"
     PAID = "PAID"
     REJECTED = "REJECTED"
@@ -59,6 +66,18 @@ class PaymentRequestStatus(str, enum.Enum):
 class PaymentRequestSource(str, enum.Enum):
     MANUAL = "MANUAL"          # реквизиты введены вручную
     COUNTERPARTY = "COUNTERPARTY"  # авто-заполнение из контрагента/отгрузки
+
+
+class PaymentRequestCategory(str, enum.Enum):
+    """Назначение оплаты. LOGISTICS — исторический дефолт (заявки логиста по забору)."""
+
+    LOGISTICS = "LOGISTICS"          # логистика / перевозка
+    PHOTO_CONTENT = "PHOTO_CONTENT"  # фотоконтент
+    CUSTOMS = "CUSTOMS"              # таможенное оформление
+    FULFILLMENT = "FULFILLMENT"      # фулфилмент
+    DESIGN = "DESIGN"                # дизайн
+    HOUSEHOLD = "HOUSEHOLD"          # хозрасходы
+    OTHER = "OTHER"                  # другое
 
 
 class PaymentRequestDocType(str, enum.Enum):
@@ -73,8 +92,14 @@ PAYMENT_REQUEST_TRANSITIONS: dict[PaymentRequestStatus, set[PaymentRequestStatus
         PaymentRequestStatus.CANCELLED,
     },
     PaymentRequestStatus.PENDING_REVIEW: {
-        PaymentRequestStatus.DRAFT_CREATED,
-        PaymentRequestStatus.DRAFT,  # вернуть на правку
+        PaymentRequestStatus.APPROVED,       # согласовать (ручная оплата вне системы)
+        PaymentRequestStatus.DRAFT_CREATED,  # «Создать оплату» (платёжка в банк)
+        PaymentRequestStatus.DRAFT,          # вернуть на правку
+        PaymentRequestStatus.REJECTED,
+        PaymentRequestStatus.CANCELLED,
+    },
+    PaymentRequestStatus.APPROVED: {
+        PaymentRequestStatus.PAID,           # отметить оплаченным вручную
         PaymentRequestStatus.REJECTED,
         PaymentRequestStatus.CANCELLED,
     },
@@ -98,7 +123,8 @@ class PaymentRequest(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "payment_request"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    # nullable: «общая» заявка без проекта (подаёт любой пользователь, единый инбокс согласования).
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
     number: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=PaymentRequestStatus.DRAFT.value, server_default="DRAFT"
@@ -131,6 +157,8 @@ class PaymentRequest(Base, TimestampMixin, SoftDeleteMixin):
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="RUB", server_default="RUB")
     pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Назначение оплаты (PaymentRequestCategory). NULL у старых заявок = логистика.
+    category: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
     # Bank-statement match (set by the auto-matcher) → flips status to PAID.
     matched_transaction_id: Mapped[int | None] = mapped_column(
@@ -159,6 +187,10 @@ class PaymentRequest(Base, TimestampMixin, SoftDeleteMixin):
         back_populates="payment_request",
         cascade="all, delete-orphan",
     )
+    # Read-only проект — для отображения имени в деталке (project_name). Не управляем им.
+    project: Mapped["Project | None"] = relationship(
+        "Project", viewonly=True, foreign_keys="PaymentRequest.project_id"
+    )
 
     __table_args__ = (
         CheckConstraint("amount > 0", name="ck_payment_request_amount_positive"),
@@ -168,6 +200,7 @@ class PaymentRequest(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_payment_request_counterparty_id", "counterparty_id"),
         # Partial unique/indexes created in the migration (WHERE is_deleted = false):
         #   uq_payment_request_project_number   UNIQUE (project_id, number)
+        #   uq_payment_request_general_number   UNIQUE (number) WHERE project_id IS NULL  (pay07; «общие» заявки)
         #   uq_payment_request_bank_guid        UNIQUE (bank_guid) WHERE bank_guid IS NOT NULL
         #   uq_payment_request_matched_txn      UNIQUE (matched_transaction_id) WHERE matched_transaction_id IS NOT NULL
     )
@@ -182,7 +215,8 @@ class PaymentRequestDocument(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "payment_request_document"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    # nullable: зеркалит project_id заявки (у «общей» заявки — NULL).
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
     payment_request_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("payment_request.id", ondelete="CASCADE"), nullable=False
     )

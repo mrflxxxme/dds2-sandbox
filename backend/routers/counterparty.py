@@ -27,6 +27,8 @@ from backend.models import Project, User
 from backend.project_context import get_current_project
 from backend.schemas.counterparty import (
     ALLOWED_DOC_TYPES,
+    BulkCategoryRequest,
+    BulkCategoryResponse,
     CounterpartyCreate,
     CounterpartyDetail,
     CounterpartyDocumentResponse,
@@ -89,7 +91,7 @@ async def list_counterparties(
         offset=offset,
     )
     service = CounterpartyService(db)
-    items, total, turnover_map = await service.list(
+    items, total, turnover_map, cat_map = await service.list(
         project_id=project.id,
         filters=filters,
         date_from=date_from,
@@ -99,6 +101,10 @@ async def list_counterparties(
     has_range = date_from is not None or date_to is not None
     for cp in items:
         item = CounterpartyListItem.model_validate(cp)
+        cat = cat_map.get(cp.id)
+        if cat is not None:
+            item.cat_lvl1 = cat["cat_lvl1"]
+            item.cat_lvl2 = cat["cat_lvl2"]
         if has_range:
             t = turnover_map.get(cp.id)
             if t is not None:
@@ -254,6 +260,28 @@ async def set_counterparty_category(
     except CounterpartyConflictError as e:
         raise HTTPException(status_code=409, detail=str(e)) from None
     return SetExpenseCategoryResponse(**result)
+
+
+@router.post(
+    "/bulk_category",
+    response_model=BulkCategoryResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def bulk_set_category(
+    body: BulkCategoryRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Apply a type and/or expense category to many counterparties at once."""
+    service = CounterpartyService(db)
+    result = await service.bulk_set_expense_category(
+        project_id=project.id,
+        counterparty_ids=body.ids,
+        cat_lvl1=body.cat_lvl1,
+        cat_lvl2=body.cat_lvl2,
+        primary_type=body.primary_type,
+    )
+    return BulkCategoryResponse(**result)
 
 
 @router.delete(

@@ -2513,14 +2513,18 @@ export interface CostForecastResponse {
 
 // ─── Payment Requests ──────────────────────────────────────────────────────
 
-export type PaymentRequestStatus = 'DRAFT' | 'PENDING_REVIEW' | 'DRAFT_CREATED' | 'PAID' | 'REJECTED' | 'CANCELLED';
+export type PaymentRequestStatus = 'DRAFT' | 'PENDING_REVIEW' | 'APPROVED' | 'DRAFT_CREATED' | 'PAID' | 'REJECTED' | 'CANCELLED';
 export type PaymentRequestSource = 'MANUAL' | 'COUNTERPARTY';
 export type PaymentRequestDocType = 'INVOICE' | 'ACT';
+export type PaymentRequestCategory = 'LOGISTICS' | 'PHOTO_CONTENT' | 'CUSTOMS' | 'FULFILLMENT' | 'DESIGN' | 'HOUSEHOLD' | 'OTHER';
 
 export interface PaymentRequestRow {
   id: number;
   number: string;
   status: PaymentRequestStatus;
+  category: PaymentRequestCategory | null;
+  project_id: number | null;
+  project_name: string | null;
   payee_name: string | null;
   payee_inn: string | null;
   amount: string;
@@ -2529,6 +2533,20 @@ export interface PaymentRequestRow {
   matched_transaction_id: number | null;
   doc_count: number;
   created_at: string;
+}
+
+export interface InvoiceParseResult {
+  payee_name: string | null;
+  payee_inn: string | null;
+  payee_kpp: string | null;
+  payee_account: string | null;
+  payee_bik: string | null;
+  payee_bank_name: string | null;
+  payee_corr_account: string | null;
+  amount: string | null;
+  purpose: string | null;
+  fields_found: string[];
+  warnings: string[];
 }
 
 export interface PaymentRequestDocument {
@@ -2641,6 +2659,9 @@ export interface CounterpartyReconciliation {
 
 export interface PaymentRequestCreate {
   source: PaymentRequestSource;
+  // project_id: не передано → текущий проект; null → общая (без проекта); число → этот проект.
+  project_id?: number | null;
+  category?: PaymentRequestCategory;
   outbound_shipment_id?: number;
   outbound_shipment_ids?: number[];
   counterparty_id?: number;
@@ -3492,6 +3513,9 @@ export interface CounterpartyListItem {
   income_cny?: number | null;
   expense_cny?: number | null;
   tx_count?: number | null;
+  /** Expense category (level-2), shown/managed in the list. */
+  cat_lvl1?: string | null;
+  cat_lvl2?: string | null;
 }
 
 export interface CounterpartyDetail extends CounterpartyListItem {
@@ -3511,6 +3535,11 @@ export interface SetExpenseCategoryResponse {
   cp_key: string;
   cat_lvl1: string | null;
   cat_lvl2: string | null;
+}
+
+export interface BulkCategoryResponse {
+  counterparties: number;
+  transactions: number;
 }
 
 export type Counterparty = CounterpartyListItem;

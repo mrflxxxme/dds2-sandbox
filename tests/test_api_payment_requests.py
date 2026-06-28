@@ -3,6 +3,9 @@
 API tests — payment-requests endpoints (создание, документы, submit-гейт, confirm-гейт банка).
 """
 
+import io
+import zipfile
+
 import pytest
 
 _ACC = "40702810900000000001"
@@ -50,13 +53,55 @@ async def _create_manual(client, headers, amount="9000.00"):
     )
 
 
+def _make_docx(text: str) -> bytes:
+    """Минимальный .docx (zip с word/document.xml) с текстом — для теста распознавания счёта."""
+    paras = "".join(f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>" for line in text.split("\n"))
+    document = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{paras}</w:body></w:document>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml", document)
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_parse_invoice_endpoint(client, auth_headers):
+    """POST /parse-invoice: распознаёт реквизиты из .docx-счёта (роут + валидация + парсер end-to-end)."""
+    headers = await _project_headers(client, auth_headers)
+    text = (
+        "Банк получателя ПАО СБЕРБАНК БИК 044525225\n"
+        "к/с 30101810400000000225\n"
+        "Получатель ООО Ромашка ИНН 7700000001 КПП 770001001\n"
+        "Сч. № 40702810380000100009\n"
+        "Всего к оплате 15 250,00\n"
+    )
+    resp = await client.post(
+        "/api/v1/payment-requests/parse-invoice",
+        files={"file": ("schet.docx", _make_docx(text),
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["payee_inn"] == "7700000001"
+    assert body["payee_bik"] == "044525225"
+    assert body["payee_account"] == "40702810380000100009"  # прошёл контроль-ключ по БИК
+    assert float(body["amount"]) == 15250.0
+
+
 @pytest.mark.asyncio
 async def test_list_empty(client, auth_headers):
     headers = await _project_headers(client, auth_headers)
+    pid = int(headers["X-Project-Id"])
     resp = await client.get("/api/v1/payment-requests", headers=headers)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["items"] == [] and body["total"] == 0
+    # Свежий проект — своих заявок нет. Общие заявки (без проекта) видны в инбоксе любого
+    # проекта (единый список согласования), поэтому проверяем именно отсутствие СВОИХ.
+    assert [i for i in body["items"] if i["project_id"] == pid] == []
 
 
 @pytest.mark.asyncio
@@ -76,6 +121,56 @@ async def test_create_manual(client, auth_headers):
     assert body["status"] == "PENDING_REVIEW"  # сразу «На проверке», без черновика
     assert body["payee_inn"] == _INN
     assert body["number"].startswith("ОПЛ-")
+    assert body["category"] == "OTHER"           # дефолт для не-логистики
+    assert body["project_name"]                  # деталка несёт имя проекта (не пусто)
+
+
+@pytest.mark.asyncio
+async def test_create_general_no_project(client, auth_headers):
+    """project_id=null → «общая» заявка без проекта (своя серия номера, своё назначение)."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.post(
+        "/api/v1/payment-requests",
+        json={
+            "source": "MANUAL", "project_id": None, "category": "PHOTO_CONTENT",
+            "payee_inn": _INN, "payee_account": _ACC, "payee_bik": _BIK,
+            "payee_name": "ООО Фотограф", "amount": "12000.00",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["project_id"] is None
+    assert body["project_name"] is None          # общая заявка — без имени проекта
+    assert body["category"] == "PHOTO_CONTENT"
+    assert body["number"].startswith("ОБЩ-")
+
+
+@pytest.mark.asyncio
+async def test_approve_then_mark_paid(client, auth_headers):
+    headers = await _project_headers(client, auth_headers)
+    rid = (await _create_manual(client, headers)).json()["id"]
+    r1 = await client.post(f"/api/v1/payment-requests/{rid}/approve", json={"comment": "ок"}, headers=headers)
+    assert r1.status_code == 200 and r1.json()["status"] == "APPROVED"
+    r2 = await client.post(f"/api/v1/payment-requests/{rid}/mark-paid", json={}, headers=headers)
+    assert r2.status_code == 200 and r2.json()["status"] == "PAID"
+
+
+@pytest.mark.asyncio
+async def test_reject(client, auth_headers):
+    headers = await _project_headers(client, auth_headers)
+    rid = (await _create_manual(client, headers)).json()["id"]
+    r = await client.post(f"/api/v1/payment-requests/{rid}/reject", json={"comment": "дубль"}, headers=headers)
+    assert r.status_code == 200 and r.json()["status"] == "REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_mark_paid_requires_approved(client, auth_headers):
+    """PENDING_REVIEW → PAID напрямую запрещён (только через APPROVED) → 409."""
+    headers = await _project_headers(client, auth_headers)
+    rid = (await _create_manual(client, headers)).json()["id"]
+    r = await client.post(f"/api/v1/payment-requests/{rid}/mark-paid", json={}, headers=headers)
+    assert r.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -118,6 +213,33 @@ async def test_full_flow_to_pending_review(client, auth_headers):
     submit = await client.post(f"/api/v1/payment-requests/{pid}/submit", json={}, headers=headers)
     assert submit.status_code == 200, submit.text
     assert submit.json()["status"] == "PENDING_REVIEW"
+
+
+@pytest.mark.asyncio
+async def test_upload_act_after_approval(client, auth_headers):
+    """Акт приходит позже — его можно догрузить уже к СОГЛАСОВАННОЙ заявке (без правки реквизитов)."""
+    headers = await _project_headers(client, auth_headers)
+    pid = (await _create_manual(client, headers)).json()["id"]
+    inv = await client.post(
+        f"/api/v1/payment-requests/{pid}/documents",
+        files={"file": ("invoice.pdf", _PDF, "application/pdf")},
+        data={"doc_type": "INVOICE"},
+        headers=headers,
+    )
+    assert inv.status_code == 201
+    appr = await client.post(f"/api/v1/payment-requests/{pid}/approve", json={}, headers=headers)
+    assert appr.status_code == 200 and appr.json()["status"] == "APPROVED"
+    # акт догружаем уже к APPROVED-заявке — статус-гейта на загрузку документов нет
+    act = await client.post(
+        f"/api/v1/payment-requests/{pid}/documents",
+        files={"file": ("act.pdf", _PDF, "application/pdf")},
+        data={"doc_type": "ACT"},
+        headers=headers,
+    )
+    assert act.status_code == 201, act.text
+    detail = (await client.get(f"/api/v1/payment-requests/{pid}", headers=headers)).json()
+    assert detail["doc_count"] == 2
+    assert {d["doc_type"] for d in detail["documents"]} == {"INVOICE", "ACT"}
 
 
 @pytest.mark.asyncio

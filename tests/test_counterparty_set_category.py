@@ -147,3 +147,32 @@ async def test_set_category_preserves_no_cashflow(db_session, client, auth_heade
     await svc.set_expense_category(counterparty_id=cp.id, project_id=pid, cat_lvl1="Логистика", cat_lvl2=None)
     t = (await db_session.execute(select(Transaction).where(Transaction.project_id == pid))).scalar_one()
     assert t.cat_lvl1_2 == "Логистика" and t.status == "NO_CASHFLOW"
+
+
+@pytest.mark.asyncio
+async def test_bulk_set_category_and_type(db_session, client, auth_headers):
+    """Bulk: set category + type for many counterparties; both applied."""
+    pid = await _project(client, auth_headers)
+    inn1, inn2 = _inn(), _inn()
+    cp1 = Counterparty(project_id=pid, inn=inn1, name="A", primary_type="OTHER")
+    cp2 = Counterparty(project_id=pid, inn=inn2, name="B", primary_type="OTHER")
+    db_session.add_all([cp1, cp2])
+    await db_session.flush()
+    db_session.add_all([_txn(pid, inn1, cp1.id, "100"), _txn(pid, inn2, cp2.id, "200")])
+    await db_session.commit()
+
+    svc = CounterpartyService(db_session)
+    res = await svc.bulk_set_expense_category(
+        project_id=pid,
+        counterparty_ids=[cp1.id, cp2.id],
+        cat_lvl1="Логистика",
+        cat_lvl2=None,
+        primary_type="CARRIER",
+    )
+    assert res["counterparties"] == 2
+    assert res["transactions"] == 2
+
+    rows = (await db_session.execute(select(Transaction).where(Transaction.project_id == pid))).scalars().all()
+    assert all(t.cat_lvl1_2 == "Логистика" for t in rows)
+    cps = (await db_session.execute(select(Counterparty).where(Counterparty.project_id == pid))).scalars().all()
+    assert all(c.primary_type == "CARRIER" for c in cps)

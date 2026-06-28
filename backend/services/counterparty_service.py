@@ -162,7 +162,7 @@ class CounterpartyService:
         filters: CounterpartyFilter,
         date_from: date | None = None,
         date_to: date | None = None,
-    ) -> tuple[list[Counterparty], int, dict[int, dict]]:
+    ) -> tuple[list[Counterparty], int, dict[int, dict], dict[int, dict]]:
         """List counterparties with filters + pagination.
 
         When date_from/date_to are provided, also computes per-CP turnover
@@ -243,7 +243,30 @@ class CounterpartyService:
                     bucket["expense_rub"] += expense
                 bucket["tx_count"] += int(row.tx_cnt or 0)
 
-        return items, int(total or 0), turnover_map
+        # Expense category (level-2) for the page — cp_key → cat, mapped to cp_id.
+        cat_map: dict[int, dict] = {}
+        if items:
+            keys_by_id = {cp.id: ((cp.inn or "").strip() or (cp.name or "").strip().lower()) for cp in items}
+            cp_keys = list({k for k in keys_by_id.values() if k})
+            if cp_keys:
+                cat_res = await self.db.execute(
+                    select(
+                        CounterpartyCategory.cp_key,
+                        CounterpartyCategory.cat_lvl1,
+                        CounterpartyCategory.cat_lvl2,
+                    ).where(
+                        CounterpartyCategory.project_id == project_id,
+                        CounterpartyCategory.cp_key.in_(cp_keys),
+                        CounterpartyCategory.is_deleted == False,  # noqa: E712
+                    )
+                )
+                by_key = {r.cp_key: (r.cat_lvl1, r.cat_lvl2) for r in cat_res}
+                for cp in items:
+                    pair = by_key.get(keys_by_id[cp.id])
+                    if pair and pair[0]:
+                        cat_map[cp.id] = {"cat_lvl1": pair[0], "cat_lvl2": pair[1]}
+
+        return items, int(total or 0), turnover_map, cat_map
 
     # ─── summary_by_type ────────────────────────────────────────────────
 
@@ -729,6 +752,57 @@ class CounterpartyService:
         await invalidate_project_reports(project_id)
         applied = int(getattr(result, "rowcount", 0) or 0)
         return {"applied": applied, "cp_key": cp_key, "cat_lvl1": cat1, "cat_lvl2": cat2}
+
+    async def bulk_set_expense_category(
+        self,
+        *,
+        project_id: int,
+        counterparty_ids: Sequence[int],
+        cat_lvl1: str | None = None,
+        cat_lvl2: str | None = None,
+        primary_type: str | None = None,
+    ) -> dict:
+        """Apply a type and/or expense category to many counterparties at once.
+
+        ``primary_type`` (if given) is set on all selected in one UPDATE; the
+        expense category (if given) is propagated per-counterparty via
+        ``set_expense_category`` (each touches its own transactions). A
+        per-counterparty conflict/not-found is skipped. Returns
+        ``{counterparties, transactions}``.
+        """
+        ids = [int(i) for i in counterparty_ids if i]
+        if not ids:
+            return {"counterparties": 0, "transactions": 0}
+
+        if primary_type:
+            await self.db.execute(
+                update(Counterparty)
+                .where(
+                    Counterparty.project_id == project_id,
+                    Counterparty.id.in_(ids),
+                    Counterparty.is_deleted == False,  # noqa: E712
+                )
+                .values(primary_type=primary_type)
+            )
+            await self.db.commit()
+
+        n_cp = 0
+        n_txn = 0
+        if cat_lvl1 and cat_lvl1.strip():
+            for cid in ids:
+                try:
+                    res = await self.set_expense_category(
+                        counterparty_id=cid, project_id=project_id, cat_lvl1=cat_lvl1, cat_lvl2=cat_lvl2
+                    )
+                    n_cp += 1
+                    n_txn += int(res.get("applied", 0))
+                except (CounterpartyNotFoundError, CounterpartyConflictError):
+                    continue
+        else:
+            n_cp = len(ids)  # type-only bulk
+
+        await invalidate_project_reports(project_id)
+        return {"counterparties": n_cp, "transactions": n_txn}
 
     # ─── soft_delete ────────────────────────────────────────────────────
 

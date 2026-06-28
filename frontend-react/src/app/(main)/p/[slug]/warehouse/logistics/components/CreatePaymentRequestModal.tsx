@@ -1,16 +1,19 @@
 'use client';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import type {
     PaymentRequestDetail,
     PaymentRequestStatus,
+    PaymentRequestCategory,
     ShippableShipmentRow,
 } from '@/types/api';
 
 const STATUS_LABEL: Record<PaymentRequestStatus, string> = {
     DRAFT: 'Черновик',
     PENDING_REVIEW: 'На проверке',
+    APPROVED: 'Согласовано',
     DRAFT_CREATED: 'Платёжка создана',
     PAID: 'Оплачено',
     REJECTED: 'Отклонено',
@@ -20,11 +23,23 @@ const STATUS_LABEL: Record<PaymentRequestStatus, string> = {
 const STATUS_CLASS: Record<PaymentRequestStatus, string> = {
     DRAFT: 'badge-secondary',
     PENDING_REVIEW: 'badge-warning',
+    APPROVED: 'badge-info',
     DRAFT_CREATED: 'badge-info',
     PAID: 'badge-success',
     REJECTED: 'badge-danger',
     CANCELLED: 'badge-secondary',
 };
+
+const CATEGORY_LABEL: Record<PaymentRequestCategory, string> = {
+    LOGISTICS: 'Логистика',
+    PHOTO_CONTENT: 'Фотоконтент',
+    CUSTOMS: 'Таможенное оформление',
+    FULFILLMENT: 'Фулфилмент',
+    DESIGN: 'Дизайн',
+    HOUSEHOLD: 'Хозрасходы',
+    OTHER: 'Другое',
+};
+const CATEGORY_OPTIONS: PaymentRequestCategory[] = ['PHOTO_CONTENT', 'DESIGN', 'FULFILLMENT', 'CUSTOMS', 'LOGISTICS', 'HOUSEHOLD', 'OTHER'];
 
 interface Props {
     /** Pre-selected outbound_shipment_id — when opened from a SHIPPED row */
@@ -70,12 +85,40 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     const [pickupDate, setPickupDate] = useState('');
     const [purpose, setPurpose] = useState('');
 
+    // ─── Назначение оплаты + проект (свободная заявка, не из листа логиста) ───────
+    const isShipmentContext = initialShipmentId != null || isMultiProp;
+    const [category, setCategory] = useState<PaymentRequestCategory>(isShipmentContext ? 'LOGISTICS' : 'OTHER');
+    // projectSel: id проекта | 'none' (без проекта) | '' (текущий — до загрузки списка).
+    const [projectSel, setProjectSel] = useState<string>('');
+    const [projects, setProjects] = useState<Array<{ id: number; name: string; slug: string }>>([]);
+    const params = useParams();
+    const slug = typeof params?.slug === 'string' ? params.slug : Array.isArray(params?.slug) ? params.slug[0] : '';
+
+    // Список проектов для выбора (только для свободной заявки). Дефолт projectSel='' = текущий проект.
+    useEffect(() => {
+        if (isShipmentContext || isEdit) return;
+        let aborted = false;
+        (async () => {
+            try {
+                const ps = await api.getProjects();
+                if (aborted) return;
+                setProjects(ps.map(p => ({ id: p.id, name: p.name, slug: p.slug })));
+            } catch { /* список проектов недоступен — останутся «текущий» и «без проекта» */ }
+        })();
+        return () => { aborted = true; };
+    }, [isShipmentContext, isEdit]);
+
     // ─── Created request ──────────────────────────────────────────────────
     const [created, setCreated] = useState<PaymentRequestDetail | null>(null);
     const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
     const [actFile, setActFile] = useState<File | null>(null);
     const invoiceRef = useRef<HTMLInputElement>(null);
     const actRef = useRef<HTMLInputElement>(null);
+
+    // ─── Распознавание счёта (опциональный помощник: PDF/Word → авто-заполнение реквизитов) ───
+    const [parsing, setParsing] = useState(false);
+    const [parseInfo, setParseInfo] = useState<string>('');
+    const invoiceParseRef = useRef<HTMLInputElement>(null);
 
     // ─── Status & errors ─────────────────────────────────────────────────
     const [creating, setCreating] = useState(false);
@@ -218,6 +261,30 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
         } catch { /* банка нет в справочнике — к/с вводится вручную */ }
     }, [payeeBik, payeeCorrAccount]);
 
+    // ─── Загрузить счёт → распознать реквизиты (бэкенд парсит PDF/Word, фронт только подставляет) ──
+    const handleParseInvoice = async (file: File) => {
+        setParsing(true); setError(''); setParseInfo('');
+        try {
+            const r = await api.parseInvoice(file);
+            if (r.payee_name) setPayeeName(r.payee_name);
+            if (r.payee_inn) setPayeeInn(r.payee_inn);
+            if (r.payee_account) setPayeeAccount(r.payee_account);
+            if (r.payee_bik) setPayeeBik(r.payee_bik);
+            if (r.payee_bank_name) setPayeeBankName(r.payee_bank_name);
+            if (r.payee_corr_account) setPayeeCorrAccount(r.payee_corr_account);
+            if (r.payee_kpp) setPayeeKpp(r.payee_kpp);
+            if (r.amount) setAmount(String(r.amount));
+            if (r.purpose) setPurpose(r.purpose);
+            setInvoiceFile(file);  // тот же файл прикрепится как Счёт на шаге 2 — не грузить дважды
+            const FIELD_RU: Record<string, string> = { payee_inn: 'ИНН', payee_bik: 'БИК', payee_account: 'р/с', payee_kpp: 'КПП', payee_name: 'получатель', amount: 'сумма', purpose: 'назначение', payee_corr_account: 'корр.счёт', payee_bank_name: 'банк' };
+            const found = r.fields_found.map(f => FIELD_RU[f] ?? f).join(', ');
+            setParseInfo(found ? `Распознано: ${found}.` + (r.warnings.length ? ' ⚠ ' + r.warnings.join('; ') : '') : (r.warnings.join('; ') || 'Не удалось распознать — заполните вручную'));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка распознавания счёта');
+        }
+        setParsing(false);
+    };
+
     // ─── Client-side requisites validation (понятные сообщения вместо сырого 422) ──
     const validateRequisites = (): string | null => {
         if (!payeeName.trim()) return 'Укажите наименование получателя';
@@ -236,6 +303,15 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
         if (mode === 'COUNTERPARTY' && !selectedShipment) { setError('Выберите отгрузку'); return; }
         const vErr = validateRequisites();
         if (vErr) { setError(vErr); return; }
+        // Назначение + проект — только для свободной заявки (не из листа логиста, не при правке).
+        const extra: { category?: PaymentRequestCategory; project_id?: number | null } = {};
+        if (!isShipmentContext && !isEdit) {
+            extra.category = category;
+            if (category !== 'LOGISTICS') {
+                if (projectSel === 'none') extra.project_id = null;
+                else if (projectSel && !Number.isNaN(Number(projectSel))) extra.project_id = Number(projectSel);
+            }
+        }
         setCreating(true);
         try {
             let detail: PaymentRequestDetail;
@@ -286,6 +362,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
             } else {
                 detail = await api.createPaymentRequest({
                     source: 'MANUAL',
+                    ...extra,
                     payee_inn: payeeInn || undefined,
                     payee_name: payeeName || undefined,
                     payee_account: payeeAccount || undefined,
@@ -318,6 +395,10 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     const handleUploadDocs = async () => {
         if (!created) return;
         setError('');
+        // Для не-логистических заявок счёт обязателен.
+        const requireInvoice = !isShipmentContext && category !== 'LOGISTICS';
+        const hasInvoice = !!invoiceFile || created.documents.some(d => d.doc_type === 'INVOICE');
+        if (requireInvoice && !hasInvoice) { setError('Приложите файл счёта'); return; }
         setUploading(true);
         try {
             if (invoiceFile) await api.uploadPaymentRequestDocument(created.id, invoiceFile, 'INVOICE');
@@ -359,6 +440,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 {roRow('Банк', created.payee_bank_name)}
                 {roRow('Сумма', created.amount ? `${formatNumber(Number(created.amount), 2)} ${created.currency}` : null)}
                 {roRow('Дата забора', created.pickup_date ? formatDate(created.pickup_date) : null)}
+                {roRow('Категория', created.category ? CATEGORY_LABEL[created.category] : null)}
                 {roRow('Назначение', created.purpose)}
                 {created.bank_doc_id && roRow('ID платёжки', created.bank_doc_id)}
                 {created.documents.length > 0 && (
@@ -500,8 +582,51 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 {/* ══════════ STEP 1: FORM ══════════ */}
                 {step === 'form' && (
                     <>
-                        {/* Mode toggle (скрыт при редактировании и при мульти-оплате за N заборов) */}
-                        {!isEdit && !isMultiProp && (
+                        {/* Назначение оплаты + проект — только для свободной заявки (не из листа логиста). */}
+                        {!isEdit && !isShipmentContext && (
+                        <div style={{ display: 'grid', gridTemplateColumns: category !== 'LOGISTICS' ? '1fr 1fr' : '1fr', gap: 12, marginBottom: 16 }}>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label">Назначение оплаты *</label>
+                                <select
+                                    className="form-input"
+                                    value={category}
+                                    onChange={e => {
+                                        const v = e.target.value as PaymentRequestCategory;
+                                        setCategory(v);
+                                        // Не-логистика не привязывается к отгрузке → только ручной ввод.
+                                        if (v !== 'LOGISTICS') { setMode('MANUAL'); setSelectedShipment(null); setMultiShipments([]); }
+                                    }}
+                                >
+                                    {CATEGORY_OPTIONS.map(c => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}
+                                </select>
+                            </div>
+                            {category !== 'LOGISTICS' && (
+                                <div className="form-group" style={{ margin: 0 }}>
+                                    <label className="form-label">Проект</label>
+                                    <select className="form-input" value={projectSel} onChange={e => setProjectSel(e.target.value)}>
+                                        <option value="">— Текущий проект —</option>
+                                        {projects.filter(p => p.slug !== slug).map(p => <option key={p.id} value={String(p.id)}>{p.name}</option>)}
+                                        <option value="none">— Без проекта (общая) —</option>
+                                    </select>
+                                </div>
+                            )}
+                        </div>
+                        )}
+
+                        {/* Загрузить счёт → распознать (опциональный помощник; только свободная заявка) */}
+                        {!isEdit && !isShipmentContext && (
+                            <div style={{ marginBottom: 12 }}>
+                                <button type="button" className="btn btn-secondary btn-sm" onClick={() => invoiceParseRef.current?.click()} disabled={parsing}>
+                                    {parsing ? 'Распознаю...' : '📄 Загрузить счёт → распознать реквизиты'}
+                                </button>
+                                <input ref={invoiceParseRef} type="file" accept=".pdf,.doc,.docx" style={{ display: 'none' }}
+                                    onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleParseInvoice(f); }} />
+                                {parseInfo && <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6 }}>{parseInfo}</div>}
+                            </div>
+                        )}
+
+                        {/* Mode toggle — только для логистики (привязка к отгрузке); скрыт при правке/мульти */}
+                        {!isEdit && !isMultiProp && category === 'LOGISTICS' && (
                         <div style={{ display: 'flex', gap: 0, marginBottom: 20 }}>
                             <button
                                 className={`btn btn-sm ${mode === 'COUNTERPARTY' ? 'btn-primary' : 'btn-secondary'}`}
