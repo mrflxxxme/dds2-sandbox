@@ -37,6 +37,7 @@ from backend.services.assembly import (  # noqa: F401
     reopen_for_reship,
     return_to_warehouse,
     ship_bulk,
+    ship_joint_supply,
     ship_request,
     start_assembly,
     unassign_vehicle,

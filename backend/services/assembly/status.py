@@ -174,29 +174,71 @@ async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> Asse
     return req
 
 
+async def _joint_active_siblings(
+    db: AsyncSession, project_id: int, req: AssemblyRequest
+) -> list[AssemblyRequest]:
+    """Активные сборки той же WB FBO-поставки, ВКЛЮЧАЯ req (тот же предикат, что у
+    ix_assembly_requests_fbo_wh_unique: не удалена, не CANCELLED).
+
+    Возвращает [req], если поставка не привязана. len(...) >= 2 ⇒ совместная.
+    Через identity-map сессии сам req в списке — тот же объект, что и аргумент.
+    """
+    if not req.wb_fbo_supply_id:
+        return [req]
+    result = await db.execute(
+        select(AssemblyRequest)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.wb_fbo_supply_id == req.wb_fbo_supply_id,
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+            AssemblyRequest.status != AssemblyStatus.CANCELLED,
+        )
+        .order_by(AssemblyRequest.id)
+    )
+    return list(result.scalars().all())
+
+
 async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, payload: AssignVehicle) -> AssemblyRequest:
-    """READY -> VEHICLE_ASSIGNED. Set vehicle_info, vehicle_assigned_at."""
+    """READY -> VEHICLE_ASSIGNED. Одна машина на сборку; для СОВМЕСТНОЙ поставки —
+    одна машина на ВСЕ сборки поставки сразу.
+
+    Совместная (≥2 активных сборок на WB-поставку): назначаем, только когда ВСЕ
+    сборки готовы (READY) — иначе блок с указанием неготовых. Реквизиты машины/
+    перевозчика зеркалятся во все сборки в одной транзакции (одно назначение).
+    """
     from .crud import get_assembly_request
 
     req = await get_assembly_request(db, project_id, request_id)
     if not req:
         raise ValueError("Assembly request not found")
 
-    _check_transition(AssemblyStatus(req.status), AssemblyStatus.VEHICLE_ASSIGNED)
-    old = req.status
-    req.status = AssemblyStatus.VEHICLE_ASSIGNED
-    req.vehicle_info = payload.vehicle_info
-    req.vehicle_brand = payload.vehicle_brand
-    req.driver_phone = payload.driver_phone
-    req.pickup_date = payload.pickup_date
-    req.pickup_time_slot = payload.pickup_time_slot
-    req.pickup_cost = payload.pickup_cost
-    req.delivery_date = payload.delivery_date
-    req.vehicle_assigned_at = utcnow()
+    targets = await _joint_active_siblings(db, project_id, req)
+    if len(targets) >= 2:
+        not_ready = [s for s in targets if AssemblyStatus(s.status) != AssemblyStatus.READY]
+        if not_ready:
+            names = ", ".join(f"{s.number} ({s.status})" for s in not_ready)
+            raise ValueError(f"Совместная поставка ещё не готова — не назначить машину. Не готовы: {names}")
+    else:
+        targets = [req]
+
     cp_id = await _resolve_carrier(db, project_id, payload.carrier_inn, payload.carrier_name)
-    if cp_id is not None:
-        req.counterparty_id = cp_id
-    await _log_status_change(db, project_id, req.id, old, AssemblyStatus.VEHICLE_ASSIGNED, comment=payload.vehicle_info)
+    for s in targets:
+        _check_transition(AssemblyStatus(s.status), AssemblyStatus.VEHICLE_ASSIGNED)
+        old = s.status
+        s.status = AssemblyStatus.VEHICLE_ASSIGNED
+        s.vehicle_info = payload.vehicle_info
+        s.vehicle_brand = payload.vehicle_brand
+        s.driver_phone = payload.driver_phone
+        s.pickup_date = payload.pickup_date
+        s.pickup_time_slot = payload.pickup_time_slot
+        s.pickup_cost = payload.pickup_cost
+        s.delivery_date = payload.delivery_date
+        s.vehicle_assigned_at = utcnow()
+        if cp_id is not None:
+            s.counterparty_id = cp_id
+        await _log_status_change(
+            db, project_id, s.id, old, AssemblyStatus.VEHICLE_ASSIGNED, comment=payload.vehicle_info
+        )
     await db.commit()
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
@@ -355,6 +397,38 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
     await invalidate_cache("reports:assembly_link_anomalies")
 
     return req
+
+
+async def ship_joint_supply(db: AsyncSession, project_id: int, request_id: int) -> AssemblyRequest:
+    """Отгрузить ВСЕ назначенные сборки совместной WB-поставки одним действием.
+
+    Совместная поставка = одна машина → логист отгружает её целиком. Каждая сборка
+    отгружается своим складом/стоком/OutboundShipment — переиспользуем ship_request
+    (он сам берёт row-lock и коммитит). Sync-путь авто-отгрузки не трогаем. При
+    дефиците стока по одной из сборок прочие уже отгружены, ошибка пробрасывается
+    (логист доводит остаток вручную). Возвращаем сборку-якорь (request_id).
+    """
+    from .crud import get_assembly_request
+
+    req = await get_assembly_request(db, project_id, request_id)
+    if not req:
+        raise ValueError("Assembly request not found")
+
+    siblings = await _joint_active_siblings(db, project_id, req)
+    to_ship = [s.id for s in siblings if AssemblyStatus(s.status) == AssemblyStatus.VEHICLE_ASSIGNED]
+    if not to_ship:
+        raise ValueError("Нет назначенных сборок для отгрузки")
+
+    anchor: AssemblyRequest | None = None
+    for sid in to_ship:
+        shipped = await ship_request(db, project_id, sid)
+        if sid == request_id:
+            anchor = shipped
+    if anchor is not None:
+        return anchor
+    refreshed = await get_assembly_request(db, project_id, request_id)
+    assert refreshed is not None
+    return refreshed
 
 
 async def cancel_request(db: AsyncSession, project_id: int, request_id: int) -> AssemblyRequest:

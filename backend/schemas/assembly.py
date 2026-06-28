@@ -33,6 +33,10 @@ class JointSibling(BaseModel):
     Совместная поставка = одна WB FBO-поставка несёт ≥2 сборок (по одной на
     ФФ-источник, напр. wms + wms2). siblings — ДРУГИЕ сборки той же поставки
     (без самой текущей), для бейджа/тултипа «Совместная · wms+wms2 → ASM-555».
+
+    На листе логиста из siblings строится разбивка забора: склад-источник,
+    паллеты, вес, статус и внутренний номер заявки в ФФ-портале (своя на каждый
+    склад). Поэтому здесь же pallets_count / pallet_weight_kg / ff_request_number.
     """
 
     assembly_id: int
@@ -40,6 +44,9 @@ class JointSibling(BaseModel):
     warehouse_id: int
     warehouse_name: str | None = None
     status: str
+    pallets_count: int | None = None
+    pallet_weight_kg: Decimal | None = None
+    ff_request_number: str | None = None  # внутренний номер заявки в ФФ-портале (склада-источника)
 
 
 # ─── Request schemas ────────────────────────────────────────────────────────
@@ -208,6 +215,13 @@ class AssemblyRequestResponse(BaseModel):
     # ДРУГИЕ сборки той же поставки (для бейджа «Совместная» и тултипа).
     joint_supply: bool = False
     joint_siblings: list[JointSibling] | None = None
+    # Совместная готова к логисту/назначению машины: ВСЕ активные сборки поставки
+    # в READY и дальше (ни одна не PENDING/IN_PROGRESS). Гейтит кнопку «Назначить
+    # машину» — машина назначается на всю совместную поставку, только когда готовы все.
+    joint_ready: bool = False
+    # Сумма паллет/веса по всем активным сборкам поставки (что грузим в одну машину).
+    joint_total_pallets: int | None = None
+    joint_total_weight_kg: Decimal | None = None
 
 
 class AssemblyListResponse(BaseModel):

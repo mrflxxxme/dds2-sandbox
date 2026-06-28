@@ -51,6 +51,7 @@ from backend.services.assembly_service import (
     prefetch_list_maps,
     reopen_for_reship,
     return_to_warehouse,
+    ship_joint_supply,
     ship_request,
     start_assembly,
     update_assembly_request,
@@ -2036,6 +2037,102 @@ class TestJointFboSupply:
 
         detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, PROJECT_ID, a1.id)
         assert detail["our_total"] == 8 and detail["ff_total"] == 10
+
+    # ─── Передача совместной поставки логисту ────────────────────────────────
+
+    @staticmethod
+    def _vehicle_payload() -> AssignVehicle:
+        return AssignVehicle(
+            vehicle_info="А123ВС / прицеп",
+            vehicle_brand="Газель",
+            driver_phone="+79990000000",
+            pickup_date=date(2026, 6, 15),
+            pickup_time_slot="10:00-12:00",
+            pickup_cost=Decimal("15000.00"),
+            delivery_date=date(2026, 6, 16),
+            carrier_inn="7700000000",
+            carrier_name="ИП Перевозчик",
+        )
+
+    async def _ready_pair(self, db_session):
+        """Joint pair, обе сборки переведены в READY (готовы к логисту)."""
+        a1, a2, fbo_id = await self._make_joint_pair(db_session)
+        await mark_ready(db_session, PROJECT_ID, a1.id)
+        await mark_ready(db_session, PROJECT_ID, a2.id)
+        return a1, a2, fbo_id
+
+    async def test_joint_ready_breakdown_and_ff_number(self, db_session):
+        """Лист логиста: обе готовы → joint_ready, итоги паллет/веса, ФФ-номер в siblings."""
+        from backend.routers.assembly import _enrich_joint
+
+        a1, a2, _fbo_id = await self._ready_pair(db_session)
+        # a1 = 2 паллеты по 100 кг, a2 = 1 паллета по 100 кг → итог 3 паллеты, вес 2*100+1*100=300
+        # (проверяем формулу паллеты×вес, а не просто сумму весов паллет).
+        await db_session.execute(text("UPDATE assembly_requests SET pallets_count = 2 WHERE id = :id"), {"id": a1.id})
+        await db_session.commit()
+        await _link_ff_request(db_session, assembly_request_id=a2.id, warehouse_id=a2.warehouse_id)
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
+        responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
+        await _enrich_joint(db_session, PROJECT_ID, items, responses)
+        a1_resp = {r.id: r for r in responses}[a1.id]
+
+        assert a1_resp.joint_ready is True
+        assert a1_resp.joint_total_pallets == 3
+        assert a1_resp.joint_total_weight_kg == Decimal("300.00")
+        sib = (a1_resp.joint_siblings or [])[0]
+        assert sib.assembly_id == a2.id
+        assert sib.pallets_count == 1
+        assert sib.pallet_weight_kg == Decimal("100.00")
+        assert sib.ff_request_number == f"WH-R-{a2.id}"
+
+    async def test_joint_not_ready_when_one_in_progress(self, db_session):
+        """Одна сборка ещё IN_PROGRESS → joint_ready=False (поставку нельзя передавать)."""
+        from backend.routers.assembly import _enrich_joint
+
+        a1, _a2, _fbo_id = await self._make_joint_pair(db_session)
+        await mark_ready(db_session, PROJECT_ID, a1.id)  # вторая остаётся IN_PROGRESS
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
+        responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
+        await _enrich_joint(db_session, PROJECT_ID, items, responses)
+        assert {r.id: r for r in responses}[a1.id].joint_ready is False
+
+    async def test_assign_vehicle_blocked_until_all_ready(self, db_session):
+        """Назначение машины на совместную блокируется, пока не готовы ВСЕ сборки."""
+        a1, _a2, _fbo_id = await self._make_joint_pair(db_session)
+        await mark_ready(db_session, PROJECT_ID, a1.id)  # вторая IN_PROGRESS
+        with pytest.raises(ValueError, match="не готов"):
+            await assign_vehicle(db_session, PROJECT_ID, a1.id, self._vehicle_payload())
+
+    async def test_assign_vehicle_mirrors_to_all_siblings(self, db_session):
+        """Одна машина на совместную → ОБЕ сборки VEHICLE_ASSIGNED с теми же реквизитами."""
+        a1, a2, _fbo_id = await self._ready_pair(db_session)
+        await assign_vehicle(db_session, PROJECT_ID, a1.id, self._vehicle_payload())
+        rows = (
+            await db_session.execute(
+                text(
+                    "SELECT status, vehicle_info, counterparty_id FROM assembly_requests "
+                    "WHERE id IN (:a, :b) ORDER BY id"
+                ),
+                {"a": a1.id, "b": a2.id},
+            )
+        ).all()
+        assert {r[0] for r in rows} == {"VEHICLE_ASSIGNED"}  # обе назначены
+        assert all(r[1] == "А123ВС / прицеп" for r in rows)  # та же машина
+        carriers = {r[2] for r in rows}
+        assert len(carriers) == 1 and None not in carriers  # один перевозчик на обе сборки
+
+    async def test_ship_joint_ships_all_siblings(self, db_session):
+        """ship_joint_supply отгружает ВСЕ назначенные сборки поставки одним действием."""
+        a1, a2, _fbo_id = await self._ready_pair(db_session)
+        await assign_vehicle(db_session, PROJECT_ID, a1.id, self._vehicle_payload())
+        await ship_joint_supply(db_session, PROJECT_ID, a1.id)
+        rows = (
+            await db_session.execute(
+                text("SELECT status FROM assembly_requests WHERE id IN (:a, :b)"),
+                {"a": a1.id, "b": a2.id},
+            )
+        ).scalars().all()
+        assert set(rows) == {"SHIPPED"}
 
 
 @pytest.mark.asyncio

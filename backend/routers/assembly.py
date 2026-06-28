@@ -208,6 +208,8 @@ async def _enrich_joint(
                 AssemblyRequest.warehouse_id,
                 AssemblyRequest.status,
                 AssemblyRequest.wb_fbo_supply_id,
+                AssemblyRequest.pallets_count,
+                AssemblyRequest.pallet_weight_kg,
             ).where(
                 AssemblyRequest.project_id == project_id,
                 AssemblyRequest.wb_fbo_supply_id.in_(supply_ids),
@@ -228,6 +230,29 @@ async def _enrich_joint(
         wh_rows = (await db.execute(select(Warehouse.id, Warehouse.name).where(Warehouse.id.in_(wh_ids)))).all()
         wh_names = {wid: name for wid, name in wh_rows}
 
+    # Внутренний номер ФФ-заявки каждой сборки-участника (первая привязка, как в
+    # _enrich_ff_links). Один запрос по индексу ix_fulfillment_requests_assembly_request_id.
+    all_ids = [row.id for row in rows]
+    ff_num: dict[int, str | None] = {}
+    if all_ids:
+        ff_rows = await db.execute(
+            select(
+                FulfillmentRequest.assembly_request_id,
+                FulfillmentRequest.number,
+                FulfillmentRequest.external_id,
+            )
+            .where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.assembly_request_id.in_(all_ids),
+            )
+            .order_by(FulfillmentRequest.assembly_request_id, FulfillmentRequest.id)
+        )
+        for fr in ff_rows.all():
+            ff_num.setdefault(fr.assembly_request_id, fr.number or fr.external_id)
+
+    # «Ещё не готова» к логисту: поставку нельзя передавать/назначать машину.
+    not_ready = {AssemblyStatus.PENDING, AssemblyStatus.IN_PROGRESS}
+
     for resp in response_items:
         sid = resp.wb_fbo_supply_id
         if sid is None:
@@ -236,6 +261,11 @@ async def _enrich_joint(
         if len(group) < 2:
             continue
         resp.joint_supply = True
+        # Готова к назначению машины, только когда ВСЕ сборки поставки готовы.
+        resp.joint_ready = all(row.status not in not_ready for row in group)
+        resp.joint_total_pallets = sum(int(row.pallets_count or 0) for row in group)
+        # Вес = паллеты × вес паллеты (как total_weight_kg в _build_response), суммируем по сборкам.
+        resp.joint_total_weight_kg = sum((int(row.pallets_count or 0) * (row.pallet_weight_kg or 0)) for row in group)
         resp.joint_siblings = [
             JointSibling(
                 assembly_id=row.id,
@@ -243,6 +273,9 @@ async def _enrich_joint(
                 warehouse_id=row.warehouse_id,
                 warehouse_name=wh_names.get(row.warehouse_id),
                 status=row.status,
+                pallets_count=row.pallets_count,
+                pallet_weight_kg=row.pallet_weight_kg,
+                ff_request_number=ff_num.get(row.id),
             )
             for row in group
             if row.id != resp.id
@@ -601,6 +634,20 @@ async def ship_request(
     """VEHICLE_ASSIGNED -> SHIPPED."""
     try:
         req = await assembly_service.ship_request(db, project.id, request_id)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/{request_id}/ship-joint", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
+async def ship_joint_supply(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Отгрузить все назначенные сборки СОВМЕСТНОЙ поставки одним действием (одна машина)."""
+    try:
+        req = await assembly_service.ship_joint_supply(db, project.id, request_id)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
