@@ -123,6 +123,27 @@ class TestBuildRowExpenses:
         assert row.breakeven_price == pytest.approx(625.0, abs=0.1)
         assert row.safety_margin_pct == pytest.approx(37.5, abs=0.1)
 
+    def test_pipeline_stock_breakdown(self):
+        """Остаток по локациям: ВБ+наш склад+сборка+в пути; заморожено по ВСЕМ."""
+        price = WbPrice(
+            project_id=1, nm_id=1, price=Decimal("1000"), base_price=Decimal("1000"),
+            discount=Decimal("0"), currency="RUB", synced_at=utcnow(),
+        )
+        funnel = {
+            "nm_id": 1, "vendor_code": "X", "revenue": 2000.0, "commission": 300.0,
+            "to_pay_rate": 70.0, "tax": 100.0, "cost_total": 500.0, "adv_sum": 0.0,
+            "profit": 1100.0, "orders_count": 5, "margin": 55.0, "spp_rate": 0.0,
+        }
+        row = _build_row(
+            1, price, funnel, 100.0, {}, None,
+            wb_stock=20, period_days=30, extra={"own": 50, "assembly": 30, "transit": 10},
+        )
+        assert row.own_stock == 50
+        assert row.assembly_stock == 30
+        assert row.transit_stock == 10
+        assert row.total_stock == 110  # 20 + 50 + 30 + 10
+        assert row.stock_value_cost == 11000.0  # 110 × 100 — по всем локациям
+
     def test_anomaly_ad_bleed(self):
         """Убыток из-за рекламы (без неё был бы плюс) → «Реклама в минус», не «поднять цену»."""
         price = WbPrice(

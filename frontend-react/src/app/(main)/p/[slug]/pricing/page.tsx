@@ -124,7 +124,8 @@ export default function PricingPage() {
             'Мин. цена (безубыток)': r.breakeven_price, 'Запас прочности %': r.safety_margin_pct,
             'Эластичность': r.elasticity, 'Тип спроса': r.elasticity_label, 'Реком. цена': r.optimal_price,
             'СПП %': r.spp_rate, 'Цена покупателю': r.buyer_price, 'Заказы': r.orders_count,
-            'Остаток ВБ': r.wb_stock, 'Новинка': r.is_new ? 'да' : '', 'Дней до исчерпания': r.days_left, 'Продаж/мес': r.sales_per_month,
+            'Остаток ВБ': r.wb_stock, 'Наш склад': r.own_stock, 'В сборке': r.assembly_stock, 'В пути на ВБ': r.transit_stock, 'Всего товара': r.total_stock,
+            'Новинка': r.is_new ? 'да' : '', 'Дней до исчерпания': r.days_left, 'Продаж/мес': r.sales_per_month,
             'Sell-through %': r.sell_through_pct, 'GMROI': r.gmroi, 'Заморожено (себест)': r.stock_value_cost,
             'Потенц. прибыль остатка': r.stock_potential_profit, 'Потенц. выручка остатка': r.stock_potential_revenue,
             'Выручка': r.revenue, 'Расходы ВБ': r.wb_expenses, 'Реклама': r.adv_sum, 'Налог': r.tax,
@@ -186,7 +187,11 @@ export default function PricingPage() {
                 return R(money(v), color);
             },
         },
-        { key: 'wb_stock', label: 'Остаток', align: 'right', sortable: true, render: (v) => int0(v) },
+        { key: 'wb_stock', label: 'Остаток ВБ', align: 'right', sortable: true, render: (v) => int0(v) },
+        { key: 'own_stock', label: 'Наш склад', align: 'right', sortable: true, render: (v) => int0(v) },
+        { key: 'assembly_stock', label: 'В сборке', align: 'right', sortable: true, render: (v) => int0(v) },
+        { key: 'transit_stock', label: 'В пути ВБ', align: 'right', sortable: true, render: (v) => int0(v) },
+        { key: 'total_stock', label: 'Всего', align: 'right', sortable: true, render: (v) => R(int0(v), 'var(--color-text)') },
         { key: 'days_left', label: 'Дней', align: 'right', sortable: true, render: (v) => int0(v) },
         { key: 'sell_through_pct', label: 'Sell-thr %', align: 'right', sortable: true, render: (v) => pct(v) },
         {
@@ -278,8 +283,8 @@ export default function PricingPage() {
                     <Kpi label="Маржа" value={pct(s.margin_pct)} color={signColor(s.margin_pct)} />
                     <Kpi label="Выручка" value={money(s.revenue) + ' ₽'} />
                     <Kpi label="Прибыль" value={money(s.profit) + ' ₽'} color={signColor(s.profit)} />
-                    <Kpi label="Остаток ВБ, шт" value={int0(s.wb_stock_units)} />
-                    <Kpi label="Заморожено" value={money(s.stock_value_cost) + ' ₽'} sub="по себестоимости" />
+                    <Kpi label="Остаток, шт" value={int0(s.total_stock_units)} sub={`на ВБ ${int0(s.wb_stock_units)}`} />
+                    <Kpi label="Заморожено" value={money(s.stock_value_cost) + ' ₽'} sub="весь товар по себест." />
                     <Kpi label="Аномалии" value={int0(s.anomalies)} color={s.anomalies > 0 ? 'var(--color-danger)' : 'var(--color-success)'} />
                 </div>
             )}

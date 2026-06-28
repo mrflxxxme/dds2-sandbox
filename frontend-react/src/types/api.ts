@@ -547,6 +547,10 @@ export interface PricingRow {
   margin_pct: number;
   net_markup_pct: number | null;
   wb_stock: number;
+  own_stock: number;
+  assembly_stock: number;
+  transit_stock: number;
+  total_stock: number;
   is_new: boolean;
   stock_value_cost: number | null;
   stock_potential_profit: number | null;
@@ -595,6 +599,7 @@ export interface PricingSummary {
   cost_share_pct: number | null;
   margin_pct: number;
   wb_stock_units: number;
+  total_stock_units: number;
   stock_value_cost: number;
   anomalies: number;
 }

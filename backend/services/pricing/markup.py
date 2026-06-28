@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
 from backend.models import Nomenclature, Project, WarehouseStock, WbFunnelDaily, WbPrice, WbWarehouseStock
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.schemas.pricing import PricingGroup, PricingResponse, PricingRow, PricingSummary
 from backend.services import funnel as funnel_service
 from backend.services import refs_service
@@ -120,6 +121,62 @@ async def _load_wb_stock_map(db: AsyncSession, pid: int) -> dict[int, int]:
     return {r.nm_id: int(r.qty or 0) for r in rows}
 
 
+async def _load_pipeline_stock(db: AsyncSession, pid: int) -> dict[int, dict[str, int]]:
+    """nm_id → {own, assembly, transit}: наш склад + в сборке + в пути на ВБ.
+
+    own = Σ WarehouseStock.quantity (наш склад); assembly = активные сборки
+    (PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED, до отгрузки); transit = SHIPPED
+    (отгружено, едет на ВБ, ещё не принято).
+    """
+    out: dict[int, dict[str, int]] = defaultdict(lambda: {"own": 0, "assembly": 0, "transit": 0})
+
+    own = await db.execute(
+        select(
+            Nomenclature.article_wb.label("nm_id"),
+            func.coalesce(func.sum(WarehouseStock.quantity), 0).label("qty"),
+        )
+        .join(WarehouseStock, WarehouseStock.nomenclature_id == Nomenclature.id)
+        .where(
+            Nomenclature.project_id == pid,
+            WarehouseStock.project_id == pid,
+            Nomenclature.article_wb.isnot(None),
+        )
+        .group_by(Nomenclature.article_wb)
+        .limit(_MAX_ROWS)
+    )
+    for r in own:
+        out[r.nm_id]["own"] = int(r.qty or 0)
+
+    active = [
+        AssemblyStatus.PENDING,
+        AssemblyStatus.IN_PROGRESS,
+        AssemblyStatus.READY,
+        AssemblyStatus.VEHICLE_ASSIGNED,
+    ]
+    asm = await db.execute(
+        select(
+            Nomenclature.article_wb.label("nm_id"),
+            AssemblyRequest.status,
+            func.sum(AssemblyRequestItem.quantity).label("qty"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+        .where(
+            AssemblyRequest.project_id == pid,
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+            AssemblyRequest.status.in_([*active, AssemblyStatus.SHIPPED]),
+            Nomenclature.article_wb.isnot(None),
+        )
+        .group_by(Nomenclature.article_wb, AssemblyRequest.status)
+        .limit(_MAX_ROWS)
+    )
+    for ar in asm:
+        key = "transit" if ar.status == AssemblyStatus.SHIPPED else "assembly"
+        out[ar.nm_id][key] += int(ar.qty or 0)
+
+    return dict(out)
+
+
 _ELASTICITY_DAYS = 90  # окно истории для оценки эластичности
 _ELASTICITY_MIN_POINTS = 6  # минимум дней с продажами и ценой
 _ELASTICITY_MIN_DISTINCT = 3  # минимум различных уровней цены
@@ -198,7 +255,7 @@ def _classify_anomaly(r: PricingRow) -> str | None:
     # Новинки исключаем — у них мало продаж из-за раскачки, а не из-за неликвида.
     if (
         not r.is_new
-        and r.wb_stock > 0
+        and r.total_stock > 0
         and (r.orders_count == 0 or (r.days_left is not None and r.days_left > _DEAD_STOCK_DAYS))
     ):
         return ANOMALY_DEAD_STOCK
@@ -214,7 +271,7 @@ def _recommend(r: PricingRow) -> str:
         return f"Сократить рекламу — ДРР {r.drr:.0f}%, ест прибыль"
     if a == ANOMALY_LOSS:
         # убыток не из-за рекламы: либо цена низкая, либо неликвид
-        if r.wb_stock > 0 and (r.orders_count == 0 or (r.days_left is not None and r.days_left > _DEAD_STOCK_DAYS)):
+        if r.total_stock > 0 and (r.orders_count == 0 or (r.days_left is not None and r.days_left > _DEAD_STOCK_DAYS)):
             return "Убыток + не продаётся → распродать скидкой на ВБ"
         if r.markup_pct is not None and r.markup_pct < _THIN_MARKUP_PCT:
             return "Поднять цену / снизить себест."
@@ -257,6 +314,7 @@ def _build_row(
     period_days: int = 30,
     elasticity: float | None = None,
     today: _date | None = None,
+    extra: dict | None = None,
 ) -> PricingRow:
     f = funnel or {}
     m = meta or {}
@@ -301,17 +359,24 @@ def _build_row(
     _today = today or _date.today()
     is_new = fsd is None or fsd >= _today - timedelta(days=_NEW_PRODUCT_DAYS)
 
-    # Остаток ВБ и производные
-    stock_value_cost = round(wb_stock * cost_price, 2) if has_cost and cost_price is not None else None
+    # Остатки по локациям: ВБ + наш склад + в сборке + в пути на ВБ = весь товар.
+    # Метрики капитала/оборота считаем по ВСЕМ остаткам — для точного анализа.
+    e = extra or {}
+    own_stock = int(e.get("own", 0))
+    assembly_stock = int(e.get("assembly", 0))
+    transit_stock = int(e.get("transit", 0))
+    total_stock = wb_stock + own_stock + assembly_stock + transit_stock
+
+    stock_value_cost = round(total_stock * cost_price, 2) if has_cost and cost_price is not None else None
     profit_per_unit = (profit / orders_count) if orders_count > 0 else None
     stock_potential_profit = (
-        round(wb_stock * profit_per_unit, 2) if profit_per_unit is not None and wb_stock > 0 else None
+        round(total_stock * profit_per_unit, 2) if profit_per_unit is not None and total_stock > 0 else None
     )
     stock_potential_revenue = (
-        round(wb_stock * current_price, 2) if has_price and current_price is not None and wb_stock > 0 else None
+        round(total_stock * current_price, 2) if has_price and current_price is not None and total_stock > 0 else None
     )
     avg_daily = orders_count / period_days if period_days > 0 else 0
-    days_left = round(wb_stock / avg_daily, 1) if avg_daily > 0 and wb_stock > 0 else None
+    days_left = round(total_stock / avg_daily, 1) if avg_daily > 0 and total_stock > 0 else None
     sales_per_month = round(avg_daily * 30, 1) if avg_daily > 0 else None
 
     # ДРР и точка безубыточности
@@ -337,8 +402,8 @@ def _build_row(
     # GMROI: валовая маржа за период / заморожено в остатке (бенчмарк ≥3)
     gross_profit = revenue - cost_total
     gmroi = round(gross_profit / stock_value_cost, 2) if stock_value_cost and stock_value_cost > 0 else None
-    # Sell-through: доля распроданного от (продано + остаток)
-    sold_plus_stock = orders_count + wb_stock
+    # Sell-through: доля распроданного от (продано + весь остаток)
+    sold_plus_stock = orders_count + total_stock
     sell_through_pct = round(orders_count / sold_plus_stock * 100, 1) if sold_plus_stock > 0 else None
 
     # Эластичность спроса → ярлык + оценка цены под макс. прибыль
@@ -384,6 +449,10 @@ def _build_row(
         margin_pct=round(float(f.get("margin") or 0), 2),
         net_markup_pct=net_markup_pct,
         wb_stock=wb_stock,
+        own_stock=own_stock,
+        assembly_stock=assembly_stock,
+        transit_stock=transit_stock,
+        total_stock=total_stock,
         is_new=is_new,
         stock_value_cost=stock_value_cost,
         stock_potential_profit=stock_potential_profit,
@@ -561,6 +630,7 @@ def _build_summary(rows: list[PricingRow]) -> PricingSummary:
         cost_share_pct=share,
         margin_pct=round(profit / revenue * 100, 2) if revenue > 0 else 0,
         wb_stock_units=sum(r.wb_stock for r in rows),
+        total_stock_units=sum(r.total_stock for r in rows),
         stock_value_cost=round(sum(r.stock_value_cost or 0 for r in rows), 2),
         anomalies=sum(1 for r in rows if r.anomaly),
     )
@@ -595,6 +665,7 @@ async def _compute_rows(
     meta_map = await _load_meta_map(db, project_id)
     cat_overrides = await refs_service.get_category_overrides(db, project_id)
     wb_stock_map = await _load_wb_stock_map(db, project_id)
+    pipeline_map = await _load_pipeline_stock(db, project_id)
     elasticity_map = await _load_elasticity_map(db, project_id)
 
     # длина периода (для темпа продаж / дней до исчерпания)
@@ -605,9 +676,9 @@ async def _compute_rows(
         except ValueError:
             period_days = 30
 
-    # универсум: с ценой ∪ продававшиеся ∪ с остатком на ВБ
+    # универсум: с ценой ∪ продававшиеся ∪ остаток на ВБ ∪ наш склад/сборка/в пути
     today = utcnow().date()
-    nm_ids = set(price_by_nm) | set(funnel_by_nm) | set(wb_stock_map)
+    nm_ids = set(price_by_nm) | set(funnel_by_nm) | set(wb_stock_map) | set(pipeline_map)
     rows = []
     for nm_id in nm_ids:
         meta = meta_map.get(nm_id) or {}
@@ -624,6 +695,7 @@ async def _compute_rows(
                 period_days=period_days,
                 elasticity=elasticity_map.get(nm_id),
                 today=today,
+                extra=pipeline_map.get(nm_id),
             ).model_dump()
         )
 

@@ -47,6 +47,10 @@ class PricingRow(BaseModel):
 
     # Остатки ВБ и производные
     wb_stock: int = 0  # остаток на складах ВБ (quantity_full)
+    own_stock: int = 0  # наш склад (WarehouseStock)
+    assembly_stock: int = 0  # в активных сборках (до отгрузки)
+    transit_stock: int = 0  # в пути на ВБ (отгружено, не принято)
+    total_stock: int = 0  # весь товар = ВБ + наш склад + сборка + в пути
     is_new: bool = False  # новинка (first_sale_date пуст или недавняя) — не неликвид, а раскачка
     stock_value_cost: float | None = None  # остаток × себест — заморожено в товаре, ₽
     stock_potential_profit: float | None = None  # остаток × прибыль/ед — потенциальная прибыль остатка, ₽
@@ -100,6 +104,7 @@ class PricingSummary(BaseModel):
     cost_share_pct: float | None = None
     margin_pct: float = 0
     wb_stock_units: int = 0  # суммарный остаток ВБ (шт)
+    total_stock_units: int = 0  # весь остаток по всем локациям (шт)
     stock_value_cost: float = 0  # заморожено в остатке по себест, ₽
     anomalies: int = 0  # число аномальных артикулов
 
