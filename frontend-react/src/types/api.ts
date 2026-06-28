@@ -3492,6 +3492,9 @@ export interface CounterpartyListItem {
   income_cny?: number | null;
   expense_cny?: number | null;
   tx_count?: number | null;
+  /** Expense category (level-2), shown/managed in the list. */
+  cat_lvl1?: string | null;
+  cat_lvl2?: string | null;
 }
 
 export interface CounterpartyDetail extends CounterpartyListItem {
@@ -3511,6 +3514,11 @@ export interface SetExpenseCategoryResponse {
   cp_key: string;
   cat_lvl1: string | null;
   cat_lvl2: string | null;
+}
+
+export interface BulkCategoryResponse {
+  counterparties: number;
+  transactions: number;
 }
 
 export type Counterparty = CounterpartyListItem;

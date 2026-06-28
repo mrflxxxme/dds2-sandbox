@@ -132,6 +132,9 @@ class CounterpartyListItem(CounterpartyBase):
     income_cny: Decimal | None = None
     expense_cny: Decimal | None = None
     tx_count: int | None = None
+    # Expense category (level-2) — populated by the list endpoint from the mapping.
+    cat_lvl1: str | None = None
+    cat_lvl2: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -162,6 +165,27 @@ class SetExpenseCategoryResponse(BaseModel):
     cp_key: str
     cat_lvl1: str | None = None
     cat_lvl2: str | None = None
+
+
+class BulkCategoryRequest(BaseModel):
+    """Apply a type and/or expense category to many counterparties at once."""
+
+    ids: list[int] = Field(..., min_length=1, max_length=1000)
+    cat_lvl1: str | None = Field(None, max_length=100)
+    cat_lvl2: str | None = Field(None, max_length=100)
+    primary_type: str | None = None
+
+    @field_validator("primary_type")
+    @classmethod
+    def validate_primary_type(cls, v: str | None) -> str | None:
+        if v is not None and v not in ALLOWED_CP_TYPES:
+            raise ValueError(f"primary_type must be one of: {ALLOWED_CP_TYPES}")
+        return v
+
+
+class BulkCategoryResponse(BaseModel):
+    counterparties: int
+    transactions: int
 
 
 class CounterpartyListResponse(BaseModel):
