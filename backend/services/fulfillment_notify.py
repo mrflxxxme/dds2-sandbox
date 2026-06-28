@@ -315,7 +315,7 @@ async def notify_ff_request_pushed(
 def build_new_assembly_text(
     assembly_number: object,
     warehouse_name: object = None,
-    qty: object = None,
+    qty: int | None = None,
     wb_number: object = None,
 ) -> str:
     """HTML «новая сборка» для чата склада ФФ-оператора (портал)."""
@@ -373,7 +373,7 @@ async def notify_new_ff_assembly(
     *,
     assembly_number: object,
     warehouse_name: object = None,
-    qty: object = None,
+    qty: int | None = None,
     wb_number: object = None,
 ) -> None:
     """Уведомить чат склада ФФ о новой созданной сборке (для оператора-портала)."""
