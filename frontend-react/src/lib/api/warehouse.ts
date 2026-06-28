@@ -407,6 +407,10 @@ export function addWarehouseMethods(api: ApiClient) {
         shipAssembly(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ship`);
         },
+        // Отгрузка всей совместной FBO-поставки разом (все назначенные сборки поставки).
+        shipJoint(id: number) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ship-joint`);
+        },
         unassignVehicle(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/unassign-vehicle`);
         },

@@ -1650,6 +1650,12 @@ export interface AssemblyRequest {
   joint_supply?: boolean;
   /** другие сборки той же совместной поставки (для бейджа «Совместная» и тултипа) */
   joint_siblings?: JointSibling[] | null;
+  /** совместная готова к назначению машины: ВСЕ сборки поставки в READY и дальше (ни одной PENDING/IN_PROGRESS) */
+  joint_ready?: boolean;
+  /** сумма паллет по всем активным сборкам совместной поставки */
+  joint_total_pallets?: number | null;
+  /** сумма веса (кг) по всем активным сборкам совместной поставки (Decimal — приходит строкой) */
+  joint_total_weight_kg?: number | string | null;
 }
 
 export interface FfProposedItem {
@@ -1673,6 +1679,12 @@ export interface JointSibling {
   warehouse_id: number;
   warehouse_name?: string | null;
   status: string;
+  /** паллеты сборки этого склада-источника */
+  pallets_count?: number | null;
+  /** вес паллеты (кг) этого склада-источника (Decimal — приходит строкой) */
+  pallet_weight_kg?: number | string | null;
+  /** внутренний номер заявки в ФФ-портале склада-источника */
+  ff_request_number?: string | null;
 }
 
 /** Расходящаяся позиция: наш qty vs суммарный qty привязанных заявок ФФ */
