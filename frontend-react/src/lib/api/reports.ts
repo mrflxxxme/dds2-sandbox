@@ -30,6 +30,7 @@ export function addReportMethods(api: ApiClient) {
                 daily_income_by_type: Array<{ date: string; marketplace: number; financing: number; other: number }>;
                 income_by_type: Array<{ key: string; name: string; value: number; count: number }>;
                 expense_by_category: Array<{ name: string; value: number }>;
+                expense_by_type: Array<{ type: string | null; type_label: string; value: number; count: number; categories: Array<{ name: string; value: number; count?: number }> }>;
                 income_counterparties: Array<{ name: string; key: string; total: number; count: number }>;
                 date_from: string; date_to: string;
             }>('GET', `/api/v1/reports/dashboard_summary?${q.toString()}`);

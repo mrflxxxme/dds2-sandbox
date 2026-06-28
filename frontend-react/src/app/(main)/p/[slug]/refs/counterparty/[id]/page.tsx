@@ -53,6 +53,11 @@ export default function CounterpartyDetailPage() {
     const router = useRouter();
 
     const [detail, setDetail] = useState<CounterpartyDetail | null>(null);
+    const [catEditing, setCatEditing] = useState(false);
+    const [catL1, setCatL1] = useState('');
+    const [catL2, setCatL2] = useState('');
+    const [catSaving, setCatSaving] = useState(false);
+    const [catMsg, setCatMsg] = useState('');
     const [documents, setDocuments] = useState<CounterpartyDocument[]>([]);
     const [transactions, setTransactions] = useState<CounterpartyTransactionItem[]>([]);
     const [txTotal, setTxTotal] = useState(0);
@@ -152,6 +157,22 @@ export default function CounterpartyDetailPage() {
             setError(e instanceof Error ? e.message : 'Ошибка сохранения');
         } finally {
             setSaving(false);
+        }
+    };
+
+    const handleSaveCategory = async () => {
+        setCatSaving(true); setCatMsg('');
+        try {
+            const res = await api.setCounterpartyCategory(id, catL1.trim() || null, catL2.trim() || null);
+            setCatEditing(false);
+            setCatMsg(res.cat_lvl1
+                ? `✓ Категория применена к ${res.applied} операциям`
+                : `Категория снята (${res.applied} операций)`);
+            await loadDetail();
+        } catch (e: unknown) {
+            setCatMsg(e instanceof Error ? e.message : 'Ошибка');
+        } finally {
+            setCatSaving(false);
         }
     };
 
@@ -324,6 +345,37 @@ export default function CounterpartyDetailPage() {
                     </div>
                 </div>
             )}
+
+            {/* Категория расхода (level-2) — управляется здесь, применяется ко всем операциям */}
+            <div className="glass-card" style={{ marginBottom: 16, padding: '14px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)', fontWeight: 600 }}>💸 Категория расхода:</span>
+                    {!catEditing ? (
+                        <>
+                            {detail.cat_lvl1
+                                ? <span className="badge badge-warning">{detail.cat_lvl1}{detail.cat_lvl2 ? ` · ${detail.cat_lvl2}` : ''}</span>
+                                : <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>не задана</span>}
+                            <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }}
+                                onClick={() => { setCatL1(detail.cat_lvl1 ?? ''); setCatL2(detail.cat_lvl2 ?? ''); setCatEditing(true); setCatMsg(''); }}>
+                                {detail.cat_lvl1 ? 'Изменить' : 'Задать'}
+                            </button>
+                        </>
+                    ) : (
+                        <>
+                            <input className="form-input" style={{ width: 220 }} placeholder="Категория (напр. Логистика)" value={catL1} onChange={e => setCatL1(e.target.value)} />
+                            <input className="form-input" style={{ width: 180 }} placeholder="Под-категория (опц.)" value={catL2} onChange={e => setCatL2(e.target.value)} />
+                            <button className="btn btn-primary btn-sm" onClick={handleSaveCategory} disabled={catSaving}>
+                                {catSaving ? '…' : 'Применить ко всем операциям'}
+                            </button>
+                            <button className="btn btn-secondary btn-sm" onClick={() => setCatEditing(false)}>Отмена</button>
+                        </>
+                    )}
+                </div>
+                {catMsg && <div style={{ fontSize: 12, color: 'var(--color-success)', marginTop: 8 }}>{catMsg}</div>}
+                <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 6 }}>
+                    Применяется ко ВСЕМ операциям этого контрагента и к будущим импортам. Тип (бейдж выше) — крупная группа, категория — детальнее.
+                </div>
+            </div>
 
             {/* Date range picker for stats */}
             <div className="glass-card" style={{ marginBottom: 16, padding: '12px 16px' }}>

@@ -16,7 +16,7 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,7 +24,8 @@ from backend.cache import invalidate_project_reports
 from backend.config import settings
 from backend.models.counterparty import Counterparty, CounterpartyDocument
 from backend.models.loan import Loan
-from backend.models.transactions import Transaction
+from backend.models.refs import CounterpartyCategory
+from backend.models.transactions import CategoryChangeLog, Transaction
 from backend.schemas.counterparty import (
     CounterpartyCategorySummary,
     CounterpartyCreate,
@@ -511,6 +512,19 @@ class CounterpartyService:
             {"id": row.id, "name": row.name, "warehouse_type": row.warehouse_type} for row in wh_res.all()
         ]
 
+        # Expense category (level-2), from the cp_key→category mapping.
+        cp_key = (cp.inn or "").strip() or (cp.name or "").strip().lower()
+        cat_res = await self.db.execute(
+            select(CounterpartyCategory.cat_lvl1, CounterpartyCategory.cat_lvl2)
+            .where(
+                CounterpartyCategory.cp_key == cp_key,
+                CounterpartyCategory.project_id == project_id,
+                CounterpartyCategory.is_deleted == False,  # noqa: E712
+            )
+            .limit(1)
+        )
+        cat_row = cat_res.first()
+
         return {
             "id": cp.id,
             "inn": cp.inn,
@@ -521,6 +535,8 @@ class CounterpartyService:
             "contract_number": cp.contract_number,
             "notes": cp.notes,
             "contacts": cp.contacts,
+            "cat_lvl1": cat_row.cat_lvl1 if cat_row else None,
+            "cat_lvl2": cat_row.cat_lvl2 if cat_row else None,
             "created_by_import": cp.created_by_import,
             "created_at": cp.created_at,
             "updated_at": cp.updated_at,
@@ -607,6 +623,112 @@ class CounterpartyService:
         await self.db.refresh(cp)
         await invalidate_project_reports(project_id)
         return cp
+
+    # ─── expense category (level-2) ─────────────────────────────────────
+
+    async def set_expense_category(
+        self,
+        *,
+        counterparty_id: int,
+        project_id: int,
+        cat_lvl1: str | None,
+        cat_lvl2: str | None,
+    ) -> dict:
+        """Set the expense category on a counterparty and propagate it to ALL of
+        its transactions (matched by ``counterparty_id`` OR ``cp_key``).
+
+        Persists to ``CounterpartyCategory`` (keyed by ``cp_key``, linked via
+        ``counterparty_id``) so future imports auto-apply via master logic. Passing
+        ``cat_lvl1=None`` clears the category (and soft-deletes the mapping row).
+        Returns ``{applied, cp_key, cat_lvl1, cat_lvl2}``.
+        """
+        res = await self.db.execute(
+            select(Counterparty).where(
+                Counterparty.id == counterparty_id,
+                Counterparty.project_id == project_id,
+                Counterparty.is_deleted == False,  # noqa: E712
+            )
+        )
+        cp = res.scalar_one_or_none()
+        if cp is None:
+            raise CounterpartyNotFoundError()
+
+        # cp_key mirrors master_logic.make_cp_key: INN if present, else lowercased name.
+        cp_key = (cp.inn or "").strip() or (cp.name or "").strip().lower()
+        cat1 = (cat_lvl1 or "").strip() or None
+        cat2 = (cat_lvl2 or "").strip() or None
+
+        # Upsert THIS project's cp_key→category mapping (drives future imports).
+        # The lookup is project-scoped (incl. soft-deleted) so we only ever restore
+        # OUR OWN row — never re-home a sibling tenant's. cp_key is GLOBALLY unique,
+        # so a fresh INSERT can still collide with another project that owns the key;
+        # surface that as a 409 instead of corrupting the other tenant. (Durable cure
+        # = migrate the unique to partial (project_id, cp_key) WHERE is_deleted=false.)
+        cpc_res = await self.db.execute(
+            select(CounterpartyCategory).where(
+                CounterpartyCategory.cp_key == cp_key,
+                CounterpartyCategory.project_id == project_id,
+            )
+        )
+        cpc = cpc_res.scalar_one_or_none()
+        old_cat1 = cpc.cat_lvl1 if cpc else None
+        old_cat2 = cpc.cat_lvl2 if cpc else None
+        if cpc:
+            cpc.cat_lvl1, cpc.cat_lvl2 = cat1, cat2
+            cpc.counterparty_id, cpc.cp_name, cpc.is_deleted = cp.id, cp.name, False
+        else:
+            self.db.add(
+                CounterpartyCategory(
+                    project_id=project_id,
+                    cp_key=cp_key,
+                    cp_name=cp.name,
+                    counterparty_id=cp.id,
+                    cat_lvl1=cat1,
+                    cat_lvl2=cat2,
+                )
+            )
+        try:
+            await self.db.flush()
+        except IntegrityError as e:
+            await self.db.rollback()
+            raise CounterpartyConflictError(
+                "Категория для этого ИНН уже задана в другом проекте"
+            ) from e
+
+        # Propagate to every transaction of this counterparty (by id or cp_key).
+        result = await self.db.execute(
+            update(Transaction)
+            .where(
+                Transaction.project_id == project_id,
+                Transaction.is_deleted == False,  # noqa: E712
+                or_(Transaction.counterparty_id == cp.id, Transaction.cp_key == cp_key),
+            )
+            .values(
+                cat_lvl1_2=cat1,
+                cat_lvl2_2=cat2,
+                status=case(
+                    (Transaction.is_cashflow2 == 0, "NO_CASHFLOW"),
+                    else_=("OK" if cat1 else "UNASSIGNED"),
+                ),
+            )
+        )
+
+        # Audit trail for the bulk categorization (scope='cp').
+        self.db.add(
+            CategoryChangeLog(
+                project_id=project_id,
+                txn_id=f"cp:{cp_key}"[:300],
+                old_cat_lvl1=old_cat1,
+                old_cat_lvl2=old_cat2,
+                new_cat_lvl1=cat1,
+                new_cat_lvl2=cat2,
+                scope="cp",
+            )
+        )
+        await self.db.commit()
+        await invalidate_project_reports(project_id)
+        applied = int(getattr(result, "rowcount", 0) or 0)
+        return {"applied": applied, "cp_key": cp_key, "cat_lvl1": cat1, "cat_lvl2": cat2}
 
     # ─── soft_delete ────────────────────────────────────────────────────
 

@@ -139,12 +139,29 @@ class CounterpartyListItem(CounterpartyBase):
 class CounterpartyDetail(CounterpartyListItem):
     """Full counterparty card with stats, linked entities, docs."""
 
+    # Expense category (level-2) — managed on the card, propagated to transactions.
+    cat_lvl1: str | None = None
+    cat_lvl2: str | None = None
     stats_rub: CounterpartyStats = Field(default_factory=CounterpartyStats)
     stats_cny: CounterpartyStats = Field(default_factory=CounterpartyStats)
     linked_warehouses: list[dict] = Field(default_factory=list)
     linked_suppliers: list[dict] = Field(default_factory=list)
     active_loans: list[dict] = Field(default_factory=list)
     docs_count: int = 0
+
+
+class SetExpenseCategoryRequest(BaseModel):
+    """Set/clear the expense category on a counterparty (cat_lvl1=None clears)."""
+
+    cat_lvl1: str | None = Field(None, max_length=100)
+    cat_lvl2: str | None = Field(None, max_length=100)
+
+
+class SetExpenseCategoryResponse(BaseModel):
+    applied: int
+    cp_key: str
+    cat_lvl1: str | None = None
+    cat_lvl2: str | None = None
 
 
 class CounterpartyListResponse(BaseModel):

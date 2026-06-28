@@ -122,6 +122,102 @@ async def _compute_income_by_type(
     return daily_income_by_type, income_by_type
 
 
+# ─── Expense structure: 2-level (counterparty type → expense category) ───────
+_CP_TYPE_LABELS = {
+    "SUPPLIER": "Поставщик",
+    "FULFILLMENT": "Фулфилмент",
+    "CARRIER": "Перевозчик",
+    "CUSTOMS_BROKER": "Таможенный брокер",
+    "DESIGNER": "Дизайнер",
+    "LEGAL": "Юридические",
+    "LANDLORD": "Аренда",
+    "IT_SERVICE": "IT-сервисы",
+    "MARKETPLACE": "Маркетплейс",
+    "BANK": "Банк",
+    "GOVERNMENT": "Госорганы",
+    "AFFILIATED": "Аффилированные",
+    "OTHER": "Прочее",
+}
+
+
+async def _compute_expense_by_type(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+    date_to: date,
+    avg_cny_rate: float,
+) -> list[dict]:
+    """Expenses grouped by counterparty type (level 1) → category (level 2).
+
+    Level 1 = ``counterparty.primary_type`` (what the user sets on the card);
+    level 2 = ``cat_lvl1_2``. Transactions with no linked counterparty fall under
+    «Без контрагента». CNY→RUB via the period's average rate (as elsewhere here).
+    """
+    from backend.models.counterparty import Counterparty
+
+    ptype = func.coalesce(Counterparty.primary_type, text("'__none__'")).label("ptype")
+    cat = func.coalesce(func.nullif(Transaction.cat_lvl1_2, ""), text("'Без категории'")).label("cat")
+    result = await db.execute(
+        select(
+            ptype,
+            cat,
+            Transaction.currency,
+            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            func.count().label("cnt"),
+        )
+        .select_from(Transaction)
+        .join(
+            Counterparty,
+            and_(
+                Counterparty.id == Transaction.counterparty_id,
+                Counterparty.project_id == Transaction.project_id,
+                Counterparty.is_deleted == False,  # noqa: E712
+            ),
+            isouter=True,
+        )
+        .where(
+            Transaction.project_id == project_id,
+            Transaction.date >= date_from,
+            Transaction.date <= date_to,
+            Transaction.expense > 0,
+            Transaction.is_cashflow2 == 1,
+        )
+        .group_by(ptype, cat, Transaction.currency)
+    )
+
+    types: dict = {}
+    for row in result:
+        val = float(row.expense)
+        if row.currency == "CNY":
+            val *= avg_cny_rate
+        t = types.setdefault(row.ptype, {"value": 0.0, "count": 0, "cats": {}})
+        t["value"] += val
+        t["count"] += row.cnt
+        c = t["cats"].setdefault(row.cat, {"value": 0.0, "count": 0})
+        c["value"] += val
+        c["count"] += row.cnt
+
+    out = []
+    for pt, t in types.items():
+        label = "Без контрагента" if pt == "__none__" else _CP_TYPE_LABELS.get(pt, pt)
+        cats = sorted(
+            [{"name": k, "value": round(v["value"], 2), "count": v["count"]} for k, v in t["cats"].items()],
+            key=lambda x: x["value"],
+            reverse=True,
+        )
+        out.append(
+            {
+                "type": None if pt == "__none__" else pt,
+                "type_label": label,
+                "value": round(t["value"], 2),
+                "count": t["count"],
+                "categories": cats,
+            }
+        )
+    out.sort(key=lambda x: x["value"], reverse=True)
+    return out
+
+
 @cached(prefix="reports:dashboard", ttl=300)
 async def get_dashboard_summary(
     db: AsyncSession,
@@ -371,6 +467,9 @@ async def get_dashboard_summary(
         db, project_id, date_from, date_to, rates_map, fallback_rate
     )
 
+    # 10. Expense structure — 2-level: counterparty type → category
+    expense_by_type = await _compute_expense_by_type(db, project_id, date_from, date_to, avg_cny_rate)
+
     return {
         "balance_rub": balance_rub,
         "balance_cny": balance_cny,
@@ -392,6 +491,7 @@ async def get_dashboard_summary(
         "daily_income_by_type": daily_income_by_type,
         "income_by_type": income_by_type,
         "expense_by_category": expense_by_category,
+        "expense_by_type": expense_by_type,
         "income_counterparties": income_counterparties,
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),

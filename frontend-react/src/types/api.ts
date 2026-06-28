@@ -633,6 +633,14 @@ export interface ExpenseCategoryPie {
   count?: number;
 }
 
+export interface ExpenseTypeGroup {
+  type: string | null;       // counterparty primary_type (null = «Без контрагента»)
+  type_label: string;        // localized label
+  value: number;
+  count: number;
+  categories: ExpenseCategoryPie[];  // level-2 breakdown within the type
+}
+
 export interface DailyIncomeByType {
   date: string;
   marketplace: number;
@@ -669,6 +677,7 @@ export interface DashboardSummary {
   daily_income_by_type: DailyIncomeByType[];
   income_by_type: IncomeTypeSlice[];
   expense_by_category: ExpenseCategoryPie[];
+  expense_by_type: ExpenseTypeGroup[];
   income_counterparties: IncomeCounterparty[];
   date_from: string;
   date_to: string;
@@ -3465,12 +3474,22 @@ export interface CounterpartyListItem {
 }
 
 export interface CounterpartyDetail extends CounterpartyListItem {
+  /** Expense category (level-2), managed on the card and propagated to transactions. */
+  cat_lvl1?: string | null;
+  cat_lvl2?: string | null;
   stats_rub: CounterpartyStats;
   stats_cny: CounterpartyStats;
   linked_warehouses: { id: number; name: string; warehouse_type?: string }[];
   linked_suppliers: { id: number; name: string }[];
   active_loans: LoanShort[];
   docs_count: number;
+}
+
+export interface SetExpenseCategoryResponse {
+  applied: number;
+  cp_key: string;
+  cat_lvl1: string | null;
+  cat_lvl2: string | null;
 }
 
 export type Counterparty = CounterpartyListItem;
