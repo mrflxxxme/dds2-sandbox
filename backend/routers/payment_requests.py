@@ -22,14 +22,14 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.auth import get_current_user
 from backend.config import settings
 from backend.database import get_db
 from backend.integrations.faktura_api import FakturaApiError
-from backend.models import Project, User
+from backend.models import Project, ProjectMember, User
 from backend.models.payment_request import PaymentRequest
 from backend.project_context import get_current_project
 from backend.rbac import require_role
@@ -44,7 +44,9 @@ from backend.schemas.payment_request import (
     CreateDraftsRequest,
     CreateDraftsResponse,
     CreateDraftResult,
+    InvoiceParseResult,
     LinkShipmentsRequest,
+    PaymentActionRequest,
     PaymentRequestCreate,
     PaymentRequestDetail,
     PaymentRequestDocumentResponse,
@@ -57,6 +59,7 @@ from backend.schemas.payment_request import (
     SubmitRequest,
     UnlinkShipmentsRequest,
 )
+from backend.services import invoice_parser
 from backend.services import payment_request_documents as docs_service
 from backend.services.faktura_payment import PaymentDraftError, create_payment_draft
 from backend.services.payment_request_service import (
@@ -83,6 +86,7 @@ def _to_detail(pr: PaymentRequest) -> PaymentRequestDetail:
         for e in sorted(pr.events, key=lambda e: e.changed_at)
     ]
     detail.doc_count = len(active_docs)
+    detail.project_name = pr.project.name if pr.project else None  # «—» для общей заявки
     return detail
 
 
@@ -106,6 +110,7 @@ async def get_bank_by_bic(bic: str, _user: User = Depends(get_current_user)) -> 
 @router.get("", response_model=PaymentRequestListResponse)
 async def list_payment_requests(
     status_filter: str | None = Query(None, alias="status"),
+    category: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     counterparty_id: int | None = None,
@@ -115,9 +120,10 @@ async def list_payment_requests(
     db: AsyncSession = Depends(get_db),
 ):
     service = PaymentRequestService(db)
-    rows, total, doc_counts = await service.list_requests(
+    rows, total, doc_counts, project_names = await service.list_requests(
         project.id,
         status=status_filter,
+        category=category,
         date_from=date_from,
         date_to=date_to,
         counterparty_id=counterparty_id,
@@ -128,6 +134,7 @@ async def list_payment_requests(
     for pr in rows:
         row = PaymentRequestRow.model_validate(pr)
         row.doc_count = doc_counts.get(pr.id, 0)
+        row.project_name = project_names.get(pr.project_id) if pr.project_id is not None else None
         items.append(row)
     return PaymentRequestListResponse(items=items, total=total)
 
@@ -266,7 +273,8 @@ async def get_payment_request_status(
     res = await db.execute(
         select(PaymentRequest).where(
             PaymentRequest.id == request_id,
-            PaymentRequest.project_id == project.id,
+            # свой проект ИЛИ общая (без проекта)
+            or_(PaymentRequest.project_id == project.id, PaymentRequest.project_id.is_(None)),
             PaymentRequest.is_deleted == False,  # noqa: E712
         )
     )
@@ -291,12 +299,31 @@ async def create_payment_request(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
+    # Целевой проект: поле не передано → текущий; null → общая (без проекта);
+    # число → этот проект (проверяем членство, чтобы нельзя было «подложить» чужой).
+    if "project_id" in body.model_fields_set:
+        target_pid = body.project_id
+        if target_pid is not None and target_pid != project.id:
+            member = (
+                await db.execute(
+                    select(ProjectMember).where(
+                        ProjectMember.project_id == target_pid,
+                        ProjectMember.user_id == user.id,
+                        ProjectMember.is_deleted == False,  # noqa: E712
+                    )
+                )
+            ).scalar_one_or_none()
+            if member is None:
+                raise HTTPException(status_code=403, detail="Нет доступа к выбранному проекту")
+    else:
+        target_pid = project.id
+
     service = PaymentRequestService(db)
     try:
-        pr = await service.create_request(project.id, body, user.id)
+        pr = await service.create_request(target_pid, body, user.id)
     except PaymentRequestValidationError as e:
         raise HTTPException(status_code=422, detail={"error": "VALIDATION", "missing": e.missing})
-    full = await service.get_request(project.id, pr.id)
+    full = await service.get_request(pr.project_id, pr.id)
     return _to_detail(full)  # type: ignore[arg-type]
 
 
@@ -359,6 +386,81 @@ async def cancel_payment_request(
     service = PaymentRequestService(db)
     try:
         await service.cancel_request(project.id, request_id, comment=body.comment)
+    except PaymentRequestValidationError as e:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "missing": e.missing})
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    full = await service.get_request(project.id, request_id)
+    return _to_detail(full)  # type: ignore[arg-type]
+
+
+# ─── Согласование (только админ) ────────────────────────────────────────────────
+
+
+@router.post(
+    "/{request_id}/approve",
+    response_model=PaymentRequestDetail,
+    dependencies=[Depends(rate_limit_write), Depends(require_role("admin"))],
+)
+async def approve_payment_request(
+    request_id: int,
+    body: PaymentActionRequest,
+    user: User = Depends(get_current_user),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Согласовать заявку (PENDING_REVIEW → APPROVED). Оплату админ проводит вне системы."""
+    service = PaymentRequestService(db)
+    try:
+        await service.approve_request(project.id, request_id, comment=body.comment, changed_by=_actor(user))
+    except PaymentRequestValidationError as e:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "missing": e.missing})
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    full = await service.get_request(project.id, request_id)
+    return _to_detail(full)  # type: ignore[arg-type]
+
+
+@router.post(
+    "/{request_id}/reject",
+    response_model=PaymentRequestDetail,
+    dependencies=[Depends(rate_limit_write), Depends(require_role("admin"))],
+)
+async def reject_payment_request(
+    request_id: int,
+    body: PaymentActionRequest,
+    user: User = Depends(get_current_user),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Отклонить заявку (PENDING_REVIEW/APPROVED → REJECTED)."""
+    service = PaymentRequestService(db)
+    try:
+        await service.reject_request(project.id, request_id, comment=body.comment, changed_by=_actor(user))
+    except PaymentRequestValidationError as e:
+        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "missing": e.missing})
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    full = await service.get_request(project.id, request_id)
+    return _to_detail(full)  # type: ignore[arg-type]
+
+
+@router.post(
+    "/{request_id}/mark-paid",
+    response_model=PaymentRequestDetail,
+    dependencies=[Depends(rate_limit_write), Depends(require_role("admin"))],
+)
+async def mark_paid_payment_request(
+    request_id: int,
+    body: PaymentActionRequest,
+    user: User = Depends(get_current_user),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Отметить согласованную заявку оплаченной вручную (APPROVED → PAID)."""
+    service = PaymentRequestService(db)
+    try:
+        await service.mark_paid_request(project.id, request_id, comment=body.comment, changed_by=_actor(user))
     except PaymentRequestValidationError as e:
         raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "missing": e.missing})
     except ValueError as e:
@@ -449,6 +551,45 @@ async def create_payment_drafts_bulk(
             results.append(CreateDraftResult(id=rid, ok=False, error=f"Банк недоступен: {e}"))
     created = sum(1 for r in results if r.ok)
     return CreateDraftsResponse(results=results, created=created, failed=len(results) - created)
+
+
+# ─── Распознавание реквизитов из счёта ──────────────────────────────────────────
+
+
+@router.post(
+    "/parse-invoice",
+    response_model=InvoiceParseResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def parse_invoice_file(
+    file: UploadFile = File(...),
+    _user: User = Depends(get_current_user),
+) -> InvoiceParseResult:
+    """Распознать реквизиты получателя из файла счёта (PDF/Word) — ПОДСКАЗКА для формы.
+
+    В БД ничего не пишется (без project-скоупа). Поля, не прошедшие проверку
+    (контроль-ключ р/с по БИК, БИК в справочнике), остаются None — вводятся вручную.
+    """
+    # Счёт: только PDF или Word (фото исключаем — нечего парсить без OCR). Валидация
+    # как у upload_payment_request_document: allowlist MIME + блок исполняемых + magic.
+    content_type = (file.content_type or "").lower()
+    filename_lower = (file.filename or "").lower()
+    allowed_mime = (
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument",
+    )
+    bad_ext = (".exe", ".bat", ".cmd", ".dll", ".sh", ".msi", ".ps1", ".com")
+    if filename_lower.endswith(bad_ext) or not any(content_type.startswith(p) for p in allowed_mime):
+        raise HTTPException(status_code=415, detail="Поддерживаются PDF или Word (для распознавания реквизитов)")
+
+    data = await file.read()
+    validate_file_content(data, file.filename or "invoice")  # magic-bytes integrity по расширению
+    max_bytes = min(_PR_DOC_MAX_MB, settings.MAX_UPLOAD_SIZE_MB) * 1024 * 1024
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {_PR_DOC_MAX_MB} МБ")
+
+    return await invoice_parser.parse_invoice_async(data, file.filename or "invoice")
 
 
 # ─── Documents ────────────────────────────────────────────────────────────────

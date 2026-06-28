@@ -11,6 +11,8 @@ import type {
     CreateDraftsResponse,
     PaymentRequestDocType,
     PaymentRequestStatus,
+    PaymentRequestCategory,
+    InvoiceParseResult,
 } from '@/types/api';
 
 export function addPaymentRequestMethods(api: ApiClient) {
@@ -18,6 +20,7 @@ export function addPaymentRequestMethods(api: ApiClient) {
         /** GET /api/v1/payment-requests — list with optional filters */
         listPaymentRequests(filters?: {
             status?: PaymentRequestStatus;
+            category?: PaymentRequestCategory;
             date_from?: string;
             date_to?: string;
             counterparty_id?: number;
@@ -26,6 +29,7 @@ export function addPaymentRequestMethods(api: ApiClient) {
         }): Promise<PaymentRequestListResponse> {
             const qs = new URLSearchParams();
             if (filters?.status) qs.set('status', filters.status);
+            if (filters?.category) qs.set('category', filters.category);
             if (filters?.date_from) qs.set('date_from', filters.date_from);
             if (filters?.date_to) qs.set('date_to', filters.date_to);
             if (filters?.counterparty_id != null) qs.set('counterparty_id', String(filters.counterparty_id));
@@ -114,6 +118,13 @@ export function addPaymentRequestMethods(api: ApiClient) {
             return api.uploadFormData<PaymentRequestDocument>(`/api/v1/payment-requests/${id}/documents`, formData);
         },
 
+        /** POST /api/v1/payment-requests/parse-invoice — распознать реквизиты из PDF/Word счёта */
+        parseInvoice(file: File): Promise<InvoiceParseResult> {
+            const formData = new FormData();
+            formData.append('file', file);
+            return api.uploadFormData<InvoiceParseResult>('/api/v1/payment-requests/parse-invoice', formData);
+        },
+
         /** Returns the URL to open/download a document PDF */
         paymentRequestDocumentDownloadUrl(id: number, docId: number): string {
             return `/api/v1/payment-requests/${id}/documents/${docId}/download`;
@@ -132,6 +143,21 @@ export function addPaymentRequestMethods(api: ApiClient) {
         /** POST /api/v1/payment-requests/{id}/cancel — отменить заявку (PENDING_REVIEW/DRAFT → CANCELLED) */
         cancelPaymentRequest(id: number, comment?: string): Promise<PaymentRequestDetail> {
             return api.request<PaymentRequestDetail>('POST', `/api/v1/payment-requests/${id}/cancel`, { comment: comment ?? null });
+        },
+
+        /** POST /api/v1/payment-requests/{id}/approve — согласовать (PENDING_REVIEW → APPROVED), только админ */
+        approvePaymentRequest(id: number, comment?: string): Promise<PaymentRequestDetail> {
+            return api.request<PaymentRequestDetail>('POST', `/api/v1/payment-requests/${id}/approve`, { comment: comment ?? null });
+        },
+
+        /** POST /api/v1/payment-requests/{id}/reject — отклонить (PENDING_REVIEW/APPROVED → REJECTED), только админ */
+        rejectPaymentRequest(id: number, comment?: string): Promise<PaymentRequestDetail> {
+            return api.request<PaymentRequestDetail>('POST', `/api/v1/payment-requests/${id}/reject`, { comment: comment ?? null });
+        },
+
+        /** POST /api/v1/payment-requests/{id}/mark-paid — отметить оплаченным вручную (APPROVED → PAID), только админ */
+        markPaymentRequestPaid(id: number, comment?: string): Promise<PaymentRequestDetail> {
+            return api.request<PaymentRequestDetail>('POST', `/api/v1/payment-requests/${id}/mark-paid`, { comment: comment ?? null });
         },
 
         /** GET /api/v1/payment-requests/{id}/status — lightweight poll */

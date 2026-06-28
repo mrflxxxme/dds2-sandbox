@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ALLOWED_SOURCES = ["MANUAL", "COUNTERPARTY"]
 ALLOWED_PR_DOC_TYPES = ["INVOICE", "ACT"]
+ALLOWED_CATEGORIES = ["LOGISTICS", "PHOTO_CONTENT", "CUSTOMS", "FULFILLMENT", "DESIGN", "HOUSEHOLD", "OTHER"]
 
 _INN_RE = r"^\d{10,12}$"
 _BIK_RE = r"^\d{9}$"
@@ -23,9 +24,17 @@ _ACC_RE = r"^\d{20}$"
 
 
 class PaymentRequestCreate(BaseModel):
-    """Создание заявки. source=COUNTERPARTY + outbound_shipment_id → авто-заполнение реквизитов/суммы."""
+    """Создание заявки. source=COUNTERPARTY + outbound_shipment_id → авто-заполнение реквизитов/суммы.
+
+    project_id: целевой проект. Поле НЕ передано → текущий проект (из X-Project-Id).
+    Передано как null → «общая» заявка без проекта. Передано числом → этот проект
+    (роутер проверяет членство). Различение «не передано / null» — через model_fields_set.
+    category: назначение оплаты (LOGISTICS/PHOTO_CONTENT/CUSTOMS/OTHER).
+    """
 
     source: str = Field(default="MANUAL")
+    project_id: int | None = None
+    category: str | None = None
     outbound_shipment_id: int | None = None
     # Несколько заборов на одну оплату (один счёт за две отгрузки) — одного перевозчика.
     # Если задано, сумма = Σ pickup_cost заборов, outbound_shipment_id = первый.
@@ -52,11 +61,19 @@ class PaymentRequestCreate(BaseModel):
             raise ValueError(f"source must be one of: {ALLOWED_SOURCES}")
         return v
 
+    @field_validator("category")
+    @classmethod
+    def _validate_category(cls, v: str | None) -> str | None:
+        if v is not None and v not in ALLOWED_CATEGORIES:
+            raise ValueError(f"category must be one of: {ALLOWED_CATEGORIES}")
+        return v
+
 
 class PaymentRequestUpdate(BaseModel):
     """PATCH черновика — все поля опциональны (source не меняем)."""
 
     counterparty_id: int | None = None
+    category: str | None = None
     payee_inn: str | None = Field(None, pattern=_INN_RE)
     payee_kpp: str | None = Field(None, pattern=_BIK_RE)
     payee_account: str | None = Field(None, pattern=_ACC_RE)
@@ -69,6 +86,13 @@ class PaymentRequestUpdate(BaseModel):
     pickup_date: date | None = None
     purpose: str | None = None
 
+    @field_validator("category")
+    @classmethod
+    def _validate_category(cls, v: str | None) -> str | None:
+        if v is not None and v not in ALLOWED_CATEGORIES:
+            raise ValueError(f"category must be one of: {ALLOWED_CATEGORIES}")
+        return v
+
 
 class SubmitRequest(BaseModel):
     comment: str | None = None
@@ -78,6 +102,32 @@ class CancelRequest(BaseModel):
     """Отмена заявки на оплату (PENDING_REVIEW/DRAFT → CANCELLED) с опциональной причиной."""
 
     comment: str | None = None
+
+
+class PaymentActionRequest(BaseModel):
+    """Согласовать / Отклонить / Отметить оплаченным — ручные действия админа.
+    comment: причина/примечание (для «Отклонить» — рекомендуется)."""
+
+    comment: str | None = None
+
+
+class InvoiceParseResult(BaseModel):
+    """Распознанные реквизиты из файла счёта (PDF/Word) — ПОДСКАЗКА для формы, в БД не пишется.
+    Поля, не прошедшие проверку (контроль-ключ р/с по БИК, БИК в справочнике), остаются None —
+    их пользователь вводит вручную. fields_found — что распознано (для ✓ в UI), warnings — что
+    требует ручной проверки. Числовые поля сериализуются строкой (как и весь домен)."""
+
+    payee_name: str | None = None
+    payee_inn: str | None = None
+    payee_kpp: str | None = None
+    payee_account: str | None = None
+    payee_bik: str | None = None
+    payee_bank_name: str | None = None
+    payee_corr_account: str | None = None
+    amount: Decimal | None = None
+    purpose: str | None = None
+    fields_found: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class CreateDraftRequest(BaseModel):
@@ -148,6 +198,9 @@ class PaymentRequestRow(BaseModel):
     id: int
     number: str
     status: str
+    category: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None  # имя проекта («—» для общей заявки) — заполняет сервис
     payee_name: str | None = None
     payee_inn: str | None = None
     amount: Decimal

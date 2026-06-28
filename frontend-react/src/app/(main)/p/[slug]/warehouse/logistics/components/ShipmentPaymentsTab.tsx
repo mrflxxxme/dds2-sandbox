@@ -26,6 +26,7 @@ function sortVal(r: ShippableShipmentRow, key: SortKey): string | number {
 const STATUS_MAP: Record<PaymentRequestStatus, { label: string; className: string }> = {
     DRAFT:          { label: 'Черновик',         className: 'badge-secondary' },
     PENDING_REVIEW: { label: 'На проверке',      className: 'badge-warning' },
+    APPROVED:       { label: 'Согласовано',      className: 'badge-info' },
     DRAFT_CREATED:  { label: 'Платёжка создана', className: 'badge-info' },
     PAID:           { label: 'Оплачено',         className: 'badge-success' },
     REJECTED:       { label: 'Отклонено',        className: 'badge-danger' },
