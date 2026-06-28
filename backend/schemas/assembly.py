@@ -125,6 +125,7 @@ class AssemblyItemResponse(BaseModel):
     barcode: str
     quantity: int
     product_name: str | None = None
+    article: str | None = None
     brand: str | None = None
     stock_quantity: int = 0
 

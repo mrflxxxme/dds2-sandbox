@@ -1166,6 +1166,7 @@ export default function AssemblyDetailPage() {
                 const itemCols: Column[] = [
                     { key: 'barcode', label: 'ШК', render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span> },
                     { key: 'product_name', label: 'Товар', render: (v: string) => <span style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>{v || '\u2014'}</span> },
+                    { key: 'article', label: 'Артикул', render: (v: string) => <span style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', fontFamily: 'monospace', fontSize: 12 }}>{v || '—'}</span> },
                     {
                         key: 'boxes', label: 'Коробок', align: 'right',
                         render: (_v: unknown, row: { quantity: number; _ppb?: number }) => {

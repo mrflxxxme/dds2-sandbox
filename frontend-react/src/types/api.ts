@@ -1587,6 +1587,7 @@ export interface AssemblyRequestItem {
   barcode: string;
   quantity: number;
   product_name?: string;
+  article?: string | null;
   brand?: string;
   stock_quantity: number;
 }

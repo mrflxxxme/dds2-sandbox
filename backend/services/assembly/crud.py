@@ -331,6 +331,7 @@ async def _build_items_with_stock(
                 "barcode": item.barcode,
                 "quantity": item.quantity,
                 "product_name": product_name,
+                "article": (nom.article_seller if nom else None),
                 "brand": nom.brand if nom else None,
                 "stock_quantity": stock_map.get(item.nomenclature_id, 0),
             }
