@@ -644,44 +644,62 @@ export default function LogisticsPage() {
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
                     Забор по складам
                 </div>
-                <table className="data-table" style={{ fontSize: 12, width: '100%' }}>
+                {/* Компактная таблица под узкую карточку: фикс-лейаут + узкие колонки,
+                    статус — точкой. (.data-table с padding 12×16 и auto-layout вылезала за край.) */}
+                <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 11 }}>
+                    <colgroup>
+                        <col />
+                        <col style={{ width: 30 }} />
+                        <col style={{ width: 54 }} />
+                        <col style={{ width: 46 }} />
+                        <col style={{ width: 18 }} />
+                    </colgroup>
                     <thead>
-                        <tr>
-                            <th>Сборка / склад</th>
-                            <th style={{ textAlign: 'right' }}>Палет</th>
-                            <th style={{ textAlign: 'right' }}>Вес</th>
-                            <th>ФФ №</th>
-                            <th>Статус</th>
+                        <tr style={{ color: 'var(--color-text-muted)' }}>
+                            <th style={{ padding: '2px 4px', textAlign: 'left', fontWeight: 500 }}>Сборка / склад</th>
+                            <th style={{ padding: '2px 4px', textAlign: 'right', fontWeight: 500 }}>Пал</th>
+                            <th style={{ padding: '2px 4px', textAlign: 'right', fontWeight: 500 }}>Вес</th>
+                            <th style={{ padding: '2px 4px', textAlign: 'right', fontWeight: 500 }}>ФФ №</th>
+                            <th style={{ padding: '2px 2px' }}></th>
                         </tr>
                     </thead>
                     <tbody>
                         {rows.map(r => {
-                            const cfg = STATUS_MAP[r.status as AssemblyStatus] || { label: r.status, className: '' };
                             const weight = r.pallets_count != null && r.pallet_weight_kg != null
                                 ? r.pallets_count * r.pallet_weight_kg : null;
+                            const ready = r.status !== 'PENDING' && r.status !== 'IN_PROGRESS';
                             return (
-                                <tr key={r.warehouse_id}>
-                                    <td>
-                                        <div style={{ fontFamily: 'monospace', fontSize: 11 }}>{r.number}</div>
-                                        <div style={{ color: 'var(--color-text-muted)', fontSize: 11 }}>{r.warehouse_name || `#${r.warehouse_id}`}</div>
+                                <tr key={r.warehouse_id} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                    <td style={{ padding: '3px 4px', verticalAlign: 'top' }}>
+                                        <div style={{ fontFamily: 'monospace' }}>{r.number}</div>
+                                        <div style={{ color: 'var(--color-text-muted)', fontSize: 10, wordBreak: 'break-word' }}>{r.warehouse_name || `#${r.warehouse_id}`}</div>
                                     </td>
-                                    <td style={{ textAlign: 'right' }}>{r.pallets_count != null ? formatNumber(r.pallets_count, 0) : '—'}</td>
-                                    <td style={{ textAlign: 'right' }}>{weight != null ? formatNumber(weight, 0) + ' кг' : '—'}</td>
-                                    <td style={{ fontFamily: 'monospace' }}>{r.ff_request_number || '—'}</td>
-                                    <td><span className={`badge ${cfg.className}`} style={{ fontSize: 10 }}>{cfg.label}</span></td>
+                                    <td style={{ padding: '3px 4px', textAlign: 'right', verticalAlign: 'top' }}>{r.pallets_count != null ? formatNumber(r.pallets_count, 0) : '—'}</td>
+                                    <td style={{ padding: '3px 4px', textAlign: 'right', verticalAlign: 'top' }}>{weight != null ? formatNumber(weight, 0) + ' кг' : '—'}</td>
+                                    <td style={{ padding: '3px 4px', textAlign: 'right', verticalAlign: 'top', fontFamily: 'monospace' }}>{r.ff_request_number || '—'}</td>
+                                    <td style={{ padding: '3px 2px', textAlign: 'center', verticalAlign: 'top' }}>
+                                        <span
+                                            title={STATUS_MAP[r.status as AssemblyStatus]?.label || String(r.status)}
+                                            style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: ready ? 'var(--color-success)' : 'var(--color-warning)' }}
+                                        />
+                                    </td>
                                 </tr>
                             );
                         })}
                     </tbody>
                     <tfoot>
-                        <tr style={{ fontWeight: 600 }}>
-                            <td>ИТОГО</td>
-                            <td style={{ textAlign: 'right' }}>{formatNumber(jointTotalPallets(item), 0)}</td>
-                            <td style={{ textAlign: 'right' }}>{formatNumber(jointTotalWeight(item), 0)} кг</td>
+                        <tr style={{ fontWeight: 600, borderTop: '1px solid var(--color-border)' }}>
+                            <td style={{ padding: '3px 4px' }}>Итого</td>
+                            <td style={{ padding: '3px 4px', textAlign: 'right' }}>{formatNumber(jointTotalPallets(item), 0)}</td>
+                            <td style={{ padding: '3px 4px', textAlign: 'right' }}>{formatNumber(jointTotalWeight(item), 0)} кг</td>
                             <td colSpan={2}></td>
                         </tr>
                     </tfoot>
                 </table>
+                <div style={{ display: 'flex', gap: 10, fontSize: 10, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                    <span><span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: 'var(--color-warning)', verticalAlign: 'middle', marginRight: 3 }} />в сборке</span>
+                    <span><span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: 'var(--color-success)', verticalAlign: 'middle', marginRight: 3 }} />готова</span>
+                </div>
             </div>
         );
     };
