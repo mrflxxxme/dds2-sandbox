@@ -144,6 +144,13 @@ _PAYEE_ROLE_RE = re.compile(rf"(?:Исполнитель|Поставщик|Пр
 _ORG_LINE_RE = re.compile(rf"(?m)^[ \t]*({_ORG}\b[^\n,]+)")
 # Назначение: «Счёт на оплату №X от <дата>» → «Оплата по счёту №X от <дата>».
 _PURPOSE_RE = re.compile(r"Сч[её]т\s+на\s+оплату\s+(№\s*\S+\s+от\s+[^\n]+?)(?:\s*г\.|\n|$)", re.IGNORECASE)
+# Основание-договор: «Договор № КВ/25-082 от 08.04.2025» → «по договору № … от …».
+_CONTRACT_RE = re.compile(
+    r"Договор\D{0,40}?(?:№|N)\s*([^\s,;]+)\s*от\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})", re.IGNORECASE
+)
+# НДС: явная ставка «НДС 20%» (+ сумма рядом, если есть) либо пометка «Без НДС / не облагается».
+_VAT_RATE_RE = re.compile(r"НДС\s*(\d{1,2})\s*%(?:[^\d\-%]{0,25}?(\d[\d\s]*[,.]\d{2}))?", re.IGNORECASE)
+_VAT_NONE_RE = re.compile(r"Без\s+НДС|НДС\s+не\s+облага|не\s+облага\w*\s+НДС", re.IGNORECASE)
 
 
 def _valid_rs(account: str, bik: str) -> bool:
@@ -240,12 +247,43 @@ def _parse_payee_name(text: str, inn: str | None) -> str | None:
     return None
 
 
+def _parse_contract(text: str) -> str | None:
+    """«Договор № X от <дата>» → «по договору № X от <дата>» (основание платежа)."""
+    if m := _CONTRACT_RE.search(text):
+        num = m.group(1).strip(" .,;№")
+        return f"по договору № {num} от {m.group(2)}"
+    return None
+
+
+def _parse_vat(text: str) -> str | None:
+    """Строка НДС для назначения: «В т.ч. НДС 20% — 3 850,00 руб.» / «Без НДС»."""
+    if m := _VAT_RATE_RE.search(text):
+        rate = m.group(1)
+        if m.group(2):
+            amount = re.sub(r"\s+", " ", m.group(2)).strip()
+            return f"В т.ч. НДС {rate}% — {amount} руб."
+        return f"В т.ч. НДС {rate}%"
+    if _VAT_NONE_RE.search(text):
+        return "Без НДС"
+    return None
+
+
 def _parse_purpose(text: str) -> str | None:
-    """«Счёт на оплату №X от <дата>» → «Оплата по счёту №X от <дата>»."""
+    """Назначение из счёта: «Оплата по счёту №… от …» + основание-договор + строка НДС."""
+    parts: list[str] = []
     if m := _PURPOSE_RE.search(text):
         ref = re.sub(r"\s+", " ", m.group(1)).strip()
-        return f"Оплата по счёту {ref}"[:300]
-    return None
+        parts.append(f"Оплата по счёту {ref}")
+    if contract := _parse_contract(text):
+        parts.append(contract)
+    if not parts:
+        return None
+    base = " ".join(parts)
+    if base.startswith("по договору"):  # счёта-якоря не было — оформляем грамотно
+        base = "Оплата " + base
+    if vat := _parse_vat(text):
+        base = f"{base}. {vat}"
+    return base[:300]
 
 
 def extract_requisites_from_text(text: str) -> InvoiceParseResult:
@@ -338,7 +376,12 @@ _LLM_SYSTEM = (
     "НЕ путай его с КОРРЕСПОНДЕНТСКИМ счётом банка (payee_corr_account) — тот начинается с 301. "
     "На счёте часто два «Сч. №»: к/с (301…) в блоке банка и р/с (40…) в блоке получателя — верни оба.\n"
     "Если поля нет в счёте — верни null. Сумму верни числом с точкой (например 95750.00). "
-    "Назначение — кратко из «Счёт на оплату №… от …» и предмета (товар/услуга).\n"
+    "Назначение (purpose) собери в ОДНУ строку: «Оплата по счёту №… от …», затем основание "
+    "«по договору №… от …» (если в счёте есть договор-основание), кратко предмет (товар/услуга) "
+    "и строку НДС: «В т.ч. НДС 20% — 3 850,00 руб.» (ставку и сумму НДС бери из итогов счёта) "
+    "либо «Без НДС», если счёт без НДС / УСН. Пример: «Оплата по счёту № 7690.1 от 25.06.2026 "
+    "по договору № КВ/25-082 от 08.04.2025 за услуги по таможенному оформлению. "
+    "В т.ч. НДС 20% — 3 850,00 руб.»\n"
     "Вызови инструмент extract_requisites ровно один раз."
 )
 
@@ -355,7 +398,7 @@ _LLM_TOOL: dict = {
             "payee_corr_account": {"type": ["string", "null"], "description": "Корреспондентский счёт банка (20 цифр, начинается с 301). Это НЕ расчётный счёт получателя."},
             "payee_bik": {"type": ["string", "null"], "description": "БИК банка получателя (9 цифр)."},
             "amount": {"type": ["string", "null"], "description": "Сумма к оплате числом, напр. 95750.00."},
-            "purpose": {"type": ["string", "null"], "description": "Назначение платежа."},
+            "purpose": {"type": ["string", "null"], "description": "Назначение платежа: «Оплата по счёту №… от …» + «по договору №… от …» (если есть основание-договор) + кратко предмет + строка НДС («В т.ч. НДС 20% — 3 850,00 руб.» или «Без НДС»). Не длиннее 300 символов."},
         },
         "required": ["payee_name", "payee_inn", "payee_kpp", "payee_account", "payee_corr_account", "payee_bik", "amount", "purpose"],
     },

@@ -161,6 +161,47 @@ async def test_create_general_no_project(client, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_brand_create_filter_and_edit(client, auth_headers):
+    """Бренд: сохраняется на заявке (NULL = «Все бренды»), list фильтрует, PATCH правит/сбрасывает."""
+    headers = await _project_headers(client, auth_headers)
+    # Заявка с брендом.
+    r1 = await client.post(
+        "/api/v1/payment-requests",
+        json={
+            "source": "MANUAL", "category": "OTHER", "brand": "Ромашка",
+            "payee_inn": _INN, "payee_account": _ACC, "payee_bik": _BIK,
+            "payee_name": "ООО Перевозчик", "amount": "5000.00",
+        },
+        headers=headers,
+    )
+    assert r1.status_code == 201, r1.text
+    branded = r1.json()
+    assert branded["brand"] == "Ромашка"
+    # Заявка без бренда → «Все бренды» (NULL).
+    plain = (await _create_manual(client, headers)).json()
+    assert plain["brand"] is None
+
+    # list?brand=Ромашка → только брендированная.
+    lst = await client.get("/api/v1/payment-requests", params={"brand": "Ромашка"}, headers=headers)
+    assert lst.status_code == 200
+    ids = [i["id"] for i in lst.json()["items"]]
+    assert branded["id"] in ids and plain["id"] not in ids
+
+    # PATCH: сменить бренд.
+    patched = await client.patch(
+        f"/api/v1/payment-requests/{branded['id']}", json={"brand": "Лютик"}, headers=headers
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["brand"] == "Лютик"
+
+    # PATCH: сбросить в «Все бренды» (null).
+    cleared = await client.patch(
+        f"/api/v1/payment-requests/{branded['id']}", json={"brand": None}, headers=headers
+    )
+    assert cleared.status_code == 200 and cleared.json()["brand"] is None
+
+
+@pytest.mark.asyncio
 async def test_approve_then_mark_paid(client, auth_headers):
     headers = await _project_headers(client, auth_headers)
     rid = (await _create_manual(client, headers)).json()["id"]

@@ -22,6 +22,7 @@ export function addPaymentRequestMethods(api: ApiClient) {
         listPaymentRequests(filters?: {
             status?: PaymentRequestStatus;
             category?: PaymentRequestCategory;
+            brand?: string;
             date_from?: string;
             date_to?: string;
             counterparty_id?: number;
@@ -31,6 +32,7 @@ export function addPaymentRequestMethods(api: ApiClient) {
             const qs = new URLSearchParams();
             if (filters?.status) qs.set('status', filters.status);
             if (filters?.category) qs.set('category', filters.category);
+            if (filters?.brand) qs.set('brand', filters.brand);
             if (filters?.date_from) qs.set('date_from', filters.date_from);
             if (filters?.date_to) qs.set('date_to', filters.date_to);
             if (filters?.counterparty_id != null) qs.set('counterparty_id', String(filters.counterparty_id));

@@ -64,6 +64,8 @@ class PaymentRequestCreate(BaseModel):
     currency: str = Field(default="RUB", max_length=3)
     pickup_date: date | None = None
     purpose: str | None = None
+    # Бренд-атрибуция. None/не передано → «Все бренды» (общий расход по проекту).
+    brand: str | None = Field(None, max_length=200)
 
     @field_validator("source")
     @classmethod
@@ -94,6 +96,8 @@ class PaymentRequestUpdate(BaseModel):
     currency: str | None = Field(None, max_length=3)
     pickup_date: date | None = None
     purpose: str | None = None
+    # Бренд-атрибуция. null → сбросить в «Все бренды»; не передано → не менять.
+    brand: str | None = Field(None, max_length=200)
 
     @field_validator("category")
     @classmethod
@@ -234,6 +238,7 @@ class PaymentRequestRow(BaseModel):
     number: str
     status: str
     category: str | None = None
+    brand: str | None = None  # бренд-атрибуция; None = «Все бренды»
     project_id: int | None = None
     project_name: str | None = None  # имя проекта («—» для общей заявки) — заполняет сервис
     payee_name: str | None = None

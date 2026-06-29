@@ -115,6 +115,7 @@ async def get_bank_by_bic(bic: str, _user: User = Depends(get_current_user)) -> 
 async def list_payment_requests(
     status_filter: str | None = Query(None, alias="status"),
     category: str | None = None,
+    brand: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     counterparty_id: int | None = None,
@@ -128,6 +129,7 @@ async def list_payment_requests(
         project.id,
         status=status_filter,
         category=category,
+        brand=brand,
         date_from=date_from,
         date_to=date_to,
         counterparty_id=counterparty_id,

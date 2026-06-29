@@ -115,6 +115,37 @@ def test_payment_grid_name_and_purpose():
     assert "payee_name" in r.fields_found and "purpose" in r.fields_found
 
 
+def test_purpose_includes_contract_and_vat():
+    """Назначение собирает счёт + основание-договор + строку НДС (реальный кейс КВ Терминал)."""
+    text = (
+        "Счёт на оплату № 7690.1 от 25.06.2026 г.\n"
+        "Основание: Договор № КВ/25-082 от 08.04.2025 г.\n"
+        "В том числе НДС 20% — 3 850,00\n"
+        "Всего к оплате: 21 350,00\n"
+    )
+    r = extract_requisites_from_text(text)
+    assert r.purpose is not None
+    assert r.purpose.startswith("Оплата по счёту № 7690.1 от 25.06.2026")
+    assert "по договору № КВ/25-082 от 08.04.2025" in r.purpose
+    assert r.purpose.endswith("В т.ч. НДС 20% — 3 850,00 руб.")
+    assert "purpose" in r.fields_found
+
+
+def test_purpose_plain_invoice_unchanged():
+    """Нет договора/НДС → только «Оплата по счёту …» (прежнее поведение)."""
+    text = "Счёт на оплату № 42 от 28.06.2026\nВсего к оплате: 1 234,56\n"
+    r = extract_requisites_from_text(text)
+    assert r.purpose == "Оплата по счёту № 42 от 28.06.2026"
+
+
+def test_purpose_vat_exempt_marker():
+    """Счёт без НДС (УСН) → строка «Без НДС» в назначении."""
+    text = "Счёт на оплату № 7 от 28.06.2026\nБез НДС\nВсего к оплате: 500,00\n"
+    r = extract_requisites_from_text(text)
+    assert r.purpose is not None
+    assert r.purpose.endswith("Без НДС")
+
+
 def test_valid_account_surfaces():
     r = extract_requisites_from_text(_invoice_text(_RS_VALID))
     assert r.payee_account == _RS_VALID
