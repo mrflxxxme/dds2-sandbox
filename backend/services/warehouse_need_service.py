@@ -948,8 +948,35 @@ async def get_warehouse_need(
             if remaining_budget <= 0:
                 continue
 
+            # Покрытие ФО для этого SKU (сток + в-сборке + в-пути + уже распределённое
+            # greedy). Бампим главный склад ФО ТОЛЬКО если весь ФО ещё НЕ насеян
+            # (< одной коробки) — это бутстрап пустых дальних регионов. Если ФО уже
+            # покрыт (стоком/транзитом на ЛЮБОМ его складе), коробка на главный =
+            # перетаривание уже локализованного округа (см. /review MEDIUM + кейс юзера
+            # «доливаем в Невинномысск/ЕКБ поверх уже едущего»).
+            okrug_cov: dict[str, float] = {}
+            okrug_demand: dict[str, float] = {}
+            for _wh, _wd in wh_data.items():
+                _c = _wd["articles"].get(nm_id)
+                _d = warehouse_to_district(_wh)
+                okrug_cov[_d] = okrug_cov.get(_d, 0.0) + (
+                    stock_lookup.get((_wh, nm_id), 0)
+                    + assembly_target_map.get(nm_id, {}).get(_wh, 0)
+                    + transit_target_map.get(nm_id, {}).get(_wh, 0)
+                    + (_c["need"] if _c else 0)
+                )
+                if _c:
+                    okrug_demand[_d] = okrug_demand.get(_d, 0.0) + (_c.get("avg_daily", 0) or 0) * supply_days
+
             for wh_name in main_wh_set:
                 if wh_name not in wh_data:
+                    continue
+                _md = warehouse_to_district(wh_name)
+                _cov = okrug_cov.get(_md, 0.0)
+                # Бампим ФО ТОЛЬКО если он пустой (cold-start bootstrap) ИЛИ недо-покрыт
+                # относительно своего спроса. ФО, где сток/транзит уже ≥ коробки ИЛИ
+                # ≥ спроса, НЕ трогаем — иначе перетаривание уже локализованного округа.
+                if _cov >= bump_target or (_cov > 0 and _cov >= okrug_demand.get(_md, 0.0)):
                     continue
                 arts = wh_data[wh_name]["articles"]
                 if nm_id not in arts:

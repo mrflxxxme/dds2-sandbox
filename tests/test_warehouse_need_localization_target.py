@@ -407,3 +407,43 @@ async def test_covered_okrug_warehouse_not_overstocked(db_session, project, monk
     assert by_wh[ANCHOR_WH]["articles"].get(nm_id, {}).get("need", 0) == 0
     # Главное: достигнутая локализация у цели ~75%, БЕЗ overshoot (без фикса было бы ~90%).
     assert 0.68 <= achieved <= 0.82, f"localization {achieved:.2%} вне [68%,82%] — перетаривание ФО?"
+
+
+# ── Bump regression: covered okrug main warehouse is NOT bumped ────────────────
+async def test_bump_skips_covered_okrug(db_session, project, monkeypatch):
+    """Min-stock bump НЕ добивает главный склад ФО, если ФО уже покрыт стоком
+    соседнего склада (кейс юзера: коробка на пустой главный ЦФО при заваленном
+    стоком ЦФО = перетаривание). Пустой cold-start ФО по-прежнему бампится.
+    """
+    pid = project.id
+    nm_id = 703100 + (uuid.uuid4().int % 1000)
+    bc = f"BC{nm_id}"
+    # SKU с кратностью коробки (ppb=24) → bump-секция активна.
+    res_ins = await db_session.execute(
+        text(
+            "INSERT INTO nomenclature (project_id, barcode, article_seller, article_wb, "
+            "use_box_multiplicity, box_qty_override, updated_at) "
+            "VALUES (:p, :bc, :art, :nm, true, 24, NOW()) RETURNING id"
+        ),
+        {"p": pid, "bc": bc, "art": f"ART-{nm_id}", "nm": nm_id},
+    )
+    nom_id = res_ins.scalar()
+    ff_id = await _seed_ff_warehouse(db_session, pid, "FF-Bump")
+    await _seed_rf_stock(db_session, pid, ff_id, nom_id, bc, 10_000)
+    EL = "Электросталь"  # главный ЦФО (больше заказов), пустой
+    await _seed_wb_stock(db_session, pid, nm_id, EL, 0)
+    await _seed_wb_stock(db_session, pid, nm_id, ANCHOR_WH, 100)  # Тула закрывает ЦФО стоком
+    await db_session.commit()
+
+    orders = [{"nmId": nm_id, "quantity": 50, "warehouseName": EL, "supplierArticle": "A"}]
+    orders += [{"nmId": nm_id, "quantity": 10, "warehouseName": ANCHOR_WH, "supplierArticle": "A"}]
+    _patch_api(monkeypatch, orders)
+
+    res = await _call(
+        db_session, pid, supply_days=14, analysis_days=14, only_available=True,
+        localization_target=75,
+    )
+    by_wh = {w["name"]: w for w in res["warehouses"]}
+    el_need = by_wh.get(EL, {}).get("articles", {}).get(nm_id, {}).get("need", 0)
+    # ЦФО покрыт Тулой (сток 100 ≥ спрос 60) → главный Электросталь НЕ бампится коробкой.
+    assert el_need == 0, f"Электросталь забамплена на {el_need} в уже покрытый ЦФО"
