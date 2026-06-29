@@ -129,7 +129,7 @@ export default function PricingPage() {
             'Sell-through %': r.sell_through_pct, 'GMROI': r.gmroi, 'Заморожено (себест)': r.stock_value_cost,
             'Потенц. прибыль остатка': r.stock_potential_profit, 'Потенц. выручка остатка': r.stock_potential_revenue,
             'Выручка': r.revenue, 'Расходы ВБ': r.wb_expenses, 'Реклама': r.adv_sum, 'Налог': r.tax,
-            'Прибыль': r.profit, 'Чист. наценка %': r.net_markup_pct, 'ДРР %': r.drr,
+            'Прибыль': r.profit, 'Чист. наценка %': r.net_markup_pct, 'ДРР %': r.drr, 'CR (конверсия) %': r.cr,
             'Аномалия': r.anomaly || '', 'Рекомендация': r.recommendation,
         }));
         exportToExcel(out, 'Ценообразование');
@@ -203,6 +203,7 @@ export default function PricingPage() {
         { key: 'revenue', label: 'Выручка', align: 'right', sortable: true, render: (v) => money(v) },
         { key: 'profit', label: 'Прибыль', align: 'right', sortable: true, render: (v) => R(money(v), signColor(v)) },
         { key: 'drr', label: 'ДРР %', align: 'right', sortable: true, render: (v) => pct(v) },
+        { key: 'cr', label: 'CR %', align: 'right', sortable: true, render: (v) => pct(v) },
         {
             key: 'recommendation', label: 'Рекомендация', width: '210px', sortable: true,
             render: (v: string, r: PricingRow) =>

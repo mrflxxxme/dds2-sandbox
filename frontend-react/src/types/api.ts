@@ -561,6 +561,7 @@ export interface PricingRow {
   breakeven_price: number | null;
   safety_margin_pct: number | null;
   drr: number;
+  cr: number;
   gmroi: number | null;
   sell_through_pct: number | null;
   elasticity: number | null;

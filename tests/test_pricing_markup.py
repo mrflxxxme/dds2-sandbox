@@ -103,6 +103,23 @@ class TestBuildRowExpenses:
         assert row.wb_expenses == 4020.0  # не -588000 (revenue − revenue×59.8)
         assert 0 <= row.wb_expenses <= row.revenue
 
+    def test_ad_bleed_new_product_levers(self):
+        """Новинка с огромным ДРР → рекомендация про рычаги (цена/карточка), не «просто резать»."""
+        price = WbPrice(
+            project_id=1, nm_id=1, price=Decimal("974"), base_price=Decimal("974"),
+            discount=Decimal("0"), currency="RUB", synced_at=utcnow(),
+        )
+        funnel = {
+            "nm_id": 1, "vendor_code": "mosaic", "revenue": 974.0, "commission": 200.0,
+            "to_pay_rate": 70.0, "tax": 50.0, "cost_total": 232.0, "adv_sum": 6997.0,
+            "profit": -6630.0, "orders_count": 1, "margin": -680.0, "spp_rate": 0.0, "cr": 2.0,
+        }
+        row = _build_row(1, price, funnel, 232.0, {}, None, wb_stock=50)  # meta None → новинка
+        assert row.anomaly == "Реклама в минус"
+        assert row.is_new is True
+        assert row.cr == 2.0
+        assert "карточ" in row.recommendation.lower() or "цену" in row.recommendation.lower()
+
     def test_financial_metrics(self):
         """GMROI / запас прочности / sell-through / точка безубыточности."""
         price = WbPrice(

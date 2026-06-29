@@ -274,7 +274,12 @@ def _recommend(r: PricingRow) -> str:
     if a == ANOMALY_PRICE_BELOW_COST:
         return "Срочно поднять цену"
     if a == ANOMALY_AD_BLEED:
-        return f"Сократить рекламу — ДРР {r.drr:.0f}%, ест прибыль"
+        drr = r.drr or 0
+        if r.is_new:
+            return f"Новинка: реклама не окупается (ДРР {drr:.0f}%) — проверить цену/карточку/фото; не пойдёт → урезать рекламу"
+        if drr > 100:
+            return f"Реклама не окупается (ДРР {drr:.0f}%) — снизить цену / улучшить карточку или урезать рекламу"
+        return f"Сократить рекламу — ДРР {drr:.0f}%, ест прибыль"
     if a == ANOMALY_LOSS:
         # убыток не из-за рекламы: либо цена низкая, либо неликвид
         if r.total_stock > 0 and (r.orders_count == 0 or (r.days_left is not None and r.days_left > _DEAD_STOCK_DAYS)):
@@ -387,8 +392,9 @@ def _build_row(
     days_left = round(total_stock / avg_daily, 1) if avg_daily > 0 and total_stock > 0 else None
     sales_per_month = round(avg_daily * 30, 1) if avg_daily > 0 else None
 
-    # ДРР и точка безубыточности
+    # ДРР, конверсия и точка безубыточности
     drr = round(adv_sum / revenue * 100, 2) if revenue > 0 else 0
+    cr = round(float(f.get("cr") or 0), 2)  # конверсия клик→заказ, % (из воронки)
     # цена, при которой прибыль = 0: масштабируем текущую цену так, чтобы
     # ценозависимый нетто-вклад (выручка − удержания ВБ − налог) покрыл fixed-затраты
     # (себестоимость + реклама). Учитывает СПП/комиссию/налог через realized-доли.
@@ -468,6 +474,7 @@ def _build_row(
         days_left=days_left,
         sales_per_month=sales_per_month,
         drr=drr,
+        cr=cr,
         breakeven_price=breakeven_price,
         safety_margin_pct=safety_margin_pct,
         gmroi=gmroi,
