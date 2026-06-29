@@ -328,6 +328,8 @@ def _build_row(
     elasticity: float | None = None,
     today: _date | None = None,
     extra: dict | None = None,
+    keep_by_cat: dict[str, float] | None = None,
+    global_keep: float | None = None,
 ) -> PricingRow:
     f = funnel or {}
     m = meta or {}
@@ -406,6 +408,12 @@ def _build_row(
     breakeven_price = None
     if has_price and current_price is not None and revenue > 0 and net_contrib > 0:
         breakeven_price = round(current_price * cost_total / net_contrib, 2)
+    elif has_cost and cost_price is not None and cost_price > 0:
+        # нет продаж (новинка/неактивный) → оценка по средней доле к получению
+        # (net_contrib/выручка) категории, иначе по проекту. breakeven = себест / доля.
+        keep = (keep_by_cat or {}).get(category) or global_keep
+        if keep and keep > 0:
+            breakeven_price = round(cost_price / keep, 2)
 
     # Запас прочности по цене: насколько можно снижать до нулевой прибыли
     safety_margin_pct = (
@@ -692,6 +700,23 @@ async def _compute_rows(
         except ValueError:
             period_days = 30
 
+    # Средняя «доля к получению» (net_contrib / выручка) по категориям — для оценки
+    # минимальной цены у товаров без продаж (новинки/неактивные).
+    _ded: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
+    for nm, f in funnel_by_nm.items():
+        rev = float(f.get("revenue") or 0)
+        if rev <= 0:
+            continue
+        net = rev - float(f.get("commission") or 0) - float(f.get("tax") or 0)
+        if net <= 0:
+            continue
+        cat = cat_overrides.get(nm) or f.get("subject") or UNCATEGORIZED
+        _ded[cat][0] += net
+        _ded[cat][1] += rev
+    keep_by_cat = {c: v[0] / v[1] for c, v in _ded.items() if v[1] > 0}
+    _tot_rev = sum(v[1] for v in _ded.values())
+    global_keep = (sum(v[0] for v in _ded.values()) / _tot_rev) if _tot_rev > 0 else None
+
     # универсум: с ценой ∪ продававшиеся ∪ остаток на ВБ ∪ наш склад/сборка/в пути
     today = utcnow().date()
     nm_ids = set(price_by_nm) | set(funnel_by_nm) | set(wb_stock_map) | set(pipeline_map)
@@ -712,6 +737,8 @@ async def _compute_rows(
                 elasticity=elasticity_map.get(nm_id),
                 today=today,
                 extra=pipeline_map.get(nm_id),
+                keep_by_cat=keep_by_cat,
+                global_keep=global_keep,
             ).model_dump()
         )
 

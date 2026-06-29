@@ -396,6 +396,32 @@ class TestStockAndAnomalies:
         assert "Подозрительная себестоимость" in labels
 
     @pytest.mark.asyncio
+    async def test_breakeven_fallback_for_non_seller(self, db_session: AsyncSession, project):
+        """Непродающийся товар получает оценку мин. цены по средней доле категории."""
+        # продающийся задаёт среднюю «долю к получению» категории
+        await _add_price(db_session, project.id, 5001, 1000.0, discount=50.0)
+        await set_cost_override(db_session, project.id, nm_id=5001, cost_price=300.0)
+        await _add_funnel(db_session, project.id, 5001, orders_sum=10000.0, orders_count=10, vendor_code="SELLER")
+        # непродающийся в той же категории
+        await _add_price(db_session, project.id, 5002, 800.0, discount=50.0)
+        await set_cost_override(db_session, project.id, nm_id=5002, cost_price=200.0)
+        for nm in (5001, 5002):
+            await db_session.execute(
+                text(
+                    "INSERT INTO category_overrides (project_id, nm_id, category_value, updated_at) "
+                    "VALUES (:p, :n, 'TestCat', NOW())"
+                ),
+                {"p": project.id, "n": nm},
+            )
+        await db_session.commit()
+
+        res = await get_markup_analytics(db_session, project.id, group_by="sku")
+        nonsel = next(r for r in res["data_rows"] if r["nm_id"] == 5002)
+        assert nonsel["orders_count"] == 0
+        assert nonsel["breakeven_price"] is not None  # оценка по категории, не None
+        assert nonsel["breakeven_price"] > 0
+
+    @pytest.mark.asyncio
     async def test_anomaly_price_not_set(self, db_session: AsyncSession, project):
         # скидка 0% + абсурдная наценка → «Цена завышена / нет скидки», не «подозр. себест»
         await _add_price(db_session, project.id, 4007, 20000.0, discount=0.0)
