@@ -53,12 +53,19 @@ describe('buildPalletManifest · mode box (смешанные паллеты)', 
     });
 });
 
-describe('buildPalletManifest · mode mono (по SKU)', () => {
-    it('каждый SKU — свои паллеты', () => {
-        // A=200 → ⌈200/160⌉=2; B=160 → 1. Итого 3 паллеты, ни одной смешанной.
-        const m = buildPalletManifest([line(1, 200), line(2, 160)], { mode: 'mono', maxHeightCm: H });
-        expect(m.pallets.length).toBe(3);
-        for (const p of m.pallets) expect(p.items.length).toBe(1); // моно — один SKU
+describe('buildPalletManifest · mode mono (≤3 артикула на паллету)', () => {
+    it('мелкие моно-SKU собираются на одну паллету (≤3 артикула)', () => {
+        // 3 SKU по 40 шт (0.25 паллеты) → 1 общая паллета на 3 артикула.
+        const m = buildPalletManifest([line(1, 40), line(2, 40), line(3, 40)], { mode: 'mono', maxHeightCm: H });
+        expect(m.pallets.length).toBe(1);
+        expect(m.pallets[0].items.length).toBe(3);
+        expect(totalUnits(m)).toBe(120);
+    });
+
+    it('реконсиляция: Σ паллет манифеста == palletsForLines(mono)', () => {
+        const lines = [line(1, 200), line(2, 160)];
+        const m = buildPalletManifest(lines, { mode: 'mono', maxHeightCm: H });
+        expect(m.pallets.length).toBe(palletsForLines(toPalletLines(lines), H, 'mono').pallets);
         expect(totalUnits(m)).toBe(360);
     });
 

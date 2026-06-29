@@ -24,6 +24,8 @@
 import {
     effectiveBoxesPerPallet,
     DEFAULT_MAX_PALLET_HEIGHT_CM,
+    monoPalletBins,
+    MONO_MAX_PALLET_ARTICLES,
 } from '@/lib/utils/boxPallet';
 
 /** Линия товара отгрузки для манифеста. */
@@ -125,26 +127,34 @@ export function buildPalletManifest(lines: ManifestLine[], opts: ManifestOpts): 
 interface NormLineLite { line: ManifestLine; units: number; ppb: number; cap: number; }
 
 /**
- * MONO: каждый SKU — свои паллеты. ⌈units/cap⌉ паллет, последняя может быть
- * неполной. Зеркалит `palletsForLines(..., 'mono')` (Σ ⌈units_i/cap_i⌉).
+ * MONO: паллета вмещает ≤3 АРТИКУЛА (правило WB) — мелкие моно-SKU собираются
+ * ВМЕСТЕ на одну паллету (`monoPalletBins`), а не каждый на свою. Зеркалит
+ * `palletsForLines(..., 'mono')` → `Σ manifest.pallets.length === pallets`.
  */
 function packMono(norm: NormLineLite[]): PalletBin[] {
+    // Агрегируем по nm (один артикул = один ключ), сохраняем геометрию.
+    const byKey = new Map<number, NormLineLite>();
+    for (const n of norm) {
+        const e = byKey.get(n.line.nmId);
+        if (e) e.units += n.units;
+        else byKey.set(n.line.nmId, { ...n });
+    }
+    const items = [...byKey.values()].map((n) => ({ key: String(n.line.nmId), units: n.units, cap: n.cap, box: n.ppb || 0 }));
+    const bins = monoPalletBins(items, MONO_MAX_PALLET_ARTICLES);
     const pallets: PalletBin[] = [];
     let no = 1;
-    for (const { line, units, ppb, cap } of norm) {
-        let rem = units;
-        while (rem > 0) {
-            const onPallet = Math.min(rem, cap);
-            pallets.push({
-                palletNo: no++,
-                items: [{
-                    nmId: line.nmId, vendorCode: line.vendorCode, units: onPallet,
-                    boxes: unitsToBoxes(onPallet, ppb),
-                }],
-                fillPct: onPallet / cap,
+    for (const bin of bins) {
+        let frac = 0;
+        const palletItems: PalletItem[] = [];
+        for (const { key, units } of bin) {
+            const n = byKey.get(Number(key))!;
+            frac += units / n.cap;
+            palletItems.push({
+                nmId: n.line.nmId, vendorCode: n.line.vendorCode, units,
+                boxes: unitsToBoxes(units, n.ppb),
             });
-            rem -= onPallet;
         }
+        pallets.push({ palletNo: no++, items: palletItems, fillPct: Math.min(frac, 1) });
     }
     return pallets;
 }
@@ -164,9 +174,11 @@ function packMono(norm: NormLineLite[]): PalletBin[] {
 function packBox(norm: NormLineLite[]): PalletBin[] {
     if (norm.length === 0) return [];
     const EPS = 1e-9;
-    // Целое число паллет = агрегат (тот же ceil, что в palletsForLines 'box').
+    // Целое число паллет = агрегат (тот же `ceil(fill − tol)`, что в palletsForLines 'box':
+    // −tol поглощает дискретизационный сливер после snapToWholePallets, иначе 1.05→2 паллеты).
     const totalFill = norm.reduce((s, n) => s + n.units / n.cap, 0);
-    const palletCount = Math.max(1, Math.ceil(totalFill - EPS));
+    const tol = Math.min(0.5, norm.reduce((m, n) => Math.max(m, n.cap > 0 ? 1 / n.cap : 0), 0));
+    const palletCount = Math.max(1, Math.ceil(totalFill - Math.max(tol, EPS)));
 
     const queue = norm.map(n => ({ ...n, rem: n.units }));
     const pallets: PalletBin[] = [];

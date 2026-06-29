@@ -25,7 +25,7 @@ bash scripts/check_conventions.sh
    grep -rn 'db.delete\|session.delete' --include="*.py" backend/ || echo OK
    grep -rn 'Float' --include="*.py" backend/models/ || echo OK
    ```
-4. **Frontend-сборка** — если в diff есть `frontend-react/`: `cd frontend-react && npm run build`.
+4. **Frontend-проверка** — если в diff есть `frontend-react/`: `cd frontend-react && npx tsc --noEmit && npm run lint` (секунды vs минута полной сборки, ловит тот же класс ошибок, что блокирует CI). Полный `npm run build` — только если менялся `next.config`/билд-конфиг или правка крупная. UI юзер проверяет вживую — браузерный прогон агенту запрещён.
 5. **Ревью-фан-аут** — если менялся код: запусти `/review` (профильные субагенты на Opus 4.8 по матрице diff→агент, единый вердикт APPROVE/WARNING/BLOCK). BLOCK блокирует коммит. Для тяжёлого прогона — `Workflow({name:'review-deep'})`.
 
 Тяжёлые шаги можно гонять параллельно фоновыми агентами.

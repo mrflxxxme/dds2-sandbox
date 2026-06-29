@@ -9,6 +9,7 @@ Checks after Edit/Write:
 5. datetime.utcnow() / datetime.now() (must use utcnow from utils)
 6. f-string in text() -- SQL injection
 7. Business logic (DB access) in routers
+8. Depends(rate_limit_write) missing on write endpoints in routers (iron rule 9)
 """
 
 import ast
@@ -64,6 +65,8 @@ SQL_INJECTION_PATTERN = re.compile(r'text\(\s*f["\']')
 DB_DELETE_PATTERN = re.compile(r"(db|session)\.(delete)\(")
 FLOAT_COL_PATTERN = re.compile(r"(Column|mapped_column)\(.*Float")
 ROUTER_DB_PATTERN = re.compile(r"(await\s+db\.|async_session|\.execute\()")
+# Write endpoints in a router -> must depend on rate_limit_write (rule 9).
+WRITE_ROUTE_PATTERN = re.compile(r"@\w+\.(post|put|patch|delete)\(")
 
 
 def check_python_file(filepath: str, content: str) -> list[str]:
@@ -95,6 +98,15 @@ def check_python_file(filepath: str, content: str) -> list[str]:
             if ROUTER_DB_PATTERN.search(line) and not line.strip().startswith("#"):
                 warnings.append(f"[DDS2] line {i}: DB access in router --" " move business logic to services/")
                 break
+
+        # rule 9: a write endpoint without Depends(rate_limit_write) (advisory, file-level).
+        # Suppress with a `# ok-no-ratelimit` comment anywhere in the file.
+        has_write_route = any(WRITE_ROUTE_PATTERN.search(line) for line in lines)
+        if has_write_route and "rate_limit_write" not in content and "# ok-no-ratelimit" not in content:
+            warnings.append(
+                "[DDS2] write endpoint without Depends(rate_limit_write)"
+                " (rule 9). Suppress: # ok-no-ratelimit"
+            )
 
     # --- Models: Float and money ---
     if "models" in parts and filepath.endswith(".py"):

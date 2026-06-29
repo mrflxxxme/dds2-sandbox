@@ -18,7 +18,9 @@ export const meta = {
   ],
 }
 
-const ROOT = '/Users/a1/Desktop/dds_app'
+// Агенты Workflow запускаются с cwd = корень репозитория, поэтому git-команды
+// выполняются в текущей рабочей директории — без хардкода абсолютного пути.
+const ROOT = 'корне репозитория DDS2 (твоя текущая рабочая директория)'
 
 const SCOPE_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -27,7 +29,7 @@ const SCOPE_SCHEMA = {
     changedFiles: { type: 'array', items: { type: 'string' } },
     reviewers: {
       type: 'array',
-      items: { type: 'string', enum: ['code-reviewer', 'database-reviewer', 'security-reviewer', 'performance-optimizer', 'api-designer'] },
+      items: { type: 'string', enum: ['code-reviewer', 'frontend-reviewer', 'database-reviewer', 'security-reviewer', 'performance-optimizer', 'api-designer'] },
     },
     rationale: { type: 'string' },
   },
@@ -60,6 +62,7 @@ const FINDING_SCHEMA = {
 
 const MATRIX = [
   'код в backend/** или frontend-react/** → code-reviewer (всегда)',
+  'frontend-react/** (.tsx/.ts) → + frontend-reviewer',
   'migrations/**, backend/models/**, *.sql, alembic → + database-reviewer',
   'backend/auth*, backend/rbac.py, backend/utils/crypto*, text(-SQL, пользовательский ввод → + security-reviewer',
   'backend/routers/**, новый endpoint, массовые выборки (.scalars().all()) → + performance-optimizer',

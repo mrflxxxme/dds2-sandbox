@@ -59,7 +59,15 @@ if [ -s "$PENDING" ]; then
   echo ""
 fi
 
-# 5/6. CI-failure issues + Docker health — отключены: gh API + docker ps медленные (3-5 сек на старт),
+# 5. Pre-push gate sanity — предупредить, если защита снята (была тихо-инертной до 2026-06-26)
+HOOKS_PATH=$(git config core.hooksPath 2>/dev/null || echo "")
+if [ "$HOOKS_PATH" != "scripts/hooks" ] && [ ! -x "$ROOT_DIR/.git/hooks/pre-push" ]; then
+  echo "## ⚠ Pre-push gate НЕ установлен (пуш не проверяется → mypy/audit ловятся только в CI ~9 мин)"
+  echo "Активировать: git config core.hooksPath scripts/hooks"
+  echo ""
+fi
+
+# 6. CI-failure issues + Docker health — отключены: gh API + docker ps медленные (3-5 сек на старт),
 # результат используется редко. Запускай /status вручную если нужно.
 
 # Reset session counter при старте

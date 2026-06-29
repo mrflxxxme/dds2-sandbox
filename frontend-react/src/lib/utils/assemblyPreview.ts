@@ -3,7 +3,10 @@
 // Используется страницей distribute/preview.
 import type { AssemblyDraftRow, HandedUnit, PackageType } from '@/types/api';
 import type { ExcelExportColumn } from '@/lib/utils';
-import { snapToWholePallets } from './boxPallet';
+import { snapToWholePallets, packMonoPallets } from './boxPallet';
+
+/** Максимум артикулов на одной монопаллете (правило WB). */
+export const MONO_MAX_ARTICLES = 3;
 
 export interface PreviewLine {
     ffId: number;
@@ -20,38 +23,43 @@ export const PKG_LABEL_RU: Record<string, string> = {
     BOX: 'Короб', MONOPALLET: 'Моно', SUPERSAFE: 'Суперсейф',
 };
 
-/** Зеркало backend `_allocate_pairs` (pro-rata + largest-remainder) — чтобы
- *  предпросмотр «ФФ → WB → товар» совпадал с заявками, которые создаст commit.
- *  Возвращает Map "ffId::wbName" → qty. */
+/** Зеркало backend `_allocate_pairs` — раскладка строки по парам (ФФ → WB-склад)
+ *  с СОХРАНЕНИЕМ ОБОИХ МАРГИНАЛОВ (каждый ФФ отгружает ровно свой запас, каждый
+ *  склад получает ровно свою потребность). Greedy north-west-corner: ячейка берёт
+ *  min(остаток ФФ, остаток склада), осушает один пул и идёт дальше. Так
+ *  предпросмотр «ФФ → WB → товар» совпадает с заявками commit, и товар не
+ *  приписывается чужому складу-источнику. Возвращает Map "ffId::wbName" → qty.
+ *
+ *  ⚠ Старая joint-pro-rata (sv*tv/Σ) сохраняла лишь ОБЩУЮ сумму строки, но не
+ *  по-складовые суммы: src={1:1,2:1}, tgt={A:1,B:1} давала {(1,A):1,(1,B):1} →
+ *  ФФ 1 «отгружал» 2 при запасе 1, ФФ 2 выпадал. Алгоритм идентичен backend. */
 export function allocatePairs(src: Record<string, number>, tgt: Record<string, number>): Map<string, number> {
     const srcItems = Object.entries(src)
         .map(([k, v]) => [Number(k), Math.trunc(Number(v) || 0)] as [number, number])
-        .filter(([, v]) => v > 0);
+        .filter(([, v]) => v > 0)
+        .sort((a, b) => a[0] - b[0]);
     const tgtItems = Object.entries(tgt)
         .map(([k, v]) => [k, Math.trunc(Number(v) || 0)] as [string, number])
-        .filter(([, v]) => v > 0);
+        .filter(([, v]) => v > 0)
+        .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     const out = new Map<string, number>();
     if (!srcItems.length || !tgtItems.length) return out;
-    const total = srcItems.reduce((s, [, v]) => s + v, 0);
-    if (total <= 0) return out;
 
-    const raw: Array<{ sid: number; tname: string; q: number; residue: number }> = [];
-    let floorSum = 0;
-    for (const [sid, sv] of srcItems) {
-        for (const [tname, tv] of tgtItems) {
-            const num = sv * tv;
-            const q = Math.floor(num / total);
-            raw.push({ sid, tname, q, residue: (num - q * total) / total });
-            floorSum += q;
+    let i = 0;
+    let j = 0;
+    while (i < srcItems.length && j < tgtItems.length) {
+        const [sid, sv] = srcItems[i];
+        const [tname, tv] = tgtItems[j];
+        const q = sv < tv ? sv : tv;
+        if (q > 0) {
+            const key = `${sid}::${tname}`;
+            out.set(key, (out.get(key) || 0) + q);
         }
+        srcItems[i][1] = sv - q;
+        tgtItems[j][1] = tv - q;
+        if (srcItems[i][1] === 0) i++;
+        if (tgtItems[j][1] === 0) j++;
     }
-    const remainder = total - floorSum;
-    raw.sort((a, b) => b.residue - a.residue || a.sid - b.sid
-        || (a.tname < b.tname ? -1 : a.tname > b.tname ? 1 : 0));
-    raw.forEach((r, i) => {
-        const q = r.q + (i < remainder ? 1 : 0);
-        if (q > 0) out.set(`${r.sid}::${r.tname}`, q);
-    });
     return out;
 }
 
@@ -96,17 +104,19 @@ export interface TrimWholeResult {
 export function trimLinesToWholePallets(
     lines: PreviewLine[],
     uppOf: (nmId: number, wbName: string) => number | null,
+    boxOf?: (nmId: number) => number | null | undefined,
 ): TrimWholeResult {
     // Группа = одна отгрузка по упаковке. Короб — смешанная паллета (все SKU вместе);
-    // моно/сейф — каждый SKU своей паллетой (микс запрещён) → отдельная под-группа.
-    const groups = new Map<string, { wb: string; km: Record<string, number>; meta: Map<number, PreviewLine> }>();
+    // МОНО — общая паллета ≤3 артикула (тоже без nmId в ключе, правило WB); сейф —
+    // каждый SKU своей паллетой (микс запрещён) → отдельная под-группа.
+    const groups = new Map<string, { wb: string; pkg: PackageType; km: Record<string, number>; meta: Map<number, PreviewLine> }>();
     for (const l of lines) {
         if (l.qty <= 0) continue;
-        const gk = l.pkg === 'BOX'
-            ? `${l.ffId}::${l.wbName}::BOX`
-            : `${l.ffId}::${l.wbName}::${l.pkg}::${l.nmId}`;
+        const gk = l.pkg === 'SUPERSAFE'
+            ? `${l.ffId}::${l.wbName}::SUPERSAFE::${l.nmId}`
+            : `${l.ffId}::${l.wbName}::${l.pkg}`;
         let g = groups.get(gk);
-        if (!g) { g = { wb: l.wbName, km: {}, meta: new Map() }; groups.set(gk, g); }
+        if (!g) { g = { wb: l.wbName, pkg: l.pkg, km: {}, meta: new Map() }; groups.set(gk, g); }
         g.km[String(l.nmId)] = (g.km[String(l.nmId)] || 0) + l.qty;
         g.meta.set(l.nmId, l);
     }
@@ -129,7 +139,11 @@ export function trimLinesToWholePallets(
             if (line?.isNew) kept.push({ ...line, qty: u });
             else droppedUnits += u;
         }
-        const { kept: kk, dropped } = snapToWholePallets(geomKm, (k) => uppOf(Number(k), g.wb));
+        // МОНО — упаковка ≤3 артикула на паллету (правило WB); КОРОБ/СЕЙФ — смешанный /
+        // одиночный snap по суммарному footprint'у. Сигнатуры идентичны.
+        const { kept: kk, dropped } = g.pkg === 'MONOPALLET'
+            ? packMonoPallets(geomKm, (k) => uppOf(Number(k), g.wb), MONO_MAX_ARTICLES, (k) => boxOf?.(Number(k)) ?? null)
+            : snapToWholePallets(geomKm, (k) => uppOf(Number(k), g.wb));
         for (const [nmStr, u] of Object.entries(kk)) {
             if (u <= 0) continue;
             kept.push({ ...g.meta.get(Number(nmStr))!, qty: u });

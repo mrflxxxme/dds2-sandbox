@@ -106,38 +106,40 @@ describe('buildDraftRows · cap по ФФ-стоку', () => {
     });
 });
 
-describe('buildDraftRows · только целые паллеты', () => {
-    it('wholePalletsOnly (дефолт): под-паллетный хвост снимается', () => {
-        // need 250 (1 паллета 160 + 90 хвост); цель одна → 250 нельзя в целые паллеты,
-        // остаётся 160 (1 паллета), 90 на ФФ.
+describe('buildDraftRows · целые коробы (паллеты режет нормализатор отдельно)', () => {
+    it('под-паллетный объём НЕ срезается здесь — отдаётся целыми коробами', () => {
+        // need 250 = 25 коробов (1.56 паллеты). buildDraftRows больше НЕ режет до целых
+        // паллет (это делает normalizeDraft per-shipment) → отдаёт 250 целыми коробами.
         const rows = buildDraftRows({
             skus: [sku({ target: { 'Коледино': 250 }, ffStock: { 100: 1000 } })],
         });
-        const box = rows.find(r => r.package_type === 'BOX');
-        expect(box).toBeDefined();
-        expect(sum(box!.tgt) % 160).toBe(0);
-        expect(sum(box!.tgt)).toBe(160);
-        expect(sum(box!.src)).toBe(sum(box!.tgt)); // инвариант держится
-    });
-
-    it('wholePalletsOnly=false: не-палетизируемый box SKU держит полный box-кратный объём', () => {
-        // Нет габаритов → кросс-SKU паллет-консолидация не применяется; короб-кратно,
-        // без обрезки до паллеты. ppb=10, need 250 → 250 целиком (россыпь-хвост 0).
-        const rows = buildDraftRows({
-            skus: [sku({ box_size: null, target: { 'Коледино': 250 }, ffStock: { 100: 1000 } })],
-            wholePalletsOnly: false,
-        });
         const box = rows.find(r => r.package_type === 'BOX')!;
-        expect(sum(box.tgt)).toBeGreaterThan(160);
-        expect(sum(box.tgt) % PPB).toBe(0);
-        expect(sum(box.src)).toBe(sum(box.tgt)); // инвариант
+        expect(box).toBeDefined();
+        expect(sum(box.tgt)).toBe(250);
+        expect(sum(box.tgt) % PPB).toBe(0);        // целые коробы
+        expect(sum(box.src)).toBe(sum(box.tgt));   // инвариант держится
     });
 
-    it('меньше целой паллеты под wholePalletsOnly → box-строки нет (всё на ФФ)', () => {
+    it('меньше целой паллеты — строка ОСТАЁТСЯ (целые коробы), не дропается', () => {
+        // 90 = 9 коробов < паллеты. Раньше wholePalletsOnly дропал → теперь строка живёт
+        // целыми коробами; срез до целых паллет — уже в нормализаторе.
         const rows = buildDraftRows({
             skus: [sku({ target: { 'Коледино': 90 }, ffStock: { 100: 1000 } })],
         });
-        expect(rows.find(r => r.package_type === 'BOX')).toBeUndefined();
+        const box = rows.find(r => r.package_type === 'BOX')!;
+        expect(box).toBeDefined();
+        expect(sum(box.tgt)).toBe(90);
+        expect(sum(box.tgt) % PPB).toBe(0);
+    });
+
+    it('не-палетизируемый box SKU держит полный box-кратный объём', () => {
+        const rows = buildDraftRows({
+            skus: [sku({ box_size: null, target: { 'Коледино': 250 }, ffStock: { 100: 1000 } })],
+        });
+        const box = rows.find(r => r.package_type === 'BOX')!;
+        expect(sum(box.tgt)).toBe(250);
+        expect(sum(box.tgt) % PPB).toBe(0);
+        expect(sum(box.src)).toBe(sum(box.tgt));
     });
 });
 
@@ -209,5 +211,44 @@ describe('buildDraftRows · разные баркоды одного nm_id не 
         expect(sum(byBc.get('BC-A')!.tgt)).toBe(160);
         expect(sum(byBc.get('BC-B')!.tgt)).toBe(160);
         for (const r of rows) expect(sum(r.src)).toBe(sum(r.tgt));
+    });
+});
+
+describe('buildDraftRows · ВСЕГДА целые коробы (округление вверх из ФФ)', () => {
+    it('неполный короб добивается ВВЕРХ из свободного ФФ (б/габ box-SKU)', () => {
+        // box_size=null → раньше хвост ехал россыпью (95 = 90 + 5). Теперь добивается до 100.
+        const rows = buildDraftRows({
+            skus: [sku({ box_size: null, target: { 'Коледино': 95 }, ffStock: { 100: 1000 } })],
+            wholePalletsOnly: false,
+        });
+        const r = rows.find(x => x.package_type === 'BOX')!;
+        expect(r.tgt['Коледино']).toBe(100);          // добито до целого короба
+        expect(sum(r.tgt) % PPB).toBe(0);             // без россыпи
+        expect(sum(r.src)).toBe(sum(r.tgt));          // баланс держится
+    });
+
+    it('не хватает ФФ на полный короб → срез ВНИЗ (без россыпи)', () => {
+        const rows = buildDraftRows({
+            skus: [sku({ box_size: null, target: { 'Коледино': 95 }, ffStock: { 100: 95 } })],
+            wholePalletsOnly: false,
+        });
+        const r = rows.find(x => x.package_type === 'BOX')!;
+        expect(r.tgt['Коледино']).toBe(90);           // нет ФФ добить → срез вниз
+        expect(sum(r.tgt) % PPB).toBe(0);
+        expect(sum(r.src)).toBe(sum(r.tgt));
+    });
+
+    it('все box-cells кратны ppb на разнородном наборе (нет россыпи)', () => {
+        const rows = buildDraftRows({
+            skus: [
+                sku({ box_size: null, target: { 'Коледино': 95, 'Краснодар': 47 }, ffStock: { 100: 1000 } }),
+                sku({ nm_id: 2, barcode: 'B2', vendor_code: 'V2', box_size: null, target: { 'Казань': 133 }, ffStock: { 100: 1000 } }),
+            ],
+            wholePalletsOnly: false,
+        });
+        for (const r of rows.filter(x => x.package_type === 'BOX')) {
+            for (const q of Object.values(r.tgt)) expect(q % PPB).toBe(0);
+            expect(sum(r.src)).toBe(sum(r.tgt));
+        }
     });
 });

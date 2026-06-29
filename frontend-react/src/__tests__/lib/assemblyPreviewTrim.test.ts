@@ -82,15 +82,23 @@ describe('trimLinesToWholePallets', () => {
         expect(r.removedSupplies).toBe(0); // отгрузка осталась (целая паллета есть)
     });
 
-    it('моно: каждый SKU своей паллетой (не миксуются)', () => {
-        // 2 моно-SKU по 0.5 пал в одной отгрузке: НЕ складываются в 1 (микс запрещён) →
-        // обе под-паллеты неполные → снимаются.
+    it('моно ≤3: SKU одной отгрузки собираются в целую паллету (правило WB max 3 арт.)', () => {
+        // 2 моно-SKU по 0.5 пал в одной отгрузке складываются в 1 ЦЕЛУЮ паллету (≤3 арт.)
+        // → 160 шт едут, ничего не снято.
         const r = trimLinesToWholePallets([
             line(1, 'Казань', 100, 80, 'MONOPALLET'),
             line(1, 'Казань', 101, 80, 'MONOPALLET'),
         ], uppOf);
+        expect(sum(r.kept)).toBe(160);
+        expect(r.droppedUnits).toBe(0);
+    });
+
+    it('моно: одиночный SKU < паллеты остаётся на ФФ (не с кем собраться)', () => {
+        const r = trimLinesToWholePallets([
+            line(1, 'Казань', 100, 80, 'MONOPALLET'),
+        ], uppOf);
         expect(r.kept).toHaveLength(0);
-        expect(r.droppedUnits).toBe(160);
+        expect(r.droppedUnits).toBe(80);
     });
 
     it('новинка без габаритов — едет РОССЫПЬЮ (гибрид: не снимается)', () => {

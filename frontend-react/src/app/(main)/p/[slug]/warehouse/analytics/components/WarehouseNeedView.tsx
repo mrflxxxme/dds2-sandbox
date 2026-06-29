@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { formatNumber, exportToExcel } from '@/lib/utils';
 import { distributeByBoxMultiple } from '@/lib/utils/boxDistribution';
 import { parseBoxSize, maxPalletHeightCm, consolidateDistrictPallets, canonBoxSize, effectiveBoxesPerPallet, consolidateMixedDistrictPallets } from '@/lib/utils/boxPallet';
+import { normalizeDraft } from '@/lib/utils/normalizeDraft';
 import { DISTRICT_LABELS, DISTRICT_COLORS, DISTRICT_ORDER } from '@/lib/constants/localization';
 import type {
     AcceptanceCheckPerItem,
@@ -1199,64 +1200,18 @@ export function WarehouseNeedView({
         return m;
     }, [data, newcomerSet, skuBoxDistribution]);
 
-    /** Кросс-SKU консолидация КОРОБОВ по округам в целые СМЕШАННЫЕ паллеты (для типа
-     *  «короб» WB разрешает микс любых артикулов на паллете). nm_id → (wh → units) box-
-     *  портации. Палет-режим выкл / edited / не-палетизируемый box → проходит как есть.
-     *  Моно/сейф здесь нет — у них каждый SKU = своя паллета (≤3 — отдельная фича). */
+    /** box-портация per SKU (nm_id → wh → units), целыми коробами, БЕЗ окружной
+     *  консолидации. Целые ПАЛЛЕТЫ (per-shipment ФФ→WB, смешанные короба + моно ≤3)
+     *  режет `regularShipmentAlloc` через общий `normalizeDraft` — той же логикой, что
+     *  черновик и заявки. Окружной пуллинг крошек убран: он давал расхождение
+     *  «Потребность» vs «Заявки» (разные алгоритмы паллет). */
     const okrugBoxConsolidated = useMemo(() => {
         const result = new Map<number, Record<string, number>>();
-        if (!palletMode) {
-            for (const [nmId, plan] of skuPlans) {
-                if (Object.keys(plan.boxTgt).length) result.set(nmId, { ...plan.boxTgt });
-            }
-            return result;
-        }
-        // Группируем box-cells палетизируемых не-edited SKU по округам: okrug → wh → key → units.
-        const byOkrug = new Map<string, Record<string, Record<string, number>>>();
         for (const [nmId, plan] of skuPlans) {
-            if (edits.has(nmId) || !plan.palletActive) continue;   // edited/не-палет → как есть (ниже)
-            for (const [wh, units] of Object.entries(plan.boxTgt)) {
-                if (units <= 0) continue;
-                const ok = warehouseToDistrict.get(wh) || `__${wh}`;
-                const g = byOkrug.get(ok) ?? {};
-                (g[wh] ??= {})[String(nmId)] = units;
-                byOkrug.set(ok, g);
-            }
-        }
-        const ppbOf = (key: string) => skuPlans.get(Number(key))?.ppb || 1;
-        const palletUnitsOf = (key: string, wh: string): number | null => {
-            const plan = skuPlans.get(Number(key));
-            if (!plan) return null;
-            const bpp = effectiveBoxesPerPallet(plan.boxSizeStr, maxPalletHeightCm(wh), palletOverrides);
-            return bpp && bpp > 0 && plan.ppb > 0 ? bpp * plan.ppb : null;
-        };
-        for (const [, byWhKey] of byOkrug) {
-            // Приоритетный склад округа = крупнейший по суммарным units (тай — по имени).
-            let anchor = '';
-            let best = -1;
-            for (const [wh, km] of Object.entries(byWhKey)) {
-                const tot = Object.values(km).reduce((s, v) => s + v, 0);
-                if (tot > best || (tot === best && (anchor === '' || wh < anchor))) { best = tot; anchor = wh; }
-            }
-            const canAnchor = (key: string, wh: string) => skuPlans.get(Number(key))?.canBoxAt(wh) ?? true;
-            const out = consolidateMixedDistrictPallets({ byWhKey, anchorWh: anchor, ppbOf, palletUnitsOf, canAnchor });
-            for (const [wh, km] of Object.entries(out.byWhKey)) {
-                for (const [key, units] of Object.entries(km)) {
-                    if (units <= 0) continue;
-                    const nmId = Number(key);
-                    const r = result.get(nmId) ?? {};
-                    r[wh] = (r[wh] || 0) + units;
-                    result.set(nmId, r);
-                }
-            }
-        }
-        // edited / не-палетизируемые box SKU — box-портация как есть (без консолидации).
-        for (const [nmId, plan] of skuPlans) {
-            if (!(edits.has(nmId) || !plan.palletActive)) continue;
             if (Object.keys(plan.boxTgt).length) result.set(nmId, { ...plan.boxTgt });
         }
         return result;
-    }, [palletMode, skuPlans, edits, warehouseToDistrict, palletOverrides]);
+    }, [skuPlans]);
 
     /** Карта обычных SKU → финальная отгрузка == заявка: консолидированный короб (микс-
      *  паллеты) + моно/сейф, подбор источника из ФФ (короб уже паллет-целый и капнут под
@@ -1378,8 +1333,51 @@ export function WarehouseNeedView({
             const total = Object.values(byWh).reduce((s, v) => s + v, 0);
             m.set(a.nm_id, { rows, byWh, total });
         }
-        return m;
-    }, [data, newcomerSet, skuPlans, okrugBoxConsolidated, assemblyWarehouseId]);
+
+        // Палет-режим: ЕДИНЫЙ канон с черновиком/заявками — прогоняем ВСЕ строки через
+        // `normalizeDraft` (короб = смешанные целые паллеты на отгрузку ФФ→WB, моно ≤3
+        // артикула). Так «Потребность» = заявки бит-в-бит. Выкл → box-кратно, без паллет.
+        if (!palletMode) return m;
+        const allRows: AssemblyDraftRow[] = [];
+        for (const [nmId, v] of m) {
+            for (const r of v.rows) {
+                allRows.push({ nm_id: nmId, barcode: String(nmId), vendor_code: '', src: r.src, tgt: r.tgt, package_type: r.package_type });
+            }
+        }
+        if (allRows.length === 0) return m;
+        // Свободный ФФ per nm = доступно − уже засорсенное (для добора моно до целого
+        // короба, вариант A). После среза/добора пул общий с коробами.
+        const freeByNm: Record<number, Record<number, number>> = {};
+        for (const [nmId, v] of m) {
+            const plan = skuPlans.get(nmId);
+            if (!plan) continue;
+            const used: Record<number, number> = {};
+            for (const r of v.rows) for (const [ff, q] of Object.entries(r.src)) used[Number(ff)] = (used[Number(ff)] || 0) + q;
+            const pool: Record<number, number> = {};
+            for (const w of allRf) {
+                const free = (plan.rfStocksForSku[w.id]?.available || 0) - (used[w.id] || 0);
+                if (free > 0) pool[w.id] = free;
+            }
+            if (Object.keys(pool).length) freeByNm[nmId] = pool;
+        }
+        const norm = normalizeDraft(allRows, {
+            ppbOf: (nm) => { const { ppb, use } = resolveSkuLevelPpb(nm); return use && ppb && ppb > 0 ? ppb : null; },
+            boxSizeOf: (nm) => resolveSkuBoxSize(nm),
+            overrides: palletOverrides,
+            isNewcomer: () => false, // новинок тут нет (свой newcomerBoxedAlloc)
+            freeByNm,
+        });
+        const m2 = new Map<number, { rows: { package_type: PackageType; tgt: Record<string, number>; src: Record<string, number> }[]; byWh: Record<string, number>; total: number }>();
+        for (const r of norm.rows) {
+            const e = m2.get(r.nm_id) ?? { rows: [], byWh: {}, total: 0 };
+            e.rows.push({ package_type: (r.package_type || 'BOX') as PackageType, tgt: r.tgt, src: r.src });
+            for (const [wh, q] of Object.entries(r.tgt)) { e.byWh[wh] = (e.byWh[wh] || 0) + q; e.total += q; }
+            m2.set(r.nm_id, e);
+        }
+        // SKU, у которых после среза до целых паллет ничего не осталось — пустые (всё на ФФ).
+        for (const nmId of m.keys()) if (!m2.has(nmId)) m2.set(nmId, { rows: [], byWh: {}, total: 0 });
+        return m2;
+    }, [data, newcomerSet, skuPlans, okrugBoxConsolidated, assemblyWarehouseId, palletMode, resolveSkuLevelPpb, resolveSkuBoxSize, palletOverrides]);
 
     /** Per-WB кол-во для ДИСПЛЕЯ (матрица/итоги/сортировка) — паллет-консолидированное,
      *  т.е. ровно то, что уйдёт в заявку. Fallback на сырой getArticleWbNeed (новинки

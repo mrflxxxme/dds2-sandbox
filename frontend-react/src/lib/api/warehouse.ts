@@ -10,6 +10,7 @@ import type {
     AssemblyDraftRow,
     BarcodeEligibilityResponse,
     CommitSupply,
+    ForecastResponse,
     AssemblyDraftCreate,
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
@@ -605,6 +606,15 @@ export function addWarehouseMethods(api: ApiClient) {
          *  несколько — объединяет в один. Единая страница «Сборка» зовёт на входе. */
         getOrCreateCurrentDraft() {
             return api.request<AssemblyDraft>('POST', '/api/v1/assembly/drafts/current');
+        },
+        /** Прогноз загрузки WB-складов с учётом черновика: текущий остаток + входящая
+         *  − продажи за lead-time → дни покрытия/светофор + индекс локализации до/после. */
+        getDraftForecast(draftId: number) {
+            return api.request<ForecastResponse>('GET', `/api/v1/assembly/drafts/${draftId}/forecast`);
+        },
+        /** Убрать SKU (неликвид) из черновика — удаляет строки + чистит handed-юниты. */
+        removeAssemblyDraftRows(draftId: number, nmIds: number[]) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${draftId}/remove-rows`, { nm_ids: nmIds });
         },
         /** Проверка приёмки WB по баркодам: типы упаковки + лимиты + остаток на ФФ. */
         getBarcodeEligibility(barcodes: string[]) {

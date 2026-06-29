@@ -85,6 +85,10 @@ interface DraftPreviewProps {
     onToast: (message: string, type: 'success' | 'error') => void;
     /** Коммит оставил строки в черновике (whole-only снял неполные) — родитель перезагружает. */
     onReloadDraft: () => void;
+    /** Пересоздать черновик целыми коробами (округление вверх из ФФ / вниз). */
+    onRecreateWholeBoxes?: () => Promise<void>;
+    /** Перепроверить приёмку WB текущего черновика (перераспределить закрытые склады). */
+    onRecheckAcceptance?: () => Promise<void>;
 }
 
 /** Предпросмотр заявок + commit. Показывает ВЕСЬ черновик (короб + моно + сейф)
@@ -92,11 +96,13 @@ interface DraftPreviewProps {
 export default function DraftPreview({
     slug, draftId, rows, newcomerNmIds, warehouses,
     nmPpb, nmMeta, nmBoxSize, palletOverrides, geomReady,
-    ensureSaved, onToast, onReloadDraft,
+    ensureSaved, onToast, onReloadDraft, onRecreateWholeBoxes, onRecheckAcceptance,
 }: DraftPreviewProps) {
     const router = useRouter();
 
     const [committing, setCommitting] = useState(false);
+    const [rounding, setRounding] = useState(false);
+    const [rechecking, setRechecking] = useState(false);
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
     // Раскрытые манифесты паллет «📐 Раскладка» по ключу `${ffId}::${wb}::${pkg}`.
     const [manifestOpen, setManifestOpen] = useState<Set<string>>(new Set());
@@ -104,6 +110,7 @@ export default function DraftPreview({
     const [selectedWbs, setSelectedWbs] = useState<Set<string>>(new Set());
     const [selectedSubjects, setSelectedSubjects] = useState<Set<string>>(new Set());
     const [selectedBrands, setSelectedBrands] = useState<Set<string>>(new Set());
+    const [showPartial, setShowPartial] = useState(false);  // разбивка неполных коробов
     const [viewMode, setViewMode] = useState<'cards' | 'table' | 'matrix'>('cards');
     const [matrixUnit, setMatrixUnit] = useState<'qty' | 'boxes' | 'pallets'>('qty');
     // «Только целые паллеты»: срез каждой отгрузки (ФФ→склад) до целых паллет.
@@ -223,6 +230,33 @@ export default function DraftPreview({
         () => allLines.reduce((s, l) => { const k = nmPpb.get(l.nmId); return s + (k && k > 0 && l.qty % k !== 0 ? l.qty % k : 0); }, 0),
         [allLines, nmPpb],
     );
+    // Разбивка неполных коробов: строки-отгрузки (SKU×склад), где qty не кратно коробу.
+    const partialDetail = useMemo(() => {
+        const out: { nmId: number; vendor: string; barcode: string; wb: string; qty: number; full: number; loose: number; k: number; isNew: boolean }[] = [];
+        for (const l of allLines) {
+            const k = nmPpb.get(l.nmId);
+            if (!k || k <= 0) continue;          // без кратности короба (в т.ч. новинки россыпью) — не «неполный короб»
+            const loose = l.qty % k;
+            if (loose === 0) continue;
+            out.push({ nmId: l.nmId, vendor: l.vendor, barcode: l.barcode, wb: l.wbName, qty: l.qty, full: Math.floor(l.qty / k), loose, k, isNew: l.isNew });
+        }
+        return out.sort((a, b) => b.loose - a.loose);
+    }, [allLines, nmPpb]);
+    const exportPartial = useCallback(() => {
+        exportToExcel(
+            partialDetail.map(d => ({ vendor: d.vendor, barcode: d.barcode, wb: d.wb, qty: d.qty, full: d.full, loose: d.loose, k: d.k })),
+            'Неполные_коробы',
+            [
+                { key: 'vendor', label: 'Артикул' },
+                { key: 'barcode', label: 'Баркод' },
+                { key: 'wb', label: 'WB-склад' },
+                { key: 'qty', label: 'Шт' },
+                { key: 'full', label: 'Полных коробов' },
+                { key: 'loose', label: 'Россыпь (шт)' },
+                { key: 'k', label: 'В коробе (кратность)' },
+            ],
+        );
+    }, [partialDetail]);
 
     const boxesOf = useCallback((l: PreviewLine) => {
         const k = nmPpb.get(l.nmId);
@@ -637,6 +671,32 @@ export default function DraftPreview({
                 <button className="btn btn-secondary btn-sm" onClick={exportSeparate} disabled={ffGroups.length === 0} title="Скачать отдельный Excel-файл на каждый склад-источник">
                     📥 Отдельно по складам
                 </button>
+                {onRecreateWholeBoxes && partialBoxes > 0 && (
+                    <button
+                        className="btn btn-sm btn-primary"
+                        disabled={rounding}
+                        title="Округлить ВСЕ короба до целых: добить вверх из свободного ФФ, при нехватке — срезать вниз. Россыпь убирается."
+                        onClick={async () => {
+                            setRounding(true);
+                            try { await onRecreateWholeBoxes(); }
+                            catch (e: unknown) { onToast(e instanceof Error ? e.message : 'Ошибка округления', 'error'); }
+                            finally { setRounding(false); }
+                        }}
+                    >{rounding ? 'Округление…' : `📦 Округлить до целых коробов (${formatNumber(partialBoxes, 0)})`}</button>
+                )}
+                {onRecheckAcceptance && (
+                    <button
+                        className="btn btn-sm btn-secondary"
+                        disabled={rechecking}
+                        title="Перепроверить приёмку WB по всему черновику: закрытые склады перераспределить на открытые, тип упаковки по приёмке, пересобрать строки."
+                        onClick={async () => {
+                            setRechecking(true);
+                            try { await onRecheckAcceptance(); }
+                            catch (e: unknown) { onToast(e instanceof Error ? e.message : 'Ошибка перепроверки приёмки', 'error'); }
+                            finally { setRechecking(false); }
+                        }}
+                    >{rechecking ? 'Проверка приёмки…' : '🚦 Перепроверить приёмку'}</button>
+                )}
                 <button
                     className={`btn btn-sm ${wholeOnly ? 'btn-primary' : 'btn-secondary'}`}
                     onClick={toggleWholeOnly}
@@ -666,8 +726,70 @@ export default function DraftPreview({
                 <KpiCard label="Коробок" value={formatNumber(boxesSum(allLines), 0)} icon="📦" color="var(--color-accent)" />
                 <KpiCard label="Паллет" value={formatNumber(palletTotals.pallets, 0)} icon="🟫" color="var(--color-accent)" sub={palletTotals.unknownUnits > 0 ? `${formatNumber(palletTotals.unknownUnits, 0)} шт без габаритов` : 'по габаритам коробки'} />
                 <KpiCard label="SKU" value={formatNumber(distinctSku, 0)} icon="🏷️" color="var(--color-warning)" sub="уникальных" />
-                <KpiCard label="Неполных коробов" value={formatNumber(partialBoxes, 0)} icon="🟧" color={partialBoxes > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)'} sub={partialBoxes > 0 ? `${formatNumber(looseUnits, 0)} шт россыпью` : 'все короба полные'} />
+                <div
+                    onClick={() => partialBoxes > 0 && setShowPartial(s => !s)}
+                    style={{ cursor: partialBoxes > 0 ? 'pointer' : 'default' }}
+                    title={partialBoxes > 0 ? 'Нажми — разбивка неполных коробов по артикулам' : undefined}
+                >
+                    <KpiCard label="Неполных коробов" value={formatNumber(partialBoxes, 0)} icon="🟧" color={partialBoxes > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)'} sub={partialBoxes > 0 ? `${formatNumber(looseUnits, 0)} шт россыпью · ${showPartial ? 'скрыть' : 'разбивка ▾'}` : 'все короба полные'} />
+                </div>
             </div>
+
+            {/* Разбивка неполных коробов (по клику на KPI) */}
+            {showPartial && partialBoxes > 0 && (
+                <div className="glass-card animate-in" style={{ padding: 16, marginBottom: 12 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+                        <div style={{ fontSize: 15, fontWeight: 600 }}>🟧 Неполные коробы — {formatNumber(partialBoxes, 0)} строк · {formatNumber(looseUnits, 0)} шт россыпью</div>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            {onRecreateWholeBoxes && (
+                                <button
+                                    className="btn btn-sm btn-primary"
+                                    disabled={rounding}
+                                    title="Округлить все короба до целых: добить вверх из свободного ФФ, при нехватке — срезать вниз"
+                                    onClick={async () => {
+                                        setRounding(true);
+                                        try { await onRecreateWholeBoxes(); }
+                                        catch (e: unknown) { onToast(e instanceof Error ? e.message : 'Ошибка округления', 'error'); }
+                                        finally { setRounding(false); }
+                                    }}
+                                >{rounding ? 'Округление…' : '📦 Округлить всё до целых коробов'}</button>
+                            )}
+                            <button className="btn btn-sm btn-secondary" onClick={exportPartial}>⬇ Excel</button>
+                        </div>
+                    </div>
+                    <p style={{ fontSize: 12, color: 'var(--color-text-muted)', margin: '0 0 12px', lineHeight: 1.5 }}>
+                        <strong>Почему так:</strong> неполный короб появляется, когда потребность склада по артикулу <strong>не делится нацело на кратность короба</strong> (шт/короб). Остаток (qty mod кратность) едет <strong>россыпью</strong> — не округляем вверх (чтобы не передать лишнее) и не вниз (чтобы не недодать нужное). Это нормально; много россыпи = менее плотная упаковка. Уменьшить: добрать/убавить кол-во до кратности короба или объединить отгрузки одного SKU на соседние склады.
+                    </p>
+                    <div style={{ overflowX: 'auto', maxHeight: 360, overflowY: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                            <thead>
+                                <tr style={{ textAlign: 'right', color: 'var(--color-text-muted)', position: 'sticky', top: 0, background: 'var(--color-bg-card)' }}>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>Артикул</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>WB-склад</th>
+                                    <th style={{ padding: '6px 8px' }}>Шт</th>
+                                    <th style={{ padding: '6px 8px' }}>Полных коробов</th>
+                                    <th style={{ padding: '6px 8px' }}>Россыпь</th>
+                                    <th style={{ padding: '6px 8px' }}>В коробе</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {partialDetail.map((d, i) => (
+                                    <tr key={`${d.nmId}-${d.wb}-${i}`} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                        <td style={{ textAlign: 'left', padding: '6px 8px', whiteSpace: 'nowrap' }}>
+                                            {d.isNew && <span title="Новинка" style={{ marginRight: 4 }}>🆕</span>}{d.vendor}
+                                        </td>
+                                        <td style={{ textAlign: 'left', padding: '6px 8px', whiteSpace: 'nowrap' }}>{d.wb}</td>
+                                        <td style={{ textAlign: 'right', padding: '6px 8px' }}>{formatNumber(d.qty, 0)}</td>
+                                        <td style={{ textAlign: 'right', padding: '6px 8px' }}>{formatNumber(d.full, 0)}</td>
+                                        <td style={{ textAlign: 'right', padding: '6px 8px', color: 'var(--color-warning)', fontWeight: 600 }}>+{formatNumber(d.loose, 0)}</td>
+                                        <td style={{ textAlign: 'right', padding: '6px 8px', color: 'var(--color-text-muted)' }}>{formatNumber(d.k, 0)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
 
             {/* Поиск + фильтры (только отображение/выгрузка) */}
             <div className="glass-card" style={{ padding: 12, marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>

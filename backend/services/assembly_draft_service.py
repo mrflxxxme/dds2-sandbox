@@ -15,7 +15,7 @@ from datetime import date, timedelta
 from typing import cast
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_cache
@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 # nm_id считается новинкой если first_sale_date IS NULL ИЛИ ≥ today-14d.
 NEWCOMER_DAYS = 14
 NEWCOMER_COMMENT_PREFIX = "🆕 Новинки"
+
+# Advisory-lock namespace для get_or_create_current_draft: сериализует
+# конкурентные POST /assembly/drafts/current одного project_id, иначе синглтон
+# не синглтон (два пустых черновика) либо двойной merge задваивает количества.
+# 0x41534D = 'ASM'. Lock снимается на commit/rollback транзакции.
+_CURRENT_DRAFT_LOCK_NS = 0x41534D
 
 
 def _dedupe_rows(rows: list[AssemblyDraftRow]) -> list[AssemblyDraftRow]:
@@ -212,6 +218,30 @@ async def get_draft(
     return result.scalar_one_or_none()
 
 
+async def _get_draft_for_update(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+) -> AssemblyDraft | None:
+    """`get_draft` с блокировкой строки (`FOR UPDATE`) — для commit-путей.
+
+    Сериализует конкурентные/повторные коммиты одного черновика: второй вызов
+    ждёт первый, затем перечитывает уже soft-deleted строку → None (404), не
+    задваивая заявки. (`expire_on_commit=False` + отдельные сессии не дают
+    кросс-инвалидизации, поэтому защита нужна на уровне БД.)
+    """
+    result = await db.execute(
+        select(AssemblyDraft)
+        .where(
+            AssemblyDraft.id == draft_id,
+            AssemblyDraft.project_id == project_id,
+            AssemblyDraft.is_deleted == False,  # noqa: E712
+        )
+        .with_for_update()
+    )
+    return result.scalar_one_or_none()
+
+
 async def create_draft(
     db: AsyncSession,
     project_id: int,
@@ -250,6 +280,35 @@ async def update_draft(
     if payload.comment is not None:
         draft.comment = payload.comment
 
+    await db.commit()
+    await db.refresh(draft)
+    return draft
+
+
+async def remove_rows_by_nm(
+    db: AsyncSession,
+    project_id: int,
+    draft_id: int,
+    nm_ids: list[int],
+) -> AssemblyDraft:
+    """Убрать из черновика все строки и handed-юниты указанных SKU (удаление неликвида
+    из прогноза). handed-юниты с несколькими SKU очищаются от этих nm_id; пустые
+    юниты выбрасываются. Остальные поля черновика не трогаются. 404 если не найден."""
+    draft = await get_draft(db, project_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+    nm_set = set(nm_ids)
+    distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
+    distribution.rows = [r for r in distribution.rows if r.nm_id not in nm_set]
+    kept_units = []
+    for unit in distribution.handed_units:
+        unit.items = [it for it in unit.items if it.nm_id not in nm_set]
+        if unit.items:
+            kept_units.append(unit)
+    distribution.handed_units = kept_units
+
+    draft.distribution = distribution.model_dump(mode="json")
     await db.commit()
     await db.refresh(draft)
     return draft
@@ -401,7 +460,17 @@ async def get_or_create_current_draft(
     Так «Создать заявку из потребности», редактор и автосейв всегда работают над
     одним и тем же черновиком, а ранее накопленные параллельные черновики (прод)
     лениво консолидируются при первом входе.
+
+    Конкурентные вызовы (StrictMode double-mount, две вкладки) сериализуются
+    advisory-lock'ом по project_id: lock держится до commit'а внутри
+    create_draft/merge_drafts, поэтому следующий ждущий запрос перечитывает
+    list_drafts уже после фиксации и видит ровно один черновик. Без этого гонка
+    создавала два пустых черновика или задваивала merge.
     """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :pid)"),
+        {"ns": _CURRENT_DRAFT_LOCK_NS, "pid": project_id},
+    )
     drafts = await list_drafts(db, project_id)
     if not drafts:
         return await create_draft(
@@ -481,47 +550,58 @@ def _allocate_pairs(
 ) -> dict[tuple[int, str], int]:
     """
     Distribute one row's quantities across (source_warehouse_id, target_wb_name)
-    pairs using deterministic largest-remainder rounding.
+    pairs PRESERVING BOTH MARGINALS (transportation feasibility).
 
     Inputs:
-      src = {warehouse_id_str: qty}  (sum == row total)
-      tgt = {wb_warehouse_name: qty}  (sum == row total)
+      src = {warehouse_id_str: qty}  (sum == row total when balanced)
+      tgt = {wb_warehouse_name: qty}  (sum == row total when balanced)
 
-    Returns: {(source_id_int, target_name): qty}, each qty >= 0,
-    sum equals min(sum(src), sum(tgt)) which equals row total when balanced.
+    Returns: {(source_id_int, target_name): qty}, each qty > 0, with
+      Σ_target alloc[(sid, ·)] == src[sid]   for every source, and
+      Σ_source alloc[(·, tname)] == tgt[tname]   for every target,
+    when the row is balanced (Σsrc == Σtgt). Total shipped = min(Σsrc, Σtgt).
 
-    Algorithm: pro-rata (X * Y / total) with floor + remainder distribution
-    to the pairs with the largest fractional residue (ties broken by
-    deterministic key ordering).
+    Algorithm — greedy north-west-corner depletion over sources sorted by id and
+    targets sorted by name: each cell takes min(remaining_src, remaining_tgt),
+    draining one pool, then advances. This is a feasible integer transportation
+    solution, so EACH source ships exactly its own stock.
+
+    ⚠ The old joint pro-rata (sv*tv/Σ) preserved only the GRAND TOTAL, not the
+    per-source/per-target marginals: e.g. src={1:1, 2:1}, tgt={A:1, B:1} rounded
+    to {(1,A):1, (1,B):1} → source 1 shipped 2 while source 2 shipped 0. Commit
+    then created an AssemblyRequest on warehouse 1 for stock it did not have and
+    dropped warehouse 2 entirely. The mirror `allocatePairs` in
+    frontend assemblyPreview.ts uses the identical algorithm so the preview
+    matches what commit creates.
     """
-    src_items = [(int(k), int(v)) for k, v in src.items() if int(v or 0) > 0]
-    tgt_items = [(str(k), int(v)) for k, v in tgt.items() if int(v or 0) > 0]
+    src_items: list[tuple[int, int]] = sorted(
+        ((int(k), int(v)) for k, v in src.items() if int(v or 0) > 0),
+        key=lambda x: x[0],
+    )
+    tgt_items: list[tuple[str, int]] = sorted(
+        ((str(k), int(v)) for k, v in tgt.items() if int(v or 0) > 0),
+        key=lambda x: x[0],
+    )
     if not src_items or not tgt_items:
         return {}
 
-    total = sum(v for _, v in src_items)
-    # If src/tgt are balanced (caller guarantees), total == sum(tgt) too.
-
-    # Floor allocation + fractional residues
-    raw: list[tuple[tuple[int, str], int, float]] = []  # (pair, floor_q, residue)
-    floor_sum = 0
-    for sid, sv in src_items:
-        for tname, tv in tgt_items:
-            num = sv * tv
-            q = num // total
-            residue = (num - q * total) / total
-            raw.append(((sid, tname), q, residue))
-            floor_sum += q
-
-    remainder = total - floor_sum
-    # Distribute remainder to highest residue first; deterministic tie-break
-    raw.sort(key=lambda x: (-x[2], x[0][0], x[0][1]))
+    # Remaining quantities, parallel to *_items (mutated as pools drain).
+    src_rem = [v for _, v in src_items]
+    tgt_rem = [v for _, v in tgt_items]
 
     allocation: dict[tuple[int, str], int] = {}
-    for i, (pair, q, _residue) in enumerate(raw):
-        bonus = 1 if i < remainder else 0
-        if q + bonus > 0:
-            allocation[pair] = q + bonus
+    i = j = 0
+    while i < len(src_items) and j < len(tgt_items):
+        q = src_rem[i] if src_rem[i] < tgt_rem[j] else tgt_rem[j]
+        if q > 0:
+            pair = (src_items[i][0], tgt_items[j][0])
+            allocation[pair] = allocation.get(pair, 0) + q
+        src_rem[i] -= q
+        tgt_rem[j] -= q
+        if src_rem[i] == 0:
+            i += 1
+        if tgt_rem[j] == 0:
+            j += 1
 
     return allocation
 
@@ -544,8 +624,14 @@ async def commit_draft(
     фильтра коммитит весь черновик и soft-delete'ит его. Новинки и обычные товары
     на один склад идут ОДНОЙ заявкой (заявка с новинкой получает префикс 🆕 в
     комментарии).
+
+    Идемпотентность: черновик берётся `FOR UPDATE`, поэтому два параллельных
+    (или повторный после двойного клика/таймаута) коммита одного черновика
+    сериализуются — первый создаёт заявки и soft-delete'ит/обрезает черновик,
+    второй на разлоке перечитывает уже-удалённую строку и получает 404 (или
+    «нет строк выбранной упаковки» при частичном коммите), не задваивая заявки.
     """
-    draft = await get_draft(db, project_id, draft_id)
+    draft = await _get_draft_for_update(db, project_id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
 
@@ -1117,8 +1203,11 @@ async def commit_unit(
 ) -> AssemblyDraftCommitResponse:
     """«В сборку»: создать AssemblyRequest из юнита и убрать его из черновика.
     Юнит в rows замораживается неявно (отдельный шаг «Передать на ФФ» не нужен).
-    Если черновик опустел (нет rows и handed_units) — soft-delete."""
-    draft = await get_draft(db, project_id, draft_id)
+    Если черновик опустел (нет rows и handed_units) — soft-delete.
+
+    Черновик берётся `FOR UPDATE` — повторный/параллельный «В сборку» по тому же
+    юниту сериализуется (без задвоения заявки)."""
+    draft = await _get_draft_for_update(db, project_id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
     distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})

@@ -3850,6 +3850,86 @@ export interface CommitSupply {
   items: Record<string, number>;
 }
 
+// ─── Прогноз загрузки WB-складов (вкладка «Прогноз/Локализация») ─────────────
+export type TrafficLight = 'red' | 'orange' | 'yellow' | 'green';
+
+export interface ForecastLeadTime {
+  assembly_ship_days: number; // создание → отгрузка (сборка + отправка)
+  delivery_days: number;      // отгрузка → приёмка WB
+  total_days: number;
+  has_history: boolean;       // false = использованы дефолты
+}
+
+export interface ForecastItem {
+  warehouse_name: string;
+  district: string;
+  district_label: string;
+  nm_id: number;
+  vendor_code: string;
+  current_stock: number;
+  incoming: number;
+  avg_daily: number;          // скорость продаж на складе (шт/день)
+  projected_on_arrival: number; // остаток на момент прихода поставки (может быть <0)
+  days_cover: number;         // дней покрытия после поставки
+  traffic_light: TrafficLight;
+}
+
+export interface ForecastWarehouse {
+  warehouse_name: string;
+  district: string;
+  district_label: string;
+  sku_count: number;
+  current_stock: number;
+  incoming: number;
+  traffic_light_counts: Record<string, number>;
+}
+
+export interface ForecastLocalizationDistrict {
+  district: string;
+  label: string;
+  demand: number;
+  avail_current: number;
+  avail_after: number;
+  local_pct_current: number;
+  local_pct_after: number;
+}
+
+export interface ForecastLocalization {
+  index_current: number;      // ИЛ (КТР-взвеш.), НИЖЕ = лучше
+  index_after: number;
+  avg_loc_pct_current: number; // средняя доля локализации %, ВЫШЕ = лучше
+  avg_loc_pct_after: number;
+  status_current: string;     // excellent / neutral / weak / critical
+  status_after: string;
+  horizon_days: number;
+  by_district: ForecastLocalizationDistrict[];
+}
+
+export interface ForecastSkuLocalization {
+  nm_id: number;
+  loc_pct_current: number;
+  loc_pct_after: number;
+}
+
+export interface ForecastSummary {
+  sku_count: number;
+  warehouse_count: number;
+  total_incoming: number;
+  traffic_light_counts: Record<string, number>;
+}
+
+export interface ForecastResponse {
+  draft_id: number;
+  lead_time: ForecastLeadTime;
+  summary: ForecastSummary;
+  localization: ForecastLocalization;
+  sku_localization: ForecastSkuLocalization[];
+  newcomer_nm_ids: number[];
+  warehouses: ForecastWarehouse[];
+  items: ForecastItem[];
+  generated_at: string;
+}
+
 export interface AssemblyDraftMergeRequest {
   /** IDs of drafts to merge (≥2 distinct values). */
   draft_ids: number[];
