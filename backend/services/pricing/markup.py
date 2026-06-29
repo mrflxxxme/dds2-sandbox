@@ -42,9 +42,12 @@ ANOMALY_PRICE_BELOW_COST = "Цена ниже себестоимости"
 ANOMALY_AD_BLEED = "Реклама в минус"
 ANOMALY_LOSS = "Убыток после расходов ВБ"
 ANOMALY_NO_COST = "Нет себестоимости"
+ANOMALY_PRICE_NOT_SET = "Цена завышена / нет скидки"
 ANOMALY_SUSPICIOUS_COST = "Подозрительная себестоимость"
 ANOMALY_THIN_MARKUP = "Низкая наценка"
 ANOMALY_DEAD_STOCK = "Залежавшийся остаток"
+
+_LOW_DISCOUNT_PCT = 5.0  # скидка ≤5% при абсурдной наценке → цена не настроена (базовая)
 
 _DEAD_STOCK_DAYS = 365  # >1 года до распродажи остатка = неликвид
 _NEW_PRODUCT_DAYS = 30  # first_sale_date пуст/в пределах N дней = новинка (раскачка, не неликвид)
@@ -248,6 +251,9 @@ def _classify_anomaly(r: PricingRow) -> str | None:
     if r.has_price and not r.has_cost:
         return ANOMALY_NO_COST
     if r.cost_share_pct is not None and r.cost_share_pct < _SUSPICIOUS_COST_SHARE_PCT:
+        # абсурдная наценка: нет скидки на ВБ (цена = базовая, завышена) ИЛИ кривая себест
+        if (r.discount or 0) <= _LOW_DISCOUNT_PCT:
+            return ANOMALY_PRICE_NOT_SET
         return ANOMALY_SUSPICIOUS_COST
     if r.markup_pct is not None and 0 <= r.markup_pct < _THIN_MARKUP_PCT:
         return ANOMALY_THIN_MARKUP
@@ -278,6 +284,8 @@ def _recommend(r: PricingRow) -> str:
         return "Пересмотреть юнит-экономику"
     if a == ANOMALY_NO_COST:
         return "Заполнить себестоимость"
+    if a == ANOMALY_PRICE_NOT_SET:
+        return "Выставить скидку / снизить цену на ВБ"
     if a == ANOMALY_SUSPICIOUS_COST:
         return "Проверить себестоимость"
     if a == ANOMALY_THIN_MARKUP:
@@ -571,6 +579,7 @@ _ANOMALY_ORDER = [
     ANOMALY_AD_BLEED,
     ANOMALY_LOSS,
     ANOMALY_NO_COST,
+    ANOMALY_PRICE_NOT_SET,
     ANOMALY_SUSPICIOUS_COST,
     ANOMALY_THIN_MARKUP,
     ANOMALY_DEAD_STOCK,

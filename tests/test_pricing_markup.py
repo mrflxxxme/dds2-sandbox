@@ -165,7 +165,7 @@ class TestBuildRowExpenses:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-async def _add_price(db: AsyncSession, pid: int, nm_id: int, price: float, vendor_code: str = "ART"):
+async def _add_price(db: AsyncSession, pid: int, nm_id: int, price: float, vendor_code: str = "ART", discount: float = 0.0):
     db.add(
         WbPrice(
             project_id=pid,
@@ -173,7 +173,7 @@ async def _add_price(db: AsyncSession, pid: int, nm_id: int, price: float, vendo
             vendor_code=vendor_code,
             base_price=Decimal(str(price)),
             price=Decimal(str(price)),
-            discount=Decimal("0"),
+            discount=Decimal(str(discount)),
             currency="RUB",
             synced_at=utcnow(),
         )
@@ -369,13 +369,26 @@ class TestStockAndAnomalies:
 
     @pytest.mark.asyncio
     async def test_anomaly_suspicious_cost(self, db_session: AsyncSession, project):
-        await _add_price(db_session, project.id, 4004, 10000.0)
+        # скидка ВЫСТАВЛЕНА (50%), но себест всё равно мизерная → кривая себест
+        await _add_price(db_session, project.id, 4004, 10000.0, discount=50.0)
         await set_cost_override(db_session, project.id, nm_id=4004, cost_price=100.0)  # 1% от цены
         await _add_wb_stock(db_session, project.id, 4004, 5)
 
         res = await get_markup_analytics(db_session, project.id, only_in_stock=True, group_by="anomaly")
         labels = {g["category"] for g in res["data_groups"]}
         assert "Подозрительная себестоимость" in labels
+
+    @pytest.mark.asyncio
+    async def test_anomaly_price_not_set(self, db_session: AsyncSession, project):
+        # скидка 0% + абсурдная наценка → «Цена завышена / нет скидки», не «подозр. себест»
+        await _add_price(db_session, project.id, 4007, 20000.0, discount=0.0)
+        await set_cost_override(db_session, project.id, nm_id=4007, cost_price=200.0)  # 1% от цены
+        await _add_wb_stock(db_session, project.id, 4007, 10)
+
+        res = await get_markup_analytics(db_session, project.id, only_in_stock=True, group_by="sku")
+        r = next(x for x in res["data_rows"] if x["nm_id"] == 4007)
+        assert r["anomaly"] == "Цена завышена / нет скидки"
+        assert "скидк" in r["recommendation"].lower()
 
     @pytest.mark.asyncio
     async def test_anomaly_dead_stock(self, db_session: AsyncSession, project):
