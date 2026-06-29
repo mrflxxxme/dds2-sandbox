@@ -1008,7 +1008,12 @@ export function WarehouseNeedView({
                 if (!canSendToWh(primary.wh)) continue;   // нет открытого якоря ФО — backend base как есть
                 let need = 0;
                 if (agg.base > 0) need = agg.base;
-                else if (agg.avgD > 0 && agg.coverage < ppb) need = ppb;   // бутстрап = 1 коробка
+                // Бутстрап коробкой ТОЛЬКО для пустого (cold-start) ИЛИ недо-покрытого
+                // относительно спроса ФО. ФО, где сток/транзит уже ≥ коробки ИЛИ ≥ спроса,
+                // НЕ трогаем — иначе перетаривание уже локализованного округа (коробка на
+                // якорь поверх уже лежащего/едущего). Зеркалит backend-гейт (шаг 4.7).
+                else if (agg.avgD > 0 && agg.coverage < ppb
+                    && (agg.coverage <= 0 || agg.coverage < agg.avgD * supplyDays)) need = ppb;
                 const zero = agg.anchors.filter(c => c.wh !== primary.wh && c.base > 0).map(c => c.wh);
                 targets.push({ wh: primary.wh, need, zero, pr: okrugPriority.indexOf(ok) });
             }
@@ -1045,7 +1050,7 @@ export function WarehouseNeedView({
             if (perSku.size > 0) result.set(a.nm_id, perSku);
         }
         return result;
-    }, [data, newcomerSet, wbWarehouses, acceptanceMap, getBaseArticleWbNeed, coldStartData, warehouseToDistrict, okrugInfo, speedCities, resolveSkuLevelPpb]);
+    }, [data, newcomerSet, wbWarehouses, acceptanceMap, getBaseArticleWbNeed, coldStartData, warehouseToDistrict, okrugInfo, speedCities, resolveSkuLevelPpb, supplyDays]);
 
     /** Итоговый per-cell need: base + client-side bump (если активен «Дораспределить»). */
     const getArticleWbNeed = useCallback((article: NeedArticle, whName: string): number => {
