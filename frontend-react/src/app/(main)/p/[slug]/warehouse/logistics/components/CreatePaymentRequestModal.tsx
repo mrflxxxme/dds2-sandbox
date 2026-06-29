@@ -98,6 +98,9 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     // projectSel: id проекта | 'none' (без проекта) | '' (текущий — до загрузки списка).
     const [projectSel, setProjectSel] = useState<string>('');
     const [projects, setProjects] = useState<Array<{ id: number; name: string; slug: string }>>([]);
+    // Бренд-атрибуция (свободная заявка/правка) — список как в План-Факте; '' = «Все бренды».
+    const [brands, setBrands] = useState<string[]>([]);
+    const [brandSel, setBrandSel] = useState<string>('');
     const params = useParams();
     const slug = typeof params?.slug === 'string' ? params.slug : Array.isArray(params?.slug) ? params.slug[0] : '';
 
@@ -123,6 +126,25 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     }, [categories, category]);
     const catLabelOf = (code: string | null | undefined): string =>
         (code ? (categories.find(c => c.code === code)?.label ?? CATEGORY_LABEL[code] ?? code) : '');
+
+    // Бренды проекта для атрибуции (источник — План-Факт/wb-brands). Свободная заявка/правка.
+    useEffect(() => {
+        if (isShipmentContext) return;
+        let aborted = false;
+        (async () => {
+            try {
+                const b = await api.getWbBrands();
+                if (!aborted) setBrands(b.filter(n => n !== 'Неопознанный Товар'));
+            } catch { /* бренды недоступны — селект скрыт */ }
+        })();
+        return () => { aborted = true; };
+    }, [isShipmentContext]);
+    // Сохранённый бренд гарантированно среди опций (при правке — даже если он исчез из продаж).
+    const brandOptions = useMemo(() => {
+        const list = brands.slice();
+        if (brandSel && !list.includes(brandSel)) list.unshift(brandSel);
+        return list;
+    }, [brands, brandSel]);
 
     // Список проектов для выбора (только для свободной заявки). Дефолт projectSel='' = текущий проект.
     useEffect(() => {
@@ -267,6 +289,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 setPickupDate(d.pickup_date || '');
                 setPurpose(d.purpose || '');
                 setCategory(d.category ?? 'OTHER');  // даём поправить ошибочно выбранное «Назначение»
+                setBrandSel(d.brand ?? '');           // бренд можно поправить при правке заявки
                 setLiveStatus(d.status);
                 setReadOnly(d.status !== 'DRAFT' && d.status !== 'PENDING_REVIEW');  // редактировать можно до создания платёжки в банке
                 setStep('form');
@@ -358,13 +381,14 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
         const vErr = validateRequisites();
         if (vErr) { setError(vErr); return; }
         // Назначение + проект — только для свободной заявки (не из листа логиста, не при правке).
-        const extra: { category?: PaymentRequestCategory; project_id?: number | null } = {};
+        const extra: { category?: PaymentRequestCategory; project_id?: number | null; brand?: string } = {};
         if (!isShipmentContext && !isEdit) {
             extra.category = category;
             if (category !== 'LOGISTICS') {
                 if (projectSel === 'none') extra.project_id = null;
                 else if (projectSel && !Number.isNaN(Number(projectSel))) extra.project_id = Number(projectSel);
             }
+            if (brandSel) extra.brand = brandSel;  // '' = «Все бренды» → не отправляем (остаётся NULL)
         }
         setCreating(true);
         try {
@@ -372,6 +396,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
             if (isEdit && created) {
                 detail = await api.updatePaymentRequest(created.id, {
                     category,  // даём исправить ошибочно выбранное «Назначение» (бэкенд PATCH это принимает)
+                    brand: brandSel || null,  // '' → сбросить в «Все бренды»; иначе тег бренда
                     payee_inn: payeeInn || undefined,
                     payee_name: payeeName || undefined,
                     payee_account: payeeAccount || undefined,
@@ -496,6 +521,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 {roRow('Сумма', created.amount ? `${formatNumber(Number(created.amount), 2)} ${created.currency}` : null)}
                 {roRow('Дата забора', created.pickup_date ? formatDate(created.pickup_date) : null)}
                 {roRow('Категория', created.category ? catLabelOf(created.category) : null)}
+                {roRow('Бренд', created.brand)}
                 {roRow('Назначение', created.purpose)}
                 {created.bank_doc_id && roRow('ID платёжки', created.bank_doc_id)}
                 {created.documents.length > 0 && (
@@ -682,6 +708,20 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                                 </div>
                             )}
                         </div>
+                        )}
+
+                        {/* Бренд — атрибуция расхода (как в План-Факте); «Все бренды» = общий по проекту */}
+                        {!isShipmentContext && brandOptions.length > 0 && (
+                            <div className="form-group" style={{ margin: '0 0 16px' }}>
+                                <label className="form-label">Бренд</label>
+                                <select className="form-input" value={brandSel} onChange={e => setBrandSel(e.target.value)}>
+                                    <option value="">Все бренды</option>
+                                    {brandOptions.map(b => <option key={b} value={b}>{b}</option>)}
+                                </select>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                                    «Все бренды» — расход общий по проекту.
+                                </div>
+                            </div>
                         )}
 
                         {/* Mode toggle — только для логистики (привязка к отгрузке); скрыт при правке/мульти */}

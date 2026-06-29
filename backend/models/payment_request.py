@@ -187,6 +187,9 @@ class PaymentRequest(Base, TimestampMixin, SoftDeleteMixin):
     purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Назначение оплаты (PaymentRequestCategory). NULL у старых заявок = логистика.
     category: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # Бренд (атрибут товара из wb_finance_rows.brand_name). NULL = «Все бренды» — общий
+    # расход по проекту. Тег для фильтра в списке; на отчёты пока не влияет.
+    brand: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     # Bank-statement match (set by the auto-matcher) → flips status to PAID.
     matched_transaction_id: Mapped[int | None] = mapped_column(

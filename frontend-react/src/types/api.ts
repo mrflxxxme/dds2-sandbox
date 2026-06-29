@@ -2536,6 +2536,7 @@ export interface PaymentRequestRow {
   number: string;
   status: PaymentRequestStatus;
   category: PaymentRequestCategory | null;
+  brand: string | null;  // бренд-атрибуция; null = «Все бренды»
   project_id: number | null;
   project_name: string | null;
   payee_name: string | null;
@@ -2689,6 +2690,8 @@ export interface PaymentRequestCreate {
   currency?: string;
   pickup_date?: string;
   purpose?: string;
+  // Бренд-атрибуция. Опущено → «Все бренды»; null → сбросить в «Все бренды» (при PATCH).
+  brand?: string | null;
 }
 
 export interface PaymentRequestStatusPoll {

@@ -87,6 +87,9 @@ export default function PaymentsPanel({ embedded = false }: Props) {
     const [search, setSearch] = useState('');
     const [dateFrom, setDateFrom] = useState('');
     const [dateTo, setDateTo] = useState('');
+    // Фильтр по бренду (список как в План-Факте); '' = все бренды.
+    const [brandFilter, setBrandFilter] = useState('');
+    const [brands, setBrands] = useState<string[]>([]);
 
     // Detail drawer
     const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -123,6 +126,7 @@ export default function PaymentsPanel({ embedded = false }: Props) {
             const resp = await api.listPaymentRequests({
                 status: statusTab === 'all' ? undefined : statusTab,
                 search: search || undefined,
+                brand: brandFilter || undefined,
                 date_from: dateFrom || undefined,
                 date_to: dateTo || undefined,
             });
@@ -132,10 +136,19 @@ export default function PaymentsPanel({ embedded = false }: Props) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
         setLoading(false);
-    }, [statusTab, search, dateFrom, dateTo]);
+    }, [statusTab, search, brandFilter, dateFrom, dateTo]);
 
     useEffect(() => { load(); }, [load]);
     useEffect(() => { loadCategories(); }, [loadCategories]);
+    // Список брендов проекта для фильтра (источник — План-Факт/wb-brands).
+    useEffect(() => {
+        let aborted = false;
+        (async () => {
+            try { const b = await api.getWbBrands(); if (!aborted) setBrands(b.filter(n => n !== 'Неопознанный Товар')); }
+            catch { /* бренды недоступны — фильтр скрыт */ }
+        })();
+        return () => { aborted = true; };
+    }, []);
 
     // code → отображаемый лейбл: справочник → фолбэк системных → сам код.
     const labelOf = useMemo(() => {
@@ -283,6 +296,7 @@ export default function PaymentsPanel({ embedded = false }: Props) {
             '№': r.number,
             'Статус': PAYMENT_STATUS_MAP[r.status]?.label ?? r.status,
             'Назначение': r.category ? labelOf(r.category) : '',
+            'Бренд': r.brand ?? 'Все бренды',
             'Проект': r.project_name ?? '',
             'Получатель': r.payee_name ?? '',
             'ИНН': r.payee_inn ?? '',
@@ -299,6 +313,8 @@ export default function PaymentsPanel({ embedded = false }: Props) {
     // «Дата забора» — логистическая колонка. Показываем, только если хоть у одной видимой
     // строки есть забор — на чисто фото/дизайн/таможня выборке колонка-«—» исчезает.
     const hasPickup = useMemo(() => items.some(r => r.pickup_date), [items]);
+    // Колонка «Бренд» появляется, только если хоть одна заявка тегирована брендом.
+    const hasBrand = useMemo(() => items.some(r => r.brand), [items]);
 
     // ─── Bulk selection (только PENDING_REVIEW можно передать в банк) ─────────────
     const pendingIds = useMemo(
@@ -455,6 +471,15 @@ export default function PaymentsPanel({ embedded = false }: Props) {
                             style={{ minWidth: 220 }}
                         />
                     </div>
+                    {brands.length > 0 && (
+                        <div className="form-group" style={{ margin: 0 }}>
+                            <label className="form-label" style={{ fontSize: 12 }}>Бренд</label>
+                            <select className="form-input" value={brandFilter} onChange={e => setBrandFilter(e.target.value)} style={{ minWidth: 160 }}>
+                                <option value="">Все бренды</option>
+                                {brands.map(b => <option key={b} value={b}>{b}</option>)}
+                            </select>
+                        </div>
+                    )}
                     <div className="form-group" style={{ margin: 0 }}>
                         <label className="form-label" style={{ fontSize: 12 }}>Дата от</label>
                         <input className="form-input" type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
@@ -548,6 +573,10 @@ export default function PaymentsPanel({ embedded = false }: Props) {
                                     key: 'project_name', label: 'Проект', sortable: true,
                                     render: (v: string | null) => v ?? <span style={{ color: 'var(--color-text-muted)' }}>— общая</span>,
                                 },
+                                ...(hasBrand ? [{
+                                    key: 'brand', label: 'Бренд', sortable: true,
+                                    render: (v: string | null) => v ?? <span style={{ color: 'var(--color-text-muted)' }}>Все бренды</span>,
+                                }] : []),
                                 { key: 'payee_name', label: 'Получатель', sortable: true, render: (v: string | null) => v ?? '—' },
                                 { key: 'payee_inn', label: 'ИНН', sortable: false, render: (v: string | null) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v ?? '—'}</span> },
                                 {
@@ -600,6 +629,7 @@ export default function PaymentsPanel({ embedded = false }: Props) {
                                 <div style={{ fontSize: 13, marginBottom: 16 }}>
                                     <div style={{ fontWeight: 600, marginBottom: 8, color: 'var(--color-text-muted)', textTransform: 'uppercase', fontSize: 11, letterSpacing: '0.5px' }}>Реквизиты</div>
                                     {detail.category && <DetailRow label="Категория" value={labelOf(detail.category)} />}
+                                    <DetailRow label="Бренд" value={detail.brand ?? 'Все бренды'} />
                                     <DetailRow label="Проект" value={detail.project_name ?? '— общая (без проекта)'} />
                                     {detail.payee_name && <DetailRow label="Получатель" value={detail.payee_name} />}
                                     {detail.payee_inn && <DetailRow label="ИНН" value={detail.payee_inn} mono />}
