@@ -319,6 +319,12 @@ async def order_geography(
 @router.post("/distribute_cold_start", response_model=DistributeResponse)
 async def distribute_cold_start(
     req: DistributeRequest,
+    localization_target: int = Query(
+        75,
+        ge=1,
+        le=100,
+        description="Целевая локализация (%) для новинки: концентрация seed на топ-ФО. 100 = размазывать по всем ФО (старое поведение).",
+    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> DistributeResponse:
@@ -332,7 +338,7 @@ async def distribute_cold_start(
     """
     from backend.services.cold_start_distribution_service import compute_distribution
 
-    return await compute_distribution(db, project.id, req)
+    return await compute_distribution(db, project.id, req, localization_target=localization_target)
 
 
 @router.get("/cold_start_table", response_model=ColdStartTableResponse)

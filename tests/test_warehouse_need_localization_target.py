@@ -337,3 +337,73 @@ async def test_high2_total_need_mode_invariant(db_session, project, monkeypatch)
 
     assert total_actual == total_loc, f"total_need mode-variant: actual={total_actual} loc={total_loc}"
     assert res_loc["summary"]["unmapped_demand_qty"] == 140
+
+
+# ── MEDIUM regression: covered warehouse counts toward okrug localization ──────
+async def test_covered_okrug_warehouse_not_overstocked(db_session, project, monkeypatch):
+    """Склад, чей ФО уже покрыт WB-стоком СОСЕДНЕГО склада, не доливается сверх 75%.
+
+    Регресс на MEDIUM из /review: demand_by_okrug/existing_by_okrug строились только
+    по складам с need>0 → покрытый склад (need==0) выпадал, ФО выглядел недо-покрытым,
+    greedy переливал. Фикс учитывает ВСЕ склады ФО. Проверяем достигнутую локализацию:
+    с фиксом ≈75% (цель), без фикса был бы overshoot ~90% (перетаривание).
+
+    Сетап: ЦФО — Тула WB-сток 100 покрывает свой спрос 50 (need 0, профицит);
+    Коледино спрос 30, сток 0. ПФО — Казань спрос 200, сток 0 (тянет can_send>0).
+    Σспрос 280, Σсток 100 → can_send 180. Цель 75% от 280 = 210 локального покрытия;
+    Тула уже даёт 80 → долить надо ~130, а не 173 (как без учёта Тулы).
+    """
+    from backend.services.warehouse_district import warehouse_to_district as wd
+
+    pid = project.id
+    nm_id = 702100 + (uuid.uuid4().int % 1000)
+    bc = f"BC{nm_id}"
+    nom_id = await _seed_nomenclature(db_session, pid, nm_id, bc)
+    ff_id = await _seed_ff_warehouse(db_session, pid, "FF-Cov")
+    await _seed_rf_stock(db_session, pid, ff_id, nom_id, bc, 10_000)
+    KAZAN = "Казань"  # volga anchor
+    await _seed_wb_stock(db_session, pid, nm_id, ANCHOR_WH, 100)   # Тула покрыта
+    await _seed_wb_stock(db_session, pid, nm_id, THIEF_WH, 0)      # Коледино нужна
+    await _seed_wb_stock(db_session, pid, nm_id, KAZAN, 0)         # Казань нужна
+    await db_session.commit()
+    # sanity: разные ФО
+    assert wd(ANCHOR_WH) == wd(THIEF_WH) and wd(KAZAN) != wd(ANCHOR_WH)
+
+    orders = [
+        {"nmId": nm_id, "quantity": 50, "warehouseName": ANCHOR_WH, "supplierArticle": "A"},
+        {"nmId": nm_id, "quantity": 30, "warehouseName": THIEF_WH, "supplierArticle": "A"},
+        {"nmId": nm_id, "quantity": 200, "warehouseName": KAZAN, "supplierArticle": "A"},
+    ]
+    _patch_api(monkeypatch, orders)
+
+    res = await _call(
+        db_session, pid, supply_days=14, analysis_days=14, only_available=True,
+        localization_target=75,
+    )
+    art = next(a for a in res["articles"] if a["nm_id"] == nm_id)
+    can_send = art["can_send"]
+
+    # Достигнутая локализация = Σ_ФО min(спрос_ФО, сток_ФО + выделено_ФО) / Σспрос.
+    gross = {ANCHOR_WH: 50.0, THIEF_WH: 30.0, KAZAN: 200.0}
+    total_demand = sum(gross.values())
+    dem_by_d: dict[str, float] = {}
+    cov_by_d: dict[str, float] = {}
+    distributed = 0
+    for w in res["warehouses"]:
+        cell = w["articles"].get(nm_id)
+        if not cell:
+            continue
+        d = wd(w["name"])
+        dem_by_d[d] = dem_by_d.get(d, 0.0) + gross.get(w["name"], 0.0)
+        cov_by_d[d] = cov_by_d.get(d, 0.0) + cell.get("stock", 0) + cell["need"]
+        distributed += cell["need"]
+    local = sum(min(dem_by_d[d], cov_by_d[d]) for d in dem_by_d)
+    achieved = local / total_demand
+
+    # Консервация цела.
+    assert distributed <= can_send
+    # Покрытый склад (Тула) не доливается (его ФО уже локализован стоком).
+    by_wh = {w["name"]: w for w in res["warehouses"]}
+    assert by_wh[ANCHOR_WH]["articles"].get(nm_id, {}).get("need", 0) == 0
+    # Главное: достигнутая локализация у цели ~75%, БЕЗ overshoot (без фикса было бы ~90%).
+    assert 0.68 <= achieved <= 0.82, f"localization {achieved:.2%} вне [68%,82%] — перетаривание ФО?"

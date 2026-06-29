@@ -839,13 +839,16 @@ async def get_warehouse_need(
             demand_by_okrug: dict[str, float] = {}
             existing_by_okrug: dict[str, float] = {}
             total_gross = 0.0
-            for wh_name in wbs:
-                need_wh = wh_data[wh_name]["articles"][nm_id]["need"]
+            # Спрос и покрытие ФО считаем по ВСЕМ складам с ячейкой nm, ВКЛЮЧАЯ
+            # уже полностью покрытые (need==0): их WB-сток + в-сборке + в-пути тоже
+            # локализуют округ. Иначе округ, где сток/транзит соседнего склада уже
+            # закрыл спрос, выглядит менее покрытым → greedy доливает на оставшиеся
+            # склады ФО сверх нужды (перетаривание округа, в т.ч. поверх уже едущего).
+            for wh_name in list(wh_data.keys()):
+                arts = wh_data[wh_name]["articles"]
+                if nm_id not in arts:
+                    continue
                 okrug = _wh_to_d(wh_name)
-                wh_demand[wh_name] = need_wh
-                wh_weight[wh_name] = _priority_weight(wh_name)
-                wh_okrug[wh_name] = okrug
-
                 gross_wh = (wh_orders_map.get((wh_name, nm_id), 0) / max(actual_days, 1)) * supply_days
                 existing_wh = (
                     stock_lookup.get((wh_name, nm_id), 0)
@@ -855,6 +858,13 @@ async def get_warehouse_need(
                 demand_by_okrug[okrug] = demand_by_okrug.get(okrug, 0.0) + gross_wh
                 existing_by_okrug[okrug] = existing_by_okrug.get(okrug, 0.0) + existing_wh
                 total_gross += gross_wh
+                # Наливать cap можно ТОЛЬКО склады с остаточной потребностью (need>0);
+                # покрытые склады лишь формируют картину локализации округа.
+                need_wh = arts[nm_id]["need"]
+                if need_wh > 0:
+                    wh_demand[wh_name] = need_wh
+                    wh_weight[wh_name] = _priority_weight(wh_name)
+                    wh_okrug[wh_name] = okrug
 
             unmapped_gross = (unmapped_demand.get(nm_id, 0) / max(actual_days, 1)) * supply_days
             total_demand = total_gross + unmapped_gross
@@ -1136,5 +1146,7 @@ async def get_warehouse_need(
             # HIGH-2: суммарный непривязанный (зарубеж/СНГ) спрос за окно анализа.
             # Эти штуки учтены в total_need, но НЕ распределены по WB-складам.
             "unmapped_demand_qty": sum(unmapped_demand.values()),
+            # Целевая локализация (%), до которой велось распределение (only_available).
+            "localization_target": localization_target,
         },
     }
