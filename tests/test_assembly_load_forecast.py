@@ -8,13 +8,18 @@
 5. Пустой черновик → пустой прогноз (не падает). 404 на чужой/несуществующий.
 """
 
+import uuid
 from datetime import date
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
+from sqlalchemy import text
 
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.integrations import WbFunnelDaily, WbWarehouseStock
+from backend.models.wb_fbo import WbFboSupply, WbSupplyStatus
 from backend.models.wb_order import WbOrder
 from backend.schemas.assembly_draft import (
     AssemblyDraftCreate,
@@ -177,3 +182,140 @@ async def test_forecast_404_other_project(db_session):
     with pytest.raises(HTTPException) as ei:
         await assembly_load_forecast_service.forecast_draft_load(db_session, OTHER_PROJECT_ID, draft.id)
     assert ei.value.status_code == 404
+
+
+# ─── Транзит + чужие активные сборки в incoming ──────────────────────────────
+
+
+async def _mk_nomenclature(db_session, project_id: int, nm_id: int) -> int:
+    """Номенклатура с article_wb=nm_id (нужна для джойна сборок)."""
+    return (
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, barcode, article_wb, updated_at) "
+                "VALUES (:pid, :bc, :wb, NOW()) RETURNING id"
+            ),
+            {"pid": project_id, "bc": f"BC-{uuid.uuid4().hex[:8]}", "wb": nm_id},
+        )
+    ).scalar()
+
+
+async def _mk_warehouse(db_session, project_id: int) -> int:
+    """FULFILLMENT-склад-источник для сборки."""
+    return (
+        await db_session.execute(
+            text(
+                "INSERT INTO warehouses (project_id, name, warehouse_type, sort_order, "
+                "is_active, is_deleted, created_at, updated_at) "
+                "VALUES (:pid, :nm, 'FULFILLMENT', 1, true, false, NOW(), NOW()) RETURNING id"
+            ),
+            {"pid": project_id, "nm": f"FF-{uuid.uuid4().hex[:6]}"},
+        )
+    ).scalar()
+
+
+async def _mk_assembly(
+    db_session,
+    project_id: int,
+    wh_id: int,
+    nom_id: int,
+    *,
+    status: AssemblyStatus,
+    qty: int,
+    wb_warehouse_name_manual: str | None = None,
+    wb_fbo_supply_id: int | None = None,
+    source_draft_id: int | None = None,
+) -> AssemblyRequest:
+    req = AssemblyRequest(
+        project_id=project_id,
+        warehouse_id=wh_id,
+        number=f"ASM-{uuid.uuid4().hex[:8]}",
+        status=status,
+        wb_fbo_supply_id=wb_fbo_supply_id,
+        wb_warehouse_name_manual=wb_warehouse_name_manual,
+        source_draft_id=source_draft_id,
+        pallets_count=1,
+        pallet_weight_kg=Decimal("100.00"),
+    )
+    db_session.add(req)
+    await db_session.flush()
+    db_session.add(
+        AssemblyRequestItem(
+            project_id=project_id,
+            assembly_request_id=req.id,
+            nomenclature_id=nom_id,
+            barcode=f"BC-{uuid.uuid4().hex[:8]}",
+            quantity=qty,
+        )
+    )
+    await db_session.commit()
+    return req
+
+
+@pytest.mark.asyncio
+async def test_forecast_incoming_includes_transit_and_other_assemblies(db_session):
+    """incoming учитывает товар В ПУТИ (SHIPPED) + чужие активные сборки по складу.
+
+    Базовый прогноз: Коледино incoming=100 (только tgt черновика). После добавления
+    активной сборки (READY, 40) и транзита (SHIPPED, 25) на Коледино для того же SKU
+    → incoming должно стать 165, а локализация/avail_after — выше.
+    """
+    nom_id = await _mk_nomenclature(db_session, PROJECT_ID, NM_ID)
+    wh_id = await _mk_warehouse(db_session, PROJECT_ID)
+
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, _draft_payload())
+    base = await assembly_load_forecast_service.forecast_draft_load(db_session, PROJECT_ID, draft.id)
+    base_kol = next(it for it in base.items if it.warehouse_name == "Коледино")
+    assert base_kol.incoming == 100  # только черновик
+    base_loc = base.localization.avg_loc_pct_after
+
+    # Активная сборка (manual WB-склад) + транзит (через FBO-поставку) на Коледино.
+    await _mk_assembly(
+        db_session, PROJECT_ID, wh_id, nom_id,
+        status=AssemblyStatus.READY, qty=40, wb_warehouse_name_manual="Коледино",
+    )
+    supply = WbFboSupply(
+        project_id=PROJECT_ID, wb_supply_id=f"SUP-{uuid.uuid4().hex[:8]}",
+        wb_status=WbSupplyStatus.ACTIVE, warehouse_name="Коледино",
+        created_at_wb=utcnow(),
+    )
+    db_session.add(supply)
+    await db_session.flush()
+    await _mk_assembly(
+        db_session, PROJECT_ID, wh_id, nom_id,
+        status=AssemblyStatus.SHIPPED, qty=25, wb_fbo_supply_id=supply.id,
+    )
+
+    fc = await assembly_load_forecast_service.forecast_draft_load(db_session, PROJECT_ID, draft.id)
+    kol = next(it for it in fc.items if it.warehouse_name == "Коледино")
+    assert kol.incoming == 100 + 40 + 25  # черновик + активная + транзит
+    # Больше входящей → выше прогноз локализации после поставки.
+    assert fc.localization.avg_loc_pct_after >= base_loc
+
+
+@pytest.mark.asyncio
+async def test_forecast_incoming_excludes_self_draft_and_other_project(db_session):
+    """Двойного счёта нет: сборки этого черновика (source_draft_id) и чужого проекта
+    в incoming не попадают."""
+    nom_id = await _mk_nomenclature(db_session, PROJECT_ID, NM_ID)
+    wh_id = await _mk_warehouse(db_session, PROJECT_ID)
+    other_nom = await _mk_nomenclature(db_session, OTHER_PROJECT_ID, NM_ID)
+    other_wh = await _mk_warehouse(db_session, OTHER_PROJECT_ID)
+
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, _draft_payload())
+
+    # Сборка, рождённая ИЗ этого черновика — исключается (анти-double-count).
+    await _mk_assembly(
+        db_session, PROJECT_ID, wh_id, nom_id,
+        status=AssemblyStatus.READY, qty=999, wb_warehouse_name_manual="Коледино",
+        source_draft_id=draft.id,
+    )
+    # Сборка чужого проекта — изоляция по project_id.
+    await _mk_assembly(
+        db_session, OTHER_PROJECT_ID, other_wh, other_nom,
+        status=AssemblyStatus.READY, qty=777, wb_warehouse_name_manual="Коледино",
+    )
+
+    fc = await assembly_load_forecast_service.forecast_draft_load(db_session, PROJECT_ID, draft.id)
+    kol = next(it for it in fc.items if it.warehouse_name == "Коледино")
+    assert kol.incoming == 100  # только tgt черновика, без 999 и 777

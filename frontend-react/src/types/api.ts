@@ -4024,6 +4024,10 @@ export interface StockNeedSummary {
   deficit_count: number;
   can_send_count: number;
   no_wb_count: number;
+  /** Целевая локализация (%), до которой ведётся распределение (по умолч. 75). */
+  localization_target?: number;
+  /** Спрос гео-непривязанных заказов (СНГ и пр.): учтён в total_need, но НЕ локальный. */
+  unmapped_demand_qty?: number;
 }
 
 export interface StockNeedResponse {

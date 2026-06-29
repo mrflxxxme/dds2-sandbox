@@ -145,7 +145,10 @@ export function roundDraftRowsToWholeBoxes(
  *    если на короб хватает — `qty → следующий кратный ppb` (Σsrc/Σtgt растут поровну);
  *  • не хватает ФФ на короб — под-коробочный остаток СРЕЗАЕТСЯ вниз и остаётся на ФФ
  *    (не едет россыпью).
- * Так моно едет ТОЛЬКО целыми коробами. Новинки (`ppb`→null) и не-моно — не трогаем.
+ * Так моно едет ТОЛЬКО целыми коробами. Не-моно — не трогаем.
+ * `skipLoose(nm)` — оставить строку как есть (россыпь): новинка cold-start БЕЗ кратности
+ * короба. Новинка С кратностью НЕ попадает сюда (skipLoose=false) → едет целыми коробами,
+ * как обычный моно-SKU.
  * `freeByNm` мутируется (общий пул ФФ SKU расходуется — зови ПОСЛЕ box-округления, чтобы
  * короб и моно делили один остаток). Σsrc==Σtgt держится. Чистая функция.
  */
@@ -153,11 +156,11 @@ export function roundMonoToWholeBoxes(
     rows: AssemblyDraftRow[],
     ppbOf: (nmId: number) => number | null | undefined,
     freeByNm: Record<number, Record<number, number>>,
-    isNewcomer?: (nmId: number) => boolean,
+    skipLoose?: (nmId: number) => boolean,
 ): AssemblyDraftRow[] {
     const out = rows.map((r) => {
         if ((r.package_type || 'BOX') !== 'MONOPALLET') return r;
-        if (isNewcomer?.(r.nm_id)) return r;
+        if (skipLoose?.(r.nm_id)) return r;
         const ppb = ppbOf(r.nm_id);
         if (!ppb || ppb <= 0) return r;
 

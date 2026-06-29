@@ -93,19 +93,30 @@ export function normalizeDraft(
     const freeByNm = ctx.freeByNm ?? {};
     // 1. Целые коробы: BOX-строки (добор/срез) + МОНО (вариант A: добор короба из ФФ,
     //    иначе срез под-коробочного остатка на ФФ — моно едет только целыми коробами).
-    const boxed = roundDraftRowsToWholeBoxes(rows, ctx.ppbOf, freeByNm, ctx.isNewcomer);
-    const monoRows = roundMonoToWholeBoxes(boxed.rows, ctx.ppbOf, freeByNm, ctx.isNewcomer);
+    // Россыпь-исключение = новинка cold-start БЕЗ заданной кратности короба (`ppb`).
+    // Новинка С `ppb` едет ЦЕЛЫМИ коробами и МИКСуется в смешанные/моно-паллеты как
+    // обычный box-SKU (по требованию пользователя): её НЕ исключаем из box+pallet шагов.
+    // Новинка БЕЗ `ppb` физически нельзя округлить → остаётся россыпью (как раньше).
+    const isLoose = (nm: number): boolean => {
+        if (!ctx.isNewcomer(nm)) return false;
+        const ppb = ctx.ppbOf(nm);
+        return !(ppb && ppb > 0);
+    };
+    const boxed = roundDraftRowsToWholeBoxes(rows, ctx.ppbOf, freeByNm, isLoose);
+    const monoRows = roundMonoToWholeBoxes(boxed.rows, ctx.ppbOf, freeByNm, isLoose);
 
     // 2. Целые паллеты на каждую отгрузку ФФ→WB (короб смешанные, моно ≤3 АРТИКУЛА,
     //    добор ЦЕЛЫМИ коробами). Разворачиваем в линии, режем, сворачиваем обратно.
-    const newcomerSet = new Set(monoRows.map((r) => r.nm_id).filter((nm) => ctx.isNewcomer(nm)));
+    // `isNew` для линии = только россыпь-новинка (б/ppb): она остаётся россыпью в trim.
+    // Новинка С ppb имеет upp != null → режется до целых паллет/входит в микс как обычная.
+    const newcomerSet = new Set(monoRows.map((r) => r.nm_id).filter((nm) => isLoose(nm)));
     const uppOf = (nm: number, wb: string): number | null => {
-        if (ctx.isNewcomer(nm)) return null;
+        if (isLoose(nm)) return null;
         const ppb = ctx.ppbOf(nm);
         const bpp = effectiveBoxesPerPallet(ctx.boxSizeOf(nm), maxPalletHeightCm(wb), ctx.overrides);
         return bpp != null && ppb && ppb > 0 ? bpp * ppb : null;
     };
-    const boxOf = (nm: number): number | null => (ctx.isNewcomer(nm) ? null : (ctx.ppbOf(nm) ?? null));
+    const boxOf = (nm: number): number | null => (isLoose(nm) ? null : (ctx.ppbOf(nm) ?? null));
     const lines = buildPreviewLines(monoRows, newcomerSet);
     const trim = trimLinesToWholePallets(lines, uppOf, boxOf);
     const outRows = linesToRows(trim.kept);

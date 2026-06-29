@@ -208,6 +208,17 @@ async def get_stock_need(
             "Работает только при only_available=true. 0 = off."
         ),
     ),
+    localization_target: int = Query(
+        75,
+        ge=1,
+        le=100,
+        description=(
+            "Целевая локализация (%), до которой распределяется сток (only_available). "
+            "Распределение концентрируется на anchor-складах до достижения цели по ФО "
+            "и не размазывает остаток на дальние склады («не перетаривать»). 75 = "
+            "порог КТР «excellent». 100 = покрывать спрос полностью (старое поведение)."
+        ),
+    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -226,6 +237,7 @@ async def get_stock_need(
         localization_optimized=localization_optimized,
         only_available=only_available,
         min_stock_per_main_warehouse=min_stock_per_main_warehouse,
+        localization_target=localization_target,
     )
 
 
@@ -330,6 +342,16 @@ async def cold_start_table(
     ship_pct: int = Query(55, ge=10, le=100, description="Отгружать не более N% свободного ФФ-остатка"),
     ship_floor: int = Query(50, ge=0, le=10000, description="Ниже N свободного ФФ — отгружать 100% (кап не действует)"),
     bench_from_project_id: int | None = Query(None),
+    localization_target: int = Query(
+        75,
+        ge=1,
+        le=100,
+        description=(
+            "Целевая локализация (%) для новинок: seed концентрируется на топ-округах "
+            "по доле спроса до достижения цели, хвост дальних ФО не сидируется. "
+            "75 = «excellent». 100 = размазывать по всем ФО (старое поведение)."
+        ),
+    ),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> ColdStartTableResponse:
@@ -356,4 +378,5 @@ async def cold_start_table(
         bench_from_project_id,
         ship_fraction=ship_pct / 100,
         ship_floor=ship_floor,
+        localization_target=localization_target,
     )

@@ -2,8 +2,12 @@
 """Прогноз загрузки WB-складов с учётом черновика сборки.
 
 По одному черновику считает, как поставка ляжет на WB-склады:
-  • текущий остаток (`wb_warehouse_stocks`) + входящая поставка (`draft.tgt`)
-    − продажи за lead-time → прогноз остатка, дней покрытия и светофор по складу;
+  • текущий остаток (`wb_warehouse_stocks`) + входящая поставка − продажи за
+    lead-time → прогноз остатка, дней покрытия и светофор по складу.
+    Входящая = `draft.tgt` + уже-в-работе поставки по тем же SKU (товар в пути
+    SHIPPED + активные сборки PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED), по
+    целевому WB-складу — чтобы прогноз отражал РЕАЛЬНЫЙ будущий остаток округа,
+    а не только текущий черновик;
   • примерный ИНДЕКС ЛОКАЛИЗАЦИИ до/после поставки.
 
 Допущения (всё «примерно», см. вопрос пользователя):
@@ -29,8 +33,15 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models.assembly import AssemblyRequest, AssemblyStatus, AssemblyStatusHistory
+from backend.models.assembly import (
+    AssemblyRequest,
+    AssemblyRequestItem,
+    AssemblyStatus,
+    AssemblyStatusHistory,
+)
+from backend.models.cost import Nomenclature
 from backend.models.integrations import WbFunnelDaily, WbWarehouseStock
+from backend.models.wb_fbo import WbFboSupply
 from backend.models.wb_order import WbOrder
 from backend.schemas.assembly_draft import (
     AssemblyDraftDistribution,
@@ -214,6 +225,77 @@ async def _current_stock(
     return stock, vendor
 
 
+# Активные сборки, ещё едущие к WB (не отгружены) + отгруженные (в пути).
+_PIPELINE_ACTIVE_STATUSES = (
+    AssemblyStatus.PENDING,
+    AssemblyStatus.IN_PROGRESS,
+    AssemblyStatus.READY,
+    AssemblyStatus.VEHICLE_ASSIGNED,
+)
+
+
+async def _pipeline_incoming(
+    db: AsyncSession,
+    project_id: int,
+    nm_ids: set[int],
+    *,
+    exclude_draft_id: int | None = None,
+) -> dict[int, dict[str, int]]:
+    """Уже-в-работе поставки по (nm_id, целевой WB-склад): транзит (SHIPPED) +
+    активные сборки (PENDING/IN_PROGRESS/READY/VEHICLE_ASSIGNED).
+
+    Целевой склад = COALESCE(WbFboSupply.warehouse_name, AssemblyRequest.wb_warehouse_name_manual)
+    — тот же паттерн, что в warehouse_need_service. Имя нормализуется в канон-форму
+    (как остаток/входящая), чтобы агрегировалось в те же округа.
+
+    Анти-double-count: сборки, рождённые из текущего открытого черновика
+    (`source_draft_id == exclude_draft_id`), исключаются — их tgt уже в incoming.
+    Открытый черновик обычно ещё НЕ является AssemblyRequest, так что пересечения
+    нет; гард — на случай уже закоммиченного черновика.
+    """
+    if not nm_ids:
+        return {}
+
+    target_label = func.coalesce(
+        WbFboSupply.warehouse_name,
+        AssemblyRequest.wb_warehouse_name_manual,
+    ).label("target_wh")
+
+    stmt = (
+        select(
+            Nomenclature.article_wb,
+            target_label,
+            func.sum(AssemblyRequestItem.quantity).label("qty"),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .join(Nomenclature, Nomenclature.id == AssemblyRequestItem.nomenclature_id)
+        .outerjoin(WbFboSupply, WbFboSupply.id == AssemblyRequest.wb_fbo_supply_id)
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status.in_([*_PIPELINE_ACTIVE_STATUSES, AssemblyStatus.SHIPPED]),
+            Nomenclature.article_wb.in_(nm_ids),
+        )
+        .group_by(Nomenclature.article_wb, target_label)
+    )
+    if exclude_draft_id is not None:
+        # NULL-safe: НЕ дропать сборки без source_draft_id (FBO/manual-путь).
+        stmt = stmt.where(
+            (AssemblyRequest.source_draft_id.is_(None))
+            | (AssemblyRequest.source_draft_id != exclude_draft_id)
+        )
+
+    res = await db.execute(stmt)
+    out: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for nm, target_wh, qty in res.all():
+        q = int(qty or 0)
+        if not target_wh or q <= 0:
+            continue
+        name = canonical_warehouse_name(target_wh) or target_wh
+        out[int(nm)][name] += q
+    return out
+
+
 async def forecast_draft_load(
     db: AsyncSession,
     project_id: int,
@@ -261,6 +343,13 @@ async def forecast_draft_load(
             newcomer_nm_ids=[],
             warehouses=[], items=[], generated_at=utcnow(),
         )
+
+    # Уже-в-работе поставки (транзит SHIPPED + чужие активные сборки) по тем же
+    # SKU → реальный будущий остаток по округу, а не только текущий черновик.
+    pipeline = await _pipeline_incoming(db, project_id, nm_ids, exclude_draft_id=draft_id)
+    for nm, by_wh in pipeline.items():
+        for wh_name, qty in by_wh.items():
+            incoming[nm][wh_name] += qty
 
     lead_time = await _compute_lead_time(db, project_id)
     velocity = await _sku_velocity(db, project_id, nm_ids)

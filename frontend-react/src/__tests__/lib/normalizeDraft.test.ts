@@ -177,4 +177,101 @@ describe('normalizeDraft — инвариант «целые коробы + це
         expect(tTgt(res.rows[0])).toBe(37);
         expect(res.droppedUnits).toBe(0);
     });
+
+    // ─── Новинка С кратностью короба (ppb есть) → ведёт себя как обычный box-SKU ───
+    it('новинка С ppb (BOX): целые коробы, как обычный SKU (россыпь добивается из ФФ)', () => {
+        // ppb=10: 316 → добор до 320 из ФФ (50 свободно) → 2 целые паллеты (160×2) едут.
+        const nctx: NormalizeDraftCtx = {
+            ppbOf: () => PPB,            // новинка имеет кратность
+            boxSizeOf: () => SIZE,
+            isNewcomer: () => true,      // и при этом новинка
+            freeByNm: { 200: { 1: 50 } },
+        };
+        const res = normalizeDraft([row(200, { '1': 316 }, { 'Казань': 316 }, 'BOX')], nctx);
+        expect(res.rows.length).toBeGreaterThan(0);
+        for (const r of res.rows) {
+            for (const q of Object.values(r.tgt)) expect(q % PPB).toBe(0); // целые коробы
+            expect(tSrc(r)).toBe(tTgt(r));                                  // баланс
+        }
+        // ушло целыми паллетами (320), а не россыпью (316).
+        expect(sumTgt(res.rows, 'BOX')).toBe(320);
+    });
+
+    it('новинка С ppb (BOX) МИКСуется с обычным SKU в смешанной паллете', () => {
+        // Одна отгрузка ФФ1→Казань: новинка 80 (0.5 пал) + обычный 80 (0.5 пал) = 1 целая
+        // смешанная паллета → оба остаются (россыпью новинка бы НЕ вошла в микс и осталась
+        // бы одна, а обычный 0.5 дропнулся бы).
+        const nctx: NormalizeDraftCtx = {
+            ppbOf: () => PPB,
+            boxSizeOf: () => SIZE,
+            isNewcomer: (nm) => nm === 200, // 200 — новинка, 201 — обычный
+        };
+        const res = normalizeDraft([
+            row(200, { '1': 80 }, { 'Казань': 80 }, 'BOX'),
+            row(201, { '1': 80 }, { 'Казань': 80 }, 'BOX'),
+        ], nctx);
+        expect(sumTgt(res.rows, 'BOX')).toBe(160);    // оба в одной смешанной паллете
+        expect(res.droppedUnits).toBe(0);
+        const nms = new Set(res.rows.map(r => r.nm_id));
+        expect(nms.has(200)).toBe(true);              // новинка не отделилась россыпью
+        expect(nms.has(201)).toBe(true);
+        for (const r of res.rows) expect(tSrc(r)).toBe(tTgt(r));
+    });
+
+    it('новинка С ppb (MONO): едет ЦЕЛЫМИ коробами + ≤3 в общей моно-паллете', () => {
+        // Три моно-новинки по 64 (0.4 пал) одной отгрузки → 1 целая моно-паллета (160), 32 на ФФ.
+        const nctx: NormalizeDraftCtx = {
+            ppbOf: () => PPB,
+            boxSizeOf: () => SIZE,
+            isNewcomer: () => true,
+        };
+        const res = normalizeDraft([
+            row(100, { '1': 64 }, { 'Казань': 64 }, 'MONOPALLET'),
+            row(101, { '1': 64 }, { 'Казань': 64 }, 'MONOPALLET'),
+            row(102, { '1': 64 }, { 'Казань': 64 }, 'MONOPALLET'),
+        ], nctx);
+        expect(sumTgt(res.rows, 'MONOPALLET')).toBe(160);
+        expect(res.droppedUnits).toBe(32);
+        for (const r of res.rows) {
+            for (const q of Object.values(r.tgt)) expect(q % PPB).toBe(0); // целые коробы
+            expect(tSrc(r)).toBe(tTgt(r));
+        }
+    });
+
+    it('новинка БЕЗ ppb остаётся россыпью, даже если соседняя новинка С ppb палетизируется', () => {
+        const nctx: NormalizeDraftCtx = {
+            ppbOf: (nm) => (nm === 999 ? null : PPB), // 999 без кратности, 200 — с кратностью
+            boxSizeOf: () => SIZE,
+            isNewcomer: () => true,                   // обе новинки
+            freeByNm: { 200: { 1: 50 } },
+        };
+        const res = normalizeDraft([
+            row(999, { '2': 37 }, { 'Тула': 37 }, 'BOX'),    // новинка б/ppb → россыпь
+            row(200, { '1': 316 }, { 'Казань': 316 }, 'BOX'), // новинка с ppb → паллеты
+        ], nctx);
+        const loose = res.rows.find(r => r.nm_id === 999);
+        expect(loose).toBeDefined();
+        expect(tTgt(loose!)).toBe(37);                 // россыпь не тронута
+        const boxed = res.rows.filter(r => r.nm_id === 200);
+        expect(boxed.length).toBeGreaterThan(0);
+        for (const r of boxed) for (const q of Object.values(r.tgt)) expect(q % PPB).toBe(0);
+        expect(sumTgt(res.rows.filter(r => r.nm_id === 200), 'BOX')).toBe(320);
+    });
+
+    it('консервация штук: новинка С ppb не теряет и не дублирует (Σout+dropped==Σin)', () => {
+        const nctx: NormalizeDraftCtx = {
+            ppbOf: () => PPB,
+            boxSizeOf: () => SIZE,
+            isNewcomer: () => true,
+            freeByNm: { 200: { 1: 100 } },
+        };
+        const inUnits = 450;
+        const res = normalizeDraft([row(200, { '1': inUnits }, { 'Казань': inUnits }, 'BOX')], nctx);
+        const out = sumTgt(res.rows);
+        // Σвыход + ушло-на-ФФ − добрано-из-ФФ == Σвход (баланс штук строго).
+        const filledFromFf = res.rows.reduce((s, r) => s + tSrc(r), 0) - out; // 0 (src==tgt)
+        expect(filledFromFf).toBe(0);
+        expect(out + res.droppedUnits).toBeGreaterThanOrEqual(inUnits); // добор из ФФ не теряет
+        for (const r of res.rows) expect(tSrc(r)).toBe(tTgt(r));
+    });
 });

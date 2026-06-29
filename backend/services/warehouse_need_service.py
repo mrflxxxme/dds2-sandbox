@@ -126,6 +126,7 @@ async def get_warehouse_need(
     localization_optimized: bool = False,
     only_available: bool = False,
     min_stock_per_main_warehouse: int = 0,
+    localization_target: int = 75,
 ) -> dict:
     """Compute restocking need per warehouse per article.
 
@@ -145,6 +146,11 @@ async def get_warehouse_need(
             фактическому ФФ-остатку артикула. Сумма needs артикула во всех
             WB-колонках ≤ available_at_ff. Используется чтобы в матрице
             показывать «реально могу отправить», а не «идеальную потребность».
+        localization_target: целевая локализация (%) для жадного распределения
+            can_send по WB-складам (шаг 4.6, only_available). cap концентрируется
+            на anchor-складах до достижения target по ФО (с учётом сток+сборка+
+            транзит); остаток can_send НЕ размазывается на дальние склады.
+            Дефолт 75% (порог КТР «excellent»).
     """
     from backend.models.assembly import (
         AssemblyRequest,
@@ -177,6 +183,14 @@ async def get_warehouse_need(
     # 1. Fetch orders from WB API
     api_key = await get_wb_key(db, project_id, "wb")
     wh_orders_map: dict[tuple[str, int], int] = {}
+    # HIGH-2: непривязанный (зарубеж/СНГ) спрос — заказы, которые в режиме
+    # localization_optimized некуда привязать (нет ни city, ни region nearest).
+    # Раньше они МОЛЧА дропались (`if not wh_name: continue`) → total_need в
+    # loc-режиме занижался, а procurement-KPI зависел от режима. Теперь копим
+    # их отдельно: в per-cell распределение они НЕ идут (нельзя локализовать),
+    # но в глобальный total_need попадают → KPI инвариантен к режиму, а СНГ
+    # естественно становится «не-локальным» спросом.
+    unmapped_demand: dict[int, int] = {}
     vendor_map: dict[int, str] = {}
     brand_map: dict[int, str] = {}
     subject_map: dict[int, str] = {}
@@ -279,9 +293,13 @@ async def get_warehouse_need(
                     country_wh = get_country_filtered_warehouses(okrug, open_warehouses)
                     wh_name = find_nearest_warehouse(region, country_wh)
                 # Если ни city, ни region не дали nearest (например, region
-                # отсутствует в REGION_COORDS) — заказ некуда привязать,
-                # пропускаем (а не падаем на excluded warehouseName).
+                # отсутствует в REGION_COORDS — типично для зарубеж/СНГ) —
+                # заказ некуда привязать локально. НЕ дропаем (как раньше):
+                # копим в unmapped_demand, чтобы учесть в глобальном total_need
+                # (procurement-KPI инвариантен к режиму), но в per-cell матрицу
+                # такой спрос не попадает — его нельзя локализовать.
                 if not wh_name:
+                    unmapped_demand[nm_id] = unmapped_demand.get(nm_id, 0) + qty
                     continue
             elif mode == "hypothetical":
                 srid = _normalize_srid(order.get("srid"))
@@ -363,6 +381,12 @@ async def get_warehouse_need(
             vendor_map[r.nm_id] = r.vendor_code or f"#{r.nm_id}"
 
     for _wh, nm in wh_orders_map:
+        all_nm_ids.add(nm)
+
+    # HIGH-2: непривязанный (зарубеж/СНГ) спрос обязан попасть в total_need
+    # даже если у SKU нет ни WB-стока, ни локализованных заказов — иначе SKU,
+    # продающийся ТОЛЬКО за рубеж, выпадет из procurement-KPI.
+    for nm in unmapped_demand:
         all_nm_ids.add(nm)
 
     # SKU с RF-стоком, но без WbWarehouseStock и orders — это новинки. Они
@@ -735,6 +759,9 @@ async def get_warehouse_need(
             rf_avail_local = max(0, total_rf_stock_local - in_asm_total_local)
 
             total_orders_local = sum(qty for (wh, nm), qty in wh_orders_map.items() if nm == nm_id)
+            # HIGH-2: добавляем непривязанный (СНГ) спрос в знаменатель global_need
+            # → total_need инвариантен к режиму (локализуемый + незалокализуемый).
+            total_orders_local += unmapped_demand.get(nm_id, 0)
             avg_d_local = total_orders_local / max(actual_days, 1)
             total_wb_stock_local = wb_stock_total.get(nm_id, 0)
             transit_local = in_transit_map.get(nm_id, {"qty": 0}).get("qty", 0)
@@ -744,21 +771,20 @@ async def get_warehouse_need(
             )
             can_send_per_nm[nm_id] = min(rf_avail_local, global_need)
 
-        # Priority-weighted Hamilton: каждый склад получает долю cap_total
-        # пропорционально `need × (1 + priority_score) × penalty`, где
-        #   priority_score = `get_priority_score(склад, ФО_склада)` —
-        #      средневзвешенный приоритет склада в priority-цепочках городов
-        #      своего ФО (0..1), из speed-карты POSTAVLENO bot.
-        #   penalty = 0.6 если склад «крадёт» города у соседних ФО (его
-        #      имя встречается в priority-chains городов чужого ФО — `🐭`
-        #      на странице /warehouse/speed). Иначе 1.0.
-        # Эффект: anchor дальних/чистых ФО (Екатеринбург УФО pri=1.00,
-        # Невинномысск ЮФО pri=0.76) получают больше cap'а, stealer-склады
-        # (Краснодар, Самара Новосемейкино, Коледино) — меньше. Локально
-        # cap уходит туда, где он реально замкнёт первый priority города,
-        # а не туда, где WB и так дотянется через соседний ФО.
-        # Leftover распределяется по самой большой дробной части (Hamilton
-        # largest-fractional-remainders), но не больше per-WB need.
+        # Greedy «до целевой локализации» (по умолчанию 75%, kwarg
+        # localization_target). Заменяет старый proportional-Hamilton (он
+        # размазывал cap пропорционально и при leftover>headroom молча терял
+        # штуки — HIGH-1). Теперь cap концентрируется на anchor-складах ровно
+        # до target_pct локализации по ФО (с учётом сток+сборка+транзит),
+        # остаток cap НЕ размазывается на дальние склады — остаётся на ФФ
+        # («не перетаривать»). Единый авторитет логики — helper
+        # localization_target.greedy_allocate_to_target.
+        #
+        # «Схема воришек» (_priority_weight) сохранена: anchor чистого ФО
+        # (Екатеринбург УФО pri=1.00, Невинномысск ЮФО pri=0.76) получает вес
+        # выше, а склад-воришка (имя в priority-chain чужого ФО — `🐭` на
+        # /warehouse/speed) — penalty 0.6 → заполняется в последнюю очередь.
+        from backend.services.localization_target import greedy_allocate_to_target
         from backend.services.warehouse_district import warehouse_to_district as _wh_to_d
         from backend.services.warehouse_speed import get_priority_score, is_stealer_for_okrug
 
@@ -783,11 +809,12 @@ async def get_warehouse_need(
             return (1.0 + score) * penalty
 
         for nm_id, cap_total in can_send_per_nm.items():
+            # Склады nm с положительной остаточной потребностью (per-cell need).
             wbs = []
             for wh_name in list(wh_data.keys()):
                 arts = wh_data[wh_name]["articles"]
                 if nm_id in arts and arts[nm_id]["need"] > 0:
-                    wbs.append((wh_name, arts[nm_id]["need"]))
+                    wbs.append(wh_name)
             if not wbs or cap_total <= 0:
                 for wh_name in list(wh_data.keys()):
                     arts = wh_data[wh_name]["articles"]
@@ -795,35 +822,55 @@ async def get_warehouse_need(
                         arts[nm_id]["need"] = 0
                 continue
 
-            # Effective weight per warehouse = need × priority_weight
-            weighted: list[tuple[str, float, int]] = []
-            for wh_name, n in wbs:
-                weighted.append((wh_name, n * _priority_weight(wh_name), n))
-            total_w = sum(w for _, w, _ in weighted)
-            if total_w <= 0:
-                # Fallback на старый proportional Hamilton если все веса
-                # обнулились (теоретически невозможно, но защищаемся).
-                total_w = sum(n for _, _, n in weighted)
-                weighted = [(wh, float(n), n) for wh, _, n in weighted]
+            # Входы helper'а — строим ПОФАЙЛОВО (на этот nm).
+            #  wh_demand   — остаточная per-cell потребность склада (>0).
+            #  wh_weight   — priority_weight (anchor↑, воришка↓) = «схема воришек».
+            #  wh_okrug    — склад → канон-ключ ФО.
+            #  demand_by_okrug   — валовый спрос ФО (база покрытия): сумма gross_wh.
+            #                      gross_wh = avg_daily_склада × supply_days, единый
+            #                      горизонт supply_days (без lead_time — это база
+            #                      локализации, а не план поставки).
+            #  existing_by_okrug — уже есть/едет на ФО: WB-сток + в-сборке + в-пути.
+            #  total_demand      — весь спрос nm (Σ gross_wh + unmapped_gross), вкл.
+            #                      незалокализуемый СНГ → знаменатель локализации.
+            wh_demand: dict[str, int] = {}
+            wh_weight: dict[str, float] = {}
+            wh_okrug: dict[str, str] = {}
+            demand_by_okrug: dict[str, float] = {}
+            existing_by_okrug: dict[str, float] = {}
+            total_gross = 0.0
+            for wh_name in wbs:
+                need_wh = wh_data[wh_name]["articles"][nm_id]["need"]
+                okrug = _wh_to_d(wh_name)
+                wh_demand[wh_name] = need_wh
+                wh_weight[wh_name] = _priority_weight(wh_name)
+                wh_okrug[wh_name] = okrug
 
-            allocated: dict[str, int] = {}
-            fractionals: list[tuple[str, float, int]] = []
-            for wh_name, w, n in weighted:
-                raw_share = (cap_total * w) / total_w
-                floored = int(raw_share)
-                allocated[wh_name] = min(n, floored)
-                fractionals.append((wh_name, raw_share - floored, n))
-            leftover = cap_total - sum(allocated.values())
-            # Leftover по убыванию дробной части (как раньше, для
-            # справедливого распределения остатка).
-            for wh_name, _frac, n in sorted(fractionals, key=lambda x: -x[1]):
-                if leftover <= 0:
-                    break
-                if allocated[wh_name] < n:
-                    allocated[wh_name] += 1
-                    leftover -= 1
-            for wh_name, _ in wbs:
-                wh_data[wh_name]["articles"][nm_id]["need"] = allocated[wh_name]
+                gross_wh = (wh_orders_map.get((wh_name, nm_id), 0) / max(actual_days, 1)) * supply_days
+                existing_wh = (
+                    stock_lookup.get((wh_name, nm_id), 0)
+                    + assembly_target_map.get(nm_id, {}).get(wh_name, 0)
+                    + transit_target_map.get(nm_id, {}).get(wh_name, 0)
+                )
+                demand_by_okrug[okrug] = demand_by_okrug.get(okrug, 0.0) + gross_wh
+                existing_by_okrug[okrug] = existing_by_okrug.get(okrug, 0.0) + existing_wh
+                total_gross += gross_wh
+
+            unmapped_gross = (unmapped_demand.get(nm_id, 0) / max(actual_days, 1)) * supply_days
+            total_demand = total_gross + unmapped_gross
+
+            allocated = greedy_allocate_to_target(
+                cap_total,
+                wh_demand,
+                wh_weight,
+                wh_okrug,
+                demand_by_okrug,
+                existing_by_okrug,
+                total_demand,
+                target_pct=float(localization_target),
+            )
+            for wh_name in wbs:
+                wh_data[wh_name]["articles"][nm_id]["need"] = allocated.get(wh_name, 0)
 
         for wh_name in list(wh_data.keys()):
             wh_data[wh_name]["total_need"] = sum(a["need"] for a in wh_data[wh_name]["articles"].values())
@@ -1014,6 +1061,9 @@ async def get_warehouse_need(
         # Per-cell needs в матрице остаются per-WB-локализованными (показ
         # идеальной раскладки независимо от общего профицита).
         total_orders_for_nm = sum(qty for (wh, nm), qty in wh_orders_map.items() if nm == nm_id)
+        # HIGH-2: непривязанный (СНГ) спрос — часть общей потребности артикула
+        # (procurement-KPI считает все заказы, а не только локализуемые).
+        total_orders_for_nm += unmapped_demand.get(nm_id, 0)
         total_avg_daily = total_orders_for_nm / max(actual_days, 1)
         total_wb_stock = wb_stock_total.get(nm_id, 0)
         gross_demand = total_avg_daily * supply_days
@@ -1083,5 +1133,8 @@ async def get_warehouse_need(
             "deficit_count": deficit_count,
             "can_send_count": can_send_count,
             "no_wb_count": no_wb_count,
+            # HIGH-2: суммарный непривязанный (зарубеж/СНГ) спрос за окно анализа.
+            # Эти штуки учтены в total_need, но НЕ распределены по WB-складам.
+            "unmapped_demand_qty": sum(unmapped_demand.values()),
         },
     }
