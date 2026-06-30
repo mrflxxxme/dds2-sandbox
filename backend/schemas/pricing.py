@@ -14,6 +14,7 @@ class PricingRow(BaseModel):
     brand: str | None = None
     subject: str | None = None
     category: str
+    size: str = ""  # размер из артикула (override → parse_size → «Без размера», + алиас)
 
     # Текущая цена витрины (WB API «Цены и скидки»)
     current_price: float | None = None  # discountedPrice — витрина (до СПП)
@@ -91,6 +92,7 @@ class PricingGroup(BaseModel):
     wb_stock: int = 0
     stock_value_cost: float = 0
     children: list[PricingRow] = []
+    subgroups: list["PricingGroup"] = []  # вложенные группы (размеры внутри категории)
 
 
 class PricingSummary(BaseModel):

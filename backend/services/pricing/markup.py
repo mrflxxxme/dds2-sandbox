@@ -25,6 +25,7 @@ from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, Assemb
 from backend.schemas.pricing import PricingGroup, PricingResponse, PricingRow, PricingSummary
 from backend.services import funnel as funnel_service
 from backend.services import refs_service
+from backend.services.funnel.article_parser import parse_size
 from backend.services.bdr_loaders import load_avg_costs, load_cost_overrides, load_tax_settings
 from backend.services.funnel.bdr_rates import get_bdr_rates
 from backend.utils.time import utcnow
@@ -330,6 +331,8 @@ def _build_row(
     extra: dict | None = None,
     keep_by_cat: dict[str, float] | None = None,
     global_keep: float | None = None,
+    size_overrides: dict[int, str] | None = None,
+    size_aliases: dict[str, str] | None = None,
 ) -> PricingRow:
     f = funnel or {}
     m = meta or {}
@@ -339,6 +342,8 @@ def _build_row(
     brand = f.get("brand") or m.get("brand")
     subject = f.get("subject") or m.get("subject")
     category = cat_overrides.get(nm_id) or subject or UNCATEGORIZED
+    raw_size = (size_overrides or {}).get(nm_id) or parse_size(vendor_code) or "Без размера"
+    size = (size_aliases or {}).get(raw_size, raw_size)
 
     current_price = float(price.price) if price and price.price is not None else None
     base_price = float(price.base_price) if price and price.base_price is not None else None
@@ -450,6 +455,7 @@ def _build_row(
         brand=brand,
         subject=subject,
         category=category,
+        size=size,
         current_price=current_price,
         base_price=base_price,
         discount=discount,
@@ -555,6 +561,28 @@ def _assign_abc(rows: list[PricingRow]) -> None:
         r.abc = "A" if share <= 0.8 else ("B" if share <= 0.95 else "C")
 
 
+def _aggregate_group(label: str, items: list[PricingRow]) -> PricingGroup:
+    """Собрать агрегаты группы (категория/размер) из её строк (без children)."""
+    coef, pct, share = _portfolio_markup(items)
+    revenue = sum(r.revenue for r in items)
+    profit = sum(r.profit for r in items)
+    return PricingGroup(
+        category=label,
+        articles=len(items),
+        priced_articles=sum(1 for r in items if r.has_price),
+        markup_coef=coef,
+        markup_pct=pct,
+        cost_share_pct=share,
+        revenue=round(revenue, 2),
+        profit=round(profit, 2),
+        cost_total=round(sum(r.cost_total for r in items), 2),
+        wb_expenses=round(sum(r.wb_expenses for r in items), 2),
+        margin_pct=round(profit / revenue * 100, 2) if revenue > 0 else 0,
+        wb_stock=sum(r.wb_stock for r in items),
+        stock_value_cost=round(sum(r.stock_value_cost or 0 for r in items), 2),
+    )
+
+
 def _group_by_category(rows: list[PricingRow]) -> list[PricingGroup]:
     buckets: dict[str, list[PricingRow]] = defaultdict(list)
     for r in rows:
@@ -562,28 +590,35 @@ def _group_by_category(rows: list[PricingRow]) -> list[PricingGroup]:
 
     groups: list[PricingGroup] = []
     for cat, items in buckets.items():
-        coef, pct, share = _portfolio_markup(items)
-        revenue = sum(r.revenue for r in items)
-        profit = sum(r.profit for r in items)
+        g = _aggregate_group(cat, items)
         _sort_by_markup(items)
-        groups.append(
-            PricingGroup(
-                category=cat,
-                articles=len(items),
-                priced_articles=sum(1 for r in items if r.has_price),
-                markup_coef=coef,
-                markup_pct=pct,
-                cost_share_pct=share,
-                revenue=round(revenue, 2),
-                profit=round(profit, 2),
-                cost_total=round(sum(r.cost_total for r in items), 2),
-                wb_expenses=round(sum(r.wb_expenses for r in items), 2),
-                margin_pct=round(profit / revenue * 100, 2) if revenue > 0 else 0,
-                wb_stock=sum(r.wb_stock for r in items),
-                stock_value_cost=round(sum(r.stock_value_cost or 0 for r in items), 2),
-                children=items,
-            )
-        )
+        g.children = items
+        groups.append(g)
+    groups.sort(key=lambda g: g.revenue, reverse=True)
+    return groups
+
+
+def _group_by_size(rows: list[PricingRow]) -> list[PricingGroup]:
+    """Дерево «Категория → Размер → SKU»."""
+    by_cat: dict[str, list[PricingRow]] = defaultdict(list)
+    for r in rows:
+        by_cat[r.category].append(r)
+
+    groups: list[PricingGroup] = []
+    for cat, citems in by_cat.items():
+        cg = _aggregate_group(cat, citems)
+        by_size: dict[str, list[PricingRow]] = defaultdict(list)
+        for r in citems:
+            by_size[r.size or "Без размера"].append(r)
+        subs: list[PricingGroup] = []
+        for sz, sitems in by_size.items():
+            sg = _aggregate_group(sz, sitems)
+            _sort_by_markup(sitems)
+            sg.children = sitems
+            subs.append(sg)
+        subs.sort(key=lambda x: x.revenue, reverse=True)
+        cg.subgroups = subs
+        groups.append(cg)
     groups.sort(key=lambda g: g.revenue, reverse=True)
     return groups
 
@@ -688,6 +723,7 @@ async def _compute_rows(
     overrides = await load_cost_overrides(db, project_id)
     meta_map = await _load_meta_map(db, project_id)
     cat_overrides = await refs_service.get_category_overrides(db, project_id)
+    size_overrides, size_aliases = await refs_service.build_size_resolver(db, project_id)
     wb_stock_map = await _load_wb_stock_map(db, project_id)
     pipeline_map = await _load_pipeline_stock(db, project_id)
     elasticity_map = await _load_elasticity_map(db, project_id)
@@ -739,6 +775,8 @@ async def _compute_rows(
                 extra=pipeline_map.get(nm_id),
                 keep_by_cat=keep_by_cat,
                 global_keep=global_keep,
+                size_overrides=size_overrides,
+                size_aliases=size_aliases,
             ).model_dump()
         )
 
@@ -786,6 +824,11 @@ async def get_markup_analytics(
     elif group_by == "anomaly":
         resp = PricingResponse(
             group_by="anomaly", data_rows=[], data_groups=_group_by_anomaly(rows),
+            summary=summary, price_synced_at=synced, has_bdr=has_bdr,
+        )
+    elif group_by == "size":
+        resp = PricingResponse(
+            group_by="size", data_rows=[], data_groups=_group_by_size(rows),
             summary=summary, price_synced_at=synced, has_bdr=has_bdr,
         )
     else:

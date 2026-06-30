@@ -6,7 +6,7 @@ import { formatNumber, formatDateTime, exportToExcel } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { sanitizeAIHtml } from '@/lib/sanitize';
 import type { Column } from '@/components/DataTable';
-import type { PricingResponse, PricingRow } from '@/types/api';
+import type { PricingResponse, PricingRow, PricingGroup } from '@/types/api';
 
 // ─── format helpers ──────────────────────────────────────────────────────
 const money = (n: number | null | undefined) => (n == null ? '—' : formatNumber(n, 0));
@@ -25,6 +25,14 @@ const monthStart = () => {
 const R = (v: React.ReactNode, color?: string): React.ReactNode => (
     <span style={color ? { color } : undefined}>{v}</span>
 );
+const coef = (v: number | null | undefined) => (v == null ? '—' : formatNumber(v, 2) + '×');
+
+// стили для дерева группировок
+const thT: React.CSSProperties = { padding: '8px 10px', textAlign: 'right', fontSize: 12, color: 'var(--color-text-dim)', whiteSpace: 'nowrap' };
+const thTL: React.CSSProperties = { ...thT, textAlign: 'left' };
+const tdT: React.CSSProperties = { padding: '7px 10px', textAlign: 'right', fontSize: 13, whiteSpace: 'nowrap' };
+const tdTL: React.CSSProperties = { ...tdT, textAlign: 'left' };
+const TREE_METRIC_COLS = ['Цена ВБ', 'Себест.', 'Коэф.', 'Наценка %', 'Маржа %', 'Мин. цена', 'Остаток ВБ', 'Всего', 'Заморожено', 'Выручка', 'Прибыль'];
 
 export default function PricingPage() {
     const [resp, setResp] = useState<PricingResponse | null>(null);
@@ -39,6 +47,8 @@ export default function PricingPage() {
     const [onlyInStock, setOnlyInStock] = useState(true);
     const [anomalyOnly, setAnomalyOnly] = useState(false);
     const [newOnly, setNewOnly] = useState(false);
+    const [groupBy, setGroupBy] = useState<'sku' | 'category' | 'size'>('category');
+    const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
     const [categoryOptions, setCategoryOptions] = useState<string[]>([]);
     const [syncing, setSyncing] = useState(false);
@@ -61,13 +71,14 @@ export default function PricingPage() {
                 search: search || undefined,
                 only_in_stock: onlyInStock || undefined,
                 anomaly_only: anomalyOnly || undefined,
-                group_by: 'sku',
+                group_by: groupBy,
             });
             if (reqRef.current !== myReq) return;
             setResp(res);
             if (!category && !anomalyOnly) {
-                // полный список категорий берём из несуженного среза
-                const cats = Array.from(new Set(res.data_rows.map((r) => r.category))).sort();
+                // полный список категорий: из строк (sku) или из групп (дерево)
+                const raw = res.group_by === 'sku' ? res.data_rows.map((r) => r.category) : res.data_groups.map((g) => g.category);
+                const cats = Array.from(new Set(raw)).sort();
                 if (cats.length) setCategoryOptions((prev) => (prev.length >= cats.length ? prev : cats));
             }
         } catch (e) {
@@ -76,7 +87,7 @@ export default function PricingPage() {
         } finally {
             if (reqRef.current === myReq) setLoading(false);
         }
-    }, [dateFrom, dateTo, brand, category, search, onlyInStock, anomalyOnly]);
+    }, [dateFrom, dateTo, brand, category, search, onlyInStock, anomalyOnly, groupBy]);
 
     useEffect(() => {
         const t = setTimeout(loadData, 250);
@@ -114,10 +125,21 @@ export default function PricingPage() {
     const rows = resp?.data_rows ?? [];
     const s = resp?.summary;
     const tableRows = useMemo(() => (newOnly ? rows.filter((r) => r.is_new) : rows), [rows, newOnly]);
+    // все листовые строки (для Excel) — из плоского среза или из дерева групп
+    const allLeafRows = useMemo(() => {
+        if (!resp) return [];
+        if (resp.group_by === 'sku') return resp.data_rows;
+        const out: PricingRow[] = [];
+        for (const g of resp.data_groups) {
+            out.push(...g.children);
+            for (const sg of g.subgroups) out.push(...sg.children);
+        }
+        return out;
+    }, [resp]);
 
     const doExport = () => {
-        const out = tableRows.map((r) => ({
-            'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Категория': r.category, 'ABC': r.abc || '',
+        const out = allLeafRows.map((r) => ({
+            'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Категория': r.category, 'Размер': r.size, 'ABC': r.abc || '',
             'Бренд': r.brand || '', 'Базовая цена': r.base_price, 'Скидка продавца %': r.discount,
             'Цена ВБ': r.current_price, 'Себестоимость': r.cost_price, 'Наценка коэф': r.markup_coef,
             'Наценка %': r.markup_pct, 'Доля себест %': r.cost_share_pct, 'Маржа %': r.margin_pct,
@@ -161,6 +183,7 @@ export default function PricingPage() {
         },
         { key: 'current_price', label: 'Цена ВБ', align: 'right', sortable: true, render: (v) => money(v) },
         { key: 'cost_price', label: 'Себест.', align: 'right', sortable: true, render: (v) => money(v) },
+        { key: 'markup_coef', label: 'Коэф.', align: 'right', sortable: true, render: (v: number | null) => (v == null ? '—' : formatNumber(v, 2) + '×') },
         { key: 'markup_pct', label: 'Наценка %', align: 'right', sortable: true, render: (v) => pct(v) },
         { key: 'margin_pct', label: 'Маржа %', align: 'right', sortable: true, render: (v) => R(pct(v), signColor(v)) },
         { key: 'breakeven_price', label: 'Мин. цена', align: 'right', sortable: true, render: (v) => money(v) },
@@ -231,6 +254,11 @@ export default function PricingPage() {
                 <input type="date" className="btn btn-sm" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
                 <span style={{ color: 'var(--color-text-dim)' }}>—</span>
                 <input type="date" className="btn btn-sm" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+                <select className="btn btn-sm" value={groupBy} onChange={(e) => setGroupBy(e.target.value as 'sku' | 'category' | 'size')} title="Группировка">
+                    <option value="category">📂 По категориям</option>
+                    <option value="size">📏 По размеру</option>
+                    <option value="sku">📋 По артикулам</option>
+                </select>
                 <select className="btn btn-sm" value={category} onChange={(e) => setCategory(e.target.value)}>
                     <option value="">Все категории</option>
                     {categoryOptions.map((c) => <option key={c} value={c}>{c}</option>)}
@@ -250,8 +278,8 @@ export default function PricingPage() {
                     🆕 только новинки
                 </label>
                 <div style={{ flex: 1 }} />
-                <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={rows.length === 0}>📥 Excel</button>
-                <button className="btn btn-sm btn-success" onClick={doAi} disabled={aiLoading || rows.length === 0}>
+                <button className="btn btn-sm btn-secondary" onClick={doExport} disabled={allLeafRows.length === 0}>📥 Excel</button>
+                <button className="btn btn-sm btn-success" onClick={doAi} disabled={aiLoading || allLeafRows.length === 0}>
                     {aiLoading ? '🤖 Анализ…' : '🤖 AI-рекомендации'}
                 </button>
                 <button className="btn btn-sm btn-primary" onClick={doSync} disabled={syncing}>
@@ -291,7 +319,7 @@ export default function PricingPage() {
             )}
 
             {error && <div style={{ padding: 16, color: 'var(--color-danger)' }}>❌ {error}</div>}
-            {!error && (
+            {!error && groupBy === 'sku' && (
                 <TanStackDataTable
                     columns={columns}
                     data={tableRows}
@@ -302,7 +330,93 @@ export default function PricingPage() {
                     maxHeight={640}
                 />
             )}
+            {!error && groupBy !== 'sku' && (
+                <PricingTree
+                    groups={resp?.data_groups ?? []}
+                    mode={groupBy}
+                    expanded={expanded}
+                    onToggle={(k) => setExpanded((prev) => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; })}
+                    loading={loading}
+                />
+            )}
         </div>
+    );
+}
+
+function PricingTree({ groups, mode, expanded, onToggle, loading }: {
+    groups: PricingGroup[]; mode: 'category' | 'size'; expanded: Set<string>; onToggle: (k: string) => void; loading: boolean;
+}) {
+    if (loading) return <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>⏳ Загрузка…</div>;
+    if (!groups.length) return <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>💲 Нет данных</div>;
+    return (
+        <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                    <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
+                        <th style={thTL}>{mode === 'size' ? 'Категория / Размер / Артикул' : 'Категория / Артикул'}</th>
+                        {TREE_METRIC_COLS.map((h) => <th key={h} style={thT}>{h}</th>)}
+                    </tr>
+                </thead>
+                <tbody>
+                    {groups.map((g) => <GroupNode key={g.category} group={g} mode={mode} parentKey="" expanded={expanded} onToggle={onToggle} />)}
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
+function GroupNode({ group, mode, parentKey, expanded, onToggle }: {
+    group: PricingGroup; mode: 'category' | 'size'; parentKey: string; expanded: Set<string>; onToggle: (k: string) => void;
+}) {
+    const key = parentKey ? `${parentKey}|${group.category}` : group.category;
+    const open = expanded.has(key);
+    const level = parentKey ? 1 : 0;
+    return (
+        <>
+            <tr onClick={() => onToggle(key)} style={{ cursor: 'pointer', borderBottom: '1px solid var(--color-border)', background: level === 0 ? 'var(--color-bg-card)' : 'transparent' }}>
+                <td style={{ ...tdTL, paddingLeft: 10 + level * 22, fontWeight: level === 0 ? 700 : 600 }}>
+                    <span style={{ marginRight: 6 }}>{open ? '▾' : '▸'}</span>{group.category}
+                    <span style={{ color: 'var(--color-text-dim)', fontWeight: 400, fontSize: 11, marginLeft: 8 }}>{int0(group.articles)} арт.</span>
+                </td>
+                <td style={tdT}>—</td>
+                <td style={tdT}>—</td>
+                <td style={{ ...tdT, fontWeight: 600 }}>{coef(group.markup_coef)}</td>
+                <td style={{ ...tdT, color: signColor(group.markup_pct) }}>{pct(group.markup_pct)}</td>
+                <td style={{ ...tdT, color: signColor(group.margin_pct) }}>{pct(group.margin_pct)}</td>
+                <td style={tdT}>—</td>
+                <td style={tdT}>{int0(group.wb_stock)}</td>
+                <td style={tdT}>—</td>
+                <td style={tdT}>{money(group.stock_value_cost)}</td>
+                <td style={tdT}>{money(group.revenue)}</td>
+                <td style={{ ...tdT, color: signColor(group.profit) }}>{money(group.profit)}</td>
+            </tr>
+            {open && group.subgroups.map((sg) => <GroupNode key={sg.category} group={sg} mode={mode} parentKey={key} expanded={expanded} onToggle={onToggle} />)}
+            {open && group.children.map((r) => <LeafRow key={r.nm_id} row={r} level={level + 1} />)}
+        </>
+    );
+}
+
+function LeafRow({ row, level }: { row: PricingRow; level: number }) {
+    return (
+        <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
+            <td style={{ ...tdTL, paddingLeft: 10 + level * 22 }}>
+                <span style={{ fontWeight: 500 }}>{row.vendor_code || row.nm_id}</span>
+                <span style={{ color: 'var(--color-text-dim)', fontSize: 11, marginLeft: 6 }}>{row.nm_id}</span>
+                {row.is_new && <span style={{ color: 'var(--color-accent)', fontSize: 11, marginLeft: 6 }}>🆕</span>}
+                {row.anomaly && <span style={{ color: 'var(--color-danger)', fontSize: 11, marginLeft: 6 }}>⚠ {row.anomaly}</span>}
+            </td>
+            <td style={tdT}>{money(row.current_price)}</td>
+            <td style={tdT}>{money(row.cost_price)}</td>
+            <td style={{ ...tdT, fontWeight: 600 }}>{coef(row.markup_coef)}</td>
+            <td style={tdT}>{pct(row.markup_pct)}</td>
+            <td style={{ ...tdT, color: signColor(row.margin_pct) }}>{pct(row.margin_pct)}</td>
+            <td style={tdT}>{money(row.breakeven_price)}</td>
+            <td style={tdT}>{int0(row.wb_stock)}</td>
+            <td style={tdT}>{int0(row.total_stock)}</td>
+            <td style={tdT}>{money(row.stock_value_cost)}</td>
+            <td style={tdT}>{money(row.revenue)}</td>
+            <td style={{ ...tdT, color: signColor(row.profit) }}>{money(row.profit)}</td>
+        </tr>
     );
 }
 

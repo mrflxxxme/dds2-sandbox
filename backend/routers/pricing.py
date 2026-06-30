@@ -35,7 +35,7 @@ async def get_markup(
     db: AsyncSession = Depends(get_db),
 ):
     """Наценка по артикулам. group_by: category (дерево) | sku (плоский) | anomaly (аномалии)."""
-    gb = group_by if group_by in ("sku", "anomaly", "category") else "category"
+    gb = group_by if group_by in ("sku", "anomaly", "category", "size") else "category"
     return await markup_service.get_markup_analytics(
         db,
         project.id,

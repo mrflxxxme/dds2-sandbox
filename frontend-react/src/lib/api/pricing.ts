@@ -11,7 +11,7 @@ export interface PricingMarkupParams {
     min_orders?: number;
     only_in_stock?: boolean;
     anomaly_only?: boolean;
-    group_by?: 'category' | 'sku' | 'anomaly';
+    group_by?: 'category' | 'sku' | 'anomaly' | 'size';
 }
 
 export function addPricingMethods(api: ApiClient) {

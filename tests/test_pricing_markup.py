@@ -396,6 +396,23 @@ class TestStockAndAnomalies:
         assert "Подозрительная себестоимость" in labels
 
     @pytest.mark.asyncio
+    async def test_group_by_size_tree(self, db_session: AsyncSession, project):
+        """Группировка «По размеру» → дерево Категория → Размер → SKU."""
+        await _add_price(db_session, project.id, 6001, 1000.0, vendor_code="KOVER_200x300_серый")
+        await set_cost_override(db_session, project.id, nm_id=6001, cost_price=300.0)
+        await _add_wb_stock(db_session, project.id, 6001, 5)
+
+        res = await get_markup_analytics(db_session, project.id, only_in_stock=True, group_by="size")
+        assert res["group_by"] == "size"
+        assert len(res["data_groups"]) >= 1
+        cat = res["data_groups"][0]
+        assert len(cat["subgroups"]) >= 1  # уровень размера присутствует
+        leaf = cat["subgroups"][0]["children"][0]
+        assert leaf["nm_id"] == 6001
+        assert leaf["size"]  # размер заполнен (parse_size или «Без размера»)
+        assert leaf["markup_coef"] is not None  # коэф. наценки
+
+    @pytest.mark.asyncio
     async def test_breakeven_fallback_for_non_seller(self, db_session: AsyncSession, project):
         """Непродающийся товар получает оценку мин. цены по средней доле категории."""
         # продающийся задаёт среднюю «долю к получению» категории

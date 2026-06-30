@@ -526,6 +526,7 @@ export interface PricingRow {
   brand: string | null;
   subject: string | null;
   category: string;
+  size: string;
   current_price: number | null;
   base_price: number | null;
   discount: number | null;
@@ -586,6 +587,7 @@ export interface PricingGroup {
   wb_stock: number;
   stock_value_cost: number;
   children: PricingRow[];
+  subgroups: PricingGroup[];
 }
 
 export interface PricingSummary {
