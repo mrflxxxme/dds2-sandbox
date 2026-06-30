@@ -11,6 +11,10 @@
 """
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 # БИК → {corr_account, name}. Корр. счёт сверен (последние 3 цифры = последние 3 БИК).
 _BANKS: dict[str, dict[str, str]] = {
@@ -45,3 +49,24 @@ def resolve_bank(bic: str | None) -> dict[str, str] | None:
     if not _CORR_RE.match(corr) or corr[-3:] != bic[-3:]:
         return None
     return {"bic": bic, "corr_account": corr, "name": bank["name"]}
+
+
+async def resolve_bank_db(db: "AsyncSession", bic: str | None) -> dict[str, str] | None:
+    """БИК → банк из таблицы `cbr_bic` (полный справочник ЦБ), фолбэк на зашитый набор.
+
+    Авторитетный резолвер для платёжки и авто-заполнения формы: покрывает ЛЮБОЙ банк РФ,
+    как только заполнен справочник (джоб `cbr_bic_sync`). Если таблица пуста / банка нет /
+    к/с структурно невалиден — откат на `resolve_bank` (зашитые крупные банки), чтобы платежи
+    в основные банки работали даже без синка. Структурная проверка к/с — как в resolve_bank.
+    """
+    bic = (bic or "").strip()
+    if not _BIC_RE.match(bic):
+        return None
+    from backend.models.refs import CbrBic
+
+    row = await db.get(CbrBic, bic)
+    if row is not None:
+        corr = row.corr_account or ""
+        if _CORR_RE.match(corr) and corr[-3:] == bic[-3:]:
+            return {"bic": bic, "corr_account": corr, "name": row.name or ""}
+    return resolve_bank(bic)

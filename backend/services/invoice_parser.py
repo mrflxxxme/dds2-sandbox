@@ -12,16 +12,22 @@ stdlib zipfile + регулярка по `word/document.xml` (без python-docx
 зависимостей не добавляем.
 """
 
+import asyncio
 import html
 import io
 import logging
 import re
 import zipfile
 from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING
 
 from backend.config import settings
-from backend.schemas.payment_request import InvoiceParseResult
+from backend.schemas.payment_request import InvoiceParseResult, ParsedDocument
+from backend.services import invoice_split
 from backend.services.bank_directory import resolve_bank
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 logger = logging.getLogger("dds.payment_request")
 
@@ -127,6 +133,9 @@ _INN_RE = re.compile(r"ИНН\D{0,40}?\b(\d+)\b")
 _KPP_RE = re.compile(r"КПП\D{0,40}?(\d{9})")
 _BIK_RE = re.compile(r"БИК\D{0,40}?(\d{9})")
 _ACC20_RE = re.compile(r"\b\d{20}\b")
+# Счёт разбит пробелами по группам («40802 810 6 4007 0023507», как в счетах Сбербизнеса) —
+# слитный \d{20} такое не ловит. Берём пробег цифр+пробелов, нормализуем, проверяем длину 20.
+_ACC20_SPACED_RE = re.compile(r"\b\d[\d ]{18,28}\d\b")
 # Сумма после якоря «Всего к оплате» / «Итого к оплате» / «Всего» / «Итого».
 _TOTAL_RE = re.compile(
     r"(Всего\s+к\s+оплате|Итого\s+к\s+оплате|Всего\s+к\s+уплате|Всего|Итого)"
@@ -151,6 +160,12 @@ _CONTRACT_RE = re.compile(
 # НДС: явная ставка «НДС 20%» (+ сумма рядом, если есть) либо пометка «Без НДС / не облагается».
 _VAT_RATE_RE = re.compile(r"НДС\s*(\d{1,2})\s*%(?:[^\d\-%]{0,25}?(\d[\d\s]*[,.]\d{2}))?", re.IGNORECASE)
 _VAT_NONE_RE = re.compile(r"Без\s+НДС|НДС\s+не\s+облага|не\s+облага\w*\s+НДС", re.IGNORECASE)
+
+
+def _valid_bik(bik: str) -> bool:
+    """Российский БИК: 9 цифр, начинается с «04» (код РФ в платёжной системе). Отсекает
+    р/с (40…) и к/с (301…), ошибочно принятые распозналкой за БИК (напр. «408028108»)."""
+    return len(bik) == 9 and bik.isdigit() and bik.startswith("04")
 
 
 def _valid_rs(account: str, bik: str) -> bool:
@@ -187,13 +202,29 @@ def _find_amount(text: str) -> Decimal | None:
     return best
 
 
+def _find_accounts(text: str) -> list[str]:
+    """20-значные счета: и слитные, и разбитые пробелами («40802 810 6 4007 0023507»)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for acc in _ACC20_RE.findall(text):
+        if acc not in seen:
+            seen.add(acc)
+            out.append(acc)
+    for chunk in _ACC20_SPACED_RE.findall(text):
+        d = chunk.replace(" ", "")
+        if len(d) == 20 and d.isdigit() and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
 def _split_accounts(text: str, corr_from_bik: str | None) -> tuple[str | None, str | None]:
     """Разнести все 20-значные счёта на (расчётный, корреспондентский).
 
     к/с — начинается с «301» (или совпал со справочным corr по БИК); р/с — первый
     не-301 с банковским префиксом (40/30 кроме 301/42/47).
     """
-    accounts = _ACC20_RE.findall(text)
+    accounts = _find_accounts(text)
     corr: str | None = None
     rs: str | None = None
     for acc in accounts:
@@ -312,16 +343,20 @@ def extract_requisites_from_text(text: str) -> InvoiceParseResult:
     bik: str | None = None
     corr_from_bik: str | None = None
     if m := _BIK_RE.search(text):
-        bik = m.group(1)
-        bank = resolve_bank(bik)
-        if bank is not None:
-            result.payee_bik = bik
-            result.payee_bank_name = bank["name"]
-            result.payee_corr_account = bank["corr_account"]
-            corr_from_bik = bank["corr_account"]
-            found += ["payee_bik", "payee_bank_name", "payee_corr_account"]
+        cand = m.group(1)
+        if not _valid_bik(cand):  # р/с/к/с, ошибочно принятый за БИК → не сохраняем
+            warnings.append("БИК распознан некорректно — проверьте реквизиты банка вручную")
         else:
-            warnings.append(f"БИК {bik} не найден в справочнике — проверьте реквизиты банка вручную")
+            bik = cand
+            bank = resolve_bank(bik)
+            if bank is not None:
+                result.payee_bik = bik
+                result.payee_bank_name = bank["name"]
+                result.payee_corr_account = bank["corr_account"]
+                corr_from_bik = bank["corr_account"]
+                found += ["payee_bik", "payee_bank_name", "payee_corr_account"]
+            else:
+                warnings.append(f"БИК {bik} не найден в справочнике — проверьте реквизиты банка вручную")
 
     # Счета: р/с + к/с.
     rs, corr = _split_accounts(text, corr_from_bik)
@@ -404,6 +439,42 @@ _LLM_TOOL: dict = {
     },
 }
 
+# Скан-PDF может содержать счёт И акт на разных страницах. Тот же инструмент + классификация
+# страниц: реквизиты берём со страницы-счёта, акт-страницы фронт сохранит отдельным документом.
+_PAGES_TOOL: dict = {
+    "name": "extract_invoice_and_pages",
+    "description": "Записать реквизиты ПОЛУЧАТЕЛЯ из счёта и тип КАЖДОЙ присланной страницы.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            **_LLM_TOOL["input_schema"]["properties"],
+            "pages": {
+                "type": "array",
+                "description": "По одному элементу на КАЖДУЮ присланную страницу, СТРОГО в том же порядке.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "doc_type": {
+                            "type": "string",
+                            "enum": ["INVOICE", "ACT", "OTHER"],
+                            "description": "Тип страницы: INVOICE — счёт на оплату; ACT — акт/УПД/выполненные работы; OTHER — прочее.",
+                        }
+                    },
+                    "required": ["doc_type"],
+                },
+            },
+        },
+        "required": [*_LLM_TOOL["input_schema"]["required"], "pages"],
+    },
+}
+
+_PAGES_SYSTEM = (
+    _LLM_SYSTEM
+    + "\nФайл МНОГОСТРАНИЧНЫЙ. Реквизиты бери СО СТРАНИЦЫ-СЧЁТА. Дополнительно в поле pages "
+    "верни тип КАЖДОЙ присланной страницы (по порядку): INVOICE — счёт на оплату; "
+    "ACT — акт / УПД / акт выполненных работ; OTHER — прочее."
+)
+
 
 def _digits(v: object) -> str | None:
     if not isinstance(v, str):
@@ -429,7 +500,7 @@ def _finalize(payee: dict) -> InvoiceParseResult:
         found.append("payee_kpp")
 
     bik = _digits(payee.get("payee_bik"))
-    if bik and len(bik) == 9:
+    if bik and _valid_bik(bik):
         r.payee_bik = bik
         found.append("payee_bik")
         bank = resolve_bank(bik)
@@ -535,6 +606,138 @@ async def extract_requisites_vision(image_data: bytes, media_type: str) -> Invoi
     return _finalize(data)
 
 
+def _norm_doc_type(v: object) -> str:
+    """Тип страницы от модели → INVOICE/ACT (OTHER сворачиваем в INVOICE — едет со счётом)."""
+    return "ACT" if isinstance(v, str) and v.strip().upper() == "ACT" else "INVOICE"
+
+
+async def extract_requisites_vision_pages(
+    images: list["Image.Image"],
+) -> tuple[InvoiceParseResult, list[str]] | None:
+    """Скан-PDF (несколько страниц) → реквизиты счёта + тип каждой страницы (для авто-разнесения).
+    None → ключ не настроен. Длину pages выравниваем под число страниц (модель могла сбиться)."""
+    key = settings.ANTHROPIC_API_KEY
+    if not key or not key.isascii():  # пусто или masked-ключ (sync-prod маскирует)
+        return None
+    import base64
+
+    from backend.services.ai.llm_client import chat
+
+    content: list[dict] = []
+    for img in images:
+        b64 = base64.standard_b64encode(invoice_split.image_to_jpeg(img)).decode("ascii")
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
+    content.append({"type": "text", "text": "Извлеки реквизиты ПОЛУЧАТЕЛЯ со страницы-счёта и определи тип каждой страницы."})
+
+    msg = await chat(
+        messages=[{"role": "user", "content": content}],
+        tools=[_PAGES_TOOL],
+        system=_PAGES_SYSTEM,
+        model=_LLM_MODEL,
+        max_tokens=1024,
+        temperature=0,
+        tool_choice={"type": "tool", "name": "extract_invoice_and_pages"},
+    )
+    block = next((b for b in msg.content if getattr(b, "type", None) == "tool_use"), None)
+    data = getattr(block, "input", None)  # ToolUseBlock.input — getattr обходит union-тип content-блоков
+    if not isinstance(data, dict):
+        return None
+    result = _finalize(data)
+    raw_pages = data.get("pages")
+    pages_list = raw_pages if isinstance(raw_pages, list) else []
+    types = [_norm_doc_type(p.get("doc_type")) for p in pages_list if isinstance(p, dict)]
+    types = (types + ["INVOICE"] * len(images))[: len(images)]  # выравниваем под число страниц
+    return result, types
+
+
+def _is_real_mix(types: list[str]) -> bool:
+    """Резать стоит, только если в файле есть И акт, И не-акт (счёт) — иначе один документ."""
+    return "ACT" in types and any(t != "ACT" for t in types)
+
+
+def _build_split_docs(
+    data: bytes, types: list[str], filename: str, images: list["Image.Image"] | None
+) -> list[ParsedDocument]:
+    """Разрезать многостраничный файл по типам страниц в под-PDF (счёт→INVOICE, акт→ACT).
+
+    images=None → текстовый PDF (lossless-резка pypdfium2); иначе скан-PDF (компактный
+    растровый PDF из страниц). Любая ошибка резки → []: фронт прикрепит оригинал как было."""
+    import base64
+
+    base = (filename or "Документ").rsplit("/", 1)[-1].rsplit(".", 1)[0][:80] or "Документ"
+    out: list[ParsedDocument] = []
+    for doc_type, label in (("INVOICE", "Счёт"), ("ACT", "Акт")):
+        idx = [i for i, t in enumerate(types) if (t == "ACT") == (doc_type == "ACT")]
+        if not idx:
+            continue
+        try:
+            if images is None:
+                content = invoice_split.split_pdf_lossless(data, idx)
+            else:
+                content = invoice_split.assemble_pdf_from_images([images[i] for i in idx])
+        except Exception:
+            logger.warning("invoice split failed (%s) — отдадим оригинал", doc_type, exc_info=True)
+            return []
+        out.append(ParsedDocument(
+            doc_type=doc_type,
+            filename=f"{label}_{base}.pdf",
+            mime_type="application/pdf",
+            content_b64=base64.standard_b64encode(content).decode("ascii"),
+        ))
+    return out
+
+
+async def _requisites_from_text(text: str) -> InvoiceParseResult:
+    """Реквизиты из текста: текстовый Claude (понимает продавца/покупателя) с regex-fallback."""
+    try:
+        llm = await extract_requisites_llm(text)
+        if llm is not None:
+            return llm
+    except Exception as e:  # API недоступен/refusal/таймаут — не роняем, идём в regex
+        logger.warning("invoice LLM extract failed (%s) — fallback to regex", type(e).__name__)
+    return extract_requisites_from_text(text)
+
+
+async def _parse_pdf_invoice(data: bytes, filename: str) -> InvoiceParseResult:
+    """PDF-счёт: текстовый слой → текстовый Claude+regex; скан (без текста) → vision постранично.
+    В обоих случаях, если файл = счёт+акт, разносим страницы по типам (`documents`)."""
+    # pdfplumber/pypdfium2/Pillow — CPU-bound и синхронные; уводим с event-loop (иначе тяжёлый
+    # многостраничный скан блокирует воркер на секунды).
+    try:
+        pages_text = await asyncio.to_thread(invoice_split.extract_pages_text, data)
+    except Exception:
+        logger.warning("invoice parse: не удалось прочитать PDF %s", filename, exc_info=True)
+        return InvoiceParseResult(warnings=["Не удалось прочитать файл — введите реквизиты вручную"])
+
+    if any(p.strip() for p in pages_text):  # текстовый PDF
+        types = [invoice_split.classify_page_text(t) for t in pages_text]
+        invoice_text = "\n".join(t for t, ty in zip(pages_text, types) if ty != "ACT").strip()
+        result = await _requisites_from_text(invoice_text or "\n".join(pages_text))
+        if _is_real_mix(types):
+            result.documents = await asyncio.to_thread(_build_split_docs, data, types, filename, None)
+        return result
+
+    # Скан-PDF (нет текстового слоя) → растеризуем и распознаём vision-Claude.
+    try:
+        images = await asyncio.to_thread(invoice_split.rasterize_pages, data)
+    except Exception:
+        logger.warning("invoice parse: не удалось растеризовать PDF %s", filename, exc_info=True)
+        images = []
+    if not images:
+        return InvoiceParseResult(warnings=["Не удалось прочитать PDF — введите реквизиты вручную"])
+    try:
+        parsed = await extract_requisites_vision_pages(images)
+    except Exception as e:  # API недоступен/refusal/таймаут — не роняем
+        logger.warning("invoice vision(pages) failed (%s)", type(e).__name__)
+        return InvoiceParseResult(warnings=["Не удалось распознать PDF-скан — введите реквизиты вручную"])
+    if parsed is None:
+        return InvoiceParseResult(warnings=["Распознавание PDF-скана недоступно — введите реквизиты вручную или приложите фото"])
+    result, types = parsed
+    if _is_real_mix(types):
+        result.documents = await asyncio.to_thread(_build_split_docs, data, types, filename, images)
+    return result
+
+
 async def _parse_image_invoice(data: bytes, media_type: str) -> InvoiceParseResult:
     """Фото счёта → реквизиты через vision. HEIC сперва конвертим в JPEG. Без ключа/ошибки —
     мягкое предупреждение (regex по картинке невозможен), 500 не роняем."""
@@ -555,11 +758,18 @@ async def _parse_image_invoice(data: bytes, media_type: str) -> InvoiceParseResu
 
 
 async def parse_invoice_async(data: bytes, filename: str) -> InvoiceParseResult:
-    """Файл счёта → реквизиты. Фото (jpg/png/webp/heic) → vision-Claude; PDF/Word → текстовый
-    Claude (надёжно на любых форматах) с regex-fallback. Битый файл → не 500."""
+    """Файл счёта → реквизиты (+ авто-разнесение счёт↔акт для многостраничного PDF).
+
+    Фото (jpg/png/webp/heic) → vision-Claude; PDF → текстовый слой (Claude+regex) либо vision
+    по скану (без текста); Word → текстовый Claude+regex. Битый файл → не 500."""
     media_type = _image_media_type(data, filename)
     if media_type is not None:  # фото счёта — текста нет, идём vision-путём
         return await _parse_image_invoice(data, media_type)
+
+    if (filename or "").lower().endswith(".pdf") or data[:4] == _PDF_MAGIC:
+        return await _parse_pdf_invoice(data, filename)
+
+    # Word / прочее: текстовый разбор (постраничной резки нет — у .docx нет страниц как у PDF).
     try:
         text = _extract_text(data, filename)
     except Exception:
@@ -567,13 +777,7 @@ async def parse_invoice_async(data: bytes, filename: str) -> InvoiceParseResult:
         return InvoiceParseResult(warnings=["Не удалось прочитать файл — введите реквизиты вручную"])
     if not text or not text.strip():
         return InvoiceParseResult(warnings=["Файл пуст или текст не распознан — введите реквизиты вручную"])
-    try:
-        llm = await extract_requisites_llm(text)
-        if llm is not None:
-            return llm
-    except Exception as e:  # API недоступен/refusal/таймаут — не роняем, идём в regex
-        logger.warning("invoice LLM extract failed (%s) — fallback to regex", type(e).__name__)
-    return extract_requisites_from_text(text)
+    return await _requisites_from_text(text)
 
 
 def parse_invoice(data: bytes, filename: str) -> InvoiceParseResult:
