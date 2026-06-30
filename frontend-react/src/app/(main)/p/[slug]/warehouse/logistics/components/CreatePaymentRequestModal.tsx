@@ -10,7 +10,16 @@ import type {
     PaymentCategory,
     ShippableShipmentRow,
     InvoiceParseResult,
+    ParsedDocument,
 } from '@/types/api';
+
+// Разнесённый под-документ от бэкенда (base64) → File для прикрепления тем же upload-путём.
+const parsedDocToFile = (d: ParsedDocument): File => {
+    const bin = atob(d.content_b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new File([bytes], d.filename, { type: d.mime_type });
+};
 
 const STATUS_LABEL: Record<PaymentRequestStatus, string> = {
     DRAFT: 'Черновик',
@@ -343,7 +352,14 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
         try {
             const r = await api.parseInvoice(file);
             applyParsed(r, isShipmentContext);
-            setInvoiceFile(file);  // тот же файл прикрепится как Счёт на шаге 2 — не грузить дважды
+            // Бэкенд мог разнести счёт+акт по страницам → прикрепим разнесённые части; иначе оригинал.
+            const inv = r.documents.find(d => d.doc_type === 'INVOICE');
+            const act = r.documents.find(d => d.doc_type === 'ACT');
+            setInvoiceFile(inv ? parsedDocToFile(inv) : file);  // тот же файл прикрепится на шаге 2 — не грузить дважды
+            if (act) {
+                setActFile(parsedDocToFile(act));
+                setParseInfo(prev => `${prev} Акт распознан в файле — приложится отдельно.`.trim());
+            }
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка распознавания счёта');
         }
@@ -359,7 +375,11 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
         if (isMultiProp && multiShipments.length === 0) return;
         prefillDoneRef.current = true;
         applyParsed(prefillParse, true);
-        if (prefillFile) setInvoiceFile(prefillFile);
+        const inv = prefillParse.documents.find(d => d.doc_type === 'INVOICE');
+        const act = prefillParse.documents.find(d => d.doc_type === 'ACT');
+        if (inv) setInvoiceFile(parsedDocToFile(inv));
+        else if (prefillFile) setInvoiceFile(prefillFile);
+        if (act) setActFile(parsedDocToFile(act));
     }, [prefillParse, prefillFile, selectedShipment, multiShipments, initialShipmentId, isMultiProp, applyParsed]);
 
     // ─── Client-side requisites validation (понятные сообщения вместо сырого 422) ──

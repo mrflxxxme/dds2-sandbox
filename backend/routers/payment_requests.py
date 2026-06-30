@@ -33,7 +33,7 @@ from backend.models import Project, ProjectMember, User
 from backend.models.payment_request import PaymentRequest
 from backend.project_context import get_current_project
 from backend.rbac import require_role
-from backend.services.bank_directory import resolve_bank
+from backend.services.bank_directory import resolve_bank_db
 from backend.schemas.payment_request import (
     ALLOWED_PR_DOC_TYPES,
     ArchiveShipmentsRequest,
@@ -102,10 +102,14 @@ def _actor(user: User) -> str:
 
 
 @router.get("/banks/{bic}")
-async def get_bank_by_bic(bic: str, _user: User = Depends(get_current_user)) -> dict[str, str]:
-    """БИК → {bic, corr_account, name} из справочника — для авто-заполнения реквизитов
-    получателя. 404, если банка нет в наборе (тогда к/с вводится вручную)."""
-    bank = resolve_bank(bic)
+async def get_bank_by_bic(
+    bic: str,
+    _user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """БИК → {bic, corr_account, name} из справочника ЦБ (таблица cbr_bic, фолбэк на зашитый
+    набор) — для авто-заполнения реквизитов получателя. 404, если банк не найден (к/с вручную)."""
+    bank = await resolve_bank_db(db, bic)
     if bank is None:
         raise HTTPException(status_code=404, detail="Банк по БИК не найден в справочнике")
     return bank
@@ -659,14 +663,17 @@ async def parse_invoice_file(
     if filename_lower.endswith(bad_ext) or not ok_type:
         raise HTTPException(status_code=415, detail="Поддерживаются PDF, Word или фото счёта (JPG/PNG/HEIC)")
 
+    # Распознавание (без записи в БД) допускает файл крупнее хранимого документа: многостраничные
+    # телефонные сканы счёта легко >20 МБ. Кап = MAX_UPLOAD_SIZE_MB; разнесённые части ужимаются.
     # Размер режем ДО чтения тела в память (Content-Length), затем перестраховка по факту.
-    max_bytes = min(_PR_DOC_MAX_MB, settings.MAX_UPLOAD_SIZE_MB) * 1024 * 1024
+    max_mb = settings.MAX_UPLOAD_SIZE_MB
+    max_bytes = max_mb * 1024 * 1024
     if file.size is not None and file.size > max_bytes:
-        raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {_PR_DOC_MAX_MB} МБ")
+        raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {max_mb} МБ")
     data = await file.read()
     validate_file_content(data, file.filename or "invoice")  # magic-bytes integrity по расширению
     if len(data) > max_bytes:
-        raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {_PR_DOC_MAX_MB} МБ")
+        raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {max_mb} МБ")
 
     return await invoice_parser.parse_invoice_async(data, file.filename or "invoice")
 

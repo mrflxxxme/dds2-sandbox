@@ -150,11 +150,25 @@ class PaymentActionRequest(BaseModel):
     comment: str | None = None
 
 
+class ParsedDocument(BaseModel):
+    """Один разрезанный под-документ из многостраничного файла (счёт+акт в одном PDF).
+    content_b64 — base64 готового под-файла (под-PDF), который фронт прикрепит к заявке
+    с указанным doc_type обычным upload'ом (без повторного распознавания). В БД не пишется."""
+
+    doc_type: str  # "INVOICE" | "ACT" (см. ALLOWED_PR_DOC_TYPES)
+    filename: str
+    mime_type: str
+    content_b64: str
+
+
 class InvoiceParseResult(BaseModel):
     """Распознанные реквизиты из файла счёта (PDF/Word) — ПОДСКАЗКА для формы, в БД не пишется.
     Поля, не прошедшие проверку (контроль-ключ р/с по БИК, БИК в справочнике), остаются None —
     их пользователь вводит вручную. fields_found — что распознано (для ✓ в UI), warnings — что
-    требует ручной проверки. Числовые поля сериализуются строкой (как и весь домен)."""
+    требует ручной проверки. Числовые поля сериализуются строкой (как и весь домен).
+
+    documents — авто-разнесение: если в одном файле счёт И акт (многостраничный PDF), бэкенд
+    режет его постранично по типам; иначе пусто (фронт прикрепляет оригинал как было)."""
 
     payee_name: str | None = None
     payee_inn: str | None = None
@@ -167,6 +181,7 @@ class InvoiceParseResult(BaseModel):
     purpose: str | None = None
     fields_found: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    documents: list["ParsedDocument"] = Field(default_factory=list)
 
 
 class CreateDraftRequest(BaseModel):

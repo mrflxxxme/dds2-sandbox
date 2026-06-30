@@ -134,6 +134,7 @@ from backend.models.refs import (
     Account,
     CategoryOverride,  # noqa: F401
     CategoryRef,
+    CbrBic,
     CounterpartyCategory,
     ImtAlias,  # noqa: F401
     OpeningBalance,
@@ -272,6 +273,7 @@ __all__ = [
     "ProjectInvite",
     # References
     "Account",
+    "CbrBic",
     "CounterpartyCategory",
     "Override",
     "OpeningBalance",

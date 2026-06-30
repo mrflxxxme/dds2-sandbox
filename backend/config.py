@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""  # Claude API key for AI agent
     AI_MEMORY_DIR: str = "/data/ai_memory"  # persistent AI memory storage
 
+    # ЦБ РФ справочник БИК (ED807) — БИК→корр.счёт банка получателя для платёжек
+    CBR_BIK_URL: str = "https://www.cbr.ru/s/newbik"  # отдаёт актуальный ED807-ZIP напрямую
+
     # Telegram analytics bot
     TELEGRAM_BOT_TOKEN_ANALYTICS: str = ""  # @dds_analytics_bot token
     TELEGRAM_WEBHOOK_SECRET: str = ""  # X-Telegram-Bot-Api-Secret-Token

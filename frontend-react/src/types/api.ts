@@ -2549,6 +2549,14 @@ export interface PaymentRequestRow {
   created_at: string;
 }
 
+/** Разрезанный под-документ из многостраничного файла (счёт+акт в одном PDF). */
+export interface ParsedDocument {
+  doc_type: PaymentRequestDocType;
+  filename: string;
+  mime_type: string;
+  content_b64: string;
+}
+
 export interface InvoiceParseResult {
   payee_name: string | null;
   payee_inn: string | null;
@@ -2561,6 +2569,8 @@ export interface InvoiceParseResult {
   purpose: string | null;
   fields_found: string[];
   warnings: string[];
+  /** Авто-разнесение: счёт→INVOICE, акт→ACT. Пусто, если резать нечего. */
+  documents: ParsedDocument[];
 }
 
 export interface PaymentRequestDocument {

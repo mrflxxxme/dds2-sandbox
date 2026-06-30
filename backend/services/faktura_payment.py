@@ -25,6 +25,7 @@ from backend.cache import invalidate_cache
 from backend.integrations.faktura_api import DEFAULT_HOST, FakturaApiClient
 from backend.models.payment_request import PaymentRequest, PaymentRequestStatus
 from backend.services import payment_request_status as prs
+from backend.services.bank_directory import resolve_bank_db
 from backend.services.faktura_service import _get_faktura_key
 from backend.utils.time import utcnow
 
@@ -39,7 +40,7 @@ class PaymentDraftError(Exception):
         super().__init__("; ".join(bank_errors) or "payment validation failed")
 
 
-def _build_payment_body(pr: PaymentRequest, payer: dict, guid: str, *, fingerprint: str = "", nds: str = "-1") -> dict:
+def _build_payment_body(pr: PaymentRequest, payer: dict, guid: str, *, corr_account: str, fingerprint: str = "", nds: str = "-1") -> dict:
     """Платёжка по проверенному /payments/validate контракту (см. faktura_validate_probe.py).
 
     payer — объект счёта из /accounts: {id, number, currency, owner:{name,inn,kpp},
@@ -57,7 +58,7 @@ def _build_payment_body(pr: PaymentRequest, payer: dict, guid: str, *, fingerpri
         "nds": nds,
         "payeeAccountNumber": pr.payee_account or "",
         "payeeBankBic": pr.payee_bik or "",
-        "payeeBankAccount": pr.payee_corr_account or "",  # корр. счёт банка получателя
+        "payeeBankAccount": corr_account,  # корр. счёт банка получателя (резолв по БИК из справочника ЦБ)
         "payeeName": pr.payee_name or "",
         "payeeInn": pr.payee_inn or "",
         "payeeKpp": pr.payee_kpp or "",
@@ -143,6 +144,16 @@ async def create_payment_draft(
     if not (pr.payee_inn and pr.payee_account and pr.payee_bik and pr.amount and pr.amount > 0):
         raise ValueError("Неполные реквизиты получателя — нельзя создать платёжку")
 
+    # К/с банка получателя резолвим по БИК из справочника ЦБ (авторитетно; к/с НЕ выводится
+    # формулой из БИК). Фолбэк на сохранённый к/с заявки. Пусто на обоих → понятная ошибка
+    # вместо отбойника банка «Неверно указан к/с».
+    bank = await resolve_bank_db(db, pr.payee_bik)
+    corr_account = (bank["corr_account"] if bank else None) or pr.payee_corr_account or ""
+    if not corr_account:
+        raise ValueError(
+            f"Не удалось определить к/с банка по БИК {pr.payee_bik} — заполните к/с получателя вручную (в счёте указан)"
+        )
+
     # Credentials (raises ValueError with a clear message if the Faktura key is absent).
     key, login, password = await _get_faktura_key(db, project_id)
     cfg = key.config or {}
@@ -156,7 +167,7 @@ async def create_payment_draft(
         await client.authenticate()
         accounts = await client.get_accounts()
         payer = _resolve_payer(accounts, payer_account_id)
-        payment = _build_payment_body(pr, payer, guid)
+        payment = _build_payment_body(pr, payer, guid, corr_account=corr_account)
 
         errors = await client.validate_payment(payment)
         if errors:
