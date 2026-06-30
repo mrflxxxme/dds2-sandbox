@@ -43,6 +43,20 @@ async def sync_all_projects_wb_prices():
                         "WB prices sync: project %d — %d rows", project_id, sync_log.rows_inserted
                     )
                     ok += 1
+                    # После цен витрины — реальная цена покупателя с СПП из
+                    # публичного card-API (без ключа, best-effort: флак не валит синк).
+                    try:
+                        from backend.services.pricing.sync import sync_card_spp
+
+                        spp = await asyncio.wait_for(sync_card_spp(db, project_id), timeout=600)
+                        logger.info(
+                            "card-СПП sync: project %d — %d/%d nm",
+                            project_id, spp.get("fetched", 0), spp.get("requested", 0),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning("card-СПП sync: project %d failed — %s", project_id, str(e))
                 else:
                     logger.warning(
                         "WB prices sync: project %d — ERROR %s", project_id, sync_log.error_msg

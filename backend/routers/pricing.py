@@ -12,7 +12,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.services.pricing import ai_advisor
 from backend.services.pricing import markup as markup_service
-from backend.services.pricing.sync import sync_wb_prices
+from backend.services.pricing.sync import sync_card_spp, sync_wb_prices
 from backend.utils.rate_limit import rate_limit_write
 
 logger = logging.getLogger("dds.pricing")
@@ -34,8 +34,8 @@ async def get_markup(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Наценка по артикулам. group_by: category (дерево) | sku (плоский) | anomaly (аномалии)."""
-    gb = group_by if group_by in ("sku", "anomaly", "category", "size") else "category"
+    """Наценка по артикулам. group_by: category | sku | size | imt (склейка) | anomaly."""
+    gb = group_by if group_by in ("sku", "anomaly", "category", "size", "imt") else "category"
     return await markup_service.get_markup_analytics(
         db,
         project.id,
@@ -81,3 +81,15 @@ async def sync_prices(
         "synced_at": sync_log.finished_at.isoformat() if sync_log.finished_at else None,
         "message": sync_log.error_msg,
     }
+
+
+@router.post("/sync-spp")
+async def sync_spp(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(rate_limit_write),
+):
+    """Синк реальной цены покупателя с СПП из публичного card-API (без ключа)."""
+    res = await sync_card_spp(db, project.id)
+    await invalidate_cache(f"reports:pricing_markup:project_id={project.id}")
+    return res

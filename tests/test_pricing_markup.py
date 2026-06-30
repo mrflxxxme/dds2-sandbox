@@ -140,6 +140,46 @@ class TestBuildRowExpenses:
         assert row.breakeven_price == pytest.approx(625.0, abs=0.1)
         assert row.safety_margin_pct == pytest.approx(37.5, abs=0.1)
 
+    def test_breakeven_with_avg_category_ad(self):
+        """Мин. цена с рекламой = пол + средний ДРР категории (выше чистого пола)."""
+        price = WbPrice(
+            project_id=1, nm_id=1, price=Decimal("1000"), base_price=Decimal("1000"),
+            discount=Decimal("0"), currency="RUB", synced_at=utcnow(),
+        )
+        funnel = {
+            "nm_id": 1, "vendor_code": "X", "brand": "B", "subject": "S",
+            "revenue": 10000.0, "commission": 3000.0, "to_pay_rate": 70.0, "tax": 600.0,
+            "cost_total": 4000.0, "adv_sum": 0.0, "profit": 1900.0, "orders_count": 10,
+            "margin": 19.0, "spp_rate": 0.0,
+        }
+        # средний ДРР категории «S» = 10%
+        row = _build_row(
+            1, price, funnel, 400.0, {}, None, wb_stock=20, period_days=30,
+            adv_rate_by_cat={"S": 0.10}, global_adv_rate=0.10,
+        )
+        assert row.breakeven_price == pytest.approx(625.0, abs=0.1)  # чистый пол (без рекламы)
+        # с рекламой: 1000 × 4000 / (6400 − 10000×0.10) = 740.74
+        assert row.breakeven_with_adv == pytest.approx(740.74, abs=0.3)
+        assert row.breakeven_with_adv > row.breakeven_price  # реклама поднимает пол
+
+    def test_ad_metrics_ctr_cpc(self):
+        """CTR/CPC/показы/клики считаются из adv_views/adv_clicks/adv_sum воронки."""
+        price = WbPrice(
+            project_id=1, nm_id=1, price=Decimal("1000"), base_price=Decimal("1000"),
+            discount=Decimal("0"), currency="RUB", synced_at=utcnow(),
+        )
+        funnel = {
+            "nm_id": 1, "vendor_code": "X", "revenue": 10000.0, "commission": 3000.0,
+            "to_pay_rate": 70.0, "tax": 0.0, "cost_total": 4000.0, "adv_sum": 2000.0,
+            "adv_views": 50000, "adv_clicks": 1000, "profit": 1000.0, "orders_count": 10,
+            "margin": 10.0, "spp_rate": 0.0,
+        }
+        row = _build_row(1, price, funnel, 400.0, {}, None, wb_stock=20)
+        assert row.adv_views == 50000
+        assert row.adv_clicks == 1000
+        assert row.ctr == 2.0   # 1000 / 50000 × 100
+        assert row.cpc == 2.0   # 2000 / 1000
+
     def test_pipeline_stock_breakdown(self):
         """Остаток по локациям: ВБ+наш склад+сборка+в пути; заморожено по ВСЕМ."""
         price = WbPrice(
@@ -175,6 +215,111 @@ class TestBuildRowExpenses:
         row = _build_row(1, price, funnel, 846.0, {}, None, wb_stock=200, period_days=30)
         assert row.anomaly == "Реклама в минус"  # не «Убыток после расходов ВБ»
         assert "рекламу" in row.recommendation.lower()  # не «поднять цену»
+
+
+class TestSklejkaGrouping:
+    """Группировка по склейке (imt_id): честный ДРР склейки + роли якорь/донор."""
+
+    @staticmethod
+    def _row(nm, revenue, adv_sum, orders, imt):
+        funnel = {
+            "nm_id": nm, "vendor_code": f"A{nm}", "revenue": revenue, "commission": revenue * 0.2,
+            "to_pay_rate": 70.0, "tax": 0.0, "cost_total": revenue * 0.3, "adv_sum": adv_sum,
+            "profit": revenue * 0.2, "orders_count": orders, "margin": 20.0, "spp_rate": 0.0,
+        }
+        price = WbPrice(
+            project_id=1, nm_id=nm, price=Decimal("1000"), base_price=Decimal("1000"),
+            discount=Decimal("0"), currency="RUB", synced_at=utcnow(),
+        )
+        return _build_row(nm, price, funnel, 300.0, {}, {"imt_id": imt}, wb_stock=10)
+
+    def test_anchor_donor_and_sklejka_drr(self):
+        from backend.services.pricing.markup import _group_by_sklejka
+
+        a = self._row(1, 10000.0, 5000.0, 10, 555)  # якорь: 83% рекламы склейки
+        b = self._row(2, 8000.0, 0.0, 8, 555)        # донор: 40% выручки, 0 своей рекламы
+        c = self._row(3, 2000.0, 1000.0, 2, 555)     # нейтраль
+        groups = _group_by_sklejka([a, b, c])
+
+        assert len(groups) == 1
+        g = groups[0]
+        assert g.imt_id == 555
+        assert g.articles == 3
+        assert g.advertised_variants == 2  # a, c
+        assert g.converting_variants == 3
+        assert g.category == "Склейка 555"  # имя склейки (нет алиаса → «Склейка {imt}»)
+        assert g.drr == pytest.approx(30.0, abs=0.1)  # 6000 / 20000 × 100
+
+        assert a.sklejka_role == "якорь"
+        assert b.sklejka_role == "донор"
+        assert c.sklejka_role == ""
+        assert a.adv_share_pct == pytest.approx(83.3, abs=0.2)
+        assert b.rev_share_pct == pytest.approx(40.0, abs=0.1)
+
+    def test_no_roles_without_ads(self):
+        """Склейка без рекламы → ролей нет (нечего делить)."""
+        from backend.services.pricing.markup import _group_by_sklejka
+
+        a = self._row(1, 5000.0, 0.0, 5, 777)
+        b = self._row(2, 5000.0, 0.0, 5, 777)
+        groups = _group_by_sklejka([a, b])
+        assert groups[0].drr == 0
+        assert a.sklejka_role == "" and b.sklejka_role == ""
+
+    def test_no_imt_falls_into_without_sklejka(self):
+        """Товары без imt_id — одна плоская группа «Без склейки», без ролей."""
+        from backend.services.pricing.markup import _group_by_sklejka
+
+        a = self._row(1, 5000.0, 1000.0, 5, None)
+        b = self._row(2, 5000.0, 0.0, 5, None)
+        groups = _group_by_sklejka([a, b])
+        assert len(groups) == 1
+        assert groups[0].imt_id is None
+        assert groups[0].category == "Без склейки"
+        assert a.sklejka_role == "" and b.sklejka_role == ""
+
+
+class TestCardSpp:
+    """Публичный card-API: парсер + приоритет реальной цены с СПП в _build_row."""
+
+    def test_parse_card_products(self):
+        from backend.integrations.wb_card_api import parse_card_products
+
+        data = {
+            "data": {
+                "products": [
+                    {"id": 893149026, "sizes": [{"price": {"basic": 1842000, "product": 984300}}]},
+                    {"id": 222, "sizes": [{"price": {"product": 0}}, {"price": {"product": 50000, "basic": 60000}}]},
+                    {"id": 333, "sizes": []},  # нет цены → пропуск
+                ]
+            }
+        }
+        out = parse_card_products(data)
+        assert out[893149026]["product"] == 9843.0  # копейки → рубли
+        assert out[893149026]["basic"] == 18420.0
+        assert out[222]["product"] == 500.0  # первый ненулевой размер
+        assert 333 not in out
+
+    def test_card_price_overrides_bdr_spp(self):
+        """card_buyer_price приоритетнее BDR: цена с СПП = card, spp_rate из неё."""
+        price = WbPrice(
+            project_id=1, nm_id=1, price=Decimal("1000"), base_price=Decimal("1000"),
+            discount=Decimal("0"), currency="RUB", synced_at=utcnow(),
+        )
+        # card даёт реальную цену 700; current_spp (BDR) другой — должен проиграть
+        row = _build_row(1, price, None, 300.0, {}, None, current_spp=20.0, card_buyer_price=700.0)
+        assert row.buyer_price == 700.0
+        assert row.spp_rate == 30.0  # 1 − 700/1000
+
+    def test_bdr_spp_fallback_when_no_card(self):
+        """Без card-цены — фолбэк на СПП последнего BDR."""
+        price = WbPrice(
+            project_id=1, nm_id=1, price=Decimal("1000"), base_price=Decimal("1000"),
+            discount=Decimal("0"), currency="RUB", synced_at=utcnow(),
+        )
+        row = _build_row(1, price, None, 300.0, {}, None, current_spp=25.0, card_buyer_price=None)
+        assert row.spp_rate == 25.0
+        assert row.buyer_price == 750.0  # 1000 × (1 − 0.25)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -334,31 +479,58 @@ class TestMarkupAnalytics:
         assert nm_ids == {3004}
 
 
-class TestAiAdvisorSelection:
-    """Отбор ключевых артикулов для AI (без вызова LLM)."""
+class TestAiAdvisorPayload:
+    """Сборка payload AI по склейкам + охват кампаниями (без вызова LLM)."""
 
-    def test_select_prioritizes_by_impact(self):
-        from backend.services.pricing.ai_advisor import _select_items
+    @staticmethod
+    def _variant(nm, **kw):
+        base = dict(
+            nm_id=nm, vendor_code=f"A{nm}", size="M", category="Ковры",
+            current_price=1000.0, cost_price=300.0, markup_coef=3.3, markup_pct=233.0,
+            drr=10.0, cr=2.0, rev_share_pct=None, adv_share_pct=None, sklejka_role="",
+            adv_sum=0.0, revenue=0.0, profit=0.0, total_stock=0, is_new=False,
+            anomaly=None, stock_value_cost=0.0,
+        )
+        base.update(kw)
+        return base
 
-        def row(nm, **kw):
-            base = dict(
-                nm_id=nm, vendor_code=f"A{nm}", category="C", anomaly=None,
-                adv_sum=0.0, stock_value_cost=0.0, profit=0.0, revenue=0.0,
-                optimal_price=None, current_price=100.0, cost_price=50.0,
-            )
-            base.update(kw)
-            return base
+    def test_sklejka_payload_roles_and_campaign_coverage(self):
+        from backend.services.pricing.ai_advisor import _build_singles_payload, _build_sklejka_payload
 
-        rows = [
-            row(1, anomaly="Реклама в минус", adv_sum=5000.0, profit=-100.0),
-            row(2, anomaly="Залежавшийся остаток", stock_value_cost=999999.0),
-            row(3, revenue=500000.0),
-        ] + [row(100 + i, revenue=float(i)) for i in range(80)]
-        sel = _select_items(rows)
-        arts = {it["арт"] for it in sel}
-        assert {"A1", "A2", "A3"} <= arts  # высокоимпактные попали
-        assert len(sel) <= 50  # кап соблюдён
-        assert all("аномалия" in it for it in sel)  # компактный формат
+        sklejka = dict(
+            category="Склейка 555", imt_id=555, articles=2, advertised_variants=1, converting_variants=2,
+            revenue=18000.0, adv_sum=5000.0, drr=27.8, profit=4000.0, markup_pct=200.0, stock_value_cost=10000.0,
+            children=[
+                self._variant(1, revenue=10000.0, adv_sum=5000.0, sklejka_role="якорь", adv_share_pct=100.0, rev_share_pct=55.6),
+                self._variant(2, revenue=8000.0, adv_sum=0.0, sklejka_role="донор", adv_share_pct=0.0, rev_share_pct=44.4),
+            ],
+        )
+        singles_group = dict(
+            category="Без склейки", imt_id=None, articles=1, advertised_variants=0, converting_variants=0,
+            revenue=0.0, adv_sum=0.0, drr=0.0, profit=-500.0, markup_pct=None, stock_value_cost=99999.0,
+            children=[self._variant(9, revenue=0.0, profit=-500.0, stock_value_cost=99999.0, anomaly="Залежавшийся остаток")],
+        )
+        groups = [sklejka, singles_group]
+        nm_to_camp = {1: {111}}  # вариант 1 — в активной кампании 111
+        dyn = {1: {"тренд_заказов%": -33, "ДРР_3д%": 25.0}}  # моментум по варианту 1
+
+        sk = _build_sklejka_payload(groups, nm_to_camp, dyn)
+        assert len(sk) == 1  # одиночная группа без склейки не попала
+        s = sk[0]
+        assert s["imt_id"] == 555
+        assert s["охвачено_активными_кампаниями"] == 1
+        assert s["активных_кампаний"] == 1
+        assert s["ДРР_склейки%"] == 27.8
+        roles = {v["арт"]: v["роль"] for v in s["варианты"]}
+        assert roles["A1"] == "якорь" and roles["A2"] == "донор"
+        # динамика подмешана к варианту
+        v1 = next(v for v in s["варианты"] if v["арт"] == "A1")
+        assert v1["динамика_3д"]["тренд_заказов%"] == -33
+
+        singles = _build_singles_payload(groups, dyn)
+        arts = {it["арт"] for it in singles}
+        assert "A9" in arts  # одиночная аномалия попала
+        assert all("аномалия" in it for it in singles)  # компактный формат
 
 
 class TestStockAndAnomalies:

@@ -39,14 +39,14 @@ const profitCol = (v: number | null) => ((v || 0) > 0 ? '#10b981' : (v || 0) < 0
 const gmroiCol = (v: number | null) => (v == null ? '#9ca3af' : v >= 3 ? '#10b981' : v < 1 ? '#f59e0b' : '#111827');
 
 interface TreeVM {
-    price: number | null; cost: number | null; coef: number | null; markup: number | null; margin: number | null; minPrice: number | null;
-    adv: number; drr: number; wbStock: number; own: number; asm: number; transit: number; total: number; frozen: number | null; days: number | null;
+    price: number | null; buyerPrice: number | null; cost: number | null; coef: number | null; markup: number | null; margin: number | null; minPrice: number | null;
+    adv: number; drr: number; ctr: number; cpc: number; views: number; clicks: number; wbStock: number; own: number; asm: number; transit: number; total: number; frozen: number | null; days: number | null;
     revenue: number; profit: number; gmroi: number | null; bg: string;
 }
-const TREE_SECTIONS: Array<[string, number]> = [['ЦЕНООБРАЗОВАНИЕ', 6], ['РЕКЛАМА', 2], ['ОСТАТКИ', 7], ['ФИНАНСЫ', 3]];
+const TREE_SECTIONS: Array<[string, number]> = [['ЦЕНООБРАЗОВАНИЕ', 7], ['РЕКЛАМА', 6], ['ОСТАТКИ', 7], ['ФИНАНСЫ', 3]];
 const TREE_COLS: Array<[string, boolean]> = [
-    ['Цена ВБ', false], ['Себест.', false], ['Коэф.', false], ['Наценка %', false], ['Маржа %', false], ['Мин. цена', false],
-    ['Расходы ₽', true], ['ДРР %', false],
+    ['Цена ВБ', false], ['Цена с СПП', false], ['Себест.', false], ['Коэф.', false], ['Наценка %', false], ['Маржа %', false], ['Мин. цена', false],
+    ['Расходы ₽', true], ['ДРР %', false], ['CTR %', false], ['CPC', false], ['Показы', false], ['Клики', false],
     ['Остаток ВБ', true], ['Наш склад', false], ['В сборке', false], ['В пути ВБ', false], ['Всего', false], ['Заморож. ₽', false], ['Дней', false],
     ['Выручка ₽', true], ['Прибыль ₽', false], ['GMROI', false],
 ];
@@ -64,11 +64,12 @@ export default function PricingPage() {
     const [onlyInStock, setOnlyInStock] = useState(true);
     const [anomalyOnly, setAnomalyOnly] = useState(false);
     const [newOnly, setNewOnly] = useState(false);
-    const [groupBy, setGroupBy] = useState<'sku' | 'category' | 'size'>('category');
+    const [groupBy, setGroupBy] = useState<'sku' | 'category' | 'size' | 'imt'>('category');
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
     const [categoryOptions, setCategoryOptions] = useState<string[]>([]);
     const [syncing, setSyncing] = useState(false);
+    const [sppSyncing, setSppSyncing] = useState(false);
     const [syncMsg, setSyncMsg] = useState('');
     const [aiHtml, setAiHtml] = useState('');
     const [aiLoading, setAiLoading] = useState(false);
@@ -92,8 +93,9 @@ export default function PricingPage() {
             });
             if (reqRef.current !== myReq) return;
             setResp(res);
-            if (!category && !anomalyOnly) {
-                // полный список категорий: из строк (sku) или из групп (дерево)
+            if (!category && !anomalyOnly && res.group_by !== 'imt') {
+                // полный список категорий: из строк (sku) или из групп (дерево).
+                // Для склейки g.category = имя склейки — в фильтр категорий не годится.
                 const raw = res.group_by === 'sku' ? res.data_rows.map((r) => r.category) : res.data_groups.map((g) => g.category);
                 const cats = Array.from(new Set(raw)).sort();
                 if (cats.length) setCategoryOptions((prev) => (prev.length >= cats.length ? prev : cats));
@@ -122,6 +124,20 @@ export default function PricingPage() {
             setSyncMsg(e instanceof Error ? e.message : 'Ошибка синка');
         } finally {
             setSyncing(false);
+        }
+    };
+
+    const doSyncSpp = async () => {
+        setSppSyncing(true);
+        setSyncMsg('');
+        try {
+            const r = await api.syncPricingSpp();
+            setSyncMsg(`СПП обновлён: ${int0(r.fetched)} из ${int0(r.requested)} товаров (card-API)`);
+            await loadData();
+        } catch (e) {
+            setSyncMsg(e instanceof Error ? e.message : 'Ошибка синка СПП');
+        } finally {
+            setSppSyncing(false);
         }
     };
 
@@ -157,18 +173,20 @@ export default function PricingPage() {
     const doExport = () => {
         const out = allLeafRows.map((r) => ({
             'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Категория': r.category, 'Размер': r.size, 'ABC': r.abc || '',
+            'Склейка': r.sklejka, 'Роль в склейке': r.sklejka_role, 'Доля выручки склейки %': r.rev_share_pct, 'Доля рекламы склейки %': r.adv_share_pct,
             'Бренд': r.brand || '', 'Базовая цена': r.base_price, 'Скидка продавца %': r.discount,
             'Цена ВБ': r.current_price, 'Себестоимость': r.cost_price, 'Наценка коэф': r.markup_coef,
             'Наценка %': r.markup_pct, 'Доля себест %': r.cost_share_pct, 'Маржа %': r.margin_pct,
-            'Мин. цена (безубыток)': r.breakeven_price, 'Запас прочности %': r.safety_margin_pct,
+            'Мин. цена (с рекламой)': r.breakeven_with_adv, 'Запас прочности %': r.safety_margin_pct,
             'Эластичность': r.elasticity, 'Тип спроса': r.elasticity_label, 'Реком. цена': r.optimal_price,
-            'СПП %': r.spp_rate, 'Цена покупателю': r.buyer_price, 'Заказы': r.orders_count,
+            'СПП сейчас %': r.spp_rate, 'Цена с СПП': r.buyer_price, 'Заказы': r.orders_count,
             'Остаток ВБ': r.wb_stock, 'Наш склад': r.own_stock, 'В сборке': r.assembly_stock, 'В пути на ВБ': r.transit_stock, 'Всего товара': r.total_stock,
             'Новинка': r.is_new ? 'да' : '', 'Дней до исчерпания': r.days_left, 'Продаж/мес': r.sales_per_month,
             'Sell-through %': r.sell_through_pct, 'GMROI': r.gmroi, 'Заморожено (себест)': r.stock_value_cost,
             'Потенц. прибыль остатка': r.stock_potential_profit, 'Потенц. выручка остатка': r.stock_potential_revenue,
             'Выручка': r.revenue, 'Расходы ВБ': r.wb_expenses, 'Реклама': r.adv_sum, 'Налог': r.tax,
             'Прибыль': r.profit, 'Чист. наценка %': r.net_markup_pct, 'ДРР %': r.drr, 'CR (конверсия) %': r.cr,
+            'CTR %': r.ctr, 'CPC': r.cpc, 'Показы': r.adv_views, 'Клики': r.adv_clicks,
             'Аномалия': r.anomaly || '', 'Рекомендация': r.recommendation,
         }));
         exportToExcel(out, 'Ценообразование');
@@ -199,11 +217,17 @@ export default function PricingPage() {
                 R(v || '—', v === 'A' ? 'var(--color-success)' : v === 'C' ? 'var(--color-text-dim)' : undefined),
         },
         { key: 'current_price', label: 'Цена ВБ', align: 'right', sortable: true, render: (v) => money(v) },
+        {
+            key: 'buyer_price', label: 'Цена с СПП', align: 'right', sortable: true,
+            render: (v: number | null, r: PricingRow) => (
+                <span title={`СПП сейчас ${pct(r.spp_rate)}`} style={{ fontWeight: 600 }}>{money(v)}</span>
+            ),
+        },
         { key: 'cost_price', label: 'Себест.', align: 'right', sortable: true, render: (v) => money(v) },
         { key: 'markup_coef', label: 'Коэф.', align: 'right', sortable: true, render: (v: number | null) => (v == null ? '—' : formatNumber(v, 2) + '×') },
         { key: 'markup_pct', label: 'Наценка %', align: 'right', sortable: true, render: (v) => pct(v) },
         { key: 'margin_pct', label: 'Маржа %', align: 'right', sortable: true, render: (v) => R(pct(v), signColor(v)) },
-        { key: 'breakeven_price', label: 'Мин. цена', align: 'right', sortable: true, render: (v) => money(v) },
+        { key: 'breakeven_with_adv', label: 'Мин. цена', align: 'right', sortable: true, render: (v) => money(v) },
         {
             key: 'safety_margin_pct', label: 'Запас %', align: 'right', sortable: true,
             render: (v: number | null) =>
@@ -244,6 +268,10 @@ export default function PricingPage() {
         { key: 'profit', label: 'Прибыль', align: 'right', sortable: true, render: (v) => R(money(v), signColor(v)) },
         { key: 'drr', label: 'ДРР %', align: 'right', sortable: true, render: (v) => pct(v) },
         { key: 'cr', label: 'CR %', align: 'right', sortable: true, render: (v) => pct(v) },
+        { key: 'ctr', label: 'CTR %', align: 'right', sortable: true, render: (v) => pct(v) },
+        { key: 'cpc', label: 'CPC', align: 'right', sortable: true, render: (v) => money(v) },
+        { key: 'adv_views', label: 'Показы', align: 'right', sortable: true, render: (v) => int0(v) },
+        { key: 'adv_clicks', label: 'Клики', align: 'right', sortable: true, render: (v) => int0(v) },
         {
             key: 'recommendation', label: 'Рекомендация', width: '210px', sortable: true,
             render: (v: string, r: PricingRow) =>
@@ -271,9 +299,10 @@ export default function PricingPage() {
                 <input type="date" className="btn btn-sm" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
                 <span style={{ color: 'var(--color-text-dim)' }}>—</span>
                 <input type="date" className="btn btn-sm" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-                <select className="btn btn-sm" value={groupBy} onChange={(e) => setGroupBy(e.target.value as 'sku' | 'category' | 'size')} title="Группировка">
+                <select className="btn btn-sm" value={groupBy} onChange={(e) => setGroupBy(e.target.value as 'sku' | 'category' | 'size' | 'imt')} title="Группировка">
                     <option value="category">📂 По категориям</option>
                     <option value="size">📏 По размеру</option>
+                    <option value="imt">🧬 По склейке</option>
                     <option value="sku">📋 По артикулам</option>
                 </select>
                 <select className="btn btn-sm" value={category} onChange={(e) => setCategory(e.target.value)}>
@@ -299,6 +328,9 @@ export default function PricingPage() {
                 <button className="btn btn-sm btn-success" onClick={doAi} disabled={aiLoading || allLeafRows.length === 0}>
                     {aiLoading ? '🤖 Анализ…' : '🤖 AI-рекомендации'}
                 </button>
+                <button className="btn btn-sm btn-secondary" onClick={doSyncSpp} disabled={sppSyncing} title="Реальная цена покупателя с СПП из card-API">
+                    {sppSyncing ? '⏳ СПП…' : '🔄 СПП'}
+                </button>
                 <button className="btn btn-sm btn-primary" onClick={doSync} disabled={syncing}>
                     {syncing ? '⏳ Обновление…' : '🔄 Обновить цены'}
                 </button>
@@ -313,7 +345,7 @@ export default function PricingPage() {
                             <button className="btn btn-sm btn-secondary" style={{ marginLeft: 'auto' }} onClick={() => setAiHtml('')}>Скрыть</button>
                         )}
                     </div>
-                    {aiLoading && <div style={{ color: 'var(--color-text-dim)' }}>⏳ Claude анализирует портфель (10–20 сек)…</div>}
+                    {aiLoading && <div style={{ color: 'var(--color-text-dim)' }}>⏳ Claude детально анализирует портфель и динамику (30–60 сек)…</div>}
                     {aiErr && <div style={{ color: 'var(--color-danger)' }}>❌ {aiErr}</div>}
                     {aiHtml && (
                         <div style={{ fontSize: 14, lineHeight: 1.55 }} dangerouslySetInnerHTML={{ __html: sanitizeAIHtml(aiHtml) }} />
@@ -364,6 +396,7 @@ function MetricTds({ vm }: { vm: TreeVM }) {
     return (
         <>
             <td style={nc(vm.bg)}>{money(vm.price)}</td>
+            <td style={nc(vm.bg, { fontWeight: 600 })}>{money(vm.buyerPrice)}</td>
             <td style={nc(vm.bg)}>{money(vm.cost)}</td>
             <td style={nc(vm.bg, { fontWeight: 600 })}>{coef(vm.coef)}</td>
             <td style={nc(vm.bg)}>{pct(vm.markup)}</td>
@@ -371,6 +404,10 @@ function MetricTds({ vm }: { vm: TreeVM }) {
             <td style={nc(vm.bg)}>{money(vm.minPrice)}</td>
             <td style={nc(vm.bg, { ...SL, color: (vm.adv || 0) > 0 ? '#f97316' : '#9ca3af' })}>{money(vm.adv)}</td>
             <td style={nc(vm.bg, { color: drrCol(vm.drr), fontWeight: (vm.drr || 0) > 30 ? 600 : 400 })}>{pct(vm.drr)}</td>
+            <td style={nc(vm.bg)}>{pct(vm.ctr)}</td>
+            <td style={nc(vm.bg)}>{money(vm.cpc)}</td>
+            <td style={nc(vm.bg)}>{int0(vm.views)}</td>
+            <td style={nc(vm.bg)}>{int0(vm.clicks)}</td>
             <td style={nc(vm.bg, SL)}>{int0(vm.wbStock)}</td>
             <td style={nc(vm.bg)}>{int0(vm.own)}</td>
             <td style={nc(vm.bg)}>{int0(vm.asm)}</td>
@@ -386,16 +423,16 @@ function MetricTds({ vm }: { vm: TreeVM }) {
 }
 
 function PricingTree({ groups, mode, expanded, onToggle, loading }: {
-    groups: PricingGroup[]; mode: 'category' | 'size'; expanded: Set<string>; onToggle: (k: string) => void; loading: boolean;
+    groups: PricingGroup[]; mode: 'category' | 'size' | 'imt'; expanded: Set<string>; onToggle: (k: string) => void; loading: boolean;
 }) {
     if (loading) return <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>⏳ Загрузка…</div>;
     if (!groups.length) return <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>💲 Нет данных</div>;
     return (
         <div className="glass-card" style={{ padding: 0, overflow: 'auto', maxHeight: 'calc(100vh - 360px)' }}>
-            <table style={{ minWidth: 1500, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#ffffff' }}>
+            <table style={{ minWidth: 1800, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#ffffff' }}>
                 <thead>
                     <tr>
-                        <th rowSpan={2} style={FT_NAME_H}>{mode === 'size' ? 'КАТЕГОРИЯ → РАЗМЕР → SKU' : 'КАТЕГОРИЯ → SKU'}</th>
+                        <th rowSpan={2} style={FT_NAME_H}>{mode === 'size' ? 'КАТЕГОРИЯ → РАЗМЕР → SKU' : mode === 'imt' ? 'СКЛЕЙКА → ВАРИАНТ' : 'КАТЕГОРИЯ → SKU'}</th>
                         {TREE_SECTIONS.map(([label, span], i) => (
                             <th key={label} colSpan={span} style={i === 0 ? FT_SEC : { ...FT_SEC, borderLeft: '1px solid #e5e7eb' }}>{label}</th>
                         ))}
@@ -415,7 +452,7 @@ function PricingTree({ groups, mode, expanded, onToggle, loading }: {
 }
 
 function GroupNode({ group, mode, parentKey, expanded, onToggle }: {
-    group: PricingGroup; mode: 'category' | 'size'; parentKey: string; expanded: Set<string>; onToggle: (k: string) => void;
+    group: PricingGroup; mode: 'category' | 'size' | 'imt'; parentKey: string; expanded: Set<string>; onToggle: (k: string) => void;
 }) {
     const key = parentKey ? `${parentKey}|${group.category}` : group.category;
     const open = expanded.has(key);
@@ -423,8 +460,8 @@ function GroupNode({ group, mode, parentKey, expanded, onToggle }: {
     const bg = level === 0 ? '#eef2ff' : '#f5f7fb';
     const gmroi = group.stock_value_cost > 0 ? (group.revenue - group.cost_total) / group.stock_value_cost : null;
     const vm: TreeVM = {
-        price: null, cost: null, coef: group.markup_coef, markup: group.markup_pct, margin: group.margin_pct, minPrice: null,
-        adv: group.adv_sum, drr: group.drr, wbStock: group.wb_stock, own: group.own_stock, asm: group.assembly_stock, transit: group.transit_stock,
+        price: null, buyerPrice: null, cost: null, coef: group.markup_coef, markup: group.markup_pct, margin: group.margin_pct, minPrice: null,
+        adv: group.adv_sum, drr: group.drr, ctr: group.ctr ?? 0, cpc: group.cpc ?? 0, views: group.adv_views ?? 0, clicks: group.adv_clicks ?? 0, wbStock: group.wb_stock, own: group.own_stock, asm: group.assembly_stock, transit: group.transit_stock,
         total: group.total_stock, frozen: group.stock_value_cost, days: null, revenue: group.revenue, profit: group.profit, gmroi, bg,
     };
     return (
@@ -433,6 +470,11 @@ function GroupNode({ group, mode, parentKey, expanded, onToggle }: {
                 <td style={{ position: 'sticky', left: 0, background: bg, zIndex: 2, padding: '8px 12px', paddingLeft: 12 + level * 20, borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', minWidth: 250, fontWeight: level === 0 ? 700 : 600, color: '#111827', whiteSpace: 'nowrap' }}>
                     <span style={{ marginRight: 6 }}>{open ? '▾' : '▸'}</span>{group.category}
                     <span style={{ color: '#9ca3af', fontWeight: 400, fontSize: 11, marginLeft: 8 }}>{int0(group.articles)} арт.</span>
+                    {mode === 'imt' && (
+                        <span style={{ color: '#9ca3af', fontWeight: 400, fontSize: 11, marginLeft: 8 }}>
+                            рекл. {int0(group.advertised_variants)}/{int0(group.articles)} · продаёт {int0(group.converting_variants)}
+                        </span>
+                    )}
                 </td>
                 <MetricTds vm={vm} />
             </tr>
@@ -445,8 +487,8 @@ function GroupNode({ group, mode, parentKey, expanded, onToggle }: {
 function LeafRow({ row, level }: { row: PricingRow; level: number }) {
     const bg = '#ffffff';
     const vm: TreeVM = {
-        price: row.current_price, cost: row.cost_price, coef: row.markup_coef, markup: row.markup_pct, margin: row.margin_pct, minPrice: row.breakeven_price,
-        adv: row.adv_sum, drr: row.drr, wbStock: row.wb_stock, own: row.own_stock, asm: row.assembly_stock, transit: row.transit_stock,
+        price: row.current_price, buyerPrice: row.buyer_price, cost: row.cost_price, coef: row.markup_coef, markup: row.markup_pct, margin: row.margin_pct, minPrice: row.breakeven_with_adv,
+        adv: row.adv_sum, drr: row.drr, ctr: row.ctr, cpc: row.cpc, views: row.adv_views, clicks: row.adv_clicks, wbStock: row.wb_stock, own: row.own_stock, asm: row.assembly_stock, transit: row.transit_stock,
         total: row.total_stock, frozen: row.stock_value_cost, days: row.days_left, revenue: row.revenue, profit: row.profit, gmroi: row.gmroi, bg,
     };
     return (
@@ -455,6 +497,16 @@ function LeafRow({ row, level }: { row: PricingRow; level: number }) {
                 <span style={{ fontWeight: 500, fontSize: 13, color: '#111827' }}>{row.vendor_code || row.nm_id}</span>
                 <span style={{ color: '#9ca3af', fontSize: 11, marginLeft: 6 }}>#{row.nm_id}</span>
                 {row.is_new && <span style={{ color: '#3b82f6', fontSize: 11, marginLeft: 6 }}>🆕</span>}
+                {row.sklejka_role && (
+                    <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 24, color: '#ffffff', background: row.sklejka_role === 'якорь' ? '#3b82f6' : '#f59e0b' }}>
+                        {row.sklejka_role === 'якорь' ? '⚓ якорь' : '🩸 донор'}
+                    </span>
+                )}
+                {row.rev_share_pct != null && (
+                    <span style={{ color: '#9ca3af', fontSize: 10, marginLeft: 6 }}>
+                        реклама {pct(row.adv_share_pct)} · выручка {pct(row.rev_share_pct)} склейки
+                    </span>
+                )}
                 {row.anomaly && <div style={{ color: '#ef4444', fontSize: 11 }}>⚠ {row.anomaly}</div>}
             </td>
             <MetricTds vm={vm} />

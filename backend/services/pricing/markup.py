@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.cache import cached
 from backend.models import Nomenclature, Project, WarehouseStock, WbFunnelDaily, WbPrice, WbWarehouseStock
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.refs import ImtAlias
 from backend.schemas.pricing import PricingGroup, PricingResponse, PricingRow, PricingSummary
 from backend.services import funnel as funnel_service
 from backend.services import refs_service
@@ -53,6 +54,13 @@ _LOW_DISCOUNT_PCT = 5.0  # скидка ≤5% при абсурдной наце
 _DEAD_STOCK_DAYS = 365  # >1 года до распродажи остатка = неликвид
 _NEW_PRODUCT_DAYS = 30  # first_sale_date пуст/в пределах N дней = новинка (раскачка, не неликвид)
 
+# Роли вариантов внутри склейки (по доле рекламы/выручки склейки).
+# «Якорь» несёт основную рекламу склейки; «донор» продаётся за счёт трафика
+# карточки, почти не получая своей рекламы (ДРР варианта «занижен» субсидией якоря).
+_ANCHOR_ADV_SHARE_PCT = 50.0  # доля рекламы склейки ≥ → якорь
+_DONOR_REV_SHARE_PCT = 15.0  # доля выручки склейки ≥
+_DONOR_ADV_SHARE_PCT = 5.0  # … при доле рекламы ≤ → донор
+
 
 async def _load_tax_info(db: AsyncSession, pid: int) -> dict:
     """Налоговые настройки проекта (как в воронке: TaxRate → project.tax_rate=6%)."""
@@ -81,6 +89,7 @@ async def _load_meta_map(db: AsyncSession, pid: int) -> dict[int, dict]:
             func.max(Nomenclature.article_seller).label("article_seller"),
             func.max(WarehouseStock.cost_price).label("wh_cost"),
             func.max(Nomenclature.first_sale_date).label("first_sale_date"),
+            func.max(Nomenclature.imt_id).label("imt_id"),
         )
         .outerjoin(
             WarehouseStock,
@@ -97,9 +106,25 @@ async def _load_meta_map(db: AsyncSession, pid: int) -> dict[int, dict]:
             "article_seller": r.article_seller,
             "wh_cost": float(r.wh_cost) if r.wh_cost else None,
             "first_sale_date": r.first_sale_date,
+            "imt_id": r.imt_id,
         }
         for r in rows
     }
+
+
+async def _load_imt_alias_map(db: AsyncSession, pid: int) -> dict[int, str]:
+    """imt_id → пользовательское имя склейки (ImtAlias)."""
+    rows = await db.execute(
+        select(ImtAlias.imt_id, ImtAlias.name).where(ImtAlias.project_id == pid).limit(10000)
+    )
+    return {r.imt_id: r.name for r in rows}
+
+
+def _sklejka_label(imt_id: int | None, aliases: dict[int, str]) -> str:
+    """Имя склейки: алиас → «Склейка {imt}» → «Без склейки»."""
+    if imt_id is None:
+        return "Без склейки"
+    return aliases.get(imt_id) or f"Склейка {imt_id}"
 
 
 def _resolve_cost(nm_id: int, meta: dict, avg_costs: dict[str, float], overrides: dict[int, float]) -> float | None:
@@ -329,13 +354,20 @@ def _build_row(
     elasticity: float | None = None,
     today: _date | None = None,
     extra: dict | None = None,
+    current_spp: float | None = None,
+    card_buyer_price: float | None = None,
     keep_by_cat: dict[str, float] | None = None,
     global_keep: float | None = None,
+    adv_rate_by_cat: dict[str, float] | None = None,
+    global_adv_rate: float = 0.0,
     size_overrides: dict[int, str] | None = None,
     size_aliases: dict[str, str] | None = None,
+    imt_aliases: dict[int, str] | None = None,
 ) -> PricingRow:
     f = funnel or {}
     m = meta or {}
+    imt_id = m.get("imt_id")
+    sklejka = _sklejka_label(imt_id, imt_aliases or {})
     vendor_code = (price.vendor_code if price and price.vendor_code else None) or f.get("vendor_code") or m.get(
         "article_seller"
     )
@@ -359,8 +391,18 @@ def _build_row(
         markup_pct = round((current_price - cost_price) / cost_price * 100, 2)
         cost_share_pct = round(cost_price / current_price * 100, 2)
 
-    spp_rate = float(f.get("spp_rate") or 0)
-    buyer_price = round(current_price * (1 - spp_rate / 100), 2) if has_price and current_price is not None else None
+    # Цена с СПП «сейчас». Приоритет: реальная цена покупателя из card-API
+    # (card_buyer_price) → СПП последнего BDR → средне-периодный СПП воронки.
+    period_spp = float(f.get("spp_rate") or 0)
+    buyer_price: float | None
+    if card_buyer_price is not None and has_price and current_price and current_price > 0:
+        buyer_price = round(card_buyer_price, 2)
+        spp_rate = round(max(0.0, (1 - card_buyer_price / current_price) * 100), 2)
+    else:
+        spp_rate = current_spp if current_spp is not None else period_spp
+        buyer_price = (
+            round(current_price * (1 - spp_rate / 100), 2) if has_price and current_price is not None else None
+        )
 
     revenue = float(f.get("revenue") or 0)
     # commission из воронки = выручка − к перечислению = ВСЕ удержания ВБ
@@ -402,6 +444,10 @@ def _build_row(
     # ДРР, конверсия и точка безубыточности
     drr = round(adv_sum / revenue * 100, 2) if revenue > 0 else 0
     cr = round(float(f.get("cr") or 0), 2)  # конверсия клик→заказ, % (из воронки)
+    adv_views = int(f.get("adv_views") or 0)
+    adv_clicks = int(f.get("adv_clicks") or 0)
+    ctr = round(adv_clicks / adv_views * 100, 2) if adv_views > 0 else 0  # кликабельность
+    cpc = round(adv_sum / adv_clicks, 2) if adv_clicks > 0 else 0  # цена клика, ₽
     # цена, при которой прибыль = 0: масштабируем текущую цену так, чтобы
     # ценозависимый нетто-вклад (выручка − удержания ВБ − налог) покрыл fixed-затраты
     # (себестоимость + реклама). Учитывает СПП/комиссию/налог через realized-доли.
@@ -420,10 +466,32 @@ def _build_row(
         if keep and keep > 0:
             breakeven_price = round(cost_price / keep, 2)
 
+    # «Мин. цена с рекламой» — тот же пол, но дополнительно покрывает ТИПИЧНУЮ
+    # рекламу: себест + расходы ВБ (= «Расх. WB» воронки) + налог + СРЕДНИЙ ДРР
+    # КАТЕГОРИИ. Берём категорийный ДРР, а не свой (товар с парой продаж и
+    # огромным ДРР иначе раздул бы пол до абсурда — ровно поэтому в «чистом»
+    # безубытке рекламы нет).
+    adv_rate = (adv_rate_by_cat or {}).get(category)
+    if adv_rate is None:
+        adv_rate = global_adv_rate
+    breakeven_with_adv = None
+    if has_price and current_price is not None and revenue > 0:
+        net_contrib_adv = net_contrib - revenue * adv_rate  # минус типичная реклама
+        if net_contrib_adv > 0:
+            breakeven_with_adv = round(current_price * cost_total / net_contrib_adv, 2)
+    elif has_cost and cost_price is not None and cost_price > 0:
+        keep = (keep_by_cat or {}).get(category) or global_keep
+        if keep:
+            keep_adv = keep - adv_rate  # доля к получению за вычетом типичной рекламы
+            if keep_adv > 0:
+                breakeven_with_adv = round(cost_price / keep_adv, 2)
+
     # Запас прочности по цене: насколько можно снижать до нулевой прибыли
+    # (относительно «пола с рекламой» — именно он показывается в UI).
+    _floor = breakeven_with_adv if breakeven_with_adv is not None else breakeven_price
     safety_margin_pct = (
-        round((current_price - breakeven_price) / current_price * 100, 2)
-        if breakeven_price is not None and has_price and current_price
+        round((current_price - _floor) / current_price * 100, 2)
+        if _floor is not None and has_price and current_price
         else None
     )
     # GMROI: валовая маржа за период / заморожено в остатке (бенчмарк ≥3)
@@ -490,12 +558,19 @@ def _build_row(
         drr=drr,
         cr=cr,
         breakeven_price=breakeven_price,
+        breakeven_with_adv=breakeven_with_adv,
+        ctr=ctr,
+        cpc=cpc,
+        adv_views=adv_views,
+        adv_clicks=adv_clicks,
         safety_margin_pct=safety_margin_pct,
         gmroi=gmroi,
         sell_through_pct=sell_through_pct,
         elasticity=elasticity,
         elasticity_label=elasticity_label,
         optimal_price=optimal_price,
+        imt_id=imt_id,
+        sklejka=sklejka,
     )
     row.anomaly = _classify_anomaly(row)
     row.recommendation = _recommend(row)
@@ -567,6 +642,8 @@ def _aggregate_group(label: str, items: list[PricingRow]) -> PricingGroup:
     revenue = sum(r.revenue for r in items)
     profit = sum(r.profit for r in items)
     adv = sum(r.adv_sum for r in items)
+    views = sum(r.adv_views for r in items)
+    clicks = sum(r.adv_clicks for r in items)
     return PricingGroup(
         category=label,
         articles=len(items),
@@ -581,6 +658,10 @@ def _aggregate_group(label: str, items: list[PricingRow]) -> PricingGroup:
         margin_pct=round(profit / revenue * 100, 2) if revenue > 0 else 0,
         adv_sum=round(adv, 2),
         drr=round(adv / revenue * 100, 2) if revenue > 0 else 0,
+        ctr=round(clicks / views * 100, 2) if views > 0 else 0,
+        cpc=round(adv / clicks, 2) if clicks > 0 else 0,
+        adv_views=views,
+        adv_clicks=clicks,
         wb_stock=sum(r.wb_stock for r in items),
         own_stock=sum(r.own_stock for r in items),
         assembly_stock=sum(r.assembly_stock for r in items),
@@ -627,6 +708,58 @@ def _group_by_size(rows: list[PricingRow]) -> list[PricingGroup]:
         cg.subgroups = subs
         groups.append(cg)
     groups.sort(key=lambda g: g.revenue, reverse=True)
+    return groups
+
+
+def _assign_sklejka_roles(items: list[PricingRow]) -> None:
+    """Доли варианта в выручке/рекламе склейки + роль якорь/донор.
+
+    Роль осмысленна только в склейке из ≥2 вариантов с ненулевой рекламой:
+    варианты делят трафик одной карточки → per-nm ДРР искажён (донор «бесплатно»
+    снимает трафик, оплаченный якорем).
+    """
+    total_rev = sum(r.revenue for r in items)
+    total_adv = sum(r.adv_sum for r in items)
+    multi = len(items) >= 2
+    for r in items:
+        r.rev_share_pct = round(r.revenue / total_rev * 100, 1) if total_rev > 0 else None
+        r.adv_share_pct = round(r.adv_sum / total_adv * 100, 1) if total_adv > 0 else None
+        r.sklejka_role = ""
+        if not multi or total_adv <= 0:
+            continue
+        adv_sh = r.adv_share_pct or 0
+        rev_sh = r.rev_share_pct or 0
+        if adv_sh >= _ANCHOR_ADV_SHARE_PCT:
+            r.sklejka_role = "якорь"
+        elif rev_sh >= _DONOR_REV_SHARE_PCT and adv_sh <= _DONOR_ADV_SHARE_PCT:
+            r.sklejka_role = "донор"
+
+
+def _group_by_sklejka(rows: list[PricingRow]) -> list[PricingGroup]:
+    """Группировка «по склейке» (imt_id): варианты карточки + роли якорь/донор.
+
+    ДРР группы = Σреклама / Σвыручка вариантов — честная эффективность рекламы
+    склейки (per-nm ДРР внутри склейки врёт). Товары без imt_id собираются в
+    одну плоскую группу «Без склейки» (анализ ролей к ним неприменим).
+    """
+    buckets: dict[int | None, list[PricingRow]] = defaultdict(list)
+    for r in rows:
+        buckets[r.imt_id].append(r)
+
+    groups: list[PricingGroup] = []
+    for imt_id, items in buckets.items():
+        label = items[0].sklejka or _sklejka_label(imt_id, {})
+        g = _aggregate_group(label, items)
+        g.imt_id = imt_id
+        g.advertised_variants = sum(1 for r in items if r.adv_sum > 0)
+        g.converting_variants = sum(1 for r in items if r.orders_count > 0)
+        if imt_id is not None:
+            _assign_sklejka_roles(items)
+        items.sort(key=lambda r: r.revenue, reverse=True)
+        g.children = items
+        groups.append(g)
+    # реальные склейки (с imt_id) — выше по выручке; «Без склейки» опускается вниз
+    groups.sort(key=lambda g: (g.imt_id is not None, g.revenue), reverse=True)
     return groups
 
 
@@ -731,6 +864,10 @@ async def _compute_rows(
     meta_map = await _load_meta_map(db, project_id)
     cat_overrides = await refs_service.get_category_overrides(db, project_id)
     size_overrides, size_aliases = await refs_service.build_size_resolver(db, project_id)
+    imt_aliases = await _load_imt_alias_map(db, project_id)
+    from backend.services.pricing.sync import load_spp_map  # лениво: избегаем цикла
+
+    spp_map = await load_spp_map(project_id)  # реальная цена с СПП из card-API
     wb_stock_map = await _load_wb_stock_map(db, project_id)
     pipeline_map = await _load_pipeline_stock(db, project_id)
     elasticity_map = await _load_elasticity_map(db, project_id)
@@ -745,20 +882,29 @@ async def _compute_rows(
 
     # Средняя «доля к получению» (net_contrib / выручка) по категориям — для оценки
     # минимальной цены у товаров без продаж (новинки/неактивные).
-    _ded: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
+    # Параллельно — средний ДРР (реклама / выручка) по категориям: типичная
+    # рекламная нагрузка для «мин. цены с рекламой» (своя реклама товара с парой
+    # продаж раздувала бы безубыток — берём категорийное среднее).
+    _ded: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])  # [net, rev]
+    _adv: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])  # [adv, rev]
     for nm, f in funnel_by_nm.items():
         rev = float(f.get("revenue") or 0)
         if rev <= 0:
             continue
+        cat = cat_overrides.get(nm) or f.get("subject") or UNCATEGORIZED
+        _adv[cat][0] += float(f.get("adv_sum") or 0)
+        _adv[cat][1] += rev
         net = rev - float(f.get("commission") or 0) - float(f.get("tax") or 0)
         if net <= 0:
             continue
-        cat = cat_overrides.get(nm) or f.get("subject") or UNCATEGORIZED
         _ded[cat][0] += net
         _ded[cat][1] += rev
     keep_by_cat = {c: v[0] / v[1] for c, v in _ded.items() if v[1] > 0}
     _tot_rev = sum(v[1] for v in _ded.values())
     global_keep = (sum(v[0] for v in _ded.values()) / _tot_rev) if _tot_rev > 0 else None
+    adv_rate_by_cat = {c: v[0] / v[1] for c, v in _adv.items() if v[1] > 0}
+    _tot_adv_rev = sum(v[1] for v in _adv.values())
+    global_adv_rate = (sum(v[0] for v in _adv.values()) / _tot_adv_rev) if _tot_adv_rev > 0 else 0.0
 
     # универсум: с ценой ∪ продававшиеся ∪ остаток на ВБ ∪ наш склад/сборка/в пути
     today = utcnow().date()
@@ -767,8 +913,12 @@ async def _compute_rows(
     for nm_id in nm_ids:
         meta = meta_map.get(nm_id) or {}
         cost = _resolve_cost(nm_id, meta, avg_costs, overrides)
+        # СПП «на данный момент»: из последних BDR-данных (≈30 дн, не зависит от
+        # фильтра дат отчёта) — самый свежий, что у нас есть (в API цен СПП нет).
+        _br = bdr_rates_map.get(nm_id)
+        cur_spp = round(_br.spp_rate * 100, 2) if _br else None
         rows.append(
-            _build_row(
+            _build_row(  # card_buyer_price — реальная цена с СПП (приоритет над BDR)
                 nm_id,
                 price_by_nm.get(nm_id),
                 funnel_by_nm.get(nm_id),
@@ -780,10 +930,15 @@ async def _compute_rows(
                 elasticity=elasticity_map.get(nm_id),
                 today=today,
                 extra=pipeline_map.get(nm_id),
+                current_spp=cur_spp,
+                card_buyer_price=spp_map.get(nm_id),
                 keep_by_cat=keep_by_cat,
                 global_keep=global_keep,
+                adv_rate_by_cat=adv_rate_by_cat,
+                global_adv_rate=global_adv_rate,
                 size_overrides=size_overrides,
                 size_aliases=size_aliases,
+                imt_aliases=imt_aliases,
             ).model_dump()
         )
 
@@ -812,7 +967,7 @@ async def get_markup_analytics(
 
     Универсум строк = артикулы с ценой (WbPrice) ∪ продававшиеся за период
     (воронка) ∪ с остатком на ВБ. only_in_stock=True оставляет только остаток>0.
-    group_by: category | sku | anomaly (только аномальные, по типу).
+    group_by: category | sku | size | imt (склейка) | anomaly (по типу).
     """
     raw = await _compute_rows(db, project_id, date_from=date_from, date_to=date_to)
     rows = [PricingRow(**r) for r in raw["rows"]]
@@ -836,6 +991,11 @@ async def get_markup_analytics(
     elif group_by == "size":
         resp = PricingResponse(
             group_by="size", data_rows=[], data_groups=_group_by_size(rows),
+            summary=summary, price_synced_at=synced, has_bdr=has_bdr,
+        )
+    elif group_by == "imt":
+        resp = PricingResponse(
+            group_by="imt", data_rows=[], data_groups=_group_by_sklejka(rows),
             summary=summary, price_synced_at=synced, has_bdr=has_bdr,
         )
     else:

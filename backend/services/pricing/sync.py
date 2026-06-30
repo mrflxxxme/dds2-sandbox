@@ -5,6 +5,7 @@
 SyncLog + батч-UPSERT + аккуратный rollback на ошибке.
 """
 
+import json
 import logging
 from decimal import Decimal
 
@@ -16,6 +17,15 @@ from backend.services.integrations_service import _get_wb_key
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.pricing")
+
+# Redis-ключ с реальными ценами покупателя (с СПП) из публичного card-API.
+# Это внешние/«живые» данные, не доменные → кэш, а не таблица (без миграции).
+SPP_CACHE_PREFIX = "pricing_spp"
+_SPP_TTL = 172800  # 2 суток
+
+
+def spp_cache_key(project_id: int) -> str:
+    return f"{SPP_CACHE_PREFIX}:project_id={project_id}"
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -113,3 +123,50 @@ async def sync_wb_prices(db: AsyncSession, project_id: int) -> SyncLog:
         return err_log
 
     return sync_log
+
+
+async def sync_card_spp(db: AsyncSession, project_id: int) -> dict:
+    """Синк реальной цены покупателя (с СПП) из публичного card-API в Redis.
+
+    Берёт nm_id из wb_prices (что уже синканы) → card-API → {nm_id: цена_с_СПП}
+    в Redis (`pricing_spp:project_id=…`). Card-API ключа не требует. Best-effort:
+    флак отдельных батчей не валит синк. Возвращает статистику.
+    """
+    from backend.cache import get_redis
+    from backend.integrations.wb_card_api import fetch_card_buyer_prices
+
+    nm_ids = list(
+        (await db.execute(select(WbPrice.nm_id).where(WbPrice.project_id == project_id))).scalars().all()
+    )
+    if not nm_ids:
+        return {"status": "OK", "requested": 0, "fetched": 0, "synced_at": None}
+
+    prices = await fetch_card_buyer_prices(nm_ids)
+    synced_at = utcnow().isoformat()
+
+    r = await get_redis()
+    if r is not None and prices:
+        payload = json.dumps(
+            {"map": {str(nm): p for nm, p in prices.items()}, "synced_at": synced_at, "count": len(prices)}
+        )
+        await r.set(spp_cache_key(project_id), payload, ex=_SPP_TTL)
+
+    logger.info("card-СПП sync: project %d — %d/%d nm", project_id, len(prices), len(nm_ids))
+    return {"status": "OK", "requested": len(nm_ids), "fetched": len(prices), "synced_at": synced_at}
+
+
+async def load_spp_map(project_id: int) -> dict[int, float]:
+    """Прочитать карту {nm_id: цена_с_СПП} из Redis (пусто, если синка не было)."""
+    from backend.cache import get_redis
+
+    r = await get_redis()
+    if r is None:
+        return {}
+    raw = await r.get(spp_cache_key(project_id))
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return {int(k): float(v) for k, v in (data.get("map") or {}).items()}
+    except (ValueError, TypeError):
+        return {}

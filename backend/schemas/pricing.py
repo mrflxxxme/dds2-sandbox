@@ -31,9 +31,9 @@ class PricingRow(BaseModel):
     markup_pct: float | None = None  # (цена − себест) / себест × 100
     cost_share_pct: float | None = None  # себест / цена × 100
 
-    # СПП и цена для покупателя
-    spp_rate: float = 0  # % (из воронки)
-    buyer_price: float | None = None  # цена × (1 − СПП)
+    # СПП и цена для покупателя (СПП — самый свежий из BDR, «на данный момент»)
+    spp_rate: float = 0  # % СПП сейчас (последний BDR, фолбэк — средний воронки)
+    buyer_price: float | None = None  # АКТУАЛЬНАЯ цена с СПП = цена × (1 − СПП сейчас)
 
     # Юнит-экономика по факту за период (из воронки; 0 если продаж не было)
     orders_count: int = 0
@@ -62,9 +62,14 @@ class PricingRow(BaseModel):
 
     # Доп. метрики для решений по цене
     breakeven_price: float | None = None  # мин. цена витрины для нулевой прибыли (учёт СПП/комиссии/налога)
+    breakeven_with_adv: float | None = None  # то же + средняя реклама категории (себест+Расх.WB+налог+ср.ДРР)
     safety_margin_pct: float | None = None  # запас прочности: (цена − безубыток)/цена × 100 — куда можно снижать
     drr: float = 0  # ДРР: реклама / выручка × 100
     cr: float = 0  # конверсия в заказ, % (клики→заказы) — диагностика «дорогой» рекламы
+    ctr: float = 0  # CTR: клики / показы × 100 (кликабельность)
+    cpc: float = 0  # CPC: реклама / клики (цена клика, ₽)
+    adv_views: int = 0  # показы рекламы за период
+    adv_clicks: int = 0  # клики по рекламе за период
     gmroi: float | None = None  # валовая маржа / заморожено в остатке — отдача на ₽ в товаре (бенчмарк ≥3)
     sell_through_pct: float | None = None  # продано / (продано + остаток) × 100 — скорость распродажи
     elasticity: float | None = None  # эластичность спроса по цене (оценка по истории 90 дн, обычно < 0)
@@ -72,6 +77,14 @@ class PricingRow(BaseModel):
     optimal_price: float | None = None  # оценка цены под макс. прибыль (эластичность × точка безубыточности)
     abc: str | None = None  # ABC-класс по выручке (A/B/C)
     recommendation: str = ""  # авто-рекомендация по цене/остатку
+
+    # Склейка (imt_id — группа вариантов «цвет/размер» под одной карточкой WB).
+    # Доли и роль считаются ОТНОСИТЕЛЬНО склейки при group_by=imt (иначе пустые).
+    imt_id: int | None = None  # WB imtID карточки-склейки
+    sklejka: str = ""  # имя склейки (алиас → «Склейка {imt}» → «Без склейки»)
+    rev_share_pct: float | None = None  # доля варианта в выручке склейки, %
+    adv_share_pct: float | None = None  # доля варианта в рекламе склейки, %
+    sklejka_role: str = ""  # роль по рекламе внутри склейки: «якорь» / «донор» / «»
 
 
 class PricingGroup(BaseModel):
@@ -91,12 +104,20 @@ class PricingGroup(BaseModel):
     margin_pct: float = 0
     adv_sum: float = 0  # расходы на рекламу группы, ₽
     drr: float = 0  # ДРР группы: реклама / выручка × 100
+    ctr: float = 0  # CTR группы: Σклики / Σпоказы × 100
+    cpc: float = 0  # CPC группы: Σреклама / Σклики, ₽
+    adv_views: int = 0  # показы рекламы группы
+    adv_clicks: int = 0  # клики по рекламе группы
     wb_stock: int = 0
     own_stock: int = 0
     assembly_stock: int = 0
     transit_stock: int = 0
     total_stock: int = 0
     stock_value_cost: float = 0
+    # Склейка (при group_by=imt): id карточки + охват рекламой/продажами вариантов
+    imt_id: int | None = None  # imtID склейки
+    advertised_variants: int = 0  # вариантов с рекламой (adv_sum > 0)
+    converting_variants: int = 0  # вариантов с продажами (orders > 0)
     children: list[PricingRow] = []
     subgroups: list["PricingGroup"] = []  # вложенные группы (размеры внутри категории)
 

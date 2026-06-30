@@ -560,9 +560,14 @@ export interface PricingRow {
   sales_per_month: number | null;
   anomaly: string | null;
   breakeven_price: number | null;
+  breakeven_with_adv: number | null;
   safety_margin_pct: number | null;
   drr: number;
   cr: number;
+  ctr: number;
+  cpc: number;
+  adv_views: number;
+  adv_clicks: number;
   gmroi: number | null;
   sell_through_pct: number | null;
   elasticity: number | null;
@@ -570,12 +575,20 @@ export interface PricingRow {
   optimal_price: number | null;
   abc: string | null;
   recommendation: string;
+  imt_id: number | null;
+  sklejka: string;
+  rev_share_pct: number | null;
+  adv_share_pct: number | null;
+  sklejka_role: string;
 }
 
 export interface PricingGroup {
   category: string;
   articles: number;
   priced_articles: number;
+  imt_id?: number | null;
+  advertised_variants?: number;
+  converting_variants?: number;
   markup_coef: number | null;
   markup_pct: number | null;
   cost_share_pct: number | null;
@@ -586,6 +599,10 @@ export interface PricingGroup {
   margin_pct: number;
   adv_sum: number;
   drr: number;
+  ctr: number;
+  cpc: number;
+  adv_views: number;
+  adv_clicks: number;
   wb_stock: number;
   own_stock: number;
   assembly_stock: number;
@@ -627,6 +644,9 @@ export interface PricingAiResponse {
   model: string;
   articles_analyzed: number;
   items_sent?: number;
+  sklejki_sent?: number;
+  singles_sent?: number;
+  dynamics_window?: Record<string, string> | null;
   generated_at?: string;
 }
 

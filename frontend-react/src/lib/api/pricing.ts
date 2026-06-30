@@ -11,7 +11,7 @@ export interface PricingMarkupParams {
     min_orders?: number;
     only_in_stock?: boolean;
     anomaly_only?: boolean;
-    group_by?: 'category' | 'sku' | 'anomaly' | 'size';
+    group_by?: 'category' | 'sku' | 'anomaly' | 'size' | 'imt';
 }
 
 export function addPricingMethods(api: ApiClient) {
@@ -33,6 +33,12 @@ export function addPricingMethods(api: ApiClient) {
             return api.request<{ status: string; rows: number; synced_at: string | null; message: string | null }>(
                 'POST',
                 '/api/v1/pricing/sync',
+            );
+        },
+        syncPricingSpp() {
+            return api.request<{ status: string; requested: number; fetched: number; synced_at: string | null }>(
+                'POST',
+                '/api/v1/pricing/sync-spp',
             );
         },
         getPricingAiRecommendations(params?: { date_from?: string; date_to?: string; only_in_stock?: boolean }) {
