@@ -440,16 +440,25 @@ def test_assemble_pdf_from_images_is_multipage():
     assert len(pdfium.PdfDocument(out)) == 2
 
 
-def test_rasterize_skips_oversized_page():
-    """Анти-pixel-bomb: страница с гигантским MediaBox пропускается (to_pil() обходит
-    DecompressionBomb → иначе аллоцировали бы гигабайты на враждебном PDF)."""
+def test_rasterize_bounds_large_page_and_skips_absurd():
+    """Адаптивный DPI: крупный MediaBox рендерится ОГРАНИЧЕННЫМ (≤_STORE_MAX_LONG_PX) — не
+    аллоцируем гигантский bitmap (анти-OOM на 768МБ проде, был premature-close→502); абсурдный
+    MediaBox (>20000 pt) пропускается sanity-guard'ом."""
     import pypdfium2 as pdfium  # type: ignore[import-untyped]
 
-    pdf = pdfium.PdfDocument.new()
-    pdf.new_page(5000, 5000)  # 5000 pt @150 DPI ≈ 10417² ≈ 108 Мп > кап 40 Мп
+    big = pdfium.PdfDocument.new()
+    big.new_page(5000, 5000)  # крупная, но реальная по размеру страница
     buf = io.BytesIO()
-    pdf.save(buf)
-    assert invoice_split.rasterize_pages(buf.getvalue()) == []
+    big.save(buf)
+    imgs = invoice_split.rasterize_pages(buf.getvalue())
+    assert len(imgs) == 1
+    assert max(imgs[0].size) <= invoice_split._STORE_MAX_LONG_PX  # bitmap ограничен, не ~35 Мп
+
+    absurd = pdfium.PdfDocument.new()
+    absurd.new_page(25000, 25000)  # абсурдный MediaBox → пропуск
+    buf2 = io.BytesIO()
+    absurd.save(buf2)
+    assert invoice_split.rasterize_pages(buf2.getvalue()) == []
 
 
 def test_build_split_docs_image_pdf():

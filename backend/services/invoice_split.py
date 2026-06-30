@@ -25,10 +25,10 @@ logger = logging.getLogger("dds.payment_request")
 
 MAX_PDF_PAGES = 10            # счёт/акт — единицы страниц; глубже не разбираем (анти-DoS)
 _RASTER_DPI = 150             # рендер скан-страницы
-# Анти-pixel-bomb: bitmap = (w·dpi/72)·(h·dpi/72) пикселей; pypdfium2 render→to_pil() аллоцирует
-# буфер ПОД РАЗМЕР MediaBox и обходит Pillow DecompressionBomb (frombuffer). Враждебный PDF с
-# гигантским MediaBox → OOM. Кап как у HEIC-пути (_MAX_IMAGE_PIXELS в invoice_parser).
-_RASTER_MAX_PIXELS = 40_000_000
+# Адаптивный DPI (rasterize_pages) держит bitmap ограниченным по длинной стороне, поэтому
+# отдельный pixel-cap не нужен — огромный MediaBox даёт крошечный DPI. Тут лишь sanity-guard
+# на абсурдный/дегенеративный размер страницы (реальные счёта ≤~3500 pt; 20000 pt ≈ 280").
+_MAX_MEDIABOX_PT = 20_000.0
 _STORE_MAX_LONG_PX = 2200     # потолок длинной стороны хранимого под-файла (читаемо, но компактно)
 _VISION_MAX_LONG_PX = 1568    # потолок vision-входа (рекомендация Claude; экономит токены/латентность)
 _JPEG_QUALITY = 85
@@ -74,12 +74,16 @@ def rasterize_pages(data: bytes) -> list[Image.Image]:
     out: list[Image.Image] = []
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         for page in pdf.pages[:MAX_PDF_PAGES]:
-            # Анти-pixel-bomb: размер bitmap считаем ДО рендера (to_pil() обходит DecompressionBomb).
-            px = (page.width / 72 * _RASTER_DPI) * (page.height / 72 * _RASTER_DPI)
-            if px > _RASTER_MAX_PIXELS:
-                logger.warning("invoice rasterize: страница %.0f×%.0f pt слишком большая — пропуск", page.width, page.height)
+            long_pt = max(float(page.width), float(page.height))
+            if long_pt <= 0 or long_pt > _MAX_MEDIABOX_PT:  # дегенеративный/абсурдный MediaBox → пропуск
+                logger.warning("invoice rasterize: страница %.0f×%.0f pt вне допустимого — пропуск", page.width, page.height)
                 continue
-            pil = page.to_image(resolution=_RASTER_DPI).original  # pypdfium2-рендер под капотом
+            # Рендерим СРАЗУ в целевой размер (длинная сторона ≤_STORE_MAX_LONG_PX): у крупного
+            # MediaBox (скан с телефона ~2300×3500 pt) рендер на фикс. 150 DPI = ~35 Мп bitmap (~140 МБ)
+            # ДО downscale → OOM воркера на 768 МБ проде (premature close → 502). Адаптивный DPI держит
+            # bitmap ограниченным и заодно снимает pixel-bomb (огромный MediaBox → крошечный DPI).
+            dpi = min(float(_RASTER_DPI), _STORE_MAX_LONG_PX * 72.0 / long_pt)
+            pil = page.to_image(resolution=dpi).original  # pypdfium2-рендер под капотом
             out.append(_to_rgb_downscaled(pil, _STORE_MAX_LONG_PX))
     return out
 
