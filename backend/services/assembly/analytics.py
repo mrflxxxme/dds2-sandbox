@@ -169,6 +169,7 @@ async def refresh_from_fbo(
     if invalidate:
         await invalidate_cache("reports:assembly_flow")
         await invalidate_cache("reports:assembly_link_anomalies")
+        await invalidate_cache("reports:warehouse_need")
 
     return RefreshFromFboResponse(
         added=added,
@@ -303,6 +304,7 @@ async def refresh_active_assemblies_from_fbo(
     if any_change:
         await invalidate_cache("reports:assembly_flow")
         await invalidate_cache("reports:assembly_link_anomalies")
+        await invalidate_cache("reports:warehouse_need")
 
     return {"processed": processed, "refreshed": refreshed, "errors": errors, "supplies": len(supply_ids)}
 

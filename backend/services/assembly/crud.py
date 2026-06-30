@@ -801,6 +801,7 @@ async def create_assembly_request(
     await db.refresh(assembly_req)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
     return assembly_req
 
 
@@ -1014,6 +1015,7 @@ async def update_assembly_request(
     await db.commit()
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
     # Expunge all cached objects so selectinload re-fetches fresh data from DB
     db.expunge_all()
     updated = await get_assembly_request(db, project_id, req.id)

@@ -99,6 +99,26 @@ class ShipBulk(BaseModel):
     ids: list[int]
 
 
+class DeleteBulk(BaseModel):
+    ids: list[int]
+
+
+class BulkDeleteSkip(BaseModel):
+    """Одна пропущенная при массовом удалении заявка (с причиной)."""
+
+    id: int
+    number: str | None = None
+    status: str | None = None
+    reason: str
+
+
+class BulkDeleteResult(BaseModel):
+    """Итог массового удаления: сколько удалено + что пропущено и почему."""
+
+    deleted: int
+    skipped: list[BulkDeleteSkip] = []
+
+
 # ─── Response schemas ───────────────────────────────────────────────────────
 
 

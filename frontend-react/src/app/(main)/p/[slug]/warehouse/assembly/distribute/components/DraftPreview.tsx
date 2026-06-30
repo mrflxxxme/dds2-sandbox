@@ -85,10 +85,6 @@ interface DraftPreviewProps {
     onToast: (message: string, type: 'success' | 'error') => void;
     /** Коммит оставил строки в черновике (whole-only снял неполные) — родитель перезагружает. */
     onReloadDraft: () => void;
-    /** Пересоздать черновик целыми коробами (округление вверх из ФФ / вниз). */
-    onRecreateWholeBoxes?: () => Promise<void>;
-    /** Перепроверить приёмку WB текущего черновика (перераспределить закрытые склады). */
-    onRecheckAcceptance?: () => Promise<void>;
 }
 
 /** Предпросмотр заявок + commit. Показывает ВЕСЬ черновик (короб + моно + сейф)
@@ -96,13 +92,11 @@ interface DraftPreviewProps {
 export default function DraftPreview({
     slug, draftId, rows, newcomerNmIds, warehouses,
     nmPpb, nmMeta, nmBoxSize, palletOverrides, geomReady,
-    ensureSaved, onToast, onReloadDraft, onRecreateWholeBoxes, onRecheckAcceptance,
+    ensureSaved, onToast, onReloadDraft,
 }: DraftPreviewProps) {
     const router = useRouter();
 
     const [committing, setCommitting] = useState(false);
-    const [rounding, setRounding] = useState(false);
-    const [rechecking, setRechecking] = useState(false);
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
     // Раскрытые манифесты паллет «📐 Раскладка» по ключу `${ffId}::${wb}::${pkg}`.
     const [manifestOpen, setManifestOpen] = useState<Set<string>>(new Set());
@@ -113,10 +107,11 @@ export default function DraftPreview({
     const [showPartial, setShowPartial] = useState(false);  // разбивка неполных коробов
     const [viewMode, setViewMode] = useState<'cards' | 'table' | 'matrix'>('cards');
     const [matrixUnit, setMatrixUnit] = useState<'qty' | 'boxes' | 'pallets'>('qty');
-    // «Только целые паллеты»: срез каждой отгрузки (ФФ→склад) до целых паллет.
-    // Дефолт ВКЛ — но трим влияет на данные только когда геометрия загружена
-    // (effectiveWholeOnly ниже), иначе на mount предпросмотр мигнул бы пустым.
-    const [wholeOnly, setWholeOnly] = useState(true);
+    // «Только целые паллеты» как переключатель убран из UI — предпросмотр всегда
+    // показывает весь черновик как есть (соответствие с «Потребностью по складам»).
+    // Форму целых коробов/паллет задаёт добавление (AddFromNeedPanel) + нормализация
+    // в родителе. Константа сохранена, чтобы не трогать commit-инвариант ниже.
+    const wholeOnly = false;
 
     const warehouseNameById = useCallback(
         (id: number) => warehouses.find(w => w.id === id)?.name ?? `Склад ${id}`,
@@ -158,19 +153,6 @@ export default function DraftPreview({
         }
         return [...m.values()];
     }, [effectiveWholeOnly, allLines]);
-
-    const toggleWholeOnly = useCallback(() => {
-        if (wholeOnly) { setWholeOnly(false); return; }
-        if (!geomReady) {
-            onToast('Геометрия коробок ещё загружается — повторите через секунду', 'error');
-            return;
-        }
-        setWholeOnly(true);
-        const parts: string[] = [];
-        if (wholeTrim.removedSupplies > 0) parts.push(`убрано отгрузок: ${wholeTrim.removedSupplies}`);
-        if (wholeTrim.droppedUnits > 0) parts.push(`снято ${formatNumber(wholeTrim.droppedUnits, 0)} шт`);
-        onToast(parts.length ? `Только целые паллеты — ${parts.join(', ')}` : 'Все отгрузки уже целыми паллетами', 'success');
-    }, [wholeOnly, geomReady, wholeTrim, onToast]);
 
     // Опции фильтров (Σ qty по всему срезу, по убыванию объёма).
     const buildOptions = useCallback((keyOf: (l: PreviewLine) => string) => {
@@ -671,49 +653,11 @@ export default function DraftPreview({
                 <button className="btn btn-secondary btn-sm" onClick={exportSeparate} disabled={ffGroups.length === 0} title="Скачать отдельный Excel-файл на каждый склад-источник">
                     📥 Отдельно по складам
                 </button>
-                {onRecreateWholeBoxes && partialBoxes > 0 && (
-                    <button
-                        className="btn btn-sm btn-primary"
-                        disabled={rounding}
-                        title="Округлить ВСЕ короба до целых: добить вверх из свободного ФФ, при нехватке — срезать вниз. Россыпь убирается."
-                        onClick={async () => {
-                            setRounding(true);
-                            try { await onRecreateWholeBoxes(); }
-                            catch (e: unknown) { onToast(e instanceof Error ? e.message : 'Ошибка округления', 'error'); }
-                            finally { setRounding(false); }
-                        }}
-                    >{rounding ? 'Округление…' : `📦 Округлить до целых коробов (${formatNumber(partialBoxes, 0)})`}</button>
-                )}
-                {onRecheckAcceptance && (
-                    <button
-                        className="btn btn-sm btn-secondary"
-                        disabled={rechecking}
-                        title="Перепроверить приёмку WB по всему черновику: закрытые склады перераспределить на открытые, тип упаковки по приёмке, пересобрать строки."
-                        onClick={async () => {
-                            setRechecking(true);
-                            try { await onRecheckAcceptance(); }
-                            catch (e: unknown) { onToast(e instanceof Error ? e.message : 'Ошибка перепроверки приёмки', 'error'); }
-                            finally { setRechecking(false); }
-                        }}
-                    >{rechecking ? 'Проверка приёмки…' : '🚦 Перепроверить приёмку'}</button>
-                )}
-                <button
-                    className={`btn btn-sm ${wholeOnly ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={toggleWholeOnly}
-                    disabled={!geomReady}
-                    title={!geomReady
-                        ? 'Геометрия коробок ещё загружается…'
-                        : 'Оставить только ЦЕЛЫЕ паллеты на каждую отгрузку ФФ→склад: неполная отгрузка убирается полностью, у целых отгрузок неполный хвост снимается на ФФ.'}
-                >
-                    🟫 Только целые паллеты{wholeOnly ? ' ✓' : ''}
-                </button>
                 <button
                     className="btn btn-primary btn-sm"
                     onClick={handleCreate}
                     disabled={committing || totalAssemblies === 0}
-                    title={wholeOnly
-                        ? 'Создаёт только целые паллеты на каждую отгрузку ФФ→склад (неполные убраны).'
-                        : 'Создаёт все заявки черновика (короб + моно). Поиск и фильтры влияют только на отображение.'}
+                    title="Создаёт все заявки черновика (короб + моно). Поиск и фильтры влияют только на отображение."
                 >
                     {committing ? 'Создание…' : `✓ Создать ${totalAssemblies} заявок`}
                 </button>
@@ -741,19 +685,6 @@ export default function DraftPreview({
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
                         <div style={{ fontSize: 15, fontWeight: 600 }}>🟧 Неполные коробы — {formatNumber(partialBoxes, 0)} строк · {formatNumber(looseUnits, 0)} шт россыпью</div>
                         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                            {onRecreateWholeBoxes && (
-                                <button
-                                    className="btn btn-sm btn-primary"
-                                    disabled={rounding}
-                                    title="Округлить все короба до целых: добить вверх из свободного ФФ, при нехватке — срезать вниз"
-                                    onClick={async () => {
-                                        setRounding(true);
-                                        try { await onRecreateWholeBoxes(); }
-                                        catch (e: unknown) { onToast(e instanceof Error ? e.message : 'Ошибка округления', 'error'); }
-                                        finally { setRounding(false); }
-                                    }}
-                                >{rounding ? 'Округление…' : '📦 Округлить всё до целых коробов'}</button>
-                            )}
                             <button className="btn btn-sm btn-secondary" onClick={exportPartial}>⬇ Excel</button>
                         </div>
                     </div>

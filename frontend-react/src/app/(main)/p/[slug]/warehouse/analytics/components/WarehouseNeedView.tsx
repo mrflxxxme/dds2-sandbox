@@ -232,6 +232,11 @@ export interface WarehouseNeedViewProps {
     onRowsAddedToDraft?: () => void;
     /** На mount авто-проверить приёмку (обычные+новинки), cache-first. */
     autoCheckAcceptance?: boolean;
+    /** Сигнал «Заполнить черновик» (счётчик-нонс): при изменении строим строки для ВСЕХ
+     *  SKU потребности и отдаём через onFillAllRows. */
+    fillAllSignal?: number;
+    /** Получить готовые строки всей потребности (родитель ЗАМЕНЯЕТ ими черновик). */
+    onFillAllRows?: (rows: AssemblyDraftRow[]) => void | Promise<void>;
 }
 
 export function WarehouseNeedView({
@@ -239,6 +244,8 @@ export function WarehouseNeedView({
     hiddenNmIds,
     onRowsAddedToDraft,
     autoCheckAcceptance,
+    fillAllSignal,
+    onFillAllRows,
 }: WarehouseNeedViewProps = {}) {
     const params = useParams();
     const router = useRouter();
@@ -1531,7 +1538,14 @@ export function WarehouseNeedView({
     const filteredArticles = useMemo(() => {
         if (!data?.articles) return [];
         // Единый список: обычные + новинки (cold-start) в ОДНОЙ таблице.
-        const base: NeedArticle[] = [...data.articles, ...coldStartAsArticles];
+        // Новинки берём ТОЛЬКО из coldStartAsArticles (адаптер). В data.articles
+        // они тоже присутствуют (total_need=0) — исключаем их здесь, иначе дубль
+        // nm_id → дубль React-key → ломается reorder при сортировке + двойной
+        // счёт в итогах.
+        const base: NeedArticle[] = [
+            ...data.articles.filter(a => !newcomerSet.has(a.nm_id)),
+            ...coldStartAsArticles,
+        ];
         return base.filter(a => {
             // Встроенный режим: артикул уже в текущем черновике → скрываем из таблицы.
             if (hiddenNmIds?.has(a.nm_id)) return false;
@@ -1548,10 +1562,12 @@ export function WarehouseNeedView({
             // Дефицит без остатков тоже скрыт — он виден по чипу «С дефицитом».
             // «Расширенная» (showAdvanced) показывает всё. Чипы-статусы — свой срез.
             if (!showAdvanced && statusFilter === 'all') {
-                // Единый «отправить»: новинки — из newcomerBoxedAlloc, обычные — с bump.
+                // Единый «отправить» = то же число, что в колонке «Отправить»
+                // (getDisplayShipTotal): новинки — из newcomerBoxedAlloc, обычные —
+                // реальный план отгрузки. Прячем строки, где отправлять нечего («—»).
                 const sendQty = newcomerSet.has(a.nm_id)
                     ? (newcomerBoxedAlloc.get(a.nm_id)?.total ?? 0)
-                    : getSendWithBump(a.nm_id, a.can_send);
+                    : getDisplayShipTotal(a);
                 if (sendQty <= 0) return false;
             }
             if (statusFilter === 'deficit' && a.deficit <= 0) return false;
@@ -1585,7 +1601,7 @@ export function WarehouseNeedView({
             if (noLimitFilter && !skuHasNoLimitCell(a)) return false;
             return true;
         });
-    }, [data, coldStartAsArticles, newcomerBoxedAlloc, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet, showAdvanced, getSendWithBump, noLimitFilter, skuHasNoLimitCell, hiddenNmIds]);
+    }, [data, coldStartAsArticles, newcomerBoxedAlloc, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet, showAdvanced, getDisplayShipTotal, noLimitFilter, skuHasNoLimitCell, hiddenNmIds]);
 
     /** WB-колонки в матрице, отфильтрованные по packageFilter.
      *  При packageFilter='mono' — оставляем только склады где для хотя бы одного
@@ -1785,8 +1801,6 @@ export function WarehouseNeedView({
             } else if (sortCol === 'send_with_bump') {
                 va = getDisplayShipTotal(a);
                 vb = getDisplayShipTotal(b);
-            } else if (sortCol === 'deficit') {
-                va = a.deficit; vb = b.deficit;
             } else if (sortCol.startsWith('rf_')) {
                 const whId = parseInt(sortCol.replace('rf_', ''), 10);
                 va = a.rf_stocks[whId]?.available || 0;
@@ -1909,14 +1923,15 @@ export function WarehouseNeedView({
 
     /* ── Create assembly draft (unified: обычные + новинки в один draft) ── */
 
-    const handleCreateAssembly = useCallback(async () => {
-        if (!data || checkedIds.size === 0) return;
-        setCreatingAssembly(true);
-
-        try {
-            const draftRows: AssemblyDraftRow[] = [];
-            const skippedNoBarcode: string[] = [];
-            const skippedNoQty: string[] = [];
+    /** Построить строки черновика для заданных nm_id из ЕДИНОЙ потребностной раскладки
+     *  (regularShipmentAlloc + newcomerBoxedAlloc) — ровно то, что показано в матрице/
+     *  «Отправить»/«Итого». Чистый билдер: и «Создать сборку» (checkedIds), и «Заполнить
+     *  черновик» (все SKU) идут через него → Σ черновика == «Отправить». */
+    const buildDraftRowsForIds = useCallback((ids: Iterable<number>) => {
+        const draftRows: AssemblyDraftRow[] = [];
+        const skippedNoBarcode: string[] = [];
+        const skippedNoQty: string[] = [];
+        if (data) {
             const newcomerByNm = new Map<number, ColdStartTableRow>();
             for (const r of coldStartData?.rows ?? []) newcomerByNm.set(r.nm_id, r);
 
@@ -1952,7 +1967,7 @@ export function WarehouseNeedView({
                 return out;
             };
 
-            for (const nmId of checkedIds) {
+            for (const nmId of ids) {
                 const article = data.articles.find(a => a.nm_id === nmId);
                 const newcomer = newcomerByNm.get(nmId);
                 const barcode = article?.barcode || newcomer?.barcode || undefined;
@@ -2163,7 +2178,15 @@ export function WarehouseNeedView({
                     });
                 }
             }
+        }
+        return { draftRows, skippedNoBarcode, skippedNoQty };
+    }, [data, assemblyWarehouseId, acceptanceMap, packageFilter, coldStartData, newcomerBoxedAlloc, resolveSkuLevelPpb, regularShipmentAlloc]);
 
+    const handleCreateAssembly = useCallback(async () => {
+        if (!data || checkedIds.size === 0) return;
+        setCreatingAssembly(true);
+        try {
+            const { draftRows, skippedNoBarcode, skippedNoQty } = buildDraftRowsForIds(checkedIds);
             if (draftRows.length === 0) {
                 const lines: string[] = ['Не удалось собрать ни одной позиции:'];
                 if (skippedNoBarcode.length) {
@@ -2226,9 +2249,24 @@ export function WarehouseNeedView({
         } finally {
             setCreatingAssembly(false);
         }
-    }, [data, assemblyWarehouseId, checkedIds, router, slug, acceptanceMap, packageFilter,
-        coldStartData, newcomerBoxedAlloc, resolveSkuLevelPpb, regularShipmentAlloc,
+    }, [data, checkedIds, buildDraftRowsForIds, assemblyWarehouseId, router, slug,
         embeddedDraftId, onRowsAddedToDraft]);
+
+    /** «Заполнить черновик из потребности»: родитель (страница «Сборка») шлёт сигнал →
+     *  строим строки для ВСЕХ SKU потребности (тот же билдер, что «Создать сборку») и
+     *  отдаём их родителю, который ЗАМЕНЯЕТ ими черновик. Ждём свободные лимиты приёмки
+     *  (от них зависит раскладка). */
+    const fillHandledRef = useRef(0);
+    useEffect(() => {
+        if (!fillAllSignal || fillAllSignal === fillHandledRef.current) return;
+        if (!data?.articles?.length) return;
+        if (autoCheckAcceptance && acceptanceMap.size === 0 && !acceptanceError) return;
+        fillHandledRef.current = fillAllSignal;
+        const ids = new Set<number>([...regularShipmentAlloc.keys(), ...newcomerBoxedAlloc.keys()]);
+        const { draftRows } = buildDraftRowsForIds(ids);
+        void onFillAllRows?.(draftRows);
+    }, [fillAllSignal, data, autoCheckAcceptance, acceptanceMap, acceptanceError,
+        regularShipmentAlloc, newcomerBoxedAlloc, buildDraftRowsForIds, onFillAllRows]);
 
     /* (cold-start новинки идут через тот же handleCreateAssembly — box-кратно) */
 
@@ -2432,20 +2470,20 @@ export function WarehouseNeedView({
         const header = [
             'Артикул', 'Бренд', 'Категория', `Реализация ${analysisDays}д`, 'Потребность',
             ...rfWhs.map(w => w.name),
-            'В сборке', 'В пути', 'Могу отпр.', 'Отправить', 'Дефицит',
+            'В сборке', 'В пути', 'Могу отпр.', 'Отправить',
             ...wbWhs.map(w => w.name),
         ];
         const rows = sortedArticles.map(a => [
             a.vendor_code, a.brand || '', a.subject || '',
             a.revenue_30d || 0, a.total_need,
             ...rfWhs.map(w => a.rf_stocks[w.id]?.available || 0),
-            a.in_assembly, a.in_transit, a.can_send, getDisplayShipTotal(a), a.deficit,
+            a.in_assembly, a.in_transit, a.can_send, getDisplayShipTotal(a),
             ...wbWhs.map(w => getDisplayWbQty(a, w.name)),
         ]);
         const totalRow = [
             'ИТОГО', '', '', totals.revenue_30d, totals.total_need,
             ...rfWhs.map(w => totals.rf[w.id] || 0),
-            totals.in_assembly, totals.in_transit, totals.can_send, totals.send_with_bump, totals.deficit,
+            totals.in_assembly, totals.in_transit, totals.can_send, totals.send_with_bump,
             ...wbWhs.map(w => totals.wb[w.name] || 0),
         ];
         rows.push(totalRow);
@@ -2491,6 +2529,34 @@ export function WarehouseNeedView({
                 Ошибка: {error}
                 <div style={{ marginTop: 12 }}>
                     <button className="btn btn-sm btn-primary" onClick={load}>Повторить</button>
+                </div>
+            </div>
+        );
+    }
+
+    // Встроенный режим (вкладка «Потребность по складам» внутри сборки): пока идёт
+    // авто-проверка свободных лимитов приёмки WB (acceptanceMap ещё пуст и нет ошибки) —
+    // показываем заглушку-скелетон, чтобы не мигать таблицей без данных по лимитам.
+    if (autoCheckAcceptance && acceptanceMap.size === 0 && !acceptanceError) {
+        return (
+            <div className="animate-in">
+                <div className="page-header" style={{ marginBottom: 16 }}>
+                    <h2 className="page-title">Потребность по складам</h2>
+                    <p className="page-subtitle">Загрузка свободных лимитов приёмки WB…</p>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 16 }}>
+                    {[0, 1, 2, 3].map(i => (
+                        <div key={i} className="glass-card" style={{ padding: 16 }}>
+                            <div className="skeleton" style={{ width: '50%', height: 12, marginBottom: 10 }} />
+                            <div className="skeleton" style={{ width: '70%', height: 24 }} />
+                        </div>
+                    ))}
+                </div>
+                <div className="glass-card" style={{ padding: 16 }}>
+                    <div className="skeleton" style={{ width: 240, height: 14, marginBottom: 16 }} />
+                    {Array.from({ length: 10 }).map((_, i) => (
+                        <div key={i} className="skeleton" style={{ width: '100%', height: 28, marginBottom: 8, opacity: 1 - i * 0.06 }} />
+                    ))}
                 </div>
             </div>
         );
@@ -2928,13 +2994,6 @@ export function WarehouseNeedView({
                                     background: 'rgba(59,130,246,0.08)', fontSize: 10, fontWeight: 700,
                                     letterSpacing: 1, borderBottom: '1px solid var(--color-border)',
                                 }}>МОИ СКЛАДЫ</th>
-                                {/* Дефицит — отдельная колонка между «МОИ СКЛАДЫ» и WB-группами,
-                                    пустая ячейка в group-header чтобы WB-группы не съезжали влево. */}
-                                <th style={{
-                                    ...thBase, cursor: 'default',
-                                    background: '#f5f5f7',
-                                    borderBottom: '1px solid var(--color-border)',
-                                }}>&nbsp;</th>
 
                                 {/* СКЛАДЫ WB group — разбито по федеральным округам как в индексе локализации.
                                     Run-length encoding по visibleWbWarehouses (порядок сохраняется): соседние склады
@@ -3029,11 +3088,6 @@ export function WarehouseNeedView({
                                     title="План к отгрузке = Могу отправить + auto-bump (распределение остатков FF на underserved округа, округление до коробок). Активируется автоматически после «Проверить приёмку».">
                                     ОТПРАВИТЬ{sortArrow('send_with_bump')}
                                 </th>
-                                {/* Deficit */}
-                                <th style={{ ...thBase, background: 'rgba(59,130,246,0.04)' }}
-                                    onClick={() => handleSort('deficit')}>
-                                    ДЕФИЦИТ{sortArrow('deficit')}
-                                </th>
 
                                 {/* WB Warehouses \u2014 \u043e\u043a\u0440\u0443\u0433 \u043f\u043e\u043a\u0430\u0437\u0430\u043d \u0432 group-header \u0441\u0432\u0435\u0440\u0445\u0443, \u0442\u0443\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 */}
                                 {visibleWbWarehouses.map(wh => {
@@ -3099,9 +3153,6 @@ export function WarehouseNeedView({
                                 </td>
                                 <td style={{ ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)', color: '#16a34a', background: 'rgba(34,197,94,0.08)' }}>
                                     {totals.send_with_bump > 0 ? formatNumber(totals.send_with_bump, 0) : '\u2014'}
-                                </td>
-                                <td style={{ ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)', color: totals.deficit > 0 ? '#ef4444' : '#22c55e' }}>
-                                    {totals.deficit > 0 ? formatNumber(totals.deficit, 0) : '\u2014'}
                                 </td>
 
                                 {visibleWbWarehouses.map(wh => (
@@ -3286,20 +3337,6 @@ export function WarehouseNeedView({
                                                 </td>
                                             );
                                         })()}
-
-                                        {/* Deficit */}
-                                        <td style={{ ...tdBase }}>
-                                            {a.deficit > 0 ? (
-                                                <span style={{
-                                                    background: 'rgba(239,68,68,0.12)', color: '#ef4444',
-                                                    padding: '2px 8px', borderRadius: 10, fontWeight: 600, fontSize: 11,
-                                                }}>
-                                                    {formatNumber(a.deficit, 0)}
-                                                </span>
-                                            ) : (
-                                                <span style={{ color: '#22c55e' }}>{'\u2705'}</span>
-                                            )}
-                                        </td>
 
                                         {/* WB Warehouse needs */}
                                         {visibleWbWarehouses.map(wh => {

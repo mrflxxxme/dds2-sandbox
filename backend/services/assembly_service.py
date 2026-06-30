@@ -22,6 +22,7 @@ from backend.services.assembly import (  # noqa: F401
     cancel_request,
     close_request,
     create_assembly_request,
+    delete_bulk,
     delete_request,
     deliver_request,
     get_assembly_attempts,

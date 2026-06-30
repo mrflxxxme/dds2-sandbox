@@ -1676,6 +1676,18 @@ export interface AssemblyListResponse {
   total: number;
 }
 
+export interface AssemblyBulkDeleteSkip {
+  id: number;
+  number: string | null;
+  status: string | null;
+  reason: string;
+}
+
+export interface AssemblyBulkDeleteResult {
+  deleted: number;
+  skipped: AssemblyBulkDeleteSkip[];
+}
+
 // ─── Gazelka integration ─────────────────────────────────────────────────────
 
 export interface GazelkaConfig {

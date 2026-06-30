@@ -41,6 +41,7 @@ from backend.services.assembly_service import (
     cancel_request,
     close_request,
     create_assembly_request,
+    delete_bulk,
     deliver_request,
     get_assembly_attempts,
     get_assembly_request,
@@ -1739,3 +1740,59 @@ class TestFfLinkEnrichment:
         assert by_id[linked.id].ff_request_id == ff.id
         assert by_id[linked.id].ff_request_number == ff.number
         assert by_id[linked.id].ff_warehouse_id == wh_id
+
+
+@pytest.mark.asyncio
+class TestDeleteBulk:
+    """Массовое удаление заявок: pre-WB удаляются, отгруженные на WB — пропускаются."""
+
+    async def test_delete_bulk_removes_pre_wb_and_skips_shipped(self, db_session):
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        # Две заявки «В сборке» (IN_PROGRESS, без FBO) — удаляемые.
+        r1 = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id, wb_fbo_supply_id=None, pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=2)],
+            ),
+        )
+        r2 = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id, wb_fbo_supply_id=None, pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=2)],
+            ),
+        )
+        # Третья — отгружена на WB (SHIPPED) → удалять нельзя.
+        r3 = await _create_test_request(db_session)
+        await start_assembly(db_session, PROJECT_ID, r3.id)
+        await mark_ready(db_session, PROJECT_ID, r3.id)
+        await assign_vehicle(
+            db_session, PROJECT_ID, r3.id,
+            AssignVehicle(
+                vehicle_info="Truck DEL", vehicle_brand="GAZ", driver_phone="+79990000000",
+                pickup_date="2026-03-22", pickup_time_slot="08:00-12:00", pickup_cost=1,
+                delivery_date="2026-03-23",
+            ),
+        )
+        await ship_request(db_session, PROJECT_ID, r3.id)
+
+        result = await delete_bulk(db_session, PROJECT_ID, [r1.id, r2.id, r3.id])
+
+        assert result["deleted"] == 2
+        assert {s["id"] for s in result["skipped"]} == {r3.id}
+        # pre-WB заявки мягко удалены (не возвращаются активным lookup'ом).
+        assert await get_assembly_request(db_session, PROJECT_ID, r1.id) is None
+        assert await get_assembly_request(db_session, PROJECT_ID, r2.id) is None
+        # Отгруженная на WB осталась.
+        assert await get_assembly_request(db_session, PROJECT_ID, r3.id) is not None
+
+    async def test_delete_bulk_missing_id_reported(self, db_session):
+        result = await delete_bulk(db_session, PROJECT_ID, [999999])
+        assert result["deleted"] == 0
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["id"] == 999999

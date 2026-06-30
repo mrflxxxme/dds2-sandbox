@@ -20,6 +20,7 @@ import type {
     StockDistributionHistoryResponse,
     HandedUnitItem,
     AssemblyAttempt,
+    AssemblyBulkDeleteResult,
     AssemblyHistoryEntry,
     AssemblyListResponse,
     AssemblyRequest,
@@ -419,6 +420,10 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         deleteAssembly(id: number) {
             return api.request<void>('DELETE', `/api/v1/warehouse/assembly/${id}`);
+        },
+        /** Массовое удаление заявок, ещё не отгруженных на WB. Отгруженные пропускаются. */
+        deleteAssemblyBulk(ids: number[]) {
+            return api.request<AssemblyBulkDeleteResult>('POST', '/api/v1/warehouse/assembly/delete-bulk', { ids });
         },
         assignVehicleBulk(data: {
             vehicle_info: string;

@@ -44,6 +44,12 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
 
 const EDITABLE_STATUSES: AssemblyStatus[] = ['IN_PROGRESS', 'READY'];
 
+// Заявки, которые ещё НЕ отгружены на WB → можно массово удалить (товар физически
+// не списан, висит только резерв). Отгруженные (SHIPPED/DELIVERED/RETURNED/CLOSED)
+// удалять нельзя — сначала отмена с откатом стока.
+const BULK_DELETABLE_STATUSES = new Set<AssemblyStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED', 'CANCELLED']);
+const isBulkDeletable = (status: string): boolean => BULK_DELETABLE_STATUSES.has(status as AssemblyStatus);
+
 const STATUS_OPTIONS_FILTER: { value: string; label: string }[] = [
     { value: '', label: 'Все статусы' },
     { value: 'IN_PROGRESS', label: 'В сборке' },
@@ -555,12 +561,76 @@ export default function AssemblyListPage() {
         }
     };
 
+    // ─── Массовое удаление (заявки из черновика, ещё не на WB) ───────────────
+    const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+    const [bulkDeleting, setBulkDeleting] = useState(false);
+    const deletableCount = useMemo(() => items.filter(i => isBulkDeletable(i.status)).length, [items]);
+
+    const toggleSelect = useCallback((id: number) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    }, []);
+    const selectAllDeletable = useCallback(() => {
+        setSelectedIds(new Set(items.filter(i => isBulkDeletable(i.status)).map(i => i.id)));
+    }, [items]);
+
+    const handleBulkDelete = useCallback(async () => {
+        const ids = [...selectedIds];
+        if (ids.length === 0) return;
+        if (!confirm(`Удалить ${formatNumber(ids.length, 0)} заявок? Это действие нельзя отменить.`)) return;
+        setBulkDeleting(true);
+        try {
+            const res = await api.deleteAssemblyBulk(ids);
+            const skippedIds = new Set(res.skipped.map(s => s.id));
+            const removed = ids.filter(id => !skippedIds.has(id));
+            setItems(prev => prev.filter(i => !removed.includes(i.id)));
+            setTotal(t => Math.max(0, t - res.deleted));
+            setSelectedIds(new Set());
+            const note = res.skipped.length > 0 ? ` · пропущено ${formatNumber(res.skipped.length, 0)} (уже на WB)` : '';
+            setToast({
+                message: `Удалено заявок: ${formatNumber(res.deleted, 0)}${note}`,
+                type: res.deleted > 0 ? 'success' : 'error',
+            });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка массового удаления', type: 'error' });
+        } finally {
+            setBulkDeleting(false);
+        }
+    }, [selectedIds]);
+
     // ─── Columns (TanStackDataTable: сортировка + Excel) ────────────────────
     // Inline-редактирование (палеты/вес/дата/статус) и кнопки-действия живут
     // внутри render-ячеек; getValue даёт сортировку по вычисляемым колонкам,
     // exportValue — корректную выгрузку JSX-ячеек.
     const itemsQty = (row: AssemblyRequest) => row.items ? row.items.reduce((s, i) => s + (i.quantity || 0), 0) : 0;
     const cols: Column[] = [
+        {
+            key: '_select', label: '',
+            getValue: () => '',
+            exportValue: () => '',
+            // Вся ячейка — большая кликабельная зона переключения, клик НЕ открывает
+            // заявку (stopPropagation), чтобы не «проваливаться» при выборе галочек.
+            render: (_v, row: AssemblyRequest) => (
+                isBulkDeletable(row.status) ? (
+                    <div
+                        onClick={(e) => { e.stopPropagation(); toggleSelect(row.id); }}
+                        title="Выбрать для удаления"
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '10px 8px', margin: '-7px -6px', cursor: 'pointer' }}
+                    >
+                        <input
+                            type="checkbox"
+                            checked={selectedIds.has(row.id)}
+                            readOnly
+                            tabIndex={-1}
+                            style={{ pointerEvents: 'none', accentColor: '#3b82f6', width: 18, height: 18 }}
+                        />
+                    </div>
+                ) : null
+            ),
+        },
         {
             key: 'number', label: '№',
             render: (_v, row: AssemblyRequest) => <span style={{ fontWeight: 500 }}>{row.number}</span>,
@@ -846,10 +916,38 @@ export default function AssemblyListPage() {
                 <TanStackDataTable
                     columns={cols}
                     data={items}
-                    onRowClick={(row: AssemblyRequest) => router.push(`/p/${slug}/warehouse/assembly/${row.id}`)}
-                    rowClassName={(row: AssemblyRequest) => highlightActive && justCreatedIds.has(row.id) ? 'assembly-row-just-created' : ''}
+                    onRowClick={(row: AssemblyRequest) => {
+                        // В режиме выбора (есть отмеченные) клик по строке переключает
+                        // её галочку и НЕ открывает заявку — чтобы выбор не слетал.
+                        if (selectedIds.size > 0) {
+                            if (isBulkDeletable(row.status)) toggleSelect(row.id);
+                            return;
+                        }
+                        router.push(`/p/${slug}/warehouse/assembly/${row.id}`);
+                    }}
+                    rowClassName={(row: AssemblyRequest) =>
+                        selectedIds.has(row.id) ? 'assembly-row-selected'
+                            : (highlightActive && justCreatedIds.has(row.id) ? 'assembly-row-just-created' : '')
+                    }
                     pageSize={CLIENT_PAGE_SIZE}
                     exportName="assembly_requests"
+                    actions={
+                        selectedIds.size > 0 ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedIds.size, 0)}</span>
+                                <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting}>
+                                    {bulkDeleting ? 'Удаление…' : `🗑 Удалить выбранные (${formatNumber(selectedIds.size, 0)})`}
+                                </button>
+                                <button className="btn btn-secondary btn-sm" onClick={() => setSelectedIds(new Set())}>Снять</button>
+                            </div>
+                        ) : (
+                            deletableCount > 0 ? (
+                                <button className="btn btn-secondary btn-sm" onClick={selectAllDeletable} title="Выбрать все заявки, которые ещё не на WB">
+                                    ☑ Выбрать все удаляемые ({formatNumber(deletableCount, 0)})
+                                </button>
+                            ) : undefined
+                        )
+                    }
                 />
             )}
         </div>

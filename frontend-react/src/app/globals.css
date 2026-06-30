@@ -642,6 +642,19 @@ input[type="number"] {
     animation: fadeIn 0.3s ease-out;
 }
 
+/* ─── Skeleton (loading placeholders) ───────────────────────────────────────── */
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+}
+
+.skeleton {
+    background: var(--color-border);
+    border-radius: 8px;
+    animation: pulse 1.4s ease-in-out infinite;
+}
+
 /* ─── Modal ─────────────────────────────────────────────────────────────────── */
 
 .modal-overlay {
@@ -2749,3 +2762,5 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 /* Подсветка только что созданных заявок на сборку (флеш ~3с после создания
    из распределения). Применяется к строке TanStackDataTable через rowClassName. */
 .assembly-row-just-created { background: rgba(52, 199, 89, 0.15); transition: background 0.5s ease; }
+/* Строка, отмеченная для массового удаления. */
+.assembly-row-selected { background: rgba(59, 130, 246, 0.10); }

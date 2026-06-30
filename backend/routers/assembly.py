@@ -23,8 +23,10 @@ from backend.schemas.assembly import (
     AssemblyRequestUpdate,
     AssignVehicle,
     AssignVehicleBulk,
+    BulkDeleteResult,
     CostForecastResponse,
     CreatedGroupResponse,
+    DeleteBulk,
     FfLinkInfo,
     LinkAnomaliesResponse,
     LogisticsAnalyticsResponse,
@@ -650,6 +652,20 @@ async def ship_bulk(
         return response
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
+
+
+@router.post("/delete-bulk", response_model=BulkDeleteResult, dependencies=[Depends(rate_limit_write)])
+async def delete_bulk(
+    payload: DeleteBulk,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Массово удалить заявки на сборку, ещё не отгруженные на WB.
+
+    Отгруженные/на WB (SHIPPED/DELIVERED/RETURNED/CLOSED) пропускаются с причиной.
+    """
+    result = await assembly_service.delete_bulk(db, project.id, payload.ids)
+    return BulkDeleteResult.model_validate(result)
 
 
 # --- History ----------------------------------------------------------------

@@ -6,7 +6,6 @@ import { formatNumber } from '@/lib/utils';
 import { dropCommittedRows } from '@/lib/utils/assemblyDraftReconcile';
 import { parseBoxSize } from '@/lib/utils/boxPallet';
 import { normalizeDraft, type NormalizeDraftCtx } from '@/lib/utils/normalizeDraft';
-import { buildDraftRows, type DraftSkuInput } from '@/lib/assembly/buildDraftRows';
 import { Toast } from '@/components';
 import TabLayout from '@/components/TabLayout';
 import DraftPreview from './components/DraftPreview';
@@ -343,122 +342,79 @@ export default function AssemblyDraftPage() {
         }
     }, [draftId, ensureSaved, normalizeAndSave, applyDraft, showToast]);
 
-    // «Пересчитать» инвариант: привести УЖЕ собранный черновик к целым коробам + целым
-    // паллетам (короб — смешанные паллеты по округам, моно — ≤3 артикула). Обычно не нужна
-    // (нормализация безусловна при каждом наполнении) — кнопка-страховка/ручной пересчёт.
-    // Новинки cold-start (ppb=null) едут россыпью — не палетизируются. Бросает — DraftPreview ловит.
-    const handleRecreateWholeBoxes = useCallback(async () => {
-        if (!draftId) return;
-        const ok = await ensureSaved();
-        if (!ok) throw new Error('Не удалось сохранить перед пересчётом');
-        const res = await normalizeAndSave(draftId);
-        if (res === null) { showToast('Геометрия коробок ещё грузится — повторите через секунду', 'error'); return; }
-        if (!res.changed) { showToast('Коробы и паллеты уже целые', 'success'); return; }
-        applyDraft(res.draft);
-        showToast(
-            `Пересчитано до целых коробов и паллет` +
-            (res.droppedUnits > 0 ? ` · ${formatNumber(res.droppedUnits, 0)} шт осталось на ФФ (хвосты < паллеты)` : ''),
-            'success',
-        );
-    }, [draftId, ensureSaved, normalizeAndSave, applyDraft, showToast]);
-
-    // Перепроверить приёмку текущего черновика: прогнать его цели через acceptance-check
-    // (перераспределить закрытые склады → открытые, тип упаковки по приёмке) и пересобрать
-    // строки движком (целые коробы). По сути — пересоздание черновика с учётом приёмки.
-    const handleRecheckAcceptance = useCallback(async () => {
-        if (!draftId) return;
-        const ok = await ensureSaved();
-        if (!ok) throw new Error('Не удалось сохранить перед перепроверкой');
-        const fresh = await api.getAssemblyDraft(draftId);
-        const freshRows = fresh.distribution.rows || [];
-        if (!freshRows.length) { showToast('Черновик пуст', 'success'); return; }
-
-        // Полный доступный ФФ per nm per ff (пересобираем с нуля): обычные → rf_stocks,
-        // новинки → cold-start rf_by_warehouse.
-        const ffByNm: Record<number, Record<number, number>> = {};
-        for (const a of stockNeed?.articles ?? []) {
-            const pool: Record<number, number> = {};
-            for (const [ff, st] of Object.entries(a.rf_stocks || {})) if ((st.available || 0) > 0) pool[Number(ff)] = st.available;
-            if (Object.keys(pool).length) ffByNm[a.nm_id] = pool;
-        }
-        try {
-            const cold = await api.getColdStartTable();
-            for (const row of cold.rows ?? []) {
-                if (!newcomerNmIds.has(row.nm_id)) continue;
-                const pool: Record<number, number> = {};
-                for (const [ff, q] of Object.entries(row.rf_by_warehouse || {})) if ((q || 0) > 0) pool[Number(ff)] = q;
-                if (Object.keys(pool).length) ffByNm[row.nm_id] = pool;
-            }
-        } catch { /* cold-start best-effort */ }
-
-        // Текущие цели per (nm, barcode) = сумма tgt по складам.
-        const byKey = new Map<string, { nm_id: number; barcode: string; vendor_code: string; target: Record<string, number> }>();
-        for (const r of freshRows) {
-            const key = `${r.nm_id}::${r.barcode}`;
-            const e = byKey.get(key) ?? { nm_id: r.nm_id, barcode: r.barcode, vendor_code: r.vendor_code, target: {} };
-            for (const [wb, q] of Object.entries(r.tgt)) e.target[wb] = (e.target[wb] || 0) + (q || 0);
-            byKey.set(key, e);
-        }
-        const baseSkus: DraftSkuInput[] = [...byKey.values()].map(e => ({
-            nm_id: e.nm_id, barcode: e.barcode, vendor_code: e.vendor_code,
-            target: e.target, ffStock: ffByNm[e.nm_id] ?? {},
-            ppb: newcomerNmIds.has(e.nm_id) ? null : (nmPpb.get(e.nm_id) ?? null),
-            box_size: nmBoxSize.get(e.nm_id) ?? null, packageType: 'BOX',
-        }));
-
-        // Приёмка → перераспределение + сплиты по упаковке.
-        let skus = baseSkus;
-        let movedAway = 0;
-        let droppedClosed = 0;
-        try {
-            const resp = await api.checkWbAcceptance(
-                { items: baseSkus.map(s => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })) },
-                true,
-            );
-            const m = new Map(resp.items.map(it => [`${it.nm_id}::${it.barcode}`, it]));
-            const redone: DraftSkuInput[] = [];
-            for (const s of baseSkus) {
-                const it = m.get(`${s.nm_id}::${s.barcode}`);
-                if (!it) { redone.push(s); continue; }
-                const splits = it.splits?.length ? it.splits : [{ package_type: it.package_type, distribution: it.distribution, warnings: [] }];
-                for (const sp of splits) {
-                    const target = Object.fromEntries(Object.entries(sp.distribution || {}).filter(([, q]) => q > 0));
-                    if (Object.keys(target).length) redone.push({ ...s, target, packageType: sp.package_type });
-                }
-            }
-            skus = redone;
-            for (const mv of resp.moves ?? []) { if (mv.to_warehouse) movedAway += mv.quantity; else droppedClosed += mv.quantity; }
-        } catch {
-            showToast('Приёмка WB недоступна — перепроверка пропущена', 'error');
-            return;
-        }
-        if (!skus.length) { showToast('После приёмки нечего отгрузить — выбранные склады закрыты', 'error'); return; }
-
-        const districtMap = new Map<string, string>();
-        for (const w of stockNeed?.warehouses ?? []) if (w.district_key) districtMap.set(w.name, w.district_key);
-        const builtRows = buildDraftRows({ skus, wholePalletsOnly: false, warehouseToDistrict: Object.fromEntries(districtMap), palletOverrides });
-        if (!builtRows.length) { showToast('Нечего разложить после перепроверки приёмки', 'error'); return; }
-
-        // Приводим к инварианту: целые коробы (добивка из свободного ФФ) + целые паллеты
-        // (короб — смешанные по округам, моно — ≤3 артикула). Новинки россыпью (ppb=null).
-        const res = normalizeDraft(builtRows, buildNormalizeCtx(builtRows));
-        await api.updateAssemblyDraft(draftId, { distribution: { ...fresh.distribution, rows: res.rows } });
-        await reloadDraft();
-        showToast(
-            `Приёмка перепроверена: ${formatNumber(res.rows.length, 0)} строк` +
-            `${movedAway > 0 ? ` · ↪${formatNumber(movedAway, 0)} перераспр.` : ''}` +
-            `${droppedClosed > 0 ? ` · ⛔${formatNumber(droppedClosed, 0)} на закрытых` : ''}` +
-            `${res.droppedUnits > 0 ? ` · ${formatNumber(res.droppedUnits, 0)} шт на ФФ (хвосты < паллеты)` : ''}`,
-            'success',
-        );
-    }, [draftId, ensureSaved, stockNeed, nmPpb, nmBoxSize, newcomerNmIds, palletOverrides, buildNormalizeCtx, reloadDraft, showToast]);
-
     // Долив строк из встроенной вкладки «Потребность» → перезагрузить черновик и
     // переключиться на вкладку 'draft', чтобы пользователь увидел добавленное.
     const handleRowsAdded = useCallback(async () => {
         await reloadDraft();
         setTab('draft');
     }, [reloadDraft, setTab]);
+
+    // ── «Заполнить черновик из потребности»: ЗАМЕНИТЬ весь черновик раскладкой, которую
+    // считает вкладка «Потребность по складам» (с bump/локализацией) — точное соответствие.
+    // Кнопка переключает на вкладку потребности (там монтируется расчёт + грузятся лимиты,
+    // показывается скелетон), та строит строки для ВСЕХ SKU и отдаёт сюда через onFillAllRows.
+    const [fillSignal, setFillSignal] = useState(0);
+    const [filling, setFilling] = useState(false);
+
+    const handleFillFromNeed = useCallback(() => {
+        if (filling) return;
+        if (rows.length > 0 && !window.confirm('Заменить весь черновик раскладкой из «Потребность по складам»? Текущие строки и ручные правки будут удалены.')) return;
+        // НЕ переключаем вкладку: расчёт идёт в скрытом инстансе WarehouseNeedView под
+        // блокирующим оверлеем (иначе прыжок на вкладку + ожидание лимитов сбивали с толку).
+        setFilling(true);
+        setFillSignal(s => s + 1);
+    }, [filling, rows.length]);
+
+    const handleFillAllRows = useCallback(async (newRows: AssemblyDraftRow[]) => {
+        try {
+            if (!draftId) return;
+            if (newRows.length === 0) { showToast('В потребности нечего отгрузить', 'error'); return; }
+            const targetNames = Array.from(new Set(newRows.flatMap(r => Object.keys(r.tgt))));
+            const sourceIds = Array.from(new Set(
+                newRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0)),
+            ));
+            const dist: AssemblyDraftDistribution = {
+                ...buildDistribution(),
+                rows: newRows,
+                source_warehouse_ids: sourceIds,
+                target_warehouse_names: targetNames,
+            };
+            const units = newRows.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: dist });
+            applyDraft(updated);
+            showToast(`Черновик заполнен из потребности: ${formatNumber(newRows.length, 0)} строк · Σ ${formatNumber(units, 0)} шт`, 'success');
+        } catch (e: unknown) {
+            showToast(e instanceof Error ? e.message : 'Ошибка заполнения черновика', 'error');
+        } finally {
+            setFillSignal(0);   // сброс сигнала, чтобы повторный расчёт не само-запускался
+            setFilling(false);
+        }
+    }, [draftId, buildDistribution, applyDraft, showToast]);
+
+    // ── «Очистить черновик»: удалить всё наполнение (строки + источники/цели). ──
+    const [clearing, setClearing] = useState(false);
+    const handleClearDraft = useCallback(async () => {
+        if (!draftId || clearing) return;
+        if (rows.length === 0) { showToast('Черновик уже пуст', 'success'); return; }
+        if (!window.confirm('Очистить черновик? Всё наполнение будет удалено.')) return;
+        setClearing(true);
+        try {
+            const dist: AssemblyDraftDistribution = {
+                ...buildDistribution(),
+                rows: [],
+                source_warehouse_ids: [],
+                target_warehouse_names: [],
+                cold_start_shares: null,
+            };
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: dist });
+            applyDraft(updated);
+            showToast('Черновик очищен', 'success');
+        } catch (e: unknown) {
+            showToast(e instanceof Error ? e.message : 'Ошибка очистки черновика', 'error');
+        } finally {
+            setClearing(false);
+        }
+    }, [draftId, clearing, rows.length, buildDistribution, applyDraft, showToast]);
 
     // Удаление неликвида из вкладки «Прогноз»: убрать SKU из черновика на бэке, затем
     // АВТО-дозабивка — пере-собрать остатки округов в целые паллеты (как «Дозабить»).
@@ -503,29 +459,6 @@ export default function AssemblyDraftPage() {
             showToast(e instanceof Error ? e.message : 'Не удалось переименовать', 'error');
         }
     }, [draftId, draft, name, showToast]);
-
-    // ─── Дозабить паллеты: пересчёт инварианта (целые коробы + целые паллеты) ──────
-    const handleConsolidatePallets = useCallback(async () => {
-        if (!draftId) return;
-        if (geomState !== 'ready') {
-            showToast(geomState === 'error' ? 'Геометрия коробок недоступна — обновите страницу' : 'Геометрия коробок ещё загружается — повторите через секунду', 'error');
-            return;
-        }
-        const ok = await ensureSaved();
-        if (!ok) { showToast('Не удалось сохранить перед пересчётом', 'error'); return; }
-        try {
-            const res = await normalizeAndSave(draftId);
-            if (!res || !res.changed) { showToast('Коробы и паллеты уже целые', 'success'); return; }
-            applyDraft(res.draft);
-            showToast(
-                `Пересчитано до целых коробов и паллет` +
-                (res.droppedUnits > 0 ? ` · снято ${formatNumber(res.droppedUnits, 0)} шт (хвосты < паллеты)` : ''),
-                'success',
-            );
-        } catch (e: unknown) {
-            showToast(e instanceof Error ? e.message : 'Ошибка пересчёта', 'error');
-        }
-    }, [draftId, geomState, ensureSaved, normalizeAndSave, applyDraft, showToast]);
 
     // WB-склад → ключ округа (для кросс-SKU палет-консолидации в панелях добавления).
     const districtRecord = useMemo(() => {
@@ -601,20 +534,7 @@ export default function AssemblyDraftPage() {
                         </button>
                     )}
                     {activeTab === 'draft' && (
-                        <>
-                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{saving ? 'Сохранение…' : 'Автосохранение включено'}</span>
-                            <div style={{ flex: 1 }} />
-                            <button
-                                className="btn btn-secondary btn-sm"
-                                onClick={handleConsolidatePallets}
-                                disabled={!geomReady}
-                                title={geomReady
-                                    ? 'Слить недогруженные города одного округа на приоритетный склад до целых паллет (без перезавоза; хвост <20% остаётся на ФФ).'
-                                    : 'Геометрия коробок ещё загружается…'}
-                            >
-                                📦 Дозабить паллеты
-                            </button>
-                        </>
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{saving ? 'Сохранение…' : 'Автосохранение включено'}</span>
                     )}
                 </div>
             </div>
@@ -624,6 +544,19 @@ export default function AssemblyDraftPage() {
             {/* Вкладка «Черновик сборки» — редактор строк + предпросмотр + commit */}
             {activeTab === 'draft' && (
                 <>
+                    <div className="glass-card" style={{ padding: 12, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                        <button className="btn btn-primary btn-sm" onClick={handleFillFromNeed} disabled={filling}>
+                            {filling ? 'Заполнение…' : '⚡ Заполнить черновик из потребности'}
+                        </button>
+                        {rows.length > 0 && (
+                            <button className="btn btn-danger btn-sm" onClick={handleClearDraft} disabled={clearing}>
+                                {clearing ? 'Очистка…' : '🗑 Очистить черновик'}
+                            </button>
+                        )}
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                            Соберёт черновик заново строго из «Потребность по складам» (с bump). Текущие строки будут заменены.
+                        </span>
+                    </div>
                     <AddFromNeedPanel
                         stockNeed={stockNeed}
                         existingNmIds={existingNmIds}
@@ -657,8 +590,6 @@ export default function AssemblyDraftPage() {
                         ensureSaved={ensureSaved}
                         onToast={showToast}
                         onReloadDraft={reloadDraft}
-                        onRecreateWholeBoxes={handleRecreateWholeBoxes}
-                        onRecheckAcceptance={handleRecheckAcceptance}
                     />
                 </>
             )}
@@ -670,6 +601,8 @@ export default function AssemblyDraftPage() {
                     hiddenNmIds={draftNmIds}
                     onRowsAddedToDraft={handleRowsAdded}
                     autoCheckAcceptance
+                    fillAllSignal={fillSignal}
+                    onFillAllRows={handleFillAllRows}
                 />
             )}
 
@@ -686,6 +619,34 @@ export default function AssemblyDraftPage() {
 
             {/* Вкладка «Настройки складов» — исключение/закрытие складов + время РФ→WB */}
             {activeTab === 'settings' && <WarehouseExclusionSettings />}
+
+            {/* «Заполнить черновик из потребности»: скрытый инстанс WarehouseNeedView считает
+                раскладку ВСЕЙ потребности (data + свободные лимиты приёмки) и через onFillAllRows
+                ЗАМЕНЯЕТ черновик. Блокирующий оверлей — чтобы не ушли во время расчёта. */}
+            {filling && (
+                <>
+                    <div style={{
+                        position: 'fixed', inset: 0, zIndex: 200,
+                        background: 'rgba(0,0,0,0.18)', backdropFilter: 'blur(6px)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                        <div className="glass-card" style={{ padding: 28, textAlign: 'center', maxWidth: 360 }}>
+                            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>⚡ Собираю черновик из всей потребности…</div>
+                            <div className="skeleton" style={{ width: '80%', height: 12, margin: '0 auto 8px' }} />
+                            <div className="skeleton" style={{ width: '60%', height: 12, margin: '0 auto 14px' }} />
+                            <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Проверяю свободные лимиты приёмки WB — несколько секунд, не закрывайте страницу</div>
+                        </div>
+                    </div>
+                    <div style={{ display: 'none' }} aria-hidden>
+                        <WarehouseNeedView
+                            embeddedDraftId={draft.id}
+                            autoCheckAcceptance
+                            fillAllSignal={fillSignal}
+                            onFillAllRows={handleFillAllRows}
+                        />
+                    </div>
+                </>
+            )}
         </div>
     );
 }
