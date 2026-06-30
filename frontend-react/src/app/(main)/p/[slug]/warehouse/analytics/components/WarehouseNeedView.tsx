@@ -826,12 +826,22 @@ export function WarehouseNeedView({
         return wh?.articles?.[article.nm_id]?.need || 0;
     }, [data, newcomerBoxedAlloc]);
 
-    /** Текущий WB-сток per-cell — из data.warehouses[].articles[nm_id].stock. */
+    /** Per-nm карта WB-стока по складам для НОВИНОК (их нет в data.warehouses —
+     *  они приходят из cold-start; WB-сток по складам лежит в wb_by_warehouse). */
+    const coldStartWbByNm = useMemo(() => {
+        const m = new Map<number, Record<string, number>>();
+        for (const r of coldStartData?.rows ?? []) m.set(r.nm_id, r.wb_by_warehouse || {});
+        return m;
+    }, [coldStartData]);
+
+    /** Текущий WB-сток per-cell — из data.warehouses[].articles[nm_id].stock;
+     *  для новинок (их нет в data.warehouses) — фолбэк на cold-start wb_by_warehouse. */
     const getArticleWbStock = useCallback((article: NeedArticle, whName: string): number => {
-        if (!data?.warehouses) return 0;
-        const wh = data.warehouses.find(w => w.name === whName);
-        return wh?.articles?.[article.nm_id]?.stock || 0;
-    }, [data]);
+        const wh = data?.warehouses?.find(w => w.name === whName);
+        const reg = wh?.articles?.[article.nm_id]?.stock || 0;
+        if (reg > 0) return reg;
+        return coldStartWbByNm.get(article.nm_id)?.[whName] || 0;
+    }, [data, coldStartWbByNm]);
 
     /** Map склад → district_key (взят из coldStartData.main_warehouses).
      *  Покрывает только top-3 main_warehouses каждого ФО — для остальных WB-складов
@@ -3052,7 +3062,7 @@ export function WarehouseNeedView({
                                 <td style={{ ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>
                                     {(() => {
                                         let sum = 0;
-                                        for (const a of filteredArticles) sum += analyticsMap.get(a.nm_id)?.stocks_wb || 0;
+                                        for (const a of filteredArticles) sum += analyticsMap.get(a.nm_id)?.stocks_wb ?? a.stocks_wb ?? 0;
                                         return sum > 0 ? formatNumber(sum, 0) : '\u2014';
                                     })()}
                                 </td>
@@ -3181,7 +3191,8 @@ export function WarehouseNeedView({
                                         {/* WB stock (\u043e\u0431\u0449\u0438\u0439) */}
                                         <td style={{ ...tdBase, fontWeight: 500 }}>
                                             {(() => {
-                                                const v = analyticsMap.get(a.nm_id)?.stocks_wb ?? 0;
+                                                // \u041d\u043e\u0432\u0438\u043d\u043e\u043a \u043d\u0435\u0442 \u0432 analyticsMap \u2192 \u0444\u043e\u043b\u0431\u044d\u043a \u043d\u0430 adapter stocks_wb (cold-start wb_qty).
+                                                const v = analyticsMap.get(a.nm_id)?.stocks_wb ?? a.stocks_wb ?? 0;
                                                 return v > 0 ? formatNumber(v, 0) : '\u2014';
                                             })()}
                                         </td>
