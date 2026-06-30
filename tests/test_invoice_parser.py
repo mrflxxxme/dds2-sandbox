@@ -461,6 +461,28 @@ def test_rasterize_bounds_large_page_and_skips_absurd():
     assert invoice_split.rasterize_pages(buf2.getvalue()) == []
 
 
+def test_downscale_scan_pdf_skips_small_nonpdf_and_manypage(monkeypatch):
+    """downscale_scan_pdf не трогает: мелкий файл (≤порог), не-PDF, и PDF с >MAX_PDF_PAGES
+    страниц (иначе потеряли бы страницы)."""
+    tiny = b"%PDF-1.4\n%mini"
+    assert invoice_split.downscale_scan_pdf(tiny, "x.pdf") == tiny  # ≤ порог → как есть
+    monkeypatch.setattr(invoice_split, "_ATTACH_DOWNSCALE_MIN_BYTES", 1)
+    assert invoice_split.downscale_scan_pdf(b"plain text data", "note.txt") == b"plain text data"  # не PDF
+    many = _build_image_pdf(invoice_split.MAX_PDF_PAGES + 1)  # >10 стр. → не трогаем (без потерь)
+    assert invoice_split.downscale_scan_pdf(many, "scan.pdf") == many
+
+
+def test_downscale_scan_pdf_image_pdf_preserves_pages(monkeypatch):
+    """Скан-PDF ужимается, но ВСЕ страницы сохраняются (не теряем данные при привязке)."""
+    monkeypatch.setattr(invoice_split, "_ATTACH_DOWNSCALE_MIN_BYTES", 1)
+    pdf = _build_image_pdf(3)
+    out = invoice_split.downscale_scan_pdf(pdf, "scan.pdf")
+    assert out[:5] == b"%PDF-"
+    import pypdfium2 as pdfium  # type: ignore[import-untyped]
+
+    assert len(pdfium.PdfDocument(out)) == 3  # все 3 страницы на месте
+
+
 def test_build_split_docs_image_pdf():
     """Скан-путь (images): счёт+акт → два под-PDF верных типов с осмысленными именами."""
     import base64
