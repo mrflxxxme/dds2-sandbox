@@ -1519,13 +1519,45 @@ export function WarehouseNeedView({
         return n;
     }, [acceptanceMap, coldStartMode, coldStartData, data, newcomerSet, skuHasNoLimitCell, coldStartHasNoLimit]);
 
+    // Новинки cold-start, адаптированные в NeedArticle для ЕДИНОЙ таблицы (одно окно
+    // с обычными). Распределение по складам берётся из newcomerBoxedAlloc (через
+    // getBaseArticleWbNeed); здесь — строковые/фильтровые поля строки.
+    const coldStartAsArticles = useMemo<NeedArticle[]>(() => {
+        return (coldStartData?.rows ?? []).map((r) => {
+            const total = newcomerBoxedAlloc.get(r.nm_id)?.total ?? r.total_allocated ?? 0;
+            const rf: Record<number, ArticleRfStock> = {};
+            for (const [wid, q] of Object.entries(r.rf_by_warehouse ?? {})) {
+                rf[Number(wid)] = { stock: q || 0, available: q || 0 };
+            }
+            return {
+                nm_id: r.nm_id,
+                vendor_code: r.article_seller || `nm:${r.nm_id}`,
+                barcode: r.barcode || '',
+                brand: r.brand || '',
+                subject: r.subject || '',
+                total_need: total,
+                revenue_30d: r.revenue_30d || 0,
+                rf_stocks: rf,
+                in_assembly: r.in_assembly_total || 0,
+                in_transit: 0,
+                in_transit_date: null,
+                can_send: total,
+                deficit: 0,
+                stocks_wb: r.wb_qty || 0,
+                asm_by_warehouse: r.asm_by_warehouse,
+                transit_by_warehouse: {},
+            } as NeedArticle;
+        });
+    }, [coldStartData, newcomerBoxedAlloc]);
+
     const filteredArticles = useMemo(() => {
         if (!data?.articles) return [];
-        return data.articles.filter(a => {
-            // Новинки (cold-start) рендерятся отдельно на вкладке «🆕 Новинки» —
-            // на основной таблице их скрываем. У них total_need=0 (нет orders),
-            // в WB-колонках прочерки, создают визуальный шум.
-            if (newcomerSet.has(a.nm_id)) return false;
+        // Единый список: обычные + новинки (cold-start) в ОДНОЙ таблице.
+        const base: NeedArticle[] = [...data.articles, ...coldStartAsArticles];
+        return base.filter(a => {
+            // Чип «🆕 Новинки» работает как ФИЛЬТР: активен → только новинки;
+            // иначе новинки и обычные показываются вместе.
+            if (coldStartMode && !newcomerSet.has(a.nm_id)) return false;
             // Встроенный режим: артикул уже в текущем черновике → скрываем из таблицы.
             if (hiddenNmIds?.has(a.nm_id)) return false;
             if (brandFilter && a.brand !== brandFilter) return false;
@@ -1541,7 +1573,11 @@ export function WarehouseNeedView({
             // Дефицит без остатков тоже скрыт — он виден по чипу «С дефицитом».
             // «Расширенная» (showAdvanced) показывает всё. Чипы-статусы — свой срез.
             if (!showAdvanced && statusFilter === 'all') {
-                if (getSendWithBump(a.nm_id, a.can_send) <= 0) return false;
+                // Единый «отправить»: новинки — из newcomerBoxedAlloc, обычные — с bump.
+                const sendQty = newcomerSet.has(a.nm_id)
+                    ? (newcomerBoxedAlloc.get(a.nm_id)?.total ?? 0)
+                    : getSendWithBump(a.nm_id, a.can_send);
+                if (sendQty <= 0) return false;
             }
             if (statusFilter === 'deficit' && a.deficit <= 0) return false;
             if (statusFilter === 'can_send' && a.can_send <= 0) return false;
@@ -1574,7 +1610,7 @@ export function WarehouseNeedView({
             if (noLimitFilter && !skuHasNoLimitCell(a)) return false;
             return true;
         });
-    }, [data, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet, showAdvanced, getSendWithBump, noLimitFilter, skuHasNoLimitCell, hiddenNmIds]);
+    }, [data, coldStartAsArticles, coldStartMode, newcomerBoxedAlloc, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet, showAdvanced, getSendWithBump, noLimitFilter, skuHasNoLimitCell, hiddenNmIds]);
 
     /** WB-колонки в матрице, отфильтрованные по packageFilter.
      *  При packageFilter='mono' — оставляем только склады где для хотя бы одного
@@ -2860,7 +2896,7 @@ export function WarehouseNeedView({
                     className={`btn btn-sm ${coldStartMode ? 'btn-primary' : 'btn-secondary'}`}
                     style={!coldStartMode ? { borderColor: '#a855f7', color: '#a855f7' } : {}}
                     onClick={() => setColdStartMode(v => !v)}
-                    title="Новинки с остатком (нет данных для автоматической локализации): распределить по бенчмарку проекта"
+                    title="Фильтр: показать ТОЛЬКО новинки. Они уже в общей таблице (распределение по бенчмарку проекта)."
                 >
                     🆕 Новинки ({coldStartData ? formatNumber(coldStartRowsCount, 0) : '…'})
                 </button>
@@ -3025,501 +3061,9 @@ export function WarehouseNeedView({
                 </div>
             )}
 
-            {/* Cold-start таблица — отдельный режим */}
-            {coldStartMode && (
-                <div className="glass-card" style={{ padding: 16, marginBottom: 12 }}>
-                    <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-                        <span style={{
-                            padding: '4px 10px', borderRadius: 24, fontSize: 11, fontWeight: 600,
-                            background: coldStartData?.bench_source === 'own' ? '#22c55e' : '#f59e0b',
-                            color: '#fff',
-                        }}>
-                            {coldStartData?.bench_source === 'own'
-                                ? `Свои данные: ${formatNumber(coldStartData?.bench_total_orders || 0, 0)} заказов за ${analysisDays}д`
-                                : coldStartData?.bench_source?.startsWith('neighbor')
-                                ? `Соседний проект: ${coldStartData?.bench_total_orders} заказов`
-                                : 'Фолбэк: общероссийский WB'}
-                        </span>
-                        <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-                            Min pack:
-                            <input
-                                type="number" min={1} max={1000}
-                                value={coldStartMinPack}
-                                onChange={e => setColdStartMinPack(Math.max(1, Number(e.target.value) || 5))}
-                                style={{
-                                    padding: '4px 8px', borderRadius: 6, border: '1px solid var(--color-border)',
-                                    width: 70, fontSize: 12,
-                                }}
-                            />
-                        </label>
-                        <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}
-                            title="Сколько % свободного ФФ-остатка отгружать новинке за раз. Остаток держим буфером под добор по факту продаж. Перетаренные склады и вычет WB/сборки/пути сохраняются.">
-                            Отгружать ≤
-                            <input
-                                type="number" min={10} max={100}
-                                value={coldStartShipPct}
-                                onChange={e => setColdStartShipPct(Math.min(100, Math.max(10, Number(e.target.value) || 55)))}
-                                style={{
-                                    padding: '4px 8px', borderRadius: 6, border: '1px solid var(--color-border)',
-                                    width: 60, fontSize: 12,
-                                }}
-                            />
-                            % ФФ
-                        </label>
-                        <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}
-                            title="Если свободного ФФ-остатка ≤ N шт — отгружаем 100% (буфер держать бессмысленно). Выше N действует кап «% ФФ».">
-                            100% если ≤
-                            <input
-                                type="number" min={0} max={10000}
-                                value={coldStartShipFloor}
-                                onChange={e => setColdStartShipFloor(Math.min(10000, Math.max(0, Number(e.target.value) || 50)))}
-                                style={{
-                                    padding: '4px 8px', borderRadius: 6, border: '1px solid var(--color-border)',
-                                    width: 64, fontSize: 12,
-                                }}
-                            />
-                            шт ФФ
-                        </label>
-                        {coldStartLoading && <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>Считаю…</span>}
-                        {coldStartData && coldStartData.meta.excluded_warehouses.length > 0 && (
-                            <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                                Исключено складов: {coldStartData.meta.excluded_warehouses.length}
-                            </span>
-                        )}
-                        {filteredColdStartRows.length > 0 && (() => {
-                            const allChecked = filteredColdStartRows.every(r => checkedIds.has(r.nm_id));
-                            return (
-                                <button
-                                    className="btn btn-sm btn-secondary"
-                                    onClick={() => {
-                                        setCheckedIds(prev => {
-                                            const next = new Set(prev);
-                                            if (allChecked) {
-                                                for (const r of filteredColdStartRows) next.delete(r.nm_id);
-                                            } else {
-                                                for (const r of filteredColdStartRows) {
-                                                    const ov = coldStartQtyOverrides[r.nm_id];
-                                                    const total = ov !== undefined ? ov : r.total_allocated;
-                                                    if (total > 0) next.add(r.nm_id);
-                                                }
-                                            }
-                                            return next;
-                                        });
-                                    }}
-                                    style={{ marginLeft: 'auto' }}
-                                    title="Выбрать/снять все новинки для общей сборки"
-                                >
-                                    {allChecked ? '☑ Снять новинки' : `☐ Выбрать все (${filteredColdStartRows.filter(r => {
-                                        const ov = coldStartQtyOverrides[r.nm_id];
-                                        return (ov !== undefined ? ov : r.total_allocated) > 0;
-                                    }).length})`}
-                                </button>
-                            );
-                        })()}
-                    </div>
-                    {coldStartData && coldStartData.rows.length > 0 ? (
-                        <div style={{ overflowX: 'auto' }}>
-                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                                <thead>
-                                    {/* Group-header: цветные плашки округов над WB-колонками (как в основной таблице).
-                                        colSpan = 10 + N: checkbox + Артикул + Реализ + Маржа + Хватит + % лок + N×RF + WB + В сборке + Распределить + Свободно */}
-                                    <tr>
-                                        <th colSpan={10 + (coldStartData.rf_warehouses?.length ?? 0)} style={{ background: '#f5f5f7' }}>&nbsp;</th>
-                                        {(() => {
-                                            const groups: Array<{ key: string; count: number }> = [];
-                                            for (const w of visibleColdStartWarehouses) {
-                                                const k = w.district_key || 'unknown';
-                                                const last = groups[groups.length - 1];
-                                                if (last && last.key === k) last.count += 1;
-                                                else groups.push({ key: k, count: 1 });
-                                            }
-                                            return groups.map((g, i) => (
-                                                <th
-                                                    key={`cs-grp-${i}-${g.key}`}
-                                                    colSpan={g.count}
-                                                    style={{
-                                                        background: DISTRICT_COLORS[g.key] ?? '#475569',
-                                                        color: '#fff',
-                                                        fontSize: 10, fontWeight: 700,
-                                                        letterSpacing: 0.5, textTransform: 'uppercase',
-                                                        textAlign: 'center', padding: '6px 8px',
-                                                        borderBottom: '1px solid var(--color-border)',
-                                                    }}
-                                                >
-                                                    {DISTRICT_LABELS[g.key] ?? g.key}
-                                                </th>
-                                            ));
-                                        })()}
-                                        <th style={{ background: '#f5f5f7' }}>&nbsp;</th>
-                                    </tr>
-                                    <tr style={{ borderBottom: '2px solid var(--color-border)', background: '#f5f5f7' }}>
-                                        <th style={{ padding: '8px 6px', width: 30 }}></th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'left', cursor: 'pointer' }} onClick={() => handleColdStartSort('vendor_code')}>
-                                            Артикул{csSortArrow('vendor_code')}
-                                        </th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right', cursor: 'pointer' }} onClick={() => handleColdStartSort('revenue_30d')}>
-                                            Реализ. 30д{csSortArrow('revenue_30d')}
-                                        </th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right' }} title="Маржа % — из аналитики остатков">
-                                            Маржа %
-                                        </th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right' }} title="На сколько дней хватит при текущей скорости продаж">
-                                            Хватит дн
-                                        </th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right' }} title="Процент локализации — из индекса локализации (период 14д)">
-                                            % лок
-                                        </th>
-                                        {(coldStartData.rf_warehouses ?? []).map(wh => (
-                                            <th key={`cs_rf_${wh.id}`} style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', background: 'rgba(59,130,246,0.04)', cursor: 'pointer' }}
-                                                onClick={() => handleColdStartSort(`cs_rf_${wh.id}`)}>
-                                                {wh.name.length > 12 ? wh.name.slice(0, 12) + '…' : wh.name}
-                                                {csSortArrow(`cs_rf_${wh.id}`)}
-                                            </th>
-                                        ))}
-                                        <th style={{ padding: '8px 10px', textAlign: 'right', cursor: 'pointer' }} onClick={() => handleColdStartSort('wb_qty')}>
-                                            WB{csSortArrow('wb_qty')}
-                                        </th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right', cursor: 'pointer' }} onClick={() => handleColdStartSort('in_assembly_total')}>
-                                            В сборке{csSortArrow('in_assembly_total')}
-                                        </th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', cursor: 'pointer' }} onClick={() => handleColdStartSort('total_allocated')}>
-                                            Распределить{csSortArrow('total_allocated')}
-                                            <div style={{ fontSize: 10, color: 'var(--color-text-muted)', fontWeight: 400 }}>
-                                                ✏️ редактируй
-                                            </div>
-                                        </th>
-                                        <th style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', cursor: 'pointer' }}
-                                            onClick={() => handleColdStartSort('free_remainder')}
-                                            title="Свободный ФФ-остаток, который ещё можно распределить = остаток ФФ − в сборке − распределено">
-                                            Свободно{csSortArrow('free_remainder')}
-                                        </th>
-                                        {visibleColdStartWarehouses.map(w => (
-                                            <th key={w.warehouse} style={{ padding: '8px 10px', textAlign: 'right', whiteSpace: 'nowrap', cursor: 'pointer' }}
-                                                onClick={() => handleColdStartSort(`cs_wb_${w.warehouse}`)}>
-                                                <div style={{ fontSize: 11 }}>{w.warehouse}{csSortArrow(`cs_wb_${w.warehouse}`)}</div>
-                                                <div style={{ fontSize: 10, color: 'var(--color-text-muted)', fontWeight: 400 }}>
-                                                    {w.share_pct.toFixed(1)}%
-                                                </div>
-                                            </th>
-                                        ))}
-                                        <th style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700 }}>Итого</th>
-                                    </tr>
-                                    {/* ИТОГО — сумма по всем новинкам, под колонками */}
-                                    <tr style={{ background: 'rgba(59,130,246,0.06)', fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>
-                                        <td style={{ padding: '8px 6px' }}>&nbsp;</td>
-                                        <td style={{ padding: '8px 10px' }}>ИТОГО</td>
-                                        <td style={{ padding: '8px 10px', textAlign: 'right' }}>
-                                            {coldStartTotals.revenue_30d > 0 ? `₽${formatNumber(coldStartTotals.revenue_30d, 0)}` : '—'}
-                                        </td>
-                                        <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>—</td>
-                                        <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>—</td>
-                                        <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>—</td>
-                                        {(coldStartData.rf_warehouses ?? []).map(wh => (
-                                            <td key={`tot_cs_rf_${wh.id}`} style={{ padding: '8px 10px', textAlign: 'right', background: 'rgba(59,130,246,0.04)' }}>
-                                                {(coldStartTotals.rf[wh.id] || 0) > 0 ? formatNumber(coldStartTotals.rf[wh.id], 0) : '—'}
-                                            </td>
-                                        ))}
-                                        <td style={{ padding: '8px 10px', textAlign: 'right' }}>
-                                            {coldStartTotals.wb_qty > 0 ? formatNumber(coldStartTotals.wb_qty, 0) : '—'}
-                                        </td>
-                                        <td style={{ padding: '8px 10px', textAlign: 'right' }}>
-                                            {coldStartTotals.in_assembly_total > 0 ? formatNumber(coldStartTotals.in_assembly_total, 0) : '—'}
-                                        </td>
-                                        <td style={{ padding: '8px 10px', textAlign: 'right' }}>
-                                            {coldStartTotals.total_allocated > 0 ? formatNumber(coldStartTotals.total_allocated, 0) : '—'}
-                                        </td>
-                                        <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>
-                                            {coldStartTotals.free_remainder > 0 ? formatNumber(coldStartTotals.free_remainder, 0) : '—'}
-                                        </td>
-                                        {visibleColdStartWarehouses.map(w => (
-                                            <td key={`tot_cs_wb_${w.warehouse}`} style={{ padding: '8px 10px', textAlign: 'right' }}>
-                                                {(coldStartTotals.wb[w.warehouse] || 0) > 0 ? formatNumber(coldStartTotals.wb[w.warehouse], 0) : '—'}
-                                            </td>
-                                        ))}
-                                        <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700 }}>
-                                            {coldStartTotals.total_allocated > 0 ? formatNumber(coldStartTotals.total_allocated, 0) : '—'}
-                                        </td>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {sortedColdStartRows.map(row => {
-                                        const overrideQty = coldStartQtyOverrides[row.nm_id];
-                                        const useOverride = overrideQty !== undefined && overrideQty !== row.total_allocated;
-                                        // Box-кратное распределение (как в матрице/сборке): ячейки и «Итого»
-                                        // целыми коробками; input ниже остаётся желаемым qty (хвост на ФФ).
-                                        const effective = newcomerBoxedAlloc.get(row.nm_id)
-                                            ?? { alloc: row.allocations, total: row.total_allocated };
-                                        // Дефолт «Распределить» = box-кратный total (как «Итого» и ячейки),
-                                        // чтобы заглавное число = тому, что реально уедет (целые коробки K).
-                                        const inputValue = overrideQty !== undefined ? overrideQty : effective.total;
-                                        // Кратность короба K (та же, что в newcomerBoxedAlloc). 0 = без кратности.
-                                        const boxK = editStep(row.nm_id);
-                                        return (
-                                        <tr key={row.nm_id} style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                            <td style={{ padding: '6px 6px', textAlign: 'center' }}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={checkedIds.has(row.nm_id)}
-                                                    onChange={() => toggleOne(row.nm_id)}
-                                                    disabled={effective.total <= 0}
-                                                    title={effective.total <= 0 ? 'Распределение = 0 — нечего собирать' : 'Включить в общую сборку'}
-                                                />
-                                            </td>
-                                            <td style={{ padding: '8px 10px' }}>
-                                                <div style={{ fontWeight: 500 }}>
-                                                    <span style={{
-                                                        marginRight: 6, padding: '1px 6px', borderRadius: 6,
-                                                        background: '#a855f7', color: '#fff', fontSize: 9, fontWeight: 700,
-                                                    }}>🆕</span>
-                                                    {row.article_seller || '—'}
-                                                    {boxK > 0 ? (
-                                                        <span style={{
-                                                            marginLeft: 6, padding: '1px 6px', borderRadius: 6,
-                                                            background: 'rgba(34,197,94,0.15)', color: '#16a34a',
-                                                            fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap',
-                                                        }} title={`Кратность короба: ${boxK} шт — распределяется целыми коробками K`}>
-                                                            📦×{boxK}
-                                                        </span>
-                                                    ) : (
-                                                        <span style={{
-                                                            marginLeft: 6, fontSize: 10, fontWeight: 400,
-                                                            color: 'var(--color-text-muted)', whiteSpace: 'nowrap',
-                                                        }} title="Без кратности короба — распределяется поштучно (pro-rata)">
-                                                            россыпь
-                                                        </span>
-                                                    )}
-                                                </div>
-                                                <div style={{ fontSize: 10, color: 'var(--color-text-muted)' }}>
-                                                    {[row.brand, row.subject].filter(Boolean).join(' · ')}
-                                                </div>
-                                            </td>
-                                            <td style={{ padding: '8px 10px', textAlign: 'right', color: row.revenue_30d > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }}>
-                                                {row.revenue_30d > 0 ? `₽${formatNumber(row.revenue_30d, 0)}` : '—'}
-                                            </td>
-                                            {/* Margin % / Хватит дн — для новинок из analyticsMap */}
-                                            {(() => {
-                                                const m = analyticsMap.get(row.nm_id)?.margin_pct;
-                                                const color = m == null ? 'var(--color-text-muted)'
-                                                    : m < 0 ? '#ef4444' : m < 20 ? '#a16207' : '#16a34a';
-                                                return (
-                                                    <td style={{ padding: '8px 10px', textAlign: 'right', color, fontWeight: 600 }}>
-                                                        {m == null ? '—' : `${formatNumber(m, 1)}%`}
-                                                    </td>
-                                                );
-                                            })()}
-                                            {(() => {
-                                                const dl = analyticsMap.get(row.nm_id)?.days_left;
-                                                if (dl == null || dl <= 0) {
-                                                    return <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>—</td>;
-                                                }
-                                                const bg = dl < 7 ? '#ff4444' : dl <= 14 ? '#ff9800' : dl <= 29 ? '#ffd600' : '#4caf50';
-                                                const color = dl <= 29 && dl > 14 ? '#333' : '#fff';
-                                                return (
-                                                    <td style={{ padding: '8px 10px', textAlign: 'right' }}>
-                                                        <span style={{ background: bg, color, padding: '2px 8px', borderRadius: 10, fontWeight: 600, fontSize: 11 }}>
-                                                            {dl >= 999 ? '∞' : dl}
-                                                        </span>
-                                                    </td>
-                                                );
-                                            })()}
-                                            {(() => {
-                                                const p = locMap.get(row.nm_id);
-                                                if (p == null) return <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--color-text-muted)' }}>—</td>;
-                                                const color = p >= 80 ? '#16a34a' : p >= 50 ? '#a16207' : '#ef4444';
-                                                return (
-                                                    <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 600, color }}>
-                                                        {formatNumber(p, 1)}%
-                                                    </td>
-                                                );
-                                            })()}
-                                            {(coldStartData.rf_warehouses ?? []).map(wh => {
-                                                const v = row.rf_by_warehouse?.[wh.id] ?? 0;
-                                                return (
-                                                    <td key={`cs_rf_cell_${wh.id}`} style={{
-                                                        padding: '8px 10px', textAlign: 'right',
-                                                        background: 'rgba(59,130,246,0.04)',
-                                                        color: v > 0 ? 'var(--color-text)' : 'var(--color-text-muted)',
-                                                        fontWeight: v > 0 ? 500 : 400,
-                                                    }}>
-                                                        {v > 0 ? formatNumber(v, 0) : '—'}
-                                                    </td>
-                                                );
-                                            })}
-                                            <td style={{ padding: '8px 10px', textAlign: 'right' }}>{formatNumber(row.wb_qty, 0)}</td>
-                                            <td
-                                                style={{
-                                                    padding: '8px 10px', textAlign: 'right',
-                                                    cursor: row.in_assembly_total > 0 ? 'help' : 'default',
-                                                    textDecoration: row.in_assembly_total > 0 ? 'underline dotted var(--color-text-muted)' : undefined,
-                                                }}
-                                                title={
-                                                    row.in_assembly_total > 0 && row.asm_by_warehouse
-                                                        ? 'В сборке по складам:\n' + Object.entries(row.asm_by_warehouse)
-                                                            .sort((a, b) => b[1] - a[1])
-                                                            .map(([wh, q]) => `• ${wh}: ${formatNumber(q, 0)}`)
-                                                            .join('\n')
-                                                        : undefined
-                                                }
-                                            >
-                                                {row.in_assembly_total > 0 ? formatNumber(row.in_assembly_total, 0) : '—'}
-                                            </td>
-                                            <td style={{ padding: '6px 8px', textAlign: 'right' }}>
-                                                <input
-                                                    type="number" min={0} max={100000}
-                                                    value={inputValue}
-                                                    onChange={e => {
-                                                        const v = Math.max(0, Number(e.target.value) || 0);
-                                                        setColdStartQtyOverrides(prev => ({ ...prev, [row.nm_id]: v }));
-                                                    }}
-                                                    title="Распределить столько штук пропорционально долям ФО; при заданной кратности — целыми коробками (хвост < короба остаётся на ФФ)"
-                                                    style={{
-                                                        padding: '3px 6px', borderRadius: 6,
-                                                        border: useOverride ? '1px solid #a855f7' : '1px solid var(--color-border)',
-                                                        background: useOverride ? '#faf5ff' : 'var(--color-bg)',
-                                                        width: 64, fontSize: 12, textAlign: 'right',
-                                                        fontWeight: useOverride ? 600 : 400,
-                                                    }}
-                                                />
-                                            </td>
-                                            {(() => {
-                                                // Свободный ФФ-остаток = остаток ФФ − в сборке − распределено (boxed).
-                                                const free = Math.max(0, (row.rf_qty || 0) - (row.in_assembly_total || 0) - effective.total);
-                                                return (
-                                                    <td style={{ padding: '8px 10px', textAlign: 'right', color: free > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }}
-                                                        title="Свободный ФФ-остаток, который ещё можно распределить">
-                                                        {free > 0 ? formatNumber(free, 0) : '—'}
-                                                    </td>
-                                                );
-                                            })()}
-                                            {visibleColdStartWarehouses.map(w => {
-                                                const v = effective.alloc[w.warehouse] || 0;
-                                                const asmQty = row.asm_by_warehouse?.[w.warehouse] ?? 0;
-                                                const m = getCellAcceptanceMarks(row.nm_id, w.warehouse);
-                                                // Режим «Редактировать»: ячейки отмеченных новинок (не закрытых
-                                                // по приёмке) вводимы; шаг = K, потолок = свободный ФФ-остаток.
-                                                const isEditing = editMode && !m.closed;
-                                                const editK = editStep(row.nm_id);
-                                                const stepUp = editK > 0 ? editK : 1;
-                                                const cellInvalid = editValidity.has(row.nm_id);
-                                                const freeFf = Math.max(0, (row.rf_qty || 0) - (row.in_assembly_total || 0));
-                                                const canAddStep = effective.total + stepUp <= freeFf;
-                                                const onlyMono = m.checked && !m.box && m.mono;
-                                                const onlySuper = m.checked && !m.box && !m.mono && m.super;
-                                                const cellBg = m.closed
-                                                    ? 'rgba(148,163,184,0.18)'
-                                                    : onlyMono
-                                                        ? 'rgba(234,179,8,0.10)'
-                                                        : onlySuper
-                                                            ? 'rgba(168,85,247,0.10)'
-                                                            : undefined;
-                                                const cellColor = m.closed
-                                                    ? '#64748b'
-                                                    : onlyMono
-                                                        ? '#a16207'
-                                                        : onlySuper
-                                                            ? '#7e22ce'
-                                                            : v > 0 ? '#16a34a' : 'var(--color-text-muted)';
-                                                // Приоритет: короб → моно → super. Тип + ⌛ если нет лимита приёмки
-                                                // (доступен по options, но free+paid дней = 0 / нет данных → предзаявка).
-                                                const shownType: 'box' | 'mono' | 'super' | null =
-                                                    m.box ? 'box' : m.mono ? 'mono' : m.super ? 'super' : null;
-                                                const limitDays = shownType === 'box' ? (m.box_free ?? 0) + (m.box_paid ?? 0)
-                                                    : shownType === 'mono' ? (m.mono_free ?? 0) + (m.mono_paid ?? 0)
-                                                    : shownType === 'super' ? (m.super_free ?? 0) + (m.super_paid ?? 0)
-                                                    : 0;
-                                                const noLimit = shownType !== null && limitDays <= 0;
-                                                const badgeParts: string[] = [];
-                                                if (m.closed) badgeParts.push('⛔');
-                                                else if (shownType === 'box') badgeParts.push('📦');
-                                                else if (shownType === 'mono') badgeParts.push('📐');
-                                                else if (shownType === 'super') badgeParts.push('🔒');
-                                                if (noLimit) badgeParts.push('⌛');  // ⌛ нет лимита приёмки
-                                                const badge = badgeParts.length ? ' ' + badgeParts.join('') : '';
-                                                const tipParts: string[] = [];
-                                                if (m.closed) tipParts.push(`WB не принимает на «${w.warehouse}» в ближайшие 14 дней`);
-                                                else {
-                                                    // Tooltip с разделением free/paid/quota — пользователь видит всё что
-                                                    // принимает склад, даже если бесплатных слотов нет (платные квоты).
-                                                    const slotsLabel = (free?: number, paid?: number, min?: number | null): string => {
-                                                        const f = free ?? 0;
-                                                        const p = paid ?? 0;
-                                                        if (f > 0 && p > 0) return ` (бесплатно ${f}/14 + платно ${p}/14, мин ×${min})`;
-                                                        if (f > 0) return ` (бесплатно ${f}/14 дн)`;
-                                                        if (p > 0) return ` (только платно ${p}/14 дн, мин ×${min})`;
-                                                        if (free === undefined && paid === undefined) return '';
-                                                        return ' (по индивидуальной квоте)';
-                                                    };
-                                                    // Приоритет: короб дешевле, поэтому если есть — другие варианты не показываем.
-                                                    if (m.box) tipParts.push(`коробом${slotsLabel(m.box_free, m.box_paid, m.box_min)}`);
-                                                    else if (m.mono) tipParts.push(`моно-паллетой${slotsLabel(m.mono_free, m.mono_paid, m.mono_min)}`);
-                                                    else if (m.super) tipParts.push(`super-safe${slotsLabel(m.super_free, m.super_paid, m.super_min)}`);
-                                                }
-                                                const baseTip = tipParts.length
-                                                    ? (m.closed ? tipParts[0] : `Принимает: ${tipParts.join(', ')}${noLimit ? ' — ⌛ нет лимита приёмки, нужна предзаявка' : ''}`)
-                                                    : '';
-                                                const asmTip = asmQty > 0 ? `Уже в сборке: ${formatNumber(asmQty, 0)} шт` : '';
-                                                const tip = [baseTip, asmTip].filter(Boolean).join('\n');
-                                                return (
-                                                    <td key={w.warehouse} title={tip} style={{
-                                                        padding: '8px 10px', textAlign: 'right',
-                                                        color: cellColor,
-                                                        background: cellBg,
-                                                        fontWeight: v > 0 ? 500 : 400,
-                                                        textDecoration: m.closed && v > 0 ? 'line-through' : undefined,
-                                                    }}>
-                                                        <div>
-                                                            {isEditing ? (
-                                                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }} onClick={(e) => e.stopPropagation()}>
-                                                                    <button type="button" disabled={v <= 0}
-                                                                        onClick={() => setColdStartCellEdit(row.nm_id, w.warehouse, Math.max(0, v - stepUp))}
-                                                                        title={`−${stepUp}`}
-                                                                        style={{ width: 22, height: 22, padding: 0, fontSize: 15, fontWeight: 700, lineHeight: 1, borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg-card)', cursor: v > 0 ? 'pointer' : 'default', opacity: v > 0 ? 1 : 0.3 }}
-                                                                    >{'−'}</button>
-                                                                    <input type="number" value={v || ''} min={0} step={stepUp}
-                                                                        title={cellInvalid ? (editValidity.get(row.nm_id) || '') : (editK > 0 ? `кратно ${editK}` : '')}
-                                                                        onChange={(e) => setColdStartCellEdit(row.nm_id, w.warehouse, Math.max(0, Math.round(Number(e.target.value) || 0)))}
-                                                                        style={{ width: 46, textAlign: 'center', fontSize: 13, padding: '3px 4px', borderRadius: 6, background: 'var(--color-bg-card)', color: 'var(--color-text)', border: `1px solid ${cellInvalid ? 'var(--color-danger)' : 'var(--color-border)'}` }}
-                                                                    />
-                                                                    <button type="button" disabled={!canAddStep}
-                                                                        onClick={() => setColdStartCellEdit(row.nm_id, w.warehouse, v + stepUp)}
-                                                                        title={!canAddStep ? `не хватает свободного остатка на +${stepUp}` : `+${stepUp}`}
-                                                                        style={{ width: 22, height: 22, padding: 0, fontSize: 15, fontWeight: 700, lineHeight: 1, borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg-card)', cursor: canAddStep ? 'pointer' : 'default', opacity: canAddStep ? 1 : 0.3 }}
-                                                                    >+</button>
-                                                                </span>
-                                                            ) : (v > 0 ? formatNumber(v, 0) : '—')}
-                                                            {/* Бейдж приёмки: при v>0 — справа от qty; при v=0 + acceptance проверен и
-                                                                склад доступен — рядом с прочерком (видно куда ещё МОЖНО, даже без потребности). */}
-                                                            {!isEditing && badge && (v > 0 || (m.checked && !m.closed)) && (
-                                                                <span style={{ marginLeft: 4, fontSize: 10, opacity: v > 0 ? 1 : 0.55 }}>{badge}</span>
-                                                            )}
-                                                        </div>
-                                                        {asmQty > 0 && (
-                                                            <div style={{ fontSize: 10, color: '#16a34a', fontWeight: 600, lineHeight: 1.1, marginTop: 2 }}>
-                                                                🚚 {formatNumber(asmQty, 0)}
-                                                            </div>
-                                                        )}
-                                                    </td>
-                                                );
-                                            })}
-                                            <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700 }}>
-                                                {effective.total > 0 ? formatNumber(effective.total, 0) : '—'}
-                                            </td>
-                                        </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
-                        </div>
-                    ) : !coldStartLoading ? (
-                        <div style={{ padding: 24, textAlign: 'center', color: 'var(--color-text-muted)' }}>
-                            Нет новинок с остатком — все SKU имеют историю продаж, для них работает обычная локализация
-                        </div>
-                    ) : null}
-                </div>
-            )}
 
-            {/* Table */}
-            {!coldStartMode && data && sortedArticles.length > 0 ? (
+            {/* Единая таблица: обычные + новинки (cold-start) вместе */}
+            {data && sortedArticles.length > 0 ? (
                 <div className="glass-card" style={{ overflowX: 'auto', padding: 0, position: 'relative' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                         {/* Level 1: Group Headers */}
@@ -4066,7 +3610,7 @@ export function WarehouseNeedView({
                         </tbody>
                     </table>
                 </div>
-            ) : !coldStartMode ? (
+            ) : (
                 <div className="glass-card">
                     <div className="empty-state">
                         <div className="empty-state-text">
@@ -4074,7 +3618,7 @@ export function WarehouseNeedView({
                         </div>
                     </div>
                 </div>
-            ) : null}
+            )}
 
             {/* Floating Action Bar */}
             {checkedCount > 0 && (
