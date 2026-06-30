@@ -1747,25 +1747,8 @@ export function WarehouseNeedView({
         });
     }, [visibleWbWarehouses, getBaseArticleWbNeed, bumpedCells, acceptanceMap, regularShipmentAlloc]);
 
-    /** Ручная правка ячейки новинки (nm_id, wb-склад). Аналог setCellEdit, но для
-     *  cold-start: новинок часто нет в data.articles, сеем из newcomerBoxedAlloc. */
-    const setColdStartCellEdit = useCallback((nmId: number, whName: string, qty: number) => {
-        setEdits(prev => {
-            const next = new Map(prev);
-            let m = next.get(nmId);
-            if (!m) {
-                m = new Map();
-                for (const [wh, q] of Object.entries(newcomerBoxedAlloc.get(nmId)?.alloc ?? {})) {
-                    if (q > 0) m.set(wh, q);
-                }
-            } else {
-                m = new Map(m);
-            }
-            if (qty > 0) m.set(whName, qty); else m.delete(whName);
-            next.set(nmId, m);
-            return next;
-        });
-    }, [newcomerBoxedAlloc]);
+    // setColdStartCellEdit удалён: после слияния таблиц правка новинок идёт через
+    // общий setCellEdit (он сеет первую правку из newcomerBoxedAlloc, см. выше).
 
     /** Валидность ручных правок по SKU: '' = ок, иначе текст ошибки.
      *  Правило: Σ ≤ свободный остаток ФФ И каждая ячейка кратна K. */
