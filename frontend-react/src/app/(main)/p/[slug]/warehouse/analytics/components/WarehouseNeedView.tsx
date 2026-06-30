@@ -3052,8 +3052,8 @@ export function WarehouseNeedView({
 
                             {/* ИТОГО row */}
                             <tr style={{ background: 'rgba(59,130,246,0.06)', fontWeight: 700 }}>
-                                <td style={{ ...stickyCheckbox, background: 'rgba(59,130,246,0.06)', borderBottom: '2px solid var(--color-border)' }}>&nbsp;</td>
-                                <td style={{ ...stickyArticle, background: 'rgba(59,130,246,0.06)', borderBottom: '2px solid var(--color-border)' }}>ИТОГО</td>
+                                <td style={{ ...stickyCheckbox, zIndex: 3, background: '#eef3fc', borderBottom: '2px solid var(--color-border)' }}>&nbsp;</td>
+                                <td style={{ ...stickyArticle, zIndex: 3, background: '#eef3fc', borderBottom: '2px solid var(--color-border)' }}>ИТОГО</td>
                                 <td style={{ ...tdBase, fontWeight: 700, borderBottom: '2px solid var(--color-border)' }}>
                                     {formatRevenue(totals.revenue_30d)}
                                 </td>
