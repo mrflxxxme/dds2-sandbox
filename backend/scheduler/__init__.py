@@ -13,6 +13,7 @@ This module: scheduler lifecycle (start, stop, status, restart).
 
 import contextlib
 import logging
+from datetime import datetime, timedelta
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -43,6 +44,7 @@ from backend.scheduler.jobs.wb_finance import (
     sync_all_projects_wb_finance,
     sync_all_projects_wb_finance_daily,
 )
+from backend.scheduler.jobs.cbr_bic_sync import sync_cbr_bic_directory
 from backend.scheduler.jobs.faktura_statement_sync import sync_all_projects_faktura_statements
 from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
@@ -312,6 +314,21 @@ def start_scheduler():
         misfire_grace_time=3600,
     )
 
+    # Справочник БИК ЦБ (ED807): раз в неделю (Пн 04:00 MSK) + один прогон сразу на старте
+    # (next_run_time) — наполнить cbr_bic после деплоя, чтобы к/с банка получателя резолвился
+    # для любого банка РФ (resolve_bank_db). Без БД-справочника платёжки в не-крупные банки
+    # отбивались банком «Неверно указан к/с».
+    _scheduler.add_job(
+        sync_cbr_bic_directory,
+        trigger=CronTrigger(day_of_week="mon", hour=4, minute=0, timezone=MSK),
+        id="cbr_bic_sync",
+        name="CBR BIC directory sync (weekly Mon 04:00 MSK + on startup)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+        next_run_time=datetime.now(MSK),
+    )
+
     # AI morning digest: daily at 7:00 MSK
     _scheduler.add_job(
         send_daily_digests,
@@ -368,7 +385,6 @@ def start_scheduler():
 
     # Startup catch-up: run finance daily sync 30s after start
     # to recover from missed jobs (e.g. worker restart during scheduled time)
-    from datetime import datetime, timedelta
 
     from apscheduler.triggers.date import DateTrigger
 

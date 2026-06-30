@@ -33,7 +33,7 @@ from backend.models import Project, ProjectMember, User
 from backend.models.payment_request import PaymentRequest
 from backend.project_context import get_current_project
 from backend.rbac import require_role
-from backend.services.bank_directory import resolve_bank
+from backend.services.bank_directory import resolve_bank_db
 from backend.schemas.payment_request import (
     ALLOWED_PR_DOC_TYPES,
     ArchiveShipmentsRequest,
@@ -47,6 +47,9 @@ from backend.schemas.payment_request import (
     InvoiceParseResult,
     LinkShipmentsRequest,
     PaymentActionRequest,
+    PaymentCategoryCreate,
+    PaymentCategorySchema,
+    PaymentCategoryUpdate,
     PaymentRequestCreate,
     PaymentRequestDetail,
     PaymentRequestDocumentResponse,
@@ -60,6 +63,7 @@ from backend.schemas.payment_request import (
     UnlinkShipmentsRequest,
 )
 from backend.services import invoice_parser
+from backend.services import payment_category_service as pcs
 from backend.services import payment_request_documents as docs_service
 from backend.services.faktura_payment import PaymentDraftError, create_payment_draft
 from backend.services.payment_request_service import (
@@ -98,10 +102,14 @@ def _actor(user: User) -> str:
 
 
 @router.get("/banks/{bic}")
-async def get_bank_by_bic(bic: str, _user: User = Depends(get_current_user)) -> dict[str, str]:
-    """БИК → {bic, corr_account, name} из справочника — для авто-заполнения реквизитов
-    получателя. 404, если банка нет в наборе (тогда к/с вводится вручную)."""
-    bank = resolve_bank(bic)
+async def get_bank_by_bic(
+    bic: str,
+    _user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """БИК → {bic, corr_account, name} из справочника ЦБ (таблица cbr_bic, фолбэк на зашитый
+    набор) — для авто-заполнения реквизитов получателя. 404, если банк не найден (к/с вручную)."""
+    bank = await resolve_bank_db(db, bic)
     if bank is None:
         raise HTTPException(status_code=404, detail="Банк по БИК не найден в справочнике")
     return bank
@@ -111,6 +119,7 @@ async def get_bank_by_bic(bic: str, _user: User = Depends(get_current_user)) -> 
 async def list_payment_requests(
     status_filter: str | None = Query(None, alias="status"),
     category: str | None = None,
+    brand: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     counterparty_id: int | None = None,
@@ -124,6 +133,7 @@ async def list_payment_requests(
         project.id,
         status=status_filter,
         category=category,
+        brand=brand,
         date_from=date_from,
         date_to=date_to,
         counterparty_id=counterparty_id,
@@ -245,6 +255,69 @@ async def unarchive_shipments(
     service = PaymentRequestService(db)
     n = await service.unarchive_shipments(project.id, body.shipment_ids)
     return {"unarchived": n}
+
+
+# ─── Справочник «Назначение оплаты» (категории) ─────────────────────────────────
+# ВАЖНО: объявлены ДО `/{request_id}` — иначе «categories» матчится как request_id.
+
+
+@router.get("/categories", response_model=list[PaymentCategorySchema])
+async def list_payment_categories(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Список категорий для выпадающего «Назначение» + карты лейблов на странице Оплаты."""
+    return await pcs.list_categories(db, project.id)
+
+
+@router.post(
+    "/categories",
+    response_model=PaymentCategorySchema,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit_write), Depends(require_role("admin"))],
+)
+async def create_payment_category(
+    body: PaymentCategoryCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await pcs.create_category(db, project.id, body.label, body.sort_order)
+    except pcs.PaymentCategoryError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.patch(
+    "/categories/{cat_id}",
+    response_model=PaymentCategorySchema,
+    dependencies=[Depends(rate_limit_write), Depends(require_role("admin"))],
+)
+async def update_payment_category(
+    cat_id: int,
+    body: PaymentCategoryUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await pcs.update_category(db, project.id, cat_id, body.label, body.sort_order)
+    except pcs.PaymentCategoryError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.delete(
+    "/categories/{cat_id}",
+    dependencies=[Depends(rate_limit_write), Depends(require_role("admin"))],
+)
+async def delete_payment_category(
+    cat_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        await pcs.delete_category(db, project.id, cat_id)
+    except pcs.PaymentCategoryError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True}
 
 
 @router.get("/{request_id}", response_model=PaymentRequestDetail)
@@ -565,29 +638,42 @@ async def parse_invoice_file(
     file: UploadFile = File(...),
     _user: User = Depends(get_current_user),
 ) -> InvoiceParseResult:
-    """Распознать реквизиты получателя из файла счёта (PDF/Word) — ПОДСКАЗКА для формы.
+    """Распознать реквизиты получателя из файла счёта (PDF/Word/фото) — ПОДСКАЗКА для формы.
 
     В БД ничего не пишется (без project-скоупа). Поля, не прошедшие проверку
     (контроль-ключ р/с по БИК, БИК в справочнике), остаются None — вводятся вручную.
+    PDF/Word разбираются текстовым Claude+regex, фото (jpg/png/webp/heic) — vision-Claude.
     """
-    # Счёт: только PDF или Word (фото исключаем — нечего парсить без OCR). Валидация
-    # как у upload_payment_request_document: allowlist MIME + блок исполняемых + magic.
+    # Счёт: PDF/Word/фото. Валидация как у upload_payment_request_document:
+    # allowlist MIME ИЛИ расширение (браузер часто шлёт пустой content_type на HEIC)
+    # + блок исполняемых + magic-проверка ниже.
     content_type = (file.content_type or "").lower()
     filename_lower = (file.filename or "").lower()
     allowed_mime = (
         "application/pdf",
         "application/msword",
         "application/vnd.openxmlformats-officedocument",
+        "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif",
+    )
+    allowed_ext = (
+        ".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif",
     )
     bad_ext = (".exe", ".bat", ".cmd", ".dll", ".sh", ".msi", ".ps1", ".com")
-    if filename_lower.endswith(bad_ext) or not any(content_type.startswith(p) for p in allowed_mime):
-        raise HTTPException(status_code=415, detail="Поддерживаются PDF или Word (для распознавания реквизитов)")
+    ok_type = any(content_type.startswith(p) for p in allowed_mime) or filename_lower.endswith(allowed_ext)
+    if filename_lower.endswith(bad_ext) or not ok_type:
+        raise HTTPException(status_code=415, detail="Поддерживаются PDF, Word или фото счёта (JPG/PNG/HEIC)")
 
+    # Распознавание (без записи в БД) допускает файл крупнее хранимого документа: многостраничные
+    # телефонные сканы счёта легко >20 МБ. Кап = MAX_UPLOAD_SIZE_MB; разнесённые части ужимаются.
+    # Размер режем ДО чтения тела в память (Content-Length), затем перестраховка по факту.
+    max_mb = settings.MAX_UPLOAD_SIZE_MB
+    max_bytes = max_mb * 1024 * 1024
+    if file.size is not None and file.size > max_bytes:
+        raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {max_mb} МБ")
     data = await file.read()
     validate_file_content(data, file.filename or "invoice")  # magic-bytes integrity по расширению
-    max_bytes = min(_PR_DOC_MAX_MB, settings.MAX_UPLOAD_SIZE_MB) * 1024 * 1024
     if len(data) > max_bytes:
-        raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {_PR_DOC_MAX_MB} МБ")
+        raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {max_mb} МБ")
 
     return await invoice_parser.parse_invoice_async(data, file.filename or "invoice")
 

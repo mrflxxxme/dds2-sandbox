@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "pr01_wb_prices"
-down_revision = "cogs01_category_ref_is_cogs"
+down_revision = "cbr01_cbr_bic_directory"
 branch_labels = None
 depends_on = None
 

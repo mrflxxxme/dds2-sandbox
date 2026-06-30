@@ -2648,13 +2648,26 @@ export interface CostForecastResponse {
 export type PaymentRequestStatus = 'DRAFT' | 'PENDING_REVIEW' | 'APPROVED' | 'DRAFT_CREATED' | 'PAID' | 'REJECTED' | 'CANCELLED';
 export type PaymentRequestSource = 'MANUAL' | 'COUNTERPARTY';
 export type PaymentRequestDocType = 'INVOICE' | 'ACT';
-export type PaymentRequestCategory = 'LOGISTICS' | 'PHOTO_CONTENT' | 'CUSTOMS' | 'FULFILLMENT' | 'DESIGN' | 'HOUSEHOLD' | 'OTHER';
+// «Назначение оплаты» — теперь редактируемый справочник (PaymentCategory), поэтому код — string.
+// LOGISTICS/OTHER остаются системными кодами со спец-логикой (привязка к отгрузке/банк, дефолт).
+export type PaymentRequestCategory = string;
+
+/** Строка справочника «Назначение оплаты» (управляется в модалке на странице Оплаты). */
+export interface PaymentCategory {
+  id: number;
+  code: string;
+  label: string;
+  sort_order: number;
+  is_system: boolean;
+  project_id: number | null;
+}
 
 export interface PaymentRequestRow {
   id: number;
   number: string;
   status: PaymentRequestStatus;
   category: PaymentRequestCategory | null;
+  brand: string | null;  // бренд-атрибуция; null = «Все бренды»
   project_id: number | null;
   project_name: string | null;
   payee_name: string | null;
@@ -2665,6 +2678,14 @@ export interface PaymentRequestRow {
   matched_transaction_id: number | null;
   doc_count: number;
   created_at: string;
+}
+
+/** Разрезанный под-документ из многостраничного файла (счёт+акт в одном PDF). */
+export interface ParsedDocument {
+  doc_type: PaymentRequestDocType;
+  filename: string;
+  mime_type: string;
+  content_b64: string;
 }
 
 export interface InvoiceParseResult {
@@ -2679,6 +2700,8 @@ export interface InvoiceParseResult {
   purpose: string | null;
   fields_found: string[];
   warnings: string[];
+  /** Авто-разнесение: счёт→INVOICE, акт→ACT. Пусто, если резать нечего. */
+  documents: ParsedDocument[];
 }
 
 export interface PaymentRequestDocument {
@@ -2808,6 +2831,8 @@ export interface PaymentRequestCreate {
   currency?: string;
   pickup_date?: string;
   purpose?: string;
+  // Бренд-атрибуция. Опущено → «Все бренды»; null → сбросить в «Все бренды» (при PATCH).
+  brand?: string | null;
 }
 
 export interface PaymentRequestStatusPoll {

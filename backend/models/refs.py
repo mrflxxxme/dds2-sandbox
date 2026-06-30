@@ -270,3 +270,21 @@ class ProductSubcategoryMap(Base):
         UniqueConstraint("project_id", "nm_id", name="uq_product_subcategory_map_nm"),
         Index("ix_product_subcategory_map_project_nm_id", "project_id", "nm_id"),
     )
+
+
+class CbrBic(Base):
+    """Справочник БИК ЦБ РФ (формат ED807): БИК → корр. счёт банка + название.
+
+    Национальный справочник (без project_id, без soft-delete) — полностью обновляется
+    джобом из cbr.ru. Источник истины для к/с банка получателя в платёжке (к/с НЕ выводится
+    формулой из БИК). Резолв — `services/bank_directory.resolve_bank_db` (с фолбэком на
+    зашитый набор крупных банков, если таблица пуста / банк отсутствует)."""
+
+    __tablename__ = "cbr_bic"
+
+    bic: Mapped[str] = mapped_column(String(9), primary_key=True)
+    corr_account: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )

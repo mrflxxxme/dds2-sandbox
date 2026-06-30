@@ -33,6 +33,20 @@ def _mock_minio(monkeypatch):
     monkeypatch.setattr("backend.services.payment_request_documents.get_minio", _fake_get_minio)
 
 
+# Глобальные категории (project_id NULL) коммитятся и persist в общей БД между тестами →
+# сбрасываем кастомные/переименованные перед каждым тестом (см. test_payment_category_service).
+@pytest.fixture(autouse=True)
+async def _reset_payment_categories(db_session):
+    from sqlalchemy import text
+
+    await db_session.execute(text("DELETE FROM payment_categories WHERE is_system = false"))
+    await db_session.execute(
+        text("UPDATE payment_categories SET label = 'Другое', is_deleted = false WHERE code = 'OTHER'")
+    )
+    await db_session.commit()
+    yield
+
+
 async def _project_headers(client, auth_headers) -> dict:
     resp = await client.post("/api/v1/projects", json={"name": "PayReq Test"}, headers=auth_headers)
     return {**auth_headers, "X-Project-Id": str(resp.json()["id"])}
@@ -144,6 +158,47 @@ async def test_create_general_no_project(client, auth_headers):
     assert body["project_name"] is None          # общая заявка — без имени проекта
     assert body["category"] == "PHOTO_CONTENT"
     assert body["number"].startswith("ОБЩ-")
+
+
+@pytest.mark.asyncio
+async def test_brand_create_filter_and_edit(client, auth_headers):
+    """Бренд: сохраняется на заявке (NULL = «Все бренды»), list фильтрует, PATCH правит/сбрасывает."""
+    headers = await _project_headers(client, auth_headers)
+    # Заявка с брендом.
+    r1 = await client.post(
+        "/api/v1/payment-requests",
+        json={
+            "source": "MANUAL", "category": "OTHER", "brand": "Ромашка",
+            "payee_inn": _INN, "payee_account": _ACC, "payee_bik": _BIK,
+            "payee_name": "ООО Перевозчик", "amount": "5000.00",
+        },
+        headers=headers,
+    )
+    assert r1.status_code == 201, r1.text
+    branded = r1.json()
+    assert branded["brand"] == "Ромашка"
+    # Заявка без бренда → «Все бренды» (NULL).
+    plain = (await _create_manual(client, headers)).json()
+    assert plain["brand"] is None
+
+    # list?brand=Ромашка → только брендированная.
+    lst = await client.get("/api/v1/payment-requests", params={"brand": "Ромашка"}, headers=headers)
+    assert lst.status_code == 200
+    ids = [i["id"] for i in lst.json()["items"]]
+    assert branded["id"] in ids and plain["id"] not in ids
+
+    # PATCH: сменить бренд.
+    patched = await client.patch(
+        f"/api/v1/payment-requests/{branded['id']}", json={"brand": "Лютик"}, headers=headers
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["brand"] == "Лютик"
+
+    # PATCH: сбросить в «Все бренды» (null).
+    cleared = await client.patch(
+        f"/api/v1/payment-requests/{branded['id']}", json={"brand": None}, headers=headers
+    )
+    assert cleared.status_code == 200 and cleared.json()["brand"] is None
 
 
 @pytest.mark.asyncio
@@ -342,5 +397,76 @@ async def test_create_drafts_bulk_blocked_for_non_admin(client, auth_headers, db
         "/api/v1/payment-requests/create-drafts",
         json={"ids": [pr["id"]], "confirm": True},
         headers=headers,
+    )
+    assert resp.status_code == 403
+
+
+# ─── Справочник «Назначение оплаты» (категории) ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_payment_categories(client, auth_headers):
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.get("/api/v1/payment-requests/categories", headers=headers)
+    assert resp.status_code == 200
+    by_code = {c["code"]: c for c in resp.json()}
+    assert "LOGISTICS" in by_code and "OTHER" in by_code
+    assert by_code["LOGISTICS"]["is_system"] is True
+    assert by_code["LOGISTICS"]["label"]  # есть человекочитаемый лейбл
+
+
+@pytest.mark.asyncio
+async def test_create_and_use_custom_category(client, auth_headers):
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.post(
+        "/api/v1/payment-requests/categories", json={"label": "Маркетинг"}, headers=headers
+    )
+    assert resp.status_code == 201, resp.text
+    cat = resp.json()
+    assert cat["is_system"] is False and cat["code"]
+    # заявка с новым кодом проходит валидацию
+    req = await client.post(
+        "/api/v1/payment-requests",
+        json={"source": "MANUAL", "payee_inn": _INN, "payee_account": _ACC, "payee_bik": _BIK,
+              "payee_name": "ООО Дизайн", "amount": "5000.00", "category": cat["code"]},
+        headers=headers,
+    )
+    assert req.status_code == 201, req.text
+    assert req.json()["category"] == cat["code"]
+
+
+@pytest.mark.asyncio
+async def test_create_request_unknown_category_rejected(client, auth_headers):
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.post(
+        "/api/v1/payment-requests",
+        json={"source": "MANUAL", "payee_inn": _INN, "payee_account": _ACC, "payee_bik": _BIK,
+              "payee_name": "X", "amount": "100.00", "category": "ZZZ_UNKNOWN_CODE"},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_delete_system_category_blocked(client, auth_headers):
+    headers = await _project_headers(client, auth_headers)
+    cats = (await client.get("/api/v1/payment-requests/categories", headers=headers)).json()
+    other_id = next(c["id"] for c in cats if c["code"] == "OTHER")
+    resp = await client.delete(f"/api/v1/payment-requests/categories/{other_id}", headers=headers)
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_category_write_blocked_for_non_admin(client, auth_headers, db_session):
+    from sqlalchemy import text
+
+    headers = await _project_headers(client, auth_headers)
+    project_id = int(headers["X-Project-Id"])
+    await db_session.execute(
+        text("UPDATE project_members SET role = 'editor' WHERE project_id = :p"), {"p": project_id}
+    )
+    await db_session.commit()
+    resp = await client.post(
+        "/api/v1/payment-requests/categories", json={"label": "Хак"}, headers=headers
     )
     assert resp.status_code == 403

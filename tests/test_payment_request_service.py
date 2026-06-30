@@ -154,6 +154,9 @@ async def test_submit_succeeds_with_documents(db_session, project):
 def test_transition_guard():
     prs.check_transition(PaymentRequestStatus.DRAFT, PaymentRequestStatus.PENDING_REVIEW)  # ok
     prs.check_transition(PaymentRequestStatus.DRAFT_CREATED, PaymentRequestStatus.PAID)  # ok
+    # Банковский черновик можно создать и после ручного согласования (любая категория).
+    prs.check_transition(PaymentRequestStatus.PENDING_REVIEW, PaymentRequestStatus.DRAFT_CREATED)  # ok
+    prs.check_transition(PaymentRequestStatus.APPROVED, PaymentRequestStatus.DRAFT_CREATED)  # ok (новое)
     with pytest.raises(ValueError):
         prs.check_transition(PaymentRequestStatus.DRAFT, PaymentRequestStatus.PAID)
     with pytest.raises(ValueError):

@@ -38,6 +38,7 @@ from backend.schemas.payment_request import (
     ShippableShipmentRow,
 )
 from backend.utils.time import utcnow
+from backend.services import payment_category_service as pcs
 from backend.services import payment_request_status as prs
 
 logger = logging.getLogger("dds.payment_request")
@@ -45,7 +46,7 @@ logger = logging.getLogger("dds.payment_request")
 _LIST_LIMIT = 2000
 # Поля, которые разрешено править через PATCH (защита от mass-assignment при расширении схемы).
 _EDITABLE_FIELDS = frozenset({
-    "counterparty_id", "category", "payee_inn", "payee_kpp", "payee_account", "payee_bik",
+    "counterparty_id", "category", "brand", "payee_inn", "payee_kpp", "payee_account", "payee_bik",
     "payee_bank_name", "payee_corr_account", "payee_name", "amount", "currency",
     "pickup_date", "purpose",
 })
@@ -101,6 +102,7 @@ class PaymentRequestService:
         *,
         status: str | None = None,
         category: str | None = None,
+        brand: str | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
         counterparty_id: int | None = None,
@@ -114,6 +116,8 @@ class PaymentRequestService:
             conds.append(PaymentRequest.status == status)
         if category:
             conds.append(PaymentRequest.category == category)
+        if brand:
+            conds.append(PaymentRequest.brand == brand)
         if counterparty_id is not None:
             conds.append(PaymentRequest.counterparty_id == counterparty_id)
         if date_from is not None:
@@ -762,6 +766,8 @@ class PaymentRequestService:
             if covered_shipments
             else PaymentRequestCategory.OTHER.value
         )
+        if not await pcs.is_valid_code(self.db, project_id, category):
+            raise PaymentRequestValidationError([f"Неизвестная категория оплаты: {category}"])
 
         number = await self._next_number(project_id)
         pr = PaymentRequest(
@@ -770,6 +776,7 @@ class PaymentRequestService:
             status=PaymentRequestStatus.PENDING_REVIEW.value,
             source=data.source,
             category=category,
+            brand=data.brand or None,  # пусто/None → «Все бренды»
             counterparty_id=counterparty_id,
             outbound_shipment_id=(covered_shipments[0].id if covered_shipments else data.outbound_shipment_id),
             assembly_request_id=assembly_request_id,
@@ -810,6 +817,8 @@ class PaymentRequestService:
             PaymentRequestStatus.PENDING_REVIEW.value,
         ):
             raise ValueError("Редактировать можно только до создания платёжки в банке")
+        if data.category is not None and not await pcs.is_valid_code(self.db, project_id, data.category):
+            raise PaymentRequestValidationError([f"Неизвестная категория оплаты: {data.category}"])
         for field, value in data.model_dump(exclude_unset=True).items():
             if field in _EDITABLE_FIELDS:  # allowlist — не даём писать status/bank_*/matched_* при расширении схемы
                 setattr(pr, field, value)

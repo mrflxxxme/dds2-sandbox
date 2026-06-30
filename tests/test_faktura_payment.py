@@ -38,12 +38,13 @@ def _pr() -> PaymentRequest:
 
 
 def test_build_payment_body_matches_proven_contract():
-    body = _build_payment_body(_pr(), _PAYER, "guid-1")
+    # к/с резолвится upstream (resolve_bank_db по БИК) и передаётся явно — body его прокидывает.
+    body = _build_payment_body(_pr(), _PAYER, "guid-1", corr_account="30101810400000000225")
 
     # Имена полей — строго как в проверенной /payments/validate пробе.
     assert body["payeeAccountNumber"] == "40702810900000000001"
     assert body["payeeBankBic"] == "044525225"
-    assert body["payeeBankAccount"] == "30101810000000000225"
+    assert body["payeeBankAccount"] == "30101810400000000225"
     assert body["payeeName"] == "ООО Перевозчик"
     assert body["payeeInn"] == "7700000001"
     assert body["payeeKpp"] == "770001001"

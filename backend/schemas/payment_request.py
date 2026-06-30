@@ -13,11 +13,22 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ALLOWED_SOURCES = ["MANUAL", "COUNTERPARTY"]
 ALLOWED_PR_DOC_TYPES = ["INVOICE", "ACT"]
+# Системные коды категорий (сид pay08). Список «Назначение оплаты» теперь редактируемый
+# справочник (PaymentCategory) — существование кода проверяет сервис; здесь только формат.
 ALLOWED_CATEGORIES = ["LOGISTICS", "PHOTO_CONTENT", "CUSTOMS", "FULFILLMENT", "DESIGN", "HOUSEHOLD", "OTHER"]
 
 _INN_RE = r"^\d{10,12}$"
 _BIK_RE = r"^\d{9}$"
 _ACC_RE = r"^\d{20}$"
+_CATEGORY_CODE_RE = r"^[A-Z0-9_]{1,30}$"  # формат кода категории (существование — в сервисе)
+
+
+def _check_category_code(v: str | None) -> str | None:
+    import re
+
+    if v is not None and not re.match(_CATEGORY_CODE_RE, v):
+        raise ValueError("category: недопустимый код категории")
+    return v
 
 
 # ─── Write models ─────────────────────────────────────────────────────────────
@@ -53,6 +64,8 @@ class PaymentRequestCreate(BaseModel):
     currency: str = Field(default="RUB", max_length=3)
     pickup_date: date | None = None
     purpose: str | None = None
+    # Бренд-атрибуция. None/не передано → «Все бренды» (общий расход по проекту).
+    brand: str | None = Field(None, max_length=200)
 
     @field_validator("source")
     @classmethod
@@ -64,9 +77,7 @@ class PaymentRequestCreate(BaseModel):
     @field_validator("category")
     @classmethod
     def _validate_category(cls, v: str | None) -> str | None:
-        if v is not None and v not in ALLOWED_CATEGORIES:
-            raise ValueError(f"category must be one of: {ALLOWED_CATEGORIES}")
-        return v
+        return _check_category_code(v)
 
 
 class PaymentRequestUpdate(BaseModel):
@@ -85,13 +96,41 @@ class PaymentRequestUpdate(BaseModel):
     currency: str | None = Field(None, max_length=3)
     pickup_date: date | None = None
     purpose: str | None = None
+    # Бренд-атрибуция. null → сбросить в «Все бренды»; не передано → не менять.
+    brand: str | None = Field(None, max_length=200)
 
     @field_validator("category")
     @classmethod
     def _validate_category(cls, v: str | None) -> str | None:
-        if v is not None and v not in ALLOWED_CATEGORIES:
-            raise ValueError(f"category must be one of: {ALLOWED_CATEGORIES}")
-        return v
+        return _check_category_code(v)
+
+
+# ─── Справочник «Назначение оплаты» (PaymentCategory) ────────────────────────────
+
+
+class PaymentCategorySchema(BaseModel):
+    id: int
+    code: str
+    label: str
+    sort_order: int
+    is_system: bool
+    project_id: int | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaymentCategoryCreate(BaseModel):
+    """Добавление категории. code генерит сервис из label (стабильный, неизменяемый)."""
+
+    label: str = Field(min_length=1, max_length=100)
+    sort_order: int | None = None
+
+
+class PaymentCategoryUpdate(BaseModel):
+    """Переименование / смена порядка. code менять нельзя (на нём висят заявки)."""
+
+    label: str | None = Field(None, min_length=1, max_length=100)
+    sort_order: int | None = None
 
 
 class SubmitRequest(BaseModel):
@@ -111,11 +150,25 @@ class PaymentActionRequest(BaseModel):
     comment: str | None = None
 
 
+class ParsedDocument(BaseModel):
+    """Один разрезанный под-документ из многостраничного файла (счёт+акт в одном PDF).
+    content_b64 — base64 готового под-файла (под-PDF), который фронт прикрепит к заявке
+    с указанным doc_type обычным upload'ом (без повторного распознавания). В БД не пишется."""
+
+    doc_type: str  # "INVOICE" | "ACT" (см. ALLOWED_PR_DOC_TYPES)
+    filename: str
+    mime_type: str
+    content_b64: str
+
+
 class InvoiceParseResult(BaseModel):
     """Распознанные реквизиты из файла счёта (PDF/Word) — ПОДСКАЗКА для формы, в БД не пишется.
     Поля, не прошедшие проверку (контроль-ключ р/с по БИК, БИК в справочнике), остаются None —
     их пользователь вводит вручную. fields_found — что распознано (для ✓ в UI), warnings — что
-    требует ручной проверки. Числовые поля сериализуются строкой (как и весь домен)."""
+    требует ручной проверки. Числовые поля сериализуются строкой (как и весь домен).
+
+    documents — авто-разнесение: если в одном файле счёт И акт (многостраничный PDF), бэкенд
+    режет его постранично по типам; иначе пусто (фронт прикрепляет оригинал как было)."""
 
     payee_name: str | None = None
     payee_inn: str | None = None
@@ -128,6 +181,7 @@ class InvoiceParseResult(BaseModel):
     purpose: str | None = None
     fields_found: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    documents: list["ParsedDocument"] = Field(default_factory=list)
 
 
 class CreateDraftRequest(BaseModel):
@@ -199,6 +253,7 @@ class PaymentRequestRow(BaseModel):
     number: str
     status: str
     category: str | None = None
+    brand: str | None = None  # бренд-атрибуция; None = «Все бренды»
     project_id: int | None = None
     project_name: str | None = None  # имя проекта («—» для общей заявки) — заполняет сервис
     payee_name: str | None = None

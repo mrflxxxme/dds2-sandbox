@@ -12,6 +12,7 @@ import type {
     PaymentRequestDocType,
     PaymentRequestStatus,
     PaymentRequestCategory,
+    PaymentCategory,
     InvoiceParseResult,
 } from '@/types/api';
 
@@ -21,6 +22,7 @@ export function addPaymentRequestMethods(api: ApiClient) {
         listPaymentRequests(filters?: {
             status?: PaymentRequestStatus;
             category?: PaymentRequestCategory;
+            brand?: string;
             date_from?: string;
             date_to?: string;
             counterparty_id?: number;
@@ -30,6 +32,7 @@ export function addPaymentRequestMethods(api: ApiClient) {
             const qs = new URLSearchParams();
             if (filters?.status) qs.set('status', filters.status);
             if (filters?.category) qs.set('category', filters.category);
+            if (filters?.brand) qs.set('brand', filters.brand);
             if (filters?.date_from) qs.set('date_from', filters.date_from);
             if (filters?.date_to) qs.set('date_to', filters.date_to);
             if (filters?.counterparty_id != null) qs.set('counterparty_id', String(filters.counterparty_id));
@@ -108,6 +111,24 @@ export function addPaymentRequestMethods(api: ApiClient) {
         /** PATCH /api/v1/payment-requests/{id} — only allowed in DRAFT status */
         updatePaymentRequest(id: number, body: Partial<PaymentRequestCreate>): Promise<PaymentRequestDetail> {
             return api.request<PaymentRequestDetail>('PATCH', `/api/v1/payment-requests/${id}`, body);
+        },
+
+        // ─── Справочник «Назначение оплаты» (категории) ──────────────────────────
+        /** GET /api/v1/payment-requests/categories */
+        listPaymentCategories(): Promise<PaymentCategory[]> {
+            return api.request<PaymentCategory[]>('GET', '/api/v1/payment-requests/categories');
+        },
+        /** POST /api/v1/payment-requests/categories — admin */
+        createPaymentCategory(label: string, sortOrder?: number): Promise<PaymentCategory> {
+            return api.request<PaymentCategory>('POST', '/api/v1/payment-requests/categories', { label, sort_order: sortOrder ?? null });
+        },
+        /** PATCH /api/v1/payment-requests/categories/{id} — admin */
+        updatePaymentCategory(id: number, body: { label?: string; sort_order?: number }): Promise<PaymentCategory> {
+            return api.request<PaymentCategory>('PATCH', `/api/v1/payment-requests/categories/${id}`, body);
+        },
+        /** DELETE /api/v1/payment-requests/categories/{id} — admin */
+        deletePaymentCategory(id: number): Promise<{ ok: boolean }> {
+            return api.request<{ ok: boolean }>('DELETE', `/api/v1/payment-requests/categories/${id}`);
         },
 
         /** POST /api/v1/payment-requests/{id}/documents — multipart upload */

@@ -1,0 +1,8 @@
+# Snyk policy — https://docs.snyk.io/snyk-cli/test-for-vulnerabilities/the-.snyk-file
+# Исключение из Snyk Code (SAST): загрузчик справочника БИК ЦБ.
+# XXE-предупреждение на xml.etree — ложноположительное: stdlib expat на Python 3.11 НЕ резолвит
+# внешние сущности (подтверждено security-review), а parse_ed807 явно отвергает DOCTYPE/ENTITY.
+# Источник — официальный ED807-ZIP ЦБ по HTTPS (cbr.ru).
+exclude:
+  code:
+    - backend/services/cbr_bic_loader.py

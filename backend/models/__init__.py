@@ -109,6 +109,7 @@ from backend.models.order_city import (
 # Payment Requests (заявки на оплату перевозчику)
 from backend.models.payment_request import (
     PAYMENT_REQUEST_TRANSITIONS,
+    PaymentCategory,
     PaymentRequest,
     PaymentRequestDocType,
     PaymentRequestDocument,
@@ -134,6 +135,7 @@ from backend.models.refs import (
     Account,
     CategoryOverride,  # noqa: F401
     CategoryRef,
+    CbrBic,
     CounterpartyCategory,
     ImtAlias,  # noqa: F401
     OpeningBalance,
@@ -272,6 +274,7 @@ __all__ = [
     "ProjectInvite",
     # References
     "Account",
+    "CbrBic",
     "CounterpartyCategory",
     "Override",
     "OpeningBalance",
@@ -334,6 +337,7 @@ __all__ = [
     # Order City
     "OrderCityMap",
     # Payment Requests
+    "PaymentCategory",
     "PaymentRequest",
     "PaymentRequestDocument",
     "PaymentRequestEvent",

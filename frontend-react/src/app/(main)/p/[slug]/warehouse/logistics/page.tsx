@@ -88,6 +88,7 @@ function ffRequestNumbers(item: AssemblyRequest): string[] {
 
 /** Строка разбивки забора совместной поставки: один склад-источник. */
 interface JointRow {
+    number: string;                        // номер сборки этого склада-источника (ASM-…)
     warehouse_id: number;
     warehouse_name: string | null;
     pallets_count: number | null;
@@ -100,6 +101,7 @@ interface JointRow {
  *  Anchor берёт собственные поля; siblings — поля JointSibling. Сортировка по warehouse_id. */
 function jointRows(item: AssemblyRequest): JointRow[] {
     const rows: JointRow[] = [{
+        number: item.number,
         warehouse_id: item.warehouse_id,
         warehouse_name: item.warehouse_name ?? null,
         pallets_count: item.pallets_count,
@@ -109,6 +111,7 @@ function jointRows(item: AssemblyRequest): JointRow[] {
     }];
     for (const s of item.joint_siblings ?? []) {
         rows.push({
+            number: s.number,
             warehouse_id: s.warehouse_id,
             warehouse_name: s.warehouse_name ?? null,
             pallets_count: s.pallets_count ?? null,
@@ -641,41 +644,62 @@ export default function LogisticsPage() {
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
                     Забор по складам
                 </div>
-                <table className="data-table" style={{ fontSize: 12, width: '100%' }}>
+                {/* Компактная таблица под узкую карточку: фикс-лейаут + узкие колонки,
+                    статус — точкой. (.data-table с padding 12×16 и auto-layout вылезала за край.) */}
+                <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 11 }}>
+                    <colgroup>
+                        <col />
+                        <col style={{ width: 30 }} />
+                        <col style={{ width: 54 }} />
+                        <col style={{ width: 46 }} />
+                        <col style={{ width: 18 }} />
+                    </colgroup>
                     <thead>
-                        <tr>
-                            <th>Склад</th>
-                            <th style={{ textAlign: 'right' }}>Палет</th>
-                            <th style={{ textAlign: 'right' }}>Вес</th>
-                            <th>ФФ №</th>
-                            <th>Статус</th>
+                        <tr style={{ color: 'var(--color-text-muted)' }}>
+                            <th style={{ padding: '2px 4px', textAlign: 'left', fontWeight: 500 }}>Сборка / склад</th>
+                            <th style={{ padding: '2px 4px', textAlign: 'right', fontWeight: 500 }}>Пал</th>
+                            <th style={{ padding: '2px 4px', textAlign: 'right', fontWeight: 500 }}>Вес</th>
+                            <th style={{ padding: '2px 4px', textAlign: 'right', fontWeight: 500 }}>ФФ №</th>
+                            <th style={{ padding: '2px 2px' }}></th>
                         </tr>
                     </thead>
                     <tbody>
                         {rows.map(r => {
-                            const cfg = STATUS_MAP[r.status as AssemblyStatus] || { label: r.status, className: '' };
                             const weight = r.pallets_count != null && r.pallet_weight_kg != null
                                 ? r.pallets_count * r.pallet_weight_kg : null;
+                            const ready = r.status !== 'PENDING' && r.status !== 'IN_PROGRESS';
                             return (
-                                <tr key={r.warehouse_id}>
-                                    <td>{r.warehouse_name || `#${r.warehouse_id}`}</td>
-                                    <td style={{ textAlign: 'right' }}>{r.pallets_count != null ? formatNumber(r.pallets_count, 0) : '—'}</td>
-                                    <td style={{ textAlign: 'right' }}>{weight != null ? formatNumber(weight, 0) + ' кг' : '—'}</td>
-                                    <td style={{ fontFamily: 'monospace' }}>{r.ff_request_number || '—'}</td>
-                                    <td><span className={`badge ${cfg.className}`} style={{ fontSize: 10 }}>{cfg.label}</span></td>
+                                <tr key={r.warehouse_id} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                    <td style={{ padding: '3px 4px', verticalAlign: 'top' }}>
+                                        <div style={{ fontFamily: 'monospace' }}>{r.number}</div>
+                                        <div style={{ color: 'var(--color-text-muted)', fontSize: 10, wordBreak: 'break-word' }}>{r.warehouse_name || `#${r.warehouse_id}`}</div>
+                                    </td>
+                                    <td style={{ padding: '3px 4px', textAlign: 'right', verticalAlign: 'top' }}>{r.pallets_count != null ? formatNumber(r.pallets_count, 0) : '—'}</td>
+                                    <td style={{ padding: '3px 4px', textAlign: 'right', verticalAlign: 'top' }}>{weight != null ? formatNumber(weight, 0) + ' кг' : '—'}</td>
+                                    <td style={{ padding: '3px 4px', textAlign: 'right', verticalAlign: 'top', fontFamily: 'monospace' }}>{r.ff_request_number || '—'}</td>
+                                    <td style={{ padding: '3px 2px', textAlign: 'center', verticalAlign: 'top' }}>
+                                        <span
+                                            title={STATUS_MAP[r.status as AssemblyStatus]?.label || String(r.status)}
+                                            style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: ready ? 'var(--color-success)' : 'var(--color-warning)' }}
+                                        />
+                                    </td>
                                 </tr>
                             );
                         })}
                     </tbody>
                     <tfoot>
-                        <tr style={{ fontWeight: 600 }}>
-                            <td>ИТОГО</td>
-                            <td style={{ textAlign: 'right' }}>{formatNumber(jointTotalPallets(item), 0)}</td>
-                            <td style={{ textAlign: 'right' }}>{formatNumber(jointTotalWeight(item), 0)} кг</td>
+                        <tr style={{ fontWeight: 600, borderTop: '1px solid var(--color-border)' }}>
+                            <td style={{ padding: '3px 4px' }}>Итого</td>
+                            <td style={{ padding: '3px 4px', textAlign: 'right' }}>{formatNumber(jointTotalPallets(item), 0)}</td>
+                            <td style={{ padding: '3px 4px', textAlign: 'right' }}>{formatNumber(jointTotalWeight(item), 0)} кг</td>
                             <td colSpan={2}></td>
                         </tr>
                     </tfoot>
                 </table>
+                <div style={{ display: 'flex', gap: 10, fontSize: 10, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                    <span><span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: 'var(--color-warning)', verticalAlign: 'middle', marginRight: 3 }} />в сборке</span>
+                    <span><span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: 'var(--color-success)', verticalAlign: 'middle', marginRight: 3 }} />готова</span>
+                </div>
             </div>
         );
     };
@@ -1052,14 +1076,16 @@ export default function LogisticsPage() {
                                                     className="glass-card"
                                                     style={{
                                                         padding: 16,
-                                                        opacity: soon ? 0.5 : 1,
+                                                        // Совместную не затемняем даже «в сборке» — внутри читаемая разбивка.
+                                                        opacity: (soon && !isJoint) ? 0.5 : 1,
                                                         border: borderColor ? `2px solid ${borderColor}` : undefined,
+                                                        borderLeft: isJoint ? '3px solid var(--color-primary)' : undefined,
                                                         cursor: canCheck ? 'pointer' : undefined,
                                                     }}
                                                     onClick={canCheck ? () => toggleChecked(item.id) : undefined}
                                                 >
-                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                                             {canCheck && (
                                                                 <input
                                                                     type="checkbox"
@@ -1071,13 +1097,18 @@ export default function LogisticsPage() {
                                                             )}
                                                             <Link
                                                                 href={`/p/${slug}/warehouse/assembly/${item.id}`}
-                                                                style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)' }}
+                                                                style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)', whiteSpace: 'nowrap' }}
                                                                 onClick={e => e.stopPropagation()}
                                                             >
                                                                 {item.number}
                                                             </Link>
+                                                            {isJoint && (item.joint_siblings?.length ?? 0) > 0 && (
+                                                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }} title="Связанные сборки той же совместной поставки">
+                                                                    + {(item.joint_siblings || []).map(s => s.number).join(', ')}
+                                                                </span>
+                                                            )}
                                                         </div>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                                                             {isJoint && (
                                                                 <span className="badge badge-info" title="Совместная FBO-поставка: несколько сборок (по складу-источнику) в одну WB-поставку">
                                                                     Совместная
@@ -1134,29 +1165,28 @@ export default function LogisticsPage() {
 
                                                     {isJoint ? renderJointBreakdown(item) : renderForecastCard(item)}
 
-                                                    {!soon && (
+                                                    {(!soon || isJoint) && (
                                                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
                                                             <div style={{ display: 'flex', gap: 8 }}>
-                                                                {item.status === 'READY' && (
-                                                                    isJoint && !jointReady ? (
-                                                                        <div style={{ width: '100%' }}>
-                                                                            <button className="btn btn-primary btn-sm" disabled style={{ width: '100%' }}>
-                                                                                Назначить машину
-                                                                            </button>
-                                                                            <div style={{ fontSize: 11, color: 'var(--color-warning)', marginTop: 4 }}>
-                                                                                Ждёт готовности: {jointPending.join(', ') || 'другие склады поставки'}
-                                                                            </div>
-                                                                        </div>
-                                                                    ) : (
-                                                                        <button
-                                                                            className="btn btn-primary btn-sm"
-                                                                            onClick={() => openVehicleModal([item.id])}
-                                                                            disabled={actionLoading}
-                                                                        >
-                                                                            Назначить машину{isJoint ? ' (совместная)' : ''}
+                                                                {isJoint && !jointReady ? (
+                                                                    // Совместная не готова — пометка + неактивная кнопка ВСЕГДА (даже если якорь «в сборке»).
+                                                                    <div style={{ width: '100%' }}>
+                                                                        <button className="btn btn-primary btn-sm" disabled style={{ width: '100%' }}>
+                                                                            Назначить машину
                                                                         </button>
-                                                                    )
-                                                                )}
+                                                                        <div style={{ fontSize: 11, color: 'var(--color-warning)', marginTop: 4 }}>
+                                                                            Ждёт готовности: {jointPending.join(', ') || 'другие склады поставки'}
+                                                                        </div>
+                                                                    </div>
+                                                                ) : item.status === 'READY' ? (
+                                                                    <button
+                                                                        className="btn btn-primary btn-sm"
+                                                                        onClick={() => openVehicleModal([item.id])}
+                                                                        disabled={actionLoading}
+                                                                    >
+                                                                        Назначить машину{isJoint ? ' (совместная)' : ''}
+                                                                    </button>
+                                                                ) : null}
                                                                 {item.status === 'VEHICLE_ASSIGNED' && (
                                                                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
                                                                         {(item.vehicle_info || item.driver_phone) && (
