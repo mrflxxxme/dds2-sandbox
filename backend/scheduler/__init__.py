@@ -13,7 +13,7 @@ This module: scheduler lifecycle (start, stop, status, restart).
 
 import contextlib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -371,7 +371,6 @@ def start_scheduler():
 
     # Startup catch-up: run finance daily sync 30s after start
     # to recover from missed jobs (e.g. worker restart during scheduled time)
-    from datetime import datetime, timedelta
 
     from apscheduler.triggers.date import DateTrigger
 
