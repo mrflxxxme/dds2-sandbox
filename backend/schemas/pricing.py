@@ -89,7 +89,13 @@ class PricingGroup(BaseModel):
     cost_total: float = 0
     wb_expenses: float = 0
     margin_pct: float = 0
+    adv_sum: float = 0  # расходы на рекламу группы, ₽
+    drr: float = 0  # ДРР группы: реклама / выручка × 100
     wb_stock: int = 0
+    own_stock: int = 0
+    assembly_stock: int = 0
+    transit_stock: int = 0
+    total_stock: int = 0
     stock_value_cost: float = 0
     children: list[PricingRow] = []
     subgroups: list["PricingGroup"] = []  # вложенные группы (размеры внутри категории)

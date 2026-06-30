@@ -566,6 +566,7 @@ def _aggregate_group(label: str, items: list[PricingRow]) -> PricingGroup:
     coef, pct, share = _portfolio_markup(items)
     revenue = sum(r.revenue for r in items)
     profit = sum(r.profit for r in items)
+    adv = sum(r.adv_sum for r in items)
     return PricingGroup(
         category=label,
         articles=len(items),
@@ -578,7 +579,13 @@ def _aggregate_group(label: str, items: list[PricingRow]) -> PricingGroup:
         cost_total=round(sum(r.cost_total for r in items), 2),
         wb_expenses=round(sum(r.wb_expenses for r in items), 2),
         margin_pct=round(profit / revenue * 100, 2) if revenue > 0 else 0,
+        adv_sum=round(adv, 2),
+        drr=round(adv / revenue * 100, 2) if revenue > 0 else 0,
         wb_stock=sum(r.wb_stock for r in items),
+        own_stock=sum(r.own_stock for r in items),
+        assembly_stock=sum(r.assembly_stock for r in items),
+        transit_stock=sum(r.transit_stock for r in items),
+        total_stock=sum(r.total_stock for r in items),
         stock_value_cost=round(sum(r.stock_value_cost or 0 for r in items), 2),
     )
 

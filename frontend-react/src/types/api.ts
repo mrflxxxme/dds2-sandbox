@@ -584,7 +584,13 @@ export interface PricingGroup {
   cost_total: number;
   wb_expenses: number;
   margin_pct: number;
+  adv_sum: number;
+  drr: number;
   wb_stock: number;
+  own_stock: number;
+  assembly_stock: number;
+  transit_stock: number;
+  total_stock: number;
   stock_value_cost: number;
   children: PricingRow[];
   subgroups: PricingGroup[];

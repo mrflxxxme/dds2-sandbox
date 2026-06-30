@@ -27,12 +27,29 @@ const R = (v: React.ReactNode, color?: string): React.ReactNode => (
 );
 const coef = (v: number | null | undefined) => (v == null ? '—' : formatNumber(v, 2) + '×');
 
-// стили для дерева группировок
-const thT: React.CSSProperties = { padding: '8px 10px', textAlign: 'right', fontSize: 12, color: 'var(--color-text-dim)', whiteSpace: 'nowrap' };
-const thTL: React.CSSProperties = { ...thT, textAlign: 'left' };
-const tdT: React.CSSProperties = { padding: '7px 10px', textAlign: 'right', fontSize: 13, whiteSpace: 'nowrap' };
-const tdTL: React.CSSProperties = { ...tdT, textAlign: 'left' };
-const TREE_METRIC_COLS = ['Цена ВБ', 'Себест.', 'Коэф.', 'Наценка %', 'Маржа %', 'Мин. цена', 'Остаток ВБ', 'Всего', 'Заморожено', 'Выручка', 'Прибыль'];
+// ─── стиль дерева «как в воронке» (светлая таблица, секции, цвета) ──────────
+const FT_NAME_H: React.CSSProperties = { position: 'sticky', left: 0, top: 0, background: '#ffffff', color: '#374151', zIndex: 22, verticalAlign: 'bottom', borderBottom: '2px solid #e5e7eb', minWidth: 250, borderRight: '1px solid #e5e7eb', padding: '8px 12px', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.08)', textAlign: 'left', fontSize: 12, fontWeight: 700 };
+const FT_SEC: React.CSSProperties = { position: 'sticky', top: 0, background: '#f9fafb', color: '#374151', textAlign: 'center', zIndex: 20, borderBottom: '2px solid #e5e7eb', fontSize: 12, fontWeight: 600, padding: '6px 8px', whiteSpace: 'nowrap' };
+const FT_COLH: React.CSSProperties = { position: 'sticky', top: 33, background: '#ffffff', color: '#4b5563', zIndex: 19, fontSize: 11, borderBottom: '1px solid #e5e7eb', padding: '6px 8px', textAlign: 'right', whiteSpace: 'nowrap' };
+const SL: React.CSSProperties = { borderLeft: '1px solid #eef0f4' };
+const nc = (bg: string, extra?: React.CSSProperties): React.CSSProperties => ({ textAlign: 'right', borderBottom: '1px solid #f3f4f6', padding: '7px 10px', fontSize: 13, color: '#111827', background: bg, whiteSpace: 'nowrap', ...(extra || {}) });
+const drrCol = (v: number | null) => (v == null ? '#9ca3af' : v > 30 ? '#ef4444' : v > 15 ? '#f59e0b' : v > 0 ? '#10b981' : '#9ca3af');
+const marginCol = (v: number | null) => (v == null ? '#9ca3af' : v > 20 ? '#10b981' : v > 0 ? '#65a30d' : '#ef4444');
+const profitCol = (v: number | null) => ((v || 0) > 0 ? '#10b981' : (v || 0) < 0 ? '#ef4444' : '#111827');
+const gmroiCol = (v: number | null) => (v == null ? '#9ca3af' : v >= 3 ? '#10b981' : v < 1 ? '#f59e0b' : '#111827');
+
+interface TreeVM {
+    price: number | null; cost: number | null; coef: number | null; markup: number | null; margin: number | null; minPrice: number | null;
+    adv: number; drr: number; wbStock: number; own: number; asm: number; transit: number; total: number; frozen: number | null; days: number | null;
+    revenue: number; profit: number; gmroi: number | null; bg: string;
+}
+const TREE_SECTIONS: Array<[string, number]> = [['ЦЕНООБРАЗОВАНИЕ', 6], ['РЕКЛАМА', 2], ['ОСТАТКИ', 7], ['ФИНАНСЫ', 3]];
+const TREE_COLS: Array<[string, boolean]> = [
+    ['Цена ВБ', false], ['Себест.', false], ['Коэф.', false], ['Наценка %', false], ['Маржа %', false], ['Мин. цена', false],
+    ['Расходы ₽', true], ['ДРР %', false],
+    ['Остаток ВБ', true], ['Наш склад', false], ['В сборке', false], ['В пути ВБ', false], ['Всего', false], ['Заморож. ₽', false], ['Дней', false],
+    ['Выручка ₽', true], ['Прибыль ₽', false], ['GMROI', false],
+];
 
 export default function PricingPage() {
     const [resp, setResp] = useState<PricingResponse | null>(null);
@@ -343,18 +360,50 @@ export default function PricingPage() {
     );
 }
 
+function MetricTds({ vm }: { vm: TreeVM }) {
+    return (
+        <>
+            <td style={nc(vm.bg)}>{money(vm.price)}</td>
+            <td style={nc(vm.bg)}>{money(vm.cost)}</td>
+            <td style={nc(vm.bg, { fontWeight: 600 })}>{coef(vm.coef)}</td>
+            <td style={nc(vm.bg)}>{pct(vm.markup)}</td>
+            <td style={nc(vm.bg, { color: marginCol(vm.margin) })}>{pct(vm.margin)}</td>
+            <td style={nc(vm.bg)}>{money(vm.minPrice)}</td>
+            <td style={nc(vm.bg, { ...SL, color: (vm.adv || 0) > 0 ? '#f97316' : '#9ca3af' })}>{money(vm.adv)}</td>
+            <td style={nc(vm.bg, { color: drrCol(vm.drr), fontWeight: (vm.drr || 0) > 30 ? 600 : 400 })}>{pct(vm.drr)}</td>
+            <td style={nc(vm.bg, SL)}>{int0(vm.wbStock)}</td>
+            <td style={nc(vm.bg)}>{int0(vm.own)}</td>
+            <td style={nc(vm.bg)}>{int0(vm.asm)}</td>
+            <td style={nc(vm.bg)}>{int0(vm.transit)}</td>
+            <td style={nc(vm.bg, { fontWeight: 600 })}>{int0(vm.total)}</td>
+            <td style={nc(vm.bg)}>{money(vm.frozen)}</td>
+            <td style={nc(vm.bg)}>{vm.days == null ? '—' : int0(vm.days)}</td>
+            <td style={nc(vm.bg, SL)}>{money(vm.revenue)}</td>
+            <td style={nc(vm.bg, { fontWeight: 700, color: profitCol(vm.profit), background: (vm.profit || 0) > 0 ? '#f0fdf4' : (vm.profit || 0) < 0 ? '#fef2f2' : vm.bg })}>{money(vm.profit)}</td>
+            <td style={nc(vm.bg, { color: gmroiCol(vm.gmroi) })}>{vm.gmroi == null ? '—' : num2(vm.gmroi)}</td>
+        </>
+    );
+}
+
 function PricingTree({ groups, mode, expanded, onToggle, loading }: {
     groups: PricingGroup[]; mode: 'category' | 'size'; expanded: Set<string>; onToggle: (k: string) => void; loading: boolean;
 }) {
     if (loading) return <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>⏳ Загрузка…</div>;
     if (!groups.length) return <div className="glass-card" style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>💲 Нет данных</div>;
     return (
-        <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <div className="glass-card" style={{ padding: 0, overflow: 'auto', maxHeight: 'calc(100vh - 360px)' }}>
+            <table style={{ minWidth: 1500, borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#ffffff' }}>
                 <thead>
-                    <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                        <th style={thTL}>{mode === 'size' ? 'Категория / Размер / Артикул' : 'Категория / Артикул'}</th>
-                        {TREE_METRIC_COLS.map((h) => <th key={h} style={thT}>{h}</th>)}
+                    <tr>
+                        <th rowSpan={2} style={FT_NAME_H}>{mode === 'size' ? 'КАТЕГОРИЯ → РАЗМЕР → SKU' : 'КАТЕГОРИЯ → SKU'}</th>
+                        {TREE_SECTIONS.map(([label, span], i) => (
+                            <th key={label} colSpan={span} style={i === 0 ? FT_SEC : { ...FT_SEC, borderLeft: '1px solid #e5e7eb' }}>{label}</th>
+                        ))}
+                    </tr>
+                    <tr>
+                        {TREE_COLS.map(([label, left]) => (
+                            <th key={label} style={left ? { ...FT_COLH, borderLeft: '1px solid #e5e7eb' } : FT_COLH}>{label}</th>
+                        ))}
                     </tr>
                 </thead>
                 <tbody>
@@ -371,24 +420,21 @@ function GroupNode({ group, mode, parentKey, expanded, onToggle }: {
     const key = parentKey ? `${parentKey}|${group.category}` : group.category;
     const open = expanded.has(key);
     const level = parentKey ? 1 : 0;
+    const bg = level === 0 ? '#eef2ff' : '#f5f7fb';
+    const gmroi = group.stock_value_cost > 0 ? (group.revenue - group.cost_total) / group.stock_value_cost : null;
+    const vm: TreeVM = {
+        price: null, cost: null, coef: group.markup_coef, markup: group.markup_pct, margin: group.margin_pct, minPrice: null,
+        adv: group.adv_sum, drr: group.drr, wbStock: group.wb_stock, own: group.own_stock, asm: group.assembly_stock, transit: group.transit_stock,
+        total: group.total_stock, frozen: group.stock_value_cost, days: null, revenue: group.revenue, profit: group.profit, gmroi, bg,
+    };
     return (
         <>
-            <tr onClick={() => onToggle(key)} style={{ cursor: 'pointer', borderBottom: '1px solid var(--color-border)', background: level === 0 ? 'var(--color-bg-card)' : 'transparent' }}>
-                <td style={{ ...tdTL, paddingLeft: 10 + level * 22, fontWeight: level === 0 ? 700 : 600 }}>
+            <tr onClick={() => onToggle(key)} style={{ cursor: 'pointer' }}>
+                <td style={{ position: 'sticky', left: 0, background: bg, zIndex: 2, padding: '8px 12px', paddingLeft: 12 + level * 20, borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', minWidth: 250, fontWeight: level === 0 ? 700 : 600, color: '#111827', whiteSpace: 'nowrap' }}>
                     <span style={{ marginRight: 6 }}>{open ? '▾' : '▸'}</span>{group.category}
-                    <span style={{ color: 'var(--color-text-dim)', fontWeight: 400, fontSize: 11, marginLeft: 8 }}>{int0(group.articles)} арт.</span>
+                    <span style={{ color: '#9ca3af', fontWeight: 400, fontSize: 11, marginLeft: 8 }}>{int0(group.articles)} арт.</span>
                 </td>
-                <td style={tdT}>—</td>
-                <td style={tdT}>—</td>
-                <td style={{ ...tdT, fontWeight: 600 }}>{coef(group.markup_coef)}</td>
-                <td style={{ ...tdT, color: signColor(group.markup_pct) }}>{pct(group.markup_pct)}</td>
-                <td style={{ ...tdT, color: signColor(group.margin_pct) }}>{pct(group.margin_pct)}</td>
-                <td style={tdT}>—</td>
-                <td style={tdT}>{int0(group.wb_stock)}</td>
-                <td style={tdT}>—</td>
-                <td style={tdT}>{money(group.stock_value_cost)}</td>
-                <td style={tdT}>{money(group.revenue)}</td>
-                <td style={{ ...tdT, color: signColor(group.profit) }}>{money(group.profit)}</td>
+                <MetricTds vm={vm} />
             </tr>
             {open && group.subgroups.map((sg) => <GroupNode key={sg.category} group={sg} mode={mode} parentKey={key} expanded={expanded} onToggle={onToggle} />)}
             {open && group.children.map((r) => <LeafRow key={r.nm_id} row={r} level={level + 1} />)}
@@ -397,25 +443,21 @@ function GroupNode({ group, mode, parentKey, expanded, onToggle }: {
 }
 
 function LeafRow({ row, level }: { row: PricingRow; level: number }) {
+    const bg = '#ffffff';
+    const vm: TreeVM = {
+        price: row.current_price, cost: row.cost_price, coef: row.markup_coef, markup: row.markup_pct, margin: row.margin_pct, minPrice: row.breakeven_price,
+        adv: row.adv_sum, drr: row.drr, wbStock: row.wb_stock, own: row.own_stock, asm: row.assembly_stock, transit: row.transit_stock,
+        total: row.total_stock, frozen: row.stock_value_cost, days: row.days_left, revenue: row.revenue, profit: row.profit, gmroi: row.gmroi, bg,
+    };
     return (
-        <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-            <td style={{ ...tdTL, paddingLeft: 10 + level * 22 }}>
-                <span style={{ fontWeight: 500 }}>{row.vendor_code || row.nm_id}</span>
-                <span style={{ color: 'var(--color-text-dim)', fontSize: 11, marginLeft: 6 }}>{row.nm_id}</span>
-                {row.is_new && <span style={{ color: 'var(--color-accent)', fontSize: 11, marginLeft: 6 }}>🆕</span>}
-                {row.anomaly && <span style={{ color: 'var(--color-danger)', fontSize: 11, marginLeft: 6 }}>⚠ {row.anomaly}</span>}
+        <tr>
+            <td style={{ position: 'sticky', left: 0, background: bg, zIndex: 2, padding: '7px 12px', paddingLeft: 12 + level * 20, borderRight: '1px solid #e5e7eb', borderBottom: '1px solid #f3f4f6', boxShadow: 'inset -6px 0 6px -6px rgba(0,0,0,0.05)', minWidth: 250, whiteSpace: 'nowrap' }}>
+                <span style={{ fontWeight: 500, fontSize: 13, color: '#111827' }}>{row.vendor_code || row.nm_id}</span>
+                <span style={{ color: '#9ca3af', fontSize: 11, marginLeft: 6 }}>#{row.nm_id}</span>
+                {row.is_new && <span style={{ color: '#3b82f6', fontSize: 11, marginLeft: 6 }}>🆕</span>}
+                {row.anomaly && <div style={{ color: '#ef4444', fontSize: 11 }}>⚠ {row.anomaly}</div>}
             </td>
-            <td style={tdT}>{money(row.current_price)}</td>
-            <td style={tdT}>{money(row.cost_price)}</td>
-            <td style={{ ...tdT, fontWeight: 600 }}>{coef(row.markup_coef)}</td>
-            <td style={tdT}>{pct(row.markup_pct)}</td>
-            <td style={{ ...tdT, color: signColor(row.margin_pct) }}>{pct(row.margin_pct)}</td>
-            <td style={tdT}>{money(row.breakeven_price)}</td>
-            <td style={tdT}>{int0(row.wb_stock)}</td>
-            <td style={tdT}>{int0(row.total_stock)}</td>
-            <td style={tdT}>{money(row.stock_value_cost)}</td>
-            <td style={tdT}>{money(row.revenue)}</td>
-            <td style={{ ...tdT, color: signColor(row.profit) }}>{money(row.profit)}</td>
+            <MetricTds vm={vm} />
         </tr>
     );
 }
