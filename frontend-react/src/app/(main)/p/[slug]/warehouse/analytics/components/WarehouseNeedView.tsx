@@ -432,7 +432,6 @@ export function WarehouseNeedView({
     }, [slug]);
 
     /* ── Cold-start режим ── */
-    const [coldStartMode, setColdStartMode] = useState(false);
     const [coldStartData, setColdStartData] = useState<ColdStartTableResponse | null>(null);
     const [coldStartMinPack, setColdStartMinPack] = useState(5);
     // Доля свободного ФФ-остатка, разрешённая к отгрузке новинки за раз (дефолт 55%):
@@ -440,10 +439,7 @@ export function WarehouseNeedView({
     const [coldStartShipPct, setColdStartShipPct] = useState(55);
     // Пол: если свободного ФФ ≤ N шт — отгружаем 100% (буфер держать бессмысленно).
     const [coldStartShipFloor, setColdStartShipFloor] = useState(50);
-    const [coldStartLoading, setColdStartLoading] = useState(false);
     const [coldStartQtyOverrides, setColdStartQtyOverrides] = useState<Record<number, number>>({});
-    const [coldStartSortCol, setColdStartSortCol] = useState<string>('revenue_30d');
-    const [coldStartSortDir, setColdStartSortDir] = useState<'asc' | 'desc'>('desc');
 
     useEffect(() => {
         // Сброс overrides при перезагрузке cold-start данных
@@ -457,18 +453,15 @@ export function WarehouseNeedView({
     useEffect(() => {
         let cancelled = false;
         (async () => {
-            if (coldStartMode) setColdStartLoading(true);
             try {
                 const resp = await api.getColdStartTable(analysisDays, coldStartMinPack, coldStartShipPct, coldStartShipFloor);
                 if (!cancelled) setColdStartData(resp);
             } catch (e) {
                 if (!cancelled) console.error('cold-start load failed', e);
-            } finally {
-                if (!cancelled) setColdStartLoading(false);
             }
         })();
         return () => { cancelled = true; };
-    }, [coldStartMode, analysisDays, coldStartMinPack, coldStartShipPct, coldStartShipFloor]);
+    }, [analysisDays, coldStartMinPack, coldStartShipPct, coldStartShipFloor]);
 
     // Speed-карта /okrug-info — anchors_top per ФО. В «Дораспределить» нужен
     // anchor_rank склада (POSTAVLENO) как tiebreak при выборе primary-якоря ФО
@@ -1482,42 +1475,17 @@ export function WarehouseNeedView({
         return false;
     }, [acceptanceMap, wbWarehouses, getArticleWbNeed, getCellAcceptanceMarks]);
 
-    /** Cold-start новинка: есть ли планируемый склад (alloc>0) с ⌛ (нет лимита
-     *  приёмки). Аналог skuHasNoLimitCell, но по newcomerBoxedAlloc + новинко-складам. */
-    const coldStartHasNoLimit = useCallback((row: ColdStartTableRow): boolean => {
-        if (acceptanceMap.size === 0) return false;
-        const boxed = newcomerBoxedAlloc.get(row.nm_id);
-        if (!boxed) return false;
-        for (const wh of filteredMainWarehouses) {
-            if ((boxed.alloc[wh.warehouse] || 0) <= 0) continue;
-            const m = getCellAcceptanceMarks(row.nm_id, wh.warehouse);
-            if (!m.checked || m.closed) continue;
-            const days = m.box ? (m.box_free ?? 0) + (m.box_paid ?? 0)
-                : m.mono ? (m.mono_free ?? 0) + (m.mono_paid ?? 0)
-                : m.super ? (m.super_free ?? 0) + (m.super_paid ?? 0)
-                : 1;
-            if (days <= 0) return true;
-        }
-        return false;
-    }, [acceptanceMap, newcomerBoxedAlloc, filteredMainWarehouses, getCellAcceptanceMarks]);
-
     // Счётчик чипа «Нет лимита» — mode-aware: в режиме новинок по cold-start строкам,
     // иначе по основным SKU.
     const noLimitCount = useMemo(() => {
         if (acceptanceMap.size === 0) return 0;
         let n = 0;
-        if (coldStartMode) {
-            for (const row of coldStartData?.rows ?? []) {
-                if (coldStartHasNoLimit(row)) n++;
-            }
-        } else {
-            for (const a of data?.articles ?? []) {
-                if (newcomerSet.has(a.nm_id)) continue;
-                if (skuHasNoLimitCell(a)) n++;
-            }
+        for (const a of data?.articles ?? []) {
+            if (newcomerSet.has(a.nm_id)) continue;
+            if (skuHasNoLimitCell(a)) n++;
         }
         return n;
-    }, [acceptanceMap, coldStartMode, coldStartData, data, newcomerSet, skuHasNoLimitCell, coldStartHasNoLimit]);
+    }, [acceptanceMap, data, newcomerSet, skuHasNoLimitCell]);
 
     // Новинки cold-start, адаптированные в NeedArticle для ЕДИНОЙ таблицы (одно окно
     // с обычными). Распределение по складам берётся из newcomerBoxedAlloc (через
@@ -1555,9 +1523,6 @@ export function WarehouseNeedView({
         // Единый список: обычные + новинки (cold-start) в ОДНОЙ таблице.
         const base: NeedArticle[] = [...data.articles, ...coldStartAsArticles];
         return base.filter(a => {
-            // Чип «🆕 Новинки» работает как ФИЛЬТР: активен → только новинки;
-            // иначе новинки и обычные показываются вместе.
-            if (coldStartMode && !newcomerSet.has(a.nm_id)) return false;
             // Встроенный режим: артикул уже в текущем черновике → скрываем из таблицы.
             if (hiddenNmIds?.has(a.nm_id)) return false;
             if (brandFilter && a.brand !== brandFilter) return false;
@@ -1610,7 +1575,7 @@ export function WarehouseNeedView({
             if (noLimitFilter && !skuHasNoLimitCell(a)) return false;
             return true;
         });
-    }, [data, coldStartAsArticles, coldStartMode, newcomerBoxedAlloc, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet, showAdvanced, getSendWithBump, noLimitFilter, skuHasNoLimitCell, hiddenNmIds]);
+    }, [data, coldStartAsArticles, newcomerBoxedAlloc, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet, showAdvanced, getSendWithBump, noLimitFilter, skuHasNoLimitCell, hiddenNmIds]);
 
     /** WB-колонки в матрице, отфильтрованные по packageFilter.
      *  При packageFilter='mono' — оставляем только склады где для хотя бы одного
@@ -1831,125 +1796,6 @@ export function WarehouseNeedView({
     }, [filteredArticles, sortCol, sortDir, getDisplayWbQty, getDisplayShipTotal]);
 
     /* ── Totals ── */
-
-    /* Cold-start: сортировка + ИТОГО (под колонками) */
-    /** Cold-start строки под верхние фильтры (бренд / категория / поиск) — чтобы
-     *  селект категории работал и на вкладке «Новинки» (рендер, итоги, «Выбрать все»). */
-    /** Кол-во новинок для бейджа вкладки «Новинки» — общий тотал (без brand/search
-     *  фильтров), но в embedded-режиме за вычетом уже добавленных в черновик. */
-    const coldStartRowsCount = useMemo(() => {
-        const rows = coldStartData?.rows ?? [];
-        if (!hiddenNmIds) return rows.length;
-        return rows.reduce((n, r) => n + (hiddenNmIds.has(r.nm_id) ? 0 : 1), 0);
-    }, [coldStartData, hiddenNmIds]);
-
-    const filteredColdStartRows = useMemo(() => {
-        if (!coldStartData) return [];
-        const q = searchQuery.trim().toLowerCase();
-        return coldStartData.rows.filter(r => {
-            // Встроенный режим: новинка уже в текущем черновике → скрываем.
-            if (hiddenNmIds?.has(r.nm_id)) return false;
-            if (brandFilter && r.brand !== brandFilter) return false;
-            if (subjectFilter && r.subject !== subjectFilter) return false;
-            if (q && !(r.article_seller || '').toLowerCase().includes(q)) return false;
-            if (noLimitFilter && !coldStartHasNoLimit(r)) return false;
-            return true;
-        });
-    }, [coldStartData, brandFilter, subjectFilter, searchQuery, noLimitFilter, coldStartHasNoLimit, hiddenNmIds]);
-
-    /** Колонки-склады для таблицы новинок. При активном «Нет лимита» оставляем
-     *  только склады, где у видимой новинки есть ⌛ (план>0, нет лимита приёмки) —
-     *  таблица сжимается. Иначе — все anchor-склады. ВАЖНО: только для РЕНДЕРА;
-     *  расчёт аллокаций по-прежнему по полному filteredMainWarehouses. */
-    const visibleColdStartWarehouses = useMemo(() => {
-        if (!noLimitFilter || acceptanceMap.size === 0) return filteredMainWarehouses;
-        return filteredMainWarehouses.filter(wh => {
-            for (const row of filteredColdStartRows) {
-                const boxed = newcomerBoxedAlloc.get(row.nm_id);
-                if (!boxed || (boxed.alloc[wh.warehouse] || 0) <= 0) continue;
-                const m = getCellAcceptanceMarks(row.nm_id, wh.warehouse);
-                if (!m.checked || m.closed) continue;
-                const days = m.box ? (m.box_free ?? 0) + (m.box_paid ?? 0)
-                    : m.mono ? (m.mono_free ?? 0) + (m.mono_paid ?? 0)
-                    : m.super ? (m.super_free ?? 0) + (m.super_paid ?? 0)
-                    : 1;
-                if (days <= 0) return true;
-            }
-            return false;
-        });
-    }, [noLimitFilter, acceptanceMap, filteredMainWarehouses, filteredColdStartRows, newcomerBoxedAlloc, getCellAcceptanceMarks]);
-
-    const sortedColdStartRows = useMemo(() => {
-        const rows = [...filteredColdStartRows];
-        const dir = coldStartSortDir === 'asc' ? 1 : -1;
-        const col = coldStartSortCol;
-        rows.sort((a, b) => {
-            if (col === 'vendor_code') {
-                return dir * (a.article_seller || '').localeCompare(b.article_seller || '');
-            }
-            let va = 0, vb = 0;
-            if (col === 'revenue_30d') { va = a.revenue_30d; vb = b.revenue_30d; }
-            else if (col === 'rf_qty') { va = a.rf_qty; vb = b.rf_qty; }
-            else if (col === 'wb_qty') { va = a.wb_qty; vb = b.wb_qty; }
-            else if (col === 'in_assembly_total') { va = a.in_assembly_total; vb = b.in_assembly_total; }
-            else if (col === 'total_allocated') { va = a.total_allocated; vb = b.total_allocated; }
-            else if (col === 'free_remainder') {
-                va = Math.max(0, a.rf_qty - a.in_assembly_total - a.total_allocated);
-                vb = Math.max(0, b.rf_qty - b.in_assembly_total - b.total_allocated);
-            }
-            else if (col.startsWith('cs_rf_')) {
-                const id = parseInt(col.replace('cs_rf_', ''), 10);
-                va = a.rf_by_warehouse?.[id] || 0;
-                vb = b.rf_by_warehouse?.[id] || 0;
-            }
-            else if (col.startsWith('cs_wb_')) {
-                const wh = col.replace('cs_wb_', '');
-                va = a.allocations?.[wh] || 0;
-                vb = b.allocations?.[wh] || 0;
-            }
-            return dir * (va - vb);
-        });
-        return rows;
-    }, [filteredColdStartRows, coldStartSortCol, coldStartSortDir]);
-
-    const coldStartTotals = useMemo(() => {
-        const t = {
-            revenue_30d: 0,
-            rf_qty: 0,
-            wb_qty: 0,
-            in_assembly_total: 0,
-            total_allocated: 0,  // Σ box-кратно отгружаемого («Распределить» = «Итого» = per-wh)
-            free_remainder: 0,   // Σ свободного ФФ-остатка (что ещё можно распределить)
-            rf: {} as Record<number, number>,
-            wb: {} as Record<string, number>,
-        };
-        if (!coldStartData) return t;
-        for (const row of filteredColdStartRows) {
-            t.revenue_30d += row.revenue_30d || 0;
-            t.rf_qty += row.rf_qty || 0;
-            t.wb_qty += row.wb_qty || 0;
-            t.in_assembly_total += row.in_assembly_total || 0;
-            // «Распределить»/«Итого»/wb — всё из box-кратной карты (хвост < короба на ФФ).
-            const boxed = newcomerBoxedAlloc.get(row.nm_id);
-            const boxedTotal = boxed?.total ?? (row.total_allocated || 0);
-            t.total_allocated += boxedTotal;
-            t.free_remainder += Math.max(0, (row.rf_qty || 0) - (row.in_assembly_total || 0) - boxedTotal);
-            for (const [whId, qty] of Object.entries(row.rf_by_warehouse || {})) {
-                const id = Number(whId);
-                t.rf[id] = (t.rf[id] || 0) + (qty || 0);
-            }
-            for (const [wh, qty] of Object.entries(boxed?.alloc ?? row.allocations ?? {})) {
-                t.wb[wh] = (t.wb[wh] || 0) + (qty || 0);
-            }
-        }
-        return t;
-    }, [coldStartData, filteredColdStartRows, newcomerBoxedAlloc]);
-
-    const handleColdStartSort = (col: string) => {
-        if (coldStartSortCol === col) setColdStartSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
-        else { setColdStartSortCol(col); setColdStartSortDir('desc'); }
-    };
-    const csSortArrow = (col: string) => coldStartSortCol === col ? (coldStartSortDir === 'asc' ? ' ↑' : ' ↓') : '';
 
     const totals = useMemo(() => {
         const t = {
@@ -2874,14 +2720,6 @@ export function WarehouseNeedView({
                     title="SKU без заданной кратности короба."
                 >
                     Без кратности ({multiplicityCounts.without})
-                </button>
-                <button
-                    className={`btn btn-sm ${coldStartMode ? 'btn-primary' : 'btn-secondary'}`}
-                    style={!coldStartMode ? { borderColor: '#a855f7', color: '#a855f7' } : {}}
-                    onClick={() => setColdStartMode(v => !v)}
-                    title="Фильтр: показать ТОЛЬКО новинки. Они уже в общей таблице (распределение по бенчмарку проекта)."
-                >
-                    🆕 Новинки ({coldStartData ? formatNumber(coldStartRowsCount, 0) : '…'})
                 </button>
                 <button
                     className={`btn btn-sm ${palletMode ? 'btn-primary' : 'btn-secondary'}`}
