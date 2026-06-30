@@ -519,6 +519,137 @@ export interface FunnelColorsResponse {
   colors: string[];
 }
 
+// ─── Ценообразование (наценка по артикулам) ──────────────────────────────
+export interface PricingRow {
+  nm_id: number;
+  vendor_code: string | null;
+  brand: string | null;
+  subject: string | null;
+  category: string;
+  size: string;
+  current_price: number | null;
+  base_price: number | null;
+  discount: number | null;
+  cost_price: number | null;
+  has_cost: boolean;
+  has_price: boolean;
+  markup_coef: number | null;
+  markup_pct: number | null;
+  cost_share_pct: number | null;
+  spp_rate: number;
+  buyer_price: number | null;
+  orders_count: number;
+  revenue: number;
+  wb_expenses: number;
+  adv_sum: number;
+  tax: number;
+  cost_total: number;
+  profit: number;
+  margin_pct: number;
+  net_markup_pct: number | null;
+  wb_stock: number;
+  own_stock: number;
+  assembly_stock: number;
+  transit_stock: number;
+  total_stock: number;
+  is_new: boolean;
+  stock_value_cost: number | null;
+  stock_potential_profit: number | null;
+  stock_potential_revenue: number | null;
+  days_left: number | null;
+  sales_per_month: number | null;
+  anomaly: string | null;
+  breakeven_price: number | null;
+  breakeven_with_adv: number | null;
+  safety_margin_pct: number | null;
+  drr: number;
+  cr: number;
+  ctr: number;
+  cpc: number;
+  adv_views: number;
+  adv_clicks: number;
+  gmroi: number | null;
+  sell_through_pct: number | null;
+  elasticity: number | null;
+  elasticity_label: string;
+  optimal_price: number | null;
+  abc: string | null;
+  recommendation: string;
+  imt_id: number | null;
+  sklejka: string;
+  rev_share_pct: number | null;
+  adv_share_pct: number | null;
+  sklejka_role: string;
+}
+
+export interface PricingGroup {
+  category: string;
+  articles: number;
+  priced_articles: number;
+  imt_id?: number | null;
+  advertised_variants?: number;
+  converting_variants?: number;
+  markup_coef: number | null;
+  markup_pct: number | null;
+  cost_share_pct: number | null;
+  revenue: number;
+  profit: number;
+  cost_total: number;
+  wb_expenses: number;
+  margin_pct: number;
+  adv_sum: number;
+  drr: number;
+  ctr: number;
+  cpc: number;
+  adv_views: number;
+  adv_clicks: number;
+  wb_stock: number;
+  own_stock: number;
+  assembly_stock: number;
+  transit_stock: number;
+  total_stock: number;
+  stock_value_cost: number;
+  children: PricingRow[];
+  subgroups: PricingGroup[];
+}
+
+export interface PricingSummary {
+  total_articles: number;
+  priced_articles: number;
+  costed_articles: number;
+  revenue: number;
+  profit: number;
+  cost_total: number;
+  wb_expenses: number;
+  markup_pct: number | null;
+  cost_share_pct: number | null;
+  margin_pct: number;
+  wb_stock_units: number;
+  total_stock_units: number;
+  stock_value_cost: number;
+  anomalies: number;
+}
+
+export interface PricingResponse {
+  group_by: string;
+  data_groups: PricingGroup[];
+  data_rows: PricingRow[];
+  summary: PricingSummary;
+  price_synced_at: string | null;
+  has_bdr: boolean;
+}
+
+export interface PricingAiResponse {
+  html: string;
+  model: string;
+  articles_analyzed: number;
+  items_sent?: number;
+  sklejki_sent?: number;
+  singles_sent?: number;
+  dynamics_window?: Record<string, string> | null;
+  generated_at?: string;
+}
+
 export interface FunnelSummary {
   opens: number;
   open_card?: number;

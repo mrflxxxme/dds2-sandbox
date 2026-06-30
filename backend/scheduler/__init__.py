@@ -48,6 +48,7 @@ from backend.scheduler.jobs.cbr_bic_sync import sync_cbr_bic_directory
 from backend.scheduler.jobs.faktura_statement_sync import sync_all_projects_faktura_statements
 from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
+from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
 from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_stocks
 
 logger = logging.getLogger("dds.scheduler")
@@ -265,6 +266,19 @@ def start_scheduler():
         name="WB warehouse stocks snapshot (daily 00:00 MSK)",
         replace_existing=True,
         misfire_grace_time=600,
+    )
+
+    # WB prices snapshot (цены витрины): 2×/день — 09:30 и 21:30 MSK.
+    # Питает страницу «Ценообразование» (наценка по артикулам). Цены меняются
+    # редко → 2 раза в день достаточно; rate limit Discounts-Prices мягкий.
+    _scheduler.add_job(
+        sync_all_projects_wb_prices,
+        trigger=CronTrigger(hour="9,21", minute=30, timezone=MSK),
+        id="wb_prices_sync",
+        name="WB prices snapshot (09:30 + 21:30 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
     )
 
     # Fulfillment (skladbot, wmscelicom, migfull) stocks + requests mirror —

@@ -164,6 +164,7 @@ async def invalidate_project_reports(project_id: int):
         "reports:localization_dates",
         "reports:localization_daily",
         "reports:warehouse_need",
+        "reports:pricing_markup",
         # Counterparty & Loans (Phase 1 pre-registered; @cached in Phase 2 services)
         "counterparty_list",
         "counterparty_detail",

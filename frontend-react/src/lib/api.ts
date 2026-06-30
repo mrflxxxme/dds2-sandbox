@@ -31,6 +31,7 @@ import { addLoanMethods } from './api/loans';
 import { addWbReturnsMethods } from './api/wb-returns';
 import { addLocalizationMethods } from './api/localization';
 import { addPaymentRequestMethods } from './api/payment-requests';
+import { addPricingMethods } from './api/pricing';
 
 const client = new ApiClient();
 
@@ -57,4 +58,5 @@ export const api = Object.assign(client, {
     ...addWbReturnsMethods(client),
     ...addLocalizationMethods(client),
     ...addPaymentRequestMethods(client),
+    ...addPricingMethods(client),
 });

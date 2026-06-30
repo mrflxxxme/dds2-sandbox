@@ -41,6 +41,7 @@ from backend.routers import (
     monitoring,
     payment_requests,
     planning,
+    pricing,
     projects,
     refs,
     reports,
@@ -545,6 +546,12 @@ app.include_router(
     funnel.router,
     prefix="/api/v1",
     tags=["Funnel"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    pricing.router,
+    prefix="/api/v1",
+    tags=["Pricing"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
