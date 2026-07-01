@@ -8,6 +8,7 @@ HTTP + валидация; вся логика — в services/. Все write-э
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from urllib.parse import quote
 
@@ -63,6 +64,7 @@ from backend.schemas.payment_request import (
     UnlinkShipmentsRequest,
 )
 from backend.services import invoice_parser
+from backend.services import invoice_split
 from backend.services import payment_category_service as pcs
 from backend.services import payment_request_documents as docs_service
 from backend.services.faktura_payment import PaymentDraftError, create_payment_draft
@@ -75,7 +77,7 @@ from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/payment-requests", tags=["Payment Requests"])
 
-_PR_DOC_MAX_MB = 20
+_PR_DOC_MAX_MB = 50
 
 
 def _to_detail(pr: PaymentRequest) -> PaymentRequestDetail:
@@ -716,6 +718,10 @@ async def upload_payment_request_document(
     max_bytes = min(_PR_DOC_MAX_MB, settings.MAX_UPLOAD_SIZE_MB) * 1024 * 1024
     if len(data) > max_bytes:
         raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {_PR_DOC_MAX_MB} МБ")
+
+    # Крупный скан-PDF ужимаем перед хранением (адаптивный DPI: 25 МБ-фото → ~1 МБ), чтобы не
+    # раздувать MinIO. CPU-bound → в to_thread (не блокируем loop). Не-скан/мелкий — без изменений.
+    data = await asyncio.to_thread(invoice_split.downscale_scan_pdf, data, file.filename or "document")
 
     doc = await docs_service.upload_document(
         db,

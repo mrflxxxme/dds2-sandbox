@@ -32,6 +32,7 @@ _MAX_MEDIABOX_PT = 20_000.0
 _STORE_MAX_LONG_PX = 2200     # потолок длинной стороны хранимого под-файла (читаемо, но компактно)
 _VISION_MAX_LONG_PX = 1568    # потолок vision-входа (рекомендация Claude; экономит токены/латентность)
 _JPEG_QUALITY = 85
+_ATTACH_DOWNSCALE_MIN_BYTES = 3 * 1024 * 1024  # ужимаем при привязке только крупные сканы (>3 МБ)
 
 # Заголовки документов. «Акт № …» / «Акт выполненных…» / УПД → ACT; «Счёт на оплату» → INVOICE.
 _ACT_TITLE_RE = re.compile(
@@ -124,3 +125,32 @@ def assemble_pdf_from_images(images: list[Image.Image]) -> bytes:
     buf = io.BytesIO()
     pages[0].save(buf, format="PDF", save_all=True, append_images=pages[1:])
     return buf.getvalue()
+
+
+def downscale_scan_pdf(data: bytes, filename: str) -> bytes:
+    """Крупный скан-PDF (image-only) → компактный растровый PDF (адаптивный DPI), чтобы не хранить
+    десятки МБ в MinIO при привязке к заявке. Возвращает исходные байты, если ужимать нельзя/незачем:
+    мелкий файл, не-PDF, текстовый PDF (растеризация потеряла бы текст-слой), >MAX_PDF_PAGES страниц
+    (иначе потеряли бы страницы), или результат не меньше оригинала. Ошибки → исходник (не роняем upload)."""
+    if len(data) <= _ATTACH_DOWNSCALE_MIN_BYTES:
+        return data
+    if not (filename.lower().endswith(".pdf") or data[:4] == b"%PDF"):
+        return data
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            n = len(pdf.pages)
+            if n == 0 or n > MAX_PDF_PAGES:  # пусто или больше капа — не трогаем (страницы не теряем)
+                return data
+            has_text = any((p.extract_text() or "").strip() for p in pdf.pages)
+        if has_text:  # текстовый PDF — растеризация убила бы текст-слой
+            return data
+        images = rasterize_pages(data)
+        if len(images) != n:  # подстраховка: страница отсеялась (абсурдный MediaBox) → храним оригинал
+            return data
+        compact = assemble_pdf_from_images(images)
+        return compact if len(compact) < len(data) else data
+    except Exception:
+        logger.warning("attach downscale scan-pdf failed — store as-is", exc_info=True)
+        return data

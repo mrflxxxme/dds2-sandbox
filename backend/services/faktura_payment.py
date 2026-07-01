@@ -16,6 +16,7 @@ Faktura payment-draft creation — «Создать оплату» для зая
 """
 
 import logging
+import re
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -38,6 +39,27 @@ class PaymentDraftError(Exception):
     def __init__(self, bank_errors: list[str]):
         self.bank_errors = bank_errors
         super().__init__("; ".join(bank_errors) or "payment validation failed")
+
+
+# Назначение платежа (поле 24) — ограниченный набор символов (ЦБ 762-П). Банк (Faktura) отбивает
+# типографику: длинное/короткое тире «—/–», «ёлочки»/«кавычки», неразрывный пробел, «₽», «…».
+# Заменяем на ASCII-аналоги, всё вне набора — убираем. «№», «%», «,», «.», кавычки, скобки — ok.
+_PURPOSE_MAP = str.maketrans({
+    "—": "-", "–": "-", "−": "-", "‒": "-", "―": "-", "•": "-", "·": "-",
+    "«": '"', "»": '"', "„": '"', "“": '"', "”": '"', "‟": '"',
+    "‘": "'", "’": "'", "‚": "'", "‛": "'", "`": "'", "´": "'",
+    " ": " ", " ": " ", " ": " ", "\t": " ", "\r": " ", "\n": " ",
+    "…": "...", "₽": "р.",
+})
+_PURPOSE_ALLOWED_RE = re.compile(r"[^0-9A-Za-zА-Яа-яЁё №%.,:;()\-+/=*!?#\"'& ]")
+
+
+def _sanitize_purpose(text: str | None) -> str:
+    """Назначение → допустимый банком набор символов (ЦБ 762-П): типографику в ASCII, прочее убрать.
+    Чинит «Поле "Назначение платежа" содержит недопустимые символы» (длинное тире из распозналки/LLM)."""
+    s = (text or "").translate(_PURPOSE_MAP)
+    s = _PURPOSE_ALLOWED_RE.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _build_payment_body(pr: PaymentRequest, payer: dict, guid: str, *, corr_account: str, fingerprint: str = "", nds: str = "-1") -> dict:
@@ -65,7 +87,7 @@ def _build_payment_body(pr: PaymentRequest, payer: dict, guid: str, *, corr_acco
         "payerName": owner.get("name") or "",
         "payerKpp": owner.get("kpp") or "",
         "payerAccountId": payer.get("id"),
-        "purpose": pr.purpose or "",
+        "purpose": _sanitize_purpose(pr.purpose),  # ЦБ-charset: типографику (тире «—» и т.п.) → ASCII
         "queue": 5,  # очерёдность платежа (поле 21)
         "uip": "0",
         "urgent": "false",
