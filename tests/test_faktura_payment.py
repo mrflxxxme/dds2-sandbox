@@ -65,6 +65,23 @@ def test_build_payment_body_matches_proven_contract():
         assert bad not in body
 
 
+def test_sanitize_purpose_strips_bank_invalid_chars():
+    """Назначение → допустимый банком набор символов. Чинит «Поле "Назначение платежа"
+    содержит недопустимые символы» (реальный кейс ОПЛ-00022: длинное тире из распозналки)."""
+    import re
+
+    from backend.services.faktura_payment import _sanitize_purpose
+
+    src = "Оплата по счёту № 98 от 1 июня 2026 г. по договору Основной договор. В т.ч. НДС 5% — 3 150,00 руб."
+    out = _sanitize_purpose(src)
+    assert "—" not in out and "- 3 150,00" in out  # длинное тире → дефис
+    assert "№ 98" in out and "5%" in out            # стандартные символы сохранены
+    assert re.fullmatch(r"[0-9A-Za-zА-Яа-яЁё №%.,:;()\-+/=*!?#\"'& ]+", out)  # только допустимый набор
+    assert _sanitize_purpose("ООО «Ромашка»").count('"') == 2  # ёлочки → прямые кавычки
+    assert "\u00a0" not in _sanitize_purpose("a\u00a0b")  # неразрывный пробел убран
+    assert _sanitize_purpose(None) == "" and _sanitize_purpose("  a   b ") == "a b"
+
+
 def test_resolve_payer_does_not_guess_when_ambiguous():
     two_rub = [
         {"id": "1", "number": "a", "currency": "RUB"},
