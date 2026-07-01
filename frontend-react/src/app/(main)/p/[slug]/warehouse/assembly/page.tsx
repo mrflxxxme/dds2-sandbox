@@ -633,7 +633,20 @@ export default function AssemblyListPage() {
         },
         {
             key: 'number', label: '№',
-            render: (_v, row: AssemblyRequest) => <span style={{ fontWeight: 500 }}>{row.number}</span>,
+            render: (_v, row: AssemblyRequest) => (
+                <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ fontWeight: 500 }}>{row.number}</span>
+                    {row.is_pre_distribution && (
+                        <span
+                            className="badge badge-info"
+                            style={{ fontSize: 11 }}
+                            title="Заявка создана предраспределением машины в пути (до приёмки)"
+                        >
+                            🚚 Предраспределение{row.source_vehicle_order_no ? ` машины ${row.source_vehicle_order_no}` : ''}
+                        </span>
+                    )}
+                </span>
+            ),
             exportValue: (row: AssemblyRequest) => row.number,
         },
         {

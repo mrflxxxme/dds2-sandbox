@@ -23,6 +23,13 @@ from .crud import (
     list_wb_warehouses,
     update_assembly_request,
 )
+from .pre_distribution import (
+    _advance_pre_distribution_assemblies,
+    advance_pre_distribution_manual,
+    create_pre_distribution,
+    get_pre_distribution_vehicles,
+    get_vehicle_pre_dist_pool,
+)
 from .status import (
     _check_transition,
     _log_status_change,
@@ -77,4 +84,10 @@ __all__ = [
     "get_logistics_analytics",
     "refresh_active_assemblies_from_fbo",
     "refresh_from_fbo",
+    # pre-distribution (машина в пути)
+    "_advance_pre_distribution_assemblies",
+    "advance_pre_distribution_manual",
+    "create_pre_distribution",
+    "get_pre_distribution_vehicles",
+    "get_vehicle_pre_dist_pool",
 ]

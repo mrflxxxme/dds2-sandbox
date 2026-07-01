@@ -162,7 +162,13 @@ async def _update_stock(
 
 
 async def _get_reserved_map(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[int, int]:
-    """Get reserved qty per nomenclature_id from active assembly requests."""
+    """Get reserved qty per nomenclature_id from active assembly requests.
+
+    PRE_DISTRIBUTED НАМЕРЕННО исключён: такая заявка зарезервирована под товар машины
+    в пути, которого ещё нет на ФФ-складе — она НЕ держит реальный ФФ-сток. Включить
+    её сюда = занять несуществующий остаток (фейк-резерв). На разгрузке машины статус
+    становится IN_PROGRESS и заявка попадает в резерв уже законно. См. C1 в PREDIST_DESIGN.md.
+    """
     result = await db.execute(
         select(
             AssemblyRequestItem.nomenclature_id,
@@ -190,7 +196,11 @@ async def _get_reserved_map(db: AsyncSession, project_id: int, warehouse_id: int
 async def _get_reserved_map_batch(
     db: AsyncSession, project_id: int, warehouse_ids: set[int]
 ) -> dict[int, dict[int, int]]:
-    """Batch version: one query for all warehouses. Returns {warehouse_id: {nomenclature_id: reserved}}."""
+    """Batch version: one query for all warehouses. Returns {warehouse_id: {nomenclature_id: reserved}}.
+
+    PRE_DISTRIBUTED исключён намеренно — см. _get_reserved_map (товар машины в пути не
+    держит реальный ФФ-сток; включение = фейк-резерв). C1 в PREDIST_DESIGN.md.
+    """
     if not warehouse_ids:
         return {}
     result = await db.execute(

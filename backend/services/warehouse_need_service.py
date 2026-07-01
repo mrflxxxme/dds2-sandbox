@@ -630,7 +630,12 @@ async def get_warehouse_need(
         .where(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.is_deleted.is_(False),
-            AssemblyRequest.status.in_([*active_statuses, AssemblyStatus.SHIPPED]),
+            # PRE_DISTRIBUTED — машина в пути: товар едет, заявка УЖЕ направлена на свой
+            # WB-склад → уменьшает потребность ИМЕННО этого склада (как «в пути»). Берём
+            # его ТОЛЬКО в WB-target-агрегат (ниже → transit_target_map), но НЕ в общий
+            # active_statuses / in_assembly_per_wh — иначе зарезервируется не приехавший
+            # ФФ-сток (фейк-резерв). См. критику C1 в .claude/PREDIST_DESIGN.md.
+            AssemblyRequest.status.in_([*active_statuses, AssemblyStatus.SHIPPED, AssemblyStatus.PRE_DISTRIBUTED]),
             Nomenclature.article_wb.isnot(None),
         )
         .group_by(Nomenclature.article_wb, AssemblyRequest.status, target_label)
@@ -641,7 +646,10 @@ async def get_warehouse_need(
         qty = int(row.qty or 0)
         if not target or qty <= 0:
             continue
-        bucket = transit_target_map if row.status == AssemblyStatus.SHIPPED else assembly_target_map
+        # PRE_DISTRIBUTED идёт в «в пути» (transit), как и SHIPPED: товар ещё не на ФФ,
+        # но уже едет на свой WB-склад → вычитается из raw_need того склада (шаг 4).
+        is_transit = row.status in (AssemblyStatus.SHIPPED, AssemblyStatus.PRE_DISTRIBUTED)
+        bucket = transit_target_map if is_transit else assembly_target_map
         if nm not in bucket:
             bucket[nm] = {}
         bucket[nm][target] = bucket[nm].get(target, 0) + qty

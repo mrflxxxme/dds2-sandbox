@@ -66,8 +66,13 @@ class AssemblyDraftDistribution(BaseModel):
     cold_start_shares: dict[str, float] | None = None
     # Замороженные заявки-юниты, переданные на ФФ (вырезаны из rows).
     handed_units: list[HandedUnit] = Field(default_factory=list)
+    # Предбронь: целые коробы, НЕ собравшиеся в целую паллету при «Заполнить черновик»
+    # (под-паллетный хвост). Не теряются на ФФ — показываются отдельным списком с
+    # действиями (удалить / дозабить паллету из свободного ФФ / оставить). Пересчитывается
+    # при каждом заполнении из потребности. Та же строчная структура, что и rows.
+    prebook: list[AssemblyDraftRow] = Field(default_factory=list)
 
-    @field_validator("rows", "source_warehouse_ids", "target_warehouse_names", "handed_units", mode="before")
+    @field_validator("rows", "source_warehouse_ids", "target_warehouse_names", "handed_units", "prebook", mode="before")
     @classmethod
     def coerce_null_to_empty_list(cls, v: object) -> object:
         """Guard against explicit null in stored JSONB (null → [])."""

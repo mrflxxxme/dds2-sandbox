@@ -374,6 +374,9 @@ async def merge_drafts(
     # Rows merged element-wise by (nm_id, package_type) via the shared helper.
     # Start from survivor's rows; fold each other draft in, preserving order.
     merged_rows: list[dict] = [r.model_dump() for r in merged.rows]
+    # Предбронь сливается так же, как rows (по nm_id×pkg), чтобы не терять её при мерже
+    # дублей текущего черновика.
+    merged_prebook: list[dict] = [r.model_dump() for r in merged.prebook]
 
     # Handed units keyed by (ff, wb, pkg). Preserve survivor's order.
     def _handed_key(u: HandedUnit) -> tuple[int, str, str]:
@@ -403,6 +406,7 @@ async def merge_drafts(
 
         # Merge rows: sum (nm_id, pkg) element-wise, append new keys.
         merged_rows = _merge_rows(merged_rows, [r.model_dump() for r in other_dist.rows])
+        merged_prebook = _merge_rows(merged_prebook, [r.model_dump() for r in other_dist.prebook])
 
         # Merge handed_units: carry into survivor (merge would otherwise drop them).
         # Same key → sum items by barcode; 'handed' beats 'draft' (part is at FF).
@@ -425,6 +429,7 @@ async def merge_drafts(
                     existing_unit.status = "handed"
 
     merged.rows = [AssemblyDraftRow.model_validate(r) for r in merged_rows]
+    merged.prebook = [AssemblyDraftRow.model_validate(r) for r in merged_prebook]
     merged.handed_units = list(handed_by_key.values())
     merged.source_warehouse_ids = src_ids
     merged.target_warehouse_names = tgt_names
@@ -859,8 +864,10 @@ async def commit_draft(
             created_ids.append(assembly_req.id)
 
         # 7. Если остались строки другого типа упаковки ИЛИ замороженные
-        # (передан на ФФ) юниты — оставляем черновик; иначе soft-delete.
-        if leftover_rows or distribution.handed_units:
+        # (передан на ФФ) юниты ИЛИ предбронь (коробы, ждущие паллету) — оставляем
+        # черновик; иначе soft-delete. Предбронь НЕ коммитится (только rows), но и не
+        # теряется при коммите (сохраняется в distribution).
+        if leftover_rows or distribution.handed_units or distribution.prebook:
             distribution.rows = leftover_rows
             draft.distribution = distribution.model_dump(mode="json")
         else:

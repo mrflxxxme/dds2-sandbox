@@ -1640,6 +1640,10 @@ export interface AssemblyRequest {
   ff_links?: FfLinkInfo[] | null;
   /** состав сборки расходится с привязанной заявкой(ами) ФФ по наполнению (true — расхождение, null — неизвестно) */
   ff_mismatch?: boolean | null;
+  /** Предраспределение: машина-источник (CostOrder), флаг и её номер для бейджа. */
+  source_vehicle_id?: number | null;
+  is_pre_distribution?: boolean;
+  source_vehicle_order_no?: string | null;
 }
 
 export interface FfLinkInfo {
@@ -1669,6 +1673,59 @@ export interface FfMismatchDetail {
   ff_total: number;
   ff_request_numbers: string[];
   rows: FfMismatchDetailRow[];
+}
+
+// ─── Предраспределение машины в пути ─────────────────────────────────────────
+/** Машина (CostOrder) в статусе CUSTOMS/DISPATCHED — кандидат на предраспределение. */
+export interface PreDistVehicle {
+  id: number;
+  order_no: string;
+  status: string;
+  target_warehouse_id: number | null;
+  target_warehouse_name: string | null;
+  eta: string | null;
+  total_qty: number;
+  sku_count: number;
+  distributed_qty: number;
+  can_distribute: boolean;
+  block_reason: string | null;
+}
+
+/** Строка пула машины: товар и его доступный для раздачи остаток (gross − уже разнесённое). */
+export interface PreDistPoolRow {
+  barcode: string;
+  article_seller: string | null;
+  article_wb: string | null;
+  name: string | null;
+  brand: string | null;
+  gross_qty: number;
+  distributed_qty: number;
+  available_qty: number;
+}
+
+export interface PreDistVehiclePool {
+  vehicle: PreDistVehicle;
+  rows: PreDistPoolRow[];
+}
+
+/** Одна назначаемая строка: товар → WB-склад, количество, тип упаковки. */
+export interface PreDistRow {
+  barcode: string;
+  wb_warehouse_name: string;
+  qty: number;
+  package_type: PackageType;
+}
+
+export interface PreDistributionCreate {
+  vehicle_id: number;
+  wb_fbo_supply_id?: number | null;
+  rows: PreDistRow[];
+}
+
+export interface PreDistributionCreateResult {
+  created: number;
+  request_ids: number[];
+  requests: AssemblyRequest[];
 }
 
 export interface AssemblyListResponse {
@@ -3812,6 +3869,9 @@ export interface AssemblyDraftDistribution {
   cold_start_shares?: Record<string, number> | null;
   /** Замороженные заявки-юниты, переданные на ФФ (вырезаны из rows). */
   handed_units?: HandedUnit[];
+  /** Предбронь: целые коробы, не собравшиеся в целую паллету при «Заполнить черновик»
+   *  (под-паллетный хвост). Не теряются на ФФ — отдельный список с действиями. */
+  prebook?: AssemblyDraftRow[];
 }
 
 /** Ссылка на заявку-юнит черновика (hand-off / revert / commit).

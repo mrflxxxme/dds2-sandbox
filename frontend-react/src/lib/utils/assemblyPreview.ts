@@ -86,6 +86,8 @@ export interface TrimWholeResult {
     droppedUnits: number;
     /** Отгрузок (ФФ→склад), убранных целиком (не набирали целой паллеты). */
     removedSupplies: number;
+    /** Срезанные линии (целые коробы, не собравшие паллету) — для предброни. */
+    droppedLines: PreviewLine[];
 }
 
 /**
@@ -125,6 +127,7 @@ export function trimLinesToWholePallets(
     const before = new Set(lines.filter(l => l.qty > 0).map(supplyKey));
 
     const kept: PreviewLine[] = [];
+    const droppedLines: PreviewLine[] = [];
     let droppedUnits = 0;
     for (const g of groups.values()) {
         // Палетизируемые (upp!=null) режем до целых паллет. Без габаритов:
@@ -137,7 +140,7 @@ export function trimLinesToWholePallets(
             if (upp != null && upp > 0) { geomKm[nmStr] = u; continue; }
             const line = g.meta.get(Number(nmStr));
             if (line?.isNew) kept.push({ ...line, qty: u });
-            else droppedUnits += u;
+            else { droppedUnits += u; if (line) droppedLines.push({ ...line, qty: u }); }
         }
         // МОНО — упаковка ≤3 артикула на паллету (правило WB); КОРОБ/СЕЙФ — смешанный /
         // одиночный snap по суммарному footprint'у. Сигнатуры идентичны.
@@ -148,14 +151,19 @@ export function trimLinesToWholePallets(
             if (u <= 0) continue;
             kept.push({ ...g.meta.get(Number(nmStr))!, qty: u });
         }
-        for (const u of Object.values(dropped)) droppedUnits += u;
+        for (const [nmStr, u] of Object.entries(dropped)) {
+            if (u <= 0) continue;
+            droppedUnits += u;
+            const line = g.meta.get(Number(nmStr));
+            if (line) droppedLines.push({ ...line, qty: u });
+        }
     }
 
     const after = new Set(kept.map(supplyKey));
     let removedSupplies = 0;
     for (const k of before) if (!after.has(k)) removedSupplies += 1;
 
-    return { kept, droppedUnits, removedSupplies };
+    return { kept, droppedUnits, removedSupplies, droppedLines };
 }
 
 export const sumQty = (ls: PreviewLine[]) => ls.reduce((s, l) => s + l.qty, 0);

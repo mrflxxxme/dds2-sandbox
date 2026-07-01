@@ -307,6 +307,7 @@ async def accept_receipt(
 
     # Auto-transition vehicle DISPATCHED → DELIVERED
     vehicle_delivered = False
+    pre_dist_advanced = 0
     if receipt.cost_order_id:
         from backend.models.cost import CostOrder, CostOrderItem
         from backend.models.enums import VehicleStatus
@@ -339,6 +340,15 @@ async def accept_receipt(
                 for foi in foi_result.scalars().all():
                     foi.is_delivered = True
 
+        # Предраспределение машины в пути: заявки сборки, зарезервированные под товар
+        # этой машины (source_vehicle_id) ДО приёмки, на разгрузке становятся обычными
+        # (PRE_DISTRIBUTED → IN_PROGRESS) — резерв стал реальным стоком в ЭТОЙ же
+        # транзакции. Хук по cost_order_id, НЕ по переходу DISPATCHED→DELIVERED:
+        # машина могла стоять в CUSTOMS, а товар уже физически приехал (критика H1).
+        from backend.services.assembly.pre_distribution import _advance_pre_distribution_assemblies
+
+        pre_dist_advanced = await _advance_pre_distribution_assemblies(db, project_id, receipt.cost_order_id)
+
     await db.commit()
 
     # Invalidate supplier catalog cache — delivered_qty depends on vehicle status
@@ -346,6 +356,14 @@ async def accept_receipt(
         from backend.cache import invalidate_cache
 
         await invalidate_cache(f"supply_chain:supplier_catalog:project_id={project_id}")
+
+    # Предраспределение переведено в сборку → отчёты сборки/потребности устарели.
+    if pre_dist_advanced:
+        from backend.cache import invalidate_cache
+
+        await invalidate_cache("reports:assembly_flow")
+        await invalidate_cache("reports:assembly_link_anomalies")
+        await invalidate_cache("reports:warehouse_need")
 
     await db.refresh(receipt, ["items"])
     return receipt

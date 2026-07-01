@@ -940,6 +940,20 @@ async def compute_cold_start_table(
         if speed_whs:
             wh_per_district[d] = speed_whs
 
+    # Канонизируем имена складов в stock-пространство (трафик заказов зовёт склад
+    # иначе, чем сток/матрица: «Алексин (Тула)» vs «Тула») + мёржим дубли по канону.
+    # Иначе аллокация уходит на имя, которого нет среди колонок матрицы (не рисуется —
+    # «отправить N, склад не показан»), и per-склад вычет WB/сборок ниже промахивается
+    # (active_asm/wb_by_warehouse — уже канон, а wh был сырой).
+    _canon_wpd: dict[str, list[tuple[str, int]]] = {}
+    for d, whs in wh_per_district.items():
+        merged: dict[str, int] = {}
+        for wh, cnt in whs:
+            c = _canonicalize_asm_warehouse(wh)
+            merged[c] = merged.get(c, 0) + cnt
+        _canon_wpd[d] = list(merged.items())
+    wh_per_district = _canon_wpd
+
     # main_warehouses meta — все склады каждого ФО (top-3), РФ-округа (abroad/unknown скрыты)
     # share_pct = доля округа × доля склада в трафике округа
     main_wh_meta: list[dict[str, Any]] = []
@@ -957,7 +971,7 @@ async def compute_cold_start_table(
                 {
                     "district_key": d,
                     "district_label": DISTRICT_LABELS.get(d, d),
-                    "warehouse": wh,
+                    "warehouse": wh,  # уже канонизирован (wh_per_district нормализован в корне)
                     "share_pct": round(wh_share * 100, 2),
                 }
             )

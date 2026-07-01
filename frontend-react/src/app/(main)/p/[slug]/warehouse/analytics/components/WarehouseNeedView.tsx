@@ -8,6 +8,7 @@ import { distributeByBoxMultiple } from '@/lib/utils/boxDistribution';
 import { parseBoxSize, maxPalletHeightCm, consolidateDistrictPallets, canonBoxSize, effectiveBoxesPerPallet, consolidateMixedDistrictPallets } from '@/lib/utils/boxPallet';
 import { normalizeDraft } from '@/lib/utils/normalizeDraft';
 import { DISTRICT_LABELS, DISTRICT_COLORS, DISTRICT_ORDER } from '@/lib/constants/localization';
+import { seedNewcomerWholeBoxes } from '@/lib/assembly/coldStartSeed';
 import type {
     AcceptanceCheckPerItem,
     AssemblyDraftRow,
@@ -752,14 +753,45 @@ export function WarehouseNeedView({
                 m.set(row.nm_id, { alloc, total: sumVals(alloc) });
                 continue;
             }
+            // АВТО новинка с кратностью K: засев ЦЕЛЫМИ коробами по топ-складам округов
+            // (по доле спроса) из ПОЛНОГО ФФ-остатка rf_qty — «не держать новинку на ФФ,
+            // лучше разложить по главным складам» (по требованию пользователя). Хвост
+            // < короба остаётся на ФФ. Закрытые по приёмке анкеры исключаем (их доля
+            // перетекает на открытые при largest-remainder). Заменяет прежний строгий
+            // per-cell боксинг backend-аллокаций (он резал мелкий засев в ноль).
+            if (!useOverride) {
+                const wbW = row.wb_by_warehouse || {};
+                const asmW = row.asm_by_warehouse || {};
+                const openAnchors = filteredMainWarehouses
+                    .filter(w => !isClosed(row.nm_id, w.warehouse))
+                    .map(w => ({
+                        warehouse: w.warehouse,
+                        share_pct: w.share_pct,
+                        // coverage: уже на складе (WB) + в сборке/в пути → не перетаривать.
+                        existing: (wbW[w.warehouse] || 0) + (asmW[w.warehouse] || 0),
+                    }));
+                // Источник засева = СВОБОДНЫЙ ФФ-остаток = полный rf_qty МИНУС уже
+                // зарезервированное активными заявками (in_assembly_total). Иначе засев
+                // сеет тот же ФФ-сток, что уже уехал в существующие заявки (В СБОРКЕ) →
+                // фантомная «Отправить», которую черновик не соберёт (свободного ФФ = 0).
+                // Backend это же вычитает в total_allocated (rf_qty − asm_qty), но в ответе
+                // отдаёт полный rf_qty для показа «остаток на ФФ» — нетто считаем тут.
+                const freeFf = Math.max(0, (row.rf_qty || 0) - (row.in_assembly_total || 0));
+                const seeded = seedNewcomerWholeBoxes(freeFf, boxPpb, openAnchors);
+                m.set(row.nm_id, { alloc: seeded, total: sumVals(seeded) });
+                continue;
+            }
             let needs: { name: string; need: number }[];
             let distTotal: number;
             if (useOverride) {
                 // Ручной override: coverage-aware пересчёт — вычитаем WB+сборку/пути по
                 // складу и догружаем недостающие (как авто-план backend), а не размазываем
                 // по сырым долям ФО. Перетаренные склады → 0, хвост остаётся на ФФ.
+                // Кап override свободным ФФ (rf_qty − в сборке): нельзя засеять больше,
+                // чем физически свободно на ФФ, иначе фантом «Отправить» > черновика.
+                const freeFf = Math.max(0, (row.rf_qty || 0) - (row.in_assembly_total || 0));
                 const cov = recomputeColdStartAllocWithCoverage(
-                    overrideQty, filteredMainWarehouses, coldStartMinPack,
+                    Math.min(overrideQty, freeFf), filteredMainWarehouses, coldStartMinPack,
                     row.wb_by_warehouse || {}, row.asm_by_warehouse || {},
                 );
                 needs = Object.entries(cov.alloc)
@@ -1091,16 +1123,6 @@ export function WarehouseNeedView({
         for (const q of bumpMap.values()) bumpSum += q;
         return canSend + bumpSum;
     }, [bumpedCells, edits]);
-
-    /** Сколько шт добавлено через «Дораспределить» суммарно. Показывается в кнопке
-     *  чтобы пользователь видел реальное действие фичи. */
-    const bumpTotal = useMemo(() => {
-        let sum = 0;
-        for (const skuMap of bumpedCells.values()) {
-            for (const q of skuMap.values()) sum += q;
-        }
-        return sum;
-    }, [bumpedCells]);
 
     /** PER-SKU базовое распределение коробами (БЕЗ паллет-консолидации), разбитое по
      *  типу упаковки (короб/моно/сейф из приёмки). Уважает packageFilter из шапки.
@@ -1634,15 +1656,16 @@ export function WarehouseNeedView({
         // Склад открыт, если хотя бы для одного проверенного SKU доступен любой
         // тип упаковки. Склады, которых нет в acceptance (не проверяли), оставляем.
         const afterClosed = (showAdvanced || acceptanceMap.size === 0) ? base : base.filter(wh => {
-            // Оставляем склад, только если хотя бы одна ВИДИМАЯ строка открыта для
-            // отгрузки сюда (любой тип упаковки). Иначе колонка вся ⛔ — убираем.
-            // Проверяем именно filteredArticles, а не все проверенные SKU: иначе
-            // скрытый SKU/новинка, открытый для склада, держал бы мёртвую колонку
-            // (баг: Подольск ⛔ во всех видимых строках, но не убирался). «Расширенная»
-            // вернёт колонку. Новинки рендерятся отдельно (filteredMainWarehouses).
+            // Оставляем склад, если хотя бы одна ВИДИМАЯ строка: (а) открыта для
+            // отгрузки сюда по приёмке, ЛИБО (б) реально получает отгрузку (план>0).
+            // (б) критично: склад-получатель после перераспределения приёмки мог НЕ
+            // попасть в availability запроса → колонку срезали, и товар, который НАДО
+            // отгрузить, не показывал склад назначения (был виден только в «Расширенной»).
+            // Проверяем filteredArticles, а не все проверенные SKU.
             for (const a of filteredArticles) {
                 const acc = acceptanceMap.get(a.nm_id)?.availability?.[wh.name];
                 if (acc && (acc.can_box || acc.can_monopallet || acc.can_supersafe)) return true;
+                if (getDisplayWbQty(a, wh.name) > 0) return true;
             }
             return false;
         });
@@ -1669,7 +1692,7 @@ export function WarehouseNeedView({
             .map((wh, idx) => ({ wh, idx, di: districtIdx(wh.district_key) }))
             .sort((a, b) => a.di - b.di || a.idx - b.idx)
             .map(x => x.wh);
-    }, [wbWarehouses, packageFilter, filteredArticles, acceptanceMap, showAdvanced, noLimitFilter, getArticleWbNeed, getCellAcceptanceMarks]);
+    }, [wbWarehouses, packageFilter, filteredArticles, acceptanceMap, showAdvanced, noLimitFilter, getArticleWbNeed, getCellAcceptanceMarks, getDisplayWbQty]);
 
     /* Counters для бэйджей фильтров: SKU имеющий ХОТЯ БЫ ОДИН split такого типа */
     const acceptanceCounts = useMemo(() => {
@@ -2321,16 +2344,20 @@ export function WarehouseNeedView({
                 const filteredCs = coldStart?.main_warehouses?.filter(
                     w => w.share_pct > 0 && !isSpecWarehouse(w.warehouse),
                 ) || [];
+                // (1) Own-need по складам: backend посчитал потребность именно там —
+                //     это РЕАЛЬНЫЕ склады отгрузки. Их приёмку обязательно проверяем,
+                //     иначе ячейка без данных приёмки («как сдать») и колонка прячется.
+                for (const wh of data.warehouses) {
+                    const need = wh.articles?.[a.nm_id]?.need || 0;
+                    if (need > 0) distribution[wh.name] = need;
+                }
+                // (2) + share_pct по главным складам округов: warehouse_need считает need
+                //     только где есть продажи (нет продаж в ДВ → need=0, хотя WB рекомендует
+                //     моно туда). Дополняем недостающие склады, own-need НЕ перетираем.
                 if (filteredCs.length > 0 && totalNeed > 0) {
-                    // Replace own-need with share_pct distribution.
-                    distribution = recomputeColdStartAlloc(
-                        totalNeed, filteredCs, coldStartMinPack,
-                    ).alloc;
-                } else {
-                    // Fallback: own-need (без cold-start доступного).
-                    for (const wh of data.warehouses) {
-                        const need = wh.articles?.[a.nm_id]?.need || 0;
-                        if (need > 0) distribution[wh.name] = need;
+                    const csAlloc = recomputeColdStartAlloc(totalNeed, filteredCs, coldStartMinPack).alloc;
+                    for (const [wh, q] of Object.entries(csAlloc)) {
+                        if (q > 0 && !(wh in distribution)) distribution[wh] = q;
                     }
                 }
                 // Перезатаренные SKU (total_need=0 И own-need везде 0) — раньше пропускались.
@@ -2370,6 +2397,19 @@ export function WarehouseNeedView({
                     const distribution: Record<string, number> = {};
                     for (const [wh, q] of Object.entries(alloc)) {
                         if (q > 0) distribution[wh] = q;
+                    }
+                    // Дисплей сеет новинку ЦЕЛЫМИ коробами по главным складам округов
+                    // (seedNewcomerWholeBoxes из rf_qty), даже когда backend total_allocated=0
+                    // и row.allocations пуст. Раньше проверка приёмки брала row.allocations →
+                    // пустой distribution → SKU пропускался → у засева НЕ было данных приёмки
+                    // (короб/моно/лимит, красное число без значка). Пробиваем приёмку по ТЕМ ЖЕ
+                    // главным складам, куда пойдёт засев (share_pct-распределение rf_qty).
+                    const freeFf = Math.max(0, (row.rf_qty || 0) - (row.in_assembly_total || 0));
+                    if (Object.keys(distribution).length === 0 && freeFf > 0 && filteredCs.length > 0) {
+                        const probe = recomputeColdStartAlloc(freeFf, filteredCs, coldStartMinPack).alloc;
+                        for (const [wh, q] of Object.entries(probe)) {
+                            if (q > 0) distribution[wh] = q;
+                        }
                     }
                     if (Object.keys(distribution).length > 0) {
                         items.push({ nm_id: row.nm_id, barcode, distribution });
@@ -2590,16 +2630,9 @@ export function WarehouseNeedView({
                         <div style={{ fontSize: 22, fontWeight: 700 }}>{formatNumber(summary.total_need, 0)}</div>
                     </div>
                     <div className="glass-card" style={{ padding: '14px 16px', borderLeft: '3px solid #22c55e' }}>
-                        <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 4 }}>
-                            {bumpTotal > 0 ? 'Отправить (с bump)' : 'Могу отправить'}
-                        </div>
+                        <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 4 }}>Отправить</div>
                         <div style={{ fontSize: 22, fontWeight: 700, color: '#22c55e' }}>
                             {formatNumber(totals.send_with_bump || summary.total_can_send, 0)}
-                            {bumpTotal > 0 && (
-                                <span style={{ fontSize: 11, fontWeight: 500, color: '#8b5cf6', marginLeft: 6 }}>
-                                    +{formatNumber(bumpTotal, 0)}
-                                </span>
-                            )}
                         </div>
                     </div>
                     {summary.total_deficit > 0 && (
@@ -2667,9 +2700,9 @@ export function WarehouseNeedView({
 
                 <button
                     className="btn btn-sm btn-secondary"
-                    onClick={handleCheckAcceptance}
-                    disabled={acceptanceLoading || !data?.articles?.length}
-                    title="Запросить у WB API доступность складов для каждого артикула. Закрытые склады автоматически перераспределятся."
+                    onClick={() => { void load(); void handleCheckAcceptance(); }}
+                    disabled={acceptanceLoading || loading || !data?.articles?.length}
+                    title="Перезагрузить потребность (свежий сток/сборки) и заново проверить приёмку WB. Закрытые склады автоматически перераспределятся."
                     style={{
                         opacity: (acceptanceLoading || !data?.articles?.length) ? 0.5 : 1,
                         ...(acceptanceMap.size > 0 ? { borderColor: '#22c55e', color: '#16a34a' } : {}),
@@ -3314,26 +3347,14 @@ export function WarehouseNeedView({
                                         {/* Send with bump = \u0438\u0442\u043e\u0433\u043e\u0432\u044b\u0439 \u043f\u043b\u0430\u043d (Hamilton + \u00ab\u0414\u043e\u0440\u0430\u0441\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c\u00bb) */}
                                         {(() => {
                                             const sendTotal = getDisplayShipTotal(a);
-                                            const bumpDelta = sendTotal - a.can_send;
                                             return (
                                                 <td style={{
                                                     ...tdBase,
                                                     color: sendTotal > 0 ? '#16a34a' : 'var(--color-text-muted)',
                                                     fontWeight: sendTotal > 0 ? 700 : 400,
-                                                    background: bumpDelta > 0 ? 'rgba(34,197,94,0.06)' : undefined,
                                                 }}
-                                                title={bumpDelta > 0
-                                                    ? `\u0411\u0430\u0437\u043e\u0432\u044b\u0439 \u043f\u043b\u0430\u043d: ${formatNumber(a.can_send, 0)} + bump \u00ab\u0414\u043e\u0440\u0430\u0441\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c\u00bb: +${formatNumber(bumpDelta, 0)}`
-                                                    : '\u041f\u043b\u0430\u043d \u043a \u043e\u0442\u0433\u0440\u0443\u0437\u043a\u0435 (= \u041c\u043e\u0433\u0443 \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c, \u0442.\u043a. bump \u043d\u0435 \u0441\u0440\u0430\u0431\u043e\u0442\u0430\u043b)'}>
+                                                title="\u0421\u043a\u043e\u043b\u044c\u043a\u043e \u0431\u0443\u0434\u0435\u0442 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e \u043d\u0430 WB">
                                                     {sendTotal > 0 ? formatNumber(sendTotal, 0) : '\u2014'}
-                                                    {bumpDelta > 0 && (
-                                                        <span style={{
-                                                            marginLeft: 4, fontSize: 9, fontWeight: 600,
-                                                            color: '#8b5cf6', verticalAlign: 'super',
-                                                        }}>
-                                                            +{formatNumber(bumpDelta, 0)}
-                                                        </span>
-                                                    )}
                                                 </td>
                                             );
                                         })()}

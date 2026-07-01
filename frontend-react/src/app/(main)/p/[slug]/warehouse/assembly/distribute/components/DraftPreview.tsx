@@ -544,37 +544,53 @@ export default function DraftPreview({
                                                 {mOpen ? '▾' : '▸'} 📐 Раскладка по паллетам ({formatNumber(manifest.pallets.length, 0)})
                                             </button>
                                             {mOpen && (
-                                                <div style={{ marginTop: 6, paddingLeft: 6, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
                                                     {manifest.pallets.map(p => {
                                                         const pct = Math.round(p.fillPct * 100);
                                                         const low = p.fillPct < 0.6;
+                                                        const palUnits = p.items.reduce((s, it) => s + it.units, 0);
+                                                        const palBoxes = p.items.reduce((s, it) => { const ppb = nmPpb.get(it.nmId) || 0; return s + (ppb > 0 ? Math.round(it.units / ppb) : 0); }, 0);
                                                         return (
-                                                            <div key={p.palletNo} style={{ fontSize: 12, display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
-                                                                <span className="badge badge-secondary" style={{ fontSize: 10 }}>Паллета {formatNumber(p.palletNo, 0)}</span>
-                                                                <span style={{ color: 'var(--color-text)' }}>
-                                                                    {p.items.map((it, i) => (
-                                                                        <Fragment key={it.nmId}>
-                                                                            {i > 0 && <span style={{ color: 'var(--color-text-muted)' }}> + </span>}
-                                                                            <span>{it.vendorCode}</span>
-                                                                            <span style={{ color: 'var(--color-text-muted)' }}>×{formatNumber(it.units, 0)}</span>
-                                                                        </Fragment>
-                                                                    ))}
-                                                                </span>
-                                                                <span style={{ color: low ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: low ? 600 : 400 }} title={low ? 'Паллета заполнена менее 60% — неполная' : undefined}>
-                                                                    {low && '⚠ '}— {formatNumber(pct, 0)}%
-                                                                </span>
+                                                            <div key={p.palletNo} style={{ border: `1px solid ${low ? 'var(--color-warning)' : 'var(--color-border)'}`, borderRadius: 10, padding: '8px 10px' }}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+                                                                    <span className="badge badge-secondary" style={{ fontSize: 10 }}>Паллета {formatNumber(p.palletNo, 0)}</span>
+                                                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{formatNumber(p.items.length, 0)} арт. · {formatNumber(palBoxes, 0)} кор · {formatNumber(palUnits, 0)} шт</span>
+                                                                    <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: low ? 700 : 600, color: low ? 'var(--color-warning)' : 'var(--color-success)' }} title={low ? 'Паллета заполнена менее 60% — неполная' : 'Заполнение паллеты'}>
+                                                                        {low && '⚠ '}{formatNumber(pct, 0)}%
+                                                                    </span>
+                                                                </div>
+                                                                <div style={{ height: 4, background: 'rgba(148,163,184,0.20)', borderRadius: 2, overflow: 'hidden', marginBottom: 8 }}>
+                                                                    <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', background: low ? 'var(--color-warning)' : 'var(--color-success)' }} />
+                                                                </div>
+                                                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                                                    {p.items.map(it => {
+                                                                        const ppb = nmPpb.get(it.nmId) || 0;
+                                                                        const boxes = ppb > 0 ? Math.round(it.units / ppb) : 0;
+                                                                        const size = nmBoxSize.get(it.nmId) || null;
+                                                                        return (
+                                                                            <span key={it.nmId} style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, background: 'rgba(148,163,184,0.12)', display: 'inline-flex', gap: 6, alignItems: 'baseline' }}
+                                                                                title={`${formatNumber(it.units, 0)} шт${size ? ` · короб ${size}` : ''}`}>
+                                                                                <span style={{ color: 'var(--color-text)', fontWeight: 500 }}>{it.vendorCode}</span>
+                                                                                <span style={{ color: 'var(--color-text-muted)' }}>{boxes > 0 ? `${formatNumber(boxes, 0)} кор` : `${formatNumber(it.units, 0)} шт`}</span>
+                                                                                {size && <span style={{ color: 'var(--color-text-dim)' }}>{size}</span>}
+                                                                            </span>
+                                                                        );
+                                                                    })}
+                                                                </div>
                                                             </div>
                                                         );
                                                     })}
                                                     {manifest.unpalletized.length > 0 && (
-                                                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }} title="Нет габаритов короба — паллету не посчитать">
-                                                            без паллетизации (нет габаритов):{' '}
-                                                            {manifest.unpalletized.map((it, i) => (
-                                                                <Fragment key={it.nmId}>
-                                                                    {i > 0 && ', '}
-                                                                    {it.vendorCode}×{formatNumber(it.units, 0)}
-                                                                </Fragment>
-                                                            ))}
+                                                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title="Нет габаритов короба — паллету не посчитать">
+                                                            <div style={{ marginBottom: 4 }}>Без паллетизации (нет габаритов):</div>
+                                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                                                {manifest.unpalletized.map(it => (
+                                                                    <span key={it.nmId} style={{ padding: '2px 8px', borderRadius: 6, background: 'rgba(245,158,11,0.12)', display: 'inline-flex', gap: 4, alignItems: 'baseline' }}>
+                                                                        <span style={{ color: 'var(--color-text)' }}>{it.vendorCode}</span>
+                                                                        <span style={{ fontWeight: 600 }}>×{formatNumber(it.units, 0)}</span>
+                                                                    </span>
+                                                                ))}
+                                                            </div>
                                                         </div>
                                                     )}
                                                 </div>

@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -39,6 +40,7 @@ class AssemblyStatus(enum.StrEnum):
     """Assembly request status — strict sequential transitions."""
 
     PENDING = "PENDING"
+    PRE_DISTRIBUTED = "PRE_DISTRIBUTED"  # зарезервировано под машину в пути; реал-стока ещё нет
     IN_PROGRESS = "IN_PROGRESS"
     READY = "READY"
     VEHICLE_ASSIGNED = "VEHICLE_ASSIGNED"
@@ -68,6 +70,9 @@ class PackageType(enum.StrEnum):
 
 # Allowed status transitions (from → set of valid next statuses)
 ASSEMBLY_TRANSITIONS: dict[AssemblyStatus, set[AssemblyStatus]] = {
+    # Предраспределение машины в пути: статус-вход, создаётся напрямую. На разгрузке
+    # машины авто → IN_PROGRESS (резерв стал реальным стоком); ручной abort → CANCELLED.
+    AssemblyStatus.PRE_DISTRIBUTED: {AssemblyStatus.IN_PROGRESS, AssemblyStatus.CANCELLED},
     AssemblyStatus.PENDING: {AssemblyStatus.IN_PROGRESS, AssemblyStatus.CANCELLED},
     AssemblyStatus.IN_PROGRESS: {AssemblyStatus.READY, AssemblyStatus.CANCELLED},
     AssemblyStatus.READY: {AssemblyStatus.VEHICLE_ASSIGNED, AssemblyStatus.IN_PROGRESS, AssemblyStatus.CANCELLED},
@@ -111,6 +116,16 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
 
     # FBO supply link (1:1, unique per active project)
     wb_fbo_supply_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("wb_fbo_supplies.id"), nullable=True)
+
+    # Предраспределение машины в пути: заявка зарезервирована под входящий товар
+    # машины (cost_orders.id) ДО физприёмки. На разгрузке машины статус авто →
+    # IN_PROGRESS. is_pre_distribution остаётся True на всю жизнь заявки (бейдж/отчёты).
+    source_vehicle_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("cost_orders.id"), nullable=True
+    )
+    is_pre_distribution: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     # Created on SHIPPED, cleared on rollback
     outbound_shipment_id: Mapped[int | None] = mapped_column(
@@ -174,6 +189,7 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_assembly_requests_status", "status"),
         Index("ix_assembly_requests_counterparty_id", "counterparty_id"),
         Index("ix_assembly_requests_source_draft_id", "source_draft_id"),
+        Index("ix_assembly_requests_source_vehicle_id", "source_vehicle_id"),
         # Partial unique: allow new request for same FBO after cancel
         Index(
             "ix_assembly_requests_fbo_unique",

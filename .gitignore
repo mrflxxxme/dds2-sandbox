@@ -49,3 +49,6 @@ tests/loadtest/results_*.csv
 /override_upload_*.csv
 scripts/_*.py
 scripts/*_probe.py
+
+# Локальный dev-compose worktree (ускорения, не для прода)
+/wt-dev.yml

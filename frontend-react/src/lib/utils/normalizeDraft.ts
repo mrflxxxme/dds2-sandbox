@@ -45,6 +45,9 @@ export interface NormalizeDraftResult {
     droppedUnits: number;
     /** Изменилась ли раскладка относительно входа. */
     changed: boolean;
+    /** Срезанные до-паллетные хвосты как строки (целые коробы, не собравшие паллету) —
+     *  для предброни. Σtgt(dropped) ⊆ droppedUnits (без сырой россыпи box-округления). */
+    dropped: AssemblyDraftRow[];
 }
 
 /** Канон-подпись распределения строк (для детекта изменения / идемпотентности). */
@@ -120,6 +123,7 @@ export function normalizeDraft(
     const lines = buildPreviewLines(monoRows, newcomerSet);
     const trim = trimLinesToWholePallets(lines, uppOf, boxOf);
     const outRows = linesToRows(trim.kept);
+    const dropped = linesToRows(trim.droppedLines);
 
     // changed: дешёвые счётчики первыми (короб добит/срезан, паллеты сняты) — если они
     // показали изменение, строковую подпись всего черновика НЕ строим. Подпись считаем
@@ -133,5 +137,107 @@ export function normalizeDraft(
     const sumTgt = (rs: AssemblyDraftRow[]) => rs.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
     const droppedUnits = Math.max(0, sumTgt(rows) - sumTgt(outRows));
 
-    return { rows: outRows, droppedUnits, changed };
+    return { rows: outRows, droppedUnits, changed, dropped };
+}
+
+export interface PrebookConsolidateResult {
+    /** Собравшиеся целые паллеты, извлечённые из предброни → в черновик. */
+    toDraft: AssemblyDraftRow[];
+    /** Остаток предброни: неполные (<1 паллеты) хвосты + непалетизируемая россыпь. */
+    prebook: AssemblyDraftRow[];
+    /** Извлечено штук в целых паллетах. */
+    extractedUnits: number;
+    /** Было ли что извлекать. */
+    changed: boolean;
+}
+
+/**
+ * Вынести из предброни СОБРАВШИЕСЯ целые паллеты в черновик, оставив в предброни
+ * только неполные (<1 паллеты) хвосты и непалетизируемую россыпь.
+ *
+ * Предбронь-группа (ФФ→склад) может накопить >1 паллеты (сложение хвостов при
+ * дозаборе/добавлении из потребности). Целые паллеты должны ЕХАТЬ (учитываться в
+ * черновике), а не «висеть» в предброни (требование юзера). Логика зеркалит
+ * `trimLinesToWholePallets`, но `kept` (целые паллеты) уходит в ЧЕРНОВИК, а не
+ * остаётся. Пустой `newcomerSet`: непалетизируемая россыпь (upp=null) попадает в
+ * `droppedLines` → остаётся в предброни. Чистая функция; идемпотентна (после выноса
+ * ни одна группа не набирает целой паллеты → повторный прогон ничего не извлечёт).
+ */
+export function consolidatePrebookWholePallets(
+    prebook: AssemblyDraftRow[],
+    ctx: NormalizeDraftCtx,
+): PrebookConsolidateResult {
+    if (prebook.length === 0) return { toDraft: [], prebook, extractedUnits: 0, changed: false };
+    const uppOf = (nm: number, wb: string): number | null => {
+        const ppb = ctx.ppbOf(nm);
+        const bpp = effectiveBoxesPerPallet(ctx.boxSizeOf(nm), maxPalletHeightCm(wb), ctx.overrides);
+        return bpp != null && ppb && ppb > 0 ? bpp * ppb : null;
+    };
+    const boxOf = (nm: number): number | null => ctx.ppbOf(nm) ?? null;
+    const lines = buildPreviewLines(prebook, new Set());
+    const trim = trimLinesToWholePallets(lines, uppOf, boxOf);
+    const toDraft = linesToRows(trim.kept);
+    const prebookOut = linesToRows(trim.droppedLines);
+    const extractedUnits = toDraft.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
+    return { toDraft, prebook: prebookOut, extractedUnits, changed: extractedUnits > 0 };
+}
+
+/**
+ * Согласовать свежий fill из потребности с ЗАРЕЗЕРВИРОВАННОЙ предбронью.
+ *
+ * Резерв (текущая предбронь) ПИНится к своим направлениям: на каждое
+ * (nm, barcode, упаковка, склад) ИТОГ остаётся = свежая потребность (не задваиваем),
+ * но зарезервированные коробы входят в итог первыми (со своим ФФ), а свежий fill
+ * добирает остаток (уменьшая свою ёмкость на том же ФФ, чтобы не пилить сверху).
+ * Излишек резерва сверх потребности ИЛИ резерв на направление, которого в свежей
+ * потребности НЕТ, — ОТПУСКАЕТСЯ (не входит → товар свободен на ФФ).
+ *
+ * Σ combined по каждому (nm,barcode,pkg,склад) == Σ fresh по нему (потребность
+ * неизменна) → консервация. Чистая функция.
+ */
+export function reconcileFillWithReserved(
+    fresh: AssemblyDraftRow[],
+    reserved: AssemblyDraftRow[],
+): AssemblyDraftRow[] {
+    if (reserved.length === 0) return fresh;
+    const keyOf = (l: PreviewLine) => `${l.nmId}::${l.barcode}::${l.pkg}::${l.wbName}`;
+    const group = (lines: PreviewLine[]): Map<string, PreviewLine[]> => {
+        const m = new Map<string, PreviewLine[]>();
+        for (const l of lines) { if (l.qty <= 0) continue; const a = m.get(keyOf(l)) ?? []; a.push(l); m.set(keyOf(l), a); }
+        return m;
+    };
+    const freshByKey = group(buildPreviewLines(fresh, new Set()));
+    const resByKey = group(buildPreviewLines(reserved, new Set()));
+    const sumQ = (ls: PreviewLine[]) => ls.reduce((s, l) => s + l.qty, 0);
+    const out: PreviewLine[] = [];
+    // Идём по свежей потребности: только её направления вообще едут (резерв на
+    // отсутствующее направление отпускается — ключа нет во freshByKey).
+    for (const [k, fLines] of freshByKey) {
+        const rLines = resByKey.get(k);
+        const freshQ = sumQ(fLines);
+        if (!rLines || rLines.length === 0) { out.push(...fLines); continue; }
+        const sample = fLines[0];
+        // Пиним резерв, но не больше потребности (излишек отпускаем).
+        let keepBudget = freshQ;
+        const pinnedByFf = new Map<number, number>();
+        for (const rl of rLines) {
+            if (keepBudget <= 0) break;
+            const take = Math.min(rl.qty, keepBudget);
+            if (take > 0) { pinnedByFf.set(rl.ffId, (pinnedByFf.get(rl.ffId) || 0) + take); keepBudget -= take; }
+        }
+        const pinnedQ = freshQ - keepBudget;
+        // Свежий добирает остаток потребности из своей ёмкости за вычетом запиненного
+        // на том же ФФ (резерв замещает свежий на своём ФФ).
+        const freshByFf = new Map<number, number>();
+        for (const fl of fLines) freshByFf.set(fl.ffId, (freshByFf.get(fl.ffId) || 0) + fl.qty);
+        let remaining = freshQ - pinnedQ;
+        for (const [ff, q] of freshByFf) {
+            if (remaining <= 0) break;
+            const avail = Math.max(0, q - (pinnedByFf.get(ff) || 0));
+            const take = Math.min(avail, remaining);
+            if (take > 0) { out.push({ ...sample, ffId: ff, qty: take }); remaining -= take; }
+        }
+        for (const [ff, q] of pinnedByFf) out.push({ ...sample, ffId: ff, qty: q });
+    }
+    return linesToRows(out);
 }

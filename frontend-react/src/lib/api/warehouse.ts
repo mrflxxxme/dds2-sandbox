@@ -29,6 +29,10 @@ import type {
     AssemblyReturnPayload,
     CreatedAssemblyGroup,
     FfMismatchDetail,
+    PreDistVehicle,
+    PreDistVehiclePool,
+    PreDistributionCreate,
+    PreDistributionCreateResult,
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBatchListResponse,
     BoxMultiplicityBatchRevertResponse,
@@ -424,6 +428,23 @@ export function addWarehouseMethods(api: ApiClient) {
         /** Массовое удаление заявок, ещё не отгруженных на WB. Отгруженные пропускаются. */
         deleteAssemblyBulk(ids: number[]) {
             return api.request<AssemblyBulkDeleteResult>('POST', '/api/v1/warehouse/assembly/delete-bulk', { ids });
+        },
+        // ─── Предраспределение машины в пути ────────────────────────────────
+        /** Машины (CostOrder CUSTOMS/DISPATCHED) — кандидаты на предраспределение. */
+        getPreDistVehicles() {
+            return api.request<PreDistVehicle[]>('GET', '/api/v1/warehouse/assembly/pre-distribution/vehicles');
+        },
+        /** Пул товаров машины (gross / уже разнесено / доступно) для раздачи по WB-складам. */
+        getPreDistVehiclePool(vehicleId: number) {
+            return api.request<PreDistVehiclePool>('GET', `/api/v1/warehouse/assembly/pre-distribution/vehicles/${vehicleId}/pool`);
+        },
+        /** Создать заявки-предраспределения (status PRE_DISTRIBUTED, без приёмки). */
+        createPreDistribution(payload: PreDistributionCreate) {
+            return api.request<PreDistributionCreateResult>('POST', '/api/v1/warehouse/assembly/pre-distribution', payload);
+        },
+        /** Ручной перевод предраспределённых заявок машины PRE_DISTRIBUTED→IN_PROGRESS. */
+        advancePreDistribution(vehicleId: number) {
+            return api.request<{ advanced: number }>('POST', `/api/v1/warehouse/assembly/pre-distribution/vehicles/${vehicleId}/advance`);
         },
         assignVehicleBulk(data: {
             vehicle_info: string;

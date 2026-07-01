@@ -12,16 +12,19 @@ like `from backend.services.assembly_service import X` or
 """
 
 from backend.services.assembly import (  # noqa: F401
+    _advance_pre_distribution_assemblies,
     _build_items_with_stock,
     _build_response,
     _check_transition,
     _log_status_change,
     _validate_stock_for_ship,
+    advance_pre_distribution_manual,
     assign_vehicle,
     assign_vehicle_bulk,
     cancel_request,
     close_request,
     create_assembly_request,
+    create_pre_distribution,
     delete_bulk,
     delete_request,
     deliver_request,
@@ -30,6 +33,8 @@ from backend.services.assembly import (  # noqa: F401
     get_assembly_request,
     get_created_groups,
     get_logistics_analytics,
+    get_pre_distribution_vehicles,
+    get_vehicle_pre_dist_pool,
     list_assembly_requests,
     list_wb_warehouses,
     mark_ready,
