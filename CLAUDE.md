@@ -51,7 +51,8 @@ make sync-prod                                  # локалка = копия п
 После написания кода запускай `/review` (фан-аут профильных субагентов по diff-путям, единый вердикт APPROVE/WARNING/BLOCK; обычно — шагом `/verify`). Субагенты `code-reviewer`, `security-reviewer`, `database-reviewer`, `performance-optimizer`, `api-designer` — по запросу или когда задача в их зоне.
 
 ## Workflow
-- Миграции Alembic — sequential, делает только lead. Перед коммитом прогнать `alembic upgrade head && downgrade -1 && upgrade head`.
+- Миграции Alembic — sequential, делает только lead. Перед коммитом прогнать `alembic upgrade head && downgrade -1 && upgrade head`. Новая миграция цепляется за ГОЛОВУ origin/dev (не за локальный хвост).
+- Основное дерево держать чистым: работа либо закоммичена, либо живёт в worktree. После каждого шипа из worktree — сразу `git fetch && git merge origin/dev` в основном дереве (иначе копятся дубли отшипанного и расходятся миграционные цепочки — см. расчистку 2026-07-02).
 - Фичи и багфиксы — через TDD: падающий тест первым, потом минимальная реализация.
 - Обновление документации — в тот же коммит, что и код.
 - Push в remote — только по явному запросу. Деплой — через CI (`dev` → CI green → `main` → auto-deploy), не через SSH.
