@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { exportToExcel, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
-import CounterpartyTypeBadge, { TYPE_CONFIG } from '@/components/CounterpartyTypeBadge';
+import CounterpartyTypeBadge, { TYPE_CONFIG, getCounterpartyTypeLabel } from '@/components/CounterpartyTypeBadge';
 import type {
     CounterpartyListItem, CounterpartyType, CounterpartyCreate,
     CounterpartyCategorySummary,
@@ -53,6 +53,7 @@ export default function CounterpartyPage() {
 
     // Filters
     const [search, setSearch] = useState('');
+    const [debouncedSearch, setDebouncedSearch] = useState('');
     const [typeFilter, setTypeFilter] = useState<CounterpartyType | ''>('');
     const [activeOnly, setActiveOnly] = useState(false);
     const [catFilter, setCatFilter] = useState<'all' | 'none'>('all');
@@ -85,7 +86,7 @@ export default function CounterpartyPage() {
         try {
             const [listRes, summaryRes] = await Promise.all([
                 api.listCounterparties({
-                    q: search.trim() || undefined,
+                    q: debouncedSearch.trim() || undefined,
                     type: typeFilter || undefined,
                     active_only: activeOnly || undefined,
                     limit: 200,
@@ -103,15 +104,16 @@ export default function CounterpartyPage() {
         } finally {
             setLoading(false);
         }
-    }, [search, typeFilter, activeOnly, dateFrom, dateTo]);
+    }, [debouncedSearch, typeFilter, activeOnly, dateFrom, dateTo]);
 
     useEffect(() => { load(); }, [load]);
 
-    // Debounced search
+    // Debounce search: typing updates `search` instantly (UI), but the query
+    // only re-runs 300ms after the last keystroke. Other filters fire immediately.
     useEffect(() => {
-        const timer = setTimeout(() => { load(); }, 300);
+        const timer = setTimeout(() => setDebouncedSearch(search), 300);
         return () => clearTimeout(timer);
-    }, [search]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [search]);
 
     const handleCreate = async () => {
         if (!form.name.trim()) { setFormError('Введите название'); return; }
@@ -202,6 +204,7 @@ export default function CounterpartyPage() {
     const columns = [
         {
             key: '_sel', label: '',
+            sortable: false,
             render: (_v: unknown, row: CounterpartyListItem) => (
                 <input
                     type="checkbox"
@@ -313,8 +316,21 @@ export default function CounterpartyPage() {
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button
                         className="btn btn-secondary btn-sm"
-                        onClick={() => exportToExcel(items, 'counterparties')}
-                        disabled={items.length === 0}
+                        onClick={() => exportToExcel(
+                            visibleItems.map(c => ({
+                                'ИНН': c.inn ?? '',
+                                'Название': c.name,
+                                'Тип': getCounterpartyTypeLabel(c.primary_type),
+                                'Категория': c.cat_lvl1 ? (c.cat_lvl2 ? `${c.cat_lvl1} · ${c.cat_lvl2}` : c.cat_lvl1) : '',
+                                'Контракт': c.contract_number ?? '',
+                                'Расход ₽': Number(c.expense_rub ?? 0),
+                                'Расход ¥': Number(c.expense_cny ?? 0),
+                                'Транзакций': Number(c.tx_count ?? 0),
+                                'Источник': c.created_by_import ? 'импорт' : 'вручную',
+                            })),
+                            'counterparties',
+                        )}
+                        disabled={visibleItems.length === 0}
                     >
                         Excel
                     </button>
@@ -343,7 +359,16 @@ export default function CounterpartyPage() {
                         gap: 12,
                     }}>
                         {summary
-                            .filter(s => s.count_cps > 0 && (s.expense_rub > 0 || s.expense_cny > 0 || s.income_rub > 0 || s.income_cny > 0 || typeFilter === s.primary_type))
+                            // Money fields arrive as Decimal-as-string — coerce with Number() before any
+                            // comparison or formatNumber() (toLocaleString on a string ignores the options).
+                            .map(s => ({
+                                ...s,
+                                expRub: Number(s.expense_rub ?? 0),
+                                expCny: Number(s.expense_cny ?? 0),
+                                incRub: Number(s.income_rub ?? 0),
+                                incCny: Number(s.income_cny ?? 0),
+                            }))
+                            .filter(s => s.count_cps > 0 && (s.expRub > 0 || s.expCny > 0 || s.incRub > 0 || s.incCny > 0 || typeFilter === s.primary_type))
                             .map(s => {
                                 const cfg = TYPE_CONFIG[s.primary_type] ?? TYPE_CONFIG.OTHER;
                                 const active = typeFilter === s.primary_type;
@@ -366,17 +391,17 @@ export default function CounterpartyPage() {
                                                 {formatNumber(s.count_cps, 0)} КА
                                             </span>
                                         </div>
-                                        {s.expense_rub > 0 && (
+                                        {s.expRub > 0 && (
                                             <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-danger)', fontVariantNumeric: 'tabular-nums' }}>
-                                                {formatNumber(s.expense_rub)} ₽
+                                                {formatNumber(s.expRub)} ₽
                                             </div>
                                         )}
-                                        {s.expense_cny > 0 && (
+                                        {s.expCny > 0 && (
                                             <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--color-warning)', fontVariantNumeric: 'tabular-nums' }}>
-                                                {formatNumber(s.expense_cny)} ¥
+                                                {formatNumber(s.expCny)} ¥
                                             </div>
                                         )}
-                                        {s.expense_rub === 0 && s.expense_cny === 0 && (
+                                        {s.expRub === 0 && s.expCny === 0 && (
                                             <div style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>нет расходов</div>
                                         )}
                                     </button>

@@ -33,6 +33,9 @@ import type {
     SupplyProjectCreate,
     SupplyProjectUpdate,
     MergeOrdersResult,
+    SupplierDebtOverview,
+    SupplierFinance,
+    AutoDistributeResult,
 } from '@/types/api';
 import { FactoryQtyExceededError } from '@/types/api';
 
@@ -65,6 +68,44 @@ export function addSupplyChainMethods(api: ApiClient) {
         // ─── Factory Orders ─────────────────────────────────────────
         getFactoryOrders() {
             return api.request<FactoryOrder[]>('GET', '/api/v1/supply-chain/factory-orders');
+        },
+        getSupplierDebtOverview() {
+            return api.request<SupplierDebtOverview>('GET', '/api/v1/supply-chain/debt-overview');
+        },
+        getSupplierFinance(supplierId: number) {
+            return api.request<SupplierFinance>('GET', `/api/v1/supply-chain/suppliers/${supplierId}/finance`);
+        },
+        linkSupplierPayment(supplierId: number, transactionId: number) {
+            return api.request<{ linked: boolean; transaction_id: number; counterparty_id: number }>(
+                'POST', `/api/v1/supply-chain/suppliers/${supplierId}/link-payment`, { transaction_id: transactionId });
+        },
+        unlinkSupplierPayment(supplierId: number, transactionId: number) {
+            return api.request<{ unlinked: boolean; transaction_id: number }>(
+                'POST', `/api/v1/supply-chain/suppliers/${supplierId}/unlink-payment`, { transaction_id: transactionId });
+        },
+        addSupplierIdentifier(supplierId: number, kind: 'CONTRACT' | 'ACCOUNT' | 'INN', value: string, currency?: string) {
+            return api.request<SupplierFinance>(
+                'POST', `/api/v1/supply-chain/suppliers/${supplierId}/identifiers`, { kind, value, currency: currency ?? null });
+        },
+        deleteSupplierIdentifier(supplierId: number, identifierId: number) {
+            return api.request<SupplierFinance>(
+                'DELETE', `/api/v1/supply-chain/suppliers/${supplierId}/identifiers/${identifierId}`);
+        },
+        assignPaymentMachine(supplierId: number, transactionId: number, orderNo: string | null) {
+            return api.request<SupplierFinance>(
+                'POST', `/api/v1/supply-chain/suppliers/${supplierId}/assign-machine`, { transaction_id: transactionId, order_no: orderNo });
+        },
+        assignPaymentsMachineBulk(supplierId: number, transactionIds: number[], orderNo: string | null) {
+            return api.request<SupplierFinance>(
+                'POST', `/api/v1/supply-chain/suppliers/${supplierId}/assign-machine-bulk`, { transaction_ids: transactionIds, order_no: orderNo });
+        },
+        setMachinePlan(supplierId: number, orderNo: string, remainingDueDate: string | null) {
+            return api.request<SupplierFinance>(
+                'POST', `/api/v1/supply-chain/suppliers/${supplierId}/machine-plan`, { order_no: orderNo, remaining_due_date: remainingDueDate });
+        },
+        autoDistributeMachines(supplierId: number) {
+            return api.request<AutoDistributeResult>(
+                'POST', `/api/v1/supply-chain/suppliers/${supplierId}/auto-distribute`);
         },
         getFactoryOrder(id: number) {
             return api.request<FactoryOrder>('GET', `/api/v1/supply-chain/factory-orders/${id}`);

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import Decimal
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -33,6 +34,9 @@ from backend.schemas.counterparty import (
     CounterpartyDetail,
     CounterpartyDocumentResponse,
     CounterpartyFilter,
+    CounterpartyIdentifierCreate,
+    CounterpartyIdentifierItem,
+    CounterpartyIdentifiersResponse,
     CounterpartyListItem,
     CounterpartyListResponse,
     CounterpartyMergeRequest,
@@ -409,6 +413,24 @@ async def list_counterparty_documents(
     return [CounterpartyDocumentResponse.model_validate(d) for d in docs]
 
 
+@router.get("/{counterparty_id}/documents/{doc_id}/download")
+async def download_counterparty_document(
+    counterparty_id: int,
+    doc_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stream a counterparty document through the backend (project-scoped, no presigned URL)."""
+    service = CounterpartyService(db)
+    data, filename, content_type = await service.download_document(
+        doc_id=doc_id,
+        counterparty_id=counterparty_id,
+        project_id=project.id,
+    )
+    disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
+    return Response(content=data, media_type=content_type, headers={"Content-Disposition": disposition})
+
+
 @router.delete(
     "/{counterparty_id}/documents/{doc_id}",
     dependencies=[Depends(rate_limit_write)],
@@ -429,3 +451,63 @@ async def delete_counterparty_document(
     if not ok:
         raise HTTPException(status_code=404, detail="Document not found")
     return {"deleted": True, "id": doc_id}
+
+
+# ─── identifiers (statement-matching keys) ───────────────────────────────────
+
+
+@router.get(
+    "/{counterparty_id}/identifiers",
+    response_model=CounterpartyIdentifiersResponse,
+)
+async def list_counterparty_identifiers(
+    counterparty_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """List statement-matching identifiers (contracts / accounts / INNs)."""
+    service = CounterpartyService(db)
+    items = await service.list_identifiers(counterparty_id, project_id=project.id)
+    return CounterpartyIdentifiersResponse(items=[CounterpartyIdentifierItem.model_validate(i) for i in items])
+
+
+@router.post(
+    "/{counterparty_id}/identifiers",
+    response_model=CounterpartyIdentifierItem,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def add_counterparty_identifier(
+    counterparty_id: int,
+    payload: CounterpartyIdentifierCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Register a contract / account / INN so statement rows resolve to this CP."""
+    service = CounterpartyService(db)
+    ident = await service.add_identifier(
+        counterparty_id,
+        project_id=project.id,
+        kind=payload.kind,
+        value=payload.value,
+        currency=payload.currency,
+        note=payload.note,
+    )
+    return CounterpartyIdentifierItem.model_validate(ident)
+
+
+@router.delete(
+    "/{counterparty_id}/identifiers/{identifier_id}",
+    dependencies=[Depends(rate_limit_write)],
+)
+async def delete_counterparty_identifier(
+    counterparty_id: int,
+    identifier_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Soft-delete a statement-matching identifier."""
+    service = CounterpartyService(db)
+    ok = await service.delete_identifier(counterparty_id, identifier_id, project_id=project.id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Identifier not found")
+    return {"deleted": True, "id": identifier_id}

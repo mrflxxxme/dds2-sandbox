@@ -331,6 +331,116 @@ class TestApplyMasterLogic:
         assert result.iloc[0]["is_cashflow2"] == 1
         assert result.iloc[0]["status"] == "UNASSIGNED"
 
+    def test_enrichment_contract_number_wired(self):
+        """Regression: apply_master_logic must populate contract_number (was always NULL)."""
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2026, 4, 1),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "CNY",
+                    "counterparty": "БАНК ВТБ (ПАО)",
+                    "inn": None,
+                    "counterparty_account": "30301156700810000001",
+                    "purpose": "По МТ103 20 PERC.PMNT FOR CARPETS PER ANNEX 44. CONTRACT 20250707 DD 07.07.2025",
+                    "income": 0,
+                    "expense": 500296.16,
+                }
+            ]
+        )
+        result = apply_master_logic(df, {"ACC1"}, set(), {}, {})
+        row = result.iloc[0]
+        assert row["contract_number"] == "20250707"
+        assert row["annex_id"] == "44"
+        assert row["loan_payment_type"] is None
+
+    def test_enrichment_unk_number_wired(self):
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2026, 4, 1),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "Bank",
+                    "inn": None,
+                    "counterparty_account": "EXTERNAL",
+                    "purpose": "Комиссия за ВК по УНК 25080714/1000/0081/2/1 п.3.3.1",
+                    "income": 0,
+                    "expense": 12471.67,
+                }
+            ]
+        )
+        result = apply_master_logic(df, {"ACC1"}, set(), {}, {})
+        assert result.iloc[0]["unk_number"] == "25080714/1000/0081/2/1"
+
+    def test_enrichment_loan_payment_type_wired(self):
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2026, 4, 1),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "ИП Вяткин",
+                    "inn": "370212932304",
+                    "counterparty_account": "EXTERNAL",
+                    "purpose": "Выдача займа по Договору займа №3 от 01.01.2026",
+                    "income": 0,
+                    "expense": 1000000,
+                }
+            ]
+        )
+        result = apply_master_logic(df, {"ACC1"}, set(), {}, {})
+        assert result.iloc[0]["loan_payment_type"] == "DISBURSEMENT"
+
+    def test_enrichment_deposit_override_when_oper(self):
+        """Deposit whose counter-account isn't ours → re-classified, stops being cashflow."""
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2026, 4, 3),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "ООО ПЛЮС ВАЙБ",
+                    "inn": None,
+                    "counterparty_account": "EXTERNAL_DEPOSIT",
+                    "purpose": "Размещение средств в депозит по Ген.согл N ДЕППИБ-25",
+                    "income": 0,
+                    "expense": 4142226.18,
+                }
+            ]
+        )
+        result = apply_master_logic(df, {"ACC1"}, set(), {}, {})
+        row = result.iloc[0]
+        assert row["event_type2"] == "DEPOSIT_PLACE"
+        assert row["is_cashflow2"] == 0
+        assert row["status"] == "NO_CASHFLOW"
+
+    def test_enrichment_deposit_internal_keeps_priority(self):
+        """Deposit between OUR accounts stays INTERNAL_TRANSFER (not DEPOSIT_PLACE)."""
+        df = self._make_df(
+            [
+                {
+                    "date": datetime(2026, 4, 3),
+                    "bank": "VTB",
+                    "account": "ACC1",
+                    "currency": "RUB",
+                    "counterparty": "ООО ПЛЮС ВАЙБ",
+                    "inn": None,
+                    "counterparty_account": "ACC2",
+                    "purpose": "Размещение средств в депозит по Ген.согл N ДЕППИБ-25",
+                    "income": 0,
+                    "expense": 4142226.18,
+                }
+            ]
+        )
+        result = apply_master_logic(df, {"ACC1", "ACC2"}, set(), {}, {})
+        assert result.iloc[0]["event_type2"] == "INTERNAL_TRANSFER"
+        assert result.iloc[0]["is_cashflow2"] == 0
+
     def test_category_override_priority(self):
         df = self._make_df(
             [

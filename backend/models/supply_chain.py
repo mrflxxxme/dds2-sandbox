@@ -236,3 +236,25 @@ class FactoryOrderHistory(Base):
         Index("ix_factory_order_history_project_id", "project_id"),
         Index("ix_factory_order_history_order_id", "factory_order_id"),
     )
+
+
+class SupplierMachinePlan(Base, TimestampMixin):
+    """Плановая дата оплаты ОСТАТКА по машине для конкретного поставщика.
+
+    Остаток считается на пару (поставщик, машина): у каждого поставщика своя доля
+    в машине (мультипоставщиковая машина), поэтому и план оплаты остатка — per
+    (project, supplier, order_no). Upsert по уникальному ключу (без soft-delete).
+    """
+
+    __tablename__ = "supplier_machine_plan"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    supplier_id: Mapped[int] = mapped_column(Integer, ForeignKey("suppliers.id"), nullable=False)
+    order_no: Mapped[str] = mapped_column(String(50), nullable=False)  # CostOrder.order_no (бизнес-ключ)
+    remaining_due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "supplier_id", "order_no", name="uq_supplier_machine_plan"),
+        Index("ix_supplier_machine_plan_lookup", "project_id", "supplier_id"),
+    )

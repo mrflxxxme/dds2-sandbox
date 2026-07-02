@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_project_reports
 from backend.config import settings
-from backend.models.counterparty import Counterparty, CounterpartyDocument
+from backend.models.counterparty import Counterparty, CounterpartyDocument, CounterpartyIdentifier
 from backend.models.loan import Loan
 from backend.models.refs import CounterpartyCategory
 from backend.models.transactions import CategoryChangeLog, Transaction
@@ -837,6 +837,102 @@ class CounterpartyService:
         if cp is None:
             return False
         cp.soft_delete()
+        await self.db.commit()
+        await invalidate_project_reports(project_id)
+        return True
+
+    # ─── identifiers (statement-matching keys) ──────────────────────────
+
+    async def _ensure_cp(self, counterparty_id: int, project_id: int) -> Counterparty:
+        res = await self.db.execute(
+            select(Counterparty).where(
+                Counterparty.id == counterparty_id,
+                Counterparty.project_id == project_id,
+                Counterparty.is_deleted == False,  # noqa: E712
+            )
+        )
+        cp = res.scalar_one_or_none()
+        if cp is None:
+            raise HTTPException(status_code=404, detail="Counterparty not found")
+        return cp
+
+    async def list_identifiers(
+        self, counterparty_id: int, *, project_id: int
+    ) -> builtins.list[CounterpartyIdentifier]:
+        await self._ensure_cp(counterparty_id, project_id)
+        res = await self.db.execute(
+            select(CounterpartyIdentifier)
+            .where(
+                CounterpartyIdentifier.counterparty_id == counterparty_id,
+                CounterpartyIdentifier.project_id == project_id,
+                CounterpartyIdentifier.is_deleted == False,  # noqa: E712
+            )
+            .order_by(CounterpartyIdentifier.kind, CounterpartyIdentifier.value)
+        )
+        return builtins.list(res.scalars().all())
+
+    async def add_identifier(
+        self,
+        counterparty_id: int,
+        *,
+        project_id: int,
+        kind: str,
+        value: str,
+        currency: str | None = None,
+        note: str | None = None,
+    ) -> CounterpartyIdentifier:
+        """Register a statement-matching identifier; restore a soft-deleted dup.
+
+        (project_id, kind, value) is partial-unique WHERE not deleted, so a
+        re-create of a previously removed identifier must RESTORE that row, not
+        INSERT — else IntegrityError on the unique index (SoftDelete+unique mine).
+        """
+        await self._ensure_cp(counterparty_id, project_id)
+        value = value.strip()
+
+        # Find ANY existing row (incl. soft-deleted) for this (project, kind, value).
+        res = await self.db.execute(
+            select(CounterpartyIdentifier).where(
+                CounterpartyIdentifier.project_id == project_id,
+                CounterpartyIdentifier.kind == kind,
+                CounterpartyIdentifier.value == value,
+            )
+        )
+        existing = res.scalar_one_or_none()
+        if existing is not None:
+            existing.restore()
+            existing.counterparty_id = counterparty_id
+            existing.currency = currency
+            existing.note = note
+            ident = existing
+        else:
+            ident = CounterpartyIdentifier(
+                project_id=project_id,
+                counterparty_id=counterparty_id,
+                kind=kind,
+                value=value,
+                currency=currency,
+                note=note,
+            )
+            self.db.add(ident)
+        await self.db.commit()
+        await self.db.refresh(ident)
+        await invalidate_project_reports(project_id)
+        return ident
+
+    async def delete_identifier(self, counterparty_id: int, identifier_id: int, *, project_id: int) -> bool:
+        res = await self.db.execute(
+            select(CounterpartyIdentifier).where(
+                CounterpartyIdentifier.id == identifier_id,
+                CounterpartyIdentifier.counterparty_id == counterparty_id,
+                CounterpartyIdentifier.project_id == project_id,
+                CounterpartyIdentifier.is_deleted == False,  # noqa: E712
+            )
+        )
+        ident = res.scalar_one_or_none()
+        if ident is None:
+            return False
+        ident.soft_delete()
         await self.db.commit()
         await invalidate_project_reports(project_id)
         return True

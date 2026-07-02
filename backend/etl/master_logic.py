@@ -123,6 +123,36 @@ def extract_annex_id(purpose: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+# ─── Invoice number normalization (machine invoice_no ↔ statement invoice_id) ─
+
+# Cyrillic homoglyphs → Latin: real machine invoice_no values mix scripts
+# (e.g. «СС20260036» with Cyrillic С instead of Latin C). Applied after upper().
+_CYR2LAT = str.maketrans("АВЕКМНОРСТХ", "ABEKMHOPCTX")
+
+
+def normalize_invoice_token(value: str) -> str:
+    """Normalize a single invoice token: trim, upper-case, Cyrillic→Latin."""
+    return str(value).strip().upper().translate(_CYR2LAT)
+
+
+def normalize_invoice_no(raw: str | None) -> list[str]:
+    """Split a (possibly composite) invoice string into normalized tokens.
+
+    Machines store one or several invoices in ``CostOrder.invoice_no`` joined by
+    ``+`` (e.g. «CC20260033+BZ-260402+HD-W20260328-1»); values may carry stray
+    whitespace and Cyrillic homoglyphs. Returns a de-duplicated, order-preserving
+    list of normalized tokens for matching against ``transactions.invoice_id``.
+    """
+    if not raw:
+        return []
+    tokens: list[str] = []
+    for part in re.split(r"[+,;]", str(raw)):
+        token = normalize_invoice_token(part)
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
 # ─── Phase 2: Purpose enrichment (contract_number, unk, deposits, loans) ─────
 
 
@@ -279,6 +309,25 @@ def apply_master_logic(
     result["purpose_tag"] = result["purpose"].apply(get_purpose_tag)
     result["invoice_id"] = result["purpose"].apply(extract_invoice_id)
     result["annex_id"] = result["purpose"].apply(extract_annex_id)
+
+    # ── Phase 2 purpose enrichment (contract_number, unk, loans, deposits) ──
+    # enrich_purpose() was defined and unit-tested but never wired here, so
+    # contract_number / unk_number / loan_payment_type stayed permanently NULL
+    # on every imported row (persist_df reads them from this df). Wire it now.
+    enr = result["purpose"].apply(enrich_purpose)
+    result["contract_number"] = enr.apply(lambda e: e["contract_number"])
+    result["unk_number"] = enr.apply(lambda e: e["unk_number"])
+    result["loan_payment_type"] = enr.apply(lambda e: e["loan_payment_type"])
+
+    # Deposit override: a deposit between our own accounts is already
+    # INTERNAL_TRANSFER; this only re-classifies deposits whose counter-account
+    # is not registered as ours (still OPER) so they stop counting as cashflow.
+    ev_override = enr.apply(lambda e: e["event_type2_override"])
+    cf_override = enr.apply(lambda e: e["is_cashflow2_override"])
+    dep_mask = ev_override.notna() & (result["event_type2"] == "OPER")
+    if dep_mask.any():
+        result.loc[dep_mask, "event_type2"] = ev_override[dep_mask]
+        result.loc[dep_mask, "is_cashflow2"] = cf_override[dep_mask].astype(int)
 
     # ── Categories (priority: override > cp_category > empty) ──
     def _get_categories(row):

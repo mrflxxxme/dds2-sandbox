@@ -494,6 +494,7 @@ const FF_PROVIDER_LABELS: Record<string, string> = {
     skladbot: 'skladbot.ru',
     wmscelicom: 'Целиком (WMS Celicom)',
     migfull: 'Натали (migfull.app)',
+    mprocket: 'Нитропак (mprocket)',
 };
 
 function FulfillmentSection({ warehouseId, status, onChanged }: {

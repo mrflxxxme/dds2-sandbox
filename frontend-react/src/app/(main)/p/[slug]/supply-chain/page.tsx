@@ -24,6 +24,7 @@ const calcVolumeM3 = (boxSize: string, qty: number, pcsPerBox: number | null): n
 };
 import PageHeader from '@/components/PageHeader';
 import TabLayout from '@/components/TabLayout';
+import Toast from '@/components/Toast';
 import DataTable, { Column } from '@/components/DataTable';
 import FormModal from '@/components/FormModal';
 import KpiCard from '@/components/KpiCard';
@@ -31,6 +32,9 @@ import type {
     FactoryOrder,
     FactoryOrderCreate,
     FactoryOrderItem,
+    SupplierFinance,
+    SupplierIdentifierItem,
+    SupplierPaymentTxn,
     SupplyChainOverview,
     VehicleStatus,
     VehicleSchema,
@@ -2738,6 +2742,517 @@ function CatalogHistoryStatusBadge({ entry }: { entry: SkuOrderHistoryEntry }) {
     return <span className="badge badge-secondary">{t('catalog_status_at_factory')}</span>;
 }
 
+// ─── Supplier card: Finance (заказы / оплаты / долг + ручная привязка) ───
+
+function SupplierFinanceView({ supplierId }: { supplierId: number }) {
+    const { t } = useT();
+    const [data, setData] = useState<SupplierFinance | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [linking, setLinking] = useState<number | null>(null);
+    const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+    const [idKind, setIdKind] = useState<'CONTRACT' | 'ACCOUNT' | 'INN'>('CONTRACT');
+    const [idValue, setIdValue] = useState('');
+    const [savingId, setSavingId] = useState(false);
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        setError('');
+        try {
+            setData(await api.getSupplierFinance(supplierId));
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setLoading(false);
+        }
+    }, [supplierId]);
+
+    useEffect(() => { load(); }, [load]);
+
+    const handleLink = useCallback(async (txnId: number) => {
+        setLinking(txnId);
+        try {
+            await api.linkSupplierPayment(supplierId, txnId);
+            const fresh = await api.getSupplierFinance(supplierId);
+            setData(fresh);
+            setToast({ message: `${t('fin_linked_ok')} ${fresh.supplier_name} → ${t('fin_payments_title')}`, type: 'success' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : String(e), type: 'error' });
+        } finally {
+            setLinking(null);
+        }
+    }, [supplierId, t]);
+
+    const handleUnlink = useCallback(async (txnId: number) => {
+        setLinking(txnId);
+        try {
+            await api.unlinkSupplierPayment(supplierId, txnId);
+            setData(await api.getSupplierFinance(supplierId));
+            setToast({ message: t('fin_unlinked_ok'), type: 'info' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : String(e), type: 'error' });
+        } finally {
+            setLinking(null);
+        }
+    }, [supplierId, t]);
+
+    const handleAssignMachine = useCallback(async (txnId: number, orderNo: string) => {
+        try {
+            setData(await api.assignPaymentMachine(supplierId, txnId, orderNo || null));
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : String(e), type: 'error' });
+        }
+    }, [supplierId]);
+
+    const [autoBusy, setAutoBusy] = useState(false);
+    const handleAutoDistribute = useCallback(async () => {
+        setAutoBusy(true);
+        try {
+            const res = await api.autoDistributeMachines(supplierId);
+            setData(res.finance);
+            setToast({
+                message: res.assigned > 0
+                    ? `${t('fin_auto_assigned')}: ${res.assigned}`
+                    : t('fin_auto_none'),
+                type: res.assigned > 0 ? 'success' : 'info',
+            });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : String(e), type: 'error' });
+        } finally {
+            setAutoBusy(false);
+        }
+    }, [supplierId, t]);
+
+    // Мультивыбор оплат → привязка к одной машине (депозит + доплата одним действием)
+    const [selected, setSelected] = useState<Set<number>>(new Set());
+    const [bulkMachine, setBulkMachine] = useState('');
+    const [bulkBusy, setBulkBusy] = useState(false);
+    const toggleSelected = useCallback((id: number) => {
+        setSelected((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    }, []);
+    const handleBulkAssign = useCallback(async () => {
+        if (!bulkMachine || selected.size === 0) return;
+        setBulkBusy(true);
+        try {
+            const fresh = await api.assignPaymentsMachineBulk(supplierId, [...selected], bulkMachine);
+            setData(fresh);
+            setToast({ message: `${t('fin_bulk_done')}: ${selected.size}`, type: 'success' });
+            setSelected(new Set());
+            setBulkMachine('');
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : String(e), type: 'error' });
+        } finally {
+            setBulkBusy(false);
+        }
+    }, [bulkMachine, selected, supplierId, t]);
+
+    // Открытие машины (заказа) в модалке: оплаты + дата оплаты остатка
+    const [openMachine, setOpenMachine] = useState<string | null>(null);
+    const [modalPick, setModalPick] = useState<Set<number>>(new Set());
+    const [modalBusy, setModalBusy] = useState(false);
+    const toggleModalPick = useCallback((id: number) => {
+        setModalPick((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    }, []);
+    const handleSetPlan = useCallback(async (orderNo: string, due: string | null) => {
+        try {
+            setData(await api.setMachinePlan(supplierId, orderNo, due));
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : String(e), type: 'error' });
+        }
+    }, [supplierId]);
+    const handleModalAssign = useCallback(async (orderNo: string) => {
+        if (modalPick.size === 0) return;
+        setModalBusy(true);
+        try {
+            const fresh = await api.assignPaymentsMachineBulk(supplierId, [...modalPick], orderNo);
+            setData(fresh);
+            setToast({ message: `${t('fin_bulk_done')}: ${modalPick.size}`, type: 'success' });
+            setModalPick(new Set());
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : String(e), type: 'error' });
+        } finally {
+            setModalBusy(false);
+        }
+    }, [modalPick, supplierId, t]);
+
+    const handleAddIdentifier = useCallback(async () => {
+        const v = idValue.trim();
+        if (!v) return;
+        setSavingId(true);
+        try {
+            setData(await api.addSupplierIdentifier(supplierId, idKind, v));
+            setIdValue('');
+            setToast({ message: t('fin_id_added'), type: 'success' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : String(e), type: 'error' });
+        } finally {
+            setSavingId(false);
+        }
+    }, [supplierId, idKind, idValue, t]);
+
+    const handleDeleteIdentifier = useCallback(async (idId: number) => {
+        try {
+            setData(await api.deleteSupplierIdentifier(supplierId, idId));
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : String(e), type: 'error' });
+        }
+    }, [supplierId]);
+
+    const kindLabel = useCallback((k: string) => (
+        k === 'CONTRACT' ? t('fin_id_kind_CONTRACT') : k === 'ACCOUNT' ? t('fin_id_kind_ACCOUNT') : t('fin_id_kind_INN')
+    ), [t]);
+
+    const renderRows = (rows: SupplierPaymentTxn[], withLink: boolean) => (
+        <table className="sc-fin-table">
+            <thead>
+                <tr>
+                    {!withLink && (
+                        <th className="sc-fin-check">
+                            <input
+                                type="checkbox"
+                                aria-label="select-all"
+                                checked={rows.length > 0 && rows.every((r) => selected.has(r.id))}
+                                onChange={(e) => setSelected(e.target.checked ? new Set(rows.map((r) => r.id)) : new Set())}
+                            />
+                        </th>
+                    )}
+                    <th>{t('fin_col_date')}</th>
+                    {withLink ? (
+                        <th className="sc-fin-num">{t('fin_col_amount')}</th>
+                    ) : (
+                        <>
+                            <th className="sc-fin-num">{t('fin_col_goods')}</th>
+                            <th className="sc-fin-num">{t('fin_col_commission')}</th>
+                            <th className="sc-fin-num">{t('fin_col_total')}</th>
+                        </>
+                    )}
+                    <th>{t('fin_col_contract')}</th>
+                    {!withLink && <th>{t('fin_col_machine')}</th>}
+                    <th>{t('fin_col_purpose')}</th>
+                    <th />
+                </tr>
+            </thead>
+            <tbody>
+                {rows.map((p) => (
+                    <tr key={p.id} className={!withLink && selected.has(p.id) ? 'sc-fin-row-sel' : undefined}>
+                        {!withLink && (
+                            <td className="sc-fin-check">
+                                <input
+                                    type="checkbox"
+                                    checked={selected.has(p.id)}
+                                    onChange={() => toggleSelected(p.id)}
+                                />
+                            </td>
+                        )}
+                        <td>{formatDate(p.date)}</td>
+                        {withLink ? (
+                            <td className="sc-fin-num">{formatNumber(Number(p.expense), 0)} {currencySymbol(p.currency)}</td>
+                        ) : (
+                            <>
+                                <td className="sc-fin-num">{formatNumber(Number(p.expense), 0)}</td>
+                                <td className="sc-fin-num sc-fin-comm">{Number(p.commission) > 0 ? `+${formatNumber(Number(p.commission), 0)}` : '—'}</td>
+                                <td className="sc-fin-num sc-fin-total">{formatNumber(Number(p.total), 0)} {currencySymbol(p.currency)}</td>
+                            </>
+                        )}
+                        <td className="sc-fin-contract">{p.contract_number ? <span className="badge badge-info">{p.contract_number}</span> : '—'}</td>
+                        {!withLink && (
+                            <td>
+                                <select
+                                    className="sc-fin-id-select"
+                                    value={p.machine_order_no || ''}
+                                    onChange={(e) => handleAssignMachine(p.id, e.target.value)}
+                                >
+                                    <option value="">—</option>
+                                    {(data?.machines ?? []).map((m) => (
+                                        <option key={m.order_no} value={m.order_no}>
+                                            {m.order_no}{m.invoice_no ? ` · ${m.invoice_no.slice(0, 14)}` : ''}
+                                        </option>
+                                    ))}
+                                </select>
+                            </td>
+                        )}
+                        <td className="sc-fin-purpose">{(p.purpose || '').slice(0, 90)}</td>
+                        <td className="sc-fin-action">
+                            {withLink ? (
+                                <button
+                                    className="btn btn-primary btn-sm"
+                                    disabled={linking === p.id}
+                                    onClick={() => handleLink(p.id)}
+                                >
+                                    {t('fin_link_btn')}
+                                </button>
+                            ) : (
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    disabled={linking === p.id}
+                                    onClick={() => handleUnlink(p.id)}
+                                >
+                                    {t('fin_unlink_btn')}
+                                </button>
+                            )}
+                        </td>
+                    </tr>
+                ))}
+            </tbody>
+        </table>
+    );
+
+    if (loading) return <div className="glass-card sc-form-card">{t('msg_loading')}</div>;
+    if (error) {
+        return (
+            <div className="glass-card sc-form-card">
+                <p>{error}</p>
+                <button className="btn btn-secondary btn-sm" onClick={load}>↻</button>
+            </div>
+        );
+    }
+    if (!data) return null;
+
+    const sym = currencySymbol(data.currency);
+    const debt = Number(data.debt);
+    const debtCls = debt > 0 ? 'badge badge-danger' : debt < 0 ? 'badge badge-success' : 'badge badge-secondary';
+
+    return (
+        <div className="animate-in">
+            <div className="sc-kpi-grid-3">
+                <KpiCard label={t('fin_ordered')} value={`${formatNumber(Number(data.ordered), 0)} ${sym}`} />
+                <KpiCard label={t('fin_paid')} value={`${formatNumber(Number(data.paid), 0)} ${sym}`} />
+                <KpiCard label={t('fin_debt')} value={`${formatNumber(debt, 0)} ${sym}`} />
+            </div>
+            <p className="sc-fin-comm">{t('fin_debt_hint')}</p>
+            {!data.linked && (
+                <p><span className="badge badge-warning">{t('fin_not_linked')}</span></p>
+            )}
+            <div className="glass-card sc-form-card">
+                <div className="sc-fin-h-row">
+                    <h3 className="sc-fin-h3">{t('fin_machines_title')} · {data.machines.length}</h3>
+                    {data.linked && (
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            onClick={handleAutoDistribute}
+                            disabled={autoBusy}
+                            title={t('fin_auto_hint')}
+                        >
+                            {autoBusy ? '…' : `🪄 ${t('fin_auto_btn')}`}
+                        </button>
+                    )}
+                </div>
+                {data.machines.length === 0 ? (
+                    <p>{t('fin_machines_empty')}</p>
+                ) : (
+                    <table className="sc-fin-table">
+                        <thead>
+                            <tr>
+                                <th>{t('fin_col_machine')}</th>
+                                <th>{t('fin_col_status')}</th>
+                                <th>{t('fin_col_invoice')}</th>
+                                <th className="sc-fin-num">{t('fin_col_order_amount')}</th>
+                                <th className="sc-fin-num">{t('fin_paid')}</th>
+                                <th className="sc-fin-num">{t('fin_remaining')}</th>
+                                <th>{t('fin_col_due')}</th>
+                                <th />
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {data.machines.map((m) => {
+                                const rem = Number(m.remaining);
+                                return (
+                                    <tr key={m.order_no} className="sc-fin-row-click" onClick={() => setOpenMachine(m.order_no)}>
+                                        <td>{m.order_no}</td>
+                                        <td><span className="badge badge-secondary">{m.status || '—'}</span></td>
+                                        <td className="sc-fin-contract">{m.invoice_no || '—'}</td>
+                                        <td className="sc-fin-num sc-fin-total">{formatNumber(Number(m.amount), 0)} {sym}</td>
+                                        <td className="sc-fin-num">{Number(m.paid) > 0 ? `${formatNumber(Number(m.paid), 0)} ${sym}` : '—'}</td>
+                                        <td className="sc-fin-num">
+                                            <span className={rem > 0 ? 'badge badge-danger' : 'badge badge-success'}>
+                                                {formatNumber(rem, 0)} {sym}
+                                            </span>
+                                        </td>
+                                        <td>{m.remaining_due_date ? formatDate(m.remaining_due_date) : (rem > 0 ? <span className="sc-fin-comm">{t('fin_due_set')}</span> : '—')}</td>
+                                        <td className="sc-fin-action"><span className="sc-fin-open">↗</span></td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                )}
+            </div>
+            {openMachine && (() => {
+                const m = data.machines.find((x) => x.order_no === openMachine);
+                if (!m) return null;
+                const onMachine = data.payments.filter((p) => p.machine_order_no === openMachine);
+                const offMachine = data.payments.filter((p) => p.machine_order_no !== openMachine);
+                const rem = Number(m.remaining);
+                return (
+                    <div className="sc-modal-backdrop" onClick={() => { setOpenMachine(null); setModalPick(new Set()); }}>
+                        <div className="sc-modal-dialog sc-modal-card-wide" onClick={(e) => e.stopPropagation()}>
+                            <div className="sc-modal-header">
+                                <div className="sc-modal-header-title">{t('mm_title')} {m.order_no}</div>
+                                <button className="sc-fin-id-del" aria-label="close" onClick={() => { setOpenMachine(null); setModalPick(new Set()); }}>×</button>
+                            </div>
+                            <div className="sc-modal-body">
+                                <div className="sc-kpi-grid-3">
+                                    <KpiCard label={t('fin_col_order_amount')} value={`${formatNumber(Number(m.amount), 0)} ${sym}`} />
+                                    <KpiCard label={t('fin_paid')} value={`${formatNumber(Number(m.paid), 0)} ${sym}`} />
+                                    <KpiCard label={t('fin_remaining')} value={`${formatNumber(rem, 0)} ${sym}`} />
+                                </div>
+                                <div className="sc-fin-due-row">
+                                    <label className="sc-form-label">{t('mm_due_label')}</label>
+                                    <input
+                                        type="date"
+                                        className="sc-fin-id-input"
+                                        value={m.remaining_due_date || ''}
+                                        onChange={(e) => handleSetPlan(openMachine, e.target.value || null)}
+                                    />
+                                    {m.remaining_due_date && (
+                                        <button className="btn btn-secondary btn-sm" onClick={() => handleSetPlan(openMachine, null)}>{t('mm_due_clear')}</button>
+                                    )}
+                                </div>
+
+                                <h4 className="sc-fin-h3">{t('mm_assigned')} · {onMachine.length}</h4>
+                                {onMachine.length === 0 ? <p className="sc-fin-comm">{t('mm_assigned_empty')}</p> : (
+                                    <table className="sc-fin-table">
+                                        <tbody>
+                                            {onMachine.map((p) => (
+                                                <tr key={p.id}>
+                                                    <td>{formatDate(p.date)}</td>
+                                                    <td className="sc-fin-num sc-fin-total">{formatNumber(Number(p.expense), 0)} {currencySymbol(p.currency)}</td>
+                                                    <td className="sc-fin-purpose">{(p.purpose || '').slice(0, 60)}</td>
+                                                    <td className="sc-fin-action">
+                                                        <button className="btn btn-secondary btn-sm" onClick={() => handleAssignMachine(p.id, '')}>{t('mm_remove')}</button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                )}
+
+                                <h4 className="sc-fin-h3">{t('mm_add')} · {offMachine.length}</h4>
+                                {offMachine.length === 0 ? <p className="sc-fin-comm">{t('mm_add_empty')}</p> : (
+                                    <table className="sc-fin-table">
+                                        <tbody>
+                                            {offMachine.map((p) => (
+                                                <tr key={p.id} className={modalPick.has(p.id) ? 'sc-fin-row-sel' : undefined}>
+                                                    <td className="sc-fin-check">
+                                                        <input type="checkbox" checked={modalPick.has(p.id)} onChange={() => toggleModalPick(p.id)} />
+                                                    </td>
+                                                    <td>{formatDate(p.date)}</td>
+                                                    <td className="sc-fin-num">{formatNumber(Number(p.expense), 0)} {currencySymbol(p.currency)}</td>
+                                                    <td className="sc-fin-contract">{p.machine_order_no ? <span className="badge badge-info">{p.machine_order_no}</span> : '—'}</td>
+                                                    <td className="sc-fin-purpose">{(p.purpose || '').slice(0, 50)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                )}
+                            </div>
+                            <div className="sc-modal-footer">
+                                <span className="sc-fin-bulk-count">{t('fin_bulk_selected')}: {modalPick.size}</span>
+                                <button className="btn btn-primary btn-sm" disabled={modalPick.size === 0 || modalBusy} onClick={() => handleModalAssign(openMachine)}>
+                                    {modalBusy ? '…' : t('mm_attach')}
+                                </button>
+                                <button className="btn btn-secondary btn-sm" onClick={() => { setOpenMachine(null); setModalPick(new Set()); }}>{t('mm_close')}</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
+            <div className="glass-card sc-form-card">
+                <h3 className="sc-fin-h3">{t('fin_id_title')}</h3>
+                <p className="sc-fin-comm">{t('fin_id_hint')}</p>
+                <div className="sc-fin-id-chips">
+                    {data.identifiers.length === 0 && <span className="sc-fin-comm">{t('fin_id_empty')}</span>}
+                    {data.identifiers.map((i: SupplierIdentifierItem) => (
+                        <span key={i.id} className="sc-fin-id-chip">
+                            {kindLabel(i.kind)}: {i.value}
+                            <button className="sc-fin-id-del" aria-label="delete" onClick={() => handleDeleteIdentifier(i.id)}>×</button>
+                        </span>
+                    ))}
+                </div>
+                <div className="sc-fin-id-form">
+                    <select
+                        className="sc-fin-id-select"
+                        value={idKind}
+                        onChange={(e) => setIdKind(e.target.value as 'CONTRACT' | 'ACCOUNT' | 'INN')}
+                    >
+                        <option value="CONTRACT">{t('fin_id_kind_CONTRACT')}</option>
+                        <option value="ACCOUNT">{t('fin_id_kind_ACCOUNT')}</option>
+                        <option value="INN">{t('fin_id_kind_INN')}</option>
+                    </select>
+                    <input
+                        className="sc-fin-id-input"
+                        value={idValue}
+                        placeholder={t('fin_id_placeholder')}
+                        onChange={(e) => setIdValue(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleAddIdentifier(); }}
+                    />
+                    <button className="btn btn-primary btn-sm" disabled={savingId || !idValue.trim()} onClick={handleAddIdentifier}>
+                        {t('fin_id_add')}
+                    </button>
+                </div>
+            </div>
+            <div className="glass-card sc-form-card">
+                <h3 className="sc-fin-h3">
+                    {t('fin_payments_title')} · {data.payments.length}
+                    {Number(data.commission_total) > 0 && (
+                        <span className="sc-fin-comm-tag"> · {t('fin_commission_total')} {formatNumber(Number(data.commission_total), 0)} {sym}</span>
+                    )}
+                </h3>
+                {selected.size > 0 && (
+                    <div className="sc-fin-bulkbar">
+                        <span className="sc-fin-bulk-count">{t('fin_bulk_selected')}: {selected.size}</span>
+                        <select
+                            className="sc-fin-id-select"
+                            value={bulkMachine}
+                            onChange={(e) => setBulkMachine(e.target.value)}
+                        >
+                            <option value="">{t('fin_bulk_pick')}</option>
+                            {(data.machines ?? []).map((m) => (
+                                <option key={m.order_no} value={m.order_no}>
+                                    {m.order_no}{m.invoice_no ? ` · ${m.invoice_no.slice(0, 14)}` : ''}
+                                </option>
+                            ))}
+                        </select>
+                        <button
+                            className="btn btn-primary btn-sm"
+                            disabled={!bulkMachine || bulkBusy}
+                            onClick={handleBulkAssign}
+                        >
+                            {bulkBusy ? '…' : t('fin_bulk_assign')}
+                        </button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => setSelected(new Set())}>
+                            {t('fin_bulk_clear')}
+                        </button>
+                    </div>
+                )}
+                {data.payments.length === 0
+                    ? <p>{t('fin_no_payments')}</p>
+                    : renderRows(data.payments, false)}
+            </div>
+            <div className="glass-card sc-form-card">
+                <h3 className="sc-fin-h3">{t('fin_unlinked_title')} · {data.unlinked_candidates.length}</h3>
+                {data.unlinked_candidates.length === 0
+                    ? <p>{t('fin_no_candidates')}</p>
+                    : renderRows(data.unlinked_candidates, true)}
+            </div>
+            <p className="sc-debt-badge">
+                <span className={debtCls}>{t('fin_debt')}: {formatNumber(debt, 0)} {sym}</span>
+            </p>
+            {toast && (
+                <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
+            )}
+        </div>
+    );
+}
+
 function SupplierCatalogView({
     supplierId,
     onBack,
@@ -2746,7 +3261,7 @@ function SupplierCatalogView({
     onBack: () => void;
 }) {
     const { t, lang } = useT();
-    const [mode, setMode] = useState<'catalog' | 'matrix'>('matrix');
+    const [mode, setMode] = useState<'catalog' | 'matrix' | 'finance'>('matrix');
     const [catalog, setCatalog] = useState<SupplierCatalogResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -2923,6 +3438,12 @@ function SupplierCatalogView({
                     >
                         {t('matrix_mode_shipment')}
                     </button>
+                    <button
+                        className={`sc-mode-btn ${mode === 'finance' ? 'sc-mode-btn-active' : ''}`}
+                        onClick={() => setMode('finance')}
+                    >
+                        {t('finance_mode')}
+                    </button>
                 </div>
                 {mode === 'catalog' && (
                     <button className="btn btn-sm" onClick={handleExport} disabled={filteredSubjects.length === 0}>
@@ -2931,7 +3452,9 @@ function SupplierCatalogView({
                 )}
             </div>
 
-            {mode === 'matrix' ? (
+            {mode === 'finance' ? (
+                <SupplierFinanceView supplierId={supplierId} />
+            ) : mode === 'matrix' ? (
                 <ShipmentMatrixView supplierId={supplierId} />
             ) : (
             <>

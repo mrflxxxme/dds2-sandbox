@@ -25,6 +25,23 @@ COPY alembic.ini .
 COPY entrypoint.sh .
 COPY entrypoint-worker.sh .
 
+# ─── КриптоПро CSP (для VTB ИБК H2H: csptest-подпись + cprocsp-curl GOST-TLS) ──
+# По умолчанию ВЫКЛ → прод-CI собирается без него (дистрибутив gitignored, в git его нет).
+# Включить:  docker build --build-arg INSTALL_CRYPTOPRO=1   (нужен docker/cryptopro/linux-amd64_deb.tgz
+# в build-контексте; на ARM-Mac добавить --platform=linux/amd64). Bind-mount → 38 МБ не оседают в слое.
+ARG INSTALL_CRYPTOPRO=0
+ENV PATH="/opt/cprocsp/bin/amd64:/opt/cprocsp/sbin/amd64:${PATH}"
+# docker/cryptopro/ всегда в git (Dockerfile тест-рига); *.tgz gitignored → в прод-CI
+# COPY тащит только мелочь, а RUN при =0 пропускает установку. Слой 38 МБ возникает
+# лишь при сборке VTB-образа (--build-arg INSTALL_CRYPTOPRO=1 с дистрибутивом на месте).
+COPY docker/cryptopro/ /tmp/cryptopro/
+RUN if [ "$INSTALL_CRYPTOPRO" = "1" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends procps && rm -rf /var/lib/apt/lists/* \
+        && cd /tmp/cryptopro && tar xzf linux-amd64_deb.tgz && cd linux-amd64_deb \
+        && bash install.sh && (dpkg -i cprocsp-pki-cades-64_*.deb || true) ; \
+    fi \
+    && rm -rf /tmp/cryptopro
+
 RUN chmod +x entrypoint.sh entrypoint-worker.sh \
     && mkdir -p /data/ai_memory \
     && chown -R app:app /app /data

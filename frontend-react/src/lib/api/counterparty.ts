@@ -124,6 +124,11 @@ export function addCounterpartyMethods(api: ApiClient) {
             );
         },
 
+        /** Download a counterparty document as a Blob (auth + project headers handled by the client). */
+        downloadCounterpartyDocument(counterpartyId: number, docId: number): Promise<Blob> {
+            return api.requestBlob(`/api/v1/counterparties/${counterpartyId}/documents/${docId}/download`);
+        },
+
         deleteCounterpartyDocument(counterpartyId: number, docId: number) {
             return api.request<void>(
                 'DELETE', `/api/v1/counterparties/${counterpartyId}/documents/${docId}`
