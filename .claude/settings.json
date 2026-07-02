@@ -87,9 +87,14 @@
             "type": "command",
             "command": "bash scripts/hooks/prompt-team-detect.sh",
             "timeout": 3
+          },
+          {
+            "type": "command",
+            "command": "python3 scripts/hooks/prompt_quality_check.py",
+            "timeout": 3
           }
         ],
-        "description": "[PUSH] при фейле авто-пуша dev + счётчик /compact"
+        "description": "[PUSH] при фейле авто-пуша + счётчик /compact + ТЗ-гейт: расплывчатый промпт (баг без указателя, «ничего не изменилось», дизайн без референса) → агент сначала задаёт уточняющие вопросы"
       }
     ],
     "SessionStart": [
