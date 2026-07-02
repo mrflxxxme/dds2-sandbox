@@ -47,6 +47,13 @@ class LoanStatus(str, enum.Enum):
     DEFAULTED = "DEFAULTED"
 
 
+class LoanEntityType(str, enum.Enum):
+    """Legal entity the loan was taken on (как у заёмщика: физлицо или ИП)."""
+
+    PHYSICAL = "PHYSICAL"  # физлицо
+    IP = "IP"  # индивидуальный предприниматель
+
+
 class LoanPaymentType(str, enum.Enum):
     """Type of loan payment event."""
 
@@ -83,6 +90,12 @@ class Loan(Base, TimestampMixin, SoftDeleteMixin):
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     maturity_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default=LoanStatus.ACTIVE, server_default="ACTIVE")
+    # Сущность заёмщика (физлицо / ИП) — «был займ на ип или физ».
+    entity_type: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    # Банк лендера, куда выплачиваются проценты (сбер/альфа/…) — справочно.
+    lender_bank: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Цепочка продлений: при продлении старый займ закрывается, новый ссылается на него.
+    parent_loan_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("loan.id"), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
@@ -94,12 +107,17 @@ class Loan(Base, TimestampMixin, SoftDeleteMixin):
         back_populates="loan",
         foreign_keys="LoanPayment.loan_id",
     )
+    parent_loan: Mapped["Loan | None"] = relationship(
+        remote_side=[id],
+        foreign_keys=[parent_loan_id],
+    )
 
     __table_args__ = (
         Index("ix_loan_project_id", "project_id"),
         Index("ix_loan_counterparty", "counterparty_id"),
         # Partial indexes created via CONCURRENTLY in migration:
         #   ix_loan_project_status  (project_id, status) WHERE is_deleted = false
+        #   ix_loan_parent          (parent_loan_id) WHERE parent_loan_id IS NOT NULL
     )
 
 

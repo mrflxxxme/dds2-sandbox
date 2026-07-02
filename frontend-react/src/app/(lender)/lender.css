@@ -1,0 +1,180 @@
+/* ─── Lender portal — minimal layout glue ─────────────────────────────────────
+ * The lender portal mirrors the MAIN APP (desktop): its visual language is the
+ * globals.css system — .sidebar / .sidebar-* / .main-content / .glass-card /
+ * .badge / .btn / .stat-card / .page-title / .page-subtitle / .data-table.
+ *
+ * This file holds ONLY what the system doesn't provide: the loading skeleton,
+ * detail-page key/value rows, and a small responsive rule that collapses the
+ * fixed sidebar into a top strip on narrow screens (desktop is primary).
+ * Every value uses --color-* tokens and the system radius scale.
+ */
+
+/* Loading skeleton (used in the shell gate + pages before data arrives). */
+.lender-feed {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.lender-skeleton {
+    height: 96px;
+    border-radius: 20px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-card);
+    position: relative;
+    overflow: hidden;
+}
+
+.lender-skeleton::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        var(--color-bg-hover) 50%,
+        transparent 100%
+    );
+    animation: lenderShimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes lenderShimmer {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(100%); }
+}
+
+/* ── Responsive: collapse the fixed desktop sidebar into a top strip on phones ──
+   Desktop (>900px) uses the system .sidebar (fixed) + .main-content unchanged.
+   Below 900px the sidebar becomes a horizontal bar at the top. */
+@media (max-width: 900px) {
+    .lender-sidebar {
+        position: static;
+        width: 100%;
+        height: auto;
+        flex-direction: row;
+        align-items: center;
+        gap: 8px;
+        overflow-x: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--color-border);
+    }
+
+    .lender-sidebar .sidebar-logo {
+        padding: 16px;
+    }
+
+    .lender-sidebar .sidebar-nav {
+        flex-direction: row;
+        padding: 0;
+        flex: 1;
+    }
+
+    .lender-sidebar .sidebar-user {
+        border-top: none;
+        padding: 12px 16px;
+    }
+
+    .lender-main {
+        margin-left: 0;
+        padding: 24px 16px 48px;
+    }
+}
+
+/* ─── Карточки займов (список на дашборде) ────────────────────────────────── */
+.lender-loan-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 16px;
+}
+
+.lender-loan-card {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.lender-loan-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-glass-hover);
+}
+
+.lender-loan-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.lender-loan-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+/* ─── KPI / детали — строки ключ→значение ─────────────────────────────────── */
+.lender-kpi-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.lender-kpi-row > * {
+    flex: 1 1 180px;
+    min-width: 180px;
+}
+
+.lender-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.lender-kv {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 14px;
+}
+
+.lender-kv:last-child {
+    border-bottom: none;
+}
+
+.lender-kv-key {
+    color: var(--color-text-dim);
+}
+
+.lender-kv-val {
+    color: var(--color-text);
+    font-weight: 500;
+    text-align: right;
+}
+
+/* ─── Деталь — back-ссылка ────────────────────────────────────────────────── */
+.lender-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    color: var(--color-text-muted);
+    margin-bottom: 16px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    text-decoration: none;
+}
+
+.lender-back:hover {
+    color: var(--color-accent);
+}
+
+.lender-num {
+    text-align: right;
+}

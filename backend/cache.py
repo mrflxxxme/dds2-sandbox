@@ -145,6 +145,7 @@ async def invalidate_project_reports(project_id: int):
         "reports:balance_daily",
         "reports:dds_month",
         "reports:dashboard",
+        "reports:dashboard_ops",
         "reports:wb_bdr",
         "reports:opiu",
         "reports:cost_dna",
@@ -185,6 +186,9 @@ async def invalidate_project_reports(project_id: int):
         "reviews:summary",
         "reviews:newcomers",
         "reviews:breakdown",
+        "loan_dashboard",
+        "loan_by_lender",
+        "loan_forecast",
     ):
         await invalidate_cache(f"{prefix}:project_id={project_id}")
 

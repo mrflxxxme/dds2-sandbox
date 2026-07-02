@@ -113,7 +113,7 @@ const navGroups: { title: string; section: string; items: NavItem[] }[] = [
         section: 'refs',
         items: [
             { href: '/refs/counterparty', label: 'Контрагенты', icon: '👥', pageKey: 'refs' },
-            { href: '/refs/loans', label: 'Займы и кредиты', icon: '💸', pageKey: 'refs' },
+            { href: '/loans', label: 'Займы', icon: '💸', pageKey: 'refs' },
             { href: '/refs', label: 'Счета и категории', icon: '📋', pageKey: 'refs' },
         ],
     },
