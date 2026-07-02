@@ -1,8 +1,9 @@
 ---
 name: database-reviewer
-description: "PostgreSQL специалист для DDS2. Оптимизация запросов, схемы, миграции, PgBouncer. Используй при ревью SQL/миграций/схемы и проблемах с производительностью."
+description: "PostgreSQL специалист для DDS2. Оптимизация запросов, схемы, миграции, PgBouncer. Используй ПРОАКТИВНО при любом изменении migrations/**, backend/models/** или сырого SQL, и при проблемах с производительностью БД."
 tools: ["Read", "Grep", "Glob", "Bash"]
 model: opus
+memory: project
 ---
 
 # Database Reviewer — DDS2

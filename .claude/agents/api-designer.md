@@ -1,6 +1,6 @@
 ---
 name: api-designer
-description: "API-дизайнер DDS2. Проверяет OpenAPI, breaking changes, версионирование, REST-консистентность. Используй при новых endpoint'ах или изменении существующих схем."
+description: "API-дизайнер DDS2. Проверяет OpenAPI, breaking changes, версионирование, REST-консистентность. Используй ПРОАКТИВНО при новых endpoint'ах или изменении существующих схем (backend/routers/** + backend/schemas/**)."
 tools: ["Read", "Grep", "Glob", "Bash"]
 model: opus
 ---

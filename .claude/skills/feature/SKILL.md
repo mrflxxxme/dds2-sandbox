@@ -1,4 +1,5 @@
 ---
+name: feature
 description: "Сквозная разработка фичи DDS2: план (ждёт ok) → хребет → фан-аут backend‖frontend → verify-луп → review → /ship. Один вход на всю фичу."
 argument-hint: "<описание фичи: что строим и зачем>"
 ---

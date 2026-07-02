@@ -1,4 +1,5 @@
 ---
+name: new-endpoint
 description: "Новый API endpoint DDS2: schema → service → router → test, с проверкой конвенций и docs."
 ---
 

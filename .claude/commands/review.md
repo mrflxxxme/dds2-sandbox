@@ -6,11 +6,10 @@ description: "Фан-аут ревью DDS2: по diff-путям спавнит
 
 Оживляет 5 профильных субагентов: вместо «модель вспомнит про code-reviewer» — детерминированный фан-аут по тому, что реально изменилось. Работает в любой сессии (через инструмент Agent), без Workflow-tool. Для тяжёлого/ultracode-прогона есть SOTA-версия `.claude/workflows/review-deep.js` (`pipeline`+cache-warmup), запуск `Workflow({name:'review-deep'})`.
 
-## 1. Скоуп
-```bash
-git diff --staged --name-only && git diff --name-only
-```
-Собери список изменённых путей. Пусто → нечего ревьюить, стоп.
+## 1. Скоуп (снят автоматически при вызове)
+Изменённые пути:
+!`{ git diff --staged --name-only; git diff --name-only; } | sort -u | head -60`
+Пусто → нечего ревьюить, стоп.
 
 ## 2. Матрица «diff-путь → агент»
 Выбери агентов по совпавшим путям (code-reviewer — всегда, если есть код):
@@ -25,8 +24,7 @@ git diff --staged --name-only && git diff --name-only
 | `backend/routers/**` + `backend/schemas/**` (контракт API изменился) | **+ api-designer** |
 
 ## 3. Спавн — параллельно, на Opus 4.8
-Подними выбранных агентов **одним сообщением** (параллельно). **Каждому явно `model: opus`** — обязательно:
-- env `CLAUDE_CODE_SUBAGENT_MODEL` может быть закеширован на старте на нерабочем билде (см. [[model-always-top-tier]]); явный override в вызове перебивает env и гарантирует Opus 4.8.
+Подними выбранных агентов **одним сообщением** (параллельно). Ревьюеры сидят на `model: opus` во frontmatter (env-override `CLAUDE_CODE_SUBAGENT_MODEL` из settings убран намеренно — он глушил per-agent выбор модели); при сомнении можно продублировать `model: opus` в вызове.
 - Cache-warmup: первым подними `code-reviewer` (он прогреет общий префикс — CLAUDE.md+rules+diff), следом остальных параллельно → они читают кэш (0.1x) вместо полной цены.
 
 Каждому агенту в промпт: скоуп diff, какие файлы его зоны, «отчёт только по находкам с уверенностью >80%».

@@ -1,4 +1,5 @@
 ---
+name: autofix
 description: "Автономный self-verification луп багфикса DDS2: репро-тест → фикс корня → гоняет гейты до зелёного. Останавливается на зелёном (НЕ пушит)."
 argument-hint: "<описание бага: симптом / где / как воспроизвести>"
 ---
@@ -16,7 +17,9 @@ Self-verification агентный цикл: даю условие «зелен�
 - `docker compose exec backend pytest tests/ -x --tb=short -q` — **репро-тест проходит + не сломаны соседние**
 - если менялся `backend/services/**` или `backend/models/**`: `docker compose exec backend mypy backend/services backend/models`
 - `bash scripts/check_conventions.sh`
-- если менялся `frontend-react/**`: `cd frontend-react && npx tsc --noEmit && npm run lint`
+- если менялся `frontend-react/**`: tsc в контейнере (node на хосте НЕТ) — one-off контейнер с node_modules-volume, либо делегируй `test-runner`
+
+Прогоны гейтов можно делегировать агенту `test-runner` (haiku) — простыня логов не съедает контекст лупа; сложное падение — агенту `debugger` (sonnet).
 
 > ⚠ **Нет docker/гейта → нет автономности.** Если проверку прогнать нельзя (docker down) — НЕ продолжай вслепую и НЕ выдавай «готово». Остановись и скажи юзеру: запусти `make dev`.
 

@@ -1,5 +1,7 @@
 ---
+name: ship
 description: "Отправка фичи DDS2: /verify → коммит → push dev → наблюдение за CI → /learn. Только по явному /ship (есть side-effect: push)."
+disable-model-invocation: true
 ---
 
 # /ship — verify → commit → push → watch CI

@@ -1,8 +1,16 @@
 ---
-description: "Верификация DDS2 перед коммитом: тесты, конвенции, безопасность. Аргумент quick — быстрый срез."
+name: verify
+description: "Верификация DDS2 перед коммитом: тесты, конвенции, безопасность, frontend-проверка, ревью-фан-аут. Запускай ПРОАКТИВНО, когда закончен блок изменений кода в backend/ или frontend-react/ и дело идёт к коммиту/шипу, либо когда пользователь спрашивает «готово ли к коммиту / всё ли ок». Аргумент quick — быстрый срез (~30 сек)."
+argument-hint: "[quick]"
 ---
 
 # /verify — проверка перед коммитом
+
+## Контекст (снят автоматически при вызове)
+Изменения в дереве:
+!`git status --porcelain | head -30`
+Diff-стата:
+!`git diff --stat HEAD | tail -15`
 
 ## Режимы
 - `/verify quick` — быстрый срез (~30 сек): импорты + pytest + конвенции, последовательно.
@@ -16,7 +24,7 @@ bash scripts/check_conventions.sh
 ```
 
 ## full
-1. **Backend-тесты:** `docker compose exec backend pytest tests/ -x --tb=short -q`
+1. **Backend-тесты:** делегируй агенту `test-runner` (haiku, изолирует простыню логов от контекста) либо `docker compose exec -T backend pytest tests/ -x --tb=short -q`. НЕ запускай два pytest конкурентно — общая БД даёт ложные падения.
 2. **Конвенции:** `bash scripts/check_conventions.sh`
 3. **Безопасность** — grep по `backend/`:
    ```bash
@@ -25,7 +33,7 @@ bash scripts/check_conventions.sh
    grep -rn 'db.delete\|session.delete' --include="*.py" backend/ || echo OK
    grep -rn 'Float' --include="*.py" backend/models/ || echo OK
    ```
-4. **Frontend-проверка** — если в diff есть `frontend-react/`: `cd frontend-react && npx tsc --noEmit && npm run lint` (секунды vs минута полной сборки, ловит тот же класс ошибок, что блокирует CI). Полный `npm run build` — только если менялся `next.config`/билд-конфиг или правка крупная. UI юзер проверяет вживую — браузерный прогон агенту запрещён.
+4. **Frontend-проверка** — если в diff есть `frontend-react/` (node на хосте НЕТ — только контейнер): `docker run --rm --entrypoint sh -v "$PWD/frontend-react":/app -v dds2_frontend_node_modules:/app/node_modules -w /app <FRONTEND_IMAGE_ID> -c 'npx tsc --noEmit'` (образ по ID: `docker images | grep frontend`; имя dds2-frontend-react ложно блокируется хуком). Либо делегируй `test-runner`. UI юзер проверяет вживую — браузерный прогон агенту запрещён.
 5. **Ревью-фан-аут** — если менялся код: запусти `/review` (профильные субагенты на Opus 4.8 по матрице diff→агент, единый вердикт APPROVE/WARNING/BLOCK). BLOCK блокирует коммит. Для тяжёлого прогона — `Workflow({name:'review-deep'})`.
 
 Тяжёлые шаги можно гонять параллельно фоновыми агентами.

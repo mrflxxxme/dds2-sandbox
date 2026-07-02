@@ -1,5 +1,7 @@
 ---
+name: rollback
 description: "Откат прод-деплоя DDS2 на предыдущую версию без нового коммита фичи."
+disable-model-invocation: true
 ---
 
 # /rollback — откат прод-деплоя

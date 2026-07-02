@@ -48,7 +48,7 @@ make sync-prod                                  # локалка = копия п
 | перед коммитом / отправка фичи / после фичи | `/verify` · `/ship` · `/learn` |
 | баг, вопрос, мелкая правка | без skill — сразу |
 
-После написания кода запускай `/review` (фан-аут профильных субагентов по diff-путям, единый вердикт APPROVE/WARNING/BLOCK; обычно — шагом `/verify`). Субагенты `code-reviewer`, `security-reviewer`, `database-reviewer`, `performance-optimizer`, `api-designer` — по запросу или когда задача в их зоне.
+После написания кода запускай `/review` (фан-аут профильных субагентов по diff-путям, единый вердикт APPROVE/WARNING/BLOCK; обычно — шагом `/verify`). Ревьюеры (Opus, матрица в /review): `code-reviewer`, `security-reviewer`, `database-reviewer`, `performance-optimizer`, `api-designer`, `frontend-reviewer`. Исполнители: `test-runner` (haiku — ЛЮБОЙ прогон тестов/гейтов: изолирует простыню логов), `debugger` (sonnet — ошибки и падения), `docs-syncer` (haiku — docs в тот же коммит), `refactorer` (sonnet), `prod-diagnost` (sonnet — read-only триаж прода, первая фаза /hotfix).
 
 ## Workflow
 - Миграции Alembic — sequential, делает только lead. Перед коммитом прогнать `alembic upgrade head && downgrade -1 && upgrade head`. Новая миграция цепляется за ГОЛОВУ origin/dev (не за локальный хвост).

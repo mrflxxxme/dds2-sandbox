@@ -1,4 +1,5 @@
 ---
+name: hotfix
 description: "Экстренный фикс прода DDS2: диагностика инцидента → минимальный фикс → деплой через CI."
 ---
 
@@ -7,6 +8,7 @@ description: "Экстренный фикс прода DDS2: диагности�
 Только для прод-инцидентов (прод лёг, 5xx, потеря данных, безопасность, деньги). Обычные баги — чини в `dev`.
 
 ## 1. Диагностика
+Делегируй агенту `prod-diagnost` (read-only триаж: масштаб, логи backend+worker, корреляция с деплоем, зависимости) — либо руками:
 ```bash
 ssh dds-app "cd /opt/dds_app && docker compose logs backend --tail=200 | grep -E 'ERROR|CRITICAL|Traceback'"
 curl -sf https://app.vyatkin-wb.ru/health

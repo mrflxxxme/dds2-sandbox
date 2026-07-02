@@ -1,4 +1,5 @@
 ---
+name: new-page
 description: "Новая страница Next.js DDS2: types → api → page с loading/error/empty states."
 ---
 

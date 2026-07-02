@@ -1,4 +1,5 @@
 ---
+name: migration
 description: "Alembic-миграция DDS2: проверка heads, генерация, тест upgrade/downgrade, обновление docs."
 ---
 
