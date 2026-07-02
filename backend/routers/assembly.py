@@ -778,9 +778,11 @@ async def assign_vehicle_bulk(
             )
             req = await assembly_service.assign_vehicle(db, project.id, item.request_id, assign_payload)
             results.append(req)
+        # via_gazelka одним батч-запросом на весь bulk (не N+1 через single-row fallback).
+        gz_ids = await assembly_service._gazelka_linked_ids(db, project.id, [r.id for r in results])
         response = []
         for req in results:
-            resp = await assembly_service._build_response(db, req)
+            resp = await assembly_service._build_response(db, req, via_gazelka_ids=gz_ids)
             response.append(AssemblyRequestResponse.model_validate(resp))
         return response
     except ValueError as e:
@@ -796,9 +798,11 @@ async def ship_bulk(
     """Bulk ship multiple requests."""
     try:
         results = await assembly_service.ship_bulk(db, project.id, payload.ids)
+        # via_gazelka одним батч-запросом на весь bulk (не N+1 через single-row fallback).
+        gz_ids = await assembly_service._gazelka_linked_ids(db, project.id, [r.id for r in results])
         response = []
         for req in results:
-            resp = await assembly_service._build_response(db, req)
+            resp = await assembly_service._build_response(db, req, via_gazelka_ids=gz_ids)
             response.append(AssemblyRequestResponse.model_validate(resp))
         return response
     except ValueError as e:
