@@ -16,6 +16,7 @@ from backend.services.assembly import (  # noqa: F401
     _build_items_with_stock,
     _build_response,
     _check_transition,
+    _gazelka_linked_ids,
     _log_status_change,
     _validate_stock_for_ship,
     advance_pre_distribution_manual,

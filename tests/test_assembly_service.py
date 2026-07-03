@@ -26,6 +26,7 @@ import pytest_asyncio
 from sqlalchemy import event, select, text
 
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.gazelka import GazelkaOrder, GazelkaOrderStatus
 from backend.models.warehouse import InboundReceipt, OutboundShipment, WarehouseStock
 from backend.models.wb_fbo import WbFboSupply, WbSupplyStatus
 from backend.schemas.assembly import (
@@ -884,6 +885,71 @@ class TestLifecycle:
         )
         with pytest.raises(ValueError, match="Cannot transition"):
             await assign_vehicle(db_session, PROJECT_ID, req.id, payload)
+
+    async def test_assign_vehicle_blocked_when_via_gazelka(self, db_session):
+        """READY-заявка с активной (SENT/MATCHED) отправкой в Газельку → машину
+        назначить нельзя (логистику ведёт агрегатор). Статус остаётся READY."""
+        req = await _create_test_request(db_session)
+        req = await mark_ready(db_session, PROJECT_ID, req.id)
+        db_session.add(
+            GazelkaOrder(project_id=PROJECT_ID, assembly_request_id=req.id, status=GazelkaOrderStatus.SENT)
+        )
+        await db_session.commit()
+
+        payload = AssignVehicle(
+            vehicle_info="Truck ABC-123",
+            vehicle_brand="GAZ-330",
+            driver_phone="+79991234567",
+            pickup_date="2026-03-22",
+            pickup_time_slot="08:00-12:00",
+            pickup_cost=15000,
+            delivery_date="2026-03-23",
+        )
+        with pytest.raises(ValueError, match="Газельку"):
+            await assign_vehicle(db_session, PROJECT_ID, req.id, payload)
+
+        fresh = await get_assembly_request(db_session, PROJECT_ID, req.id)
+        assert fresh.status == AssemblyStatus.READY
+
+    async def test_assign_vehicle_allowed_when_gazelka_failed(self, db_session):
+        """Только SENT/MATCHED блокируют; FAILED/UNCERTAIN (заявка в Газельку не ушла)
+        — назначению машины не мешают."""
+        req = await _create_test_request(db_session)
+        req = await mark_ready(db_session, PROJECT_ID, req.id)
+        db_session.add(
+            GazelkaOrder(project_id=PROJECT_ID, assembly_request_id=req.id, status=GazelkaOrderStatus.FAILED)
+        )
+        await db_session.commit()
+
+        payload = AssignVehicle(
+            vehicle_info="Truck ABC-123",
+            vehicle_brand="GAZ-330",
+            driver_phone="+79991234567",
+            pickup_date="2026-03-22",
+            pickup_time_slot="08:00-12:00",
+            pickup_cost=15000,
+            delivery_date="2026-03-23",
+        )
+        req = await assign_vehicle(db_session, PROJECT_ID, req.id, payload)
+        assert req.status == AssemblyStatus.VEHICLE_ASSIGNED
+
+    async def test_list_exposes_via_gazelka_flag(self, db_session):
+        """Список логистики отдаёт via_gazelka=True для заявки с активной отправкой
+        в Газельку (для дизейбла кнопки на фронте, батчем без N+1)."""
+        req = await _create_test_request(db_session)
+        req = await mark_ready(db_session, PROJECT_ID, req.id)
+        db_session.add(
+            GazelkaOrder(project_id=PROJECT_ID, assembly_request_id=req.id, status=GazelkaOrderStatus.MATCHED)
+        )
+        await db_session.commit()
+
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, status="READY", limit=50)
+        maps = await prefetch_list_maps(db_session, PROJECT_ID, items)
+        flags = {}
+        for r in items:
+            resp = await _build_response(db_session, r, **maps)
+            flags[resp["id"]] = resp["via_gazelka"]
+        assert flags.get(req.id) is True
 
     async def test_reopen_from_ready_to_in_progress(self, db_session):
         """9b. READY -> IN_PROGRESS (reopen): allowed, clears actual_ready_date."""

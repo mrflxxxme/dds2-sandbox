@@ -1840,6 +1840,8 @@ export interface AssemblyRequest {
   joint_total_pallets?: number | null;
   /** сумма веса (кг) по всем активным сборкам совместной поставки (Decimal — приходит строкой) */
   joint_total_weight_kg?: number | string | null;
+  /** по заявке есть активная (SENT/MATCHED) отправка в Газельку — логистику ведёт агрегатор, ручное «Назначить машину» запрещено */
+  via_gazelka?: boolean;
 }
 
 export interface FfProposedItem {

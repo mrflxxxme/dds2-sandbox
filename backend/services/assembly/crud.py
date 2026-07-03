@@ -25,6 +25,7 @@ from backend.models.assembly import (
 from backend.models.cost import Nomenclature
 from backend.models.counterparty import Counterparty
 from backend.models.fulfillment import FulfillmentRequest
+from backend.models.gazelka import GazelkaOrder, GazelkaOrderStatus
 from backend.models.warehouse import (
     InboundReceipt,
     OutboundShipment,
@@ -347,6 +348,7 @@ async def _build_response(
     stock_by_wh_nom: dict[tuple[int, int], int] | None = None,
     cp_map: dict[int, Any] | None = None,
     prop_nom_map: dict[str, Nomenclature] | None = None,
+    via_gazelka_ids: set[int] | None = None,
 ) -> dict:
     """
     Build AssemblyRequestResponse dict from ORM model.
@@ -383,6 +385,25 @@ async def _build_response(
         if cp_row is not None:
             carrier_inn = cp_row.inn
             carrier_name = cp_row.name
+
+    # Активная (SENT/MATCHED) отправка в Газельку по этой заявке → логистику ведёт
+    # агрегатор, ручное «Назначить машину» блокируется. В списке берём из батч-набора
+    # via_gazelka_ids (0 запросов на строку); одиночный вызов делает один
+    # project-scoped indexed-запрос по FK.
+    if via_gazelka_ids is not None:
+        via_gazelka = request.id in via_gazelka_ids
+    else:
+        via_gazelka = (
+            await db.execute(
+                select(GazelkaOrder.id)
+                .where(
+                    GazelkaOrder.assembly_request_id == request.id,
+                    GazelkaOrder.project_id == request.project_id,
+                    GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.MATCHED]),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none() is not None
 
     # Предложенная ФФ-оператором правка состава (ожидает согласования в DDS).
     # ff_proposed_items не None ⇒ pending; резолвим имя/артикул из номенклатуры
@@ -467,6 +488,7 @@ async def _build_response(
         "ff_proposed_items": ff_proposed_out,
         "ff_proposed_at": request.ff_proposed_at,
         "ff_proposed_by": request.ff_proposed_by,
+        "via_gazelka": via_gazelka,
     }
 
 
@@ -544,11 +566,28 @@ async def prefetch_list_maps(
         )
         prop_nom_map = {n.barcode: n for n in res.scalars().all()}
 
+    # Один запрос на всю страницу: id заявок с активной (SENT/MATCHED) отправкой в
+    # Газельку. Ограничено IN (набор строк страницы) → без .limit().
+    req_ids = [r.id for r in requests]
+    via_gazelka_ids: set[int] = set()
+    if req_ids:
+        gz_result = await db.execute(
+            select(GazelkaOrder.assembly_request_id).where(
+                GazelkaOrder.project_id == project_id,
+                GazelkaOrder.assembly_request_id.in_(req_ids),
+                GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.MATCHED]),
+            )
+        )
+        for rid in gz_result.scalars().all():
+            if rid is not None:
+                via_gazelka_ids.add(rid)
+
     return {
         "nom_map": nom_map,
         "stock_by_wh_nom": stock_by_wh_nom,
         "cp_map": cp_map,
         "prop_nom_map": prop_nom_map,
+        "via_gazelka_ids": via_gazelka_ids,
     }
 
 

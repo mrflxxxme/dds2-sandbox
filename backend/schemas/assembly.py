@@ -269,6 +269,9 @@ class AssemblyRequestResponse(BaseModel):
     # Сумма паллет/веса по всем активным сборкам поставки (что грузим в одну машину).
     joint_total_pallets: int | None = None
     joint_total_weight_kg: Decimal | None = None
+    # По заявке есть активная (SENT/MATCHED) отправка в Газельку — логистику ведёт
+    # агрегатор. Гейтит ручное «Назначить машину» (бэк-валидация + дизейбл на фронте).
+    via_gazelka: bool = False
 
 
 class AssemblyListResponse(BaseModel):

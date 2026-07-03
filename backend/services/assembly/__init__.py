@@ -34,6 +34,7 @@ from .pre_distribution import (
 from .prebooking import create_prebooking
 from .status import (
     _check_transition,
+    _gazelka_linked_ids,
     _log_status_change,
     assign_vehicle,
     assign_vehicle_bulk,
@@ -69,6 +70,7 @@ __all__ = [
     "update_assembly_request",
     # status
     "_check_transition",
+    "_gazelka_linked_ids",
     "_log_status_change",
     "assign_vehicle",
     "assign_vehicle_bulk",
