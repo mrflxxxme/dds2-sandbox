@@ -291,6 +291,12 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                 const busyTrim = trimTailKey === key;
                 const busy = busyTop || busyShip || busyDel || busyPrebook || busyTailTop || busyTrim;
                 const preorderOk = preorderWbs.has(g.wb);
+                // Предзаявка (бронь → отдельная заявка на сборку) нужна ТОЛЬКО для ⌛ моно
+                // (приём открыт, но лимита нет). Для моно с ОТКРЫТЫМ лимитом предзаявка не
+                // нужна — оно едет в черновик как короб: целые паллеты авто-уезжают
+                // консолидацией, недобор → «Оставить так»/«Дозабить»/«На ФФ». Поэтому все
+                // кнопки предзаявки скрываем на не-⌛ направлениях (тот же предикат, что split).
+                const preorderByLimit = isPrebookingByLimit(acceptanceMarks.get(key));
                 // Полный footprint: целые паллеты (уже собраны) + дробь последней.
                 const whole = Math.floor(g.footprint + 1e-9);
                 // ЧЕСТНЫЙ floor (не round): недобранная паллета (0.997) НЕ должна показываться
@@ -355,7 +361,7 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                 </span>
                             )}
                             <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: (low || whole >= 1) ? 700 : 400, color: low ? 'var(--color-warning)' : whole >= 1 ? 'var(--color-success)' : 'var(--color-text-muted)' }}>{fillLabel}</span>
-                            {isMono && whole >= 1 && (
+                            {isMono && whole >= 1 && preorderByLimit && (
                                 <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px' }} disabled={busy || !preorderOk}
                                     title={preorderOk
                                         ? `Создать предзаявку (бронь) — заявки на сборку с пометкой «предзаявка на моно». В бронь уйдут только ЦЕЛЫЕ паллеты (${whole}); неполный хвост останется в предброни`
@@ -511,12 +517,14 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                             Выбрано {formatNumber(selected.length, 0)} паллет · {formatNumber(selUnits, 0)} шт
                                         </span>
                                         <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
-                                            <button className="btn btn-primary btn-sm" style={{ padding: '2px 9px', fontSize: 11 }}
-                                                disabled={busy || palletOpKey != null || !preorderOk}
-                                                title={preorderOk ? 'Создать ОДНУ предзаявку из всех выбранных паллет — остальные паллеты направления останутся в предброни' : 'Склад не в списке разрешённых для предзаявки — добавьте в «Настройки складов»'}
-                                                onClick={() => onBookPallets(g.wb, g.ffId, selected.map(({ pallet, palletNo }) => ({ pallet, palletNo })))}>
-                                                {bulkBusy ? '…' : '📋 Предзаявка одной заявкой'}
-                                            </button>
+                                            {preorderByLimit && (
+                                                <button className="btn btn-primary btn-sm" style={{ padding: '2px 9px', fontSize: 11 }}
+                                                    disabled={busy || palletOpKey != null || !preorderOk}
+                                                    title={preorderOk ? 'Создать ОДНУ предзаявку из всех выбранных паллет — остальные паллеты направления останутся в предброни' : 'Склад не в списке разрешённых для предзаявки — добавьте в «Настройки складов»'}
+                                                    onClick={() => onBookPallets(g.wb, g.ffId, selected.map(({ pallet, palletNo }) => ({ pallet, palletNo })))}>
+                                                    {bulkBusy ? '…' : '📋 Предзаявка одной заявкой'}
+                                                </button>
+                                            )}
                                             <button className="btn btn-secondary btn-sm" style={{ padding: '2px 9px', fontSize: 11 }}
                                                 disabled={busy || palletOpKey != null}
                                                 title="Оставить выбранные паллеты на ФФ — убрать из предброни, коробы освободятся; остальные паллеты направления останутся"
@@ -543,12 +551,14 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                                 </span>
                                             ))}
                                             <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 4 }}>
-                                                <button className="btn btn-primary btn-sm" style={{ padding: '1px 7px', fontSize: 11 }}
-                                                    disabled={busy || palletOpKey != null || !preorderOk}
-                                                    title={preorderOk ? (partial ? `Создать предзаявку из этой ЧАСТИЧНОЙ паллеты (${Math.round(p.fillPct * 100)}%) — по вашему решению` : 'Создать предзаявку ТОЛЬКО из этой паллеты — остальные останутся в предброни') : 'Склад не в списке разрешённых для предзаявки — добавьте в «Настройки складов»'}
-                                                    onClick={() => onBookPallets(g.wb, g.ffId, [{ pallet: p, palletNo }])}>
-                                                    {busyPallet ? '…' : '📋 Предзаявка'}
-                                                </button>
+                                                {preorderByLimit && (
+                                                    <button className="btn btn-primary btn-sm" style={{ padding: '1px 7px', fontSize: 11 }}
+                                                        disabled={busy || palletOpKey != null || !preorderOk}
+                                                        title={preorderOk ? (partial ? `Создать предзаявку из этой ЧАСТИЧНОЙ паллеты (${Math.round(p.fillPct * 100)}%) — по вашему решению` : 'Создать предзаявку ТОЛЬКО из этой паллеты — остальные останутся в предброни') : 'Склад не в списке разрешённых для предзаявки — добавьте в «Настройки складов»'}
+                                                        onClick={() => onBookPallets(g.wb, g.ffId, [{ pallet: p, palletNo }])}>
+                                                        {busyPallet ? '…' : '📋 Предзаявка'}
+                                                    </button>
+                                                )}
                                                 <button className="btn btn-secondary btn-sm" style={{ padding: '1px 7px', fontSize: 11 }}
                                                     disabled={busy || palletOpKey != null}
                                                     title="Оставить эту паллету на ФФ — убрать её из предброни, коробы освободятся"

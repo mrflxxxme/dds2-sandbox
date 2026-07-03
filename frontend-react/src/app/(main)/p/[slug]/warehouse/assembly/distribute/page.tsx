@@ -1407,10 +1407,11 @@ export default function AssemblyDraftPage() {
             const nextPrebook = mergeDraftRows([...stripped, ...split.prebook]);
             const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook } });
             applyDraft(updated);
+            const numbers = (res.requests || []).map(r => r.number).filter(Boolean);
             showToast(
-                `Предзаявка на моно «${wb}» создана: ${formatNumber(res.created, 0)} заявок №${(res.request_ids || []).join(', №')} (${formatNumber(wholeUnits, 0)} шт целыми паллетами)`
+                `Предзаявка на моно «${wb}» создана: ${formatNumber(res.created, 0)} заявок ${numbers.length ? numbers.join(', ') : ''} (${formatNumber(wholeUnits, 0)} шт целыми паллетами)`
                 + (tailUnits ? ` · хвост ${formatNumber(tailUnits, 0)} шт остался в предброни` : '')
-                + ' — заявки в списке «Сборка» с бейджем 🅿️',
+                + ' — ищите их в списке «Заявки на сборку» с бейджем 🅿️',
                 'success',
             );
         } catch (e) { showToast(e instanceof Error ? e.message : 'Ошибка создания предзаявки', 'error'); }
@@ -1587,9 +1588,10 @@ export default function AssemblyDraftPage() {
             const nextPrebook = stripPalletsFromPrebook(sel.map(x => x.pallet), wb, ffId);
             const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook } });
             applyDraft(updated);
+            const numbers = (res.requests || []).map(r => r.number).filter(Boolean);
             showToast(
-                `Предзаявка из ${sel.length === 1 ? `паллеты ${palletsLabel(sel)}` : `${formatNumber(sel.length, 0)} паллет (${palletsLabel(sel)})`} на «${wb}» создана: заявка №${(res.request_ids || []).join(', №')} (${formatNumber(units, 0)} шт${partials ? `, ${formatNumber(partials, 0)} частичн.` : ''})`
-                + ' — в списке «Сборка» с бейджем 🅿️',
+                `Предзаявка из ${sel.length === 1 ? `паллеты ${palletsLabel(sel)}` : `${formatNumber(sel.length, 0)} паллет (${palletsLabel(sel)})`} на «${wb}» создана: заявка ${numbers.join(', ')} (${formatNumber(units, 0)} шт${partials ? `, ${formatNumber(partials, 0)} частичн.` : ''})`
+                + ' — ищите в списке «Заявки на сборку» с бейджем 🅿️',
                 'success',
             );
         } catch (e) { showToast(e instanceof Error ? e.message : 'Ошибка создания предзаявки', 'error'); }
