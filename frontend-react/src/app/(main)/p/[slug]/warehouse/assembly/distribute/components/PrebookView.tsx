@@ -116,6 +116,9 @@ interface Props {
     /** Освободить выбранные паллеты раскладки на ФФ (убрать из предброни; остальные
      *  паллеты направления остаются). */
     onReleasePallets: (wb: string, ffId: number, pallets: { pallet: PrebookMonoPallet; palletNo: number }[]) => void;
+    /** Перенести выбранные паллеты В ЧЕРНОВИК как есть (для открытого лимита — «Оставить
+     *  так» точечно по паллетам; ⌛ идёт предзаявкой, не сюда). */
+    onDraftPallets: (wb: string, ffId: number, pallets: { pallet: PrebookMonoPallet; palletNo: number }[]) => void;
     /** `${wb}::${ffId}::${palletNo}` (или `::#1+3+5` для пачки) пока идёт попаллетная операция. */
     palletOpKey: string | null;
 }
@@ -127,7 +130,7 @@ const PKG_LABEL: Record<string, string> = { BOX: 'Короб', MONOPALLET: 'Мо
 const THRESHOLD_KEY = 'dds.prebook.readyThresholdPct';
 const DEFAULT_THRESHOLD = 60;
 
-export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletingKey, prebookingKey, tailTopUpKey, trimTailKey, acceptanceMarks, acceptanceLoading, preorderWbs, onTopUp, onShipAsIs, onDelete, onDeleteDirection, onCreatePrebooking, onTopUpPrebook, onTrimTail, onBookPallets, onReleasePallets, palletOpKey }: Props) {
+export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletingKey, prebookingKey, tailTopUpKey, trimTailKey, acceptanceMarks, acceptanceLoading, preorderWbs, onTopUp, onShipAsIs, onDelete, onDeleteDirection, onCreatePrebooking, onTopUpPrebook, onTrimTail, onBookPallets, onReleasePallets, onDraftPallets, palletOpKey }: Props) {
     const pkgsPresent = useMemo(() => {
         const order: PackageType[] = ['BOX', 'MONOPALLET', 'SUPERSAFE'];
         return order.filter(p => groups.some(g => g.pkg === p));
@@ -525,6 +528,14 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                                     {bulkBusy ? '…' : '📋 Предзаявка одной заявкой'}
                                                 </button>
                                             )}
+                                            {!preorderByLimit && (
+                                                <button className="btn btn-primary btn-sm" style={{ padding: '2px 9px', fontSize: 11 }}
+                                                    disabled={busy || palletOpKey != null}
+                                                    title="Перенести выбранные паллеты в черновик как есть (частичные моно). Открытый лимит приёмки — предзаявка не нужна. Остальные паллеты направления останутся в предброни."
+                                                    onClick={() => onDraftPallets(g.wb, g.ffId, selected.map(({ pallet, palletNo }) => ({ pallet, palletNo })))}>
+                                                    {bulkBusy ? '…' : '📦 В черновик'}
+                                                </button>
+                                            )}
                                             <button className="btn btn-secondary btn-sm" style={{ padding: '2px 9px', fontSize: 11 }}
                                                 disabled={busy || palletOpKey != null}
                                                 title="Оставить выбранные паллеты на ФФ — убрать из предброни, коробы освободятся; остальные паллеты направления останутся"
@@ -557,6 +568,14 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                                         title={preorderOk ? (partial ? `Создать предзаявку из этой ЧАСТИЧНОЙ паллеты (${Math.round(p.fillPct * 100)}%) — по вашему решению` : 'Создать предзаявку ТОЛЬКО из этой паллеты — остальные останутся в предброни') : 'Склад не в списке разрешённых для предзаявки — добавьте в «Настройки складов»'}
                                                         onClick={() => onBookPallets(g.wb, g.ffId, [{ pallet: p, palletNo }])}>
                                                         {busyPallet ? '…' : '📋 Предзаявка'}
+                                                    </button>
+                                                )}
+                                                {!preorderByLimit && (
+                                                    <button className="btn btn-primary btn-sm" style={{ padding: '1px 7px', fontSize: 11 }}
+                                                        disabled={busy || palletOpKey != null}
+                                                        title={partial ? `Перенести эту ЧАСТИЧНУЮ паллету (${Math.round(p.fillPct * 100)}%) в черновик как есть — остальные останутся в предброни` : 'Перенести эту паллету в черновик — остальные останутся в предброни'}
+                                                        onClick={() => onDraftPallets(g.wb, g.ffId, [{ pallet: p, palletNo }])}>
+                                                        {busyPallet ? '…' : '📦 В черновик'}
                                                     </button>
                                                 )}
                                                 <button className="btn btn-secondary btn-sm" style={{ padding: '1px 7px', fontSize: 11 }}

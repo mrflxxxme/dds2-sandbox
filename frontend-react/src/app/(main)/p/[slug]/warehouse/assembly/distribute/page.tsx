@@ -1640,6 +1640,54 @@ export default function AssemblyDraftPage() {
         finally { setPalletOp(null); }
     }, [draftId, palletOp, stripPalletsFromPrebook, buildDistribution, applyDraft, showToast]);
 
+    // Перенести выбранные моно-паллеты предброни В ЧЕРНОВИК как есть (для направлений с
+    // ОТКРЫТЫМ лимитом: моно-недобор, дозабрать нечем — «Оставить так» точечно по паллетам).
+    // as_is=true: частичная моно-паллета едет в черновик, normalizeDraft её не режет.
+    const handleDraftPallets = useCallback(async (wb: string, ffId: number, sel: { pallet: PrebookMonoPallet; palletNo: number }[]) => {
+        if (!draftId || palletOp || ffId < 0 || sel.length === 0) return;
+        const chosenKey = String(ffId);
+        // Сколько штук per nm просят выбранные паллеты.
+        const wantByNm = new Map<number, number>();
+        for (const x of sel) for (const it of x.pallet.items) wantByNm.set(it.nm_id, (wantByNm.get(it.nm_id) || 0) + it.units);
+        // Баркод/вендор + РЕАЛЬНО доступная порция направления (ffId→wb) per nm — грузим в
+        // черновик min(want, avail), ровно столько снимет stripPalletsFromPrebook (консервация).
+        const meta = new Map<number, { barcode: string; vendor_code: string; avail: number }>();
+        for (const r of prebook) {
+            if ((r.package_type || 'BOX') !== 'MONOPALLET' || !r.barcode || !(r.tgt[wb] > 0) || !(r.src[chosenKey] > 0)) continue;
+            const portion = allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0;
+            const e = meta.get(r.nm_id);
+            if (e) e.avail += portion;
+            else meta.set(r.nm_id, { barcode: r.barcode, vendor_code: r.vendor_code, avail: portion });
+        }
+        const shipRows: AssemblyDraftRow[] = [...wantByNm.entries()]
+            .map(([nm, want]): AssemblyDraftRow | null => {
+                const m = meta.get(nm);
+                const qty = Math.min(want, m?.avail ?? 0);
+                return m && qty > 0
+                    ? { nm_id: nm, barcode: m.barcode, vendor_code: m.vendor_code, src: { [chosenKey]: qty }, tgt: { [wb]: qty }, package_type: 'MONOPALLET' as PackageType, as_is: true }
+                    : null;
+            })
+            .filter((r): r is AssemblyDraftRow => r != null);
+        if (shipRows.length === 0) { showToast('Не нашёл баркоды артикулов паллет в предброни', 'error'); return; }
+        const units = shipRows.reduce((s, r) => s + (r.tgt[wb] || 0), 0);
+        const partials = sel.filter(x => x.pallet.fillPct < 0.999).length;
+        const what = sel.length === 1 ? `паллету ${palletsLabel(sel)}` : `${formatNumber(sel.length, 0)} паллет (${palletsLabel(sel)})`;
+        if (!window.confirm(`Перенести ${what} в черновик как есть (${formatNumber(units, 0)} шт${partials ? `, в т.ч. ${formatNumber(partials, 0)} частичн.` : ''})? Моно поедет частичными паллетами; остальные паллеты направления останутся в предброни.`)) return;
+        const key = `${wb}::${ffId}::#${sel.map(x => x.palletNo).join('+')}`;
+        setPalletOp(key);
+        try {
+            for (const r of shipRows) prebookOriginRef.current.add(`${r.nm_id}::${wb}`);
+            const nextPrebook = stripPalletsFromPrebook(sel.map(x => x.pallet), wb, ffId);
+            const mergedRows = mergeDraftRows([...rows, ...shipRows]);
+            const targetNames = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.tgt))));
+            const sourceIds = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: mergedRows, prebook: nextPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames } });
+            applyDraft(updated);
+            showToast(`${sel.length === 1 ? `Паллета ${palletsLabel(sel)}` : `Паллеты ${palletsLabel(sel)}`} перенесены в черновик (${formatNumber(units, 0)} шт как есть) — бейдж «из предброни» в раскладке`, 'success');
+        } catch (e) { showToast(e instanceof Error ? e.message : 'Ошибка переноса в черновик', 'error'); }
+        finally { setPalletOp(null); }
+    }, [draftId, palletOp, prebook, rows, stripPalletsFromPrebook, buildDistribution, applyDraft, showToast]);
+
     // ── «Очистить черновик»: удалить всё наполнение (строки + источники/цели). ──
     const [clearing, setClearing] = useState(false);
     const handleClearDraft = useCallback(async () => {
@@ -1920,6 +1968,7 @@ export default function AssemblyDraftPage() {
                     onTrimTail={handleTrimPrebookTail}
                     onBookPallets={handleBookPallets}
                     onReleasePallets={handleReleasePallets}
+                    onDraftPallets={handleDraftPallets}
                     palletOpKey={palletOp}
                 />
             )}
