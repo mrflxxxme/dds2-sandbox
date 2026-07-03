@@ -23,6 +23,7 @@ const pages = [
   { path: '/warehouse/wb-stocks', name: 'WB Stocks' },
   { path: '/warehouse/analytics', name: 'Stock Analytics' },
   { path: '/warehouse/logistics', name: 'Logistics' },
+  { path: '/barcode-labels', name: 'Barcode Labels' },
   { path: '/planning', name: 'Planning' },
   { path: '/supply-chain', name: 'Supply Chain' },
   { path: '/container-loader', name: 'Container Loader' },
