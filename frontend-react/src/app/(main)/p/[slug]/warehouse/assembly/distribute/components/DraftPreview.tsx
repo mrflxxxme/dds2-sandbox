@@ -83,6 +83,9 @@ interface DraftPreviewProps {
     palletOverrides: Record<string, number>;
     /** Геометрия коробок загружена (gate для «только целые паллеты»). */
     geomReady: boolean;
+    /** Провенанс «из предброни»: ключи `${nm_id}::${wb}`. Паллета, содержащая хоть один
+     *  такой SKU, помечается бейджем «из предброни» в раскладке. */
+    prebookOrigin?: Set<string>;
     /** Сбросить правки редактора на сервер перед commit (родитель). Возвращает успех. */
     ensureSaved: () => Promise<boolean>;
     onToast: (message: string, type: 'success' | 'error') => void;
@@ -94,7 +97,7 @@ interface DraftPreviewProps {
  *  с бейджем упаковки на каждой отгрузке. Встроен внизу страницы «Черновик». */
 export default function DraftPreview({
     slug, draftId, rows, newcomerNmIds, warehouses,
-    nmPpb, nmPpbByWh, nmMeta, nmBoxSize, palletOverrides, geomReady,
+    nmPpb, nmPpbByWh, nmMeta, nmBoxSize, palletOverrides, geomReady, prebookOrigin,
     ensureSaved, onToast, onReloadDraft,
 }: DraftPreviewProps) {
     const router = useRouter();
@@ -561,10 +564,16 @@ export default function DraftPreview({
                                                         const low = p.fillPct < 0.6;
                                                         const palUnits = p.items.reduce((s, it) => s + it.units, 0);
                                                         const palBoxes = p.items.reduce((s, it) => { const ppb = nmPpb.get(it.nmId) || 0; return s + (ppb > 0 ? Math.round(it.units / ppb) : 0); }, 0);
+                                                        // «Из предброни»: паллета содержит хоть один SKU, чей контент
+                                                        // приехал в черновик из предброни (Оставить так/Дозабить/консолидация).
+                                                        const fromPrebook = !!prebookOrigin && p.items.some(it => prebookOrigin.has(`${it.nmId}::${wb}`));
                                                         return (
                                                             <div key={p.palletNo} style={{ border: `1px solid ${low ? 'var(--color-warning)' : 'var(--color-border)'}`, borderRadius: 10, padding: '8px 10px' }}>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
                                                                     <span className="badge badge-secondary" style={{ fontSize: 10 }}>Паллета {formatNumber(p.palletNo, 0)}</span>
+                                                                    {fromPrebook && (
+                                                                        <span className="badge badge-info" style={{ fontSize: 10 }} title="Содержимое этой паллеты приехало в черновик из предброни (Оставить так / Дозабить / авто-консолидация)">🅿️ из предброни</span>
+                                                                    )}
                                                                     <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{formatNumber(p.items.length, 0)} арт. · {formatNumber(palBoxes, 0)} кор · {formatNumber(palUnits, 0)} шт</span>
                                                                     <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: low ? 700 : 600, color: low ? 'var(--color-warning)' : 'var(--color-success)' }} title={low ? 'Паллета заполнена менее 60% — неполная' : 'Заполнение паллеты'}>
                                                                         {low && '⚠ '}{formatNumber(pct, 0)}%

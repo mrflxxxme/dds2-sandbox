@@ -158,6 +158,12 @@ export default function AssemblyDraftPage() {
 
     const showToast = useCallback((message: string, type: 'success' | 'error') => setToast({ message, type }), []);
 
+    // Провенанс «из предброни»: набор `${nm_id}::${wb}`, чей контент попал в rows из
+    // предброни. Живёт в ref (не в rows — normalizeDraft пересобирает строки и стёр бы
+    // флаг), персистится в distribution.prebook_origin. Обновляется хендлерами prebook→
+    // draft ПЕРЕД updateAssemblyDraft (buildDistribution читает ref), сбрасывается на re-fill.
+    const prebookOriginRef = useRef<Set<string>>(new Set());
+
     // ─── Apply a draft payload into state (initial load + reload after commit) ─
     const applyDraft = useCallback((d: AssemblyDraft) => {
         setDraft(d);
@@ -172,6 +178,7 @@ export default function AssemblyDraftPage() {
         setColdStartShares(d.distribution.cold_start_shares || null);
         setHandedUnits(d.distribution.handed_units || []);
         setPrebook(d.distribution.prebook || []);
+        prebookOriginRef.current = new Set(d.distribution.prebook_origin || []);
         setNewcomerNmIds(new Set(d.newcomer_nm_ids || []));
         lastSavedJsonRef.current = JSON.stringify(d.distribution);
     }, []);
@@ -285,6 +292,7 @@ export default function AssemblyDraftPage() {
         cold_start_shares: coldStartShares,
         handed_units: handedUnits,
         prebook,
+        prebook_origin: [...prebookOriginRef.current],
     }), [sourceWarehouseIds, targetWarehouseNames, rows, palletsCount, palletWeightKg, estimatedReadyDate, coldStartShares, handedUnits, prebook]);
 
     // ─── Нормализатор инварианта «целые коробы + целые паллеты» ───────────
@@ -582,6 +590,9 @@ export default function AssemblyDraftPage() {
             const sourceIds = Array.from(new Set(
                 keptRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0)),
             ));
+            // Полное заполнение = свежая раскладка: целые паллеты из потребности (не из
+            // предброни). Сбрасываем провенанс — новые пометки добавят topup/консолидация.
+            prebookOriginRef.current = new Set();
             const dist: AssemblyDraftDistribution = {
                 ...buildDistribution(),
                 rows: keptRows,
@@ -945,6 +956,13 @@ export default function AssemblyDraftPage() {
                         + Object.entries(r.tgt).filter(([, q]) => (q || 0) > 0).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, q]) => `${k}:${q}`).join(','))
                     .sort().join(';');
                 if (canon(newRows) === canon(rows) && canon(newPrebook) === canon(prebook)) return;
+                // Провенанс: контент предброни, доехавший этой синхронизацией до rows —
+                // помечаем «из предброни» (было в prebook И теперь в rows).
+                const newNmWb = new Set(newRows.flatMap(r => Object.keys(r.tgt).map(wb => `${r.nm_id}::${wb}`)));
+                for (const r of prebook) for (const wb of Object.keys(r.tgt)) {
+                    const k = `${r.nm_id}::${wb}`;
+                    if (newNmWb.has(k)) prebookOriginRef.current.add(k);
+                }
                 const targetNames = Array.from(new Set(newRows.flatMap(r => Object.keys(r.tgt))));
                 const sourceIds = Array.from(new Set(newRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
                 const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: newRows, prebook: newPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames } });
@@ -1186,6 +1204,8 @@ export default function AssemblyDraftPage() {
             const looseKept = norm.rows.filter(r => isLooseNewcomer(r.nm_id));
             const keptUnits = palletizedRows.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
             if (keptUnits <= 0) { showToast('Не удалось дособрать целую паллету — не хватает свободного ФФ', 'error'); return; }
+            // Провенанс: дозабранные паллеты собраны с участием предброни направления.
+            for (const r of palletizedRows) prebookOriginRef.current.add(`${r.nm_id}::${wb}`);
             const mergedRows = mergeDraftRows([...rows, ...palletizedRows]);
             // Новая предбронь: снимаем ТОЛЬКО порцию (chosenFf→wb) из затронутых строк
             // (остаток других складов/ФФ строки остаётся) + добавляем срез дозабора.
@@ -1304,6 +1324,8 @@ export default function AssemblyDraftPage() {
                 return;
             }
             const movedUnits = shipRows.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
+            // Провенанс: эти строки уехали в черновик ИЗ предброни («Оставить так»).
+            for (const r of shipRows) prebookOriginRef.current.add(`${r.nm_id}::${wb}`);
             const mergedRows = mergeDraftRows([...rows, ...shipRows]);
             const targetNames = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.tgt))));
             const sourceIds = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
@@ -1847,6 +1869,7 @@ export default function AssemblyDraftPage() {
                         nmBoxSize={nmBoxSize}
                         palletOverrides={palletOverrides}
                         geomReady={geomReady}
+                        prebookOrigin={prebookOriginRef.current}
                         ensureSaved={ensureSaved}
                         onToast={showToast}
                         onReloadDraft={reloadDraft}

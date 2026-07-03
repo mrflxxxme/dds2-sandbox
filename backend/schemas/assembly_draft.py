@@ -76,8 +76,15 @@ class AssemblyDraftDistribution(BaseModel):
     # действиями (удалить / дозабить паллету из свободного ФФ / оставить). Пересчитывается
     # при каждом заполнении из потребности. Та же строчная структура, что и rows.
     prebook: list[AssemblyDraftRow] = Field(default_factory=list)
+    # Провенанс «из предброни»: ключи `${nm_id}::${wb_warehouse_name}`, чей контент попал
+    # в rows ИЗ предброни (через «Оставить так»/«Дозабить»/авто-консолидацию). Чисто для
+    # показа — бейдж «из предброни» на паллете раскладки. Нормализатор его не трогает
+    # (живёт отдельно от rows). Сбрасывается при полном «Заполнить из потребности».
+    prebook_origin: list[str] = Field(default_factory=list)
 
-    @field_validator("rows", "source_warehouse_ids", "target_warehouse_names", "handed_units", "prebook", mode="before")
+    @field_validator(
+        "rows", "source_warehouse_ids", "target_warehouse_names", "handed_units", "prebook", "prebook_origin", mode="before"
+    )
     @classmethod
     def coerce_null_to_empty_list(cls, v: object) -> object:
         """Guard against explicit null in stored JSONB (null → [])."""
