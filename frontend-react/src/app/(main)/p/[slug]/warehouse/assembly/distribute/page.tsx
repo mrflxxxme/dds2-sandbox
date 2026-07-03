@@ -1123,18 +1123,21 @@ export default function AssemblyDraftPage() {
             let dirOpen = false;
             let dirNoLimit = false;
             {
-                let perNm: Map<number, AcceptanceFlags | undefined>;
-                try {
-                    const items = [
-                        ...pool.map(c => ({ nm_id: c.nm_id, barcode: c.barcode, distribution: { [wb]: c.ppb } })),
-                        ...pbOnFf.map(r => ({ nm_id: r.nm_id, barcode: r.barcode, distribution: { [wb]: r.tgt[wb] || 0 } })),
-                    ];
-                    const resp = await api.checkWbAcceptance({ items }, true);
-                    perNm = new Map((resp.items || []).map(it => [it.nm_id, it.availability?.[wb]]));
-                } catch {
-                    perNm = new Map([...pool.map(c => c.nm_id), ...pbOnFf.map(r => r.nm_id)]
-                        .map(nm => [nm, prebookAcceptance.get(nm)?.availability?.[wb]]));
-                    if (![...perNm.values()].some(Boolean)) {
+                // Приёмка из фонового кэша (НЕ force — суб-лимит 6/мин, серия кликов = 429;
+                // см. коммент в handleShipPrebookAsIs).
+                const accNm = [...pool.map(c => c.nm_id), ...pbOnFf.map(r => r.nm_id)];
+                let perNm: Map<number, AcceptanceFlags | undefined> = new Map(
+                    accNm.map(nm => [nm, prebookAcceptance.get(nm)?.availability?.[wb]]),
+                );
+                if (![...perNm.values()].some(Boolean)) {
+                    try {
+                        const items = [
+                            ...pool.map(c => ({ nm_id: c.nm_id, barcode: c.barcode, distribution: { [wb]: c.ppb } })),
+                            ...pbOnFf.map(r => ({ nm_id: r.nm_id, barcode: r.barcode, distribution: { [wb]: r.tgt[wb] || 0 } })),
+                        ];
+                        const resp = await api.checkWbAcceptance({ items });
+                        perNm = new Map((resp.items || []).map(it => [it.nm_id, it.availability?.[wb]]));
+                    } catch {
                         showToast('WB ограничивает частоту проверок приёмки — подождите минуту и нажмите ещё раз', 'error');
                         return;
                     }
@@ -1229,14 +1232,23 @@ export default function AssemblyDraftPage() {
             const okNm = new Set<number>();
             let openNoLimit = false;
             {
-                let perNm: Map<number, AcceptanceFlags | undefined>;
-                try {
-                    const items = affected.map(r => ({ nm_id: r.nm_id, barcode: r.barcode, distribution: { [wb]: allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0 } }));
-                    const resp = await api.checkWbAcceptance({ items }, true);
-                    perNm = new Map((resp.items || []).map(it => [it.nm_id, it.availability?.[wb]]));
-                } catch {
-                    perNm = new Map(affected.map(r => [r.nm_id, prebookAcceptance.get(r.nm_id)?.availability?.[wb]]));
-                    if (![...perNm.values()].some(Boolean)) {
+                // Приёмка из фонового кэша страницы (пер-баркод, ≤10 мин) — НЕ force.
+                // force сидит на суб-лимите 6/мин: серия «Оставить так»/«Дозабить» его
+                // выжигала → 429 и на кнопках, и на фоновой проверке (та переставала
+                // грузиться → «черновик = готовое к сдаче» не досинхронивался, недобор
+                // застревал в rows). Секундная свежесть коэффициентов для локального
+                // переноса rows↔prebook не нужна — данные обновляются фоново каждые 10 мин.
+                let perNm: Map<number, AcceptanceFlags | undefined> = new Map(
+                    affected.map(r => [r.nm_id, prebookAcceptance.get(r.nm_id)?.availability?.[wb]]),
+                );
+                if (![...perNm.values()].some(Boolean)) {
+                    // Кэш ещё не прогрет (приёмка не догрузилась) — ОДИН обычный запрос
+                    // (не force): пер-баркод кэш бэка сам его закэширует.
+                    try {
+                        const items = affected.map(r => ({ nm_id: r.nm_id, barcode: r.barcode, distribution: { [wb]: allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0 } }));
+                        const resp = await api.checkWbAcceptance({ items });
+                        perNm = new Map((resp.items || []).map(it => [it.nm_id, it.availability?.[wb]]));
+                    } catch {
                         showToast('WB ограничивает частоту проверок приёмки — подождите минуту и нажмите ещё раз', 'error');
                         return;
                     }
