@@ -19,6 +19,7 @@ from backend.models.assembly import (
     AssemblyStatusHistory,
 )
 from backend.models.counterparty import Counterparty
+from backend.models.gazelka import GazelkaOrder, GazelkaOrderStatus
 from backend.models.warehouse import (
     InboundReceipt,
     InboundReceiptItem,
@@ -198,6 +199,26 @@ async def _joint_active_siblings(
     return list(result.scalars().all())
 
 
+async def _gazelka_linked_ids(db: AsyncSession, project_id: int, req_ids: list[int]) -> set[int]:
+    """id заявок из req_ids, по которым есть активная (SENT/MATCHED) отправка в Газельку.
+
+    Логистику таких заявок ведёт агрегатор — ручное назначение машины запрещено.
+    Ограничено IN (req_ids) → без .limit(). Project-scoped.
+    """
+    if not req_ids:
+        return set()
+    rows = (
+        await db.execute(
+            select(GazelkaOrder.assembly_request_id).where(
+                GazelkaOrder.project_id == project_id,
+                GazelkaOrder.assembly_request_id.in_(req_ids),
+                GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.MATCHED]),
+            )
+        )
+    ).scalars().all()
+    return {rid for rid in rows if rid is not None}
+
+
 async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, payload: AssignVehicle) -> AssemblyRequest:
     """READY -> VEHICLE_ASSIGNED. Одна машина на сборку; для СОВМЕСТНОЙ поставки —
     одна машина на ВСЕ сборки поставки сразу.
@@ -220,6 +241,16 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
             raise ValueError(f"Совместная поставка ещё не готова — не назначить машину. Не готовы: {names}")
     else:
         targets = [req]
+
+    # Газелька: логистику заявки (или любой сборки совместной поставки) ведёт
+    # агрегатор — ручную машину назначать нельзя. Жёсткая гарантия для всех путей
+    # (пер-строчный / bulk / совместная), фронт лишь дублирует дизейблом кнопки.
+    linked = await _gazelka_linked_ids(db, project_id, [s.id for s in targets])
+    if linked:
+        blocked = ", ".join(s.number for s in targets if s.id in linked)
+        raise ValueError(
+            f"Заявка отправлена в Газельку — машину назначает Газелька, вручную нельзя ({blocked})."
+        )
 
     cp_id = await _resolve_carrier(db, project_id, payload.carrier_inn, payload.carrier_name)
     for s in targets:

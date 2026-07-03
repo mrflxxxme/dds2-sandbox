@@ -458,6 +458,9 @@ export default function LogisticsPage() {
     // ─── Checked items summary ──────────────────────────────────────────
 
     const checkedItems = displayItems.filter(i => checkedIds.has(i.id));
+    // Страховка от рассинхрона checkedIds↔данные: заявку могли отметить в READY, затем
+    // отправить в Газельку (via_gazelka стал true после load) — из назначения машины её исключаем.
+    const assignableCheckedIds = checkedItems.filter(i => !i.via_gazelka).map(i => i.id);
     const checkedPallets = checkedItems.reduce((s, i) => s + (i.joint_supply ? jointTotalPallets(i) : i.pallets_count), 0);
     const checkedWeight = checkedItems.reduce((s, i) => s + (i.joint_supply ? jointTotalWeight(i) : (Number(i.total_weight_kg) || 0)), 0);
 
@@ -914,7 +917,8 @@ export default function LogisticsPage() {
                                                 const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
                                                 const isJoint = !!item.joint_supply;
                                                 const jointReady = item.joint_ready !== false;
-                                                const canCheck = item.status === 'READY' && (!isJoint || jointReady);
+                                                // Газелька ведёт логистику сама — из ручного назначения (чек/bulk) исключаем.
+                                                const canCheck = item.status === 'READY' && (!isJoint || jointReady) && !item.via_gazelka;
                                                 const isChecked = checkedIds.has(item.id);
                                                 const stuck = daysStuck(item);
                                                 const isStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS;
@@ -952,6 +956,9 @@ export default function LogisticsPage() {
                                                                     Совместная
                                                                 </span>
                                                             )}
+                                                            {item.via_gazelka && (
+                                                                <span className="badge badge-info" style={{ fontSize: 10, marginLeft: 6 }} title="Отправлено в Газельку — машину назначает агрегатор, вручную нельзя">🚚 Газелька</span>
+                                                            )}
                                                             {!isJoint && ffNums.length > 0 && (
                                                                 <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--color-text-muted)' }} title="Номер(а) заявки ФФ">
                                                                     ФФ: {ffNums.join(', ')}
@@ -985,7 +992,14 @@ export default function LogisticsPage() {
                                                         <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
                                                             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                                                                 {item.status === 'READY' && (
-                                                                    isJoint && !jointReady ? (
+                                                                    item.via_gazelka ? (
+                                                                        <div>
+                                                                            <button className="btn btn-primary btn-sm" disabled>Назначить машину</button>
+                                                                            <div style={{ fontSize: 10, color: 'var(--color-text-muted)', marginTop: 2, whiteSpace: 'normal', maxWidth: 160 }}>
+                                                                                Логистику ведёт Газелька
+                                                                            </div>
+                                                                        </div>
+                                                                    ) : isJoint && !jointReady ? (
                                                                         <div>
                                                                             <button className="btn btn-primary btn-sm" disabled>Назначить машину</button>
                                                                             <div style={{ fontSize: 10, color: 'var(--color-warning)', marginTop: 2, whiteSpace: 'normal', maxWidth: 160 }}>
@@ -1057,8 +1071,8 @@ export default function LogisticsPage() {
                                             const isChecked = checkedIds.has(item.id);
                                             const isJoint = !!item.joint_supply;
                                             const jointReady = item.joint_ready !== false; // дефолт: не блокируем, если флаг не пришёл
-                                            // Совместный якорь можно чекать (для bulk) только когда вся поставка готова.
-                                            const canCheck = item.status === 'READY' && (!isJoint || jointReady);
+                                            // Совместный якорь можно чекать (для bulk) только когда вся поставка готова; Газелька ведёт логистику сама.
+                                            const canCheck = item.status === 'READY' && (!isJoint || jointReady) && !item.via_gazelka;
                                             const stuck = daysStuck(item);
                                             const isStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS;
                                             const veryStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS * 2;
@@ -1114,6 +1128,9 @@ export default function LogisticsPage() {
                                                                     Совместная
                                                                 </span>
                                                             )}
+                                                            {item.via_gazelka && (
+                                                                <span className="badge badge-info" title="Отправлено в Газельку — машину назначает агрегатор, вручную нельзя">🚚 Газелька</span>
+                                                            )}
                                                             <span className={`badge ${statusCfg.className}`}>
                                                                 {soon && item.estimated_ready_date
                                                                     ? formatDate(item.estimated_ready_date)
@@ -1168,7 +1185,16 @@ export default function LogisticsPage() {
                                                     {(!soon || isJoint) && (
                                                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
                                                             <div style={{ display: 'flex', gap: 8 }}>
-                                                                {isJoint && !jointReady ? (
+                                                                {item.status === 'READY' && item.via_gazelka ? (
+                                                                    <div style={{ width: '100%' }}>
+                                                                        <button className="btn btn-primary btn-sm" disabled style={{ width: '100%' }}>
+                                                                            Назначить машину
+                                                                        </button>
+                                                                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                                                                            Логистику ведёт Газелька
+                                                                        </div>
+                                                                    </div>
+                                                                ) : isJoint && !jointReady ? (
                                                                     // Совместная не готова — пометка + неактивная кнопка ВСЕГДА (даже если якорь «в сборке»).
                                                                     <div style={{ width: '100%' }}>
                                                                         <button className="btn btn-primary btn-sm" disabled style={{ width: '100%' }}>
@@ -1233,7 +1259,7 @@ export default function LogisticsPage() {
                                     {group.subGroups.map(sub => {
                                         // Совместный якорь попадает в bulk только если вся поставка готова (joint_ready).
                                         const readyIds = sub.items
-                                            .filter(i => i.status === 'READY' && (!i.joint_supply || i.joint_ready !== false))
+                                            .filter(i => i.status === 'READY' && (!i.joint_supply || i.joint_ready !== false) && !i.via_gazelka)
                                             .map(i => i.id);
                                         if (readyIds.length <= 1) return null;
                                         return (
@@ -1486,8 +1512,8 @@ export default function LogisticsPage() {
                     </div>
                     <button
                         className="btn btn-primary"
-                        onClick={() => openVehicleModal(Array.from(checkedIds))}
-                        disabled={actionLoading}
+                        onClick={() => openVehicleModal(assignableCheckedIds)}
+                        disabled={actionLoading || assignableCheckedIds.length === 0}
                     >
                         Назначить машину
                     </button>
