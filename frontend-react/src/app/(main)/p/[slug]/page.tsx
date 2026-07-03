@@ -1,23 +1,27 @@
 'use client';
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import Link from 'next/link';
+import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import type {
     DashboardSummary, BalanceAccount, DashboardFunnelSummary,
-    DailyCashflowRow, ExpenseCategoryPie, IncomeCounterparty,
+    DailyCashflowRow, ExpenseCategoryPie, ExpenseTypeGroup, IncomeCounterparty, IncomeTypeSlice,
     DashboardTransaction, CategoryCounterparty,
     ChartTooltipProps, ChartTooltipPayloadItem, PieLabelProps,
 } from '@/types/api';
 import {
     XAxis, YAxis, CartesianGrid, Tooltip, Legend,
     ResponsiveContainer, PieChart, Pie, Cell,
-    AreaChart, Area,
+    AreaChart, Area, BarChart, Bar,
 } from 'recharts';
 import KpiCard from '@/components/KpiCard';
 
 /* ─── Цвета ────────────────────────────────────────────────────── */
 const C = { income: '#22c55e', expense: '#ef4444', accent: '#a78bfa', warning: '#f59e0b', info: '#3b82f6', muted: '#64748b' };
 const PIE_COLORS = ['#a78bfa','#f472b6','#38bdf8','#22c55e','#f59e0b','#ef4444','#6366f1','#14b8a6','#e879f9','#fb923c'];
+/* Цвета типов прихода (маркетплейс — выручка, финансирование — займы, прочее) */
+const INCOME_TYPE_COLORS: Record<string,string> = { marketplace: '#22c55e', financing: '#3b82f6', other: '#94a3b8' };
 
 /* ─── Period ───────────────────────────────────────────────────── */
 type PeriodKey = 'month'|'prev_month'|'7d'|'30d'|'90d'|'all'|'custom';
@@ -50,6 +54,18 @@ function renderPieLabel({cx,cy,midAngle,outerRadius,name,percent,index}:PieLabel
     const R=Math.PI/180,r=outerRadius+20,x=cx+r*Math.cos(-midAngle*R),y=cy+r*Math.sin(-midAngle*R);
     if(percent<0.03) return null;
     return <text x={x} y={y} fill={PIE_COLORS[index%PIE_COLORS.length]} textAnchor={x>cx?'start':'end'} dominantBaseline="central" fontSize={11} fontWeight={600}>{truncate(name,12)} {(percent*100).toFixed(0)}%</text>;
+}
+/* Тултип для стэка прихода по типам — скрывает нулевые серии, добавляет «Итого» */
+function IncomeTypeTooltip({active,payload,label}:ChartTooltipProps) {
+    if(!active||!payload?.length) return null;
+    const items=payload.filter((p:ChartTooltipPayloadItem)=>Number(p.value)>0);
+    if(!items.length) return null;
+    const total=items.reduce((s:number,p:ChartTooltipPayloadItem)=>s+Number(p.value),0);
+    return (<div style={{background:'rgba(15,17,26,0.95)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,padding:'10px 14px',fontSize:13}}>
+        <div style={{color:'#94a3b8',marginBottom:4}}>{label}</div>
+        {items.map((p:ChartTooltipPayloadItem,i:number)=>(<div key={i} style={{color:p.color||p.fill,fontWeight:600}}>{p.name}: {formatNumber(p.value)} ₽</div>))}
+        {items.length>1&&<div style={{color:'#e2e8f0',fontWeight:600,marginTop:4,borderTop:'1px solid rgba(255,255,255,0.1)',paddingTop:4}}>Итого: {formatNumber(total)} ₽</div>}
+    </div>);
 }
 /* KpiCard imported from @/components/KpiCard */
 
@@ -101,6 +117,8 @@ function InlineTxnRows({txnList,txnTotal,txnFlow,onFlowChange,filterLoading,colS
 
 /* ═══════════════════════════════════════════════════════════════ */
 export default function DashboardPage() {
+    const params=useParams();
+    const slug=(params?.slug as string)||'';
     const [data,setData]=useState<DashboardSummary|null>(null);
     const [balance,setBalance]=useState<BalanceAccount[]>([]);
     const [funnel,setFunnel]=useState<DashboardFunnelSummary|null>(null);
@@ -109,6 +127,7 @@ export default function DashboardPage() {
     const [period,setPeriod]=useState<PeriodKey>('month');
     const [customFrom,setCustomFrom]=useState('');
     const [customTo,setCustomTo]=useState('');
+    const [expandedType,setExpandedType]=useState<string|null>(null);
 
     /* ─── Filter state ────────────────────────────────────────── */
     const [selectedCp,setSelectedCp]=useState<IncomeCounterparty|null>(null);
@@ -225,10 +244,19 @@ export default function DashboardPage() {
     ];
     const incomeCounterparties=data?.income_counterparties||[];
     const expensePie:ExpenseCategoryPie[]=data?.expense_by_category||[];
+    const expenseByType:ExpenseTypeGroup[]=data?.expense_by_type||[];
     const dailyChart=useMemo(()=>{
         const raw=filteredDaily||data?.daily_cashflow||[];
         return raw.map((d:DailyCashflowRow)=>({...d,label:shortDay(d.date)}));
     },[data,filteredDaily]);
+    const incomeByTypeChart=useMemo(()=>(data?.daily_income_by_type||[]).map(d=>({...d,label:shortDay(d.date)})),[data]);
+    const incomeTypeSummary:IncomeTypeSlice[]=data?.income_by_type||[];
+    const incomeTypeTotal=useMemo(()=>incomeTypeSummary.reduce((s,t)=>s+t.value,0),[incomeTypeSummary]);
+    const uncatExpPct=useMemo(()=>{
+        const exp=data?.month_expense||0;
+        const u=(data?.expense_by_category||[]).find((c:ExpenseCategoryPie)=>c.name==='Без категории');
+        return exp>0&&u?(u.value/exp*100):0;
+    },[data]);
     const hasFilter=selectedCp||selectedExpCat;
     const filterLabel=selectedCp?truncate(selectedCp.name,20):selectedExpCat?truncate(selectedExpCat,20):'';
 
@@ -268,6 +296,39 @@ export default function DashboardPage() {
                 <KpiCard icon="📥" label="INBOX" value={`${data.inbox_count}`} sub="нераспределённых" color={data.inbox_count>0?C.warning:C.income}/>
                 {funnel?(<KpiCard icon="🛒" label="Заказы WB" value={funnel.orders_count?.toLocaleString('ru-RU')||'—'} sub={`${formatNumber(funnel.orders_sum_rub,0)} ₽`} color={C.info}/>):(<KpiCard icon="📊" label="Счета" value={`${data.accounts_count}`} sub="активных" color={C.accent}/>)}
             </div>
+
+            {/* ─── Поступления по дням (по типам) ── */}
+            {incomeByTypeChart.length>0&&incomeTypeTotal>0&&(
+                <div className="glass-card" style={{marginTop:20,padding:'20px 16px'}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16,flexWrap:'wrap',gap:10}}>
+                        <h3 style={{fontSize:15,fontWeight:600,color:'var(--color-text)'}}>💰 Поступления по дням
+                            <span style={{fontSize:12,color:C.muted,fontWeight:400,marginLeft:8}}>чистый приход, без переводов между счетами</span>
+                        </h3>
+                        <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+                            {incomeTypeSummary.map((t:IncomeTypeSlice)=>{
+                                const pct=incomeTypeTotal>0?(t.value/incomeTypeTotal*100):0;
+                                return (<div key={t.key} style={{display:'flex',alignItems:'center',gap:6}}>
+                                    <span style={{width:10,height:10,borderRadius:2,background:INCOME_TYPE_COLORS[t.key]||C.muted,display:'inline-block'}}/>
+                                    <span style={{fontSize:12,color:'#94a3b8'}}>{t.name}</span>
+                                    <span style={{fontSize:13,fontWeight:600,color:INCOME_TYPE_COLORS[t.key]||C.muted}}>{formatNumber(t.value,0)} ₽</span>
+                                    <span style={{fontSize:11,color:C.muted}}>{pct.toFixed(0)}% · {t.count}</span>
+                                </div>);
+                            })}
+                        </div>
+                    </div>
+                    <ResponsiveContainer width="100%" height={300}>
+                        <BarChart data={incomeByTypeChart} margin={{left:10,right:10}}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" vertical={false}/>
+                            <XAxis dataKey="label" tick={{fill:'#94a3b8',fontSize:11}}/>
+                            <YAxis tickFormatter={fmtK} tick={{fill:'#94a3b8',fontSize:12}}/>
+                            <Tooltip content={<IncomeTypeTooltip/>} cursor={{fill:'rgba(255,255,255,0.04)'}}/>
+                            <Bar dataKey="marketplace" name="Маркетплейс" stackId="inc" fill={INCOME_TYPE_COLORS.marketplace} maxBarSize={48}/>
+                            <Bar dataKey="financing" name="Финансирование" stackId="inc" fill={INCOME_TYPE_COLORS.financing} maxBarSize={48}/>
+                            <Bar dataKey="other" name="Прочее" stackId="inc" fill={INCOME_TYPE_COLORS.other} maxBarSize={48}/>
+                        </BarChart>
+                    </ResponsiveContainer>
+                </div>
+            )}
 
             {/* Charts */}
             <div style={{display:'grid',gridTemplateColumns:dailyChart.length>0&&expensePie.length>0?'1.6fr 1fr':'1fr',gap:20,marginTop:20}}>
@@ -318,6 +379,46 @@ export default function DashboardPage() {
                 )}
             </div>
 
+            {/* ─── Расходы: тип контрагента → категория (2 уровня) ── */}
+            {expenseByType.length>0&&(
+                <div className="glass-card" style={{marginTop:20}}>
+                    <div className="table-toolbar">
+                        <h3 style={{fontSize:16,fontWeight:600}}>🗂 Расходы по типам контрагентов</h3>
+                        <span style={{fontSize:12,color:C.muted}}>тип → категория · клик для раскрытия</span>
+                    </div>
+                    <table className="data-table"><thead><tr>
+                        <th>Тип / Категория</th><th style={{textAlign:'right'}}>Сумма</th><th style={{textAlign:'right'}}>Операций</th><th style={{textAlign:'right'}}>% от расходов</th>
+                    </tr></thead><tbody>
+                        {expenseByType.map((g:ExpenseTypeGroup,i:number)=>{
+                            const pct=data.month_expense>0?(g.value/data.month_expense*100):0;
+                            const key=g.type??'__none__';
+                            const isOpen=expandedType===key;
+                            return (<React.Fragment key={key}>
+                                <tr onClick={()=>setExpandedType(isOpen?null:key)} style={{cursor:'pointer',fontWeight:600}}>
+                                    <td style={{display:'flex',alignItems:'center',gap:8}}>
+                                        <span style={{width:10,height:10,borderRadius:3,display:'inline-block',background:PIE_COLORS[i%PIE_COLORS.length]}}/>
+                                        <span style={{display:'inline-block',width:14,fontSize:10,color:'#94a3b8'}}>{isOpen?'▼':'▶'}</span>
+                                        {g.type_label}
+                                    </td>
+                                    <td style={{textAlign:'right',color:'var(--color-danger)'}}>{formatNumber(g.value)} ₽</td>
+                                    <td style={{textAlign:'right'}}>{g.count}</td>
+                                    <td style={{textAlign:'right'}}><span className="badge badge-warning">{pct.toFixed(1)}%</span></td>
+                                </tr>
+                                {isOpen&&g.categories.map((c:ExpenseCategoryPie,j:number)=>{
+                                    const cpct=g.value>0?(c.value/g.value*100):0;
+                                    return (<tr key={j} style={{fontSize:13,background:'rgba(255,255,255,0.015)'}}>
+                                        <td style={{paddingLeft:48,color:c.name==='Без категории'?C.muted:'var(--color-text)'}}>{c.name}</td>
+                                        <td style={{textAlign:'right'}}>{formatNumber(c.value)} ₽</td>
+                                        <td style={{textAlign:'right'}}>{c.count??'—'}</td>
+                                        <td style={{textAlign:'right',color:C.muted,fontSize:12}}>{cpct.toFixed(0)}%</td>
+                                    </tr>);
+                                })}
+                            </React.Fragment>);
+                        })}
+                    </tbody></table>
+                </div>
+            )}
+
             {/* ─── Income counterparties (1-level: click → txn list) ── */}
             {/* TODO: migrate to TanStackDataTable — interactive drill-down table with click-to-expand transaction list */}
             {incomeCounterparties.length>0&&(
@@ -354,7 +455,14 @@ export default function DashboardPage() {
                 <div className="glass-card" style={{marginTop:20}}>
                     <div className="table-toolbar">
                         <h3 style={{fontSize:16,fontWeight:600}}>Расходы по категориям</h3>
-                        {selectedExpCat&&<button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
+                        <div style={{display:'flex',alignItems:'center',gap:12,marginLeft:'auto'}}>
+                            {uncatExpPct>=20&&slug&&(
+                                <Link href={`/p/${slug}/refs`} style={{fontSize:12,color:C.warning,textDecoration:'none'}}>
+                                    ⚠ {uncatExpPct.toFixed(0)}% без категории — назначить →
+                                </Link>
+                            )}
+                            {selectedExpCat&&<button className="btn btn-sm btn-secondary" onClick={resetFilters}>Все</button>}
+                        </div>
                     </div>
                     <table className="data-table"><thead><tr>
                         <th>Категория</th><th style={{textAlign:'right'}}>Сумма</th><th style={{textAlign:'right'}}>Операций</th><th style={{textAlign:'right'}}>% от расходов</th>

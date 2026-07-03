@@ -2620,6 +2620,17 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
     // Колонка «Кол-во (шт)» (пересчёт коробов) видна, когда у заявок есть это число (migfull)
     const hasUnits = rows.some(r => r.total_qty_units != null);
 
+    // Сколько заявок ФФ привязано к одной нашей сборке (migfull/«Натали» — N:1).
+    // Считаем из загруженных строк: если >1 — на строках показываем бейдж, что они
+    // относятся к одной нашей сборке ASM (иначе строки выглядят несвязанными).
+    const linkedCount = useMemo(() => {
+        const m = new Map<number, number>();
+        for (const r of rows) {
+            if (r.assembly_request_id != null) m.set(r.assembly_request_id, (m.get(r.assembly_request_id) ?? 0) + 1);
+        }
+        return m;
+    }, [rows]);
+
     const cols: Column[] = [
         {
             key: '_select', label: '', sortable: false, align: 'center',
@@ -2690,9 +2701,29 @@ function FfRequestsTab({ warehouseId, slug, kind }: { warehouseId: number; slug:
             render: (_: unknown, row: FfRequestRow) => {
                 const acting = actingId === row.id;
                 if (row.linked_number) {
+                    const siblings = row.assembly_request_id != null ? (linkedCount.get(row.assembly_request_id) ?? 0) : 0;
                     return (
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                            <span style={{ fontWeight: 600 }}>{row.linked_number}</span>
+                            {row.assembly_request_id != null ? (
+                                <Link
+                                    href={`/p/${slug}/warehouse/assembly/${row.assembly_request_id}`}
+                                    title="Открыть нашу сборку"
+                                    style={{ fontWeight: 600, color: 'var(--color-accent)', textDecoration: 'none' }}
+                                >
+                                    {row.linked_number}
+                                </Link>
+                            ) : (
+                                <span style={{ fontWeight: 600 }}>{row.linked_number}</span>
+                            )}
+                            {siblings > 1 && (
+                                <span
+                                    className="badge badge-info"
+                                    style={{ fontSize: 11, padding: '2px 8px' }}
+                                    title={`Сборка ${row.linked_number}: на неё в ФФ «Натали» заведено ${formatNumber(siblings, 0)} заявок — все относятся к одной нашей сборке`}
+                                >
+                                    заявок на сборку: {formatNumber(siblings, 0)}
+                                </span>
+                            )}
                             {row.linked_status && (
                                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{linkedStatusLabel(row.linked_status)}</span>
                             )}

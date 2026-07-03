@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Transaction
 from backend.cache import cached
+from backend.services.reports._cogs import get_cogs_include_clause
 
 
 @cached(prefix="reports:dds_month", ttl=300)
@@ -25,6 +26,9 @@ async def get_dds_month(
     month_start = date(year, month, 1)
     last_day = calendar.monthrange(year, month)[1]
     month_end = date(year, month, last_day)
+
+    # Исключаем «себестоимость»-категории целиком (полностью убрать из ДДС).
+    cogs_incl = await get_cogs_include_clause(db, project_id)
 
     result = await db.execute(
         select(
@@ -41,6 +45,7 @@ async def get_dds_month(
                 Transaction.date <= month_end,
                 Transaction.currency == currency,
                 Transaction.is_cashflow2 == 1,
+                cogs_incl,
             )
         )
         .group_by(Transaction.cat_lvl1_2, Transaction.cat_lvl2_2)
@@ -77,6 +82,9 @@ async def get_dds_pnl(
     rates_map = await fx_service.get_rates_map(db, project_id, year_start, year_end)
     avg_rate = (sum(rates_map.values()) / len(rates_map)) if rates_map else 1.0
 
+    # Исключаем «себестоимость»-категории целиком (полностью убрать из ОПиУ-ДДС).
+    cogs_incl = await get_cogs_include_clause(db, project_id)
+
     # Fetch all cashflow transactions for the year
     result = await db.execute(
         select(
@@ -93,6 +101,7 @@ async def get_dds_pnl(
             Transaction.is_cashflow2 == 1,
             Transaction.date >= year_start,
             Transaction.date <= year_end,
+            cogs_incl,
         )
         .group_by(
             func.extract("month", Transaction.date),

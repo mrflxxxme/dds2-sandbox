@@ -154,6 +154,9 @@ async def test_submit_succeeds_with_documents(db_session, project):
 def test_transition_guard():
     prs.check_transition(PaymentRequestStatus.DRAFT, PaymentRequestStatus.PENDING_REVIEW)  # ok
     prs.check_transition(PaymentRequestStatus.DRAFT_CREATED, PaymentRequestStatus.PAID)  # ok
+    # Банковский черновик можно создать и после ручного согласования (любая категория).
+    prs.check_transition(PaymentRequestStatus.PENDING_REVIEW, PaymentRequestStatus.DRAFT_CREATED)  # ok
+    prs.check_transition(PaymentRequestStatus.APPROVED, PaymentRequestStatus.DRAFT_CREATED)  # ok (новое)
     with pytest.raises(ValueError):
         prs.check_transition(PaymentRequestStatus.DRAFT, PaymentRequestStatus.PAID)
     with pytest.raises(ValueError):
@@ -190,8 +193,11 @@ async def test_soft_deleted_excluded_from_list(db_session, project):
     db_pr.soft_delete()
     await db_session.commit()
 
-    rows, total, _ = await svc.list_requests(project.id)
-    assert total == 0
+    rows, _, _, _ = await svc.list_requests(project.id)
+    # Мягко-удалённая заявка исключена. total теперь включает «общие» заявки инбокса,
+    # поэтому проверяем именно отсутствие СВОИХ (проектных) строк.
+    own = [r for r in rows if r.project_id == project.id]
+    assert own == []
     assert all(r.id != pr.id for r in rows)
 
 
@@ -261,3 +267,121 @@ async def test_archive_hides_from_default_and_shows_in_archived(db_session, proj
 
     assert await svc.unarchive_shipments(project.id, [shp.id]) == 1
     assert any(r.outbound_shipment_id == shp.id for r in await svc.list_shippable(project.id))
+
+
+# ─── Общая заявка (без проекта) + назначение (category) ─────────────────────────
+
+
+async def _mk_manual(svc, project_id, **kw):
+    """Создать MANUAL-заявку (project_id=None → общая) с валидными реквизитами."""
+    return await svc.create_request(
+        project_id,
+        PaymentRequestCreate(
+            source="MANUAL", payee_inn=_INN, payee_account=_ACC, payee_bik=_BIK,
+            payee_name="ООО Фотограф", amount=Decimal("12000.00"), **kw,
+        ),
+        user_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_general_no_project(db_session, project):
+    """project_id=None → «общая» заявка: своя серия номера, доступна, category по умолчанию OTHER."""
+    svc = PaymentRequestService(db_session)
+    pr = await _mk_manual(svc, None, category="PHOTO_CONTENT")
+    assert pr.project_id is None
+    assert pr.number.startswith("ОБЩ-")
+    assert pr.category == "PHOTO_CONTENT"
+    assert pr.status == PaymentRequestStatus.PENDING_REVIEW.value
+
+
+@pytest.mark.asyncio
+async def test_create_category_default_other_for_manual(db_session, project):
+    svc = PaymentRequestService(db_session)
+    pr = await _mk_manual(svc, project.id)  # без category
+    assert pr.category == "OTHER"
+
+
+@pytest.mark.asyncio
+async def test_create_all_categories_accepted(db_session, project):
+    """Все назначения (вкл. фулфилмент/дизайн/хозрасходы) принимаются схемой и сохраняются."""
+    svc = PaymentRequestService(db_session)
+    for cat in ("PHOTO_CONTENT", "CUSTOMS", "FULFILLMENT", "DESIGN", "HOUSEHOLD", "OTHER"):
+        pr = await _mk_manual(svc, project.id, category=cat)
+        assert pr.category == cat
+
+
+@pytest.mark.asyncio
+async def test_general_request_visible_across_projects(db_session, project, other_project):
+    """Общая заявка (без проекта) видна из любого проекта — единый инбокс согласования."""
+    svc = PaymentRequestService(db_session)
+    pr = await _mk_manual(svc, None)
+    assert await svc.get_request(project.id, pr.id) is not None
+    assert await svc.get_request(other_project.id, pr.id) is not None
+    rows_a, _, _, _ = await svc.list_requests(project.id)
+    rows_b, _, _, _ = await svc.list_requests(other_project.id)
+    assert any(r.id == pr.id for r in rows_a)
+    assert any(r.id == pr.id for r in rows_b)
+
+
+@pytest.mark.asyncio
+async def test_named_project_request_not_visible_as_general(db_session, project, other_project):
+    """Заявка проекта X не видна из проекта Y (изоляция именованных проектов сохранена)."""
+    svc = PaymentRequestService(db_session)
+    pr = await _mk_manual(svc, project.id)
+    assert await svc.get_request(other_project.id, pr.id) is None
+
+
+@pytest.mark.asyncio
+async def test_general_shipment_requires_project(db_session, project):
+    """Заявку по забору (COUNTERPARTY+shipment) нельзя сделать «общей» (без проекта)."""
+    cp = await _mk_carrier(db_session, project.id)
+    shp = await _mk_shipment(db_session, project.id, cp.id)
+    await db_session.commit()
+    svc = PaymentRequestService(db_session)
+    with pytest.raises(PaymentRequestValidationError):
+        await svc.create_request(
+            None,
+            PaymentRequestCreate(source="COUNTERPARTY", outbound_shipment_id=shp.id),
+            user_id=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_approve_then_mark_paid(db_session, project):
+    svc = PaymentRequestService(db_session)
+    pr = await _mk_manual(svc, project.id)
+    approved = await svc.approve_request(project.id, pr.id, comment="ок")
+    assert approved.status == PaymentRequestStatus.APPROVED.value
+    paid = await svc.mark_paid_request(project.id, pr.id)
+    assert paid.status == PaymentRequestStatus.PAID.value
+    # история переходов записана
+    full = await svc.get_request(project.id, pr.id)
+    new_statuses = {e.new_status for e in full.events}
+    assert {"APPROVED", "PAID"} <= new_statuses
+
+
+@pytest.mark.asyncio
+async def test_reject_request(db_session, project):
+    svc = PaymentRequestService(db_session)
+    pr = await _mk_manual(svc, project.id)
+    rejected = await svc.reject_request(project.id, pr.id, comment="дубль")
+    assert rejected.status == PaymentRequestStatus.REJECTED.value
+
+
+@pytest.mark.asyncio
+async def test_mark_paid_requires_approved(db_session, project):
+    """PENDING_REVIEW → PAID напрямую запрещён (только через APPROVED)."""
+    svc = PaymentRequestService(db_session)
+    pr = await _mk_manual(svc, project.id)
+    with pytest.raises(ValueError):
+        await svc.mark_paid_request(project.id, pr.id)
+
+
+@pytest.mark.asyncio
+async def test_approve_general_request(db_session, project):
+    """Общую заявку (без проекта) можно согласовать из контекста любого проекта."""
+    svc = PaymentRequestService(db_session)
+    pr = await _mk_manual(svc, None)
+    approved = await svc.approve_request(project.id, pr.id)
+    assert approved.status == PaymentRequestStatus.APPROVED.value

@@ -32,6 +32,7 @@ from backend.services.funnel.capital import (
 # ─── Queries ─────────────────────────────────────────────────────────────────
 from backend.services.funnel.queries import (
     bulk_set_cost_overrides,
+    get_color_options,
     get_cost_overrides,
     get_filters,
     get_funnel_abc_analysis,
@@ -46,9 +47,11 @@ from backend.services.funnel.queries import (
     set_cost_override,
 )
 
-# ─── Grouping (tag, imt) ─────────────────────────────────────────────────────
+# ─── Grouping (tag, imt, size) ───────────────────────────────────────────────
 from backend.services.funnel.queries_grouping import (
+    get_funnel_by_category_size,
     get_funnel_by_imt,
+    get_funnel_by_size,
     get_funnel_by_tag,
 )
 
@@ -91,6 +94,7 @@ __all__ = [
     "get_funnel_detailed",
     "get_summary",
     "get_filters",
+    "get_color_options",
     "get_cost_overrides",
     "get_missing_costs",
     "set_cost_override",
@@ -106,6 +110,8 @@ __all__ = [
     # grouping
     "get_funnel_by_tag",
     "get_funnel_by_imt",
+    "get_funnel_by_size",
+    "get_funnel_by_category_size",
     # stock costs
     "get_stock_cost_map",
     "merge_stock_costs",

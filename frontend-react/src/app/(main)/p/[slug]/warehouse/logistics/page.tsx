@@ -84,6 +84,82 @@ function ffRequestNumbers(item: AssemblyRequest): string[] {
     return item.ff_request_number ? [item.ff_request_number] : [];
 }
 
+// ─── Joint (совместная) FBO-поставка: коллапс N сборок в одну карточку ─────────
+
+/** Строка разбивки забора совместной поставки: один склад-источник. */
+interface JointRow {
+    number: string;                        // номер сборки этого склада-источника (ASM-…)
+    warehouse_id: number;
+    warehouse_name: string | null;
+    pallets_count: number | null;
+    pallet_weight_kg: number | null;       // вес паллеты (коэрсим из строки)
+    ff_request_number: string | null;
+    status: AssemblyStatus | string;
+}
+
+/** Строки разбивки совместной поставки: сам anchor + его siblings, по складу-источнику.
+ *  Anchor берёт собственные поля; siblings — поля JointSibling. Сортировка по warehouse_id. */
+function jointRows(item: AssemblyRequest): JointRow[] {
+    const rows: JointRow[] = [{
+        number: item.number,
+        warehouse_id: item.warehouse_id,
+        warehouse_name: item.warehouse_name ?? null,
+        pallets_count: item.pallets_count,
+        pallet_weight_kg: item.pallet_weight_kg != null ? Number(item.pallet_weight_kg) : null,
+        ff_request_number: ffRequestNumbers(item)[0] ?? null,
+        status: item.status,
+    }];
+    for (const s of item.joint_siblings ?? []) {
+        rows.push({
+            number: s.number,
+            warehouse_id: s.warehouse_id,
+            warehouse_name: s.warehouse_name ?? null,
+            pallets_count: s.pallets_count ?? null,
+            pallet_weight_kg: s.pallet_weight_kg != null ? Number(s.pallet_weight_kg) : null,
+            ff_request_number: s.ff_request_number ?? null,
+            status: s.status,
+        });
+    }
+    return rows.sort((a, b) => a.warehouse_id - b.warehouse_id);
+}
+
+/** Суммарные паллеты совместной поставки: joint_total_pallets либо сумма строк разбивки. */
+function jointTotalPallets(item: AssemblyRequest): number {
+    if (item.joint_total_pallets != null) return item.joint_total_pallets;
+    return jointRows(item).reduce((s, r) => s + (r.pallets_count ?? 0), 0);
+}
+
+/** Суммарный вес (кг) совместной поставки: joint_total_weight_kg либо сумма (паллеты × вес паллеты). */
+function jointTotalWeight(item: AssemblyRequest): number {
+    if (item.joint_total_weight_kg != null) return Number(item.joint_total_weight_kg);
+    return jointRows(item).reduce((s, r) => s + (r.pallets_count ?? 0) * (r.pallet_weight_kg ?? 0), 0);
+}
+
+/** Склады-источники совместной поставки, ещё не готовые (PENDING/IN_PROGRESS) — для гейта кнопки. */
+function jointPendingWarehouses(item: AssemblyRequest): string[] {
+    return jointRows(item)
+        .filter(r => r.status === 'PENDING' || r.status === 'IN_PROGRESS')
+        .map(r => r.warehouse_name || `склад #${r.warehouse_id}`);
+}
+
+/** Коллапс совместных поставок: из плоского списка оставляем по одной заявке-«якорю»
+ *  на каждую WB FBO-поставку (минимальный id среди сборок этой поставки в загруженном
+ *  списке), остальные joint-сёстры выкидываем, чтобы не рисовать их отдельными карточками.
+ *  Не-совместные заявки не трогаем. */
+function collapseJoint(items: AssemblyRequest[]): AssemblyRequest[] {
+    // Минимальный id по wb_fbo_supply_id среди ЗАГРУЖЕННЫХ совместных заявок.
+    const minIdBySupply = new Map<number, number>();
+    for (const i of items) {
+        if (!i.joint_supply || i.wb_fbo_supply_id == null) continue;
+        const cur = minIdBySupply.get(i.wb_fbo_supply_id);
+        if (cur == null || i.id < cur) minIdBySupply.set(i.wb_fbo_supply_id, i.id);
+    }
+    return items.filter(i => {
+        if (!i.joint_supply || i.wb_fbo_supply_id == null) return true;
+        return minIdBySupply.get(i.wb_fbo_supply_id) === i.id;
+    });
+}
+
 // ─── Status config ──────────────────────────────────────────────────────────
 
 const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
@@ -362,21 +438,28 @@ export default function LogisticsPage() {
         return true;
     });
 
+    // ─── Collapse joint supplies ──────────────────────────────────────────
+    // Совместная поставка (N сборок на одну WB FBO-поставку) схлопывается в одну
+    // карточку-«якорь» (мин. id среди сборок поставки); остальные сёстры выкидываем.
+
+    const displayItems = collapseJoint(filteredItems);
+
     // ─── Grouping ─────────────────────────────────────────────────────────
 
-    const grouped = groupItems(filteredItems, groupBy);
+    const grouped = groupItems(displayItems, groupBy);
 
     // ─── Summary ──────────────────────────────────────────────────────────
+    // Для совместного якоря считаем по всей поставке (joint-итоги), а не по одной сборке.
 
-    const totalRequests = filteredItems.length;
-    const totalPallets = filteredItems.reduce((s, i) => s + i.pallets_count, 0);
-    const totalWeight = filteredItems.reduce((s, i) => s + (Number(i.total_weight_kg) || 0), 0);
+    const totalRequests = displayItems.length;
+    const totalPallets = displayItems.reduce((s, i) => s + (i.joint_supply ? jointTotalPallets(i) : i.pallets_count), 0);
+    const totalWeight = displayItems.reduce((s, i) => s + (i.joint_supply ? jointTotalWeight(i) : (Number(i.total_weight_kg) || 0)), 0);
 
     // ─── Checked items summary ──────────────────────────────────────────
 
-    const checkedItems = filteredItems.filter(i => checkedIds.has(i.id));
-    const checkedPallets = checkedItems.reduce((s, i) => s + i.pallets_count, 0);
-    const checkedWeight = checkedItems.reduce((s, i) => s + (Number(i.total_weight_kg) || 0), 0);
+    const checkedItems = displayItems.filter(i => checkedIds.has(i.id));
+    const checkedPallets = checkedItems.reduce((s, i) => s + (i.joint_supply ? jointTotalPallets(i) : i.pallets_count), 0);
+    const checkedWeight = checkedItems.reduce((s, i) => s + (i.joint_supply ? jointTotalWeight(i) : (Number(i.total_weight_kg) || 0)), 0);
 
     const toggleChecked = (id: number) => {
         setCheckedIds(prev => {
@@ -474,6 +557,19 @@ export default function LogisticsPage() {
         setActionLoading(false);
     };
 
+    // Отгрузка совместной поставки разом: бэк отгружает все назначенные сборки поставки.
+    const handleShipJoint = async (anchorId: number) => {
+        setActionLoading(true);
+        setError('');
+        try {
+            await api.shipJoint(anchorId);
+            await load();
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка отгрузки');
+        }
+        setActionLoading(false);
+    };
+
     const handleUnassignVehicle = async (id: number) => {
         if (!confirm('Отменить назначение машины? Заявка вернётся в статус "Готово".')) return;
         setActionLoading(true);
@@ -535,6 +631,74 @@ export default function LogisticsPage() {
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title={`Диапазон по истории · уровень: ${f.basis} · отгрузок: ${f.sample}`}>
                     {formatNumber(f.low, 0)}–{formatNumber(f.high, 0)} ₽ · {f.basis}
+                </div>
+            </div>
+        );
+    };
+
+    // Разбивка забора совместной поставки: по строке на склад-источник + ИТОГО.
+    const renderJointBreakdown = (item: AssemblyRequest): React.ReactNode => {
+        const rows = jointRows(item);
+        return (
+            <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--color-border)' }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
+                    Забор по складам
+                </div>
+                {/* Компактная таблица под узкую карточку: фикс-лейаут + узкие колонки,
+                    статус — точкой. (.data-table с padding 12×16 и auto-layout вылезала за край.) */}
+                <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 11 }}>
+                    <colgroup>
+                        <col />
+                        <col style={{ width: 30 }} />
+                        <col style={{ width: 54 }} />
+                        <col style={{ width: 46 }} />
+                        <col style={{ width: 18 }} />
+                    </colgroup>
+                    <thead>
+                        <tr style={{ color: 'var(--color-text-muted)' }}>
+                            <th style={{ padding: '2px 4px', textAlign: 'left', fontWeight: 500 }}>Сборка / склад</th>
+                            <th style={{ padding: '2px 4px', textAlign: 'right', fontWeight: 500 }}>Пал</th>
+                            <th style={{ padding: '2px 4px', textAlign: 'right', fontWeight: 500 }}>Вес</th>
+                            <th style={{ padding: '2px 4px', textAlign: 'right', fontWeight: 500 }}>ФФ №</th>
+                            <th style={{ padding: '2px 2px' }}></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map(r => {
+                            const weight = r.pallets_count != null && r.pallet_weight_kg != null
+                                ? r.pallets_count * r.pallet_weight_kg : null;
+                            const ready = r.status !== 'PENDING' && r.status !== 'IN_PROGRESS';
+                            return (
+                                <tr key={r.warehouse_id} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                    <td style={{ padding: '3px 4px', verticalAlign: 'top' }}>
+                                        <div style={{ fontFamily: 'monospace' }}>{r.number}</div>
+                                        <div style={{ color: 'var(--color-text-muted)', fontSize: 10, wordBreak: 'break-word' }}>{r.warehouse_name || `#${r.warehouse_id}`}</div>
+                                    </td>
+                                    <td style={{ padding: '3px 4px', textAlign: 'right', verticalAlign: 'top' }}>{r.pallets_count != null ? formatNumber(r.pallets_count, 0) : '—'}</td>
+                                    <td style={{ padding: '3px 4px', textAlign: 'right', verticalAlign: 'top' }}>{weight != null ? formatNumber(weight, 0) + ' кг' : '—'}</td>
+                                    <td style={{ padding: '3px 4px', textAlign: 'right', verticalAlign: 'top', fontFamily: 'monospace' }}>{r.ff_request_number || '—'}</td>
+                                    <td style={{ padding: '3px 2px', textAlign: 'center', verticalAlign: 'top' }}>
+                                        <span
+                                            title={STATUS_MAP[r.status as AssemblyStatus]?.label || String(r.status)}
+                                            style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: ready ? 'var(--color-success)' : 'var(--color-warning)' }}
+                                        />
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                    <tfoot>
+                        <tr style={{ fontWeight: 600, borderTop: '1px solid var(--color-border)' }}>
+                            <td style={{ padding: '3px 4px' }}>Итого</td>
+                            <td style={{ padding: '3px 4px', textAlign: 'right' }}>{formatNumber(jointTotalPallets(item), 0)}</td>
+                            <td style={{ padding: '3px 4px', textAlign: 'right' }}>{formatNumber(jointTotalWeight(item), 0)} кг</td>
+                            <td colSpan={2}></td>
+                        </tr>
+                    </tfoot>
+                </table>
+                <div style={{ display: 'flex', gap: 10, fontSize: 10, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                    <span><span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: 'var(--color-warning)', verticalAlign: 'middle', marginRight: 3 }} />в сборке</span>
+                    <span><span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: 'var(--color-success)', verticalAlign: 'middle', marginRight: 3 }} />готова</span>
                 </div>
             </div>
         );
@@ -742,18 +906,21 @@ export default function LogisticsPage() {
                                                 <td colSpan={13} style={{ background: 'var(--color-bg-secondary)', fontWeight: 600, fontSize: 13, padding: '8px 12px' }}>
                                                     {group.label || 'Без склада'}
                                                     <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8 }}>
-                                                        {group.items.length} заявок, {group.items.reduce((s, i) => s + i.pallets_count, 0)} палет
+                                                        {group.items.length} заявок, {group.items.reduce((s, i) => s + (i.joint_supply ? jointTotalPallets(i) : i.pallets_count), 0)} палет
                                                     </span>
                                                 </td>
                                             </tr>
                                             {group.items.map(item => {
                                                 const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
-                                                const canCheck = item.status === 'READY';
+                                                const isJoint = !!item.joint_supply;
+                                                const jointReady = item.joint_ready !== false;
+                                                const canCheck = item.status === 'READY' && (!isJoint || jointReady);
                                                 const isChecked = checkedIds.has(item.id);
                                                 const stuck = daysStuck(item);
                                                 const isStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS;
                                                 const veryStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS * 2;
                                                 const ffNums = ffRequestNumbers(item);
+                                                const jointPending = isJoint ? jointPendingWarehouses(item) : [];
                                                 return (
                                                     <tr
                                                         key={item.id}
@@ -780,19 +947,24 @@ export default function LogisticsPage() {
                                                             >
                                                                 {item.number}
                                                             </Link>
-                                                            {ffNums.length > 0 && (
+                                                            {isJoint && (
+                                                                <span className="badge badge-info" style={{ fontSize: 10, marginLeft: 6 }} title={`Совместная FBO-поставка · ${jointRows(item).map(r => r.warehouse_name || `#${r.warehouse_id}`).join(' + ')}`}>
+                                                                    Совместная
+                                                                </span>
+                                                            )}
+                                                            {!isJoint && ffNums.length > 0 && (
                                                                 <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--color-text-muted)' }} title="Номер(а) заявки ФФ">
                                                                     ФФ: {ffNums.join(', ')}
                                                                 </div>
                                                             )}
                                                         </td>
                                                         <td style={{ fontSize: 12 }}>{item.brands || '\u2014'}</td>
-                                                        <td style={{ color: 'var(--color-text-muted)' }}>{item.warehouse_name || '\u2014'}</td>
+                                                        <td style={{ color: 'var(--color-text-muted)' }}>{isJoint ? jointRows(item).map(r => r.warehouse_name || `#${r.warehouse_id}`).join(' + ') : (item.warehouse_name || '\u2014')}</td>
                                                         <td>{item.effective_wb_warehouse || '—'}</td>
                                                         <td style={{ fontSize: 12 }}>{renderWbDeliveryDate(item)}</td>
                                                         <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{item.wb_supply_id_wb ||'\u2014'}</td>
-                                                        <td style={{ textAlign: 'right' }}>{item.pallets_count}</td>
-                                                        <td style={{ textAlign: 'right' }}>{item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</td>
+                                                        <td style={{ textAlign: 'right' }}>{isJoint ? formatNumber(jointTotalPallets(item), 0) : item.pallets_count}</td>
+                                                        <td style={{ textAlign: 'right' }}>{isJoint ? formatNumber(jointTotalWeight(item), 0) + ' кг' : (item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014')}</td>
                                                         <td style={{ textAlign: 'right' }}>{item.items?.length || 0}</td>
                                                         <td style={{ textAlign: 'right' }}>{(() => {
                                                             const f = item.status === 'READY' ? forecastFor(forecast, item.effective_wb_warehouse, item.pallets_count) : null;
@@ -813,13 +985,22 @@ export default function LogisticsPage() {
                                                         <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
                                                             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                                                                 {item.status === 'READY' && (
-                                                                    <button
-                                                                        className="btn btn-primary btn-sm"
-                                                                        onClick={() => openVehicleModal([item.id])}
-                                                                        disabled={actionLoading}
-                                                                    >
-                                                                        Назначить машину
-                                                                    </button>
+                                                                    isJoint && !jointReady ? (
+                                                                        <div>
+                                                                            <button className="btn btn-primary btn-sm" disabled>Назначить машину</button>
+                                                                            <div style={{ fontSize: 10, color: 'var(--color-warning)', marginTop: 2, whiteSpace: 'normal', maxWidth: 160 }}>
+                                                                                Ждёт: {jointPending.join(', ') || 'другие склады'}
+                                                                            </div>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <button
+                                                                            className="btn btn-primary btn-sm"
+                                                                            onClick={() => openVehicleModal([item.id])}
+                                                                            disabled={actionLoading}
+                                                                        >
+                                                                            Назначить машину
+                                                                        </button>
+                                                                    )
                                                                 )}
                                                                 {item.status === 'VEHICLE_ASSIGNED' && (
                                                                     <div style={{ display: 'flex', gap: 4 }}>
@@ -832,10 +1013,10 @@ export default function LogisticsPage() {
                                                                         </button>
                                                                         <button
                                                                             className="btn btn-primary btn-sm"
-                                                                            onClick={() => handleShip(item.id)}
+                                                                            onClick={() => isJoint ? handleShipJoint(item.id) : handleShip(item.id)}
                                                                             disabled={actionLoading}
                                                                         >
-                                                                            Отгрузить
+                                                                            {isJoint ? 'Отгрузить поставку' : 'Отгрузить'}
                                                                         </button>
                                                                     </div>
                                                                 )}
@@ -865,7 +1046,7 @@ export default function LogisticsPage() {
                                     <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12, padding: '0 4px' }}>
                                         {group.label || 'Без склада'}
                                         <span style={{ fontWeight: 400, color: 'var(--color-text-muted)', marginLeft: 8, fontSize: 14 }}>
-                                            ({group.items.length} заявок, {group.items.reduce((s, i) => s + i.pallets_count, 0)} палет)
+                                            ({group.items.length} заявок, {group.items.reduce((s, i) => s + (i.joint_supply ? jointTotalPallets(i) : i.pallets_count), 0)} палет)
                                         </span>
                                     </h2>
 
@@ -874,11 +1055,15 @@ export default function LogisticsPage() {
                                             const soon = isSoonReady(item);
                                             const statusCfg = STATUS_MAP[item.status] || { label: item.status, className: '' };
                                             const isChecked = checkedIds.has(item.id);
-                                            const canCheck = item.status === 'READY';
+                                            const isJoint = !!item.joint_supply;
+                                            const jointReady = item.joint_ready !== false; // дефолт: не блокируем, если флаг не пришёл
+                                            // Совместный якорь можно чекать (для bulk) только когда вся поставка готова.
+                                            const canCheck = item.status === 'READY' && (!isJoint || jointReady);
                                             const stuck = daysStuck(item);
                                             const isStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS;
                                             const veryStuck = stuck != null && stuck >= STUCK_THRESHOLD_DAYS * 2;
                                             const ffNums = ffRequestNumbers(item);
+                                            const jointPending = isJoint ? jointPendingWarehouses(item) : [];
                                             const borderColor = isChecked
                                                 ? 'var(--color-primary)'
                                                 : veryStuck ? 'var(--color-danger)'
@@ -891,14 +1076,16 @@ export default function LogisticsPage() {
                                                     className="glass-card"
                                                     style={{
                                                         padding: 16,
-                                                        opacity: soon ? 0.5 : 1,
+                                                        // Совместную не затемняем даже «в сборке» — внутри читаемая разбивка.
+                                                        opacity: (soon && !isJoint) ? 0.5 : 1,
                                                         border: borderColor ? `2px solid ${borderColor}` : undefined,
+                                                        borderLeft: isJoint ? '3px solid var(--color-primary)' : undefined,
                                                         cursor: canCheck ? 'pointer' : undefined,
                                                     }}
                                                     onClick={canCheck ? () => toggleChecked(item.id) : undefined}
                                                 >
-                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                                             {canCheck && (
                                                                 <input
                                                                     type="checkbox"
@@ -910,17 +1097,29 @@ export default function LogisticsPage() {
                                                             )}
                                                             <Link
                                                                 href={`/p/${slug}/warehouse/assembly/${item.id}`}
-                                                                style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)' }}
+                                                                style={{ fontWeight: 600, textDecoration: 'none', color: 'var(--color-text)', whiteSpace: 'nowrap' }}
                                                                 onClick={e => e.stopPropagation()}
                                                             >
                                                                 {item.number}
                                                             </Link>
+                                                            {isJoint && (item.joint_siblings?.length ?? 0) > 0 && (
+                                                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }} title="Связанные сборки той же совместной поставки">
+                                                                    + {(item.joint_siblings || []).map(s => s.number).join(', ')}
+                                                                </span>
+                                                            )}
                                                         </div>
-                                                        <span className={`badge ${statusCfg.className}`}>
-                                                            {soon && item.estimated_ready_date
-                                                                ? formatDate(item.estimated_ready_date)
-                                                                : statusCfg.label}
-                                                        </span>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                                            {isJoint && (
+                                                                <span className="badge badge-info" title="Совместная FBO-поставка: несколько сборок (по складу-источнику) в одну WB-поставку">
+                                                                    Совместная
+                                                                </span>
+                                                            )}
+                                                            <span className={`badge ${statusCfg.className}`}>
+                                                                {soon && item.estimated_ready_date
+                                                                    ? formatDate(item.estimated_ready_date)
+                                                                    : statusCfg.label}
+                                                            </span>
+                                                        </div>
                                                     </div>
 
                                                     {isStuck && (
@@ -942,12 +1141,16 @@ export default function LogisticsPage() {
                                                         {item.brands && (
                                                             <div style={{ fontWeight: 500, color: 'var(--color-text)' }}>{item.brands}</div>
                                                         )}
+                                                        {isJoint ? (
+                                                            <div>Палет: {formatNumber(jointTotalPallets(item), 0)} &middot; Вес: {formatNumber(jointTotalWeight(item), 0)} кг <span style={{ fontSize: 11, opacity: 0.7 }}>(вся поставка)</span></div>
+                                                        ) : (
                                                         <div>Палет: {item.pallets_count} &middot; Вес: {item.total_weight_kg ? formatNumber(item.total_weight_kg, 0) + ' кг' : '\u2014'}</div>
-                                                        <div>Позиций: {item.items?.length || 0}</div>
-                                                        {item.wb_supply_id_wb && (
-                                                            <div style={{ fontFamily: 'monospace', fontSize: 12 }}>Поставка: {item.wb_supply_id_wb}</div>
                                                         )}
-                                                        {ffNums.length > 0 && (
+                                                        <div>Позиций: {item.items?.length || 0}</div>
+                                                        {(item.wb_supply_id_wb || item.wb_supply_name) && (
+                                                            <div style={{ fontFamily: 'monospace', fontSize: 12 }}>Поставка: {item.wb_supply_id_wb || item.wb_supply_name}</div>
+                                                        )}
+                                                        {!isJoint && ffNums.length > 0 && (
                                                             <div style={{ fontFamily: 'monospace', fontSize: 12 }} title="Номер(а) привязанной заявки ФФ">
                                                                 Заявка ФФ: {ffNums.join(', ')}
                                                             </div>
@@ -960,20 +1163,30 @@ export default function LogisticsPage() {
                                                         )}
                                                     </div>
 
-                                                    {renderForecastCard(item)}
+                                                    {isJoint ? renderJointBreakdown(item) : renderForecastCard(item)}
 
-                                                    {!soon && (
+                                                    {(!soon || isJoint) && (
                                                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
                                                             <div style={{ display: 'flex', gap: 8 }}>
-                                                                {item.status === 'READY' && (
+                                                                {isJoint && !jointReady ? (
+                                                                    // Совместная не готова — пометка + неактивная кнопка ВСЕГДА (даже если якорь «в сборке»).
+                                                                    <div style={{ width: '100%' }}>
+                                                                        <button className="btn btn-primary btn-sm" disabled style={{ width: '100%' }}>
+                                                                            Назначить машину
+                                                                        </button>
+                                                                        <div style={{ fontSize: 11, color: 'var(--color-warning)', marginTop: 4 }}>
+                                                                            Ждёт готовности: {jointPending.join(', ') || 'другие склады поставки'}
+                                                                        </div>
+                                                                    </div>
+                                                                ) : item.status === 'READY' ? (
                                                                     <button
                                                                         className="btn btn-primary btn-sm"
                                                                         onClick={() => openVehicleModal([item.id])}
                                                                         disabled={actionLoading}
                                                                     >
-                                                                        Назначить машину
+                                                                        Назначить машину{isJoint ? ' (совместная)' : ''}
                                                                     </button>
-                                                                )}
+                                                                ) : null}
                                                                 {item.status === 'VEHICLE_ASSIGNED' && (
                                                                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
                                                                         {(item.vehicle_info || item.driver_phone) && (
@@ -992,10 +1205,10 @@ export default function LogisticsPage() {
                                                                             </button>
                                                                             <button
                                                                                 className="btn btn-primary btn-sm"
-                                                                                onClick={(e) => { e.stopPropagation(); handleShip(item.id); }}
+                                                                                onClick={(e) => { e.stopPropagation(); isJoint ? handleShipJoint(item.id) : handleShip(item.id); }}
                                                                                 disabled={actionLoading}
                                                                             >
-                                                                                Отгрузить
+                                                                                {isJoint ? 'Отгрузить поставку' : 'Отгрузить'}
                                                                             </button>
                                                                         </div>
                                                                     </div>
@@ -1018,7 +1231,10 @@ export default function LogisticsPage() {
 
                                     {/* Bulk assign buttons per sub-group */}
                                     {group.subGroups.map(sub => {
-                                        const readyIds = sub.items.filter(i => i.status === 'READY').map(i => i.id);
+                                        // Совместный якорь попадает в bulk только если вся поставка готова (joint_ready).
+                                        const readyIds = sub.items
+                                            .filter(i => i.status === 'READY' && (!i.joint_supply || i.joint_ready !== false))
+                                            .map(i => i.id);
                                         if (readyIds.length <= 1) return null;
                                         return (
                                             <div key={sub.key} style={{ marginTop: 8, padding: '0 4px' }}>
@@ -1194,7 +1410,12 @@ export default function LogisticsPage() {
                         <TanStackDataTable
                             columns={[
                                 { key: 'status', label: 'Статус', sortable: true, render: (_v: string, row: LogisticsShipmentRow) => { const cfg = STATUS_MAP[row.status as AssemblyStatus] || { label: row.status || '—', className: '' }; return <span className={`badge ${cfg.className}`}>{cfg.label}</span>; }},
-                                { key: 'assembly_number', label: '№', sortable: true, render: (v: string) => <span style={{ fontWeight: 500 }}>{v || '—'}</span> },
+                                { key: 'assembly_number', label: '№', sortable: true, render: (v: string, row: LogisticsShipmentRow) => (
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+                                        <span style={{ fontWeight: 500 }}>{v || '—'}</span>
+                                        {row.via_gazelka && <span className="badge badge-info" style={{ fontSize: 10 }} title="Отправлено через Газельку (интеграция)">🚚 Газелька</span>}
+                                    </span>
+                                ) },
                                 { key: 'shipment_id', label: '', sortable: false, render: (_v: number, row: LogisticsShipmentRow) => row.status === 'SHIPPED' ? (
                                     <button
                                         className="btn btn-secondary btn-sm"

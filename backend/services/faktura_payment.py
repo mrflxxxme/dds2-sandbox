@@ -16,6 +16,7 @@ Faktura payment-draft creation — «Создать оплату» для зая
 """
 
 import logging
+import re
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -25,6 +26,7 @@ from backend.cache import invalidate_cache
 from backend.integrations.faktura_api import DEFAULT_HOST, FakturaApiClient
 from backend.models.payment_request import PaymentRequest, PaymentRequestStatus
 from backend.services import payment_request_status as prs
+from backend.services.bank_directory import resolve_bank_db
 from backend.services.faktura_service import _get_faktura_key
 from backend.utils.time import utcnow
 
@@ -39,7 +41,28 @@ class PaymentDraftError(Exception):
         super().__init__("; ".join(bank_errors) or "payment validation failed")
 
 
-def _build_payment_body(pr: PaymentRequest, payer: dict, guid: str, *, fingerprint: str = "", nds: str = "-1") -> dict:
+# Назначение платежа (поле 24) — ограниченный набор символов (ЦБ 762-П). Банк (Faktura) отбивает
+# типографику: длинное/короткое тире «—/–», «ёлочки»/«кавычки», неразрывный пробел, «₽», «…».
+# Заменяем на ASCII-аналоги, всё вне набора — убираем. «№», «%», «,», «.», кавычки, скобки — ok.
+_PURPOSE_MAP = str.maketrans({
+    "—": "-", "–": "-", "−": "-", "‒": "-", "―": "-", "•": "-", "·": "-",
+    "«": '"', "»": '"', "„": '"', "“": '"', "”": '"', "‟": '"',
+    "‘": "'", "’": "'", "‚": "'", "‛": "'", "`": "'", "´": "'",
+    " ": " ", " ": " ", " ": " ", "\t": " ", "\r": " ", "\n": " ",
+    "…": "...", "₽": "р.",
+})
+_PURPOSE_ALLOWED_RE = re.compile(r"[^0-9A-Za-zА-Яа-яЁё №%.,:;()\-+/=*!?#\"'& ]")
+
+
+def _sanitize_purpose(text: str | None) -> str:
+    """Назначение → допустимый банком набор символов (ЦБ 762-П): типографику в ASCII, прочее убрать.
+    Чинит «Поле "Назначение платежа" содержит недопустимые символы» (длинное тире из распозналки/LLM)."""
+    s = (text or "").translate(_PURPOSE_MAP)
+    s = _PURPOSE_ALLOWED_RE.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _build_payment_body(pr: PaymentRequest, payer: dict, guid: str, *, corr_account: str, fingerprint: str = "", nds: str = "-1") -> dict:
     """Платёжка по проверенному /payments/validate контракту (см. faktura_validate_probe.py).
 
     payer — объект счёта из /accounts: {id, number, currency, owner:{name,inn,kpp},
@@ -57,14 +80,14 @@ def _build_payment_body(pr: PaymentRequest, payer: dict, guid: str, *, fingerpri
         "nds": nds,
         "payeeAccountNumber": pr.payee_account or "",
         "payeeBankBic": pr.payee_bik or "",
-        "payeeBankAccount": pr.payee_corr_account or "",  # корр. счёт банка получателя
+        "payeeBankAccount": corr_account,  # корр. счёт банка получателя (резолв по БИК из справочника ЦБ)
         "payeeName": pr.payee_name or "",
         "payeeInn": pr.payee_inn or "",
         "payeeKpp": pr.payee_kpp or "",
         "payerName": owner.get("name") or "",
         "payerKpp": owner.get("kpp") or "",
         "payerAccountId": payer.get("id"),
-        "purpose": pr.purpose or "",
+        "purpose": _sanitize_purpose(pr.purpose),  # ЦБ-charset: типографику (тире «—» и т.п.) → ASCII
         "queue": 5,  # очерёдность платежа (поле 21)
         "uip": "0",
         "urgent": "false",
@@ -95,6 +118,27 @@ def _resolve_payer(accounts: list[dict], payer_account_id: str | None) -> dict:
     return rub[0]
 
 
+def _extract_doc_id(result: object) -> str | None:
+    """Достать id созданного документа из ответа банка на /payments/save.
+
+    Формат ответа /save контрактом НЕ зафиксирован (первый живой запуск показал, что
+    id не в id/docId/guid). Пробуем типовые поля и вложенные контейнеры; если не нашли —
+    вызывающий логирует ключи ответа, чтобы добить точечно."""
+    if not isinstance(result, dict):
+        return None
+    containers: list[dict] = [result]
+    for key in ("data", "document", "result", "doc", "payment"):
+        nested = result.get(key)
+        if isinstance(nested, dict):
+            containers.append(nested)
+    for container in containers:
+        for field in ("id", "docId", "documentId", "document_id", "doc_id", "number", "guid", "uid"):
+            value = container.get(field)
+            if value:
+                return str(value)
+    return None
+
+
 async def create_payment_draft(
     db: AsyncSession,
     project_id: int,
@@ -117,10 +161,20 @@ async def create_payment_draft(
     if locked is None:
         raise ValueError("Заявка на оплату не найдена")
     pr = locked
-    if pr.status != PaymentRequestStatus.PENDING_REVIEW.value:
-        raise ValueError("Создать оплату можно только для заявки на проверке (PENDING_REVIEW)")
+    if pr.status not in (PaymentRequestStatus.PENDING_REVIEW.value, PaymentRequestStatus.APPROVED.value):
+        raise ValueError("Создать оплату можно только для заявки на проверке или согласованной")
     if not (pr.payee_inn and pr.payee_account and pr.payee_bik and pr.amount and pr.amount > 0):
         raise ValueError("Неполные реквизиты получателя — нельзя создать платёжку")
+
+    # К/с банка получателя резолвим по БИК из справочника ЦБ (авторитетно; к/с НЕ выводится
+    # формулой из БИК). Фолбэк на сохранённый к/с заявки. Пусто на обоих → понятная ошибка
+    # вместо отбойника банка «Неверно указан к/с».
+    bank = await resolve_bank_db(db, pr.payee_bik)
+    corr_account = (bank["corr_account"] if bank else None) or pr.payee_corr_account or ""
+    if not corr_account:
+        raise ValueError(
+            f"Не удалось определить к/с банка по БИК {pr.payee_bik} — заполните к/с получателя вручную (в счёте указан)"
+        )
 
     # Credentials (raises ValueError with a clear message if the Faktura key is absent).
     key, login, password = await _get_faktura_key(db, project_id)
@@ -135,7 +189,7 @@ async def create_payment_draft(
         await client.authenticate()
         accounts = await client.get_accounts()
         payer = _resolve_payer(accounts, payer_account_id)
-        payment = _build_payment_body(pr, payer, guid)
+        payment = _build_payment_body(pr, payer, guid, corr_account=corr_account)
 
         errors = await client.validate_payment(payment)
         if errors:
@@ -149,7 +203,12 @@ async def create_payment_draft(
             await db.commit()
 
         result = await client.save_payment(payment)
-        pr.bank_doc_id = str(result.get("id") or result.get("docId") or result.get("guid") or "") or None
+        pr.bank_doc_id = _extract_doc_id(result)
+        if pr.bank_doc_id is None:
+            # id документа не нашёлся в ожидаемых полях — логируем ТОЛЬКО ключи ответа
+            # (без значений → без PII), чтобы по факту добить точное поле.
+            keys = sorted(result.keys()) if isinstance(result, dict) else type(result).__name__
+            logger.warning("Faktura /payments/save: id документа не найден в ответе; ключи=%s", keys)
         # НЕ логируем сырой ответ банка — в нём финансовые PII (реквизиты/номера). Только doc id.
         logger.info("Faktura /payments/save ok (pr=%d, doc=%s)", pr.id, pr.bank_doc_id)
 

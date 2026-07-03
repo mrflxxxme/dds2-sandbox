@@ -16,7 +16,7 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,7 +24,8 @@ from backend.cache import invalidate_project_reports
 from backend.config import settings
 from backend.models.counterparty import Counterparty, CounterpartyDocument
 from backend.models.loan import Loan
-from backend.models.transactions import Transaction
+from backend.models.refs import CounterpartyCategory
+from backend.models.transactions import CategoryChangeLog, Transaction
 from backend.schemas.counterparty import (
     CounterpartyCategorySummary,
     CounterpartyCreate,
@@ -161,7 +162,7 @@ class CounterpartyService:
         filters: CounterpartyFilter,
         date_from: date | None = None,
         date_to: date | None = None,
-    ) -> tuple[list[Counterparty], int, dict[int, dict]]:
+    ) -> tuple[list[Counterparty], int, dict[int, dict], dict[int, dict]]:
         """List counterparties with filters + pagination.
 
         When date_from/date_to are provided, also computes per-CP turnover
@@ -242,7 +243,30 @@ class CounterpartyService:
                     bucket["expense_rub"] += expense
                 bucket["tx_count"] += int(row.tx_cnt or 0)
 
-        return items, int(total or 0), turnover_map
+        # Expense category (level-2) for the page — cp_key → cat, mapped to cp_id.
+        cat_map: dict[int, dict] = {}
+        if items:
+            keys_by_id = {cp.id: ((cp.inn or "").strip() or (cp.name or "").strip().lower()) for cp in items}
+            cp_keys = list({k for k in keys_by_id.values() if k})
+            if cp_keys:
+                cat_res = await self.db.execute(
+                    select(
+                        CounterpartyCategory.cp_key,
+                        CounterpartyCategory.cat_lvl1,
+                        CounterpartyCategory.cat_lvl2,
+                    ).where(
+                        CounterpartyCategory.project_id == project_id,
+                        CounterpartyCategory.cp_key.in_(cp_keys),
+                        CounterpartyCategory.is_deleted == False,  # noqa: E712
+                    )
+                )
+                by_key = {r.cp_key: (r.cat_lvl1, r.cat_lvl2) for r in cat_res}
+                for cp in items:
+                    pair = by_key.get(keys_by_id[cp.id])
+                    if pair and pair[0]:
+                        cat_map[cp.id] = {"cat_lvl1": pair[0], "cat_lvl2": pair[1]}
+
+        return items, int(total or 0), turnover_map, cat_map
 
     # ─── summary_by_type ────────────────────────────────────────────────
 
@@ -511,6 +535,19 @@ class CounterpartyService:
             {"id": row.id, "name": row.name, "warehouse_type": row.warehouse_type} for row in wh_res.all()
         ]
 
+        # Expense category (level-2), from the cp_key→category mapping.
+        cp_key = (cp.inn or "").strip() or (cp.name or "").strip().lower()
+        cat_res = await self.db.execute(
+            select(CounterpartyCategory.cat_lvl1, CounterpartyCategory.cat_lvl2)
+            .where(
+                CounterpartyCategory.cp_key == cp_key,
+                CounterpartyCategory.project_id == project_id,
+                CounterpartyCategory.is_deleted == False,  # noqa: E712
+            )
+            .limit(1)
+        )
+        cat_row = cat_res.first()
+
         return {
             "id": cp.id,
             "inn": cp.inn,
@@ -521,6 +558,8 @@ class CounterpartyService:
             "contract_number": cp.contract_number,
             "notes": cp.notes,
             "contacts": cp.contacts,
+            "cat_lvl1": cat_row.cat_lvl1 if cat_row else None,
+            "cat_lvl2": cat_row.cat_lvl2 if cat_row else None,
             "created_by_import": cp.created_by_import,
             "created_at": cp.created_at,
             "updated_at": cp.updated_at,
@@ -608,6 +647,163 @@ class CounterpartyService:
         await invalidate_project_reports(project_id)
         return cp
 
+    # ─── expense category (level-2) ─────────────────────────────────────
+
+    async def set_expense_category(
+        self,
+        *,
+        counterparty_id: int,
+        project_id: int,
+        cat_lvl1: str | None,
+        cat_lvl2: str | None,
+    ) -> dict:
+        """Set the expense category on a counterparty and propagate it to ALL of
+        its transactions (matched by ``counterparty_id`` OR ``cp_key``).
+
+        Persists to ``CounterpartyCategory`` (keyed by ``cp_key``, linked via
+        ``counterparty_id``) so future imports auto-apply via master logic. Passing
+        ``cat_lvl1=None`` clears the category (and soft-deletes the mapping row).
+        Returns ``{applied, cp_key, cat_lvl1, cat_lvl2}``.
+        """
+        res = await self.db.execute(
+            select(Counterparty).where(
+                Counterparty.id == counterparty_id,
+                Counterparty.project_id == project_id,
+                Counterparty.is_deleted == False,  # noqa: E712
+            )
+        )
+        cp = res.scalar_one_or_none()
+        if cp is None:
+            raise CounterpartyNotFoundError()
+
+        # cp_key mirrors master_logic.make_cp_key: INN if present, else lowercased name.
+        cp_key = (cp.inn or "").strip() or (cp.name or "").strip().lower()
+        cat1 = (cat_lvl1 or "").strip() or None
+        cat2 = (cat_lvl2 or "").strip() or None
+
+        # Upsert THIS project's cp_key→category mapping (drives future imports).
+        # The lookup is project-scoped (incl. soft-deleted) so we only ever restore
+        # OUR OWN row — never re-home a sibling tenant's. cp_key is GLOBALLY unique,
+        # so a fresh INSERT can still collide with another project that owns the key;
+        # surface that as a 409 instead of corrupting the other tenant. (Durable cure
+        # = migrate the unique to partial (project_id, cp_key) WHERE is_deleted=false.)
+        cpc_res = await self.db.execute(
+            select(CounterpartyCategory).where(
+                CounterpartyCategory.cp_key == cp_key,
+                CounterpartyCategory.project_id == project_id,
+            )
+        )
+        cpc = cpc_res.scalar_one_or_none()
+        old_cat1 = cpc.cat_lvl1 if cpc else None
+        old_cat2 = cpc.cat_lvl2 if cpc else None
+        if cpc:
+            cpc.cat_lvl1, cpc.cat_lvl2 = cat1, cat2
+            cpc.counterparty_id, cpc.cp_name, cpc.is_deleted = cp.id, cp.name, False
+        else:
+            self.db.add(
+                CounterpartyCategory(
+                    project_id=project_id,
+                    cp_key=cp_key,
+                    cp_name=cp.name,
+                    counterparty_id=cp.id,
+                    cat_lvl1=cat1,
+                    cat_lvl2=cat2,
+                )
+            )
+        try:
+            await self.db.flush()
+        except IntegrityError as e:
+            await self.db.rollback()
+            raise CounterpartyConflictError(
+                "Категория для этого ИНН уже задана в другом проекте"
+            ) from e
+
+        # Propagate to every transaction of this counterparty (by id or cp_key).
+        result = await self.db.execute(
+            update(Transaction)
+            .where(
+                Transaction.project_id == project_id,
+                Transaction.is_deleted == False,  # noqa: E712
+                or_(Transaction.counterparty_id == cp.id, Transaction.cp_key == cp_key),
+            )
+            .values(
+                cat_lvl1_2=cat1,
+                cat_lvl2_2=cat2,
+                status=case(
+                    (Transaction.is_cashflow2 == 0, "NO_CASHFLOW"),
+                    else_=("OK" if cat1 else "UNASSIGNED"),
+                ),
+            )
+        )
+
+        # Audit trail for the bulk categorization (scope='cp').
+        self.db.add(
+            CategoryChangeLog(
+                project_id=project_id,
+                txn_id=f"cp:{cp_key}"[:300],
+                old_cat_lvl1=old_cat1,
+                old_cat_lvl2=old_cat2,
+                new_cat_lvl1=cat1,
+                new_cat_lvl2=cat2,
+                scope="cp",
+            )
+        )
+        await self.db.commit()
+        await invalidate_project_reports(project_id)
+        applied = int(getattr(result, "rowcount", 0) or 0)
+        return {"applied": applied, "cp_key": cp_key, "cat_lvl1": cat1, "cat_lvl2": cat2}
+
+    async def bulk_set_expense_category(
+        self,
+        *,
+        project_id: int,
+        counterparty_ids: Sequence[int],
+        cat_lvl1: str | None = None,
+        cat_lvl2: str | None = None,
+        primary_type: str | None = None,
+    ) -> dict:
+        """Apply a type and/or expense category to many counterparties at once.
+
+        ``primary_type`` (if given) is set on all selected in one UPDATE; the
+        expense category (if given) is propagated per-counterparty via
+        ``set_expense_category`` (each touches its own transactions). A
+        per-counterparty conflict/not-found is skipped. Returns
+        ``{counterparties, transactions}``.
+        """
+        ids = [int(i) for i in counterparty_ids if i]
+        if not ids:
+            return {"counterparties": 0, "transactions": 0}
+
+        if primary_type:
+            await self.db.execute(
+                update(Counterparty)
+                .where(
+                    Counterparty.project_id == project_id,
+                    Counterparty.id.in_(ids),
+                    Counterparty.is_deleted == False,  # noqa: E712
+                )
+                .values(primary_type=primary_type)
+            )
+            await self.db.commit()
+
+        n_cp = 0
+        n_txn = 0
+        if cat_lvl1 and cat_lvl1.strip():
+            for cid in ids:
+                try:
+                    res = await self.set_expense_category(
+                        counterparty_id=cid, project_id=project_id, cat_lvl1=cat_lvl1, cat_lvl2=cat_lvl2
+                    )
+                    n_cp += 1
+                    n_txn += int(res.get("applied", 0))
+                except (CounterpartyNotFoundError, CounterpartyConflictError):
+                    continue
+        else:
+            n_cp = len(ids)  # type-only bulk
+
+        await invalidate_project_reports(project_id)
+        return {"counterparties": n_cp, "transactions": n_txn}
+
     # ─── soft_delete ────────────────────────────────────────────────────
 
     async def soft_delete(
@@ -631,6 +827,188 @@ class CounterpartyService:
         await self.db.commit()
         await invalidate_project_reports(project_id)
         return True
+
+    # ─── merge ──────────────────────────────────────────────────────────
+
+    async def _load_cp(self, counterparty_id: int, project_id: int) -> Counterparty:
+        res = await self.db.execute(
+            select(Counterparty).where(
+                Counterparty.id == counterparty_id,
+                Counterparty.project_id == project_id,
+                Counterparty.is_deleted == False,  # noqa: E712
+            )
+        )
+        cp = res.scalar_one_or_none()
+        if cp is None:
+            raise CounterpartyNotFoundError()
+        return cp
+
+    async def _active_category(self, cp: Counterparty, project_id: int) -> tuple[str, str | None] | None:
+        """Current expense category of a CP (by counterparty_id or cp_key), or None."""
+        cp_key = (cp.inn or "").strip() or (cp.name or "").strip().lower()
+        res = await self.db.execute(
+            select(CounterpartyCategory.cat_lvl1, CounterpartyCategory.cat_lvl2)
+            .where(
+                CounterpartyCategory.project_id == project_id,
+                CounterpartyCategory.is_deleted == False,  # noqa: E712
+                or_(
+                    CounterpartyCategory.counterparty_id == cp.id,
+                    CounterpartyCategory.cp_key == cp_key,
+                ),
+            )
+            .limit(1)
+        )
+        row = res.first()
+        if row and row.cat_lvl1:
+            return (row.cat_lvl1, row.cat_lvl2)
+        return None
+
+    async def merge(self, *, target_id: int, source_id: int, project_id: int) -> dict:
+        """Merge ``source`` counterparty into ``target`` (target survives).
+
+        Re-points every ``counterparty_id`` FK from source→target, fills target's
+        EMPTY fields from source (never overwrites), unions secondary_types,
+        rewrites merged transactions' ``cp_key`` to target's key, and soft-deletes
+        source. The winning expense category (target's if any, else source's) is
+        re-applied to the merged entity afterwards so future imports + the card stay
+        consistent. Raises ``CounterpartyConflictError`` on self-merge / ``Counterparty
+        NotFoundError`` if either side is missing in the project.
+        """
+        from backend.models.assembly import AssemblyRequest
+        from backend.models.customs import CustomsTopup
+        from backend.models.payment_request import PaymentRequest
+        from backend.models.supply_chain import Supplier
+        from backend.models.warehouse import OutboundShipment, Warehouse
+
+        if target_id == source_id:
+            raise CounterpartyConflictError("Нельзя слить контрагента с самим собой")
+
+        target = await self._load_cp(target_id, project_id)
+        source = await self._load_cp(source_id, project_id)
+
+        # Capture pre-mutation keys & categories (target wins; else source's).
+        source_cp_key = (source.inn or "").strip() or (source.name or "").strip().lower()
+        target_cat = await self._active_category(target, project_id)
+        source_cat = await self._active_category(source, project_id)
+        winning_cat = target_cat or source_cat
+
+        # 1. Fill target's EMPTY fields from source (never overwrite a set value).
+        fields_filled: list[str] = []
+        for f in ("kpp", "bank_account", "bik", "bank_name", "corr_account", "contract_number", "notes", "contacts"):
+            tv = getattr(target, f)
+            sv = getattr(source, f)
+            if (tv is None or tv == "") and sv:
+                setattr(target, f, sv)
+                fields_filled.append(f)
+        inn_assigned = False
+        if not (target.inn or "").strip() and (source.inn or "").strip():
+            moved_inn = source.inn
+            source.inn = None  # free the (project_id, inn) unique slot first...
+            await self.db.flush()  # ...persist the NULL before target claims it (partial-unique)
+            target.inn = moved_inn
+            inn_assigned = True
+            fields_filled.append("inn")
+        if (target.primary_type or "OTHER") == "OTHER" and source.primary_type and source.primary_type != "OTHER":
+            target.primary_type = source.primary_type
+            fields_filled.append("primary_type")
+        merged_secondary = list(dict.fromkeys([*(target.secondary_types or []), *(source.secondary_types or [])]))
+        if merged_secondary != (target.secondary_types or []):
+            target.secondary_types = merged_secondary
+            fields_filled.append("secondary_types")
+
+        await self.db.flush()  # persist field changes so target.inn drives cp_key below
+        target_cp_key = (target.inn or "").strip() or (target.name or "").strip().lower()
+
+        # 2. Re-point counterparty_id FKs source→target (project-scoped, count rows).
+        async def _move(model: object) -> int:
+            r = await self.db.execute(
+                update(model)  # type: ignore[arg-type]
+                .where(model.project_id == project_id, model.counterparty_id == source_id)  # type: ignore[attr-defined]
+                .values(counterparty_id=target_id)
+            )
+            return int(getattr(r, "rowcount", 0) or 0)
+
+        moved: dict[str, int] = {}
+        # Transactions: also match by cp_key and rewrite cp_key to target's key.
+        tx_res = await self.db.execute(
+            update(Transaction)
+            .where(
+                Transaction.project_id == project_id,
+                or_(Transaction.counterparty_id == source_id, Transaction.cp_key == source_cp_key),
+            )
+            .values(counterparty_id=target_id, cp_key=target_cp_key)
+        )
+        moved["transactions"] = int(getattr(tx_res, "rowcount", 0) or 0)
+        # Normalize target's OWN pre-existing transactions to the same key (its
+        # cp_key may have changed if it just inherited source's inn) → one key.
+        await self.db.execute(
+            update(Transaction)
+            .where(
+                Transaction.project_id == project_id,
+                Transaction.counterparty_id == target_id,
+                Transaction.cp_key != target_cp_key,
+            )
+            .values(cp_key=target_cp_key)
+        )
+        moved["loans"] = await _move(Loan)
+        moved["warehouses"] = await _move(Warehouse)
+        moved["outbound_shipments"] = await _move(OutboundShipment)
+        moved["payment_requests"] = await _move(PaymentRequest)  # общие (project_id NULL) — вне скоупа
+        moved["suppliers"] = await _move(Supplier)
+        moved["customs_topup"] = await _move(CustomsTopup)
+        moved["assembly_requests"] = await _move(AssemblyRequest)
+        moved["documents"] = await _move(CounterpartyDocument)
+
+        # 3. Collapse category mappings to a single row keyed by target_cp_key.
+        #    Soft-delete every active category row of source OR target whose key is
+        #    NOT target's final key — incl. target's own stale name-keyed row after
+        #    an inn move (else two active rows survive). Step 5 re-applies the
+        #    winning category on the surviving (or freshly upserted) target row.
+        cat_res = await self.db.execute(
+            select(CounterpartyCategory).where(
+                CounterpartyCategory.project_id == project_id,
+                CounterpartyCategory.is_deleted == False,  # noqa: E712
+                or_(
+                    CounterpartyCategory.counterparty_id == source_id,
+                    CounterpartyCategory.counterparty_id == target_id,
+                    CounterpartyCategory.cp_key == source_cp_key,
+                    CounterpartyCategory.cp_key == target_cp_key,
+                ),
+            )
+        )
+        for row in cat_res.scalars().all():
+            if row.cp_key != target_cp_key:  # keep only the row already at target's key
+                row.soft_delete()
+
+        # 4. Archive source, commit the structural merge.
+        source.soft_delete()
+        await self.db.commit()
+        await invalidate_project_reports(project_id)
+
+        # 5. Re-apply the winning category to the merged entity (own transaction):
+        #    upserts target's cp_key→category mapping + propagates to all (now-merged)
+        #    transactions. Reuses set_expense_category (handles the global cp_key 409).
+        category_action = "none"
+        if winning_cat and winning_cat[0]:
+            try:
+                await self.set_expense_category(
+                    counterparty_id=target_id,
+                    project_id=project_id,
+                    cat_lvl1=winning_cat[0],
+                    cat_lvl2=winning_cat[1],
+                )
+                category_action = "kept_target" if target_cat else "moved"
+            except CounterpartyConflictError:
+                category_action = "conflict"
+
+        return {
+            "target_id": target_id,
+            "source_id": source_id,
+            "moved": moved,
+            "fields_filled": fields_filled,
+            "inn_assigned": inn_assigned,
+            "category_action": category_action,
+        }
 
     # ─── documents ──────────────────────────────────────────────────────
 

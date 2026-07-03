@@ -12,14 +12,16 @@ from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.cache import invalidate_cache
+from backend.models import Project
 from backend.models.counterparty import Counterparty
 from backend.models.payment_request import (
     PaymentRequest,
+    PaymentRequestCategory,
     PaymentRequestDocType,
     PaymentRequestShipment,
     PaymentRequestSource,
@@ -36,6 +38,7 @@ from backend.schemas.payment_request import (
     ShippableShipmentRow,
 )
 from backend.utils.time import utcnow
+from backend.services import payment_category_service as pcs
 from backend.services import payment_request_status as prs
 
 logger = logging.getLogger("dds.payment_request")
@@ -43,7 +46,7 @@ logger = logging.getLogger("dds.payment_request")
 _LIST_LIMIT = 2000
 # Поля, которые разрешено править через PATCH (защита от mass-assignment при расширении схемы).
 _EDITABLE_FIELDS = frozenset({
-    "counterparty_id", "payee_inn", "payee_kpp", "payee_account", "payee_bik",
+    "counterparty_id", "category", "brand", "payee_inn", "payee_kpp", "payee_account", "payee_bik",
     "payee_bank_name", "payee_corr_account", "payee_name", "amount", "currency",
     "pickup_date", "purpose",
 })
@@ -57,9 +60,18 @@ class PaymentRequestValidationError(Exception):
         super().__init__("; ".join(missing))
 
 
-async def _invalidate(project_id: int) -> None:
+async def _invalidate(project_id: int | None) -> None:
     await invalidate_cache(f"payment_request_list:project_id={project_id}")
     await invalidate_cache(f"payment_request_detail:project_id={project_id}")
+
+
+def _project_scope(project_id: int | None) -> ColumnElement[bool]:
+    """Видимость заявки: свой проект ИЛИ «общая» (project_id IS NULL). Общие заявки —
+    единый инбокс согласования, видны из любого проекта. Изоляция именованных проектов
+    сохраняется (заявка проекта X не видна из проекта Y). project_id=None → только общие."""
+    if project_id is None:
+        return PaymentRequest.project_id.is_(None)
+    return or_(PaymentRequest.project_id == project_id, PaymentRequest.project_id.is_(None))
 
 
 class PaymentRequestService:
@@ -68,12 +80,19 @@ class PaymentRequestService:
 
     # ─── numbering ────────────────────────────────────────────────────────
 
-    async def _next_number(self, project_id: int) -> str:
-        res = await self.db.execute(
-            select(func.count()).select_from(PaymentRequest).where(PaymentRequest.project_id == project_id)
-        )
+    async def _next_number(self, project_id: int | None) -> str:
+        """Следующий номер. «Общие» (без проекта) заявки — отдельная серия «ОБЩ-…»,
+        чтобы номера не пересекались с проектными «ОПЛ-…» в едином списке."""
+        cond: ColumnElement[bool]
+        if project_id is None:
+            cond = PaymentRequest.project_id.is_(None)
+            prefix = "ОБЩ"
+        else:
+            cond = PaymentRequest.project_id == project_id
+            prefix = "ОПЛ"
+        res = await self.db.execute(select(func.count()).select_from(PaymentRequest).where(cond))
         n = (res.scalar() or 0) + 1
-        return f"ОПЛ-{n:05d}"
+        return f"{prefix}-{n:05d}"
 
     # ─── reads ────────────────────────────────────────────────────────────
 
@@ -82,16 +101,23 @@ class PaymentRequestService:
         project_id: int,
         *,
         status: str | None = None,
+        category: str | None = None,
+        brand: str | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
         counterparty_id: int | None = None,
         search: str | None = None,
         limit: int = _LIST_LIMIT,
-    ) -> tuple[list[PaymentRequest], int, dict[int, int]]:
-        """Return (rows, total, doc_counts). doc_counts: payment_request_id → active doc count."""
-        conds = [PaymentRequest.project_id == project_id, PaymentRequest.is_deleted == False]  # noqa: E712
+    ) -> tuple[list[PaymentRequest], int, dict[int, int], dict[int, str]]:
+        """Return (rows, total, doc_counts, project_names). Видит свой проект + «общие»
+        (project_id IS NULL). doc_counts: pr_id → active doc count; project_names: project_id → name."""
+        conds = [_project_scope(project_id), PaymentRequest.is_deleted == False]  # noqa: E712
         if status:
             conds.append(PaymentRequest.status == status)
+        if category:
+            conds.append(PaymentRequest.category == category)
+        if brand:
+            conds.append(PaymentRequest.brand == brand)
         if counterparty_id is not None:
             conds.append(PaymentRequest.counterparty_id == counterparty_id)
         if date_from is not None:
@@ -117,6 +143,7 @@ class PaymentRequestService:
         rows = list(res.scalars().all())
 
         doc_counts: dict[int, int] = {}
+        project_names: dict[int, str] = {}
         if rows:
             ids = [r.id for r in rows]
             from backend.models.payment_request import PaymentRequestDocument
@@ -130,19 +157,25 @@ class PaymentRequestService:
                 .group_by(PaymentRequestDocument.payment_request_id)
             )
             doc_counts = {pid: cnt for pid, cnt in dc_res.all()}
-        return rows, total, doc_counts
 
-    async def get_request(self, project_id: int, request_id: int) -> PaymentRequest | None:
+            pids = {r.project_id for r in rows if r.project_id is not None}
+            if pids:
+                pn_res = await self.db.execute(select(Project.id, Project.name).where(Project.id.in_(pids)))
+                project_names = {pid: name for pid, name in pn_res.all()}
+        return rows, total, doc_counts, project_names
+
+    async def get_request(self, project_id: int | None, request_id: int) -> PaymentRequest | None:
         res = await self.db.execute(
             select(PaymentRequest)
             .where(
                 PaymentRequest.id == request_id,
-                PaymentRequest.project_id == project_id,
+                _project_scope(project_id),  # свой проект ИЛИ общая (без проекта)
                 PaymentRequest.is_deleted == False,  # noqa: E712
             )
             .options(
                 selectinload(PaymentRequest.documents),
                 selectinload(PaymentRequest.events),
+                selectinload(PaymentRequest.project),  # имя проекта для деталки
             )
         )
         return res.scalar_one_or_none()
@@ -612,8 +645,9 @@ class PaymentRequestService:
     # ─── writes ───────────────────────────────────────────────────────────
 
     async def create_request(
-        self, project_id: int, data: PaymentRequestCreate, user_id: int | None
+        self, project_id: int | None, data: PaymentRequestCreate, user_id: int | None
     ) -> PaymentRequest:
+        """project_id: целевой проект (None = «общая» заявка без проекта). Резолвится в роутере."""
         payee = {
             "payee_inn": data.payee_inn,
             "payee_kpp": data.payee_kpp,
@@ -638,6 +672,9 @@ class PaymentRequestService:
 
         covered_shipments: list[OutboundShipment] = []
         if data.source == PaymentRequestSource.COUNTERPARTY.value and ship_ids:
+            if project_id is None:
+                # Заявка по забору — это логистика конкретного проекта, не «общая».
+                raise PaymentRequestValidationError(["Заявка по забору требует указания проекта"])
             os_res = await self.db.execute(
                 select(OutboundShipment).where(
                     OutboundShipment.id.in_(ship_ids),
@@ -723,12 +760,23 @@ class PaymentRequestService:
         if not purpose:
             purpose = self._build_purpose(covered_shipments, pickup_date)
 
+        # Назначение: явное из формы → иначе LOGISTICS для заявок по забору, OTHER для прочих.
+        category = data.category or (
+            PaymentRequestCategory.LOGISTICS.value
+            if covered_shipments
+            else PaymentRequestCategory.OTHER.value
+        )
+        if not await pcs.is_valid_code(self.db, project_id, category):
+            raise PaymentRequestValidationError([f"Неизвестная категория оплаты: {category}"])
+
         number = await self._next_number(project_id)
         pr = PaymentRequest(
             project_id=project_id,
             number=number,
             status=PaymentRequestStatus.PENDING_REVIEW.value,
             source=data.source,
+            category=category,
+            brand=data.brand or None,  # пусто/None → «Все бренды»
             counterparty_id=counterparty_id,
             outbound_shipment_id=(covered_shipments[0].id if covered_shipments else data.outbound_shipment_id),
             assembly_request_id=assembly_request_id,
@@ -742,9 +790,11 @@ class PaymentRequestService:
         self.db.add(pr)
         await self.db.flush()
         for s in covered_shipments:
+            # covered_shipments непусты только для проектной заявки (забор найден по project_id),
+            # поэтому s.project_id — реальный int (PaymentRequestShipment остаётся project-scoped).
             self.db.add(
                 PaymentRequestShipment(
-                    project_id=project_id, payment_request_id=pr.id, outbound_shipment_id=s.id
+                    project_id=s.project_id, payment_request_id=pr.id, outbound_shipment_id=s.id
                 )
             )
         prs.log_event(
@@ -753,7 +803,7 @@ class PaymentRequestService:
         )
         await self.db.commit()
         await self.db.refresh(pr)
-        await _invalidate(project_id)
+        await _invalidate(pr.project_id)
         return pr
 
     async def update_request(
@@ -767,12 +817,14 @@ class PaymentRequestService:
             PaymentRequestStatus.PENDING_REVIEW.value,
         ):
             raise ValueError("Редактировать можно только до создания платёжки в банке")
+        if data.category is not None and not await pcs.is_valid_code(self.db, project_id, data.category):
+            raise PaymentRequestValidationError([f"Неизвестная категория оплаты: {data.category}"])
         for field, value in data.model_dump(exclude_unset=True).items():
             if field in _EDITABLE_FIELDS:  # allowlist — не даём писать status/bank_*/matched_* при расширении схемы
                 setattr(pr, field, value)
         await self.db.commit()
         await self.db.refresh(pr)
-        await _invalidate(project_id)
+        await _invalidate(pr.project_id)
         return pr
 
     async def submit_request(self, project_id: int, request_id: int, comment: str | None = None) -> PaymentRequest:
@@ -793,7 +845,7 @@ class PaymentRequestService:
         )
         await self.db.commit()
         await self.db.refresh(pr)
-        await _invalidate(project_id)
+        await _invalidate(pr.project_id)
         return pr
 
     async def cancel_request(
@@ -816,7 +868,56 @@ class PaymentRequestService:
         )
         await self.db.commit()
         await self.db.refresh(pr)
-        await _invalidate(project_id)
+        await _invalidate(pr.project_id)
+        return pr
+
+    async def approve_request(
+        self, project_id: int, request_id: int, comment: str | None = None, changed_by: str = "user"
+    ) -> PaymentRequest:
+        """Согласовать заявку (PENDING_REVIEW → APPROVED). Оплату админ проводит вне системы."""
+        pr = await self.get_request(project_id, request_id)
+        if pr is None:
+            raise PaymentRequestValidationError(["Заявка не найдена"])
+        prs.apply_transition(
+            self.db, pr, PaymentRequestStatus.APPROVED, changed_by=changed_by, comment=comment or "Согласовано"
+        )
+        if pr.project_id is None:  # общую заявку согласует админ любого проекта — фиксируем кто
+            logger.info("general payment request approved: id=%d by=%s", pr.id, changed_by)
+        await self.db.commit()
+        await self.db.refresh(pr)
+        await _invalidate(pr.project_id)
+        return pr
+
+    async def reject_request(
+        self, project_id: int, request_id: int, comment: str | None = None, changed_by: str = "user"
+    ) -> PaymentRequest:
+        """Отклонить заявку (PENDING_REVIEW/APPROVED → REJECTED). Терминально; заборы освобождаются."""
+        pr = await self.get_request(project_id, request_id)
+        if pr is None:
+            raise PaymentRequestValidationError(["Заявка не найдена"])
+        prs.apply_transition(
+            self.db, pr, PaymentRequestStatus.REJECTED, changed_by=changed_by, comment=comment or "Отклонено"
+        )
+        if pr.project_id is None:  # общую заявку отклоняет админ любого проекта — фиксируем кто
+            logger.info("general payment request rejected: id=%d by=%s", pr.id, changed_by)
+        await self.db.commit()
+        await self.db.refresh(pr)
+        await _invalidate(pr.project_id)
+        return pr
+
+    async def mark_paid_request(
+        self, project_id: int, request_id: int, comment: str | None = None, changed_by: str = "user"
+    ) -> PaymentRequest:
+        """Отметить согласованную заявку оплаченной вручную (APPROVED → PAID)."""
+        pr = await self.get_request(project_id, request_id)
+        if pr is None:
+            raise PaymentRequestValidationError(["Заявка не найдена"])
+        prs.apply_transition(
+            self.db, pr, PaymentRequestStatus.PAID, changed_by=changed_by, comment=comment or "Оплачено вручную"
+        )
+        await self.db.commit()
+        await self.db.refresh(pr)
+        await _invalidate(pr.project_id)
         return pr
 
     # ─── validation ───────────────────────────────────────────────────────

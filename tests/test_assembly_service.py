@@ -17,14 +17,15 @@ Covers:
 13. Ship with insufficient stock -> ValueError with deficit details
 """
 
+from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 
-from backend.models.assembly import AssemblyRequest, AssemblyStatus
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.warehouse import InboundReceipt, OutboundShipment, WarehouseStock
 from backend.models.wb_fbo import WbFboSupply, WbSupplyStatus
 from backend.schemas.assembly import (
@@ -48,8 +49,10 @@ from backend.services.assembly_service import (
     get_logistics_analytics,
     list_assembly_requests,
     mark_ready,
+    prefetch_list_maps,
     reopen_for_reship,
     return_to_warehouse,
+    ship_joint_supply,
     ship_request,
     start_assembly,
     update_assembly_request,
@@ -317,12 +320,16 @@ class TestCreateAssemblyRequest:
         with pytest.raises(ValueError, match="FULFILLMENT"):
             await create_assembly_request(db_session, PROJECT_ID, payload)
 
-    async def test_create_already_linked_fbo(self, db_session):
-        """4. Create with already-linked FBO supply -> ValueError."""
+    async def test_create_already_linked_fbo_same_warehouse(self, db_session):
+        """4. Create 2nd request for same FBO supply FROM THE SAME warehouse -> ValueError.
+
+        Совместная поставка разрешает несколько сборок на поставку, но только с
+        РАЗНЫХ складов-источников; повтор с того же склада по-прежнему запрещён.
+        """
         # First create a request
         await _create_test_request(db_session)
 
-        # Try to create another for the same FBO supply
+        # Try to create another for the same FBO supply, same source warehouse
         wh_id = await _get_fulfillment_wh_id(db_session)
         fbo_id = await _get_fbo_supply_id(db_session)
         payload = AssemblyRequestCreate(
@@ -332,7 +339,7 @@ class TestCreateAssemblyRequest:
             pallet_weight_kg=Decimal("100.00"),
             items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=1)],
         )
-        with pytest.raises(ValueError, match="already has an active assembly request"):
+        with pytest.raises(ValueError, match="уже есть активная сборка"):
             await create_assembly_request(db_session, PROJECT_ID, payload)
 
     async def test_create_allows_accepted_fbo_supply(self, db_session):
@@ -444,6 +451,38 @@ class TestListAssemblyRequests:
         # A different carrier sees nothing of this request.
         other_items, _ = await list_assembly_requests(db_session, PROJECT_ID, counterparty_id=other.id)
         assert req.id not in [r.id for r in other_items]
+
+    async def test_list_view_archives_terminal_statuses(self, db_session):
+        """view='active' скрывает Принято ВБ/Закрыта/Отменена; 'archived' — только их.
+
+        DELIVERED ставится автоматически при приёмке WB → принятые сборки уходят
+        из активного списка (чище список). Явный status имеет приоритет над view.
+        """
+        req = await _create_test_request(db_session)  # IN_PROGRESS → активна
+
+        active_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="active"))[0]]
+        arch_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="archived"))[0]]
+        assert req.id in active_ids and req.id not in arch_ids
+
+        # Приёмка WB → DELIVERED: уходит в архив, пропадает из активного списка.
+        req.status = AssemblyStatus.DELIVERED
+        await db_session.commit()
+
+        active_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="active"))[0]]
+        arch_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="archived"))[0]]
+        assert req.id not in active_ids and req.id in arch_ids
+
+        # view='all' и None → без фильтра по статусу.
+        all_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID, view="all"))[0]]
+        none_ids = [r.id for r in (await list_assembly_requests(db_session, PROJECT_ID))[0]]
+        assert req.id in all_ids and req.id in none_ids
+
+        # Явный status имеет приоритет над view='active'.
+        explicit_ids = [
+            r.id
+            for r in (await list_assembly_requests(db_session, PROJECT_ID, status="DELIVERED", view="active"))[0]
+        ]
+        assert req.id in explicit_ids
 
 
 @pytest.mark.asyncio
@@ -1599,8 +1638,10 @@ class TestAvailableStockValidation:
 # --- FF link: ff_link filter + batch enrichment (R2) ------------------------
 
 
-async def _link_ff_request(db_session, *, assembly_request_id: int, warehouse_id: int):
-    """Helper: создать зеркало ФФ-заявки, привязанное к нашей заявке на сборку."""
+async def _link_ff_request(db_session, *, assembly_request_id: int, warehouse_id: int, total_qty: int | None = None):
+    """Helper: создать зеркало ФФ-заявки, привязанное к нашей заявке на сборку.
+
+    total_qty задаёт суммарное кол-во (skladbot → сверка расхождения «по итогам»)."""
     from backend.models.fulfillment import FulfillmentRequest
 
     ff = FulfillmentRequest(
@@ -1611,6 +1652,7 @@ async def _link_ff_request(db_session, *, assembly_request_id: int, warehouse_id
         number=f"WH-R-{assembly_request_id}",
         kind="assembly",
         stage_title="Приёмка",
+        total_qty=total_qty,
         assembly_request_id=assembly_request_id,
     )
     db_session.add(ff)
@@ -1893,3 +1935,505 @@ class TestSetStatusBulk:
         r1 = await _create_test_request(db_session)
         with pytest.raises(ValueError, match="Недопустимый статус"):
             await set_status_bulk(db_session, PROJECT_ID, [r1.id], "SHIPPED")
+
+
+@pytest.mark.asyncio
+class TestFfProposalReview:
+    """Согласование/отклонение предложенной ФФ правки состава (review_ff_proposal).
+
+    ФФ-оператор правит состав в портале → правка кладётся ПРЕДЛОЖЕНИЕМ на сборку
+    (ff_proposed_items), не применяется. В DDS approve применяет её (канонический
+    сток/резерв-валидатор), reject отбрасывает.
+    """
+
+    async def _set_proposal(self, db_session, request_id: int, items: list[dict]) -> None:
+        """Положить предложение ФФ на сборку (как делает ФФ-портал).
+
+        Грузит заявку по id, проставляет ff_proposed_*, коммитит и expire_all()
+        (чтобы сервис читал свежую строку). Вызывать с КАПТУРЕННЫМ id, не с
+        атрибутом ранее созданного объекта — он после expire_all станет стейл.
+        """
+        req = await get_assembly_request(db_session, PROJECT_ID, request_id)
+        assert req is not None
+        req.ff_proposed_items = items
+        req.ff_proposed_at = utcnow()
+        req.ff_proposed_by = "Хамза"
+        await db_session.commit()
+        db_session.expire_all()
+
+    async def test_build_response_exposes_pending_proposal(self, db_session):
+        """_build_response отдаёт ff_review_pending + resolved позиции предложения."""
+        req = await _create_test_request(db_session)  # TEST_BARCODE_1 = 5
+        req_id = req.id  # захватываем ДО expire_all (иначе sync lazy-load в async)
+        await self._set_proposal(db_session, req_id, [{"barcode": TEST_BARCODE_2, "quantity": 9}])
+
+        loaded = await get_assembly_request(db_session, PROJECT_ID, req_id)
+        resp = AssemblyRequestResponse.model_validate(await _build_response(db_session, loaded))
+
+        assert resp.ff_review_pending is True
+        assert resp.ff_proposed_by == "Хамза"
+        assert resp.ff_proposed_at is not None
+        assert resp.ff_proposed_items is not None
+        assert len(resp.ff_proposed_items) == 1
+        assert resp.ff_proposed_items[0].barcode == TEST_BARCODE_2
+        assert resp.ff_proposed_items[0].quantity == 9
+
+    async def test_build_response_no_proposal(self, db_session):
+        """Без предложения → pending False, ff_proposed_items None."""
+        req = await _create_test_request(db_session)
+        loaded = await get_assembly_request(db_session, PROJECT_ID, req.id)
+        resp = AssemblyRequestResponse.model_validate(await _build_response(db_session, loaded))
+
+        assert resp.ff_review_pending is False
+        assert resp.ff_proposed_items is None
+        assert resp.ff_proposed_at is None
+        assert resp.ff_proposed_by is None
+
+    async def test_approve_applies_proposal_and_clears_pending(self, db_session):
+        """approve: состав заявки = предложение, предложение снято."""
+        from backend.services.assembly.crud import review_ff_proposal
+
+        req = await _create_test_request(db_session)  # TEST_BARCODE_1 = 5
+        req_id = req.id  # захватываем ДО expire_all
+        # Предложение: тот же ШК → 8 + новый ШК = 4 (оба в пределах стока 100).
+        await self._set_proposal(
+            db_session,
+            req_id,
+            [{"barcode": TEST_BARCODE_1, "quantity": 8}, {"barcode": TEST_BARCODE_2, "quantity": 4}],
+        )
+
+        updated = await review_ff_proposal(db_session, PROJECT_ID, req_id, approve=True)
+
+        # Предложение применено к составу.
+        qty_by_bc = {i.barcode: i.quantity for i in updated.items}
+        assert qty_by_bc == {TEST_BARCODE_1: 8, TEST_BARCODE_2: 4}
+        # Предложение снято.
+        assert updated.ff_proposed_items is None
+        assert updated.ff_proposed_at is None
+        assert updated.ff_proposed_by is None
+
+        # И в БД действительно очищено + состав обновлён.
+        reloaded = await get_assembly_request(db_session, PROJECT_ID, req_id)
+        assert reloaded.ff_proposed_items is None
+        assert {i.barcode: i.quantity for i in reloaded.items} == {TEST_BARCODE_1: 8, TEST_BARCODE_2: 4}
+
+    async def test_reject_clears_pending_keeps_items(self, db_session):
+        """reject: предложение снято, состав НЕ изменён."""
+        from backend.services.assembly.crud import review_ff_proposal
+
+        req = await _create_test_request(db_session)  # TEST_BARCODE_1 = 5
+        req_id = req.id  # захватываем ДО expire_all
+        await self._set_proposal(db_session, req_id, [{"barcode": TEST_BARCODE_2, "quantity": 9}])
+
+        updated = await review_ff_proposal(db_session, PROJECT_ID, req_id, approve=False)
+
+        # Состав остался прежним (предложение отброшено).
+        assert {i.barcode: i.quantity for i in updated.items} == {TEST_BARCODE_1: 5}
+        assert updated.ff_proposed_items is None
+        assert updated.ff_proposed_at is None
+        assert updated.ff_proposed_by is None
+
+    async def test_review_without_proposal_raises(self, db_session):
+        """Нет предложения на согласование → ValueError (роутер → 400)."""
+        from backend.services.assembly.crud import review_ff_proposal
+
+        req = await _create_test_request(db_session)
+        with pytest.raises(ValueError, match="Нет предложения ФФ"):
+            await review_ff_proposal(db_session, PROJECT_ID, req.id, approve=True)
+        with pytest.raises(ValueError, match="Нет предложения ФФ"):
+            await review_ff_proposal(db_session, PROJECT_ID, req.id, approve=False)
+
+    async def test_approve_exceeding_stock_raises_deficit(self, db_session):
+        """approve предложения сверх доступного стока → дефицит → ValueError.
+
+        На складе 100 шт TEST_BARCODE_1; предложение на 250 → недостаточно.
+        Предложение при этом НЕ снимается (фейл валидации откатывает применение).
+        """
+        from backend.services.assembly.crud import review_ff_proposal
+
+        req = await _create_test_request(db_session)
+        req_id = req.id  # захватываем ДО expire_all
+        await self._set_proposal(db_session, req_id, [{"barcode": TEST_BARCODE_1, "quantity": 250}])
+
+        with pytest.raises(ValueError, match="Недостаточно"):
+            await review_ff_proposal(db_session, PROJECT_ID, req_id, approve=True)
+
+        # Состав не тронут, предложение всё ещё ждёт согласования.
+        reloaded = await get_assembly_request(db_session, PROJECT_ID, req_id)
+        assert {i.barcode: i.quantity for i in reloaded.items} == {TEST_BARCODE_1: 5}
+        assert reloaded.ff_proposed_items is not None
+
+
+@pytest.mark.asyncio
+class TestJointFboSupply:
+    """Совместная WB FBO-поставка: одна поставка («Совместный номер») несёт ≥2
+    сборок — по одной на ФФ-источник (напр. wms + wms2)."""
+
+    async def _make_joint_pair(self, db_session):
+        """Две сборки на одной FBO-поставке, но с РАЗНЫХ складов-источников."""
+        wh1 = await _get_fulfillment_wh_id(db_session)
+        wh2 = await _create_second_fulfillment_wh(db_session, stock_for=[TEST_BARCODE_1])
+        fbo_id = await _get_fbo_supply_id(db_session)
+        a1 = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh1,
+                wb_fbo_supply_id=fbo_id,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("100.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
+            ),
+        )
+        a2 = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh2,
+                wb_fbo_supply_id=fbo_id,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("100.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=3)],
+            ),
+        )
+        return a1, a2, fbo_id
+
+    async def test_two_warehouses_share_one_supply(self, db_session):
+        """Разные склады-источники → обе сборки привязаны к одной поставке (1:N)."""
+        a1, a2, fbo_id = await self._make_joint_pair(db_session)
+        assert a1.wb_fbo_supply_id == fbo_id
+        assert a2.wb_fbo_supply_id == fbo_id
+        assert a1.warehouse_id != a2.warehouse_id
+
+    async def test_joint_only_filter(self, db_session):
+        """joint_only=True возвращает только сборки совместных поставок."""
+        a1, a2, _fbo_id = await self._make_joint_pair(db_session)
+        # Одиночная сборка на ОТДЕЛЬНОЙ поставке — не совместная.
+        lone_supply = WbFboSupply(
+            project_id=PROJECT_ID,
+            wb_supply_id="ASM-FBO-TEST-LONE",
+            wb_status=WbSupplyStatus.ACTIVE,
+            name="Lone",
+            warehouse_name="Казань",
+            created_at_wb=datetime(2026, 3, 21),
+        )
+        db_session.add(lone_supply)
+        await db_session.flush()
+        wh1 = await _get_fulfillment_wh_id(db_session)
+        lone = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh1,
+                wb_fbo_supply_id=lone_supply.id,
+                pallets_count=1,
+                pallet_weight_kg=Decimal("100.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=1)],
+            ),
+        )
+        items, total = await list_assembly_requests(db_session, PROJECT_ID, joint_only=True, limit=100)
+        ids = {r.id for r in items}
+        assert ids == {a1.id, a2.id}
+        assert lone.id not in ids
+        assert total == 2
+
+    async def test_enrich_joint_flag_and_siblings(self, db_session):
+        """_enrich_joint ставит joint_supply=True и siblings (другая сборка поставки)."""
+        from backend.routers.assembly import _enrich_joint
+
+        a1, a2, _fbo_id = await self._make_joint_pair(db_session)
+        items, _total = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
+        responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
+        await _enrich_joint(db_session, PROJECT_ID, items, responses)
+
+        by_id = {r.id: r for r in responses}
+        assert by_id[a1.id].joint_supply is True
+        assert by_id[a2.id].joint_supply is True
+        assert {s.assembly_id for s in (by_id[a1.id].joint_siblings or [])} == {a2.id}
+        assert by_id[a1.id].joint_siblings[0].warehouse_id == a2.warehouse_id
+
+    async def test_auto_deliver_delivers_all_shipped(self, db_session):
+        """ACCEPTED поставка → ВСЕ отгруженные сборки → DELIVERED (не только одна)."""
+        from backend.services.fbo_supply.sync import _auto_deliver_assembly
+
+        a1, a2, fbo_id = await self._make_joint_pair(db_session)
+        await db_session.execute(
+            text("UPDATE assembly_requests SET status = 'SHIPPED' WHERE id IN (:a, :b)"),
+            {"a": a1.id, "b": a2.id},
+        )
+        await db_session.commit()
+        db_session.expire_all()
+
+        changed = await _auto_deliver_assembly(db_session, PROJECT_ID, fbo_id)
+        await db_session.commit()
+        assert changed is True
+
+        rows = (
+            await db_session.execute(
+                text("SELECT status FROM assembly_requests WHERE id IN (:a, :b)"),
+                {"a": a1.id, "b": a2.id},
+            )
+        ).scalars().all()
+        assert set(rows) == {"DELIVERED"}
+
+    async def test_refresh_joint_non_destructive(self, db_session):
+        """«Из FBO» на совместной сборке НЕ перестраивает позиции (no error, состав цел).
+
+        Без guard refresh затянул бы весь состав поставки (BC1=10) в сборку (было 5).
+        """
+        from backend.services.assembly.analytics import refresh_from_fbo
+
+        a1, _a2, _fbo_id = await self._make_joint_pair(db_session)
+        before = {(i.barcode, i.quantity) for i in (await get_assembly_request(db_session, PROJECT_ID, a1.id)).items}
+        res = await refresh_from_fbo(db_session, PROJECT_ID, a1.id, skip_force_enrich=True)
+        assert res.added == 0 and res.removed == 0 and res.changed == 0
+        after = {(i.barcode, i.quantity) for i in (await get_assembly_request(db_session, PROJECT_ID, a1.id)).items}
+        assert before == after  # позиции совместной сборки не тронуты
+
+    async def test_combined_ff_mismatch_match(self, db_session):
+        """Расхождение совместной поставки = СУММА 2 сборок vs СУММА их заявок ФФ.
+
+        our: a1=5 + a2=3 = 8; ФФ: 5 + 3 = 8 → совпадает (False у обеих)."""
+        from backend.services import fulfillment_service
+
+        a1, a2, _fbo_id = await self._make_joint_pair(db_session)
+        await _link_ff_request(db_session, assembly_request_id=a1.id, warehouse_id=a1.warehouse_id, total_qty=5)
+        await _link_ff_request(db_session, assembly_request_id=a2.id, warehouse_id=a2.warehouse_id, total_qty=3)
+
+        m = await fulfillment_service.get_assembly_ff_mismatch_map(db_session, PROJECT_ID, {a1.id, a2.id})
+        assert m[a1.id] is False and m[a2.id] is False
+
+        detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, PROJECT_ID, a1.id)
+        assert detail["our_total"] == 8  # сумма обеих сборок ДДС
+        assert detail["ff_total"] == 8  # сумма обеих заявок ФФ
+        assert "," in (detail["assembly_number"] or "")  # объединённая подпись «ASM-…, ASM-…»
+
+    async def test_combined_ff_mismatch_detects_diff(self, db_session):
+        """Сумма ФФ ≠ сумме сборок → расхождение True у обеих (combined).
+
+        our: 5 + 3 = 8; ФФ: 5 + 5 = 10 → расхождение."""
+        from backend.services import fulfillment_service
+
+        a1, a2, _fbo_id = await self._make_joint_pair(db_session)
+        await _link_ff_request(db_session, assembly_request_id=a1.id, warehouse_id=a1.warehouse_id, total_qty=5)
+        await _link_ff_request(db_session, assembly_request_id=a2.id, warehouse_id=a2.warehouse_id, total_qty=5)
+
+        m = await fulfillment_service.get_assembly_ff_mismatch_map(db_session, PROJECT_ID, {a1.id, a2.id})
+        assert m[a1.id] is True and m[a2.id] is True
+
+        detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, PROJECT_ID, a1.id)
+        assert detail["our_total"] == 8 and detail["ff_total"] == 10
+
+    # ─── Передача совместной поставки логисту ────────────────────────────────
+
+    @staticmethod
+    def _vehicle_payload() -> AssignVehicle:
+        return AssignVehicle(
+            vehicle_info="А123ВС / прицеп",
+            vehicle_brand="Газель",
+            driver_phone="+79990000000",
+            pickup_date=date(2026, 6, 15),
+            pickup_time_slot="10:00-12:00",
+            pickup_cost=Decimal("15000.00"),
+            delivery_date=date(2026, 6, 16),
+            carrier_inn="7700000000",
+            carrier_name="ИП Перевозчик",
+        )
+
+    async def _ready_pair(self, db_session):
+        """Joint pair, обе сборки переведены в READY (готовы к логисту)."""
+        a1, a2, fbo_id = await self._make_joint_pair(db_session)
+        await mark_ready(db_session, PROJECT_ID, a1.id)
+        await mark_ready(db_session, PROJECT_ID, a2.id)
+        return a1, a2, fbo_id
+
+    async def test_joint_ready_breakdown_and_ff_number(self, db_session):
+        """Лист логиста: обе готовы → joint_ready, итоги паллет/веса, ФФ-номер в siblings."""
+        from backend.routers.assembly import _enrich_joint
+
+        a1, a2, _fbo_id = await self._ready_pair(db_session)
+        # a1 = 2 паллеты по 100 кг, a2 = 1 паллета по 100 кг → итог 3 паллеты, вес 2*100+1*100=300
+        # (проверяем формулу паллеты×вес, а не просто сумму весов паллет).
+        await db_session.execute(text("UPDATE assembly_requests SET pallets_count = 2 WHERE id = :id"), {"id": a1.id})
+        await db_session.commit()
+        await _link_ff_request(db_session, assembly_request_id=a2.id, warehouse_id=a2.warehouse_id)
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
+        responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
+        await _enrich_joint(db_session, PROJECT_ID, items, responses)
+        a1_resp = {r.id: r for r in responses}[a1.id]
+
+        assert a1_resp.joint_ready is True
+        assert a1_resp.joint_total_pallets == 3
+        assert a1_resp.joint_total_weight_kg == Decimal("300.00")
+        sib = (a1_resp.joint_siblings or [])[0]
+        assert sib.assembly_id == a2.id
+        assert sib.pallets_count == 1
+        assert sib.pallet_weight_kg == Decimal("100.00")
+        assert sib.ff_request_number == f"WH-R-{a2.id}"
+
+    async def test_joint_not_ready_when_one_in_progress(self, db_session):
+        """Одна сборка ещё IN_PROGRESS → joint_ready=False (поставку нельзя передавать)."""
+        from backend.routers.assembly import _enrich_joint
+
+        a1, _a2, _fbo_id = await self._make_joint_pair(db_session)
+        await mark_ready(db_session, PROJECT_ID, a1.id)  # вторая остаётся IN_PROGRESS
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=100)
+        responses = [AssemblyRequestResponse.model_validate(await _build_response(db_session, r)) for r in items]
+        await _enrich_joint(db_session, PROJECT_ID, items, responses)
+        assert {r.id: r for r in responses}[a1.id].joint_ready is False
+
+    async def test_assign_vehicle_blocked_until_all_ready(self, db_session):
+        """Назначение машины на совместную блокируется, пока не готовы ВСЕ сборки."""
+        a1, _a2, _fbo_id = await self._make_joint_pair(db_session)
+        await mark_ready(db_session, PROJECT_ID, a1.id)  # вторая IN_PROGRESS
+        with pytest.raises(ValueError, match="не готов"):
+            await assign_vehicle(db_session, PROJECT_ID, a1.id, self._vehicle_payload())
+
+    async def test_assign_vehicle_mirrors_to_all_siblings(self, db_session):
+        """Одна машина на совместную → ОБЕ сборки VEHICLE_ASSIGNED с теми же реквизитами."""
+        a1, a2, _fbo_id = await self._ready_pair(db_session)
+        await assign_vehicle(db_session, PROJECT_ID, a1.id, self._vehicle_payload())
+        rows = (
+            await db_session.execute(
+                text(
+                    "SELECT status, vehicle_info, counterparty_id FROM assembly_requests "
+                    "WHERE id IN (:a, :b) ORDER BY id"
+                ),
+                {"a": a1.id, "b": a2.id},
+            )
+        ).all()
+        assert {r[0] for r in rows} == {"VEHICLE_ASSIGNED"}  # обе назначены
+        assert all(r[1] == "А123ВС / прицеп" for r in rows)  # та же машина
+        carriers = {r[2] for r in rows}
+        assert len(carriers) == 1 and None not in carriers  # один перевозчик на обе сборки
+
+    async def test_ship_joint_ships_all_siblings(self, db_session):
+        """ship_joint_supply отгружает ВСЕ назначенные сборки поставки одним действием."""
+        a1, a2, _fbo_id = await self._ready_pair(db_session)
+        await assign_vehicle(db_session, PROJECT_ID, a1.id, self._vehicle_payload())
+        await ship_joint_supply(db_session, PROJECT_ID, a1.id)
+        rows = (
+            await db_session.execute(
+                text("SELECT status FROM assembly_requests WHERE id IN (:a, :b)"),
+                {"a": a1.id, "b": a2.id},
+            )
+        ).scalars().all()
+        assert set(rows) == {"SHIPPED"}
+
+
+@pytest.mark.asyncio
+class TestListBuildBatched:
+    """Список сборок строит ответ батч-запросами, без per-row N+1.
+
+    Роутер раньше дёргал на КАЖДУЮ заявку контрагента + номенклатуру + остатки —
+    сотни запросов на ~400 строк через PgBouncer → тормоза списка/фильтров/поиска.
+    prefetch_list_maps собирает всё фиксированным числом запросов, а
+    _build_response с картами в БД не ходит. Покрываем: (1) ответ бит-в-бит равен
+    per-row сборке, (2) build-loop не масштабируется по числу строк.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _count_queries():
+        """Считает SQL-запросы через before_cursor_execute на sync-движке."""
+        from tests.conftest_api import test_engine
+
+        counter = {"n": 0}
+
+        def _before(conn, cursor, statement, params, context, executemany):
+            counter["n"] += 1
+
+        event.listen(test_engine.sync_engine, "before_cursor_execute", _before)
+        try:
+            yield counter
+        finally:
+            event.remove(test_engine.sync_engine, "before_cursor_execute", _before)
+
+    async def _seed_two_requests(self, db_session):
+        """req1: wh1 + перевозчик; req2: wh2 + своя FBO + ожидающая ФФ-правка.
+
+        Покрывает все per-row пути prefetch: номенклатура, остатки (2 склада),
+        контрагент-перевозчик, ФФ-предложение по баркоду.
+        """
+        from backend.models.counterparty import Counterparty
+
+        carrier = Counterparty(project_id=PROJECT_ID, name="ИП Батч Тест", primary_type="CARRIER")
+        db_session.add(carrier)
+        await db_session.flush()
+        req1 = await _create_test_request(db_session)
+        req1.counterparty_id = carrier.id
+
+        wh2_id = await _create_second_fulfillment_wh(db_session, stock_for=[TEST_BARCODE_2])
+        fbo2 = WbFboSupply(
+            project_id=PROJECT_ID,
+            wb_supply_id="ASM-FBO-TEST-2",
+            wb_status=WbSupplyStatus.ACTIVE,
+            name="ASM_TEST FBO Supply 2",
+            warehouse_name="Тула",
+            created_at_wb=datetime(2026, 3, 21),
+        )
+        db_session.add(fbo2)
+        await db_session.flush()
+        nom2_id = (
+            await db_session.execute(
+                text("SELECT id FROM nomenclature WHERE project_id = :pid AND barcode = :bc"),
+                {"pid": PROJECT_ID, "bc": TEST_BARCODE_2},
+            )
+        ).scalar()
+        req2 = AssemblyRequest(
+            project_id=PROJECT_ID,
+            warehouse_id=wh2_id,
+            wb_fbo_supply_id=fbo2.id,
+            number="ASM-BATCH-TEST-2",
+            status=AssemblyStatus.IN_PROGRESS,
+            pallets_count=1,
+            pallet_weight_kg=Decimal("10.00"),
+            ff_proposed_items=[{"barcode": TEST_BARCODE_2, "quantity": 3}],
+        )
+        db_session.add(req2)
+        await db_session.flush()
+        db_session.add(
+            AssemblyRequestItem(
+                project_id=PROJECT_ID,
+                assembly_request_id=req2.id,
+                nomenclature_id=nom2_id,
+                barcode=TEST_BARCODE_2,
+                quantity=3,
+            )
+        )
+        await db_session.commit()
+        return req1, req2
+
+    async def test_batch_build_matches_per_row(self, db_session):
+        """Ответ с prefetch-картами бит-в-бит равен per-row сборке."""
+        await self._seed_two_requests(db_session)
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=500)
+        assert len(items) >= 2
+
+        prefetch = await prefetch_list_maps(db_session, PROJECT_ID, items)
+        for req in items:
+            per_row = await _build_response(db_session, req)
+            batched = await _build_response(db_session, req, **prefetch)
+            assert batched == per_row
+
+    async def test_build_loop_is_constant_queries(self, db_session):
+        """prefetch + build-loop не масштабируется по числу строк (нет N+1)."""
+        await self._seed_two_requests(db_session)
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=500)
+        assert len(items) >= 2
+
+        with self._count_queries() as c:
+            prefetch = await prefetch_list_maps(db_session, PROJECT_ID, items)
+            for req in items:
+                await _build_response(db_session, req, **prefetch)
+        batched = c["n"]
+
+        with self._count_queries() as c2:
+            for req in items:
+                await _build_response(db_session, req)
+        per_row = c2["n"]
+
+        # Батч-путь дешевле и ограничен константой (≤ число prefetch-запросов),
+        # per-row растёт с числом строк.
+        assert batched < per_row
+        assert batched <= 6

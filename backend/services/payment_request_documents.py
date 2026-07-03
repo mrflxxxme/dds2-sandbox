@@ -11,7 +11,7 @@ import logging
 import mimetypes
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
@@ -26,7 +26,8 @@ async def _get_request(db: AsyncSession, project_id: int, request_id: int) -> Pa
     res = await db.execute(
         select(PaymentRequest).where(
             PaymentRequest.id == request_id,
-            PaymentRequest.project_id == project_id,
+            # свой проект ИЛИ общая (project_id IS NULL) — доступ к заявке авторизует и её документы.
+            or_(PaymentRequest.project_id == project_id, PaymentRequest.project_id.is_(None)),
             PaymentRequest.is_deleted == False,  # noqa: E712
         )
     )
@@ -48,7 +49,7 @@ async def upload_document(
     uploaded_by_user_id: int | None = None,
 ) -> PaymentRequestDocument:
     """Upload a счёт/акт to MinIO and create the metadata row (request must belong to project)."""
-    await _get_request(db, project_id, request_id)
+    pr = await _get_request(db, project_id, request_id)
 
     now = utcnow()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
@@ -69,7 +70,7 @@ async def upload_document(
     logger.info("Uploaded payment-request doc to MinIO: %s (%d bytes)", object_name, len(file_data))
 
     doc = PaymentRequestDocument(
-        project_id=project_id,
+        project_id=pr.project_id,  # зеркалит проект заявки (NULL у общей)
         payment_request_id=request_id,
         minio_path=object_name,
         doc_type=doc_type,
@@ -89,11 +90,11 @@ async def download_document(
     db: AsyncSession, *, project_id: int, request_id: int, doc_id: int
 ) -> tuple[bytes, str, str]:
     """Return (bytes, filename, content_type). Project-scoped; raises 404 if not found, 503 if MinIO down."""
+    await _get_request(db, project_id, request_id)  # авторизация доступа к заявке (свой проект / общая)
     res = await db.execute(
         select(PaymentRequestDocument).where(
             PaymentRequestDocument.id == doc_id,
             PaymentRequestDocument.payment_request_id == request_id,
-            PaymentRequestDocument.project_id == project_id,
             PaymentRequestDocument.is_deleted == False,  # noqa: E712
         )
     )
@@ -109,11 +110,11 @@ async def download_document(
 
 async def delete_document(db: AsyncSession, *, project_id: int, request_id: int, doc_id: int) -> bool:
     """Soft-delete a doc; best-effort remove from MinIO."""
+    await _get_request(db, project_id, request_id)  # авторизация доступа к заявке (свой проект / общая)
     res = await db.execute(
         select(PaymentRequestDocument).where(
             PaymentRequestDocument.id == doc_id,
             PaymentRequestDocument.payment_request_id == request_id,
-            PaymentRequestDocument.project_id == project_id,
             PaymentRequestDocument.is_deleted == False,  # noqa: E712
         )
     )

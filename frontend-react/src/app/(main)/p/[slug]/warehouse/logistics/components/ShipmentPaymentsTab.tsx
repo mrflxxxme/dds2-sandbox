@@ -1,10 +1,34 @@
 'use client';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber, exportToExcel } from '@/lib/utils';
 import CreatePaymentRequestModal from './CreatePaymentRequestModal';
-import type { PaymentRequestStatus, ShippableShipmentRow } from '@/types/api';
+import type { PaymentRequestStatus, ShippableShipmentRow, InvoiceParseResult } from '@/types/api';
+
+/** Подобрать заборы под сумму счёта: точное совпадение одного, иначе подмножество (мелкий перебор). */
+function pickShipmentsForAmount(cands: ShippableShipmentRow[], amount: number | null): number[] {
+    if (amount == null) return [];
+    const items = cands
+        .filter(c => c.pickup_cost != null)
+        .map(c => ({ id: c.outbound_shipment_id, cost: Math.round(Number(c.pickup_cost) * 100) }));  // в копейках — без float-погрешности
+    const target = Math.round(amount * 100);
+    const single = items.find(i => i.cost === target);
+    if (single) return [single.id];
+    if (items.length <= 18) {  // перебор подмножеств, выбираем минимальное по числу заборов
+        let best: number[] | null = null;
+        const n = items.length;
+        for (let mask = 1; mask < (1 << n); mask++) {
+            let sum = 0; const ids: number[] = [];
+            for (let i = 0; i < n; i++) if (mask & (1 << i)) { sum += items[i].cost; ids.push(items[i].id); }
+            if (sum === target && (best === null || ids.length < best.length)) best = ids;
+        }
+        if (best) return best;
+    }
+    return [];
+}
+
+const onlyDigits = (s: string | null | undefined): string => (s ?? '').replace(/\D/g, '');
 
 type SortKey =
     | 'number' | 'wb_supply_number' | 'destination' | 'source_warehouse'
@@ -26,6 +50,7 @@ function sortVal(r: ShippableShipmentRow, key: SortKey): string | number {
 const STATUS_MAP: Record<PaymentRequestStatus, { label: string; className: string }> = {
     DRAFT:          { label: 'Черновик',         className: 'badge-secondary' },
     PENDING_REVIEW: { label: 'На проверке',      className: 'badge-warning' },
+    APPROVED:       { label: 'Согласовано',      className: 'badge-info' },
     DRAFT_CREATED:  { label: 'Платёжка создана', className: 'badge-info' },
     PAID:           { label: 'Оплачено',         className: 'badge-success' },
     REJECTED:       { label: 'Отклонено',        className: 'badge-danger' },
@@ -41,7 +66,13 @@ const FILTERS: { key: Filter; label: string }[] = [
     { key: 'archived',  label: '🗄 Архив' },
 ];
 
-type ModalState = { initialShipmentId?: number; initialShipmentIds?: number[]; editRequestId?: number } | null;
+type ModalState = {
+    initialShipmentId?: number;
+    initialShipmentIds?: number[];
+    editRequestId?: number;
+    prefillParse?: InvoiceParseResult | null;
+    prefillFile?: File | null;
+} | null;
 
 export default function ShipmentPaymentsTab() {
     const router = useRouter();
@@ -56,6 +87,10 @@ export default function ShipmentPaymentsTab() {
     const [busy, setBusy] = useState(false);
     const [modal, setModal] = useState<ModalState>(null);
     const [sort, setSort] = useState<SortState>(null);
+    // Загрузить счёт → распознать → подобрать заборы по ИНН + сумме.
+    const [parsing, setParsing] = useState(false);
+    const [matchInfo, setMatchInfo] = useState('');
+    const fileRef = useRef<HTMLInputElement>(null);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -150,12 +185,50 @@ export default function ShipmentPaymentsTab() {
         })), 'shipments_for_payment');
     };
 
+    // Загрузить счёт → распознать → подобрать неоплаченные заборы перевозчика по ИНН + сумме.
+    const handleUploadMatch = async (file: File) => {
+        setParsing(true);
+        setMatchInfo('');
+        try {
+            const r = await api.parseInvoice(file);
+            const inn = onlyDigits(r.payee_inn);
+            const amount = r.amount != null ? Number(r.amount) : null;
+            const who = r.payee_name || (inn ? `ИНН ${inn}` : 'счёт');
+            const amtTxt = amount != null ? `${formatNumber(amount, 2)} ₽` : '—';
+            if (!inn) {
+                setMatchInfo(`Распознан ${who}, сумма ${amtTxt}. ИНН перевозчика не распознан — выберите заборы вручную.`);
+                return;
+            }
+            const cands = rows.filter(x =>
+                onlyDigits(x.carrier_inn) === inn && !x.already_requested && !x.matched_transaction_id);
+            if (cands.length === 0) {
+                if (r.payee_name) setSearch(r.payee_name);
+                setMatchInfo(`Распознан ${who} (ИНН ${inn}), сумма ${amtTxt}. Неоплаченных заборов этого перевозчика не найдено.`);
+                return;
+            }
+            const matched = pickShipmentsForAmount(cands, amount);
+            if (matched.length > 0) {
+                setMatchInfo(`${who}: подобрано заборов — ${matched.length} на сумму ${amtTxt}. Проверьте и создайте оплату.`);
+                setModal({ initialShipmentIds: matched, prefillParse: r, prefillFile: file });
+            } else {
+                if (r.payee_name) setSearch(r.payee_name);
+                setMatchInfo(`Распознан ${who} (ИНН ${inn}), сумма ${amtTxt}. Точного совпадения по сумме заборов нет — выберите заборы вручную (реквизиты со счёта подставятся при создании).`);
+            }
+        } catch (e: unknown) {
+            setMatchInfo(e instanceof Error ? e.message : 'Ошибка распознавания счёта');
+        } finally {
+            setParsing(false);
+        }
+    };
+
     const modalEl = modal && (
         <CreatePaymentRequestModal
             key={modal.editRequestId != null ? `edit-${modal.editRequestId}` : `new-${modal.initialShipmentId ?? (modal.initialShipmentIds ?? []).join('_')}`}
             initialShipmentId={modal.initialShipmentId}
             initialShipmentIds={modal.initialShipmentIds}
             editRequestId={modal.editRequestId}
+            prefillParse={modal.prefillParse}
+            prefillFile={modal.prefillFile}
             onClose={() => { setModal(null); load(); }}
             onSuccess={() => load()}
         />
@@ -166,6 +239,24 @@ export default function ShipmentPaymentsTab() {
             <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 12 }}>
                 Заборы (отгрузки) — создайте заявку на оплату перевозчику на основе забора.
             </div>
+
+            {/* Загрузить счёт → распознать → подобрать заборы перевозчика по ИНН + сумме. */}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+                <button className="btn btn-primary btn-sm" onClick={() => fileRef.current?.click()} disabled={parsing}>
+                    {parsing ? 'Распознаю счёт...' : '📄 Загрузить счёт → подобрать заборы'}
+                </button>
+                <input
+                    ref={fileRef} type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,.heic" style={{ display: 'none' }}
+                    onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleUploadMatch(f); }}
+                />
+                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>подберёт заборы по ИНН и сумме счёта</span>
+            </div>
+            {matchInfo && (
+                <div className="glass-card" style={{ padding: '10px 14px', marginBottom: 12, fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+                    <span>{matchInfo}</span>
+                    <button onClick={() => setMatchInfo('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-text-muted)', flexShrink: 0 }}>✕</button>
+                </div>
+            )}
 
             {/* Filters + bulk actions */}
             <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>

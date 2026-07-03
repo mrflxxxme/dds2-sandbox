@@ -32,6 +32,7 @@ from backend.models.warehouse import (
     OutboundStatus,
     Warehouse,
 )
+from backend.models.gazelka import GazelkaOrder, GazelkaOrderStatus
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem
 from backend.schemas.assembly import AssemblyItemResponse, RefreshFromFboResponse
 from backend.services.warehouse_service import _resolve_barcode
@@ -66,6 +67,11 @@ async def refresh_from_fbo(
     один раз на все её сборки (дедуп WB-вызовов + троттлинг).
     invalidate=False — не инвалидировать кэши здесь; пачка делает это один раз
     после всех сборок (иначе N×2 инвалидаций на прогон).
+
+    Совместная поставка (≥2 сборок на одну WB-поставку): зеркало WB обновляем как
+    обычно, но позиции сборки НЕ перестраиваем — общий состав поставки нельзя
+    разложить по ФФ-источникам. Расхождение для таких считается по СУММЕ всех
+    сборок поставки (fulfillment_service.compute_doc_ff_mismatch).
     """
     from .crud import get_assembly_request
 
@@ -100,6 +106,44 @@ async def refresh_from_fbo(
         await _try_force_enrich_supply(db, project_id, supply, force=True, with_goods=True, api_client=api_client)
     if supply.warehouse_name and req.wb_warehouse_name_manual != supply.warehouse_name:
         req.wb_warehouse_name_manual = supply.warehouse_name
+
+    # Совместная поставка (≥2 сборок на одну WB-поставку): зеркало WB обновлено
+    # выше, но позиции НЕ перестраиваем — общий состав поставки нельзя разложить
+    # по ФФ-источникам (иначе одна сборка получила бы весь объём → ложное
+    # расхождение). Расхождение для совместных считается по СУММЕ всех сборок
+    # поставки (fulfillment_service.compute_doc_ff_mismatch). Возвращаем текущие
+    # позиции без изменений.
+    joint_cnt = (
+        await db.execute(
+            select(func.count(AssemblyRequest.id)).where(
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.wb_fbo_supply_id == req.wb_fbo_supply_id,
+                AssemblyRequest.is_deleted == False,  # noqa: E712
+                AssemblyRequest.status != AssemblyStatus.CANCELLED,
+            )
+        )
+    ).scalar() or 0
+    if joint_cnt >= 2:
+        await db.commit()
+        await db.refresh(req, ["items"])
+        if invalidate:
+            await invalidate_cache("reports:assembly_flow")
+            await invalidate_cache("reports:assembly_link_anomalies")
+        return RefreshFromFboResponse(
+            added=0,
+            removed=0,
+            changed=0,
+            skipped=[],
+            items=[
+                AssemblyItemResponse(
+                    id=item.id,
+                    nomenclature_id=item.nomenclature_id,
+                    barcode=item.barcode,
+                    quantity=item.quantity,
+                )
+                for item in req.items
+            ],
+        )
 
     # Load FBO supply items
     fbo_items_result = await db.execute(
@@ -259,6 +303,13 @@ async def refresh_active_assemblies_from_fbo(
     any_change = False
 
     for i, supply_id in enumerate(supply_ids):
+        # Совместная поставка (≥2 её сборок в авто-рефреш-статусах): состав не
+        # перестраиваем, а её расхождение считается по СУММЕ сборок (FF-based) —
+        # WB-зеркало для этого не нужно. Пропускаем и WB-вызов, и диф (экономим
+        # WB-квоту). Кросс-статусный случай (одна сборка вне авто-рефреш-статусов)
+        # подстрахует non-destructive ветка в refresh_from_fbo.
+        if len(by_supply[supply_id]) >= 2:
+            continue
         # 1) Один троттлёный force-pull goods на поставку (для всех её сборок).
         supply = (
             await db.execute(
@@ -886,6 +937,22 @@ async def get_logistics_shipments(
                 acc.setdefault(rid, set()).add(brand)
         brands_by_req = {rid: ", ".join(sorted(bs)) for rid, bs in acc.items()}
 
+    # Отгрузки, ушедшие через Газельку (есть SENT/MATCHED-связь у сборки) — бейдж «Газелька».
+    gazelka_req_ids: set[int] = set()
+    if req_ids:
+        gz_rows = (
+            await db.execute(
+                select(GazelkaOrder.assembly_request_id)
+                .where(
+                    GazelkaOrder.project_id == project_id,
+                    GazelkaOrder.assembly_request_id.in_(set(req_ids)),
+                    GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.MATCHED]),
+                )
+                .distinct()
+            )
+        ).all()
+        gazelka_req_ids = {rid for (rid,) in gz_rows if rid is not None}
+
     # Робастная статистика ₽/паллета по складам (как в аналитике) — для флага аномалии.
     cpp_by_dest: dict[str, list[float]] = {}
     all_cpp: list[float] = []
@@ -936,6 +1003,7 @@ async def get_logistics_shipments(
                 "shipped_date": r.shipped_date,
                 "shipped_at": r.shipped_at,
                 "anomaly_type": anomaly_type,
+                "via_gazelka": r.assembly_request_id in gazelka_req_ids,
             }
         )
 

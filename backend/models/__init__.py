@@ -89,6 +89,7 @@ from backend.models.integrations import (
     WbAdCampaignEvent,
     WbCostOverride,
     WbFunnelDaily,
+    WbPrice,
     WbStockSnapshot,
     WbWarehouseStock,
 )
@@ -108,6 +109,7 @@ from backend.models.order_city import (
 # Payment Requests (заявки на оплату перевозчику)
 from backend.models.payment_request import (
     PAYMENT_REQUEST_TRANSITIONS,
+    PaymentCategory,
     PaymentRequest,
     PaymentRequestDocType,
     PaymentRequestDocument,
@@ -131,15 +133,21 @@ from backend.models.planning import (
 # References
 from backend.models.refs import (
     Account,
+    CategoryOverride,  # noqa: F401
     CategoryRef,
+    CbrBic,
     CounterpartyCategory,
     ImtAlias,  # noqa: F401
     OpeningBalance,
     Override,
     ProductStatusMap,  # noqa: F401
+    ProductSubcategory,  # noqa: F401
+    ProductSubcategoryMap,  # noqa: F401
     ProductTag,  # noqa: F401
     ProductTagMap,  # noqa: F401
     ProjectSetting,
+    SizeAlias,  # noqa: F401
+    SizeOverride,  # noqa: F401
 )
 
 # Supply Chain
@@ -201,6 +209,12 @@ from backend.models.gazelka import (
     GazelkaOrderStatus,
 )
 
+# migfull-портал (plusvb.migfull.app) — создание заявки на отгрузку у ФФ «Натали»
+from backend.models.migfull_portal import (
+    MigfullShipmentOrder,
+    MigfullShipmentStatus,
+)
+
 # WB FBO Supplies
 from backend.models.wb_fbo import (
     FboAuditAction,
@@ -260,6 +274,7 @@ __all__ = [
     "ProjectInvite",
     # References
     "Account",
+    "CbrBic",
     "CounterpartyCategory",
     "Override",
     "OpeningBalance",
@@ -297,6 +312,7 @@ __all__ = [
     "WbAdCampaign",
     "WbAdCampaignEvent",
     "WbCostOverride",
+    "WbPrice",
     "WbStockSnapshot",
     "WbWarehouseStock",
     # FX Rates
@@ -321,6 +337,7 @@ __all__ = [
     # Order City
     "OrderCityMap",
     # Payment Requests
+    "PaymentCategory",
     "PaymentRequest",
     "PaymentRequestDocument",
     "PaymentRequestEvent",
@@ -367,6 +384,9 @@ __all__ = [
     # Gazelka (gazelka.space)
     "GazelkaOrder",
     "GazelkaOrderStatus",
+    # migfull-портал (plusvb.migfull.app)
+    "MigfullShipmentOrder",
+    "MigfullShipmentStatus",
     # Supply Chain
     "FactoryOrder",
     "FactoryOrderHistory",

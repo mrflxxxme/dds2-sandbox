@@ -16,6 +16,8 @@
 import type {
     FfMe,
     FfAssemblyRow,
+    FfAssemblyDetail,
+    FfAssemblyItemInput,
     FfAssemblyListResponse,
     FfAcceptanceRow,
     FfAcceptanceListResponse,
@@ -215,16 +217,24 @@ export function ffMe(): Promise<FfMe> {
 export function ffListAssemblies(opts: {
     status?: FfAssemblyStatus | '';
     warehouse_id?: number | null;
+    project_slug?: string;
+    archived?: boolean;
     limit?: number;
     offset?: number;
 } = {}): Promise<FfAssemblyListResponse> {
     const query = buildQuery({
         status: opts.status || undefined,
         warehouse_id: opts.warehouse_id ?? undefined,
+        project_slug: opts.project_slug || undefined,
+        archived: opts.archived ? 'true' : undefined,
         limit: opts.limit ?? 50,
         offset: opts.offset ?? 0,
     });
     return request<FfAssemblyListResponse>('GET', `/api/v1/ff/assemblies${query}`);
+}
+
+export function ffGetAssembly(id: number): Promise<FfAssemblyDetail> {
+    return request<FfAssemblyDetail>('GET', `/api/v1/ff/assemblies/${id}`);
 }
 
 export function ffStartAssembly(id: number): Promise<FfAssemblyRow> {
@@ -239,21 +249,46 @@ export function ffShipAssembly(id: number): Promise<FfAssemblyRow> {
     return request<FfAssemblyRow>('POST', `/api/v1/ff/assemblies/${id}/ship`);
 }
 
+/** Edit assembly contents (наполнение) — allowed only in PENDING/IN_PROGRESS. */
+export function ffUpdateAssemblyItems(
+    id: number,
+    items: FfAssemblyItemInput[],
+): Promise<FfAssemblyDetail> {
+    return request<FfAssemblyDetail>('PUT', `/api/v1/ff/assemblies/${id}/items`, { items });
+}
+
+export function ffArchiveAssembly(id: number, archived: boolean): Promise<FfAssemblyRow> {
+    return request<FfAssemblyRow>('POST', `/api/v1/ff/assemblies/${id}/archive`, { archived });
+}
+
+/** Set / correct pallets count + weight (pre-ship), without changing status. */
+export function ffUpdateAssemblyPallets(id: number, body: FfReadyInput): Promise<FfAssemblyDetail> {
+    return request<FfAssemblyDetail>('PUT', `/api/v1/ff/assemblies/${id}/pallets`, body);
+}
+
 // ── Acceptances ──────────────────────────────────────────────────────────────
 
 export function ffListAcceptances(opts: {
     status?: FfAcceptanceStatus | '';
     warehouse_id?: number | null;
+    project_slug?: string;
+    archived?: boolean;
     limit?: number;
     offset?: number;
 } = {}): Promise<FfAcceptanceListResponse> {
     const query = buildQuery({
         status: opts.status || undefined,
         warehouse_id: opts.warehouse_id ?? undefined,
+        project_slug: opts.project_slug || undefined,
+        archived: opts.archived ? 'true' : undefined,
         limit: opts.limit ?? 50,
         offset: opts.offset ?? 0,
     });
     return request<FfAcceptanceListResponse>('GET', `/api/v1/ff/acceptances${query}`);
+}
+
+export function ffGetAcceptance(id: number): Promise<FfAcceptanceRow> {
+    return request<FfAcceptanceRow>('GET', `/api/v1/ff/acceptances/${id}`);
 }
 
 export function ffStartAcceptance(id: number): Promise<FfAcceptanceRow> {
@@ -267,16 +302,22 @@ export function ffAcceptAcceptance(
     return request<FfAcceptanceRow>('POST', `/api/v1/ff/acceptances/${id}/accept`, { items });
 }
 
+export function ffArchiveAcceptance(id: number, archived: boolean): Promise<FfAcceptanceRow> {
+    return request<FfAcceptanceRow>('POST', `/api/v1/ff/acceptances/${id}/archive`, { archived });
+}
+
 // ── Stock ────────────────────────────────────────────────────────────────────
 
 export function ffListStock(opts: {
     warehouse_id?: number | null;
+    project_slug?: string;
     barcode?: string;
     limit?: number;
     offset?: number;
 } = {}): Promise<FfStockListResponse> {
     const query = buildQuery({
         warehouse_id: opts.warehouse_id ?? undefined,
+        project_slug: opts.project_slug || undefined,
         barcode: opts.barcode || undefined,
         limit: opts.limit ?? 100,
         offset: opts.offset ?? 0,

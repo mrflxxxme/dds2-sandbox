@@ -131,7 +131,8 @@ export interface CategoryRef {
   direction: string;
   cat_lvl1: string;
   cat_lvl2: string;
-  sort_order: number;
+  sort_order?: number;
+  is_cogs?: boolean;
 }
 
 // ─── Reports ─────────────────────────────────────────────────────────────────
@@ -507,7 +508,146 @@ export interface FunnelGroupRow extends Omit<FunnelSkuRow, 'nm_id' | 'vendor_cod
     subject?: string | null;
     tag?: string;
     imt_group?: string;
-    children?: FunnelSkuRow[];
+    size?: string;
+    subcategory?: string;
+    nm_id?: number;
+    vendor_code?: string;
+    children?: FunnelGroupRow[];
+}
+
+export interface FunnelColorsResponse {
+  colors: string[];
+}
+
+// ─── Ценообразование (наценка по артикулам) ──────────────────────────────
+export interface PricingRow {
+  nm_id: number;
+  vendor_code: string | null;
+  brand: string | null;
+  subject: string | null;
+  category: string;
+  size: string;
+  current_price: number | null;
+  base_price: number | null;
+  discount: number | null;
+  cost_price: number | null;
+  has_cost: boolean;
+  has_price: boolean;
+  markup_coef: number | null;
+  markup_pct: number | null;
+  cost_share_pct: number | null;
+  spp_rate: number;
+  buyer_price: number | null;
+  orders_count: number;
+  revenue: number;
+  wb_expenses: number;
+  adv_sum: number;
+  tax: number;
+  cost_total: number;
+  profit: number;
+  margin_pct: number;
+  net_markup_pct: number | null;
+  wb_stock: number;
+  own_stock: number;
+  assembly_stock: number;
+  transit_stock: number;
+  total_stock: number;
+  is_new: boolean;
+  stock_value_cost: number | null;
+  stock_potential_profit: number | null;
+  stock_potential_revenue: number | null;
+  days_left: number | null;
+  sales_per_month: number | null;
+  anomaly: string | null;
+  breakeven_price: number | null;
+  breakeven_with_adv: number | null;
+  safety_margin_pct: number | null;
+  drr: number;
+  cr: number;
+  ctr: number;
+  cpc: number;
+  adv_views: number;
+  adv_clicks: number;
+  gmroi: number | null;
+  sell_through_pct: number | null;
+  elasticity: number | null;
+  elasticity_label: string;
+  optimal_price: number | null;
+  abc: string | null;
+  recommendation: string;
+  imt_id: number | null;
+  sklejka: string;
+  rev_share_pct: number | null;
+  adv_share_pct: number | null;
+  sklejka_role: string;
+}
+
+export interface PricingGroup {
+  category: string;
+  articles: number;
+  priced_articles: number;
+  imt_id?: number | null;
+  advertised_variants?: number;
+  converting_variants?: number;
+  markup_coef: number | null;
+  markup_pct: number | null;
+  cost_share_pct: number | null;
+  revenue: number;
+  profit: number;
+  cost_total: number;
+  wb_expenses: number;
+  margin_pct: number;
+  adv_sum: number;
+  drr: number;
+  ctr: number;
+  cpc: number;
+  adv_views: number;
+  adv_clicks: number;
+  wb_stock: number;
+  own_stock: number;
+  assembly_stock: number;
+  transit_stock: number;
+  total_stock: number;
+  stock_value_cost: number;
+  children: PricingRow[];
+  subgroups: PricingGroup[];
+}
+
+export interface PricingSummary {
+  total_articles: number;
+  priced_articles: number;
+  costed_articles: number;
+  revenue: number;
+  profit: number;
+  cost_total: number;
+  wb_expenses: number;
+  markup_pct: number | null;
+  cost_share_pct: number | null;
+  margin_pct: number;
+  wb_stock_units: number;
+  total_stock_units: number;
+  stock_value_cost: number;
+  anomalies: number;
+}
+
+export interface PricingResponse {
+  group_by: string;
+  data_groups: PricingGroup[];
+  data_rows: PricingRow[];
+  summary: PricingSummary;
+  price_synced_at: string | null;
+  has_bdr: boolean;
+}
+
+export interface PricingAiResponse {
+  html: string;
+  model: string;
+  articles_analyzed: number;
+  items_sent?: number;
+  sklejki_sent?: number;
+  singles_sent?: number;
+  dynamics_window?: Record<string, string> | null;
+  generated_at?: string;
 }
 
 export interface FunnelSummary {
@@ -633,6 +773,28 @@ export interface ExpenseCategoryPie {
   count?: number;
 }
 
+export interface ExpenseTypeGroup {
+  type: string | null;       // counterparty primary_type (null = «Без контрагента»)
+  type_label: string;        // localized label
+  value: number;
+  count: number;
+  categories: ExpenseCategoryPie[];  // level-2 breakdown within the type
+}
+
+export interface DailyIncomeByType {
+  date: string;
+  marketplace: number;
+  financing: number;
+  other: number;
+}
+
+export interface IncomeTypeSlice {
+  key: string;   // 'marketplace' | 'financing' | 'other'
+  name: string;  // localized label
+  value: number;
+  count: number;
+}
+
 export interface IncomeCounterparty {
   name: string;
   key: string;
@@ -652,7 +814,10 @@ export interface DashboardSummary {
   inbox_count: number;
   accounts_count: number;
   daily_cashflow: DailyCashflowRow[];
+  daily_income_by_type: DailyIncomeByType[];
+  income_by_type: IncomeTypeSlice[];
   expense_by_category: ExpenseCategoryPie[];
+  expense_by_type: ExpenseTypeGroup[];
   income_counterparties: IncomeCounterparty[];
   date_from: string;
   date_to: string;
@@ -843,6 +1008,18 @@ export interface ProductTag {
   color: string;
 }
 
+export interface ProductSubcategory {
+  id: number;
+  name: string;
+  color: string;
+}
+
+export interface DetectedSize {
+  raw_size: string;
+  display_name: string;
+  count: number;
+}
+
 export interface ProductTagMappingPayload {
   nm_ids: number[];
   add_tags: number[];
@@ -863,6 +1040,7 @@ export interface FunnelProduct {
   nm_id: number;
   brand: string;
   vendor_code: string;
+  subject: string;
   imt_id: number | null;
 }
 
@@ -1587,6 +1765,7 @@ export interface AssemblyRequestItem {
   barcode: string;
   quantity: number;
   product_name?: string;
+  article?: string | null;
   brand?: string;
   stock_quantity: number;
 }
@@ -1646,6 +1825,28 @@ export interface AssemblyRequest {
   source_vehicle_order_no?: string | null;
   /** Предзаявка (бронь) на моно: целая моно-паллета на WB-склад без лимита приёмки (⌛). */
   is_prebooking?: boolean;
+  /** ФФ предложил правку состава, ожидает согласования в DDS («Согласовать»/«Отказать») */
+  ff_review_pending?: boolean;
+  ff_proposed_items?: FfProposedItem[] | null;
+  ff_proposed_at?: string | null;
+  ff_proposed_by?: string | null;
+  /** совместная поставка: эта сборка делит WB FBO-поставку с другими (≥2 сборок на одну поставку, по одной на ФФ-источник) */
+  joint_supply?: boolean;
+  /** другие сборки той же совместной поставки (для бейджа «Совместная» и тултипа) */
+  joint_siblings?: JointSibling[] | null;
+  /** совместная готова к назначению машины: ВСЕ сборки поставки в READY и дальше (ни одной PENDING/IN_PROGRESS) */
+  joint_ready?: boolean;
+  /** сумма паллет по всем активным сборкам совместной поставки */
+  joint_total_pallets?: number | null;
+  /** сумма веса (кг) по всем активным сборкам совместной поставки (Decimal — приходит строкой) */
+  joint_total_weight_kg?: number | string | null;
+}
+
+export interface FfProposedItem {
+  barcode: string;
+  quantity: number;
+  product_name?: string | null;
+  article?: string | null;
 }
 
 export interface FfLinkInfo {
@@ -1653,6 +1854,21 @@ export interface FfLinkInfo {
   ff_request_number?: string | null;
   ff_stage_title?: string | null;
   ff_warehouse_id?: number | null;
+}
+
+/** соседняя сборка той же совместной WB-поставки (другой ФФ-источник) */
+export interface JointSibling {
+  assembly_id: number;
+  number: string;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  status: string;
+  /** паллеты сборки этого склада-источника */
+  pallets_count?: number | null;
+  /** вес паллеты (кг) этого склада-источника (Decimal — приходит строкой) */
+  pallet_weight_kg?: number | string | null;
+  /** внутренний номер заявки в ФФ-портале склада-источника */
+  ff_request_number?: string | null;
 }
 
 /** Расходящаяся позиция: наш qty vs суммарный qty привязанных заявок ФФ */
@@ -1880,6 +2096,7 @@ export interface GazelkaOrderRow {
   editable: boolean;
   linked_assembly_id: number | null;
   linked_assembly_number: string | null;
+  linked_assembly_status: string | null;
   suggested_assembly_id: number | null;
   suggested_assembly_number: string | null;
   route_number: string | null;
@@ -1922,6 +2139,68 @@ export interface GazelkaMatchResult {
 
 export interface GazelkaUnmatchResult {
   ok: boolean;
+}
+
+// ─── Migfull-portal integration (ФФ «Натали») ────────────────────────────────
+
+export interface MigfullPortalConfig {
+  configured: boolean;
+  warehouse_id: number | null;
+  warehouse_name: string | null;
+}
+
+export interface MigfullDeliveryTypeOption {
+  value: string;
+  label: string;
+}
+
+export interface MigfullShipmentPrefill {
+  number: string | null;                       // № поставки WB
+  shipment_date: string | null;                // YYYY-MM-DD
+  filter_delivery_type: 'direct' | 'transit' | 'pickup';
+  notes: string | null;
+  wb_warehouse_name: string | null;            // инфо: куда отгрузка (WB-склад)
+  assembly_number: string | null;
+}
+
+export interface MigfullOpisLine {
+  barcode: string;          // ШК короба (ITF14) или товара (EAN13)
+  name: string | null;
+  size: string | null;
+  color: string | null;
+  quantity: number;         // КОРОБОВ (для коробов) или ШТУК (россыпь)
+  is_box: boolean;          // короб?
+  units_per_box: number;
+  pieces: number;           // всего штук (инфо)
+}
+
+export interface MigfullDraftResponse {
+  eligible: boolean;                    // склад сборки == склад интеграции
+  already_sent: boolean;                // уже отправляли эту сборку
+  sent_guid: string | null;
+  sent_number: string | null;
+  prefill: MigfullShipmentPrefill;
+  delivery_types: MigfullDeliveryTypeOption[];
+  opis_lines: MigfullOpisLine[];
+  total_boxes: number;
+  total_pieces: number;
+  warnings: string[];                   // напр. «кол-во не кратно коробу»
+}
+
+export interface MigfullSendRequest {
+  filter_delivery_type: 'direct' | 'transit' | 'pickup';
+  number: string | null;
+  shipment_date: string | null;
+  notes: string | null;
+  force_resend: boolean;
+}
+
+export interface MigfullSendResult {
+  ok: boolean;
+  shipment_guid: string | null;
+  shipment_number: string | null;
+  message: string | null;
+  order_id: number | null;
 }
 
 export interface CreatedRequestBrief {
@@ -2428,6 +2707,7 @@ export interface LogisticsShipmentRow {
   shipped_date: string | null;
   shipped_at: string | null;
   anomaly_type: LogisticsAnomalyType | null;
+  via_gazelka: boolean;
 }
 
 export interface LogisticsShipmentListResponse {
@@ -2464,14 +2744,31 @@ export interface CostForecastResponse {
 
 // ─── Payment Requests ──────────────────────────────────────────────────────
 
-export type PaymentRequestStatus = 'DRAFT' | 'PENDING_REVIEW' | 'DRAFT_CREATED' | 'PAID' | 'REJECTED' | 'CANCELLED';
+export type PaymentRequestStatus = 'DRAFT' | 'PENDING_REVIEW' | 'APPROVED' | 'DRAFT_CREATED' | 'PAID' | 'REJECTED' | 'CANCELLED';
 export type PaymentRequestSource = 'MANUAL' | 'COUNTERPARTY';
 export type PaymentRequestDocType = 'INVOICE' | 'ACT';
+// «Назначение оплаты» — теперь редактируемый справочник (PaymentCategory), поэтому код — string.
+// LOGISTICS/OTHER остаются системными кодами со спец-логикой (привязка к отгрузке/банк, дефолт).
+export type PaymentRequestCategory = string;
+
+/** Строка справочника «Назначение оплаты» (управляется в модалке на странице Оплаты). */
+export interface PaymentCategory {
+  id: number;
+  code: string;
+  label: string;
+  sort_order: number;
+  is_system: boolean;
+  project_id: number | null;
+}
 
 export interface PaymentRequestRow {
   id: number;
   number: string;
   status: PaymentRequestStatus;
+  category: PaymentRequestCategory | null;
+  brand: string | null;  // бренд-атрибуция; null = «Все бренды»
+  project_id: number | null;
+  project_name: string | null;
   payee_name: string | null;
   payee_inn: string | null;
   amount: string;
@@ -2480,6 +2777,30 @@ export interface PaymentRequestRow {
   matched_transaction_id: number | null;
   doc_count: number;
   created_at: string;
+}
+
+/** Разрезанный под-документ из многостраничного файла (счёт+акт в одном PDF). */
+export interface ParsedDocument {
+  doc_type: PaymentRequestDocType;
+  filename: string;
+  mime_type: string;
+  content_b64: string;
+}
+
+export interface InvoiceParseResult {
+  payee_name: string | null;
+  payee_inn: string | null;
+  payee_kpp: string | null;
+  payee_account: string | null;
+  payee_bik: string | null;
+  payee_bank_name: string | null;
+  payee_corr_account: string | null;
+  amount: string | null;
+  purpose: string | null;
+  fields_found: string[];
+  warnings: string[];
+  /** Авто-разнесение: счёт→INVOICE, акт→ACT. Пусто, если резать нечего. */
+  documents: ParsedDocument[];
 }
 
 export interface PaymentRequestDocument {
@@ -2592,6 +2913,9 @@ export interface CounterpartyReconciliation {
 
 export interface PaymentRequestCreate {
   source: PaymentRequestSource;
+  // project_id: не передано → текущий проект; null → общая (без проекта); число → этот проект.
+  project_id?: number | null;
+  category?: PaymentRequestCategory;
   outbound_shipment_id?: number;
   outbound_shipment_ids?: number[];
   counterparty_id?: number;
@@ -2606,6 +2930,8 @@ export interface PaymentRequestCreate {
   currency?: string;
   pickup_date?: string;
   purpose?: string;
+  // Бренд-атрибуция. Опущено → «Все бренды»; null → сбросить в «Все бренды» (при PATCH).
+  brand?: string | null;
 }
 
 export interface PaymentRequestStatusPoll {
@@ -3443,15 +3769,42 @@ export interface CounterpartyListItem {
   income_cny?: number | null;
   expense_cny?: number | null;
   tx_count?: number | null;
+  /** Expense category (level-2), shown/managed in the list. */
+  cat_lvl1?: string | null;
+  cat_lvl2?: string | null;
 }
 
 export interface CounterpartyDetail extends CounterpartyListItem {
+  /** Expense category (level-2), managed on the card and propagated to transactions. */
+  cat_lvl1?: string | null;
+  cat_lvl2?: string | null;
   stats_rub: CounterpartyStats;
   stats_cny: CounterpartyStats;
   linked_warehouses: { id: number; name: string; warehouse_type?: string }[];
   linked_suppliers: { id: number; name: string }[];
   active_loans: LoanShort[];
   docs_count: number;
+}
+
+export interface SetExpenseCategoryResponse {
+  applied: number;
+  cp_key: string;
+  cat_lvl1: string | null;
+  cat_lvl2: string | null;
+}
+
+export interface BulkCategoryResponse {
+  counterparties: number;
+  transactions: number;
+}
+
+export interface CounterpartyMergeResponse {
+  target_id: number;
+  source_id: number;
+  moved: Record<string, number>;
+  fields_filled: string[];
+  inn_assigned: boolean;
+  category_action: string;
 }
 
 export type Counterparty = CounterpartyListItem;

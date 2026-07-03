@@ -29,6 +29,14 @@ function ffLinksOf(row: AssemblyRequest): FfLinkInfo[] {
     return [];
 }
 
+// Подпись-тултип бейджа «Совместная»: другие сборки той же WB-поставки.
+function jointTitle(row: AssemblyRequest): string {
+    const sibs = row.joint_siblings || [];
+    if (!sibs.length) return 'Совместная WB-поставка (несколько сборок с разных ФФ)';
+    const parts = sibs.map(s => `${s.warehouse_name || `Склад ${s.warehouse_id}`} (${s.number})`);
+    return `Совместная WB-поставка · ещё: ${parts.join(', ')}`;
+}
+
 const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
     // PENDING — legacy: больше не используется при создании, но может встретиться в истории.
     PENDING:          { label: 'В сборке',          className: 'badge-info' },
@@ -374,12 +382,18 @@ export default function AssemblyListPage() {
     // Filters
     const [warehouseId, setWarehouseId] = useState<number | ''>('');
     const [statusFilter, setStatusFilter] = useState('');
+    // Вид списка: по умолчанию «Активные» — скрываем уже принятые ВБ / закрытые /
+    // отменённые сборки (чище список). «Архив» — только они; «Все» — без фильтра.
+    const [view, setView] = useState<'active' | 'archived' | 'all'>('active');
     const [dateFrom, setDateFrom] = useState('');
     const [dateTo, setDateTo] = useState('');
     const [searchInput, setSearchInput] = useState('');
     const [search, setSearch] = useState('');
     const [brandFilter, setBrandFilter] = useState('');
     const [ffLinkFilter, setFfLinkFilter] = useState<'' | 'none' | 'linked'>('');
+    const [jointOnly, setJointOnly] = useState(false);
+    // Монотонный счётчик запросов списка — отбрасываем устаревшие ответы (см. load)
+    const loadSeq = useRef(0);
     // Пагинация/сортировка/экспорт — клиентские, через TanStackDataTable: грузим весь
     // отфильтрованный набор. Потолок = серверный кап эндпоинта (limit ≤ 500; _build_response
     // делает per-row запросы, потому кап и стоит). Если набор больше — показываем подсказку
@@ -414,28 +428,45 @@ export default function AssemblyListPage() {
     // ─── Load data ────────────────────────────────────────────────────────
 
     const load = useCallback(async () => {
+        // Гонка: debounce-поиск + смена фильтров могут пускать перекрывающиеся
+        // запросы; считаем только последний, иначе устаревший ответ перетрёт свежий.
+        const seq = ++loadSeq.current;
         setLoading(true);
         setError('');
         try {
             const resp = await api.getAssemblyRequests({
                 warehouse_id: warehouseId || undefined,
                 status: statusFilter || undefined,
+                view,
                 search: search || undefined,
                 date_from: dateFrom || undefined,
                 date_to: dateTo || undefined,
                 brand: brandFilter || undefined,
                 ff_link: ffLinkFilter || undefined,
+                joint_only: jointOnly || undefined,
                 limit: LOAD_LIMIT,
             });
+            if (seq !== loadSeq.current) return;
             setItems(resp.items);
             setTotal(resp.total);
         } catch (e: unknown) {
+            if (seq !== loadSeq.current) return;
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+        } finally {
+            if (seq === loadSeq.current) setLoading(false);
         }
-        setLoading(false);
-    }, [warehouseId, statusFilter, search, dateFrom, dateTo, brandFilter, ffLinkFilter]);
+    }, [warehouseId, statusFilter, view, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly]);
 
     useEffect(() => { load(); }, [load]);
+
+    // Автопоиск: применяем ввод через 350 мс после остановки набора — как
+    // выпадающие фильтры (мгновенно), без обязательного Enter. Enter всё ещё
+    // запускает поиск сразу (см. handleSearchKeyDown).
+    useEffect(() => {
+        if (searchInput === search) return;
+        const t = setTimeout(() => setSearch(searchInput), 350);
+        return () => clearTimeout(t);
+    }, [searchInput, search]);
 
     const handleSearchKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
@@ -674,7 +705,7 @@ export default function AssemblyListPage() {
         {
             key: 'number', label: '№',
             render: (_v, row: AssemblyRequest) => (
-                <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 500 }}>{row.number}</span>
                     {row.is_pre_distribution && (
                         <span
@@ -694,9 +725,19 @@ export default function AssemblyListPage() {
                             🅿️ Предзаявка
                         </span>
                     )}
+                    {row.ff_review_pending && (
+                        <span className="badge badge-warning" style={{ fontSize: 11 }} title="ФФ предложил правку состава — требуется согласование">
+                            ⏳ ФФ
+                        </span>
+                    )}
+                    {row.joint_supply && (
+                        <span className="badge badge-info" style={{ fontSize: 11 }} title={jointTitle(row)}>
+                            Совместная
+                        </span>
+                    )}
                 </span>
             ),
-            exportValue: (row: AssemblyRequest) => row.number,
+            exportValue: (row: AssemblyRequest) => row.joint_supply ? `${row.number} (совместная)` : row.number,
         },
         {
             key: 'status', label: 'Статус',
@@ -880,11 +921,23 @@ export default function AssemblyListPage() {
                     <div className="form-group" style={{ flex: 1, minWidth: 200 }}>
                         <input
                             className="form-input"
-                            placeholder="Поиск по номеру или поставке WB... (Enter)"
+                            placeholder="Поиск по номеру заявки или поставке WB…"
                             value={searchInput}
                             onChange={e => setSearchInput(e.target.value)}
                             onKeyDown={handleSearchKeyDown}
                         />
+                    </div>
+                    <div className="form-group">
+                        <select
+                            className="form-input"
+                            value={view}
+                            onChange={e => { setView(e.target.value as 'active' | 'archived' | 'all'); }}
+                            title="Принятые ВБ, закрытые и отменённые сборки уходят в архив"
+                        >
+                            <option value="active">Активные</option>
+                            <option value="archived">Архив</option>
+                            <option value="all">Все</option>
+                        </select>
                     </div>
                     <div className="form-group">
                         <select
@@ -930,6 +983,16 @@ export default function AssemblyListPage() {
                             <option value="">ФФ-связь: все</option>
                             <option value="none">Без связи</option>
                             <option value="linked">Со связью</option>
+                        </select>
+                    </div>
+                    <div className="form-group">
+                        <select
+                            className="form-input"
+                            value={jointOnly ? 'joint' : ''}
+                            onChange={e => { setJointOnly(e.target.value === 'joint'); }}
+                        >
+                            <option value="">Поставка: все</option>
+                            <option value="joint">Только совместные</option>
                         </select>
                     </div>
                     <div className="form-group">

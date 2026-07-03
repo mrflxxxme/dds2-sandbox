@@ -132,6 +132,9 @@ class CounterpartyListItem(CounterpartyBase):
     income_cny: Decimal | None = None
     expense_cny: Decimal | None = None
     tx_count: int | None = None
+    # Expense category (level-2) — populated by the list endpoint from the mapping.
+    cat_lvl1: str | None = None
+    cat_lvl2: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -139,12 +142,67 @@ class CounterpartyListItem(CounterpartyBase):
 class CounterpartyDetail(CounterpartyListItem):
     """Full counterparty card with stats, linked entities, docs."""
 
+    # Expense category (level-2) — managed on the card, propagated to transactions.
+    cat_lvl1: str | None = None
+    cat_lvl2: str | None = None
     stats_rub: CounterpartyStats = Field(default_factory=CounterpartyStats)
     stats_cny: CounterpartyStats = Field(default_factory=CounterpartyStats)
     linked_warehouses: list[dict] = Field(default_factory=list)
     linked_suppliers: list[dict] = Field(default_factory=list)
     active_loans: list[dict] = Field(default_factory=list)
     docs_count: int = 0
+
+
+class SetExpenseCategoryRequest(BaseModel):
+    """Set/clear the expense category on a counterparty (cat_lvl1=None clears)."""
+
+    cat_lvl1: str | None = Field(None, max_length=100)
+    cat_lvl2: str | None = Field(None, max_length=100)
+
+
+class SetExpenseCategoryResponse(BaseModel):
+    applied: int
+    cp_key: str
+    cat_lvl1: str | None = None
+    cat_lvl2: str | None = None
+
+
+class BulkCategoryRequest(BaseModel):
+    """Apply a type and/or expense category to many counterparties at once."""
+
+    ids: list[int] = Field(..., min_length=1, max_length=1000)
+    cat_lvl1: str | None = Field(None, max_length=100)
+    cat_lvl2: str | None = Field(None, max_length=100)
+    primary_type: str | None = None
+
+    @field_validator("primary_type")
+    @classmethod
+    def validate_primary_type(cls, v: str | None) -> str | None:
+        if v is not None and v not in ALLOWED_CP_TYPES:
+            raise ValueError(f"primary_type must be one of: {ALLOWED_CP_TYPES}")
+        return v
+
+
+class BulkCategoryResponse(BaseModel):
+    counterparties: int
+    transactions: int
+
+
+class CounterpartyMergeRequest(BaseModel):
+    """Merge ``source_id`` into the target counterparty (target survives)."""
+
+    source_id: int
+
+
+class CounterpartyMergeResponse(BaseModel):
+    """Summary of a merge: rows re-pointed per table + field/category outcome."""
+
+    target_id: int
+    source_id: int
+    moved: dict[str, int] = Field(default_factory=dict)
+    fields_filled: list[str] = Field(default_factory=list)
+    inn_assigned: bool = False
+    category_action: str = "none"  # moved | kept_target | none
 
 
 class CounterpartyListResponse(BaseModel):

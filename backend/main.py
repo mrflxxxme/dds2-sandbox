@@ -37,9 +37,11 @@ from backend.routers import (
     integrations_faktura,
     loans,
     localization,
+    migfull_portal,
     monitoring,
     payment_requests,
     planning,
+    pricing,
     projects,
     refs,
     reports,
@@ -511,6 +513,12 @@ app.include_router(
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
+    migfull_portal.router,
+    prefix="/api/v1",
+    tags=["MigfullPortal"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
     cost.router,
     prefix="/api/v1",
     tags=["Cost"],
@@ -538,6 +546,12 @@ app.include_router(
     funnel.router,
     prefix="/api/v1",
     tags=["Funnel"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    pricing.router,
+    prefix="/api/v1",
+    tags=["Pricing"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

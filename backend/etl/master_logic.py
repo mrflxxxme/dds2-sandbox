@@ -198,10 +198,15 @@ def apply_master_logic(
     customs_payee_accounts: set[str],  # account numbers where is_customs_payee=True
     cp_categories: dict[str, dict],  # {cp_key: {cat_lvl1, cat_lvl2}}
     overrides: dict[str, dict],  # {txn_id: {cat_lvl1, cat_lvl2}}
+    synced_accounts: set[str] | None = None,  # own-accounts whose statement we actually import
 ) -> pd.DataFrame:
     """
     Input df must have NORM_COLS.
     Returns enriched df with all master logic columns.
+
+    ``synced_accounts`` gates internal-transfer detection (see ``is_internal``
+    below). When ``None`` the legacy behaviour is used — every own-account is
+    treated as internal — kept for unit tests and ad-hoc calls.
     """
     result = df.copy()
 
@@ -229,8 +234,22 @@ def apply_master_logic(
     result["net"] = result["income"] - result["expense"]
 
     # ── is_internal ──
+    # An own-account triggers internal-transfer detection ONLY if we actually
+    # import its statement (it is a "statement owner"). A registered own-account
+    # we never sync — a "ghost" account, e.g. a WB transit account the bank API
+    # does not expose — must NOT swallow real income: a credit arriving FROM such
+    # an account is its first and only appearance in our books (the opposite leg
+    # is never imported), i.e. real cashflow, not one leg of a tracked internal
+    # movement. ``synced_accounts`` = own-accounts whose statements we import;
+    # accounts owned by the current batch count too (first-ever import). When it
+    # is None the caller opts into the legacy "every own-account is internal".
+    if synced_accounts is None:
+        internal_accounts = our_accounts
+    else:
+        batch_owners = set(result["account"].dropna().astype(str).str.strip())
+        internal_accounts = {a for a in our_accounts if a in synced_accounts or a in batch_owners}
     result["is_internal"] = (
-        result["counterparty_account"].apply(lambda a: bool(a and str(a).strip() in our_accounts)).astype(int)
+        result["counterparty_account"].apply(lambda a: bool(a and str(a).strip() in internal_accounts)).astype(int)
     )
 
     # ── is_fx ──

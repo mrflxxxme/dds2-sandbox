@@ -62,14 +62,15 @@ services:
       DB_POOL_SIZE: 5
       DB_MAX_OVERFLOW: 10
       # Тированный авто-синк ФФ (scheduler крутится в worker, SCHEDULER_ENABLED=true
-      # приходит из .env). FAST — склады с частыми заявками (5 «Газпром»/skladbot,
-      # 1 «Натали»/migfull) каждые 10 мин; SLOW — склад 2 каждые 30 мин; остальные
-      # уходят в DEFAULT (FULFILLMENT_SYNC_INTERVAL_MINUTES, по умолчанию 60).
+      # приходит из .env). FAST — склады с активной FF-интеграцией каждые 10 мин:
+      # 5 «Газпром»/skladbot, 1 «Натали»/migfull, 2 wms/wmscelicom, 12 wms 2/
+      # wmscelicom. SLOW пусто; остальные склады — DEFAULT (60 мин).
       # ВНИМАНИЕ: прод деплоится ИМЕННО этим файлом (cd-production.yml → up -d
       # docker-compose.app.yml), а не docker-compose.prod.yml — держим тут.
-      FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS: "5,1"
+      # (дублируется дефолтом backend/config.py = "5,1,2,12" на случай отсутствия env)
+      FULFILLMENT_SYNC_FAST_WAREHOUSE_IDS: "5,1,2,12"
       FULFILLMENT_SYNC_FAST_INTERVAL_MINUTES: "10"
-      FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS: "2"
+      FULFILLMENT_SYNC_SLOW_WAREHOUSE_IDS: ""
       FULFILLMENT_SYNC_SLOW_INTERVAL_MINUTES: "30"
     entrypoint: ["./entrypoint-worker.sh"]
     command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120", "--limit-max-requests", "5000"]

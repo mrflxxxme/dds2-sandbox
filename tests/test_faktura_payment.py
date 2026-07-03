@@ -38,12 +38,13 @@ def _pr() -> PaymentRequest:
 
 
 def test_build_payment_body_matches_proven_contract():
-    body = _build_payment_body(_pr(), _PAYER, "guid-1")
+    # к/с резолвится upstream (resolve_bank_db по БИК) и передаётся явно — body его прокидывает.
+    body = _build_payment_body(_pr(), _PAYER, "guid-1", corr_account="30101810400000000225")
 
     # Имена полей — строго как в проверенной /payments/validate пробе.
     assert body["payeeAccountNumber"] == "40702810900000000001"
     assert body["payeeBankBic"] == "044525225"
-    assert body["payeeBankAccount"] == "30101810000000000225"
+    assert body["payeeBankAccount"] == "30101810400000000225"
     assert body["payeeName"] == "ООО Перевозчик"
     assert body["payeeInn"] == "7700000001"
     assert body["payeeKpp"] == "770001001"
@@ -62,6 +63,23 @@ def test_build_payment_body_matches_proven_contract():
     # Старые НЕВЕРНЫЕ имена не должны просочиться.
     for bad in ("payeeAccount", "payeeBik", "payeeCorrAccount", "payeeBankName", "payerAccount", "payerBik"):
         assert bad not in body
+
+
+def test_sanitize_purpose_strips_bank_invalid_chars():
+    """Назначение → допустимый банком набор символов. Чинит «Поле "Назначение платежа"
+    содержит недопустимые символы» (реальный кейс ОПЛ-00022: длинное тире из распозналки)."""
+    import re
+
+    from backend.services.faktura_payment import _sanitize_purpose
+
+    src = "Оплата по счёту № 98 от 1 июня 2026 г. по договору Основной договор. В т.ч. НДС 5% — 3 150,00 руб."
+    out = _sanitize_purpose(src)
+    assert "—" not in out and "- 3 150,00" in out  # длинное тире → дефис
+    assert "№ 98" in out and "5%" in out            # стандартные символы сохранены
+    assert re.fullmatch(r"[0-9A-Za-zА-Яа-яЁё №%.,:;()\-+/=*!?#\"'& ]+", out)  # только допустимый набор
+    assert _sanitize_purpose("ООО «Ромашка»").count('"') == 2  # ёлочки → прямые кавычки
+    assert "\u00a0" not in _sanitize_purpose("a\u00a0b")  # неразрывный пробел убран
+    assert _sanitize_purpose(None) == "" and _sanitize_purpose("  a   b ") == "a b"
 
 
 def test_resolve_payer_does_not_guess_when_ambiguous():
@@ -84,6 +102,19 @@ def test_resolve_payer_single_account_ok():
 def test_resolve_payer_no_accounts_raises():
     with pytest.raises(ValueError):
         _resolve_payer([], None)
+
+
+def test_extract_doc_id_various_shapes():
+    from backend.services.faktura_payment import _extract_doc_id
+
+    assert _extract_doc_id({"id": "123"}) == "123"
+    assert _extract_doc_id({"docId": 456}) == "456"
+    assert _extract_doc_id({"documentId": "D-1"}) == "D-1"
+    assert _extract_doc_id({"data": {"id": "nested-7"}}) == "nested-7"
+    assert _extract_doc_id({"document": {"number": "WH-9"}}) == "WH-9"
+    assert _extract_doc_id({"status": "ok"}) is None  # ни одного известного поля
+    assert _extract_doc_id(None) is None
+    assert _extract_doc_id("not-a-dict") is None
 
 
 def test_resolve_payer_dict_currency_rur():

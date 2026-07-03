@@ -226,6 +226,8 @@ export function addWarehouseMethods(api: ApiClient) {
             date_from?: string; date_to?: string;
             sort_by?: string; sort_order?: string; limit?: number; offset?: number;
             exclude_with_assembly?: boolean;
+            /** с exclude_with_assembly: исключать только поставки, занятые сборкой этого склада-источника (совместная поставка) */
+            exclude_assembly_warehouse_id?: number;
             without_assembly?: boolean;
             partial_only?: boolean;
             excess_only?: boolean;
@@ -359,6 +361,9 @@ export function addWarehouseMethods(api: ApiClient) {
             warehouse_id?: number; counterparty_id?: number; draft_id?: number; status?: string; search?: string;
             date_from?: string; date_to?: string; brand?: string;
             ff_link?: 'none' | 'linked';
+            /** active — скрыть Принято ВБ/Закрыта/Отменена; archived — только их; all — все */
+            view?: 'active' | 'archived' | 'all';
+            joint_only?: boolean;
             limit?: number; offset?: number;
         }) {
             const query = new URLSearchParams();
@@ -386,6 +391,10 @@ export function addWarehouseMethods(api: ApiClient) {
         updateAssemblyRequest(id: number, data: AssemblyRequestUpdate) {
             return api.request<AssemblyRequest>('PUT', `/api/v1/warehouse/assembly/${id}`, data);
         },
+        /** Решение по предложенной ФФ правке состава: применить («approve») или отклонить («reject»). */
+        assemblyFfReview(id: number, action: 'approve' | 'reject') {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ff-review`, { action });
+        },
         startAssembly(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/start`);
         },
@@ -407,6 +416,10 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         shipAssembly(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ship`);
+        },
+        // Отгрузка всей совместной FBO-поставки разом (все назначенные сборки поставки).
+        shipJoint(id: number) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ship-joint`);
         },
         unassignVehicle(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/unassign-vehicle`);
@@ -759,17 +772,10 @@ export function addWarehouseMethods(api: ApiClient) {
         saveGazelkaEdit(planId: number, body: import('@/types/api').GazelkaSendRequest) {
             return api.request<import('@/types/api').GazelkaSendResult>('POST', `/api/v1/gazelka/order/${planId}/edit`, body);
         },
-        /** ТТН требует авторизацию — открываем через авторизованный fetch, затем blob-URL. */
+        /** ТТН требует авторизацию + проектный контекст — через requestBlob (правильный base URL,
+         *  Authorization, X-Project-Id, рефреш). Сырой fetch падал на проде «Failed to fetch». */
         async openGazelkaTtn(planId: number): Promise<void> {
-            const token = api.getToken();
-            const res = await fetch(`/api/v1/gazelka/order/${planId}/ttn`, {
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
-            });
-            if (!res.ok) {
-                const text = await res.text().catch(() => '');
-                throw new Error(`Ошибка ТТН: ${res.status}${text ? ' — ' + text.slice(0, 200) : ''}`);
-            }
-            const blob = await res.blob();
+            const blob = await api.requestBlob(`/api/v1/gazelka/order/${planId}/ttn`);
             const url = URL.createObjectURL(blob);
             window.open(url, '_blank');
         },
@@ -794,6 +800,41 @@ export function addWarehouseMethods(api: ApiClient) {
                 'DELETE',
                 `/api/v1/gazelka/order/${planId}/match`,
             );
+        },
+
+        // ─── Migfull-portal (ФФ «Натали») ──────────────────────────────────────
+        migfullPortalConfig() {
+            return api.request<import('@/types/api').MigfullPortalConfig>('GET', '/api/v1/migfull-portal/config');
+        },
+        migfullPortalDraft(assemblyId: number) {
+            return api.request<import('@/types/api').MigfullDraftResponse>(
+                'GET',
+                `/api/v1/migfull-portal/assembly/${assemblyId}/draft`,
+            );
+        },
+        /**
+         * Отправка заявки в портал ФФ «Натали».
+         * Повторная отправка без force_resend → backend отвечает HTTP 409. request()
+         * схлопывает статус в текст ошибки, поэтому здесь тегируем 409 в .code='conflict',
+         * чтобы модалка показала подтверждение и переслала с force_resend=true.
+         */
+        async migfullPortalSend(assemblyId: number, body: import('@/types/api').MigfullSendRequest) {
+            try {
+                return await api.request<import('@/types/api').MigfullSendResult>(
+                    'POST',
+                    `/api/v1/migfull-portal/assembly/${assemblyId}/send`,
+                    body,
+                );
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : '';
+                // Бэк на повторную отправку без force_resend отдаёт 409 с понятным detail.
+                if (!body.force_resend && /уже\s+(отправ|созда)|already|409|конфликт/i.test(msg)) {
+                    const err = new Error(msg || 'Заявка уже создавалась') as Error & { code?: string };
+                    err.code = 'conflict';
+                    throw err;
+                }
+                throw e;
+            }
         },
     };
 }

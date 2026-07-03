@@ -13,10 +13,11 @@ from backend.project_context import get_current_project
 from backend.schemas import (
     AccountSchema,
     CategoryRefCreate,
-    CounterpartyCategorySchema,
     OpeningBalanceSchema,
 )
 from backend.schemas.refs import (
+    CategoryOverrideBulkPayload,
+    CategoryRefUpdate,
     ExcludedWarehousesPayload,
     ForecastRfDefaultDaysPayload,
     ImtAliasPayload,
@@ -26,6 +27,10 @@ from backend.schemas.refs import (
     ProductStatusPayload,
     ProductTagMappingPayload,
     ProductTagSchema,
+    SizeAliasPayload,
+    SizeOverrideBulkPayload,
+    SubcategoryBulkPayload,
+    SubcategorySchema,
 )
 from backend.services import refs_service
 from backend.utils.rate_limit import rate_limit_write
@@ -67,38 +72,10 @@ async def delete_account(
     return {"ok": True}
 
 
-# ─── Counterparty Categories ──────────────────────────────────────────────────
-
-
-@router.get("/cp_categories")
-async def get_cp_categories(
-    project: Project = Depends(get_current_project),
-    db: AsyncSession = Depends(get_db),
-):
-    return await refs_service.list_cp_categories(db, project.id)
-
-
-@router.post("/cp_categories")
-async def upsert_cp_category(
-    payload: CounterpartyCategorySchema,
-    project: Project = Depends(get_current_project),
-    db: AsyncSession = Depends(get_db),
-    _: None = Depends(rate_limit_write),
-):
-    return await refs_service.upsert_cp_category(db, project.id, payload.model_dump(exclude_unset=True))
-
-
-@router.delete("/cp_categories/{cpc_id}")
-async def delete_cp_category(
-    cpc_id: int,
-    project: Project = Depends(get_current_project),
-    db: AsyncSession = Depends(get_db),
-    _: None = Depends(rate_limit_write),
-):
-    deleted = await refs_service.delete_cp_category(db, project.id, cpc_id)
-    if not deleted:
-        raise HTTPException(404, "Category not found")
-    return {"ok": True}
+# Категории контрагентов ведутся на странице «Контрагенты» (карточка/массово,
+# /counterparties/{id}/category и /counterparties/bulk_category) — отдельный
+# плоский CRUD `cp_categories` удалён. Маппинг cp_key→категория по-прежнему живёт
+# в таблице counterparty_categories и применяется в импорте (etl/service.py).
 
 
 # ─── Overrides ────────────────────────────────────────────────────────────────
@@ -173,8 +150,24 @@ async def add_category(
         payload.cat_lvl1.strip(),
         (payload.cat_lvl2 or "").strip() or None,
         direction=payload.direction.strip(),
+        is_cogs=payload.is_cogs,
     )
     return {"ok": True, "id": cat.id}
+
+
+@router.patch("/categories/{cat_id}")
+async def update_category(
+    cat_id: int,
+    payload: CategoryRefUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    """Toggle the «себестоимость» (COGS) flag on an expense category."""
+    updated = await refs_service.update_category(db, cat_id, project.id, is_cogs=payload.is_cogs)
+    if not updated:
+        raise HTTPException(404, "Category not found")
+    return {"ok": True}
 
 
 @router.delete("/categories/{cat_id}")
@@ -419,4 +412,142 @@ async def set_imt_alias(
     _: None = Depends(rate_limit_write),
 ):
     await refs_service.set_imt_alias(db, project.id, payload.imt_id, payload.name)
+    return {"ok": True}
+
+
+# ─── Sizes (overrides + aliases) ──────────────────────────────────────────────
+
+
+@router.get("/sizes")
+async def get_sizes(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Список размеров со счётчиками и текущим отображаемым именем (алиасом)."""
+    return await refs_service.get_detected_sizes(db, project.id)
+
+
+@router.get("/size-overrides")
+async def get_size_overrides(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {nm_id: size_value} mapping."""
+    return await refs_service.get_size_overrides(db, project.id)
+
+
+@router.post("/size-overrides")
+async def bulk_set_size_override(
+    payload: SizeOverrideBulkPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    await refs_service.bulk_set_size_override(db, project.id, payload.nm_ids, payload.size_value)
+    return {"ok": True}
+
+
+@router.get("/size-aliases")
+async def get_size_aliases(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {raw_size: display_name} mapping."""
+    return await refs_service.get_size_aliases(db, project.id)
+
+
+@router.patch("/size-aliases")
+async def set_size_alias(
+    payload: SizeAliasPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    await refs_service.set_size_alias(db, project.id, payload.raw_size, payload.display_name)
+    return {"ok": True}
+
+
+# ─── Category overrides (ручной перенос товара в категорию) ───────────────────
+
+
+@router.get("/category-overrides")
+async def get_category_overrides(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {nm_id: category_value} mapping."""
+    return await refs_service.get_category_overrides(db, project.id)
+
+
+@router.post("/category-overrides")
+async def bulk_set_category_override(
+    payload: CategoryOverrideBulkPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    await refs_service.bulk_set_category_override(db, project.id, payload.nm_ids, payload.category_value)
+    return {"ok": True}
+
+
+@router.get("/barcode-map")
+async def get_barcode_map(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {barcode: nm_id} — для массовой привязки по баркодам (вставка из Excel)."""
+    return await refs_service.get_barcode_nm_map(db, project.id)
+
+
+# ─── Product sub-categories (винтаж / обычные) ────────────────────────────────
+
+
+@router.get("/subcategories", response_model=list[SubcategorySchema])
+async def get_subcategories(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    return await refs_service.list_subcategories(db, project.id)
+
+
+@router.post("/subcategories", response_model=SubcategorySchema)
+async def upsert_subcategory(
+    payload: SubcategorySchema,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    return await refs_service.upsert_subcategory(db, project.id, payload.model_dump(exclude_unset=True))
+
+
+@router.delete("/subcategories/{subcategory_id}")
+async def delete_subcategory(
+    subcategory_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    deleted = await refs_service.delete_subcategory(db, project.id, subcategory_id)
+    if not deleted:
+        raise HTTPException(404, "Sub-category not found")
+    return {"ok": True}
+
+
+@router.get("/subcategories/mapping")
+async def get_subcategory_mapping(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns {nm_id: subcategory_id} (одна на товар)."""
+    return await refs_service.get_subcategory_mapping(db, project.id)
+
+
+@router.post("/subcategories/mapping")
+async def bulk_set_subcategory(
+    payload: SubcategoryBulkPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    await refs_service.bulk_set_subcategory(db, project.id, payload.nm_ids, payload.subcategory_id)
     return {"ok": True}

@@ -186,9 +186,10 @@ def test_row_from_plan_planned():
 
 
 def test_row_from_plan_linked_badge():
-    row = _row_from_plan(_PLAN, _MKTS, {"313621": (42, "ASM-431")}, editable=True)
+    row = _row_from_plan(_PLAN, _MKTS, {"313621": (42, "ASM-431", "SHIPPED")}, editable=True)
     assert row.linked_assembly_id == 42
     assert row.linked_assembly_number == "ASM-431"
+    assert row.linked_assembly_status == "Отгружена"  # статус нашей сборки
 
 
 def test_row_from_plan_active_joins():
@@ -239,6 +240,6 @@ def test_attach_suggestion_by_wb_number():
 
 
 def test_attach_suggestion_skipped_when_already_linked():
-    row = _row_from_plan(_PLAN, _MKTS, {"313621": (1, "ASM-1")}, editable=True)
+    row = _row_from_plan(_PLAN, _MKTS, {"313621": (1, "ASM-1", "READY")}, editable=True)
     _attach_suggestion(row, _PLAN, {"40299154": (7, "ASM-700")})
     assert row.suggested_assembly_id is None  # уже связана — подсказку не даём

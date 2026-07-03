@@ -7,14 +7,220 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import select, func, and_, or_, text
+from sqlalchemy import select, func, and_, or_, text, case
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from backend.models import Transaction, Account, OpeningBalance
 from backend.models.planning import Order, PlannedPayment
 from backend.cache import cached
+from backend.services.reports._cogs import cogs_include_clause, get_cogs_keys
 
 logger = logging.getLogger("dds.dashboard")
+
+# ─── Income-type split (marketplace / financing / other) ─────────────────────
+# Categorizes each cashflow income row so the dashboard can show real marketplace
+# payouts separately from financing inflows (loan tranches) and everything else.
+# Marketplace is detected first by the counterparty→category mapping (e.g. РВБ
+# carries «Маркетплейсы»); the name/purpose regex is a bootstrap fallback for
+# rows not yet categorized via /refs.
+# Short tokens are word-anchored (\m…\M) so they don't match inside unrelated
+# names (e.g. «озон» must not fire on «МОРОЗОН»); long unambiguous names are left
+# un-anchored. \m/\M are Postgres word boundaries (POSIX ARE).
+_MARKETPLACE_RE = r"вайлдберриз|wildberries|\mрвб\M|\mозон\M|\mozon\M|\mяндекс|\myandex"
+_FINANCING_RE = r"транш|займ|заём|заем|кредит"
+_INCOME_TYPE_KEYS = ("marketplace", "financing", "other")
+_INCOME_TYPE_LABELS = {"marketplace": "Маркетплейс", "financing": "Финансирование", "other": "Прочее"}
+
+
+def _income_type_case():
+    """SQL CASE → 'marketplace' | 'financing' | 'other' for an income row."""
+    cat_lower = func.lower(func.coalesce(Transaction.cat_lvl1_2, ""))
+    return case(
+        (
+            or_(
+                cat_lower.like("маркетплейс%"),
+                func.coalesce(Transaction.counterparty, "").op("~*")(_MARKETPLACE_RE),
+            ),
+            "marketplace",
+        ),
+        (
+            or_(
+                Transaction.loan_payment_type == "DISBURSEMENT",
+                func.coalesce(Transaction.purpose, "").op("~*")(_FINANCING_RE),
+                cat_lower.in_(("займы", "финансирование", "кредиты")),
+            ),
+            "financing",
+        ),
+        else_="other",
+    )
+
+
+async def _compute_income_by_type(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+    date_to: date,
+    rates_map: dict,
+    fallback_rate: Optional[float],
+) -> tuple[list[dict], list[dict]]:
+    """Daily income split into marketplace/financing/other (CNY→RUB converted).
+
+    Returns ``(daily_income_by_type, income_by_type)``. Uses the same
+    ``is_cashflow2 == 1`` filter as the rest of the dashboard, so inter-account
+    transfers (money moved between own accounts) are already excluded.
+    """
+    from backend.services import fx_service
+
+    itype = _income_type_case().label("itype")
+    result = await db.execute(
+        select(
+            func.date(Transaction.date).label("day"),
+            itype,
+            Transaction.currency,
+            func.coalesce(func.sum(Transaction.income), 0).label("income"),
+            func.count().label("cnt"),
+        )
+        .where(
+            Transaction.project_id == project_id,
+            Transaction.date >= date_from,
+            Transaction.date <= date_to,
+            Transaction.is_cashflow2 == 1,
+            Transaction.income > 0,
+        )
+        .group_by(func.date(Transaction.date), itype, Transaction.currency)
+        .order_by(func.date(Transaction.date))
+    )
+
+    daily: dict[str, dict] = {}
+    totals: dict[str, dict] = {k: {"value": 0.0, "count": 0} for k in _INCOME_TYPE_KEYS}
+    for row in result:
+        day_val = row.day
+        day_str = day_val.isoformat() if hasattr(day_val, "isoformat") else str(day_val)
+        day_date = day_val if isinstance(day_val, date) else date.fromisoformat(day_str)
+        val = float(row.income)
+        if row.currency == "CNY":
+            rate = fx_service.find_rate_for_date(rates_map, day_date) or fallback_rate or 1.0
+            val *= rate
+        key = row.itype if row.itype in _INCOME_TYPE_KEYS else "other"
+        daily.setdefault(day_str, {k: 0.0 for k in _INCOME_TYPE_KEYS})
+        daily[day_str][key] += val
+        totals[key]["value"] += val
+        totals[key]["count"] += row.cnt
+
+    daily_income_by_type = [
+        {"date": d, **{k: round(v[k], 2) for k in _INCOME_TYPE_KEYS}} for d, v in sorted(daily.items())
+    ]
+    income_by_type = [
+        {
+            "key": k,
+            "name": _INCOME_TYPE_LABELS[k],
+            "value": round(totals[k]["value"], 2),
+            "count": totals[k]["count"],
+        }
+        for k in _INCOME_TYPE_KEYS
+        if totals[k]["count"] > 0
+    ]
+    return daily_income_by_type, income_by_type
+
+
+# ─── Expense structure: 2-level (counterparty type → expense category) ───────
+_CP_TYPE_LABELS = {
+    "SUPPLIER": "Поставщик",
+    "FULFILLMENT": "Фулфилмент",
+    "CARRIER": "Перевозчик",
+    "CUSTOMS_BROKER": "Таможенный брокер",
+    "DESIGNER": "Дизайнер",
+    "LEGAL": "Юридические",
+    "LANDLORD": "Аренда",
+    "IT_SERVICE": "IT-сервисы",
+    "MARKETPLACE": "Маркетплейс",
+    "BANK": "Банк",
+    "GOVERNMENT": "Госорганы",
+    "AFFILIATED": "Аффилированные",
+    "OTHER": "Прочее",
+}
+
+
+async def _compute_expense_by_type(
+    db: AsyncSession,
+    project_id: int,
+    date_from: date,
+    date_to: date,
+    avg_cny_rate: float,
+    cogs_incl: ColumnElement[bool],
+) -> list[dict]:
+    """Expenses grouped by counterparty type (level 1) → category (level 2).
+
+    Level 1 = ``counterparty.primary_type`` (what the user sets on the card);
+    level 2 = ``cat_lvl1_2``. Transactions with no linked counterparty fall under
+    «Без контрагента». CNY→RUB via the period's average rate (as elsewhere here).
+    ``cogs_incl`` excludes «себестоимость»-категории (see _cogs.cogs_include_clause).
+    """
+    from backend.models.counterparty import Counterparty
+
+    ptype = func.coalesce(Counterparty.primary_type, text("'__none__'")).label("ptype")
+    cat = func.coalesce(func.nullif(Transaction.cat_lvl1_2, ""), text("'Без категории'")).label("cat")
+    result = await db.execute(
+        select(
+            ptype,
+            cat,
+            Transaction.currency,
+            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            func.count().label("cnt"),
+        )
+        .select_from(Transaction)
+        .join(
+            Counterparty,
+            and_(
+                Counterparty.id == Transaction.counterparty_id,
+                Counterparty.project_id == Transaction.project_id,
+                Counterparty.is_deleted == False,  # noqa: E712
+            ),
+            isouter=True,
+        )
+        .where(
+            Transaction.project_id == project_id,
+            Transaction.date >= date_from,
+            Transaction.date <= date_to,
+            Transaction.expense > 0,
+            Transaction.is_cashflow2 == 1,
+            cogs_incl,
+        )
+        .group_by(ptype, cat, Transaction.currency)
+    )
+
+    types: dict = {}
+    for row in result:
+        val = float(row.expense)
+        if row.currency == "CNY":
+            val *= avg_cny_rate
+        t = types.setdefault(row.ptype, {"value": 0.0, "count": 0, "cats": {}})
+        t["value"] += val
+        t["count"] += row.cnt
+        c = t["cats"].setdefault(row.cat, {"value": 0.0, "count": 0})
+        c["value"] += val
+        c["count"] += row.cnt
+
+    out = []
+    for pt, t in types.items():
+        label = "Без контрагента" if pt == "__none__" else _CP_TYPE_LABELS.get(pt, pt)
+        cats = sorted(
+            [{"name": k, "value": round(v["value"], 2), "count": v["count"]} for k, v in t["cats"].items()],
+            key=lambda x: x["value"],
+            reverse=True,
+        )
+        out.append(
+            {
+                "type": None if pt == "__none__" else pt,
+                "type_label": label,
+                "value": round(t["value"], 2),
+                "count": t["count"],
+                "categories": cats,
+            }
+        )
+    out.sort(key=lambda x: x["value"], reverse=True)
+    return out
 
 
 @cached(prefix="reports:dashboard", ttl=300)
@@ -32,6 +238,14 @@ async def get_dashboard_summary(
         date_to = today
     if date_from is None:
         date_from = date_to.replace(day=1)
+
+    # COGS («себестоимость») exclusion — drop COGS-flagged expense categories from
+    # every expense aggregation below (income & balances are unaffected). Fetched
+    # once; applied via CASE in mixed income/expense sums and via WHERE in the
+    # expense-only breakdowns.
+    cogs_l1, cogs_pairs = await get_cogs_keys(db, project_id)
+    cogs_incl = cogs_include_clause(cogs_l1, cogs_pairs)
+    expense_sum = func.coalesce(func.sum(case((cogs_incl, Transaction.expense), else_=0)), 0)
 
     # 1. Balances (always current — reflects actual bank state)
     balances = await get_balance(db, project_id)
@@ -51,7 +265,7 @@ async def get_dashboard_summary(
     rub_result = await db.execute(
         select(
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
-            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            expense_sum.label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= date_from,
@@ -69,7 +283,7 @@ async def get_dashboard_summary(
         select(
             func.date(Transaction.date).label("day"),
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
-            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            expense_sum.label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= date_from,
@@ -156,7 +370,7 @@ async def get_dashboard_summary(
         select(
             func.date(Transaction.date).label("day"),
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
-            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            expense_sum.label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= date_from,
@@ -175,7 +389,7 @@ async def get_dashboard_summary(
         select(
             func.date(Transaction.date).label("day"),
             func.coalesce(func.sum(Transaction.income), 0).label("income"),
-            func.coalesce(func.sum(Transaction.expense), 0).label("expense"),
+            expense_sum.label("expense"),
         ).where(
             Transaction.project_id == project_id,
             Transaction.date >= date_from,
@@ -211,6 +425,7 @@ async def get_dashboard_summary(
             Transaction.date <= date_to,
             Transaction.expense > 0,
             Transaction.is_cashflow2 == 1,
+            cogs_incl,
         ).group_by(Transaction.cat_lvl1_2, Transaction.currency).order_by(
             func.sum(Transaction.expense).desc()
         )
@@ -261,6 +476,16 @@ async def get_dashboard_summary(
             "count": row.cnt,
         })
 
+    # 9. Income split by type — marketplace / financing / other (daily + totals)
+    daily_income_by_type, income_by_type = await _compute_income_by_type(
+        db, project_id, date_from, date_to, rates_map, fallback_rate
+    )
+
+    # 10. Expense structure — 2-level: counterparty type → category
+    expense_by_type = await _compute_expense_by_type(
+        db, project_id, date_from, date_to, avg_cny_rate, cogs_incl
+    )
+
     return {
         "balance_rub": balance_rub,
         "balance_cny": balance_cny,
@@ -279,7 +504,10 @@ async def get_dashboard_summary(
         "inbox_count": inbox_count,
         "accounts_count": len(balances),
         "daily_cashflow": daily_cashflow,
+        "daily_income_by_type": daily_income_by_type,
+        "income_by_type": income_by_type,
         "expense_by_category": expense_by_category,
+        "expense_by_type": expense_by_type,
         "income_counterparties": income_counterparties,
         "date_from": date_from.isoformat(),
         "date_to": date_to.isoformat(),

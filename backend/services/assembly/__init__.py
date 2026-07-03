@@ -21,6 +21,7 @@ from .crud import (
     get_created_groups,
     list_assembly_requests,
     list_wb_warehouses,
+    prefetch_list_maps,
     update_assembly_request,
 )
 from .pre_distribution import (
@@ -47,6 +48,7 @@ from .status import (
     return_to_warehouse,
     set_status_bulk,
     ship_bulk,
+    ship_joint_supply,
     ship_request,
     start_assembly,
     unassign_vehicle,
@@ -63,6 +65,7 @@ __all__ = [
     "get_created_groups",
     "list_assembly_requests",
     "list_wb_warehouses",
+    "prefetch_list_maps",
     "update_assembly_request",
     # status
     "_check_transition",
@@ -80,6 +83,7 @@ __all__ = [
     "return_to_warehouse",
     "set_status_bulk",
     "ship_bulk",
+    "ship_joint_supply",
     "ship_request",
     "start_assembly",
     "unassign_vehicle",

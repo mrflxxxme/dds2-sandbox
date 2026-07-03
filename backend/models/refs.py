@@ -113,6 +113,9 @@ class CategoryRef(Base, SoftDeleteMixin):
     cat_lvl1: Mapped[str] = mapped_column(String(100), nullable=False)
     cat_lvl2: Mapped[str] = mapped_column(String(100), nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    # «Себестоимость товара»: расходы с такой категорией исключаются из расходных
+    # отчётов (дашборд, ДДС) — они капитализируются в стоимость товара, не опер. расход.
+    is_cogs: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     __table_args__ = (UniqueConstraint("project_id", "direction", "cat_lvl1", "cat_lvl2", name="uq_cat_ref"),)
 
@@ -187,3 +190,101 @@ class ImtAlias(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
 
     __table_args__ = (UniqueConstraint("project_id", "imt_id", name="uq_imt_alias"),)
+
+
+class SizeAlias(Base):
+    """Display name for a size value (rename + merge): raw_size → display_name."""
+
+    __tablename__ = "size_aliases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    raw_size: Mapped[str] = mapped_column(String(50), nullable=False)  # значение размера (parse/override)
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (UniqueConstraint("project_id", "raw_size", name="uq_size_alias"),)
+
+
+class SizeOverride(Base):
+    """Manual size assignment per product (overrides size parsed from article)."""
+
+    __tablename__ = "size_overrides"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    size_value: Mapped[str] = mapped_column(String(50), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "nm_id", name="uq_size_override_nm"),
+        Index("ix_size_overrides_project_nm_id", "project_id", "nm_id"),
+    )
+
+
+class CategoryOverride(Base):
+    """Manual category assignment per product (overrides WB subject in funnel grouping)."""
+
+    __tablename__ = "category_overrides"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    category_value: Mapped[str] = mapped_column(String(100), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "nm_id", name="uq_category_override_nm"),
+        Index("ix_category_overrides_project_nm_id", "project_id", "nm_id"),
+    )
+
+
+class ProductSubcategory(Base, SoftDeleteMixin):
+    """Sub-category reference within sizes (e.g. винтаж / обычные)."""
+
+    __tablename__ = "product_subcategories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(50), nullable=False)
+    color: Mapped[str] = mapped_column(String(7), nullable=False, default="#8B5CF6")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_product_subcategory_name"),)
+
+
+class ProductSubcategoryMap(Base):
+    """One sub-category per product per project (single-select)."""
+
+    __tablename__ = "product_subcategory_map"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    subcategory_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("product_subcategories.id", ondelete="CASCADE"), nullable=False
+    )
+    nm_id: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "nm_id", name="uq_product_subcategory_map_nm"),
+        Index("ix_product_subcategory_map_project_nm_id", "project_id", "nm_id"),
+    )
+
+
+class CbrBic(Base):
+    """Справочник БИК ЦБ РФ (формат ED807): БИК → корр. счёт банка + название.
+
+    Национальный справочник (без project_id, без soft-delete) — полностью обновляется
+    джобом из cbr.ru. Источник истины для к/с банка получателя в платёжке (к/с НЕ выводится
+    формулой из БИК). Резолв — `services/bank_directory.resolve_bank_db` (с фолбэком на
+    зашитый набор крупных банков, если таблица пуста / банк отсутствует)."""
+
+    __tablename__ = "cbr_bic"
+
+    bic: Mapped[str] = mapped_column(String(9), primary_key=True)
+    corr_account: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )

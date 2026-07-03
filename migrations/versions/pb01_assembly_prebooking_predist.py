@@ -10,7 +10,7 @@
     лимита приёмки), остаётся True на всю жизнь заявки.
 
 Revision ID: pb01_assembly_prebooking_predist
-Revises: mf01_migfull_shipment_orders
+Revises: pr01_wb_prices
 Create Date: 2026-07-03 00:00:00.000000
 
 """
@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "pb01_assembly_prebooking_predist"
-down_revision: str | None = "mf01_migfull_shipment_orders"
+down_revision: str | None = "pr01_wb_prices"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

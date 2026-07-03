@@ -27,6 +27,28 @@ class FfLinkInfo(BaseModel):
     ff_warehouse_id: int | None = None
 
 
+class JointSibling(BaseModel):
+    """Соседняя сборка той же совместной WB-поставки («Совместного номера»).
+
+    Совместная поставка = одна WB FBO-поставка несёт ≥2 сборок (по одной на
+    ФФ-источник, напр. wms + wms2). siblings — ДРУГИЕ сборки той же поставки
+    (без самой текущей), для бейджа/тултипа «Совместная · wms+wms2 → ASM-555».
+
+    На листе логиста из siblings строится разбивка забора: склад-источник,
+    паллеты, вес, статус и внутренний номер заявки в ФФ-портале (своя на каждый
+    склад). Поэтому здесь же pallets_count / pallet_weight_kg / ff_request_number.
+    """
+
+    assembly_id: int
+    number: str
+    warehouse_id: int
+    warehouse_name: str | None = None
+    status: str
+    pallets_count: int | None = None
+    pallet_weight_kg: Decimal | None = None
+    ff_request_number: str | None = None  # внутренний номер заявки в ФФ-портале (склада-источника)
+
+
 # ─── Request schemas ────────────────────────────────────────────────────────
 
 
@@ -147,8 +169,24 @@ class AssemblyItemResponse(BaseModel):
     barcode: str
     quantity: int
     product_name: str | None = None
+    article: str | None = None
     brand: str | None = None
     stock_quantity: int = 0
+
+
+class FfProposedItem(BaseModel):
+    """Позиция предложенной ФФ-оператором правки состава (ожидает согласования)."""
+
+    barcode: str
+    quantity: int
+    product_name: str | None = None
+    article: str | None = None
+
+
+class FfReviewAction(BaseModel):
+    """Решение по предложенной ФФ правке состава: применить или отклонить."""
+
+    action: Literal["approve", "reject"]
 
 
 class AssemblyRequestResponse(BaseModel):
@@ -213,6 +251,24 @@ class AssemblyRequestResponse(BaseModel):
     # Состав сборки расходится с привязанной заявкой(ами) ФФ по наполнению
     # (True — расхождение, False — совпадает, None — определить нельзя)
     ff_mismatch: bool | None = None
+    # ФФ предложил правку состава, ожидает согласования в DDS («Согласовать»/«Отказать»).
+    # ff_proposed_items не None ⇒ «ожидает согласования».
+    ff_review_pending: bool = False
+    ff_proposed_items: list[FfProposedItem] | None = None
+    ff_proposed_at: datetime | None = None
+    ff_proposed_by: str | None = None
+    # Совместная поставка: эта сборка делит WB FBO-поставку с другими сборками
+    # (≥2 сборок на одну поставку, по одной на ФФ-источник). joint_siblings —
+    # ДРУГИЕ сборки той же поставки (для бейджа «Совместная» и тултипа).
+    joint_supply: bool = False
+    joint_siblings: list[JointSibling] | None = None
+    # Совместная готова к логисту/назначению машины: ВСЕ активные сборки поставки
+    # в READY и дальше (ни одна не PENDING/IN_PROGRESS). Гейтит кнопку «Назначить
+    # машину» — машина назначается на всю совместную поставку, только когда готовы все.
+    joint_ready: bool = False
+    # Сумма паллет/веса по всем активным сборкам поставки (что грузим в одну машину).
+    joint_total_pallets: int | None = None
+    joint_total_weight_kg: Decimal | None = None
 
 
 class AssemblyListResponse(BaseModel):
@@ -569,6 +625,7 @@ class LogisticsShipmentRow(BaseModel):
     shipped_date: date | None = None
     shipped_at: datetime | None = None
     anomaly_type: Literal["no_cost", "overpriced", "underpriced"] | None = None
+    via_gazelka: bool = False  # отгрузка ушла через интеграцию с Газелькой
 
 
 class LogisticsShipmentListResponse(BaseModel):

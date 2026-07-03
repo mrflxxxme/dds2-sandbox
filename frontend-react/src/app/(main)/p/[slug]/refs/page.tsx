@@ -7,20 +7,19 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
 
 export default function RefsPage() {
-    const [tab, setTab] = useState<'accounts' | 'cp' | 'overrides' | 'balances' | 'categories'>('accounts');
+    const [tab, setTab] = useState<'accounts' | 'overrides' | 'balances' | 'categories'>('accounts');
 
     return (
         <div className="animate-in">
             <div className="page-header">
                 <div>
                     <h1 className="page-title">📋 Справочники</h1>
-                    <p className="page-subtitle">Счета, категории контрагентов, переопределения, начальные остатки</p>
+                    <p className="page-subtitle">Счета, переопределения, начальные остатки, справочник категорий</p>
                 </div>
             </div>
             <div style={{ display: 'flex', gap: 4, marginBottom: 20, flexWrap: 'wrap' }}>
                 {[
                     { key: 'accounts' as const, label: 'Счета' },
-                    { key: 'cp' as const, label: 'Категории контрагентов' },
                     { key: 'overrides' as const, label: 'Переопределения' },
                     { key: 'balances' as const, label: 'Начальные остатки' },
                     { key: 'categories' as const, label: '📂 Справочник категорий' },
@@ -30,7 +29,6 @@ export default function RefsPage() {
                 ))}
             </div>
             {tab === 'accounts' && <AccountsTab />}
-            {tab === 'cp' && <CpCategoriesTab />}
             {tab === 'overrides' && <OverridesTab />}
             {tab === 'balances' && <BalancesTab />}
             {tab === 'categories' && <CategoriesTab />}
@@ -113,65 +111,6 @@ function AccountsTab() {
                 ]}
                 data={data}
                 emptyText="Нет счетов"
-                enableSorting
-                enablePagination={false}
-            />
-        </div>
-    );
-}
-
-/* ─── CP Categories ─── */
-function CpCategoriesTab() {
-    const [data, setData] = useState<any[]>([]);
-    const [showForm, setShowForm] = useState(false);
-    const [form, setForm] = useState({ cp_key: '', cp_name: '', cat_lvl1: '', cat_lvl2: '', note: '' });
-    const [msg, setMsg] = useState('');
-    const { canEdit } = usePermissions();
-
-    useEffect(() => { load(); }, []);
-    const load = async () => { try { setData(await api.getCpCategories()); } catch { } };
-    const save = async () => {
-        try { await api.upsertCpCategory(form); setMsg('✅ Сохранено!'); setShowForm(false); load(); } catch (e: any) { setMsg(e.message); }
-    };
-    const del = async (id: number) => {
-        if (!confirm('Удалить?')) return;
-        try { await api.deleteCpCategory(id); load(); } catch (e: any) { setMsg(e.message); }
-    };
-
-    return (
-        <div className="glass-card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Категории контрагентов ({data.length})</h3>
-                <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn btn-secondary btn-sm" onClick={() => exportToExcel(data, 'cp_categories')}>📥 Excel</button>
-                    {canEdit() && <button className="btn btn-primary btn-sm" onClick={() => setShowForm(!showForm)}>+ Добавить</button>}
-                </div>
-            </div>
-            {msg && <div style={{ color: 'var(--color-success)', fontSize: 13, marginBottom: 8 }}>{msg}</div>}
-
-            {showForm && (
-                <div style={{ background: 'var(--color-bg-input)', padding: 16, borderRadius: 8, marginBottom: 16, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-                    <div className="form-group"><label className="form-label">CP Key (ИНН)</label><input className="form-input" value={form.cp_key} onChange={e => setForm({ ...form, cp_key: e.target.value })} /></div>
-                    <div className="form-group"><label className="form-label">Название</label><input className="form-input" value={form.cp_name} onChange={e => setForm({ ...form, cp_name: e.target.value })} /></div>
-                    <div className="form-group"><label className="form-label">Примечание</label><input className="form-input" value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} /></div>
-                    <div className="form-group"><label className="form-label">Категория 1</label><input className="form-input" value={form.cat_lvl1} onChange={e => setForm({ ...form, cat_lvl1: e.target.value })} /></div>
-                    <div className="form-group"><label className="form-label">Категория 2</label><input className="form-input" value={form.cat_lvl2} onChange={e => setForm({ ...form, cat_lvl2: e.target.value })} /></div>
-                    <div style={{ paddingTop: 24 }}><button className="btn btn-primary btn-sm" onClick={save}>💾 Сохранить</button></div>
-                </div>
-            )}
-
-            <TanStackDataTable
-                columns={[
-                    { key: 'id', label: 'ID' },
-                    { key: 'cp_key', label: 'CP Key', render: (v: any) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span> },
-                    { key: 'cp_name', label: 'Имя' },
-                    { key: 'cat_lvl1', label: 'Категория 1' },
-                    { key: 'cat_lvl2', label: 'Категория 2' },
-                    { key: 'note', label: 'Примечание', render: (v: any) => <span style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>{v}</span> },
-                    { key: '_actions', label: '', render: (_v: any, row: any) => <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(row.id)}>✕</button>, sortable: false },
-                ]}
-                data={data}
-                emptyText="Нет категорий"
                 enableSorting
                 enablePagination={false}
             />
@@ -285,8 +224,20 @@ function CategoriesTab() {
         if (!confirm('Удалить?')) return;
         try { await api.deleteCategoryRef(id); load(); } catch (e: any) { setMsg(e.message); }
     };
+    const toggleCogs = async (row: any) => {
+        try { await api.updateCategoryRef(row.id, !row.is_cogs); setMsg('✅ Сохранено!'); load(); } catch (e: any) { setMsg(e.message); }
+    };
 
     const filtered = data.filter(c => c.direction === dir);
+    const cogsCol: Column = {
+        key: 'is_cogs', label: 'Себестоимость', sortable: false,
+        render: (_v: any, row: any) => (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }} title="Расходы этой категории исключаются из расходных отчётов (себестоимость товара)">
+                <input type="checkbox" checked={!!row.is_cogs} disabled={!canEdit()} onChange={() => toggleCogs(row)} />
+                {row.is_cogs ? <span style={{ color: 'var(--color-warning)' }}>исключена</span> : ''}
+            </label>
+        ),
+    };
 
     return (
         <div className="glass-card">
@@ -322,6 +273,7 @@ function CategoriesTab() {
                     { key: 'id', label: 'ID' },
                     { key: 'cat_lvl1', label: 'Категория', render: (v: any) => <span style={{ fontWeight: 500 }}>{v}</span> },
                     { key: 'cat_lvl2', label: 'Подкатегория' },
+                    ...(dir === 'expense' ? [cogsCol] : []),
                     { key: '_actions', label: '', render: (_v: any, row: any) => <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => del(row.id)}>✕</button>, sortable: false },
                 ]}
                 data={filtered}

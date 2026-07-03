@@ -1,16 +1,30 @@
 'use client';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import type {
     PaymentRequestDetail,
     PaymentRequestStatus,
+    PaymentRequestCategory,
+    PaymentCategory,
     ShippableShipmentRow,
+    InvoiceParseResult,
+    ParsedDocument,
 } from '@/types/api';
+
+// Разнесённый под-документ от бэкенда (base64) → File для прикрепления тем же upload-путём.
+const parsedDocToFile = (d: ParsedDocument): File => {
+    const bin = atob(d.content_b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new File([bytes], d.filename, { type: d.mime_type });
+};
 
 const STATUS_LABEL: Record<PaymentRequestStatus, string> = {
     DRAFT: 'Черновик',
     PENDING_REVIEW: 'На проверке',
+    APPROVED: 'Согласовано',
     DRAFT_CREATED: 'Платёжка создана',
     PAID: 'Оплачено',
     REJECTED: 'Отклонено',
@@ -20,11 +34,24 @@ const STATUS_LABEL: Record<PaymentRequestStatus, string> = {
 const STATUS_CLASS: Record<PaymentRequestStatus, string> = {
     DRAFT: 'badge-secondary',
     PENDING_REVIEW: 'badge-warning',
+    APPROVED: 'badge-info',
     DRAFT_CREATED: 'badge-info',
     PAID: 'badge-success',
     REJECTED: 'badge-danger',
     CANCELLED: 'badge-secondary',
 };
+
+// Фолбэк-лейблы/набор системных кодов — пока справочник не загрузился с API.
+const CATEGORY_LABEL: Record<string, string> = {
+    LOGISTICS: 'Логистика',
+    PHOTO_CONTENT: 'Фотоконтент',
+    CUSTOMS: 'Таможенное оформление',
+    FULFILLMENT: 'Фулфилмент',
+    DESIGN: 'Дизайн',
+    HOUSEHOLD: 'Хозрасходы',
+    OTHER: 'Другое',
+};
+const CATEGORY_OPTIONS_FALLBACK: PaymentRequestCategory[] = ['PHOTO_CONTENT', 'DESIGN', 'FULFILLMENT', 'CUSTOMS', 'LOGISTICS', 'HOUSEHOLD', 'OTHER'];
 
 interface Props {
     /** Pre-selected outbound_shipment_id — when opened from a SHIPPED row */
@@ -33,6 +60,10 @@ interface Props {
     initialShipmentIds?: number[];
     /** Open an existing request to view (read-only) or edit (DRAFT) */
     editRequestId?: number;
+    /** Уже распознанный счёт (загружен на листе логиста) — добить пустые реквизиты без повторного парса. */
+    prefillParse?: InvoiceParseResult | null;
+    /** Файл счёта для авто-прикрепления как «Счёт» на шаге документов. */
+    prefillFile?: File | null;
     onClose: () => void;
     onSuccess?: (detail: PaymentRequestDetail) => void;
 }
@@ -40,7 +71,7 @@ interface Props {
 type Mode = 'COUNTERPARTY' | 'MANUAL';
 type Step = 'form' | 'docs' | 'done';
 
-export default function CreatePaymentRequestModal({ initialShipmentId, initialShipmentIds, editRequestId, onClose, onSuccess }: Props) {
+export default function CreatePaymentRequestModal({ initialShipmentId, initialShipmentIds, editRequestId, prefillParse, prefillFile, onClose, onSuccess }: Props) {
     const isEdit = editRequestId != null;
     const isMultiProp = (initialShipmentIds?.length ?? 0) > 0;
     const [mode, setMode] = useState<Mode>(initialShipmentId || isMultiProp ? 'COUNTERPARTY' : 'MANUAL');
@@ -70,12 +101,85 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     const [pickupDate, setPickupDate] = useState('');
     const [purpose, setPurpose] = useState('');
 
+    // ─── Назначение оплаты + проект (свободная заявка, не из листа логиста) ───────
+    const isShipmentContext = initialShipmentId != null || isMultiProp;
+    const [category, setCategory] = useState<PaymentRequestCategory>(isShipmentContext ? 'LOGISTICS' : 'OTHER');
+    // projectSel: id проекта | 'none' (без проекта) | '' (текущий — до загрузки списка).
+    const [projectSel, setProjectSel] = useState<string>('');
+    const [projects, setProjects] = useState<Array<{ id: number; name: string; slug: string }>>([]);
+    // Бренд-атрибуция (свободная заявка/правка) — список как в План-Факте; '' = «Все бренды».
+    const [brands, setBrands] = useState<string[]>([]);
+    const [brandSel, setBrandSel] = useState<string>('');
+    const params = useParams();
+    const slug = typeof params?.slug === 'string' ? params.slug : Array.isArray(params?.slug) ? params.slug[0] : '';
+
+    // ─── Справочник «Назначение оплаты» (динамический список для выпадающего меню) ──
+    const [categories, setCategories] = useState<PaymentCategory[]>([]);
+    useEffect(() => {
+        let aborted = false;
+        (async () => {
+            try { const cs = await api.listPaymentCategories(); if (!aborted) setCategories(cs); }
+            catch { /* справочник недоступен — останутся фолбэк-категории */ }
+        })();
+        return () => { aborted = true; };
+    }, []);
+    // Опции селекта; текущее значение гарантированно присутствует (удалённая кастомная при правке).
+    const categoryOptions = useMemo(() => {
+        const base = categories.length
+            ? categories.map(c => ({ code: c.code, label: c.label }))
+            : CATEGORY_OPTIONS_FALLBACK.map(c => ({ code: c, label: CATEGORY_LABEL[c] }));
+        if (category && !base.some(o => o.code === category)) {
+            base.unshift({ code: category, label: CATEGORY_LABEL[category] ?? category });
+        }
+        return base;
+    }, [categories, category]);
+    const catLabelOf = (code: string | null | undefined): string =>
+        (code ? (categories.find(c => c.code === code)?.label ?? CATEGORY_LABEL[code] ?? code) : '');
+
+    // Бренды проекта для атрибуции (источник — План-Факт/wb-brands). Свободная заявка/правка.
+    useEffect(() => {
+        if (isShipmentContext) return;
+        let aborted = false;
+        (async () => {
+            try {
+                const b = await api.getWbBrands();
+                if (!aborted) setBrands(b.filter(n => n !== 'Неопознанный Товар'));
+            } catch { /* бренды недоступны — селект скрыт */ }
+        })();
+        return () => { aborted = true; };
+    }, [isShipmentContext]);
+    // Сохранённый бренд гарантированно среди опций (при правке — даже если он исчез из продаж).
+    const brandOptions = useMemo(() => {
+        const list = brands.slice();
+        if (brandSel && !list.includes(brandSel)) list.unshift(brandSel);
+        return list;
+    }, [brands, brandSel]);
+
+    // Список проектов для выбора (только для свободной заявки). Дефолт projectSel='' = текущий проект.
+    useEffect(() => {
+        if (isShipmentContext || isEdit) return;
+        let aborted = false;
+        (async () => {
+            try {
+                const ps = await api.getProjects();
+                if (aborted) return;
+                setProjects(ps.map(p => ({ id: p.id, name: p.name, slug: p.slug })));
+            } catch { /* список проектов недоступен — останутся «текущий» и «без проекта» */ }
+        })();
+        return () => { aborted = true; };
+    }, [isShipmentContext, isEdit]);
+
     // ─── Created request ──────────────────────────────────────────────────
     const [created, setCreated] = useState<PaymentRequestDetail | null>(null);
     const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
     const [actFile, setActFile] = useState<File | null>(null);
     const invoiceRef = useRef<HTMLInputElement>(null);
     const actRef = useRef<HTMLInputElement>(null);
+
+    // ─── Распознавание счёта (опциональный помощник: PDF/Word → авто-заполнение реквизитов) ───
+    const [parsing, setParsing] = useState(false);
+    const [parseInfo, setParseInfo] = useState<string>('');
+    const invoiceParseRef = useRef<HTMLInputElement>(null);
 
     // ─── Status & errors ─────────────────────────────────────────────────
     const [creating, setCreating] = useState(false);
@@ -193,6 +297,8 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 setAmount(d.amount != null ? String(d.amount) : '');
                 setPickupDate(d.pickup_date || '');
                 setPurpose(d.purpose || '');
+                setCategory(d.category ?? 'OTHER');  // даём поправить ошибочно выбранное «Назначение»
+                setBrandSel(d.brand ?? '');           // бренд можно поправить при правке заявки
                 setLiveStatus(d.status);
                 setReadOnly(d.status !== 'DRAFT' && d.status !== 'PENDING_REVIEW');  // редактировать можно до создания платёжки в банке
                 setStep('form');
@@ -206,6 +312,75 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     const reloadCreated = useCallback(async (id: number) => {
         try { setCreated(await api.getPaymentRequest(id)); } catch { /* ignore */ }
     }, []);
+
+    // ─── Авто-подстановка корр. счёта + банка по БИК (банк требует к/с; вводить вручную лень) ──
+    const handleBikBlur = useCallback(async () => {
+        const bik = payeeBik.trim();
+        if (!/^\d{9}$/.test(bik) || payeeCorrAccount.trim()) return;  // не перетираем введённое
+        try {
+            const bank = await api.getBankByBic(bik);
+            setPayeeCorrAccount(prev => prev.trim() ? prev : bank.corr_account);
+            setPayeeBankName(prev => prev.trim() ? prev : bank.name);
+        } catch { /* банка нет в справочнике — к/с вводится вручную */ }
+    }, [payeeBik, payeeCorrAccount]);
+
+    // ─── Применить распознанный счёт к форме (общее для ручной загрузки и предзаполнения с листа) ──
+    // В потоке логиста (заявка из отгрузки) имя/ИНН/реквизиты перевозчика уже подставлены —
+    // распознанное ДОБИВАЕТ только пустые поля (fillEmptyOnly), чтобы не затереть данные контрагента.
+    const applyParsed = useCallback((r: InvoiceParseResult, fillEmptyOnly: boolean) => {
+        const fill = (val: string | null | undefined, setter: (v: (p: string) => string) => void) => {
+            if (!val) return;
+            setter(prev => (fillEmptyOnly && prev.trim()) ? prev : val);
+        };
+        fill(r.payee_name, setPayeeName);
+        fill(r.payee_inn, setPayeeInn);
+        fill(r.payee_account, setPayeeAccount);
+        fill(r.payee_bik, setPayeeBik);
+        fill(r.payee_bank_name, setPayeeBankName);
+        fill(r.payee_corr_account, setPayeeCorrAccount);
+        fill(r.payee_kpp, setPayeeKpp);
+        fill(r.amount != null ? String(r.amount) : null, setAmount);
+        fill(r.purpose, setPurpose);
+        const FIELD_RU: Record<string, string> = { payee_inn: 'ИНН', payee_bik: 'БИК', payee_account: 'р/с', payee_kpp: 'КПП', payee_name: 'получатель', amount: 'сумма', purpose: 'назначение', payee_corr_account: 'корр.счёт', payee_bank_name: 'банк' };
+        const found = r.fields_found.map(f => FIELD_RU[f] ?? f).join(', ');
+        setParseInfo(found ? `Распознано: ${found}.` + (r.warnings.length ? ' ⚠ ' + r.warnings.join('; ') : '') : (r.warnings.join('; ') || 'Не удалось распознать — заполните вручную'));
+    }, []);
+
+    // ─── Загрузить счёт → распознать реквизиты (бэкенд парсит PDF/Word/фото, фронт только подставляет) ──
+    const handleParseInvoice = async (file: File) => {
+        setParsing(true); setError(''); setParseInfo('');
+        try {
+            const r = await api.parseInvoice(file);
+            applyParsed(r, isShipmentContext);
+            // Бэкенд мог разнести счёт+акт по страницам → прикрепим разнесённые части; иначе оригинал.
+            const inv = r.documents.find(d => d.doc_type === 'INVOICE');
+            const act = r.documents.find(d => d.doc_type === 'ACT');
+            setInvoiceFile(inv ? parsedDocToFile(inv) : file);  // тот же файл прикрепится на шаге 2 — не грузить дважды
+            if (act) {
+                setActFile(parsedDocToFile(act));
+                setParseInfo(prev => `${prev} Акт распознан в файле — приложится отдельно.`.trim());
+            }
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка распознавания счёта');
+        }
+        setParsing(false);
+    };
+
+    // ─── Предзаполнение уже распознанным счётом (загружен на листе логиста) — после prefill из забора. ──
+    const prefillDoneRef = useRef(false);
+    useEffect(() => {
+        if (!prefillParse || prefillDoneRef.current) return;
+        // дождаться prefill реквизитов из выбранного забора, иначе пустые поля затрутся carrier-эффектом
+        if (initialShipmentId != null && !selectedShipment) return;
+        if (isMultiProp && multiShipments.length === 0) return;
+        prefillDoneRef.current = true;
+        applyParsed(prefillParse, true);
+        const inv = prefillParse.documents.find(d => d.doc_type === 'INVOICE');
+        const act = prefillParse.documents.find(d => d.doc_type === 'ACT');
+        if (inv) setInvoiceFile(parsedDocToFile(inv));
+        else if (prefillFile) setInvoiceFile(prefillFile);
+        if (act) setActFile(parsedDocToFile(act));
+    }, [prefillParse, prefillFile, selectedShipment, multiShipments, initialShipmentId, isMultiProp, applyParsed]);
 
     // ─── Client-side requisites validation (понятные сообщения вместо сырого 422) ──
     const validateRequisites = (): string | null => {
@@ -225,11 +400,23 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
         if (mode === 'COUNTERPARTY' && !selectedShipment) { setError('Выберите отгрузку'); return; }
         const vErr = validateRequisites();
         if (vErr) { setError(vErr); return; }
+        // Назначение + проект — только для свободной заявки (не из листа логиста, не при правке).
+        const extra: { category?: PaymentRequestCategory; project_id?: number | null; brand?: string } = {};
+        if (!isShipmentContext && !isEdit) {
+            extra.category = category;
+            if (category !== 'LOGISTICS') {
+                if (projectSel === 'none') extra.project_id = null;
+                else if (projectSel && !Number.isNaN(Number(projectSel))) extra.project_id = Number(projectSel);
+            }
+            if (brandSel) extra.brand = brandSel;  // '' = «Все бренды» → не отправляем (остаётся NULL)
+        }
         setCreating(true);
         try {
             let detail: PaymentRequestDetail;
             if (isEdit && created) {
                 detail = await api.updatePaymentRequest(created.id, {
+                    category,  // даём исправить ошибочно выбранное «Назначение» (бэкенд PATCH это принимает)
+                    brand: brandSel || null,  // '' → сбросить в «Все бренды»; иначе тег бренда
                     payee_inn: payeeInn || undefined,
                     payee_name: payeeName || undefined,
                     payee_account: payeeAccount || undefined,
@@ -275,6 +462,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
             } else {
                 detail = await api.createPaymentRequest({
                     source: 'MANUAL',
+                    ...extra,
                     payee_inn: payeeInn || undefined,
                     payee_name: payeeName || undefined,
                     payee_account: payeeAccount || undefined,
@@ -307,6 +495,10 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     const handleUploadDocs = async () => {
         if (!created) return;
         setError('');
+        // Для не-логистических заявок счёт обязателен.
+        const requireInvoice = !isShipmentContext && category !== 'LOGISTICS';
+        const hasInvoice = !!invoiceFile || created.documents.some(d => d.doc_type === 'INVOICE');
+        if (requireInvoice && !hasInvoice) { setError('Приложите файл счёта'); return; }
         setUploading(true);
         try {
             if (invoiceFile) await api.uploadPaymentRequestDocument(created.id, invoiceFile, 'INVOICE');
@@ -348,6 +540,8 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 {roRow('Банк', created.payee_bank_name)}
                 {roRow('Сумма', created.amount ? `${formatNumber(Number(created.amount), 2)} ${created.currency}` : null)}
                 {roRow('Дата забора', created.pickup_date ? formatDate(created.pickup_date) : null)}
+                {roRow('Категория', created.category ? catLabelOf(created.category) : null)}
+                {roRow('Бренд', created.brand)}
                 {roRow('Назначение', created.purpose)}
                 {created.bank_doc_id && roRow('ID платёжки', created.bank_doc_id)}
                 {created.documents.length > 0 && (
@@ -380,6 +574,18 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     // Shared requisites grid — used by both «Выбрать отгрузку» (pre-filled) and «Ввести вручную».
     const requisitesGrid = (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            {/* Распознавание из файла/фото счёта — доступно во всех потоках создания (в т.ч. у логиста);
+                в потоке отгрузки добивает только пустые реквизиты перевозчика (см. handleParseInvoice). */}
+            {!isEdit && (
+                <div style={{ gridColumn: '1 / -1' }}>
+                    <button type="button" className="btn btn-secondary btn-sm" onClick={() => invoiceParseRef.current?.click()} disabled={parsing}>
+                        {parsing ? 'Распознаю...' : '📄 Загрузить счёт или фото → распознать реквизиты'}
+                    </button>
+                    <input ref={invoiceParseRef} type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,.heic" style={{ display: 'none' }}
+                        onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleParseInvoice(f); }} />
+                    {parseInfo && <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6 }}>{parseInfo}</div>}
+                </div>
+            )}
             <div className="form-group" style={{ margin: 0 }}>
                 <label className="form-label">Наименование получателя *</label>
                 <input className="form-input" value={payeeName} onChange={e => setPayeeName(e.target.value)} placeholder="ООО «Транспорт»" />
@@ -394,7 +600,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
             </div>
             <div className="form-group" style={{ margin: 0 }}>
                 <label className="form-label">БИК *</label>
-                <input className="form-input" value={payeeBik} onChange={e => setPayeeBik(e.target.value)} placeholder="9 цифр" maxLength={9} />
+                <input className="form-input" value={payeeBik} onChange={e => setPayeeBik(e.target.value)} onBlur={handleBikBlur} placeholder="9 цифр" maxLength={9} />
             </div>
             <div className="form-group" style={{ margin: 0, gridColumn: '1 / -1' }}>
                 <label className="form-label">Наименование банка</label>
@@ -412,10 +618,13 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 <label className="form-label">Сумма (₽) *</label>
                 <input className="form-input" type="number" min={0} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.00" />
             </div>
-            <div className="form-group" style={{ margin: 0 }}>
-                <label className="form-label">Дата забора</label>
-                <input className="form-input" type="date" value={pickupDate} onChange={e => setPickupDate(e.target.value)} />
-            </div>
+            {/* «Дата забора» — поле логистики; для фото/дизайна/таможни и пр. оно не нужно. */}
+            {(isShipmentContext || category === 'LOGISTICS') && (
+                <div className="form-group" style={{ margin: 0 }}>
+                    <label className="form-label">Дата забора</label>
+                    <input className="form-input" type="date" value={pickupDate} onChange={e => setPickupDate(e.target.value)} />
+                </div>
+            )}
             <div className="form-group" style={{ margin: 0, gridColumn: '1 / -1' }}>
                 <label className="form-label">Назначение платежа</label>
                 <input className="form-input" value={purpose} onChange={e => setPurpose(e.target.value)} placeholder="Транспортные услуги по договору..." />
@@ -489,8 +698,54 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                 {/* ══════════ STEP 1: FORM ══════════ */}
                 {step === 'form' && (
                     <>
-                        {/* Mode toggle (скрыт при редактировании и при мульти-оплате за N заборов) */}
-                        {!isEdit && !isMultiProp && (
+                        {/* Назначение оплаты + проект — для свободной заявки и при правке (проект меняем
+                            только при создании: бэкенд PATCH категорию принимает, project_id — нет). */}
+                        {!isShipmentContext && (
+                        <div style={{ display: 'grid', gridTemplateColumns: category !== 'LOGISTICS' && !isEdit ? '1fr 1fr' : '1fr', gap: 12, marginBottom: 16 }}>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label">Назначение оплаты *</label>
+                                <select
+                                    className="form-input"
+                                    value={category}
+                                    onChange={e => {
+                                        const v = e.target.value as PaymentRequestCategory;
+                                        setCategory(v);
+                                        // Не-логистика не привязывается к отгрузке → только ручной ввод.
+                                        if (v !== 'LOGISTICS') { setMode('MANUAL'); setSelectedShipment(null); setMultiShipments([]); }
+                                    }}
+                                >
+                                    {categoryOptions.map(o => <option key={o.code} value={o.code}>{o.label}</option>)}
+                                </select>
+                            </div>
+                            {category !== 'LOGISTICS' && !isEdit && (
+                                <div className="form-group" style={{ margin: 0 }}>
+                                    <label className="form-label">Проект</label>
+                                    <select className="form-input" value={projectSel} onChange={e => setProjectSel(e.target.value)}>
+                                        <option value="">— Текущий проект —</option>
+                                        {projects.filter(p => p.slug !== slug).map(p => <option key={p.id} value={String(p.id)}>{p.name}</option>)}
+                                        <option value="none">— Без проекта (общая) —</option>
+                                    </select>
+                                </div>
+                            )}
+                        </div>
+                        )}
+
+                        {/* Бренд — атрибуция расхода (как в План-Факте); «Все бренды» = общий по проекту */}
+                        {!isShipmentContext && brandOptions.length > 0 && (
+                            <div className="form-group" style={{ margin: '0 0 16px' }}>
+                                <label className="form-label">Бренд</label>
+                                <select className="form-input" value={brandSel} onChange={e => setBrandSel(e.target.value)}>
+                                    <option value="">Все бренды</option>
+                                    {brandOptions.map(b => <option key={b} value={b}>{b}</option>)}
+                                </select>
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                                    «Все бренды» — расход общий по проекту.
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Mode toggle — только для логистики (привязка к отгрузке); скрыт при правке/мульти */}
+                        {!isEdit && !isMultiProp && category === 'LOGISTICS' && (
                         <div style={{ display: 'flex', gap: 0, marginBottom: 20 }}>
                             <button
                                 className={`btn btn-sm ${mode === 'COUNTERPARTY' ? 'btn-primary' : 'btn-secondary'}`}

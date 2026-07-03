@@ -107,6 +107,18 @@ def pytest_sessionfinish(session, exitstatus):
                 f'DELETE FROM "{table}" WHERE "{col}" NOT IN %s',  # noqa: S608 — table/col come from information_schema
                 (_KEEP_PROJECT_IDS,),
             )
+        # «Общие» заявки на оплату (project_id IS NULL) НЕ ловятся фильтром выше
+        # (NULL NOT IN (...) → NULL, не TRUE) → копились бы вечно. Чистим явно,
+        # child-first (session_replication_role='replica' отключает ON DELETE CASCADE).
+        cur.execute(
+            "DELETE FROM payment_request_document WHERE payment_request_id IN "
+            "(SELECT id FROM payment_request WHERE project_id IS NULL)"
+        )
+        cur.execute(
+            "DELETE FROM payment_request_event WHERE payment_request_id IN "
+            "(SELECT id FROM payment_request WHERE project_id IS NULL)"
+        )
+        cur.execute("DELETE FROM payment_request WHERE project_id IS NULL")
         cur.execute("DELETE FROM projects WHERE id NOT IN %s", (_KEEP_PROJECT_IDS,))
         cur.execute(
             "DELETE FROM users WHERE id NOT IN (SELECT DISTINCT owner_id FROM projects WHERE owner_id IS NOT NULL) "

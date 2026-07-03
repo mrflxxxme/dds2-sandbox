@@ -56,6 +56,7 @@ class CategoryRefSchema(BaseModel):
     direction: str = "expense"
     cat_lvl1: str
     cat_lvl2: str | None = None
+    is_cogs: bool = False
 
 
 class CategoryRefCreate(BaseModel):
@@ -65,6 +66,13 @@ class CategoryRefCreate(BaseModel):
     cat_lvl2: str | None = None
     direction: str = "expense"
     sort_order: int = 0
+    is_cogs: bool = False
+
+
+class CategoryRefUpdate(BaseModel):
+    """Input: toggle the «себестоимость» (COGS) flag on a category."""
+
+    is_cogs: bool
 
 
 class ProductTagSchema(BaseModel):
@@ -114,6 +122,43 @@ class ImtAliasPayload(BaseModel):
 
     imt_id: int
     name: str
+
+
+class SizeAliasPayload(BaseModel):
+    """Rename/merge a size: raw_size → display_name (пустое имя = снять алиас)."""
+
+    raw_size: str
+    display_name: str
+
+
+class SizeOverrideBulkPayload(BaseModel):
+    """Назначить размер товарам вручную; пустое значение = снять оверрайд."""
+
+    nm_ids: list[int]
+    size_value: str
+
+
+class CategoryOverrideBulkPayload(BaseModel):
+    """Назначить категорию товарам вручную; пустое значение = снять оверрайд (вернуть предмет WB)."""
+
+    nm_ids: list[int]
+    category_value: str
+
+
+class SubcategorySchema(BaseModel):
+    """Output/upsert for ProductSubcategory."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: int | None = None
+    name: str
+    color: str = "#8B5CF6"
+
+
+class SubcategoryBulkPayload(BaseModel):
+    """Назначить ОДНУ под-категорию товарам (single-select); null = снять."""
+
+    nm_ids: list[int]
+    subcategory_id: int | None = None
 
 
 class ExcludedWarehousesPayload(BaseModel):
