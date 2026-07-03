@@ -61,7 +61,9 @@ function simulateTopUp(
         return { nm_id: pr.nmId, barcode: `bc${pr.nmId}`, vendor_code: `v${pr.nmId}`, src: { [FF]: pr.units }, tgt: { [WB]: pr.units }, package_type: pkg };
     });
     const combined = [...pbOnFf, ...candidates];
-    const norm = normalizeDraft(combined, ctx);
+    // Свежий пул на прогон: строгое округление ПИШЕТ снятые остатки в freeByNm —
+    // общий модульный ctx загрязнял бы соседние тесты.
+    const norm = normalizeDraft(combined, { ...ctx, freeByNm: {} });
     const keptUnits = norm.rows.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
     const mergedRows = mergeRows([...rows, ...norm.rows]);
     const nextPrebook = prebook
@@ -90,16 +92,16 @@ describe('дозабор предброни: консервация товара
 
         // Уехало ровно 1 целая паллета (100 шт).
         expect(keptUnits).toBe(100);
-        // A полностью консервирован: draft + prebook == исходные 85.
-        expect(reservedOf(mergedRows, 1) + reservedOf(nextPrebook, 1)).toBe(85);
-        // B: зарезервировано 15 (kept), схвачено 20 → 5 избытка НЕ зарезервированы.
+        // СТРОГИЙ режим: россыпь A (85 = 8 кор + 5) в черновик не едет и НЕ резервируется
+        // (решение юзера) — 5 шт вернулись в свободный ФФ; резерв A = 80 (целые коробы).
+        expect(reservedOf(mergedRows, 1)).toBe(80);
+        expect(reservedOf(nextPrebook, 1)).toBe(0);
+        // Кандидат B взят целыми коробами и не порезан (паллета = A 80 + B 20).
         const reservedB = reservedOf(mergedRows, 2) + reservedOf(nextPrebook, 2);
         expect(grabbed[2]).toBe(20);
-        expect(reservedB).toBe(15);
-        // 🔑 Избыток кандидата = grabbed − reserved: он остаётся СВОБОДНЫМ ФФ (не теряется).
-        const freeBafter = physicalB - reservedB;
-        expect(freeBafter).toBe(85);
+        expect(reservedB).toBe(20);
         // Физический сток B сохранён целиком: reserved + free == physical.
+        const freeBafter = physicalB - reservedB;
         expect(reservedB + freeBafter).toBe(physicalB);
         // B не должен появиться в предброни (он не был предбронью — был свободным ФФ).
         expect(reservedOf(nextPrebook, 2)).toBe(0);
@@ -112,8 +114,9 @@ describe('дозабор предброни: консервация товара
         ];
         const { mergedRows, nextPrebook, keptUnits } = simulateTopUp([], prebook, [{ nmId: 2, freeBoxes: 20 }]);
         expect(keptUnits).toBe(100); // 1 целая паллета
-        // A консервирован: часть уехала в draft, срез вернулся в предбронь; Σ == 15.
-        expect(reservedOf(mergedRows, 1) + reservedOf(nextPrebook, 1)).toBe(15);
+        // СТРОГО: некратная россыпь A (15 = 1 кор + 5) не едет и не резервируется —
+        // 5 шт на ФФ; резерв A = 10 (целый короб в составе паллеты).
+        expect(reservedOf(mergedRows, 1) + reservedOf(nextPrebook, 1)).toBe(10);
         // Никаких отрицательных/фантомных остатков.
         for (const r of [...mergedRows, ...nextPrebook]) {
             for (const v of [...Object.values(r.src), ...Object.values(r.tgt)]) expect(v).toBeGreaterThan(0);
@@ -127,8 +130,11 @@ describe('дозабор предброни: консервация товара
         const before = reservedOf(prebook, 1) + reservedOf(prebook, 2);
         const { mergedRows, nextPrebook, keptUnits } = simulateTopUp([], prebook, [{ nmId: 2, freeBoxes: 10 }]);
         const after = reservedOf(mergedRows, 1) + reservedOf(mergedRows, 2) + reservedOf(nextPrebook, 1) + reservedOf(nextPrebook, 2);
-        // Прирост брони = ровно докупленное из свободного ФФ (keptUnits − то, что и так было в предброни).
-        expect(after - before).toBe(keptUnits - 85);
+        // Прирост брони = взятый кандидат (целые коробы) МИНУС снятая на ФФ россыпь A
+        // (строгий режим: 85 = 80 кор + 5 россыпь → 5 ушло в свободный ФФ).
+        expect(keptUnits).toBe(100);
+        const reservedB = reservedOf(mergedRows, 2) + reservedOf(nextPrebook, 2);
+        expect(after - before).toBe(reservedB - 5);
         expect(after).toBeLessThanOrEqual(85 + 100); // не превысили физический сток
     });
 });
@@ -180,19 +186,23 @@ describe('«Оставить так» + normalizeAndSave-preserve: консер�
         expect(reservedOf(mergedRows, 1) + reservedOf(nextPrebook, 1)).toBe(70);
     });
 
-    it('normalizeAndSave: срез частичной паллеты уходит в ПРЕДБРОНЬ, не теряется на ФФ', () => {
+    it('normalizeAndSave: срез частичной паллеты → целые коробы в ПРЕДБРОНЬ, россыпь на ФФ', () => {
         // rows содержит частичную паллету (footprint 0.85 < 1) — normalizeDraft срежет её.
         const rows: AssemblyDraftRow[] = [
             { nm_id: 1, barcode: 'bc1', vendor_code: 'A', src: { [FF]: 85 }, tgt: { [WB]: 85 }, package_type: 'BOX' },
         ];
-        const res = normalizeDraft(rows, ctx);
+        const free: Record<number, Record<number, number>> = {};
+        const res = normalizeDraft(rows, { ...ctx, freeByNm: free });
         // Новая логика normalizeAndSave: res.dropped сливается в предбронь.
         const nextPrebook = res.dropped.length ? mergeRows([...[], ...res.dropped]) : [];
         const rowsUnits = res.rows.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
         const pbUnits = nextPrebook.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
-        expect(rowsUnits + pbUnits).toBe(85);            // ничего не потеряно
         expect(rowsUnits).toBe(0);                       // <1 паллеты → в rows не осталось
-        expect(pbUnits).toBe(85);                        // весь срез в предброни
+        // СТРОГО: 85 = 8 целых коробов (80, в предбронь на дозабор) + 5 некратных (на ФФ).
+        expect(pbUnits).toBe(80);
+        expect(res.releasedUnits).toBe(5);
+        expect(free[1]?.[Number(FF)]).toBe(5);           // россыпь вернулась в свободный ФФ
+        expect(rowsUnits + pbUnits + res.releasedUnits).toBe(85); // ничего не потеряно
     });
 });
 

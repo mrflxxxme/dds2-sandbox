@@ -27,6 +27,12 @@ export function palletFootprint(
     return fp;
 }
 
+/** Направление предброни идёт в под-вкладку «Предзаявка» (а не «Дозабить»), если склад
+ *  БЕЗ лимита приёмки (⌛ noLimit). Нет данных / лимит есть → «Дозабить» (не теряем карточку). */
+export function isPrebookingByLimit(mark?: { noLimit?: boolean } | null): boolean {
+    return mark?.noLimit === true;
+}
+
 /** Кандидат дозабора: свободные целые коробы box-SKU на конкретном ФФ. */
 export interface TopUpCandidate {
     nmId: number;

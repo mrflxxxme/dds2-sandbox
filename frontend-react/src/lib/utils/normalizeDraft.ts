@@ -20,7 +20,7 @@
  * линий ФФ→WB). Идемпотентна: повторный прогон стабилен (важно — гоняется часто).
  * Чистая функция.
  */
-import type { AssemblyDraftRow } from '@/types/api';
+import type { AssemblyDraftRow, PackageType } from '@/types/api';
 import { roundDraftRowsToWholeBoxes, roundMonoToWholeBoxes } from './assemblyRoundBoxes';
 import { buildPreviewLines, trimLinesToWholePallets, type PreviewLine } from './assemblyPreview';
 import { effectiveBoxesPerPallet, maxPalletHeightCm } from './boxPallet';
@@ -28,6 +28,9 @@ import { effectiveBoxesPerPallet, maxPalletHeightCm } from './boxPallet';
 export interface NormalizeDraftCtx {
     /** nm → кратность короба (шт/короб). null/0 — россыпь (новинка без габаритов). */
     ppbOf: (nm: number) => number | null | undefined;
+    /** nm × ФФ → кратность короба ЭТОГО склада (может отличаться: 80х160_синий —
+     *  22 на Хамзе, 30 на Газпроме). Фолбэк — ppbOf. Опциональна (тесты/легаси). */
+    ppbAt?: (nm: number, ffId: number) => number | null | undefined;
     /** nm → размер коробки «ДxШxВ». */
     boxSizeOf: (nm: number) => string | null | undefined;
     /** Ручной «коробов на паллету» по канон-размеру. */
@@ -48,6 +51,9 @@ export interface NormalizeDraftResult {
     /** Срезанные до-паллетные хвосты как строки (целые коробы, не собравшие паллету) —
      *  для предброни. Σtgt(dropped) ⊆ droppedUnits (без сырой россыпи box-округления). */
     dropped: AssemblyDraftRow[];
+    /** Некратные остатки, снятые СТРОГИМ box-округлением в свободный ФФ (не едут и
+     *  не резервируются — решение юзера). Входят в droppedUnits, но НЕ в dropped. */
+    releasedUnits: number;
 }
 
 /** Канон-подпись распределения строк (для детекта изменения / идемпотентности). */
@@ -91,6 +97,12 @@ export function normalizeDraft(
     rows: AssemblyDraftRow[],
     ctx: NormalizeDraftCtx,
 ): NormalizeDraftResult {
+    // Строки `as_is` («Оставить так» — сознательно отгруженная частичная паллета)
+    // проходят НАСКВОЗЬ без нормализации: их нельзя срезать до целых паллет —
+    // пользователь явно решил везти частичную. Всё непомеченное нормализуется,
+    // что даёт self-heal легаси-недобора при прогоне нормализатора на загрузке.
+    const asIsRows = rows.filter((r) => r.as_is === true);
+    const workRows = asIsRows.length ? rows.filter((r) => r.as_is !== true) : rows;
     // freeByNm мутируется обоими шагами округления (короб расходует пул ФФ первым,
     // моно — что осталось), поэтому ОДИН объект на оба шага.
     const freeByNm = ctx.freeByNm ?? {};
@@ -105,21 +117,29 @@ export function normalizeDraft(
         const ppb = ctx.ppbOf(nm);
         return !(ppb && ppb > 0);
     };
-    const boxed = roundDraftRowsToWholeBoxes(rows, ctx.ppbOf, freeByNm, isLoose);
-    const monoRows = roundMonoToWholeBoxes(boxed.rows, ctx.ppbOf, freeByNm, isLoose);
+    const boxed = roundDraftRowsToWholeBoxes(workRows, ctx.ppbOf, freeByNm, isLoose, ctx.ppbAt);
+    const monoRows = roundMonoToWholeBoxes(boxed.rows, ctx.ppbOf, freeByNm, isLoose, ctx.ppbAt);
 
     // 2. Целые паллеты на каждую отгрузку ФФ→WB (короб смешанные, моно ≤3 АРТИКУЛА,
     //    добор ЦЕЛЫМИ коробами). Разворачиваем в линии, режем, сворачиваем обратно.
     // `isNew` для линии = только россыпь-новинка (б/ppb): она остаётся россыпью в trim.
     // Новинка С ppb имеет upp != null → режется до целых паллет/входит в микс как обычная.
     const newcomerSet = new Set(monoRows.map((r) => r.nm_id).filter((nm) => isLoose(nm)));
-    const uppOf = (nm: number, wb: string): number | null => {
+    // upp per-ФФ: вместимость паллеты = bpp × короб ЭТОГО ФФ. Глобальный min резал
+    // физически целые паллеты мульти-кратных SKU и давал моно-паллеты, некратные
+    // коробу ФФ (PUT-шторм, адверсарное ревью).
+    const uppOf = (nm: number, wb: string, ffId?: number): number | null => {
         if (isLoose(nm)) return null;
-        const ppb = ctx.ppbOf(nm);
+        const pw = ffId != null ? ctx.ppbAt?.(nm, ffId) : null;
+        const ppb = pw && pw > 0 ? pw : ctx.ppbOf(nm);
         const bpp = effectiveBoxesPerPallet(ctx.boxSizeOf(nm), maxPalletHeightCm(wb), ctx.overrides);
         return bpp != null && ppb && ppb > 0 ? bpp * ppb : null;
     };
-    const boxOf = (nm: number): number | null => (isLoose(nm) ? null : (ctx.ppbOf(nm) ?? null));
+    const boxOf = (nm: number, ffId?: number): number | null => {
+        if (isLoose(nm)) return null;
+        const pw = ffId != null ? ctx.ppbAt?.(nm, ffId) : null;
+        return pw && pw > 0 ? pw : (ctx.ppbOf(nm) ?? null);
+    };
     const lines = buildPreviewLines(monoRows, newcomerSet);
     const trim = trimLinesToWholePallets(lines, uppOf, boxOf);
     const outRows = linesToRows(trim.kept);
@@ -130,14 +150,15 @@ export function normalizeDraft(
     // только когда счётчики «тихие», но lines↔rows мог пере-собрать раскладку (детект
     // re-pairing без дропа). Так в горячем пути нет двойной пере-сборки подписи.
     const counterChanged = boxed.changed > 0 || trim.droppedUnits > 0 || trim.removedSupplies > 0;
-    const changed = counterChanged || signature(rows) !== signature(outRows);
+    const changed = counterChanged || signature(workRows) !== signature(outRows);
 
     // droppedUnits = всё, что ушло на ФФ (box-округление моно + срез до целых паллет) =
     // Σвход − Σвыход. Точнее, чем только паллет-срез (моно-россыпь тоже на ФФ).
+    // as_is-строки не участвуют: они не нормализуются, их Σ не меняется.
     const sumTgt = (rs: AssemblyDraftRow[]) => rs.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
-    const droppedUnits = Math.max(0, sumTgt(rows) - sumTgt(outRows));
+    const droppedUnits = Math.max(0, sumTgt(workRows) - sumTgt(outRows));
 
-    return { rows: outRows, droppedUnits, changed, dropped };
+    return { rows: [...outRows, ...asIsRows], droppedUnits, changed, dropped, releasedUnits: boxed.trimmedDown };
 }
 
 export interface PrebookConsolidateResult {
@@ -166,18 +187,32 @@ export interface PrebookConsolidateResult {
 export function consolidatePrebookWholePallets(
     prebook: AssemblyDraftRow[],
     ctx: NormalizeDraftCtx,
+    /** Линии, которые НЕЛЬЗЯ выносить в черновик — остаются в предброни целиком (напр.
+     *  целые ⌛-моно-паллеты → ждут «Создать предзаявку», а не едут обычной сборкой). */
+    keepInPrebook?: (nmId: number, wbName: string, pkg: PackageType) => boolean,
 ): PrebookConsolidateResult {
     if (prebook.length === 0) return { toDraft: [], prebook, extractedUnits: 0, changed: false };
-    const uppOf = (nm: number, wb: string): number | null => {
-        const ppb = ctx.ppbOf(nm);
+    const uppOf = (nm: number, wb: string, ffId?: number): number | null => {
+        const pw = ffId != null ? ctx.ppbAt?.(nm, ffId) : null;
+        const ppb = pw && pw > 0 ? pw : ctx.ppbOf(nm);
         const bpp = effectiveBoxesPerPallet(ctx.boxSizeOf(nm), maxPalletHeightCm(wb), ctx.overrides);
         return bpp != null && ppb && ppb > 0 ? bpp * ppb : null;
     };
-    const boxOf = (nm: number): number | null => ctx.ppbOf(nm) ?? null;
-    const lines = buildPreviewLines(prebook, new Set());
+    const boxOf = (nm: number, ffId?: number): number | null => {
+        const pw = ffId != null ? ctx.ppbAt?.(nm, ffId) : null;
+        return pw && pw > 0 ? pw : (ctx.ppbOf(nm) ?? null);
+    };
+    const allLines = buildPreviewLines(prebook, new Set());
+    // Отделяем «удерживаемые» линии (предзаявка-моно) от тех, что можно консолидировать.
+    const held: PreviewLine[] = [];
+    const lines: PreviewLine[] = [];
+    for (const l of allLines) {
+        if (keepInPrebook?.(l.nmId, l.wbName, l.pkg)) held.push(l);
+        else lines.push(l);
+    }
     const trim = trimLinesToWholePallets(lines, uppOf, boxOf);
     const toDraft = linesToRows(trim.kept);
-    const prebookOut = linesToRows(trim.droppedLines);
+    const prebookOut = linesToRows([...trim.droppedLines, ...held]);
     const extractedUnits = toDraft.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
     return { toDraft, prebook: prebookOut, extractedUnits, changed: extractedUnits > 0 };
 }

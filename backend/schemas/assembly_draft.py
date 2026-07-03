@@ -26,6 +26,11 @@ class AssemblyDraftRow(BaseModel):
     # Drives grouping into AssemblyRequests on commit_draft —
     # one request per (source_ff, target_wb, package_type).
     package_type: PackageTypeStr = "BOX"
+    # Сознательно отгруженная ЧАСТИЧНАЯ паллета («Оставить так» в предброни).
+    # Такие строки нормализатор фронта НЕ трогает (не срезает до целых паллет);
+    # всё непомеченное приводится к инварианту «целые коробы + целые паллеты»
+    # при загрузке страницы (self-heal легаси-недобора).
+    as_is: bool = False
 
 
 class HandedUnitItem(BaseModel):

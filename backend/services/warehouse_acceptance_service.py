@@ -17,11 +17,12 @@ Calls WB Supplies API `POST /api/v1/acceptance/options` for a batch of
    the nearest open warehouse in the same федеральный округ; if no open WH
    in district — to any open WH (warned).
 
-Rate limit on WB API: 6 req/min. We cache the (project_id, items_hash) result
-for 5 минут — повторное нажатие кнопки в UI не дёргает API.
+Rate limit on WB API: 6 req/min. Availability кэшируется ПЕР-БАРКОД на 10 минут:
+смена количеств/состава батча/вкладки не инвалидирует соседние баркоды — живой
+вызов WB идёт только по недостающим. Distribution пересчитывается на каждый
+запрос локально (флаги — уровня баркод × склад × упаковка, qty на них не влияет).
 """
 
-import hashlib
 import json
 import logging
 from collections import defaultdict
@@ -79,7 +80,7 @@ def _is_spec_acceptance_wh(name: str | None) -> bool:
 
 logger = logging.getLogger("dds.warehouse_acceptance")
 
-CACHE_TTL_SECONDS = 300  # 5 min — WB rate limit 6 req/min
+CACHE_TTL_SECONDS = 600  # 10 min пер-баркод — WB rate limit 6 req/min, флаги меняются редко
 WAREHOUSE_NAMES_CACHE_TTL = 3600  # 1 hour — IDs are stable
 COEFFICIENTS_CACHE_TTL = 3600  # 1 hour — WB обновляет ~раз в день в 03:00 МСК
 
@@ -705,14 +706,15 @@ def _build_acceptance_limits(
 # ─── async public API ───────────────────────────────────────────────────────
 
 
-def _items_cache_key(project_id: int, items: list[dict]) -> str:
-    """Stable cache key for a batch (independent of dict order)."""
-    canonical = sorted(
-        ((it.get("nm_id"), it.get("barcode"), int(it.get("quantity", 0))) for it in items),
-        key=lambda t: (t[1] or "", t[0] or 0),
-    )
-    h = hashlib.sha1(json.dumps(canonical).encode(), usedforsecurity=False).hexdigest()[:16]
-    return f"wb:acceptance:{project_id}:{h}"
+def _barcode_cache_key(project_id: int, barcode: str) -> str:
+    """Пер-баркодный ключ: доступность — свойство (баркод × склад × упаковка).
+
+    Количества и состав батча в ключе НЕ участвуют: qty на флаги WB не влияет,
+    а distribution пересчитывается на каждый запрос (`_apply_distribution`).
+    Батч-ключ с qty (до 2026-07-03) промахивался почти на каждый чих UI →
+    живой WB-вызов по ВСЕМ товарам при любом изменении → 429.
+    """
+    return f"wb:acceptance:bc:{project_id}:{barcode}"
 
 
 async def get_acceptance_closed_warehouses(project_id: int) -> set[str]:
@@ -907,41 +909,37 @@ async def check_acceptance_and_redistribute(
     if not items:
         return {"items": [], "moves": [], "checked_at": utcnow(), "cache_hit": False}
 
-    # Build payload to WB: only barcodes with non-empty distribution.
-    payload = [
-        {"barcode": it["barcode"], "quantity": max(1, sum(it.get("distribution", {}).values()) or 1)}
-        for it in items
-        if it.get("barcode")
-    ]
-    if not payload:
+    # Σ qty по баркоду — только для payload WB (поле обязательно, на флаги не влияет).
+    qty_by_barcode: dict[str, int] = defaultdict(int)
+    for it in items:
+        bc = it.get("barcode")
+        if bc:
+            qty_by_barcode[bc] += sum((it.get("distribution") or {}).values())
+    barcodes = list(qty_by_barcode)
+    if not barcodes:
         return {"items": [], "moves": [], "checked_at": utcnow(), "cache_hit": False}
 
-    # Cache lookup
-    cache_key = _items_cache_key(
-        project_id,
-        [
-            {
-                "nm_id": it.get("nm_id"),
-                "barcode": it["barcode"],
-                "quantity": sum(it.get("distribution", {}).values()),
-            }
-            for it in items
-        ],
-    )
     redis = await get_redis() if _redis_client is None else _redis_client
-    cached_raw = None
+
+    # Пер-баркодный кэш: живой вызов WB — только по недостающим баркодам.
+    availability_per_barcode: dict[str, dict[str, dict]] = {}
     if redis is not None and not force:
         try:
-            cached_raw = await redis.get(cache_key)
-        except Exception:  # pragma: no cover
-            cached_raw = None
+            cached_vals = await redis.mget([_barcode_cache_key(project_id, bc) for bc in barcodes])
+            for bc, raw_val in zip(barcodes, cached_vals):
+                if raw_val is not None:
+                    availability_per_barcode[bc] = json.loads(raw_val)
+        except Exception as e:  # pragma: no cover — graceful degradation
+            logger.warning(f"acceptance.cache_get_failed: {e}")
+            availability_per_barcode = {}
 
-    if cached_raw:
-        cached = json.loads(cached_raw)
-        # Re-apply distribution + redistribute since user might have changed it
-        return _apply_distribution(items, cached["availability_per_barcode"], cache_hit=True)
+    missing = [bc for bc in barcodes if bc not in availability_per_barcode]
+    if not missing:
+        # Distribution пересчитываем по СВЕЖИМ количествам запроса — кэш хранит
+        # только availability.
+        return _apply_distribution(items, availability_per_barcode, cache_hit=True)
 
-    # Live WB API call
+    # Live WB API call — только missing (при force=true это все баркоды батча).
     api_key = await get_wb_key(db, project_id, "wb")
     if not api_key:
         raise ValueError("WB API key not configured for this project")
@@ -950,33 +948,32 @@ async def check_acceptance_and_redistribute(
     wh_id_to_name = await _load_warehouse_id_map(client, project_id)
     raw_coefficients = await _load_coefficients(client, project_id)
     coefficients_by_canon = _aggregate_coefficients(raw_coefficients, wh_id_to_name)
+    payload = [{"barcode": bc, "quantity": max(1, qty_by_barcode[bc])} for bc in missing]
     raw = await client.get_acceptance_options(payload)
 
-    availability_per_barcode: dict[str, dict[str, dict]] = {}
+    # Каждый запрошенный баркод получает запись: не вернул WB / error → {} —
+    # негативный кэш, иначе новинки без карточки дырявили бы кэш и заставляли
+    # живой вызов на каждую проверку.
+    fetched: dict[str, dict[str, dict]] = {bc: {} for bc in missing}
     for entry in raw.get("result", []):
         bc = entry.get("barcode")
-        if not bc:
-            continue
-        if entry.get("error"):
-            availability_per_barcode[bc] = {}
+        if not bc or bc not in fetched or entry.get("error"):
             continue
         # ВАЖНО: лимит приёмки НЕ блокирует доступность (can_X = options как WB-
         # кабинет). Закрытый/отсутствующий публичный лимит ≠ «нельзя отправить» —
         # на такой склад можно слать предзаявкой. Лимит несём в *_meta
         # (free/paid/closed_days_14) — фронт рисует ⌛ «нет лимита, можно предзаявку».
-        availability_per_barcode[bc] = _flags_for_warehouse(
+        fetched[bc] = _flags_for_warehouse(
             entry.get("warehouses") or [],
             wh_id_to_name,
             coefficients_by_canon,
         )
+    availability_per_barcode.update(fetched)
 
     if redis is not None:
         try:
-            await redis.setex(
-                cache_key,
-                CACHE_TTL_SECONDS,
-                json.dumps({"availability_per_barcode": availability_per_barcode}),
-            )
+            for bc, av in fetched.items():
+                await redis.setex(_barcode_cache_key(project_id, bc), CACHE_TTL_SECONDS, json.dumps(av))
         except Exception as e:  # pragma: no cover
             logger.warning(f"acceptance.cache_set_failed: {e}")
 

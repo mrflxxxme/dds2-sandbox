@@ -395,6 +395,7 @@ async def _build_response(
         "source_draft_id": request.source_draft_id,
         "source_vehicle_id": request.source_vehicle_id,
         "is_pre_distribution": request.is_pre_distribution,
+        "is_prebooking": request.is_prebooking,
         "effective_wb_warehouse": (
             (request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else None)
             or request.wb_warehouse_name_manual
@@ -695,6 +696,7 @@ async def create_assembly_request(
     status_override: AssemblyStatus | None = None,
     source_vehicle_id: int | None = None,
     is_pre_distribution: bool = False,
+    is_prebooking: bool = False,
 ) -> AssemblyRequest:
     """
     Create assembly request from payload.
@@ -705,6 +707,10 @@ async def create_assembly_request(
       - status_override: статус создаваемой заявки (по умолч. IN_PROGRESS);
         для предраспределения = PRE_DISTRIBUTED.
       - source_vehicle_id / is_pre_distribution: привязка к машине-источнику.
+    Предзаявка (бронь) на моно, см. prebooking.py:
+      - is_prebooking: пометка «предзаявка на моно» (целая моно-паллета на WB-склад
+        без лимита приёмки). Обычная валидация стока (товар реально на ФФ), статус
+        по умолчанию IN_PROGRESS.
     FF-type check, FBO-валидация и нумерация сохраняются во всех режимах.
     """
     effective_status = status_override or AssemblyStatus.IN_PROGRESS
@@ -775,6 +781,7 @@ async def create_assembly_request(
         package_type=getattr(payload, "package_type", None) or "BOX",
         source_vehicle_id=source_vehicle_id,
         is_pre_distribution=is_pre_distribution,
+        is_prebooking=is_prebooking,
     )
     db.add(assembly_req)
     await db.flush()

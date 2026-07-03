@@ -21,6 +21,8 @@ import type {
     HandedUnitItem,
     AssemblyAttempt,
     AssemblyBulkDeleteResult,
+    AssemblyBulkStatus,
+    AssemblyBulkStatusResult,
     AssemblyHistoryEntry,
     AssemblyListResponse,
     AssemblyRequest,
@@ -33,6 +35,8 @@ import type {
     PreDistVehiclePool,
     PreDistributionCreate,
     PreDistributionCreateResult,
+    PrebookingCreate,
+    PrebookingCreateResult,
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBatchListResponse,
     BoxMultiplicityBatchRevertResponse,
@@ -429,6 +433,11 @@ export function addWarehouseMethods(api: ApiClient) {
         deleteAssemblyBulk(ids: number[]) {
             return api.request<AssemblyBulkDeleteResult>('POST', '/api/v1/warehouse/assembly/delete-bulk', { ids });
         },
+        /** Массовый перевод заявок в статус (В сборке / Готово) ОДНИМ запросом —
+         *  не съедает write-лимит, как поштучные смены. Невалидные пропускаются с причиной. */
+        setAssemblyStatusBulk(ids: number[], status: AssemblyBulkStatus) {
+            return api.request<AssemblyBulkStatusResult>('POST', '/api/v1/warehouse/assembly/status-bulk', { ids, status });
+        },
         // ─── Предраспределение машины в пути ────────────────────────────────
         /** Машины (CostOrder CUSTOMS/DISPATCHED) — кандидаты на предраспределение. */
         getPreDistVehicles() {
@@ -445,6 +454,10 @@ export function addWarehouseMethods(api: ApiClient) {
         /** Ручной перевод предраспределённых заявок машины PRE_DISTRIBUTED→IN_PROGRESS. */
         advancePreDistribution(vehicleId: number) {
             return api.request<{ advanced: number }>('POST', `/api/v1/warehouse/assembly/pre-distribution/vehicles/${vehicleId}/advance`);
+        },
+        /** Создать заявки-предзаявки на моно (is_prebooking=True) из строк предброни. */
+        createPrebooking(payload: PrebookingCreate) {
+            return api.request<PrebookingCreateResult>('POST', '/api/v1/warehouse/assembly/prebooking', payload);
         },
         assignVehicleBulk(data: {
             vehicle_info: string;

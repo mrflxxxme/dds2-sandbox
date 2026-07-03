@@ -197,6 +197,30 @@ async def _create_test_request(db_session) -> AssemblyRequest:
     return await create_assembly_request(db_session, PROJECT_ID, payload)
 
 
+async def _create_test_request_second_supply(db_session) -> AssemblyRequest:
+    """Helper: вторая валидная заявка со СВОЕЙ FBO-поставкой — у одной поставки
+    может быть только одна активная заявка, второй `_create_test_request` падает."""
+    fbo = WbFboSupply(
+        project_id=PROJECT_ID,
+        wb_supply_id="ASM-FBO-TEST-2",
+        wb_status=WbSupplyStatus.ACTIVE,
+        name="ASM_TEST FBO Supply 2",
+        warehouse_name="Электросталь",
+        created_at_wb=datetime(2026, 3, 21),
+    )
+    db_session.add(fbo)
+    await db_session.flush()
+    wh_id = await _get_fulfillment_wh_id(db_session)
+    payload = AssemblyRequestCreate(
+        warehouse_id=wh_id,
+        wb_fbo_supply_id=fbo.id,
+        pallets_count=1,
+        pallet_weight_kg=Decimal("120.00"),
+        items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=2)],
+    )
+    return await create_assembly_request(db_session, PROJECT_ID, payload)
+
+
 async def _create_second_fulfillment_wh(db_session, stock_for: list[str] | None = None) -> int:
     """Helper: create a 2nd FULFILLMENT warehouse; optionally seed stock for barcodes."""
     await db_session.execute(
@@ -1796,3 +1820,76 @@ class TestDeleteBulk:
         assert result["deleted"] == 0
         assert len(result["skipped"]) == 1
         assert result["skipped"][0]["id"] == 999999
+
+
+@pytest.mark.asyncio
+class TestSetStatusBulk:
+    """Массовый перевод статусов одним запросом: валидные переводятся,
+    невалидные пропускаются с причиной (partial success)."""
+
+    async def test_bulk_ready_updates_valid_and_skips_invalid(self, db_session):
+        from backend.services.assembly_service import set_status_bulk
+
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        # Две валидные заявки (каждая со своей поставкой WB, палеты/вес заданы) → READY.
+        r1 = await _create_test_request(db_session)
+        r2 = await _create_test_request_second_supply(db_session)
+        # Без поставки WB → mark_ready падает → skip с причиной.
+        r3 = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id, wb_fbo_supply_id=None, pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=1)],
+            ),
+        )
+
+        result = await set_status_bulk(db_session, PROJECT_ID, [r1.id, r2.id, r3.id, 999999], "READY")
+
+        assert {r.id for r in result["updated"]} == {r1.id, r2.id}
+        assert all(r.status == AssemblyStatus.READY for r in result["updated"])
+        assert all(r.actual_ready_date is not None for r in result["updated"])
+        skips = {s["id"]: s for s in result["skipped"]}
+        assert set(skips) == {r3.id, 999999}
+        assert "поставки WB" in skips[r3.id]["reason"]
+        assert skips[999999]["reason"] == "не найдена"
+        # Пропущенная заявка не тронута.
+        r3_db = await get_assembly_request(db_session, PROJECT_ID, r3.id)
+        assert r3_db is not None and r3_db.status == AssemblyStatus.IN_PROGRESS
+
+    async def test_bulk_in_progress_reopens_ready(self, db_session):
+        from backend.services.assembly_service import set_status_bulk
+
+        r1 = await _create_test_request(db_session)
+        r2 = await _create_test_request_second_supply(db_session)
+        await mark_ready(db_session, PROJECT_ID, r1.id)
+        await mark_ready(db_session, PROJECT_ID, r2.id)
+
+        result = await set_status_bulk(db_session, PROJECT_ID, [r1.id, r2.id], "IN_PROGRESS")
+
+        assert {r.id for r in result["updated"]} == {r1.id, r2.id}
+        assert all(r.status == AssemblyStatus.IN_PROGRESS for r in result["updated"])
+        # Возврат в сборку сбрасывает дату готовности (проставится заново на mark_ready).
+        assert all(r.actual_ready_date is None for r in result["updated"])
+        assert result["skipped"] == []
+
+    async def test_bulk_same_status_is_idempotent_noop(self, db_session):
+        """Уже в целевом статусе (и дубль id) → updated без skip-мусора."""
+        from backend.services.assembly_service import set_status_bulk
+
+        r1 = await _create_test_request(db_session)
+        await mark_ready(db_session, PROJECT_ID, r1.id)
+
+        result = await set_status_bulk(db_session, PROJECT_ID, [r1.id, r1.id], "READY")
+
+        assert [r.id for r in result["updated"]] == [r1.id]
+        assert result["updated"][0].status == AssemblyStatus.READY
+        assert result["skipped"] == []
+
+    async def test_bulk_rejects_unknown_target_status(self, db_session):
+        from backend.services.assembly_service import set_status_bulk
+
+        r1 = await _create_test_request(db_session)
+        with pytest.raises(ValueError, match="Недопустимый статус"):
+            await set_status_bulk(db_session, PROJECT_ID, [r1.id], "SHIPPED")

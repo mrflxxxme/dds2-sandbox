@@ -126,6 +126,12 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     is_pre_distribution: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # Предзаявка (бронь) на моно: целая моно-паллета на WB-склад БЕЗ лимита приёмки
+    # (⌛) — сдать можно только предзаявкой. Заявка создаётся сразу с этим флагом
+    # (бейдж/фильтр «предзаявка на моно»), остаётся True на всю жизнь заявки.
+    is_prebooking: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     # Created on SHIPPED, cleared on rollback
     outbound_shipment_id: Mapped[int | None] = mapped_column(

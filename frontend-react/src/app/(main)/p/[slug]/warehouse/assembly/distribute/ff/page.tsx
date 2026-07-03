@@ -91,7 +91,13 @@ export default function AssemblyFfPage() {
                 const m = new Map<number, number | null>();
                 for (const r of resp.items) {
                     let ppb: number | null = null;
-                    if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
+                    // Действующая кратность склада ЭТОЙ страницы (ffId) в приоритете —
+                    // товар физически едет его коробами (machine-first). Min по складам —
+                    // только фолбэк (давал псевдо-россыпь на целых коробах чужого склада).
+                    const own = ffId != null ? r.per_warehouse.find(p => p.warehouse_id === ffId) : undefined;
+                    if (own?.box_qty && own.box_qty > 0 && own.use_box_multiplicity) {
+                        ppb = own.box_qty;
+                    } else if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
                         ppb = r.box_qty_override;
                     } else {
                         let best = 0;
@@ -106,7 +112,7 @@ export default function AssemblyFfPage() {
             })
             .catch(() => { /* best-effort */ });
         return () => { cancelled = true; };
-    }, []);
+    }, [ffId]);
 
     const warehouseNameById = useCallback(
         (id: number) => warehouses.find(w => w.id === id)?.name ?? `Склад ${id}`,

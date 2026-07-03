@@ -16,30 +16,47 @@ describe('roundDraftRowsToWholeBoxes', () => {
         expect(free[1][10]).toBe(95); // 5 израсходовано из пула
     });
 
-    it('один склад без ФФ — россыпь сохраняется (штуки не теряем, не режем вниз)', () => {
-        const res = roundDraftRowsToWholeBoxes([row(1, { '10': 95 }, { 'Коледино': 95 })], () => 10, { 1: {} });
-        expect(res.rows[0].tgt['Коледино']).toBe(95);   // некуда консолидировать → остаётся россыпью
-        expect(sum(res.rows[0].src)).toBe(95);
-        expect(res.trimmedDown).toBe(0);
-        expect(res.looseLeft).toBe(5);
-        expect(res.changed).toBe(0);                     // строка не изменилась
+    it('СТРОГО: без ФФ некратный остаток снимается на ФФ (не резервируем, решение юзера)', () => {
+        const free: Record<number, Record<number, number>> = { 1: {} };
+        const res = roundDraftRowsToWholeBoxes([row(1, { '10': 95 }, { 'Коледино': 95 })], () => 10, free);
+        expect(res.rows[0].tgt['Коледино']).toBe(90);    // 9 целых коробов; 5 некратных → на ФФ
+        expect(sum(res.rows[0].src)).toBe(90);
+        expect(res.trimmedDown).toBe(5);
+        expect(res.looseLeft).toBe(0);
+        expect(free[1][10]).toBe(5);                     // снятое вернулось в свободный ФФ
     });
 
-    it('КОНСОЛИДАЦИЯ хвостов: огрызки по 2 складам → 1 целый короб + россыпь на одном складе', () => {
-        // 36 + 36 = 72 = 1 короб (60) + 12 россыпь; ФФ нет → 1 короб на склад с бОльшим хвостом, 12 россыпью
+    it('КОНСОЛИДАЦИЯ хвостов: огрызки по 2 складам → 1 целый короб, остаток на ФФ', () => {
+        // 36 + 36 = 72 = 1 короб (60) + 12; строгий режим: короб на склад с бОльшим
+        // хвостом, 12 некратных → в свободный ФФ (не едут, не резервируются).
+        const free: Record<number, Record<number, number>> = { 1: {} };
         const res = roundDraftRowsToWholeBoxes(
-            [row(1, { '10': 72 }, { 'Коледино': 36, 'Казань': 36 })], () => 60, { 1: {} },
+            [row(1, { '10': 72 }, { 'Коледино': 36, 'Казань': 36 })], () => 60, free,
         );
         const t = res.rows[0].tgt;
-        expect(sum(t)).toBe(72);                          // штуки целы
-        expect(sum(res.rows[0].src)).toBe(72);            // баланс
-        // Хвосты схлопнулись на ОДИН склад (1 короб + 12 россыпь = 72), вместо двух россыпь-строк.
+        expect(sum(t)).toBe(60);                          // едет ровно целый короб
+        expect(sum(res.rows[0].src)).toBe(60);            // баланс
         expect(Object.keys(t).length).toBe(1);
-        const looseCells = Object.values(t).filter((q) => q % 60 !== 0);
-        expect(looseCells.length).toBe(1);
-        expect(looseCells.reduce((s, q) => s + (q % 60), 0)).toBe(12);
+        for (const q of Object.values(t)) expect(q % 60).toBe(0);
         expect(res.consolidated).toBe(60);
-        expect(res.looseLeft).toBe(12);
+        expect(res.trimmedDown).toBe(12);
+        expect(free[1][10]).toBe(12);                     // остаток вернулся в свободный ФФ
+    });
+
+    it('МУЛЬТИ-КРАТНОСТЬ: порция меряется коробом СВОЕГО ФФ (30 на Газпроме не режется по min=22)', () => {
+        // Реальный кейс 80х160_синий: Хамза(3) ppb 22, Газпром(5) ppb 30; глобальный min 22.
+        // Порция 30@Газпром — физически ЦЕЛЫЙ короб, по min-22 выглядела бы как 22+8.
+        const ppbAt = (_nm: number, ff: number) => (ff === 3 ? 22 : ff === 5 ? 30 : null);
+        const free: Record<number, Record<number, number>> = { 1: { 3: 8 } };
+        const res = roundDraftRowsToWholeBoxes(
+            [row(1, { '3': 14, '5': 30 }, { 'Екб': 44 })], () => 22, free, undefined, ppbAt,
+        );
+        const r = res.rows[0];
+        expect(sum(r.tgt)).toBe(52);                      // хамза-порция добита 14→22, Газпром цел
+        expect(r.src['3']).toBe(22);
+        expect(r.src['5']).toBe(30);
+        expect(res.filledUp).toBe(8);
+        expect(res.trimmedDown).toBe(0);
     });
 
     it('КОНСОЛИДАЦИЯ + добор последнего короба из ФФ → 0 россыпи (кейс chashka)', () => {

@@ -542,13 +542,15 @@ describe('palletsForLines', () => {
         expect(r.fill).toBeCloseTo(0.125, 6);
     });
 
-    it('моно ≤3: до 3 артикулов собираются на паллету, >3 — разносятся (короб — без капа)', () => {
+    it('моно строго целые: ≤3 артикула собирают ЦЕЛУЮ, недобор не едет; короб — без капа', () => {
         const mk = (u: number) => ({ units: u, boxQty: BOXQTY, boxSize: SIZE }); // cap = 160
-        // 3 моно-SKU по 0.25 паллеты → собираются в 1 (≤3 артикула).
-        expect(palletsForLines([mk(40), mk(40), mk(40)], H, 'mono').pallets).toBe(1);
-        // 4 моно-SKU по 0.25 = Σ1 паллета, но ≤3/паллету → 2; короб (без капа) → 1.
+        // 3 моно-SKU вместе на ЦЕЛУЮ (60+60+40=160) → 1 паллета (≤3 артикула).
+        expect(palletsForLines([mk(60), mk(60), mk(40)], H, 'mono').pallets).toBe(1);
+        // 3 по 0.25 (Σ0.75) → целой не набирают → 0 (недобор в предбронь «Дозабить»).
+        expect(palletsForLines([mk(40), mk(40), mk(40)], H, 'mono').pallets).toBe(0);
+        // 4 по 0.25 = Σ1.0, но ≤3/паллету → top-3=0.75<1 → целой нет → 0; короб (без капа) → 1.
         const four = [mk(40), mk(40), mk(40), mk(40)];
-        expect(palletsForLines(four, H, 'mono').pallets).toBe(2);
+        expect(palletsForLines(four, H, 'mono').pallets).toBe(0);
         expect(palletsForLines(four, H, 'box').pallets).toBe(1);
     });
 

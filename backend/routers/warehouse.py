@@ -3,7 +3,7 @@
 Router: /warehouse — warehouses CRUD, stock, receipts, shipments, transfers, adjustments.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -59,7 +59,11 @@ from backend.services import (
     warehouse_defect,
     warehouse_service,
 )
-from backend.utils.rate_limit import rate_limit_write
+from backend.utils.rate_limit import (
+    rate_limit_acceptance,
+    rate_limit_acceptance_force,
+    rate_limit_write,
+)
 
 router = APIRouter(prefix="/warehouse", tags=["Warehouse"])
 
@@ -161,10 +165,11 @@ async def delete_warehouse(
 @router.post(
     "/acceptance-check",
     response_model=AcceptanceCheckResponse,
-    dependencies=[Depends(rate_limit_write)],
+    dependencies=[Depends(rate_limit_acceptance)],
 )
 async def check_wb_acceptance(
     body: AcceptanceCheckRequest,
+    request: Request,
     force: bool = Query(False, description="Skip Redis cache and call WB API live"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -174,9 +179,15 @@ async def check_wb_acceptance(
     For each {nm_id, barcode, distribution} we ask WB which warehouses accept
     the SKU (canBox/canMonopallet/canSupersafe), pick a single package_type
     per SKU, and move qty away from closed warehouses to the largest open
-    warehouse in the same федеральный округ. Cached 5 минут (WB rate limit
-    6 req/min). Pass `force=true` to bypass cache (UI «🔄 Обновить»).
+    warehouse in the same федеральный округ. Availability кэшируется пер-баркод
+    на 10 минут (WB rate limit 6 req/min) — живой вызов только по недостающим
+    баркодам; distribution пересчитывается на каждый запрос. `force=true` —
+    обойти кэш по всем баркодам батча (UI «🔄 Обновить»). Отдельный rate-limit
+    бакет (не write): фоновые проверки не выедают лимит автосейва черновиков;
+    force дополнительно гейтится под квоту WB (6/мин) — он бьёт в WB живьём.
     """
+    if force:
+        await rate_limit_acceptance_force(request)
     items = [it.model_dump() for it in body.items]
     try:
         return await warehouse_acceptance_service.check_acceptance_and_redistribute(

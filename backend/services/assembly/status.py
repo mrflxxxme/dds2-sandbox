@@ -176,6 +176,44 @@ async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> Asse
     return req
 
 
+async def set_status_bulk(db: AsyncSession, project_id: int, ids: list[int], status: str) -> dict:
+    """
+    Массовый перевод заявок в статус (IN_PROGRESS | READY) — один запрос вместо N
+    поштучных (поштучные быстро съедают общий write-лимит → 429 на середине пачки).
+
+    Каждая заявка проходит обычную одиночную транзицию (валидации/история/кэш те же:
+    start_assembly / mark_ready). Невалидные пропускаются с причиной, остальные
+    переводятся — partial success, как delete_bulk.
+
+    Возвращает {"updated": [AssemblyRequest, ...], "skipped": [{id, number, status, reason}]}.
+    """
+    from .crud import get_assembly_request
+
+    if status not in ("IN_PROGRESS", "READY"):
+        raise ValueError(f"Недопустимый статус для массового перевода: {status}")
+    updated: list[AssemblyRequest] = []
+    skipped: list[dict] = []
+    for rid in dict.fromkeys(ids):  # дедуп с сохранением порядка
+        req = await get_assembly_request(db, project_id, rid)
+        if not req:
+            skipped.append({"id": rid, "number": None, "status": None, "reason": "не найдена"})
+            continue
+        # Уже в целевом статусе — идемпотентный no-op (как start_assembly для
+        # IN_PROGRESS), а не skip с технической причиной «Cannot transition».
+        if AssemblyStatus(req.status) == AssemblyStatus(status):
+            updated.append(req)
+            continue
+        number, old = req.number, req.status
+        try:
+            if status == "IN_PROGRESS":
+                updated.append(await start_assembly(db, project_id, rid))
+            else:
+                updated.append(await mark_ready(db, project_id, rid))
+        except ValueError as e:
+            skipped.append({"id": rid, "number": number, "status": old, "reason": str(e)})
+    return {"updated": updated, "skipped": skipped}
+
+
 async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, payload: AssignVehicle) -> AssemblyRequest:
     """READY -> VEHICLE_ASSIGNED. Set vehicle_info, vehicle_assigned_at."""
     from .crud import get_assembly_request

@@ -75,6 +75,9 @@ interface DraftPreviewProps {
     newcomerNmIds: Set<number>;
     warehouses: Warehouse[];
     nmPpb: Map<number, number | null>;
+    /** Кратность per (nm × ФФ) — короб может отличаться по складам; для счётчика
+     *  «неполных коробов» порция меряется коробом СВОЕГО ФФ (min давал псевдо-россыпь). */
+    nmPpbByWh?: Map<number, Record<number, number>>;
     nmMeta: Map<number, { subject: string; brand: string }>;
     nmBoxSize: Map<number, string | null>;
     palletOverrides: Record<string, number>;
@@ -91,7 +94,7 @@ interface DraftPreviewProps {
  *  с бейджем упаковки на каждой отгрузке. Встроен внизу страницы «Черновик». */
 export default function DraftPreview({
     slug, draftId, rows, newcomerNmIds, warehouses,
-    nmPpb, nmMeta, nmBoxSize, palletOverrides, geomReady,
+    nmPpb, nmPpbByWh, nmMeta, nmBoxSize, palletOverrides, geomReady,
     ensureSaved, onToast, onReloadDraft,
 }: DraftPreviewProps) {
     const router = useRouter();
@@ -204,26 +207,34 @@ export default function DraftPreview({
         setQuery(''); setSelectedWbs(new Set()); setSelectedSubjects(new Set()); setSelectedBrands(new Set());
     }, []);
     const distinctSku = useMemo(() => new Set(allLines.map(l => l.nmId)).size, [allLines]);
+    // Кратность порции = короб ЕЁ ФФ (может отличаться по складам: 22 Хамза / 30 Газпром;
+    // глобальный min давал ПСЕВДО-россыпь на физически целых коробах чужого склада).
+    const ppbForLine = useCallback((l: PreviewLine): number | null => {
+        const pw = nmPpbByWh?.get(l.nmId)?.[l.ffId];
+        if (pw && pw > 0) return pw;
+        const k = nmPpb.get(l.nmId);
+        return k && k > 0 ? k : null;
+    }, [nmPpb, nmPpbByWh]);
     const partialBoxes = useMemo(
-        () => allLines.filter(l => { const k = nmPpb.get(l.nmId); return !!k && k > 0 && l.qty % k !== 0; }).length,
-        [allLines, nmPpb],
+        () => allLines.filter(l => { const k = ppbForLine(l); return !!k && l.qty % k !== 0; }).length,
+        [allLines, ppbForLine],
     );
     const looseUnits = useMemo(
-        () => allLines.reduce((s, l) => { const k = nmPpb.get(l.nmId); return s + (k && k > 0 && l.qty % k !== 0 ? l.qty % k : 0); }, 0),
-        [allLines, nmPpb],
+        () => allLines.reduce((s, l) => { const k = ppbForLine(l); return s + (k && l.qty % k !== 0 ? l.qty % k : 0); }, 0),
+        [allLines, ppbForLine],
     );
     // Разбивка неполных коробов: строки-отгрузки (SKU×склад), где qty не кратно коробу.
     const partialDetail = useMemo(() => {
         const out: { nmId: number; vendor: string; barcode: string; wb: string; qty: number; full: number; loose: number; k: number; isNew: boolean }[] = [];
         for (const l of allLines) {
-            const k = nmPpb.get(l.nmId);
-            if (!k || k <= 0) continue;          // без кратности короба (в т.ч. новинки россыпью) — не «неполный короб»
+            const k = ppbForLine(l);
+            if (!k) continue;                    // без кратности короба (в т.ч. новинки россыпью) — не «неполный короб»
             const loose = l.qty % k;
             if (loose === 0) continue;
             out.push({ nmId: l.nmId, vendor: l.vendor, barcode: l.barcode, wb: l.wbName, qty: l.qty, full: Math.floor(l.qty / k), loose, k, isNew: l.isNew });
         }
         return out.sort((a, b) => b.loose - a.loose);
-    }, [allLines, nmPpb]);
+    }, [allLines, ppbForLine]);
     const exportPartial = useCallback(() => {
         exportToExcel(
             partialDetail.map(d => ({ vendor: d.vendor, barcode: d.barcode, wb: d.wb, qty: d.qty, full: d.full, loose: d.loose, k: d.k })),
@@ -241,9 +252,9 @@ export default function DraftPreview({
     }, [partialDetail]);
 
     const boxesOf = useCallback((l: PreviewLine) => {
-        const k = nmPpb.get(l.nmId);
+        const k = ppbForLine(l);
         return k && k > 0 ? Math.ceil(l.qty / k) : 0;
-    }, [nmPpb]);
+    }, [ppbForLine]);
     const boxesSum = useCallback((ls: PreviewLine[]) => ls.reduce((s, l) => s + boxesOf(l), 0), [boxesOf]);
 
     // ─── Паллеты (геометрия box_size) ─────────────────────────────────────
@@ -257,7 +268,7 @@ export default function DraftPreview({
         let pallets = 0, fill = 0, unknownLines = 0, unknownUnits = 0;
         for (const [pkg, lns] of byPkg) {
             const r = palletsForLines(
-                lns.map(l => ({ units: l.qty, boxQty: nmPpb.get(l.nmId), boxSize: nmBoxSize.get(l.nmId) ?? null })),
+                lns.map(l => ({ units: l.qty, boxQty: ppbForLine(l), boxSize: nmBoxSize.get(l.nmId) ?? null })),
                 height,
                 pkg === 'BOX' ? 'box' : 'mono',
                 palletOverrides,
@@ -265,7 +276,7 @@ export default function DraftPreview({
             pallets += r.pallets; fill += r.fill; unknownLines += r.unknownLines; unknownUnits += r.unknownUnits;
         }
         return { pallets, fill, unknownLines, unknownUnits };
-    }, [nmPpb, nmBoxSize, palletOverrides]);
+    }, [ppbForLine, nmBoxSize, palletOverrides]);
 
     const palletsForFf = useCallback((ls: PreviewLine[]): PalletCount => {
         let pallets = 0, fill = 0, unknownLines = 0, unknownUnits = 0;
@@ -296,7 +307,7 @@ export default function DraftPreview({
         const out: Record<string, number> = {};
         for (const [k, ls] of groups) {
             const r = palletsForLines(
-                ls.map(l => ({ units: l.qty, boxQty: nmPpb.get(l.nmId), boxSize: nmBoxSize.get(l.nmId) ?? null })),
+                ls.map(l => ({ units: l.qty, boxQty: ppbForLine(l), boxSize: nmBoxSize.get(l.nmId) ?? null })),
                 maxPalletHeightCm(ls[0].wbName),
                 ls[0].pkg === 'BOX' ? 'box' : 'mono',
                 palletOverrides,
@@ -304,7 +315,7 @@ export default function DraftPreview({
             out[k] = Math.max(1, r.pallets);
         }
         return out;
-    }, [allLines, nmPpb, nmBoxSize, palletOverrides]);
+    }, [allLines, ppbForLine, nmBoxSize, palletOverrides]);
 
     const palletBadge = useCallback((pc: PalletCount) => {
         const avg = pc.pallets > 0 ? pc.fill / pc.pallets : 0;
@@ -328,7 +339,7 @@ export default function DraftPreview({
     // ─── Excel export ────────────────────────────────────────────────────
     const today = new Date().toISOString().slice(0, 10);
     const toRow = useCallback((l: PreviewLine, withFf = false): Record<string, string | number> => {
-        const k = nmPpb.get(l.nmId) || 0;
+        const k = ppbForLine(l) || 0;
         return {
             ...(withFf ? { ff: warehouseNameById(l.ffId) } : {}),
             vendor: l.vendor,
@@ -340,7 +351,7 @@ export default function DraftPreview({
             pkg: PKG_LABEL_RU[l.pkg] || l.pkg,
             type: l.isNew ? 'Новинка' : 'Обычный',
         };
-    }, [warehouseNameById, nmPpb]);
+    }, [warehouseNameById, ppbForLine]);
     const sortForExport = (ls: PreviewLine[]) =>
         ls.slice().sort((a, b) => a.wbName.localeCompare(b.wbName) || a.vendor.localeCompare(b.vendor));
 
@@ -387,7 +398,7 @@ export default function DraftPreview({
         { key: 'type', label: 'Тип' },
     ], []);
     const tableData = useMemo(() => lines.map(l => {
-        const k = nmPpb.get(l.nmId);
+        const k = ppbForLine(l);
         return {
             ff: warehouseNameById(l.ffId),
             wb: l.wbName,
@@ -399,7 +410,7 @@ export default function DraftPreview({
             type: l.isNew ? 'Новинка' : 'Обычный',
             isNew: l.isNew,
         };
-    }), [lines, nmPpb, warehouseNameById]);
+    }), [lines, ppbForLine, warehouseNameById]);
 
     // ─── Матричный вид ───────────────────────────────────────────────────
     const matrixWbCols = useMemo(() => {
@@ -581,8 +592,8 @@ export default function DraftPreview({
                                                         );
                                                     })}
                                                     {manifest.unpalletized.length > 0 && (
-                                                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title="Нет габаритов короба — паллету не посчитать">
-                                                            <div style={{ marginBottom: 4 }}>Без паллетизации (нет габаритов):</div>
+                                                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title="Не набрали целую паллету (моно-недобор → предбронь) либо нет габаритов короба">
+                                                            <div style={{ marginBottom: 4 }}>Без целой паллеты (недобор → предбронь / нет габаритов):</div>
                                                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                                                                 {manifest.unpalletized.map(it => (
                                                                     <span key={it.nmId} style={{ padding: '2px 8px', borderRadius: 6, background: 'rgba(245,158,11,0.12)', display: 'inline-flex', gap: 4, alignItems: 'baseline' }}>
@@ -608,7 +619,10 @@ export default function DraftPreview({
                                         </thead>
                                         <tbody>
                                             {items.map(l => {
-                                                const k = nmPpb.get(l.nmId) || 0;
+                                                // Короб ФФ ЭТОЙ порции (l.ffId), не глобальный min — иначе целый
+                                                // короб чужого склада рисуется «N кор + M шт» (псевдо-россыпь:
+                                                // хамза 18 мерилась 13 → «1 кор + 5 шт», Газпром 30 → «1 кор + 8»).
+                                                const k = ppbForLine(l) || 0;
                                                 const full = k > 0 ? Math.floor(l.qty / k) : 0;
                                                 const rem = k > 0 ? l.qty % k : 0;
                                                 return (
@@ -705,7 +719,7 @@ export default function DraftPreview({
                         </div>
                     </div>
                     <p style={{ fontSize: 12, color: 'var(--color-text-muted)', margin: '0 0 12px', lineHeight: 1.5 }}>
-                        <strong>Почему так:</strong> неполный короб появляется, когда потребность склада по артикулу <strong>не делится нацело на кратность короба</strong> (шт/короб). Остаток (qty mod кратность) едет <strong>россыпью</strong> — не округляем вверх (чтобы не передать лишнее) и не вниз (чтобы не недодать нужное). Это нормально; много россыпи = менее плотная упаковка. Уменьшить: добрать/убавить кол-во до кратности короба или объединить отгрузки одного SKU на соседние склады.
+                        <strong>Почему так:</strong> строгий режим — некратные коробу остатки в черновик <strong>не добавляются</strong>: если свободного стока ФФ хватает, порция добивается до целого короба; иначе остаток снимается на ФФ без резерва. Строки здесь — переходное состояние (вычистятся ближайшей синхронизацией) либо легаси до перезаполнения. Если список не пустеет — проверь кратность артикула на вкладке «Кратность».
                     </p>
                     <div style={{ overflowX: 'auto', maxHeight: 360, overflowY: 'auto' }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>

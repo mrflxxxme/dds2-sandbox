@@ -105,20 +105,25 @@ export interface TrimWholeResult {
  */
 export function trimLinesToWholePallets(
     lines: PreviewLine[],
-    uppOf: (nmId: number, wbName: string) => number | null,
-    boxOf?: (nmId: number) => number | null | undefined,
+    /** Штук в полной паллете; ffId группы прокидывается для per-ФФ кратности:
+     *  upp по глобальному min резал физически целые паллеты мульти-кратных SKU
+     *  (300 = 10×30@Газпром мерялось как 1.36 «паллеты по 22» → срез). */
+    uppOf: (nmId: number, wbName: string, ffId?: number) => number | null,
+    /** Кратность короба; второй аргумент — ФФ группы (кратность может отличаться по
+     *  складам: глобальный min резал бы физически целый короб чужого ФФ). */
+    boxOf?: (nmId: number, ffId?: number) => number | null | undefined,
 ): TrimWholeResult {
     // Группа = одна отгрузка по упаковке. Короб — смешанная паллета (все SKU вместе);
     // МОНО — общая паллета ≤3 артикула (тоже без nmId в ключе, правило WB); сейф —
     // каждый SKU своей паллетой (микс запрещён) → отдельная под-группа.
-    const groups = new Map<string, { wb: string; pkg: PackageType; km: Record<string, number>; meta: Map<number, PreviewLine> }>();
+    const groups = new Map<string, { wb: string; ffId: number; pkg: PackageType; km: Record<string, number>; meta: Map<number, PreviewLine> }>();
     for (const l of lines) {
         if (l.qty <= 0) continue;
         const gk = l.pkg === 'SUPERSAFE'
             ? `${l.ffId}::${l.wbName}::SUPERSAFE::${l.nmId}`
             : `${l.ffId}::${l.wbName}::${l.pkg}`;
         let g = groups.get(gk);
-        if (!g) { g = { wb: l.wbName, pkg: l.pkg, km: {}, meta: new Map() }; groups.set(gk, g); }
+        if (!g) { g = { wb: l.wbName, ffId: l.ffId, pkg: l.pkg, km: {}, meta: new Map() }; groups.set(gk, g); }
         g.km[String(l.nmId)] = (g.km[String(l.nmId)] || 0) + l.qty;
         g.meta.set(l.nmId, l);
     }
@@ -136,17 +141,18 @@ export function trimLinesToWholePallets(
         //  • обычный SKU — снимаем целиком (в паллету не положить).
         const geomKm: Record<string, number> = {};
         for (const [nmStr, u] of Object.entries(g.km)) {
-            const upp = uppOf(Number(nmStr), g.wb);
+            const upp = uppOf(Number(nmStr), g.wb, g.ffId);
             if (upp != null && upp > 0) { geomKm[nmStr] = u; continue; }
             const line = g.meta.get(Number(nmStr));
             if (line?.isNew) kept.push({ ...line, qty: u });
             else { droppedUnits += u; if (line) droppedLines.push({ ...line, qty: u }); }
         }
         // МОНО — упаковка ≤3 артикула на паллету (правило WB); КОРОБ/СЕЙФ — смешанный /
-        // одиночный snap по суммарному footprint'у. Сигнатуры идентичны.
+        // одиночный snap по суммарному footprint'у. Сигнатуры идентичны. boxOf в ОБЕ
+        // ветки (с ФФ группы — кратность per-склад): срез только целыми коробами.
         const { kept: kk, dropped } = g.pkg === 'MONOPALLET'
-            ? packMonoPallets(geomKm, (k) => uppOf(Number(k), g.wb), MONO_MAX_ARTICLES, (k) => boxOf?.(Number(k)) ?? null)
-            : snapToWholePallets(geomKm, (k) => uppOf(Number(k), g.wb));
+            ? packMonoPallets(geomKm, (k) => uppOf(Number(k), g.wb, g.ffId), MONO_MAX_ARTICLES, (k) => boxOf?.(Number(k), g.ffId) ?? null)
+            : snapToWholePallets(geomKm, (k) => uppOf(Number(k), g.wb, g.ffId), (k) => boxOf?.(Number(k), g.ffId) ?? null);
         for (const [nmStr, u] of Object.entries(kk)) {
             if (u <= 0) continue;
             kept.push({ ...g.meta.get(Number(nmStr))!, qty: u });

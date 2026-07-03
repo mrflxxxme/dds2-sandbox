@@ -1644,6 +1644,8 @@ export interface AssemblyRequest {
   source_vehicle_id?: number | null;
   is_pre_distribution?: boolean;
   source_vehicle_order_no?: string | null;
+  /** Предзаявка (бронь) на моно: целая моно-паллета на WB-склад без лимита приёмки (⌛). */
+  is_prebooking?: boolean;
 }
 
 export interface FfLinkInfo {
@@ -1728,6 +1730,25 @@ export interface PreDistributionCreateResult {
   requests: AssemblyRequest[];
 }
 
+/** Предзаявка (бронь) на моно: целые моно-паллеты на WB-склад без лимита приёмки. */
+export interface PrebookingRow {
+  warehouse_id: number;       // ФФ-склад-источник (где лежит товар предброни)
+  barcode: string;
+  wb_warehouse_name: string;  // склад назначения WB
+  qty: number;
+  package_type: PackageType;
+}
+
+export interface PrebookingCreate {
+  rows: PrebookingRow[];
+}
+
+export interface PrebookingCreateResult {
+  created: number;
+  request_ids: number[];
+  requests: AssemblyRequest[];
+}
+
 export interface AssemblyListResponse {
   items: AssemblyRequest[];
   total: number;
@@ -1742,6 +1763,15 @@ export interface AssemblyBulkDeleteSkip {
 
 export interface AssemblyBulkDeleteResult {
   deleted: number;
+  skipped: AssemblyBulkDeleteSkip[];
+}
+
+/** Массовый перевод заявок в статус одним запросом (вместо N поштучных —
+ *  поштучные съедали общий write-лимит → 429 «Слишком много запросов»). */
+export type AssemblyBulkStatus = 'IN_PROGRESS' | 'READY';
+
+export interface AssemblyBulkStatusResult {
+  updated: AssemblyRequest[];
   skipped: AssemblyBulkDeleteSkip[];
 }
 
@@ -3837,6 +3867,10 @@ export interface AssemblyDraftRow {
   /** WB acceptance package type — определяется через POST /warehouse/acceptance-check.
    *  Группирует строки в AssemblyRequest при commit_draft (одна заявка = один тип). */
   package_type?: PackageType;
+  /** Сознательно отгруженная ЧАСТИЧНАЯ паллета («Оставить так» в предброни).
+   *  normalizeDraft такие строки НЕ трогает; всё непомеченное приводится к
+   *  «целые коробы + целые паллеты» при загрузке страницы (self-heal). */
+  as_is?: boolean;
 }
 
 export interface HandedUnitItem {

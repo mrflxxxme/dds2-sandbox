@@ -2460,3 +2460,30 @@ async def test_commit_draft_twice_is_404(db_session):
     with pytest.raises(HTTPException) as ei:
         await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
     assert ei.value.status_code == 404
+
+
+# ─── _draft_nm_ids: rows + prebook (гистерезис признака новинки) ─────────────
+
+
+def test_draft_nm_ids_includes_prebook():
+    """nm_id собираются и из rows, И из prebook.
+
+    SKU, лежащий только в предброни, — часть черновика: без него новинка из
+    prebook выпадала из newcomer_nm_ids → фронт терял бейдж 🆕 и newcomer-логику
+    («одинаковые» товары вели себя по-разному в rows vs prebook).
+    """
+    draft = AssemblyDraft(
+        project_id=PROJECT_ID,
+        name="t",
+        distribution={
+            "rows": [{"nm_id": 111, "src": {}, "tgt": {}}],
+            "prebook": [{"nm_id": 222, "src": {}, "tgt": {}}, {"nm_id": "мусор"}],
+        },
+    )
+    assert assembly_draft_service._draft_nm_ids(draft) == {111, 222}
+
+
+def test_draft_nm_ids_tolerates_missing_parts():
+    """Отсутствующие/null rows и prebook не роняют чтение."""
+    draft = AssemblyDraft(project_id=PROJECT_ID, name="t", distribution={"rows": None})
+    assert assembly_draft_service._draft_nm_ids(draft) == set()

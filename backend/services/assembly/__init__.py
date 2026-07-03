@@ -30,6 +30,7 @@ from .pre_distribution import (
     get_pre_distribution_vehicles,
     get_vehicle_pre_dist_pool,
 )
+from .prebooking import create_prebooking
 from .status import (
     _check_transition,
     _log_status_change,
@@ -44,6 +45,7 @@ from .status import (
     mark_ready,
     reopen_for_reship,
     return_to_warehouse,
+    set_status_bulk,
     ship_bulk,
     ship_request,
     start_assembly,
@@ -76,6 +78,7 @@ __all__ = [
     "mark_ready",
     "reopen_for_reship",
     "return_to_warehouse",
+    "set_status_bulk",
     "ship_bulk",
     "ship_request",
     "start_assembly",
@@ -90,4 +93,6 @@ __all__ = [
     "create_pre_distribution",
     "get_pre_distribution_vehicles",
     "get_vehicle_pre_dist_pool",
+    # prebooking (предзаявка на моно)
+    "create_prebooking",
 ]

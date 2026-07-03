@@ -69,10 +69,12 @@ def _dedupe_rows(rows: list[AssemblyDraftRow]) -> list[AssemblyDraftRow]:
     commit отгрузил бы чужой физический товар (потеря/мисаттрибуция). Истинный
     спурьёзный дубль (тот же баркод) по-прежнему схлопывается keep-first.
     """
-    seen: set[tuple[int, str, str]] = set()
+    seen: set[tuple[int, str, str, bool]] = set()
     out: list[AssemblyDraftRow] = []
     for r in rows:
-        key = (r.nm_id, r.package_type or "BOX", r.barcode or "")
+        # as_is в ключе: частичная паллета «Оставить так» и обычная строка того же
+        # SKU — РАЗНЫЕ строки (keep-first без as_is молча съел бы одну из них).
+        key = (r.nm_id, r.package_type or "BOX", r.barcode or "", bool(r.as_is))
         if key in seen:
             continue
         seen.add(key)
@@ -101,15 +103,18 @@ def _merge_rows(existing: list[dict], incoming: list[dict]) -> list[dict]:
     суммирования молча терял бы количество.
     """
 
-    def _key(r: dict) -> tuple[int, str, str]:
+    def _key(r: dict) -> tuple[int, str, str, bool]:
+        # as_is в ключе: частичная «Оставить так» не суммируется с обычной строкой
+        # того же SKU (иначе флаг расползся бы на целые паллеты или потерялся).
         return (
             int(r.get("nm_id") or 0),
             str(r.get("package_type") or "BOX"),
             str(r.get("barcode") or ""),
+            bool(r.get("as_is")),
         )
 
-    by_key: dict[tuple[int, str, str], dict] = {}
-    order: list[tuple[int, str, str]] = []
+    by_key: dict[tuple[int, str, str, bool], dict] = {}
+    order: list[tuple[int, str, str, bool]] = []
     for src_list in (existing, incoming):
         for row in src_list:
             key = _key(row)
@@ -123,6 +128,7 @@ def _merge_rows(existing: list[dict], incoming: list[dict]) -> list[dict]:
                     "src": {str(k): int(v or 0) for k, v in (row.get("src") or {}).items()},
                     "tgt": {str(k): int(v or 0) for k, v in (row.get("tgt") or {}).items()},
                     "package_type": key[1],
+                    "as_is": key[3],
                 }
                 order.append(key)
                 continue
@@ -160,13 +166,20 @@ async def fetch_newcomer_nm_ids(
 
 
 def _draft_nm_ids(draft: AssemblyDraft) -> set[int]:
-    """Извлечь все nm_id из draft.distribution.rows (toJSON-friendly чтение)."""
-    rows = (draft.distribution or {}).get("rows", []) if isinstance(draft.distribution, dict) else []
+    """Извлечь все nm_id из draft.distribution: rows И prebook (toJSON-friendly).
+
+    Prebook обязателен: SKU, лежащий ТОЛЬКО в предброни, — тоже часть черновика.
+    Без него новинка из предброни выпадала из newcomer_nm_ids → фронт терял
+    бейдж 🆕 и newcomer-логику (гистерезис: «одинаковые» товары вели себя по-разному
+    в зависимости от того, в rows они или в prebook).
+    """
+    dist = draft.distribution if isinstance(draft.distribution, dict) else {}
     out: set[int] = set()
-    for r in rows:
-        nm = r.get("nm_id")
-        if isinstance(nm, int):
-            out.add(nm)
+    for part in ("rows", "prebook"):
+        for r in dist.get(part) or []:
+            nm = r.get("nm_id")
+            if isinstance(nm, int):
+                out.add(nm)
     return out
 
 

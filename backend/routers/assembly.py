@@ -24,6 +24,7 @@ from backend.schemas.assembly import (
     AssignVehicle,
     AssignVehicleBulk,
     BulkDeleteResult,
+    BulkStatusResult,
     CostForecastResponse,
     CreatedGroupResponse,
     DeleteBulk,
@@ -36,9 +37,12 @@ from backend.schemas.assembly import (
     PreDistributionCreateResult,
     PreDistVehicle,
     PreDistVehiclePool,
+    PrebookingCreate,
+    PrebookingCreateResult,
     RefreshFromFboResponse,
     ReturnToWarehouse,
     ShipBulk,
+    StatusBulk,
     StockDistributionHistoryResponse,
     StockDistributionResponse,
 )
@@ -472,6 +476,27 @@ async def advance_pre_distribution(
         raise HTTPException(400, str(e)) from None
 
 
+@router.post(
+    "/prebooking",
+    response_model=PrebookingCreateResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_prebooking(
+    payload: PrebookingCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Создать заявки-предзаявки на моно (is_prebooking=True) из строк предброни.
+
+    Целые моно-паллеты на WB-склад без лимита приёмки (⌛) — сдаются предзаявкой.
+    ⌛/whitelist проверяет фронт (там загружена приёмка); здесь — обычная валидация стока.
+    """
+    try:
+        return await assembly_service.create_prebooking(db, project.id, payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
 # --- Get by ID --------------------------------------------------------------
 
 
@@ -764,6 +789,27 @@ async def delete_bulk(
     """
     result = await assembly_service.delete_bulk(db, project.id, payload.ids)
     return BulkDeleteResult.model_validate(result)
+
+
+@router.post("/status-bulk", response_model=BulkStatusResult, dependencies=[Depends(rate_limit_write)])
+async def set_status_bulk(
+    payload: StatusBulk,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Массово перевести заявки в статус (IN_PROGRESS | READY) одним запросом.
+
+    Невалидные для перехода заявки пропускаются с причиной (partial success).
+    """
+    try:
+        result = await assembly_service.set_status_bulk(db, project.id, payload.ids, payload.status)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    updated = []
+    for req in result["updated"]:
+        resp = await assembly_service._build_response(db, req)
+        updated.append(AssemblyRequestResponse.model_validate(resp))
+    return BulkStatusResult(updated=updated, skipped=result["skipped"])
 
 
 # --- History ----------------------------------------------------------------

@@ -119,6 +119,23 @@ class BulkDeleteResult(BaseModel):
     skipped: list[BulkDeleteSkip] = []
 
 
+class StatusBulk(BaseModel):
+    """Массовый перевод заявок в статус — один запрос вместо N поштучных
+    (поштучные быстро съедают общий write-лимит → 429 «Слишком много запросов»)."""
+
+    ids: list[int]
+    status: Literal["IN_PROGRESS", "READY"]
+
+
+class BulkStatusSkip(BaseModel):
+    """Одна пропущенная при массовой смене статуса заявка (с причиной)."""
+
+    id: int
+    number: str | None = None
+    status: str | None = None
+    reason: str
+
+
 # ─── Response schemas ───────────────────────────────────────────────────────
 
 
@@ -177,6 +194,8 @@ class AssemblyRequestResponse(BaseModel):
     source_vehicle_id: int | None = None
     is_pre_distribution: bool = False
     source_vehicle_order_no: str | None = None
+    # Предзаявка (бронь) на моно: целая моно-паллета на WB-склад без лимита приёмки (⌛).
+    is_prebooking: bool = False
     package_type: PackageTypeStr = "BOX"
     effective_wb_warehouse: str | None = None  # FBO warehouse_name or manual, whichever is set
     brands: str | None = None  # comma-separated unique brands from items
@@ -199,6 +218,13 @@ class AssemblyRequestResponse(BaseModel):
 class AssemblyListResponse(BaseModel):
     items: list[AssemblyRequestResponse]
     total: int
+
+
+class BulkStatusResult(BaseModel):
+    """Итог массовой смены статуса: обновлённые заявки + что пропущено и почему."""
+
+    updated: list[AssemblyRequestResponse] = []
+    skipped: list[BulkStatusSkip] = []
 
 
 # ─── Предраспределение машины в пути (pre-distribution) ─────────────────────
@@ -265,6 +291,35 @@ class PreDistributionCreate(BaseModel):
 
 class PreDistributionCreateResult(BaseModel):
     created: int  # сколько заявок создано
+    request_ids: list[int]
+    requests: list[AssemblyRequestResponse]
+
+
+# ─── Предзаявка (бронь) на моно ─────────────────────────────────────────────
+# Целая моно-паллета на WB-склад БЕЗ лимита приёмки (⌛) — сдать можно только
+# предзаявкой. Заявка на сборку создаётся сразу с флагом is_prebooking (реальный
+# сток на ФФ, статус IN_PROGRESS). Источник — ФФ-склад, где лежит товар предброни.
+
+
+class PrebookingRow(BaseModel):
+    """Одна строка предзаявки: ШК × ФФ-источник → WB-склад назначения (моно)."""
+
+    warehouse_id: int  # ФФ-склад-источник (где реально лежит товар предброни)
+    barcode: str
+    wb_warehouse_name: str  # склад назначения WB (→ wb_warehouse_name_manual заявки)
+    qty: int
+    package_type: PackageTypeStr = "MONOPALLET"
+
+
+class PrebookingCreate(BaseModel):
+    """Создать предзаявки: строки группируются в заявки по (ФФ-источник, WB-склад,
+    упаковка) → одна заявка на группу. Флаг is_prebooking=True на каждой."""
+
+    rows: list[PrebookingRow]
+
+
+class PrebookingCreateResult(BaseModel):
+    created: int
     request_ids: list[int]
     requests: list[AssemblyRequestResponse]
 

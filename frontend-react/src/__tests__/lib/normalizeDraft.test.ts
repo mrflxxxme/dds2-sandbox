@@ -275,3 +275,39 @@ describe('normalizeDraft — инвариант «целые коробы + це
         for (const r of res.rows) expect(tSrc(r)).toBe(tTgt(r));
     });
 });
+
+describe('normalizeDraft — as_is («Оставить так»): частичная паллета проходит насквозь', () => {
+    const asIsRow = (nm: number, units: number): AssemblyDraftRow =>
+        ({ ...row(nm, { '1': units }, { 'Казань': units }, 'BOX'), as_is: true });
+
+    it('as_is-строка < паллеты НЕ срезается (без флага — срезалась бы)', () => {
+        // 80 шт = 8 коробов = 0.5 паллеты: без флага дропается (см. тест выше).
+        const res = normalizeDraft([asIsRow(300, 80)], ctx);
+        expect(res.rows).toHaveLength(1);
+        expect(res.rows[0].as_is).toBe(true);
+        expect(sumTgt(res.rows)).toBe(80);
+        expect(res.droppedUnits).toBe(0);
+        expect(res.changed).toBe(false);
+    });
+
+    it('микс: непомеченный недобор уходит в dropped, as_is остаётся (self-heal на загрузке)', () => {
+        const rows = [
+            asIsRow(300, 80),                                    // легитимная частичная
+            row(301, { '1': 80 }, { 'Казань': 80 }, 'BOX'),      // легаси-недобор → предбронь
+            row(200, { '1': 320 }, { 'Казань': 320 }, 'BOX'),    // 2 целые паллеты — едут
+        ];
+        const res = normalizeDraft(rows, ctx);
+        expect(res.rows.some(r => r.nm_id === 300 && r.as_is)).toBe(true);   // as_is цела
+        expect(res.rows.some(r => r.nm_id === 301)).toBe(false);             // недобор срезан
+        expect(res.dropped.some(r => r.nm_id === 301)).toBe(true);           // … и попал в предбронь
+        expect(sumTgt(res.rows.filter(r => r.nm_id === 200))).toBe(320);     // целые не тронуты
+        expect(res.changed).toBe(true);
+    });
+
+    it('идемпотентность с as_is: повторный прогон ничего не меняет', () => {
+        const first = normalizeDraft([asIsRow(300, 80), row(200, { '1': 320 }, { 'Казань': 320 }, 'BOX')], ctx);
+        const second = normalizeDraft(first.rows, ctx);
+        expect(second.changed).toBe(false);
+        expect(sumTgt(second.rows)).toBe(sumTgt(first.rows));
+    });
+});

@@ -817,3 +817,236 @@ async def test_get_acceptance_blocked_empty_when_no_cache(monkeypatch):
     monkeypatch.setattr(svc, "_redis_client", _StubRedis())
     blocked = await svc.get_acceptance_blocked_warehouses(db=None, project_id=999)
     assert blocked == set()
+
+
+# ─── Per-barcode caching of check_acceptance_and_redistribute ───────────────
+#
+# Фикс 2026-07-03: страница распределения фоново проверяет приёмку при каждом
+# структурном изменении и на каждой вкладке. Кэш «hash всего батча с qty»
+# промахивался почти всегда → живой WB-вызов (6 req/min) + общий write-лимит
+# → 429 «Слишком много запросов». Теперь кэш пер-баркод (TTL 10 мин): живой
+# вызов — только по недостающим баркодам, количества на ключ не влияют.
+
+
+class _FakeRedisKV:
+    """get/mget/setex — ровно то, что использует пер-баркодный кэш."""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+        self.ttls: dict[str, int] = {}
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def mget(self, keys):
+        return [self.store.get(k) for k in keys]
+
+    async def setex(self, key, ttl, value):
+        self.store[key] = value
+        self.ttls[key] = ttl
+
+
+class _FakeWBClient:
+    """Записывает payload'ы get_acceptance_options; отвечает canBox по всем складам."""
+
+    instances: list["_FakeWBClient"] = []
+
+    def __init__(self, api_key=None, project_id=None):
+        self.options_calls: list[list[dict]] = []
+        _FakeWBClient.instances.append(self)
+
+    async def get_fbw_warehouses(self):
+        return [{"ID": 507, "name": "Коледино"}]
+
+    async def get_acceptance_coefficients(self):
+        return []
+
+    async def get_acceptance_options(self, items):
+        self.options_calls.append(items)
+        return {
+            "result": [
+                {
+                    "barcode": it["barcode"],
+                    "warehouses": [{"warehouseID": 507, "canBox": True, "canMonopallet": False, "canSupersafe": False}],
+                }
+                for it in items
+                if it["barcode"] != "unknown-bc"  # у «новинки» WB карточки нет — omit
+            ]
+        }
+
+
+def _all_option_calls() -> list[list[dict]]:
+    return [c for inst in _FakeWBClient.instances for c in inst.options_calls]
+
+
+@pytest.fixture
+def acceptance_env(monkeypatch):
+    import backend.services.warehouse_acceptance_service as svc
+
+    _FakeWBClient.instances = []
+    fake_redis = _FakeRedisKV()
+    monkeypatch.setattr(svc, "_redis_client", fake_redis)
+    monkeypatch.setattr(svc, "WBApiClient", _FakeWBClient)
+
+    async def fake_get_wb_key(db, project_id, provider):
+        return "test-key"
+
+    monkeypatch.setattr(svc, "get_wb_key", fake_get_wb_key)
+    return svc, fake_redis
+
+
+@pytest.mark.asyncio
+async def test_same_barcodes_second_call_is_pure_cache_hit(acceptance_env):
+    """Смена количеств/распределения НЕ дёргает WB: флаги — уровня баркод×склад."""
+    svc, _ = acceptance_env
+    items_v1 = [{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 10}}]
+    items_v2 = [{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 33}}]
+
+    r1 = await svc.check_acceptance_and_redistribute(None, 42, items_v1)
+    assert r1["cache_hit"] is False
+    assert len(_all_option_calls()) == 1
+
+    r2 = await svc.check_acceptance_and_redistribute(None, 42, items_v2)
+    assert r2["cache_hit"] is True
+    assert len(_all_option_calls()) == 1  # живой вызов не повторился
+    # Распределение пересчитано по НОВЫМ количествам, не по кэшу
+    assert r2["items"][0]["distribution"] == {"Коледино": 33}
+
+
+@pytest.mark.asyncio
+async def test_new_barcode_fetches_only_missing(acceptance_env):
+    """Добавили SKU в батч → WB спрашиваем ТОЛЬКО про новый баркод."""
+    svc, _ = acceptance_env
+    await svc.check_acceptance_and_redistribute(
+        None, 42, [{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 5}}]
+    )
+    r2 = await svc.check_acceptance_and_redistribute(
+        None,
+        42,
+        [
+            {"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 5}},
+            {"nm_id": 2, "barcode": "BC2", "distribution": {"Коледино": 7}},
+        ],
+    )
+    calls = _all_option_calls()
+    assert len(calls) == 2
+    assert [it["barcode"] for it in calls[1]] == ["BC2"]
+    # Ответ собран из кэша (BC1) + живого вызова (BC2) — оба с availability
+    by_bc = {it["barcode"]: it for it in r2["items"]}
+    assert by_bc["BC1"]["availability"] and by_bc["BC2"]["availability"]
+
+
+@pytest.mark.asyncio
+async def test_force_refetches_all_and_rewarms_cache(acceptance_env):
+    """force=true (кнопка «Обновить») обходит кэш по ВСЕМ баркодам и перегревает его."""
+    svc, _ = acceptance_env
+    items = [{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 5}}]
+    await svc.check_acceptance_and_redistribute(None, 42, items)
+    r2 = await svc.check_acceptance_and_redistribute(None, 42, items, force=True)
+    assert r2["cache_hit"] is False
+    calls = _all_option_calls()
+    assert len(calls) == 2
+    assert [it["barcode"] for it in calls[1]] == ["BC1"]
+    # ...а третий (обычный) вызов после force — снова чистый cache hit
+    r3 = await svc.check_acceptance_and_redistribute(None, 42, items)
+    assert r3["cache_hit"] is True
+    assert len(_all_option_calls()) == 2
+
+
+@pytest.mark.asyncio
+async def test_unknown_barcode_negative_cached(acceptance_env):
+    """WB не вернул баркод (новинка без карточки) → кэшируем пустую доступность,
+    повторные проверки НЕ дёргают WB, warning сохраняется."""
+    svc, _ = acceptance_env
+    items = [{"nm_id": 9, "barcode": "unknown-bc", "distribution": {"Коледино": 3}}]
+    r1 = await svc.check_acceptance_and_redistribute(None, 42, items)
+    assert r1["items"][0]["availability"] == {}
+    assert r1["items"][0]["warnings"]
+
+    r2 = await svc.check_acceptance_and_redistribute(None, 42, items)
+    assert r2["cache_hit"] is True
+    assert len(_all_option_calls()) == 1
+    assert r2["items"][0]["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_cache_ttl_is_10_minutes(acceptance_env):
+    """TTL пер-баркод кэша = 600с (обновление раз в 10 минут по требованию)."""
+    svc, fake_redis = acceptance_env
+    await svc.check_acceptance_and_redistribute(
+        None, 42, [{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 5}}]
+    )
+    key = [k for k in fake_redis.store if "BC1" in k]
+    assert key, "пер-баркодный ключ не записан"
+    assert fake_redis.ttls[key[0]] == 600
+
+
+def test_acceptance_check_has_dedicated_rate_limit_bucket():
+    """/acceptance-check НЕ делит write-бакет с автосейвом черновиков: фоновые
+    проверки приёмки не должны выедать лимит PUT'ов (429 на любом действии)."""
+    from backend.routers.warehouse import router
+    from backend.utils.rate_limit import RateLimiter
+
+    route = next(r for r in router.routes if r.path.endswith("/acceptance-check"))
+    limiters = [d.dependency for d in route.dependencies if isinstance(d.dependency, RateLimiter)]
+    assert limiters, "endpoint остался без rate limiter'а"
+    assert all(lim.action != "write" for lim in limiters), "acceptance-check сидит на общем write-бакете"
+    assert any(lim.action == "acceptance_check" for lim in limiters)
+
+
+@pytest.mark.asyncio
+async def test_redis_failure_degrades_to_live_fetch(acceptance_env, monkeypatch):
+    """Redis упал (mget/setex бросают) → graceful: живой вызов по всем баркодам,
+    ответ полный, исключение наружу не летит."""
+    svc, fake_redis = acceptance_env
+
+    async def boom(*args, **kwargs):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(fake_redis, "mget", boom)
+    monkeypatch.setattr(fake_redis, "setex", boom)
+
+    items = [{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 5}}]
+    r1 = await svc.check_acceptance_and_redistribute(None, 42, items)
+    assert r1["cache_hit"] is False
+    assert r1["items"][0]["availability"]
+    # Кэш недоступен → каждая проверка ходит в WB (fail-open, как у лимитера)
+    await svc.check_acceptance_and_redistribute(None, 42, items)
+    assert len(_all_option_calls()) == 2
+
+
+# ─── Схема-капы и force-суб-лимит (security-ревью 2026-07-03, HIGH) ─────────
+
+
+def test_acceptance_request_caps_items_and_barcode():
+    """items ≤ 1000 (1 запрос = ceil(N/150) живых POST к WB) и barcode ≤ 64
+    (попадает в Redis-ключ) — иначе force-флуд амплифицирует WB-квоту."""
+    from pydantic import ValidationError
+
+    from backend.schemas.warehouse import AcceptanceCheckRequest
+
+    ok = AcceptanceCheckRequest(
+        items=[{"nm_id": 1, "barcode": "BC1", "distribution": {"Коледино": 1}}]
+    )
+    assert len(ok.items) == 1
+
+    with pytest.raises(ValidationError):
+        AcceptanceCheckRequest(
+            items=[
+                {"nm_id": i, "barcode": f"bc{i}", "distribution": {}}
+                for i in range(1001)
+            ]
+        )
+    with pytest.raises(ValidationError):
+        AcceptanceCheckRequest(
+            items=[{"nm_id": 1, "barcode": "x" * 65, "distribution": {}}]
+        )
+
+
+def test_force_sublimit_is_wb_quota_sized():
+    """force=true бьёт в WB живьём → суб-лимит не шире квоты WB (6 req/min)
+    и в своём собственном бакете (не делит счётчик с фоновыми проверками)."""
+    from backend.utils.rate_limit import rate_limit_acceptance, rate_limit_acceptance_force
+
+    assert rate_limit_acceptance_force.limit <= 6
+    assert rate_limit_acceptance_force.action not in ("write", rate_limit_acceptance.action)

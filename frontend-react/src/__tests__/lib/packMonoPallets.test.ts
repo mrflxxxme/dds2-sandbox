@@ -27,12 +27,13 @@ describe('packMonoPallets — целые моно-паллеты, ≤3 арти�
         expect(sum(res.dropped)).toBe(20);
     });
 
-    it('кап 3 артикула: 4 SKU по 0.3 — троих не хватает на паллету → всё на ФФ', () => {
+    it('кап 3 артикула: 4 SKU по 0.3 — троих не хватает на целую → всё на ФФ (строго целые)', () => {
         const upp: Record<string, number> = { a: 100, b: 100, c: 100, d: 100 };
         const res = packMonoPallets({ a: 30, b: 30, c: 30, d: 30 }, (k) => upp[k] ?? null);
         // 3 крупнейших = 0.9 < 1.0 паллеты → собрать целую нельзя → ничего не едет.
         expect(res.kept).toEqual({});
         expect(sum(res.dropped)).toBe(120);
+        expect(res.pallets.length).toBe(0); // готовых паллет нет
     });
 
     it('целые паллеты SKU остаются однотоварными, миксуются только хвосты', () => {
