@@ -18,6 +18,7 @@ from backend.schemas.cold_start import (
     DistributeRequest,
     DistributeResponse,
 )
+from backend.utils.rate_limit import rate_limit_import, rate_limit_write
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.routers.reports_stock")
@@ -100,7 +101,7 @@ async def get_stock_analytics(
     )
 
 
-@router.post("/stock_warehouses/sync")
+@router.post("/stock_warehouses/sync", dependencies=[Depends(rate_limit_write)])
 async def sync_warehouse_stocks(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -241,7 +242,7 @@ async def get_stock_need(
     )
 
 
-@router.post("/stock_analytics/upload_order_cities")
+@router.post("/stock_analytics/upload_order_cities", dependencies=[Depends(rate_limit_import)])
 async def upload_order_cities(
     file: UploadFile = File(...),
     project: Project = Depends(get_current_project),
