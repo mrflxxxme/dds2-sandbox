@@ -28,6 +28,7 @@ const SECTION_PAGES: Record<string, { key: string; label: string }[]> = {
         { key: 'fbo', label: 'Поставки FBO' },
         { key: 'stocks', label: 'Остатки WB' },
         { key: 'stock-analytics', label: 'Аналитика остатков' },
+        { key: 'barcode-labels', label: 'Генератор ШК' },
     ],
     'Поставки': [
         { key: 'supply-chain', label: 'Цепочка поставок' },
