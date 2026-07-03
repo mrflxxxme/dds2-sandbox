@@ -57,7 +57,8 @@ async def upload_tariffs(db: AsyncSession, project_id: int, data: bytes) -> dict
         db.add(tariff)
 
     await db.commit()
-    await invalidate_cache(f"funnel:project_id={project_id}")
+    await invalidate_cache(f"funnel:tariff_map:project_id={project_id}")
+    await invalidate_cache(f"funnel:avg_buyout:project_id={project_id}")
     logger.info(f"Uploaded {len(rows)} tariffs for project {project_id} (replaced {replaced})")
 
     return {"inserted": len(rows), "replaced": replaced}
@@ -78,7 +79,8 @@ async def delete_tariff(db: AsyncSession, project_id: int, tariff_id: int) -> bo
 
     tariff.soft_delete()
     await db.commit()
-    await invalidate_cache(f"funnel:project_id={project_id}")
+    await invalidate_cache(f"funnel:tariff_map:project_id={project_id}")
+    await invalidate_cache(f"funnel:avg_buyout:project_id={project_id}")
     return True
 
 
