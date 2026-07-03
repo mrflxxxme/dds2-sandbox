@@ -19,7 +19,7 @@ Resilience:
 - Exponential backoff: retries 429/5xx errors up to 3 times
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
@@ -785,12 +785,22 @@ def parse_wb_sales_to_payouts(sales: list[dict]) -> list[dict]:
         if total_price <= 0:
             continue
 
+        # created_at maps to a naive DateTime column — parse the WB date string into a
+        # datetime (asyncpg won't coerce a str, and rejects tz-aware values too).
+        raw_date = sale.get("date")
+        try:
+            created = datetime.fromisoformat(raw_date) if raw_date else utcnow()
+        except (ValueError, TypeError):
+            created = utcnow()
+        if created.tzinfo is not None:
+            created = created.astimezone(timezone.utc).replace(tzinfo=None)
+
         payouts.append(
             {
                 "request_id": sale_id,
                 "amount_rub": total_price,
                 "currency": "RUB",
-                "created_at": sale.get("date", utcnow().isoformat()),
+                "created_at": created,
                 "wb_status_raw": sale.get("saleID", ""),
                 "status": "TRANSIT",
             }
