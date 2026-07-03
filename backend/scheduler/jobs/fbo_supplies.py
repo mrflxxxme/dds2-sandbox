@@ -103,7 +103,7 @@ async def sync_all_projects_fbo_supplies():
             log_status = "ERROR"
             log_error_msg = "Task cancelled (worker shutdown or restart)"
             logger.warning("FBO supplies sync: project %d — CANCELLED", project_id)
-            errors += 1
+            raise  # propagate cancellation — never swallow it to keep looping
         except Exception as e:
             log_status = "ERROR"
             log_error_msg = str(e)[:500]
