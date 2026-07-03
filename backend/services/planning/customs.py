@@ -60,7 +60,8 @@ async def delete_alloc(db: AsyncSession, project_id: int, alloc_id: int):
     obj = result.scalar_one_or_none()
     if not obj:
         return None
-    obj.soft_delete()
+    # CustomsAlloc has no SoftDeleteMixin; all readers count physical rows, so hard-delete.
+    await db.delete(obj)
     await db.commit()
     return True
 
