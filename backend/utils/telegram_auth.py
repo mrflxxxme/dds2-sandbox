@@ -9,9 +9,8 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 from urllib.parse import parse_qs, unquote
-
-from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +76,9 @@ def validate_telegram_webapp_data(init_data: str, bot_token: str) -> dict | None
             return None
 
         auth_date = int(auth_date_str)
-        now_ts = int(utcnow().timestamp())
+        # time.time() is a true UTC epoch; utcnow() is naive and .timestamp() would
+        # reinterpret it in the container's local TZ, skewing the freshness check.
+        now_ts = int(time.time())
         if now_ts - auth_date > AUTH_DATE_MAX_AGE_SECONDS:
             logger.warning(
                 "TMA auth: initData expired (auth_date=%d, now=%d, diff=%ds)",
