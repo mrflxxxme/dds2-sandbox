@@ -77,7 +77,7 @@
 - **Маппинг WB `boxTypeID`:** `5` = МОНО, `6` = КОРОБ, `2` = иной / «Суперсейф».
 - **Тип упаковки выбирается per-SKU, не per-warehouse:** если часть складов берёт только моно — для всего SKU выбирается MONOPALLET + warning «часть складов недоступна» (моно-аккейпт обычно шире).
 - WB не возвращает `error` для нового баркода / без карточки → SKU помечается warning'ом «WB не вернул данные», в матрице остаётся как есть.
-- Кэш: `wb:acceptance:{project_id}:{items_hash}` — 5 мин (WB rate-limit 6 req/min); `wb:acceptance_warehouses:{project_id}` — 1 час.
+- Кэш: `wb:acceptance:bc:{project_id}:{barcode}` — **пер-баркод**, 10 мин (WB rate-limit 6 req/min): живой вызов только по недостающим баркодам, количества/состав батча на ключ не влияют (distribution пересчитывается на каждый запрос; не вернул WB → негативный кэш `{}`); `wb:acceptance_warehouses:{project_id}` — 1 час. Endpoint сидит на **отдельном** rate-limit бакете `acceptance_check` (60/мин), не на общем `write` — фоновые проверки страницы распределения не выедают лимит автосейва черновиков; `force=true` дополнительно гейтится суб-бакетом `acceptance_check_force` (6/мин = квота WB). Капы схемы: `items ≤ 1000`, `barcode ≤ 64` (barcode попадает в Redis-ключ; 1 запрос = ceil(N/150) живых POST к WB).
 - При создании сборки `package_type` пишется в `AssemblyRequest.package_type` — одна заявка = одна транспортная единица.
 
 ### Box Multiplicity (сборка по кратности коробок)

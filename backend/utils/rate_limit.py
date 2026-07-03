@@ -92,3 +92,12 @@ rate_limit_write = RateLimiter(limit=30, window=60, action="write")
 # For heavy read endpoints whose cache-miss path runs expensive JOIN queries
 # (e.g. supplier catalog) — protects against flood when Redis is unavailable.
 rate_limit_read_heavy = RateLimiter(limit=60, window=60, action="read_heavy")
+# Проверка приёмки WB (/warehouse/acceptance-check): семантически read (POST ради
+# тела), при тёплом пер-баркодном кэше — Redis mget + чистая математика. Отдельный
+# бакет, чтобы фоновые проверки страницы распределения не выедали write-лимит
+# автосейву черновиков (429 «Слишком много запросов» на любом действии, 2026-07-03).
+rate_limit_acceptance = RateLimiter(limit=60, window=60, action="acceptance_check")
+# force=true обходит кэш → каждый запрос = живые POST к WB (квота 6/мин). Жёсткий
+# суб-лимит поверх основного бакета гасит амплификацию (HIGH security-ревью
+# 2026-07-03); зовётся вручную в endpoint'е при force, не через Depends.
+rate_limit_acceptance_force = RateLimiter(limit=6, window=60, action="acceptance_check_force")

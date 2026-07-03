@@ -183,6 +183,7 @@ export function addReportMethods(api: ApiClient) {
             localizationOptimized: boolean = false,
             onlyAvailable: boolean = false,
             minStockPerMainWarehouse: number = 0,
+            localizationTarget: number = 75,
         ) {
             const q = new URLSearchParams();
             q.set('supply_days', String(supplyDays));
@@ -191,6 +192,7 @@ export function addReportMethods(api: ApiClient) {
             if (localizationOptimized) q.set('localization_optimized', 'true');
             if (onlyAvailable) q.set('only_available', 'true');
             if (minStockPerMainWarehouse > 0) q.set('min_stock_per_main_warehouse', String(minStockPerMainWarehouse));
+            if (localizationTarget !== 75) q.set('localization_target', String(localizationTarget));
             return api.request<any>('GET', `/api/v1/reports/stock_need?${q.toString()}`);
         },
         getOrderCitiesStatus() {
@@ -226,12 +228,17 @@ export function addReportMethods(api: ApiClient) {
                 'GET', `/api/v1/reports/counterparty-turnovers?${q.toString()}`
             );
         },
-        getColdStartTable(windowDays: number = 30, minPack: number = 5, shipPct: number = 55, shipFloor: number = 50, benchFromProjectId?: number) {
+        // localizationTarget=90 (не бэкенд-дефолт 75): концентрация до 75% отбрасывала
+        // округа с реальным спросом и ОТКРЫТЫМ складом (напр. СЗФО/СПБ Шушары — 8.5%
+        // спроса, но раздутый far-east→Урал вытеснял его за порог). 90% включает такие
+        // округа, оставляя на ФФ только самый дальний хвост (ДВ и т.п. — их склады закрыты).
+        getColdStartTable(windowDays: number = 30, minPack: number = 5, shipPct: number = 55, shipFloor: number = 50, benchFromProjectId?: number, localizationTarget: number = 90) {
             const q = new URLSearchParams();
             q.set('window_days', String(windowDays));
             q.set('min_pack', String(minPack));
             q.set('ship_pct', String(shipPct));
             q.set('ship_floor', String(shipFloor));
+            q.set('localization_target', String(localizationTarget));
             if (benchFromProjectId) q.set('bench_from_project_id', String(benchFromProjectId));
             return api.request<ColdStartTableResponse>(
                 'GET', `/api/v1/reports/cold_start_table?${q.toString()}`

@@ -24,6 +24,8 @@
 import {
     effectiveBoxesPerPallet,
     DEFAULT_MAX_PALLET_HEIGHT_CM,
+    packMonoPallets,
+    MONO_MAX_PALLET_ARTICLES,
 } from '@/lib/utils/boxPallet';
 
 /** Линия товара отгрузки для манифеста. */
@@ -116,8 +118,16 @@ export function buildPalletManifest(lines: ManifestLine[], opts: ManifestOpts): 
         norm.push({ line, units, ppb, cap });
     }
 
-    const pallets: PalletBin[] =
-        opts.mode === 'mono' ? packMono(norm) : packBox(norm);
+    let pallets: PalletBin[];
+    if (opts.mode === 'mono') {
+        const r = packMono(norm);
+        pallets = r.pallets;
+        // Недобранные моно (не целая паллета) — не рисуем как паллету, а в бакет «без
+        // целой паллеты» (эти штуки уедут в предбронь/«Дозабить», а не в отгрузку).
+        unpalletized.push(...r.dropped);
+    } else {
+        pallets = packBox(norm);
+    }
 
     return { pallets, unpalletized };
 }
@@ -125,28 +135,50 @@ export function buildPalletManifest(lines: ManifestLine[], opts: ManifestOpts): 
 interface NormLineLite { line: ManifestLine; units: number; ppb: number; cap: number; }
 
 /**
- * MONO: каждый SKU — свои паллеты. ⌈units/cap⌉ паллет, последняя может быть
- * неполной. Зеркалит `palletsForLines(..., 'mono')` (Σ ⌈units_i/cap_i⌉).
+ * MONO: паллета вмещает ≤3 АРТИКУЛА (правило WB). Пакуем через АВТОРИТЕТ
+ * `packMonoPallets` (тот же, что трим черновик↔предбронь), поэтому показ = то, что
+ * реально уедет: рисуем только ГОТОВЫЕ (строго полные) паллеты, а недобранные штуки
+ * возвращаем в `dropped` (уйдут в предбронь/«Дозабить», не в отгрузку).
  */
-function packMono(norm: NormLineLite[]): PalletBin[] {
+function packMono(norm: NormLineLite[]): { pallets: PalletBin[]; dropped: PalletItem[] } {
+    // Агрегируем по nm (один артикул = один ключ), сохраняем геометрию.
+    const byKey = new Map<number, NormLineLite>();
+    for (const n of norm) {
+        const e = byKey.get(n.line.nmId);
+        if (e) e.units += n.units;
+        else byKey.set(n.line.nmId, { ...n });
+    }
+    const km: Record<string, number> = {};
+    for (const [nmId, n] of byKey) km[String(nmId)] = n.units;
+    const res = packMonoPallets(
+        km,
+        (k) => byKey.get(Number(k))?.cap ?? null,
+        MONO_MAX_PALLET_ARTICLES,
+        (k) => byKey.get(Number(k))?.ppb ?? 0,
+    );
     const pallets: PalletBin[] = [];
     let no = 1;
-    for (const { line, units, ppb, cap } of norm) {
-        let rem = units;
-        while (rem > 0) {
-            const onPallet = Math.min(rem, cap);
-            pallets.push({
-                palletNo: no++,
-                items: [{
-                    nmId: line.nmId, vendorCode: line.vendorCode, units: onPallet,
-                    boxes: unitsToBoxes(onPallet, ppb),
-                }],
-                fillPct: onPallet / cap,
+    for (const bin of res.pallets) {
+        let frac = 0;
+        const palletItems: PalletItem[] = [];
+        for (const { key, units } of bin) {
+            const n = byKey.get(Number(key))!;
+            frac += units / n.cap;
+            palletItems.push({
+                nmId: n.line.nmId, vendorCode: n.line.vendorCode, units,
+                boxes: unitsToBoxes(units, n.ppb),
             });
-            rem -= onPallet;
         }
+        pallets.push({ palletNo: no++, items: palletItems, fillPct: Math.min(frac, 1) });
     }
-    return pallets;
+    const dropped: PalletItem[] = [];
+    for (const [key, units] of Object.entries(res.dropped)) {
+        if (units <= 0) continue;
+        const n = byKey.get(Number(key));
+        if (!n) continue;
+        dropped.push({ nmId: n.line.nmId, vendorCode: n.line.vendorCode, units, boxes: unitsToBoxes(units, n.ppb) });
+    }
+    return { pallets, dropped };
 }
 
 /**
@@ -164,9 +196,14 @@ function packMono(norm: NormLineLite[]): PalletBin[] {
 function packBox(norm: NormLineLite[]): PalletBin[] {
     if (norm.length === 0) return [];
     const EPS = 1e-9;
-    // Целое число паллет = агрегат (тот же ceil, что в palletsForLines 'box').
+    // Целое число паллет = агрегат (тот же `ceil(fill − tol)`, что в palletsForLines 'box':
+    // −tol поглощает дискретизационный сливер после snapToWholePallets, иначе 1.05→2 паллеты).
+    // Гранула допуска = КОРОБ (зеркало короб-гранулярного среза): сливер над целым может
+    // достигать короба крупнейшего SKU — иначе манифест рисует +1 паллету против
+    // KPI-бейджа на той же карточке (живой черновик: Казань KPI 3 vs манифест 4).
     const totalFill = norm.reduce((s, n) => s + n.units / n.cap, 0);
-    const palletCount = Math.max(1, Math.ceil(totalFill - EPS));
+    const tol = Math.min(0.5, norm.reduce((m, n) => Math.max(m, n.cap > 0 ? (n.ppb > 1 ? n.ppb : 1) / n.cap : 0), 0));
+    const palletCount = Math.max(1, Math.ceil(totalFill - Math.max(tol, EPS)));
 
     const queue = norm.map(n => ({ ...n, rem: n.units }));
     const pallets: PalletBin[] = [];

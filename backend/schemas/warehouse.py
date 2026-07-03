@@ -360,7 +360,9 @@ class AcceptanceCheckItemRequest(BaseModel):
     """Single SKU + its current planned distribution per WB warehouse."""
 
     nm_id: int
-    barcode: str
+    # max_length: barcode попадает в Redis-ключ пер-баркодного кэша и в payload WB
+    # (EAN ≤ 14 симв.) — без капа мусорные строки раздувают кэш (cache-dilution).
+    barcode: str = Field(max_length=64)
     distribution: dict[str, int]  # {wb_warehouse_name: qty}
 
 
@@ -372,7 +374,9 @@ class AcceptanceCheckRequest(BaseModel):
     qty away from closed warehouses (gео-aware via warehouse_district).
     """
 
-    items: list[AcceptanceCheckItemRequest]
+    # max_length: один запрос = ceil(N/150) живых POST к WB (квота 6/мин) —
+    # неограниченный список амплифицирует force-флуд (security-ревью 2026-07-03).
+    items: list[AcceptanceCheckItemRequest] = Field(max_length=1000)
 
 
 class AcceptanceCoefMeta(BaseModel):

@@ -1,6 +1,6 @@
 'use client';
 import type React from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -9,7 +9,7 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchBlock } from '@/components/FfMismatchModal';
 import MigfullModal from './MigfullModal';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply } from '@/types/api';
+import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply } from '@/types/api';
 
 // Статусы, в которых заявку имеет смысл отправлять на ФФ (до отгрузки нашей стороной).
 const FF_PUSH_STATUSES: ReadonlySet<AssemblyStatus> = new Set<AssemblyStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED']);
@@ -95,8 +95,8 @@ export default function AssemblyDetailPage() {
     // Цепочка попыток отгрузки (отгрузил → не приняли → вернул → переотгрузил).
     const [attempts, setAttempts] = useState<AssemblyAttempt[]>([]);
 
-    // Кратность короба по баркоду — для колонки «Коробок».
-    const [ppbByBarcode, setPpbByBarcode] = useState<Map<string, number | null>>(new Map());
+    // Сырые кратности коробов (per-nm + per-warehouse) — резолвим ниже с приоритетом склада заявки.
+    const [bmRows, setBmRows] = useState<BoxMultiplicityRow[]>([]);
 
     // FBO supply editing
     const [editingFbo, setEditingFbo] = useState(false);
@@ -135,31 +135,39 @@ export default function AssemblyDetailPage() {
         return () => { cancelled = true; };
     }, [warehouseId]);
 
-    // Кратность короба per-баркод (override > минимальный per-warehouse box_qty).
     useEffect(() => {
         let cancelled = false;
         api.getBoxMultiplicity()
-            .then(resp => {
-                if (cancelled) return;
-                const m = new Map<string, number | null>();
-                for (const r of resp.items) {
-                    let ppb: number | null = null;
-                    if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
-                        ppb = r.box_qty_override;
-                    } else {
-                        let best = 0;
-                        for (const p of r.per_warehouse) {
-                            if (p.box_qty && p.box_qty > 0 && p.use_box_multiplicity && (best === 0 || p.box_qty < best)) best = p.box_qty;
-                        }
-                        ppb = best > 0 ? best : null;
-                    }
-                    if (r.barcode) m.set(r.barcode, ppb);
-                }
-                setPpbByBarcode(m);
-            })
+            .then(resp => { if (!cancelled) setBmRows(resp.items); })
             .catch(() => { /* best-effort */ });
         return () => { cancelled = true; };
     }, []);
+
+    // Кратность короба per-баркод. Приоритет: действующая кратность склада ЗАЯВКИ
+    // (товар физически едет его коробами, machine-first) → глобальный override →
+    // минимальная по складам (фолбэк). Min-фолбэк без учёта склада заявки давал
+    // псевдо-россыпь: заявка на хамзу (короб 18, machine) мерялась ручной
+    // кратностью натали (13) → целый короб рисовался как «1 кор + 5 шт».
+    const ppbByBarcode = useMemo(() => {
+        const m = new Map<string, number | null>();
+        for (const r of bmRows) {
+            let ppb: number | null = null;
+            const own = warehouseId != null ? r.per_warehouse.find(p => p.warehouse_id === warehouseId) : undefined;
+            if (own?.box_qty && own.box_qty > 0 && own.use_box_multiplicity) {
+                ppb = own.box_qty;
+            } else if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
+                ppb = r.box_qty_override;
+            } else {
+                let best = 0;
+                for (const p of r.per_warehouse) {
+                    if (p.box_qty && p.box_qty > 0 && p.use_box_multiplicity && (best === 0 || p.box_qty < best)) best = p.box_qty;
+                }
+                ppb = best > 0 ? best : null;
+            }
+            if (r.barcode) m.set(r.barcode, ppb);
+        }
+        return m;
+    }, [bmRows, warehouseId]);
 
     // Конфиг migfull-портала («Натали») — грузим один раз; кнопку показываем,
     // только если интеграция настроена и её склад совпадает со складом сборки.

@@ -43,6 +43,7 @@ from backend.services.assembly_service import (
     cancel_request,
     close_request,
     create_assembly_request,
+    delete_bulk,
     deliver_request,
     get_assembly_attempts,
     get_assembly_request,
@@ -196,6 +197,30 @@ async def _create_test_request(db_session) -> AssemblyRequest:
         pallets_count=2,
         pallet_weight_kg=Decimal("150.00"),
         items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
+    )
+    return await create_assembly_request(db_session, PROJECT_ID, payload)
+
+
+async def _create_test_request_second_supply(db_session) -> AssemblyRequest:
+    """Helper: вторая валидная заявка со СВОЕЙ FBO-поставкой — у одной поставки
+    может быть только одна активная заявка, второй `_create_test_request` падает."""
+    fbo = WbFboSupply(
+        project_id=PROJECT_ID,
+        wb_supply_id="ASM-FBO-TEST-2",
+        wb_status=WbSupplyStatus.ACTIVE,
+        name="ASM_TEST FBO Supply 2",
+        warehouse_name="Электросталь",
+        created_at_wb=datetime(2026, 3, 21),
+    )
+    db_session.add(fbo)
+    await db_session.flush()
+    wh_id = await _get_fulfillment_wh_id(db_session)
+    payload = AssemblyRequestCreate(
+        warehouse_id=wh_id,
+        wb_fbo_supply_id=fbo.id,
+        pallets_count=1,
+        pallet_weight_kg=Decimal("120.00"),
+        items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=2)],
     )
     return await create_assembly_request(db_session, PROJECT_ID, payload)
 
@@ -1847,6 +1872,135 @@ class TestFfLinkEnrichment:
         assert by_id[linked.id].ff_request_id == ff.id
         assert by_id[linked.id].ff_request_number == ff.number
         assert by_id[linked.id].ff_warehouse_id == wh_id
+
+
+@pytest.mark.asyncio
+class TestDeleteBulk:
+    """Массовое удаление заявок: pre-WB удаляются, отгруженные на WB — пропускаются."""
+
+    async def test_delete_bulk_removes_pre_wb_and_skips_shipped(self, db_session):
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        # Две заявки «В сборке» (IN_PROGRESS, без FBO) — удаляемые.
+        r1 = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id, wb_fbo_supply_id=None, pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=2)],
+            ),
+        )
+        r2 = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id, wb_fbo_supply_id=None, pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=2)],
+            ),
+        )
+        # Третья — отгружена на WB (SHIPPED) → удалять нельзя.
+        r3 = await _create_test_request(db_session)
+        await start_assembly(db_session, PROJECT_ID, r3.id)
+        await mark_ready(db_session, PROJECT_ID, r3.id)
+        await assign_vehicle(
+            db_session, PROJECT_ID, r3.id,
+            AssignVehicle(
+                vehicle_info="Truck DEL", vehicle_brand="GAZ", driver_phone="+79990000000",
+                pickup_date="2026-03-22", pickup_time_slot="08:00-12:00", pickup_cost=1,
+                delivery_date="2026-03-23",
+            ),
+        )
+        await ship_request(db_session, PROJECT_ID, r3.id)
+
+        result = await delete_bulk(db_session, PROJECT_ID, [r1.id, r2.id, r3.id])
+
+        assert result["deleted"] == 2
+        assert {s["id"] for s in result["skipped"]} == {r3.id}
+        # pre-WB заявки мягко удалены (не возвращаются активным lookup'ом).
+        assert await get_assembly_request(db_session, PROJECT_ID, r1.id) is None
+        assert await get_assembly_request(db_session, PROJECT_ID, r2.id) is None
+        # Отгруженная на WB осталась.
+        assert await get_assembly_request(db_session, PROJECT_ID, r3.id) is not None
+
+    async def test_delete_bulk_missing_id_reported(self, db_session):
+        result = await delete_bulk(db_session, PROJECT_ID, [999999])
+        assert result["deleted"] == 0
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["id"] == 999999
+
+
+@pytest.mark.asyncio
+class TestSetStatusBulk:
+    """Массовый перевод статусов одним запросом: валидные переводятся,
+    невалидные пропускаются с причиной (partial success)."""
+
+    async def test_bulk_ready_updates_valid_and_skips_invalid(self, db_session):
+        from backend.services.assembly_service import set_status_bulk
+
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        # Две валидные заявки (каждая со своей поставкой WB, палеты/вес заданы) → READY.
+        r1 = await _create_test_request(db_session)
+        r2 = await _create_test_request_second_supply(db_session)
+        # Без поставки WB → mark_ready падает → skip с причиной.
+        r3 = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id, wb_fbo_supply_id=None, pallets_count=1,
+                pallet_weight_kg=Decimal("10.00"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_2, quantity=1)],
+            ),
+        )
+
+        result = await set_status_bulk(db_session, PROJECT_ID, [r1.id, r2.id, r3.id, 999999], "READY")
+
+        assert {r.id for r in result["updated"]} == {r1.id, r2.id}
+        assert all(r.status == AssemblyStatus.READY for r in result["updated"])
+        assert all(r.actual_ready_date is not None for r in result["updated"])
+        skips = {s["id"]: s for s in result["skipped"]}
+        assert set(skips) == {r3.id, 999999}
+        assert "поставки WB" in skips[r3.id]["reason"]
+        assert skips[999999]["reason"] == "не найдена"
+        # Пропущенная заявка не тронута.
+        r3_db = await get_assembly_request(db_session, PROJECT_ID, r3.id)
+        assert r3_db is not None and r3_db.status == AssemblyStatus.IN_PROGRESS
+
+    async def test_bulk_in_progress_reopens_ready(self, db_session):
+        from backend.services.assembly_service import set_status_bulk
+
+        r1 = await _create_test_request(db_session)
+        r2 = await _create_test_request_second_supply(db_session)
+        await mark_ready(db_session, PROJECT_ID, r1.id)
+        await mark_ready(db_session, PROJECT_ID, r2.id)
+
+        result = await set_status_bulk(db_session, PROJECT_ID, [r1.id, r2.id], "IN_PROGRESS")
+
+        assert {r.id for r in result["updated"]} == {r1.id, r2.id}
+        assert all(r.status == AssemblyStatus.IN_PROGRESS for r in result["updated"])
+        # Возврат в сборку сбрасывает дату готовности (проставится заново на mark_ready).
+        assert all(r.actual_ready_date is None for r in result["updated"])
+        assert result["skipped"] == []
+
+    async def test_bulk_same_status_is_idempotent_noop(self, db_session):
+        """Уже в целевом статусе (и дубль id) → updated без skip-мусора."""
+        from backend.services.assembly_service import set_status_bulk
+
+        r1 = await _create_test_request(db_session)
+        await mark_ready(db_session, PROJECT_ID, r1.id)
+
+        result = await set_status_bulk(db_session, PROJECT_ID, [r1.id, r1.id], "READY")
+
+        assert [r.id for r in result["updated"]] == [r1.id]
+        assert result["updated"][0].status == AssemblyStatus.READY
+        assert result["skipped"] == []
+
+    async def test_bulk_rejects_unknown_target_status(self, db_session):
+        from backend.services.assembly_service import set_status_bulk
+
+        r1 = await _create_test_request(db_session)
+        with pytest.raises(ValueError, match="Недопустимый статус"):
+            await set_status_bulk(db_session, PROJECT_ID, [r1.id], "SHIPPED")
 
 
 @pytest.mark.asyncio

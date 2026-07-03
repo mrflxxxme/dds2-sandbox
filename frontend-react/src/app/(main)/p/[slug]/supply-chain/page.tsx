@@ -2175,6 +2175,20 @@ function VehiclesTab() {
                                                         {NEXT_STATUS[status].label}
                                                     </button>
                                                 )}
+                                                {(status === 'CUSTOMS' || status === 'DISPATCHED') && (
+                                                    <button
+                                                        onClick={e => { e.stopPropagation(); router.push(`/p/${slug}/warehouse/assembly/distribute?tab=pre-dist`); }}
+                                                        style={{
+                                                            padding: '3px 10px', borderRadius: 8, fontSize: 11, fontWeight: 600,
+                                                            border: '1px solid var(--color-accent)',
+                                                            background: 'transparent', color: 'var(--color-accent)',
+                                                            cursor: 'pointer', transition: 'all 0.15s', whiteSpace: 'nowrap',
+                                                        }}
+                                                        title="Предраспределить груз машины по WB-складам до приёмки"
+                                                    >
+                                                        🚚 Предраспред.
+                                                    </button>
+                                                )}
                                                 <span className="sc-open-link" onClick={() => openVehicle(v.order_no)}>{t('vehicles_open')}</span>
                                             </div>
                                         </td>

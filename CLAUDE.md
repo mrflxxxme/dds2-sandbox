@@ -40,10 +40,12 @@ make sync-prod                                  # локалка = копия п
 | Запрос | Действие |
 |---|---|
 | новый endpoint / страница / миграция БД | `/new-endpoint` · `/new-page` · `/migration` |
-| крупная фича, cross-domain | `/plan` |
+| фича от плана до отправки (cross-domain) | `/feature` (план→хребет→фан-аут→verify→ship) |
+| только спланировать (без кода) | `/plan` |
 | прод упал / откат деплоя | `/hotfix` · `/rollback` |
 | pytest или сборка падают | `/build-fix` |
-| перед коммитом / после фичи | `/verify` · `/learn` |
+| баг с тестируемым критерием — автономно до зелёного | `/autofix` |
+| перед коммитом / отправка фичи / после фичи | `/verify` · `/ship` · `/learn` |
 | баг, вопрос, мелкая правка | без skill — сразу |
 
 После написания кода запускай `/review` (фан-аут профильных субагентов по diff-путям, единый вердикт APPROVE/WARNING/BLOCK; обычно — шагом `/verify`). Субагенты `code-reviewer`, `security-reviewer`, `database-reviewer`, `performance-optimizer`, `api-designer` — по запросу или когда задача в их зоне.
@@ -56,8 +58,13 @@ make sync-prod                                  # локалка = копия п
 - Коммиты: `feat:` / `fix:` / `infra:` / `refactor:` / `test:` (русский текст ok).
 
 ## Параллелизм
-По умолчанию lead работает sequential. Worktree-teammates — только для крупных cross-domain задач и только по явному запросу.
-- Зоны владения: backend (`backend/`, `migrations/`, `tests/`) ‖ frontend (`frontend-react/`). `models/`, `schemas/`, `.claude/`, `cache.py`, миграции — lead sequential.
+**Read-only фан-аут — ВСЕГДА параллельно, без явного запроса.** Ревью (`/review`, `Workflow({name:'review-deep'})`), research, многофайловое исследование — профильные субагенты / Explore в отдельном контексте: конфликтов нет, контекст lead остаётся чистым. Перед правкой в большом домене — сначала read-only Explore «как устроено X», потом код.
+
+**Write-teammates (worktree) — по правилу «сначала хребет, потом фан-аут».** Для cross-domain фич:
+1. Lead последовательно кладёт и **коммитит хребет**: Model → Migration → Schema (а также `cache.py`, `models/`, `schemas/`, `.claude/`, миграции — всегда lead).
+2. Только после этого — фан-аут по зонам владения: backend (`services/`, `routers/`, `tests/`) ‖ frontend (`frontend-react/`) — это уже конфликт-фри.
+
+Явный запрос юзера нужен ТОЛЬКО для задач, которые мутируют общие файлы параллельно (`models/`, `schemas/`, `cache.py`, миграции одновременно из двух lane). Всё остальное cross-domain с замороженным API-контрактом — фан-аут по умолчанию.
 - В промпт каждому teammate: относительные пути (это worktree!); при изменении API — types-first; `git status` в финальном отчёте; долгие задачи — `run_in_background`.
 
 ## Анти-паттерны

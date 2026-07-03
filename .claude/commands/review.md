@@ -18,6 +18,7 @@ git diff --staged --name-only && git diff --name-only
 | Изменённые пути | Агент |
 |---|---|
 | любой код в `backend/**` или `frontend-react/**` | **code-reviewer** (всегда) |
+| `frontend-react/**` (`.tsx`/`.ts`) | **+ frontend-reviewer** |
 | `migrations/**`, `backend/models/**`, `*.sql`, alembic | **+ database-reviewer** |
 | `backend/auth*`, `backend/rbac.py`, `backend/utils/crypto*`, `text(`-SQL, пользовательский ввод | **+ security-reviewer** |
 | `backend/routers/**`, новый endpoint, массовые выборки (`.scalars().all()`) | **+ performance-optimizer** |

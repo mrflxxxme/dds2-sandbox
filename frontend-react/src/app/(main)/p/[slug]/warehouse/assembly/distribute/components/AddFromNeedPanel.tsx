@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { buildDraftRows, type DraftSkuInput } from '@/lib/assembly/buildDraftRows';
+import { roundDraftRowsToWholeBoxes } from '@/lib/utils/assemblyRoundBoxes';
+import { effectiveBoxesPerPallet } from '@/lib/utils/boxPallet';
 import type { StockNeedResponse, ColdStartTableRow, AssemblyDraftRow } from '@/types/api';
 
 interface Candidate {
@@ -10,7 +12,11 @@ interface Candidate {
     vendor: string;
     brand: string;
     subject: string;
+    /** Потребность WB (сколько надо). Для новинок — n/a (allocation-driven). */
     need: number;
+    /** Реально можно отгрузить сейчас: обычные — can_send (с учётом свободного ФФ,
+     *  в сборке, в пути), новинки — total_allocated (кап cold-start по свободному ФФ). */
+    canSend: number;
     free: number;
     isNew: boolean;
 }
@@ -25,7 +31,8 @@ interface AddFromNeedPanelProps {
     palletOverrides: Record<string, number>;
     /** WB-склад → ключ округа (для кросс-SKU палет-консолидации в buildDraftRows). */
     districtMap: Record<string, string>;
-    /** Дозалить строки в черновик (родитель сначала флашит правки, потом merge+reload). */
+    /** Дозалить строки в черновик. Родитель сам приводит весь черновик к целым коробам +
+     *  целым паллетам (нормализация безусловна после merge) — флаги тут не нужны. */
     onAddRows: (rows: AssemblyDraftRow[]) => Promise<void>;
     onToast: (message: string, type: 'success' | 'error') => void;
 }
@@ -72,26 +79,56 @@ export default function AddFromNeedPanel({
         return m;
     }, [coldRows]);
 
+    // Влезает ли обычный SKU хотя бы в ОДНУ целую паллету (для фильтра «только целые»).
+    // Геометрия как в buildDraftRows: boxesPerPallet(180) × ppb. Все WB-склады = 180 см,
+    // поэтому оценка совпадает с реальным срезом commit'а (нет ложного скрытия).
+    const fitsWholePallet = useCallback((nm: number, canSend: number): boolean => {
+        const ppb = nmPpb.get(nm);
+        if (!ppb || ppb <= 0) return false;  // не box-режим → не палетизируется
+        const bpp = effectiveBoxesPerPallet(nmBoxSize.get(nm), undefined, palletOverrides);
+        if (!bpp || bpp <= 0) return false;  // нет габаритов → не на паллету
+        return canSend >= bpp * ppb;          // хватает хотя бы на 1 целую паллету
+    }, [nmPpb, nmBoxSize, palletOverrides]);
+
     const regularCandidates = useMemo<Candidate[]>(() => {
         const out: Candidate[] = [];
         for (const a of stockNeed?.articles ?? []) {
-            if (existingNmIds.has(a.nm_id) || a.total_need <= 0) continue;
+            // Только то, что РЕАЛЬНО можно сдать сейчас: can_send>0 (свободный ФФ под
+            // потребность за вычетом уже-в-сборке/в-пути). Потребность без отгружаемого
+            // остатка не показываем — её всё равно нельзя добавить в заявку.
+            if (existingNmIds.has(a.nm_id) || a.can_send <= 0) continue;
+            // «Только целые паллеты» ВКЛ → прячем обычные, не набирающие целой паллеты
+            // (их всё равно нельзя добавить этой галкой). Новинок не касается (россыпь).
+            if (wholePallets && !fitsWholePallet(a.nm_id, a.can_send)) continue;
             const free = Object.values(a.rf_stocks || {}).reduce((s, v) => s + (v.available || 0), 0);
-            out.push({ nm: a.nm_id, vendor: a.vendor_code, brand: a.brand, subject: a.subject, need: a.total_need, free, isNew: false });
+            out.push({ nm: a.nm_id, vendor: a.vendor_code, brand: a.brand, subject: a.subject, need: a.total_need, canSend: a.can_send, free, isNew: false });
         }
-        return out.sort((x, y) => y.need - x.need);
-    }, [stockNeed, existingNmIds]);
+        return out.sort((x, y) => y.canSend - x.canSend);
+    }, [stockNeed, existingNmIds, wholePallets, fitsWholePallet]);
 
     const newcomerCandidates = useMemo<Candidate[]>(() => {
         const out: Candidate[] = [];
         for (const r of coldRows) {
+            // total_allocated — сколько cold-start реально отгружает (кап по свободному ФФ).
             if (existingNmIds.has(r.nm_id) || r.total_allocated <= 0) continue;
-            out.push({ nm: r.nm_id, vendor: r.article_seller || `nm:${r.nm_id}`, brand: r.brand || '', subject: r.subject || '', need: r.total_allocated, free: r.rf_qty, isNew: true });
+            out.push({ nm: r.nm_id, vendor: r.article_seller || `nm:${r.nm_id}`, brand: r.brand || '', subject: r.subject || '', need: r.total_allocated, canSend: r.total_allocated, free: r.rf_qty, isNew: true });
         }
-        return out.sort((x, y) => y.need - x.need);
+        return out.sort((x, y) => y.canSend - x.canSend);
     }, [coldRows, existingNmIds]);
 
     const baseCandidates = tab === 'regular' ? regularCandidates : newcomerCandidates;
+
+    // Чистим отметки от исчезнувших кандидатов (напр. при включении «только целые
+    // паллеты» обычные не-паллетные пропадают) — иначе счётчик «Добавить отмеченные
+    // (N)» и handleAdd учитывали бы невидимые SKU.
+    useEffect(() => {
+        const valid = new Set<number>([...regularCandidates, ...newcomerCandidates].map(c => c.nm));
+        setChecked(prev => {
+            const next = new Set<number>();
+            for (const nm of prev) if (valid.has(nm)) next.add(nm);
+            return next.size === prev.size ? prev : next;
+        });
+    }, [regularCandidates, newcomerCandidates]);
 
     const brandOptions = useMemo(() => [...new Set(baseCandidates.map(c => c.brand).filter(Boolean))].sort(), [baseCandidates]);
     const subjectOptions = useMemo(() => [...new Set(baseCandidates.map(c => c.subject).filter(Boolean))].sort(), [baseCandidates]);
@@ -130,7 +167,27 @@ export default function AddFromNeedPanel({
         setAdding(true);
         try {
             const skus: DraftSkuInput[] = [];
+            let addedNewcomer = false;  // новинки → россыпь + черновик-aware консолидация
             for (const nm of checked) {
+                // НОВИНКИ ПРОВЕРЯЕМ ПЕРВЫМИ. Почти каждая новинка ОДНОВРЕМЕННО есть и в
+                // обычной потребности (stock_need.articles) — 100% overlap на проде. Если
+                // сперва матчить regularByNm, новинка уходила в regular-ветку, палетизировалась
+                // по обычной матрице, а «только целые паллеты» срезали её в ноль → тост
+                // «Не набралось целых паллет», добавление новинок не работало. У новинки нет
+                // истории продаж → её надо слать cold-start РОССЫПЬЮ (ppb=null, allocations).
+                const nc = newcomerByNm.get(nm);
+                if (nc && nc.total_allocated > 0) {
+                    const target = Object.fromEntries(Object.entries(nc.allocations || {}).filter(([, q]) => q > 0));
+                    const ffStock: Record<number, number> = {};
+                    for (const [ff, q] of Object.entries(nc.rf_by_warehouse || {})) if ((q || 0) > 0) ffStock[Number(ff)] = q;
+                    if (Object.keys(target).length === 0 || Object.keys(ffStock).length === 0) continue;
+                    // Россыпь (ppb=null): cold-start даёт мало на склад, целым коробом часто не
+                    // набирается → строка бы выпала. Паллетизацию (микс с обычными / срез б/габ)
+                    // делает предпросмотр по геометрии-картам (nmPpb), а не по этой строке.
+                    skus.push({ nm_id: nm, barcode: nc.barcode || '', vendor_code: nc.article_seller || `nm:${nm}`, target, ffStock, ppb: null, box_size: nmBoxSize.get(nm), packageType: 'BOX' });
+                    addedNewcomer = true;
+                    continue;
+                }
                 const reg = regularByNm.get(nm);
                 if (reg) {
                     const target: Record<string, number> = {};
@@ -144,23 +201,63 @@ export default function AddFromNeedPanel({
                     }
                     if (Object.keys(target).length === 0 || Object.keys(ffStock).length === 0) continue;
                     skus.push({ nm_id: nm, barcode: reg.barcode, vendor_code: reg.vendor_code, target, ffStock, ppb: nmPpb.get(nm), box_size: nmBoxSize.get(nm), packageType: 'BOX' });
-                    continue;
-                }
-                const nc = newcomerByNm.get(nm);
-                if (nc) {
-                    const target = Object.fromEntries(Object.entries(nc.allocations || {}).filter(([, q]) => q > 0));
-                    const ffStock: Record<number, number> = {};
-                    for (const [ff, q] of Object.entries(nc.rf_by_warehouse || {})) if ((q || 0) > 0) ffStock[Number(ff)] = q;
-                    if (Object.keys(target).length === 0 || Object.keys(ffStock).length === 0) continue;
-                    skus.push({ nm_id: nm, barcode: nc.barcode || '', vendor_code: nc.article_seller || `nm:${nm}`, target, ffStock, ppb: nmPpb.get(nm), box_size: nmBoxSize.get(nm), packageType: 'BOX' });
                 }
             }
             if (skus.length === 0) { onToast('Нет свободного стока/потребности у выбранных SKU', 'error'); setAdding(false); return; }
-            const rows = buildDraftRows({ skus, wholePalletsOnly: wholePallets, warehouseToDistrict: districtMap, palletOverrides });
+
+            // Проверка приёмки WB + перераспределение закрытых складов (как в «Потребности»):
+            // бэкенд acceptance-check возвращает по SKU перераспределённое распределение (закрытый
+            // склад → ближайший открытый) + сплиты по типу упаковки (короб/моно). Кладём уже с
+            // учётом приёмки. Сбой проверки → кладём как есть (без приёмки), предупреждаем.
+            let effectiveSkus = skus;
+            let movedAway = 0;
+            let droppedClosed = 0;
+            try {
+                const resp = await api.checkWbAcceptance({
+                    items: skus.map(s => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
+                });
+                const byKey = new Map(resp.items.map(it => [`${it.nm_id}::${it.barcode}`, it]));
+                const redone: DraftSkuInput[] = [];
+                for (const s of skus) {
+                    const it = byKey.get(`${s.nm_id}::${s.barcode}`);
+                    if (!it) { redone.push(s); continue; }
+                    const splits = it.splits?.length ? it.splits : [{ package_type: it.package_type, distribution: it.distribution, warnings: [] }];
+                    for (const sp of splits) {
+                        const target = Object.fromEntries(Object.entries(sp.distribution || {}).filter(([, q]) => q > 0));
+                        if (!Object.keys(target).length) continue;
+                        redone.push({ ...s, target, packageType: sp.package_type });
+                    }
+                }
+                effectiveSkus = redone;
+                for (const m of resp.moves ?? []) { if (m.to_warehouse) movedAway += m.quantity; else droppedClosed += m.quantity; }
+            } catch {
+                onToast('Приёмка WB недоступна — добавляю без проверки складов', 'error');
+            }
+            if (effectiveSkus.length === 0) { onToast('После проверки приёмки нечего отгрузить — выбранные склады закрыты', 'error'); setAdding(false); return; }
+
+            // Новинки в одиночку редко набирают целую паллету (cold-start размазывает тонко) —
+            // кладём их box-multiple РОССЫПЬЮ, а смешанные паллеты с обычными дособирает
+            // черновик-aware консолидация в родителе (onAddRows consolidate).
+            const wholeForBatch = addedNewcomer ? false : wholePallets;
+            let rows = buildDraftRows({ skus: effectiveSkus, wholePalletsOnly: wholeForBatch, warehouseToDistrict: districtMap, palletOverrides });
             if (rows.length === 0) {
-                onToast(wholePallets ? 'Не набралось целых паллет — снимите «только целые» или добавьте больше SKU' : 'Не удалось разложить выбранные SKU', 'error');
+                onToast(wholeForBatch ? 'Не набралось целых паллет — снимите «только целые» или добавьте больше SKU' : 'Не удалось разложить выбранные SKU (нет свободного ФФ под потребность)', 'error');
                 setAdding(false);
                 return;
+            }
+            // Добить ДО ЦЕЛЫХ КОРОБОВ, включая новинки (движок округлил только обычные):
+            // новинки добиваем из ОСТАВШЕГОСЯ ФФ, не хватает на короб — россыпь (не дропаем).
+            {
+                const used: Record<number, Record<number, number>> = {};
+                for (const r of rows) { const m = (used[r.nm_id] ??= {}); for (const [ff, q] of Object.entries(r.src)) m[Number(ff)] = (m[Number(ff)] || 0) + (q || 0); }
+                const freeAfter: Record<number, Record<number, number>> = {};
+                for (const s of effectiveSkus) {
+                    if (freeAfter[s.nm_id]) continue;
+                    const pool: Record<number, number> = {};
+                    for (const [ff, q] of Object.entries(s.ffStock)) { const free = (q || 0) - (used[s.nm_id]?.[Number(ff)] || 0); if (free > 0) pool[Number(ff)] = free; }
+                    if (Object.keys(pool).length) freeAfter[s.nm_id] = pool;
+                }
+                rows = roundDraftRowsToWholeBoxes(rows, (nm) => nmPpb.get(nm), freeAfter, (nm) => newcomerByNm.has(nm)).rows;
             }
             const units = rows.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
             // Часть выбранных SKU могла не набрать целой паллеты → не вернулись строкой.
@@ -168,7 +265,10 @@ export default function AddFromNeedPanel({
             const addedKeys = new Set(rows.map(r => `${r.nm_id}::${r.barcode}`));
             const droppedNms = skus.filter(s => !addedKeys.has(`${s.nm_id}::${s.barcode}`)).map(s => s.nm_id);
             await onAddRows(rows);
-            onToast(`Добавлено строк: ${formatNumber(rows.length, 0)} · Σ ${formatNumber(units, 0)} шт${droppedNms.length > 0 ? ` · ${formatNumber(droppedNms.length, 0)} пропущено (< целой паллеты)` : ''}`, 'success');
+            const accNote = (movedAway > 0 || droppedClosed > 0)
+                ? ` · приёмка:${movedAway > 0 ? ` ↪${formatNumber(movedAway, 0)} перераспр.` : ''}${droppedClosed > 0 ? ` ⛔${formatNumber(droppedClosed, 0)} на закрытых` : ''}`
+                : '';
+            onToast(`Добавлено строк: ${formatNumber(rows.length, 0)} · Σ ${formatNumber(units, 0)} шт${droppedNms.length > 0 ? ` · ${formatNumber(droppedNms.length, 0)} пропущено (< целой паллеты)` : ''}${accNote}`, 'success');
             setChecked(new Set(droppedNms));
         } catch (e: unknown) {
             onToast(e instanceof Error ? e.message : 'Ошибка добавления', 'error');
@@ -183,7 +283,7 @@ export default function AddFromNeedPanel({
                 <button className="btn btn-secondary btn-sm" onClick={() => setOpen(o => !o)}>
                     {open ? '▾' : '▸'} ➕ Добавить из потребности
                 </button>
-                {!open && <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>обычные товары и новинки из «Потребности по складам», целыми паллетами</span>}
+                {!open && <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>обычные и новинки — только то, что реально можно отгрузить сейчас (свободный ФФ), целыми паллетами</span>}
                 {open && checkedCount > 0 && (
                     <button className="btn btn-primary btn-sm" onClick={handleAdd} disabled={adding}>
                         {adding ? 'Добавление…' : `Добавить отмеченные (${checkedCount})`}
@@ -236,8 +336,9 @@ export default function AddFromNeedPanel({
                                         </th>
                                         <th style={{ padding: '4px 8px', fontWeight: 600 }}>Артикул</th>
                                         <th style={{ padding: '4px 8px', fontWeight: 600 }}>Бренд · Категория</th>
-                                        <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }}>Потребность</th>
-                                        <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }}>Свободно ФФ</th>
+                                        <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title="Сколько надо WB (потребность)">Потребность</th>
+                                        <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title="Реально можно отгрузить сейчас — попадёт в заявку">✅ Можно отправить</th>
+                                        <th style={{ padding: '4px 8px', fontWeight: 600, textAlign: 'right' }} title="Свободный остаток на ФФ">Свободно ФФ</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -250,8 +351,9 @@ export default function AddFromNeedPanel({
                                                 {c.isNew && <span style={{ marginRight: 4, color: '#a855f7', fontWeight: 700 }}>🆕</span>}{c.vendor}
                                             </td>
                                             <td style={{ padding: '5px 8px', color: 'var(--color-text-muted)' }}>{[c.brand, c.subject].filter(Boolean).join(' · ')}</td>
-                                            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600 }}>{formatNumber(c.need, 0)}</td>
-                                            <td style={{ padding: '5px 8px', textAlign: 'right', color: c.free > 0 ? 'var(--color-success)' : 'var(--color-text-muted)' }}>{formatNumber(c.free, 0)}</td>
+                                            <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--color-text-muted)' }}>{c.isNew ? '—' : formatNumber(c.need, 0)}</td>
+                                            <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 700, color: 'var(--color-success)' }} title="Реально отгружаемое сейчас">{formatNumber(c.canSend, 0)}</td>
+                                            <td style={{ padding: '5px 8px', textAlign: 'right', color: c.free > 0 ? 'var(--color-text)' : 'var(--color-text-muted)' }}>{formatNumber(c.free, 0)}</td>
                                         </tr>
                                     ))}
                                 </tbody>

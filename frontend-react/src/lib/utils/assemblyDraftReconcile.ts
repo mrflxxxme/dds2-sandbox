@@ -13,10 +13,15 @@
 
 import type { AssemblyDraftRow } from '@/types/api';
 
-/** Identity of a distribute row: (nm_id, package_type). Mirrors `commit_draft`
- *  grouping and the page's dedupe; an unset package_type defaults to BOX. */
-export function draftRowKey(r: Pick<AssemblyDraftRow, 'nm_id' | 'package_type'>): string {
-    return `${r.nm_id}-${r.package_type || 'BOX'}`;
+/** Identity of a distribute row: (nm_id, package_type, barcode). Mirrors the
+ *  backend `_dedupe_rows`/`_merge_rows` 3-tuple key and the page's dedupe; an
+ *  unset package_type defaults to BOX. Barcode MUST be in the key — one nm_id can
+ *  carry several barcodes (size variants; all article-less cards share nm_id=0),
+ *  and matching by nm_id alone would drop a live barcode on reconcile. */
+export function draftRowKey(
+    r: Pick<AssemblyDraftRow, 'nm_id' | 'package_type'> & { barcode?: string | null },
+): string {
+    return `${r.nm_id}-${r.package_type || 'BOX'}-${r.barcode || ''}`;
 }
 
 /**

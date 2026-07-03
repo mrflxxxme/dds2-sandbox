@@ -169,6 +169,22 @@ describe('consolidatePalletsInDraftRows', () => {
         expect(totalSrc(res.rows[0])).toBe(160);
     });
 
+    // ── Регресс: два баркода одного nm_id НЕ схлопываются в одну строку ────
+    it('два баркода одного nm_id не схлопываются (размерные варианты / nm_id=0)', () => {
+        // Старый ключ (голый nm_id) слил бы оба в одну строку с баркодом первого и
+        // суммой 320 → commit отгрузил бы чужой товар / потерял баркод. Ключ
+        // (nm_id, barcode) держит их раздельно; геометрия (ppb) — общая по nm_id.
+        const a: AssemblyDraftRow = { nm_id: 100, barcode: 'BC-A', vendor_code: 'V', src: { '1': 160 }, tgt: { 'Коледино': 160 } };
+        const b: AssemblyDraftRow = { nm_id: 100, barcode: 'BC-B', vendor_code: 'V', src: { '1': 160 }, tgt: { 'Коледино': 160 } };
+        const res = consolidatePalletsInDraftRows([a, b], baseOpts);
+        expect(res.rows).toHaveLength(2);
+        const byBc = Object.fromEntries(res.rows.map(r => [r.barcode, r]));
+        expect(byBc['BC-A'].tgt).toEqual({ 'Коледино': 160 });
+        expect(byBc['BC-B'].tgt).toEqual({ 'Коледино': 160 });
+        expect(byBc['BC-A'].src).toEqual({ '1': 160 });
+        expect(byBc['BC-B'].src).toEqual({ '1': 160 });
+    });
+
     // ── Находка 3: canAnchorOf (приёмка короба) honored ───────────────────
     it('canAnchorOf=false для anchor → крошка SKU роняется на ФФ, не свозится', () => {
         // Без предиката: Коледино 40 свезётся на Подольск (160+40=200, частичная

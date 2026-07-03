@@ -26,6 +26,11 @@ class AssemblyDraftRow(BaseModel):
     # Drives grouping into AssemblyRequests on commit_draft —
     # one request per (source_ff, target_wb, package_type).
     package_type: PackageTypeStr = "BOX"
+    # Сознательно отгруженная ЧАСТИЧНАЯ паллета («Оставить так» в предброни).
+    # Такие строки нормализатор фронта НЕ трогает (не срезает до целых паллет);
+    # всё непомеченное приводится к инварианту «целые коробы + целые паллеты»
+    # при загрузке страницы (self-heal легаси-недобора).
+    as_is: bool = False
 
 
 class HandedUnitItem(BaseModel):
@@ -66,8 +71,20 @@ class AssemblyDraftDistribution(BaseModel):
     cold_start_shares: dict[str, float] | None = None
     # Замороженные заявки-юниты, переданные на ФФ (вырезаны из rows).
     handed_units: list[HandedUnit] = Field(default_factory=list)
+    # Предбронь: целые коробы, НЕ собравшиеся в целую паллету при «Заполнить черновик»
+    # (под-паллетный хвост). Не теряются на ФФ — показываются отдельным списком с
+    # действиями (удалить / дозабить паллету из свободного ФФ / оставить). Пересчитывается
+    # при каждом заполнении из потребности. Та же строчная структура, что и rows.
+    prebook: list[AssemblyDraftRow] = Field(default_factory=list)
+    # Провенанс «из предброни»: ключи `${nm_id}::${wb_warehouse_name}`, чей контент попал
+    # в rows ИЗ предброни (через «Оставить так»/«Дозабить»/авто-консолидацию). Чисто для
+    # показа — бейдж «из предброни» на паллете раскладки. Нормализатор его не трогает
+    # (живёт отдельно от rows). Сбрасывается при полном «Заполнить из потребности».
+    prebook_origin: list[str] = Field(default_factory=list)
 
-    @field_validator("rows", "source_warehouse_ids", "target_warehouse_names", "handed_units", mode="before")
+    @field_validator(
+        "rows", "source_warehouse_ids", "target_warehouse_names", "handed_units", "prebook", "prebook_origin", mode="before"
+    )
     @classmethod
     def coerce_null_to_empty_list(cls, v: object) -> object:
         """Guard against explicit null in stored JSONB (null → [])."""
@@ -198,3 +215,99 @@ class AssemblyDraftMergeRequest(BaseModel):
         if len(result) < 2:
             raise ValueError("draft_ids must contain at least 2 distinct IDs")
         return result
+
+
+# ─── Прогноз загрузки складов / локализации (вкладка «Прогноз») ──────────────
+
+
+class ForecastLeadTime(BaseModel):
+    """Среднее время до появления поставки на WB-складе (дни)."""
+
+    assembly_ship_days: float  # создание заявки → отгрузка (сборка + отправка)
+    delivery_days: float  # отгрузка → приёмка WB (SHIPPED → DELIVERED)
+    total_days: float  # сумма = lead-time
+    has_history: bool  # были ли данные истории (иначе использованы дефолты)
+
+
+class ForecastItem(BaseModel):
+    """Прогноз по одному (WB-склад × SKU)."""
+
+    warehouse_name: str
+    district: str
+    district_label: str
+    nm_id: int
+    vendor_code: str = ""
+    current_stock: int  # текущий остаток на WB-складе
+    incoming: int  # входящая поставка из черновика
+    avg_daily: float  # скорость продаж на этом складе (шт/день, по доле спроса)
+    projected_on_arrival: int  # остаток на момент прихода поставки (может быть < 0)
+    days_cover: int  # дней покрытия после поставки ((остаток+входящая)/скорость)
+    traffic_light: str  # red / orange / yellow / green
+
+
+class ForecastWarehouse(BaseModel):
+    """Сводка по одному WB-складу."""
+
+    warehouse_name: str
+    district: str
+    district_label: str
+    sku_count: int
+    current_stock: int
+    incoming: int
+    traffic_light_counts: dict[str, int]  # {red,orange,yellow,green}
+
+
+class ForecastLocalizationDistrict(BaseModel):
+    """Разбивка локализации по федеральному округу (примерная оценка)."""
+
+    district: str
+    label: str
+    demand: int  # спрос за горизонт (шт)
+    avail_current: int  # покрытие текущим остатком (шт)
+    avail_after: int  # покрытие после поставки (шт)
+    local_pct_current: float  # % спроса, покрытого локально сейчас
+    local_pct_after: float  # % спроса, покрытого локально после поставки
+
+
+class ForecastLocalization(BaseModel):
+    """Примерный индекс локализации до/после поставки черновика."""
+
+    index_current: float  # ИЛ (КТР-взвеш.) сейчас — НИЖЕ = лучше
+    index_after: float  # ИЛ после поставки
+    avg_loc_pct_current: float  # средняя доля локализации сейчас (выше = лучше)
+    avg_loc_pct_after: float  # средняя доля локализации после поставки
+    status_current: str  # excellent / neutral / weak / critical
+    status_after: str
+    horizon_days: int  # горизонт спроса, на котором оценивали
+    by_district: list[ForecastLocalizationDistrict]
+
+
+class ForecastSkuLocalization(BaseModel):
+    """Примерная доля локализации одного SKU до/после поставки (%)."""
+
+    nm_id: int
+    loc_pct_current: float
+    loc_pct_after: float
+
+
+class ForecastSummary(BaseModel):
+    """Итоги по всему черновику."""
+
+    sku_count: int
+    warehouse_count: int
+    total_incoming: int
+    traffic_light_counts: dict[str, int]
+
+
+class ForecastResponse(BaseModel):
+    """Ответ /assembly/drafts/{id}/forecast — предпросмотр загрузки складов."""
+
+    draft_id: int
+    lead_time: ForecastLeadTime
+    summary: ForecastSummary
+    localization: ForecastLocalization
+    sku_localization: list[ForecastSkuLocalization]  # per-SKU доля локализации до/после
+    newcomer_nm_ids: list[int]  # SKU-новинки (для бейджа 🆕 в матрице)
+    warehouses: list[ForecastWarehouse]
+    items: list[ForecastItem]
+    generated_at: datetime

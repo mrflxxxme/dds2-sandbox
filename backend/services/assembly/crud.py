@@ -466,6 +466,9 @@ async def _build_response(
         "comment": request.comment,
         "wb_warehouse_name_manual": request.wb_warehouse_name_manual,
         "source_draft_id": request.source_draft_id,
+        "source_vehicle_id": request.source_vehicle_id,
+        "is_pre_distribution": request.is_pre_distribution,
+        "is_prebooking": request.is_prebooking,
         "effective_wb_warehouse": (
             (request.wb_fbo_supply.warehouse_name if request.wb_fbo_supply else None)
             or request.wb_warehouse_name_manual
@@ -916,10 +919,29 @@ async def create_assembly_request(
     db: AsyncSession,
     project_id: int,
     payload: AssemblyRequestCreate,
+    *,
+    skip_stock_validation: bool = False,
+    status_override: AssemblyStatus | None = None,
+    source_vehicle_id: int | None = None,
+    is_pre_distribution: bool = False,
+    is_prebooking: bool = False,
 ) -> AssemblyRequest:
     """
     Create assembly request from payload.
+
+    Pre-distribution params (машина в пути, см. pre_distribution.py):
+      - skip_stock_validation: пропустить проверку доступного стока (товар ещё едет,
+        реального стока на ФФ нет — резерв создаётся под входящую машину).
+      - status_override: статус создаваемой заявки (по умолч. IN_PROGRESS);
+        для предраспределения = PRE_DISTRIBUTED.
+      - source_vehicle_id / is_pre_distribution: привязка к машине-источнику.
+    Предзаявка (бронь) на моно, см. prebooking.py:
+      - is_prebooking: пометка «предзаявка на моно» (целая моно-паллета на WB-склад
+        без лимита приёмки). Обычная валидация стока (товар реально на ФФ), статус
+        по умолчанию IN_PROGRESS.
+    FF-type check, FBO-валидация и нумерация сохраняются во всех режимах.
     """
+    effective_status = status_override or AssemblyStatus.IN_PROGRESS
     # 1. Validate warehouse exists + type == FULFILLMENT
     wh = await get_warehouse(db, project_id, payload.warehouse_id)
     if not wh:
@@ -980,7 +1002,7 @@ async def create_assembly_request(
         project_id=project_id,
         warehouse_id=payload.warehouse_id,
         number=number,
-        status=AssemblyStatus.IN_PROGRESS,
+        status=effective_status,
         wb_fbo_supply_id=payload.wb_fbo_supply_id,
         estimated_ready_date=payload.estimated_ready_date,
         pallets_count=payload.pallets_count,
@@ -988,6 +1010,9 @@ async def create_assembly_request(
         comment=payload.comment,
         wb_warehouse_name_manual=wb_wh_manual,
         package_type=getattr(payload, "package_type", None) or "BOX",
+        source_vehicle_id=source_vehicle_id,
+        is_pre_distribution=is_pre_distribution,
+        is_prebooking=is_prebooking,
     )
     db.add(assembly_req)
     await db.flush()
@@ -1019,19 +1044,25 @@ async def create_assembly_request(
 
     # 6. Validate AVAILABLE stock (= warehouse stock - reserved by other active assembly requests).
     # Заявка не должна резервировать больше чем доступно. Свою же заявку из reserved исключаем.
-    await db.flush()
-    deficits = await _validate_available_for_assembly(
-        db, project_id, payload.warehouse_id, resolved_items, exclude_request_id=assembly_req.id
-    )
-    if deficits:
-        raise ValueError(_format_deficit_error(deficits))
+    # Предраспределение (skip_stock_validation): товар ещё едет на машине, реального
+    # стока на ФФ нет — резерв создаётся под входящую машину, проверка стока неуместна.
+    if not skip_stock_validation:
+        await db.flush()
+        deficits = await _validate_available_for_assembly(
+            db, project_id, payload.warehouse_id, resolved_items, exclude_request_id=assembly_req.id
+        )
+        if deficits:
+            raise ValueError(_format_deficit_error(deficits))
+    else:
+        await db.flush()
 
-    await _log_status_change(db, project_id, assembly_req.id, None, AssemblyStatus.IN_PROGRESS, changed_by="user")
+    await _log_status_change(db, project_id, assembly_req.id, None, effective_status, changed_by="user")
 
     await db.commit()
     await db.refresh(assembly_req)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
 
     # Best-effort: уведомить ФФ-оператора (портал, напр. Хамза) о новой сборке на
     # его складе. CancelledError (BaseException) пробрасывается, прочее — глушим.
@@ -1266,6 +1297,7 @@ async def update_assembly_request(
     await db.commit()
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
     # Expunge all cached objects so selectinload re-fetches fresh data from DB
     db.expunge_all()
     updated = await get_assembly_request(db, project_id, req.id)

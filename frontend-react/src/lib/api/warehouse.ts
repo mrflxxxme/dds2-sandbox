@@ -10,6 +10,7 @@ import type {
     AssemblyDraftRow,
     BarcodeEligibilityResponse,
     CommitSupply,
+    ForecastResponse,
     AssemblyDraftCreate,
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
@@ -19,6 +20,9 @@ import type {
     StockDistributionHistoryResponse,
     HandedUnitItem,
     AssemblyAttempt,
+    AssemblyBulkDeleteResult,
+    AssemblyBulkStatus,
+    AssemblyBulkStatusResult,
     AssemblyHistoryEntry,
     AssemblyListResponse,
     AssemblyRequest,
@@ -27,6 +31,12 @@ import type {
     AssemblyReturnPayload,
     CreatedAssemblyGroup,
     FfMismatchDetail,
+    PreDistVehicle,
+    PreDistVehiclePool,
+    PreDistributionCreate,
+    PreDistributionCreateResult,
+    PrebookingCreate,
+    PrebookingCreateResult,
     BoxMultiplicityBulkRequest,
     BoxMultiplicityBatchListResponse,
     BoxMultiplicityBatchRevertResponse,
@@ -432,6 +442,36 @@ export function addWarehouseMethods(api: ApiClient) {
         deleteAssembly(id: number) {
             return api.request<void>('DELETE', `/api/v1/warehouse/assembly/${id}`);
         },
+        /** Массовое удаление заявок, ещё не отгруженных на WB. Отгруженные пропускаются. */
+        deleteAssemblyBulk(ids: number[]) {
+            return api.request<AssemblyBulkDeleteResult>('POST', '/api/v1/warehouse/assembly/delete-bulk', { ids });
+        },
+        /** Массовый перевод заявок в статус (В сборке / Готово) ОДНИМ запросом —
+         *  не съедает write-лимит, как поштучные смены. Невалидные пропускаются с причиной. */
+        setAssemblyStatusBulk(ids: number[], status: AssemblyBulkStatus) {
+            return api.request<AssemblyBulkStatusResult>('POST', '/api/v1/warehouse/assembly/status-bulk', { ids, status });
+        },
+        // ─── Предраспределение машины в пути ────────────────────────────────
+        /** Машины (CostOrder CUSTOMS/DISPATCHED) — кандидаты на предраспределение. */
+        getPreDistVehicles() {
+            return api.request<PreDistVehicle[]>('GET', '/api/v1/warehouse/assembly/pre-distribution/vehicles');
+        },
+        /** Пул товаров машины (gross / уже разнесено / доступно) для раздачи по WB-складам. */
+        getPreDistVehiclePool(vehicleId: number) {
+            return api.request<PreDistVehiclePool>('GET', `/api/v1/warehouse/assembly/pre-distribution/vehicles/${vehicleId}/pool`);
+        },
+        /** Создать заявки-предраспределения (status PRE_DISTRIBUTED, без приёмки). */
+        createPreDistribution(payload: PreDistributionCreate) {
+            return api.request<PreDistributionCreateResult>('POST', '/api/v1/warehouse/assembly/pre-distribution', payload);
+        },
+        /** Ручной перевод предраспределённых заявок машины PRE_DISTRIBUTED→IN_PROGRESS. */
+        advancePreDistribution(vehicleId: number) {
+            return api.request<{ advanced: number }>('POST', `/api/v1/warehouse/assembly/pre-distribution/vehicles/${vehicleId}/advance`);
+        },
+        /** Создать заявки-предзаявки на моно (is_prebooking=True) из строк предброни. */
+        createPrebooking(payload: PrebookingCreate) {
+            return api.request<PrebookingCreateResult>('POST', '/api/v1/warehouse/assembly/prebooking', payload);
+        },
         assignVehicleBulk(data: {
             vehicle_info: string;
             vehicle_brand: string;
@@ -613,6 +653,20 @@ export function addWarehouseMethods(api: ApiClient) {
          *  мёржит по (nm_id, pkg), union складов; возвращает обновлённый черновик. */
         addAssemblyDraftRows(draftId: number, rows: AssemblyDraftRow[]) {
             return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${draftId}/rows`, { rows });
+        },
+        /** Единственный «текущий» черновик проекта (синглтон): нет — создаёт пустой,
+         *  несколько — объединяет в один. Единая страница «Сборка» зовёт на входе. */
+        getOrCreateCurrentDraft() {
+            return api.request<AssemblyDraft>('POST', '/api/v1/assembly/drafts/current');
+        },
+        /** Прогноз загрузки WB-складов с учётом черновика: текущий остаток + входящая
+         *  − продажи за lead-time → дни покрытия/светофор + индекс локализации до/после. */
+        getDraftForecast(draftId: number) {
+            return api.request<ForecastResponse>('GET', `/api/v1/assembly/drafts/${draftId}/forecast`);
+        },
+        /** Убрать SKU (неликвид) из черновика — удаляет строки + чистит handed-юниты. */
+        removeAssemblyDraftRows(draftId: number, nmIds: number[]) {
+            return api.request<AssemblyDraft>('POST', `/api/v1/assembly/drafts/${draftId}/remove-rows`, { nm_ids: nmIds });
         },
         /** Проверка приёмки WB по баркодам: типы упаковки + лимиты + остаток на ФФ. */
         getBarcodeEligibility(barcodes: string[]) {

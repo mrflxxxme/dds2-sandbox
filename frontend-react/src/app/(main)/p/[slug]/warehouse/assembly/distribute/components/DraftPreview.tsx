@@ -28,6 +28,13 @@ const PKG_BADGE: Record<string, string> = {
     BOX: 'badge-info', MONOPALLET: 'badge-warning', SUPERSAFE: 'badge-secondary',
 };
 
+// Эмодзи секции по упаковке (для раздельных секций «Короба / Моно / Сейф» в карточках).
+const PKG_EMOJI: Record<string, string> = {
+    BOX: '📦', MONOPALLET: '🟫', SUPERSAFE: '🔒',
+};
+// Порядок секций упаковки в виде «Карточки».
+const PKG_ORDER: PackageType[] = ['BOX', 'MONOPALLET', 'SUPERSAFE'];
+
 const toggleInSet = (s: Set<string>, value: string): Set<string> => {
     const n = new Set(s);
     if (n.has(value)) n.delete(value); else n.add(value);
@@ -68,11 +75,17 @@ interface DraftPreviewProps {
     newcomerNmIds: Set<number>;
     warehouses: Warehouse[];
     nmPpb: Map<number, number | null>;
+    /** Кратность per (nm × ФФ) — короб может отличаться по складам; для счётчика
+     *  «неполных коробов» порция меряется коробом СВОЕГО ФФ (min давал псевдо-россыпь). */
+    nmPpbByWh?: Map<number, Record<number, number>>;
     nmMeta: Map<number, { subject: string; brand: string }>;
     nmBoxSize: Map<number, string | null>;
     palletOverrides: Record<string, number>;
     /** Геометрия коробок загружена (gate для «только целые паллеты»). */
     geomReady: boolean;
+    /** Провенанс «из предброни»: ключи `${nm_id}::${wb}`. Паллета, содержащая хоть один
+     *  такой SKU, помечается бейджем «из предброни» в раскладке. */
+    prebookOrigin?: Set<string>;
     /** Сбросить правки редактора на сервер перед commit (родитель). Возвращает успех. */
     ensureSaved: () => Promise<boolean>;
     onToast: (message: string, type: 'success' | 'error') => void;
@@ -84,7 +97,7 @@ interface DraftPreviewProps {
  *  с бейджем упаковки на каждой отгрузке. Встроен внизу страницы «Черновик». */
 export default function DraftPreview({
     slug, draftId, rows, newcomerNmIds, warehouses,
-    nmPpb, nmMeta, nmBoxSize, palletOverrides, geomReady,
+    nmPpb, nmPpbByWh, nmMeta, nmBoxSize, palletOverrides, geomReady, prebookOrigin,
     ensureSaved, onToast, onReloadDraft,
 }: DraftPreviewProps) {
     const router = useRouter();
@@ -97,10 +110,14 @@ export default function DraftPreview({
     const [selectedWbs, setSelectedWbs] = useState<Set<string>>(new Set());
     const [selectedSubjects, setSelectedSubjects] = useState<Set<string>>(new Set());
     const [selectedBrands, setSelectedBrands] = useState<Set<string>>(new Set());
+    const [showPartial, setShowPartial] = useState(false);  // разбивка неполных коробов
     const [viewMode, setViewMode] = useState<'cards' | 'table' | 'matrix'>('cards');
     const [matrixUnit, setMatrixUnit] = useState<'qty' | 'boxes' | 'pallets'>('qty');
-    // «Только целые паллеты»: срез каждой отгрузки (ФФ→склад) до целых паллет.
-    const [wholeOnly, setWholeOnly] = useState(false);
+    // «Только целые паллеты» как переключатель убран из UI — предпросмотр всегда
+    // показывает весь черновик как есть (соответствие с «Потребностью по складам»).
+    // Форму целых коробов/паллет задаёт добавление (AddFromNeedPanel) + нормализация
+    // в родителе. Константа сохранена, чтобы не трогать commit-инвариант ниже.
+    const wholeOnly = false;
 
     const warehouseNameById = useCallback(
         (id: number) => warehouses.find(w => w.id === id)?.name ?? `Склад ${id}`,
@@ -124,11 +141,14 @@ export default function DraftPreview({
     }, [nmPpb, nmBoxSize, palletOverrides]);
 
     const wholeTrim = useMemo(() => trimLinesToWholePallets(rawLines, uppForCell), [rawLines, uppForCell]);
-    const allLines = useMemo(() => (wholeOnly ? wholeTrim.kept : rawLines), [wholeOnly, wholeTrim, rawLines]);
+    // Намерение «только целые» (wholeOnly) применяется к ДАННЫМ лишь когда геометрия
+    // готова — иначе трим без габаритов снёс бы все строки → пустой предпросмотр.
+    const effectiveWholeOnly = wholeOnly && geomReady;
+    const allLines = useMemo(() => (effectiveWholeOnly ? wholeTrim.kept : rawLines), [effectiveWholeOnly, wholeTrim, rawLines]);
 
     // Явные отгрузки для commit (режим «только целые»): заявки создаются ровно из них.
     const wholeSupplies = useMemo<CommitSupply[]>(() => {
-        if (!wholeOnly) return [];
+        if (!effectiveWholeOnly) return [];
         const m = new Map<string, CommitSupply>();
         for (const l of allLines) {
             if (l.qty <= 0) continue;
@@ -138,20 +158,7 @@ export default function DraftPreview({
             s.items[l.barcode] = (s.items[l.barcode] || 0) + l.qty;
         }
         return [...m.values()];
-    }, [wholeOnly, allLines]);
-
-    const toggleWholeOnly = useCallback(() => {
-        if (wholeOnly) { setWholeOnly(false); return; }
-        if (!geomReady) {
-            onToast('Геометрия коробок ещё загружается — повторите через секунду', 'error');
-            return;
-        }
-        setWholeOnly(true);
-        const parts: string[] = [];
-        if (wholeTrim.removedSupplies > 0) parts.push(`убрано отгрузок: ${wholeTrim.removedSupplies}`);
-        if (wholeTrim.droppedUnits > 0) parts.push(`снято ${formatNumber(wholeTrim.droppedUnits, 0)} шт`);
-        onToast(parts.length ? `Только целые паллеты — ${parts.join(', ')}` : 'Все отгрузки уже целыми паллетами', 'success');
-    }, [wholeOnly, geomReady, wholeTrim, onToast]);
+    }, [effectiveWholeOnly, allLines]);
 
     // Опции фильтров (Σ qty по всему срезу, по убыванию объёма).
     const buildOptions = useCallback((keyOf: (l: PreviewLine) => string) => {
@@ -179,6 +186,13 @@ export default function DraftPreview({
     }, [allLines, query, selectedWbs, selectedSubjects, selectedBrands, nmMeta]);
     const ffGroups = useMemo(() => groupByFf(lines), [lines]);
 
+    // Присутствующие типы упаковки в отфильтрованном наборе (для раздельных секций
+    // в виде «Карточки»). Порядок фиксированный: короб → моно → сейф.
+    const presentPkgs = useMemo(
+        () => PKG_ORDER.filter(pkg => lines.some(l => l.pkg === pkg)),
+        [lines],
+    );
+
     // Заявок = уникальные (ФФ, WB, упаковка); withNewcomer — сколько с 🆕.
     const breakdown = useMemo(() => {
         const groups = new Set<string>();
@@ -196,19 +210,54 @@ export default function DraftPreview({
         setQuery(''); setSelectedWbs(new Set()); setSelectedSubjects(new Set()); setSelectedBrands(new Set());
     }, []);
     const distinctSku = useMemo(() => new Set(allLines.map(l => l.nmId)).size, [allLines]);
+    // Кратность порции = короб ЕЁ ФФ (может отличаться по складам: 22 Хамза / 30 Газпром;
+    // глобальный min давал ПСЕВДО-россыпь на физически целых коробах чужого склада).
+    const ppbForLine = useCallback((l: PreviewLine): number | null => {
+        const pw = nmPpbByWh?.get(l.nmId)?.[l.ffId];
+        if (pw && pw > 0) return pw;
+        const k = nmPpb.get(l.nmId);
+        return k && k > 0 ? k : null;
+    }, [nmPpb, nmPpbByWh]);
     const partialBoxes = useMemo(
-        () => allLines.filter(l => { const k = nmPpb.get(l.nmId); return !!k && k > 0 && l.qty % k !== 0; }).length,
-        [allLines, nmPpb],
+        () => allLines.filter(l => { const k = ppbForLine(l); return !!k && l.qty % k !== 0; }).length,
+        [allLines, ppbForLine],
     );
     const looseUnits = useMemo(
-        () => allLines.reduce((s, l) => { const k = nmPpb.get(l.nmId); return s + (k && k > 0 && l.qty % k !== 0 ? l.qty % k : 0); }, 0),
-        [allLines, nmPpb],
+        () => allLines.reduce((s, l) => { const k = ppbForLine(l); return s + (k && l.qty % k !== 0 ? l.qty % k : 0); }, 0),
+        [allLines, ppbForLine],
     );
+    // Разбивка неполных коробов: строки-отгрузки (SKU×склад), где qty не кратно коробу.
+    const partialDetail = useMemo(() => {
+        const out: { nmId: number; vendor: string; barcode: string; wb: string; qty: number; full: number; loose: number; k: number; isNew: boolean }[] = [];
+        for (const l of allLines) {
+            const k = ppbForLine(l);
+            if (!k) continue;                    // без кратности короба (в т.ч. новинки россыпью) — не «неполный короб»
+            const loose = l.qty % k;
+            if (loose === 0) continue;
+            out.push({ nmId: l.nmId, vendor: l.vendor, barcode: l.barcode, wb: l.wbName, qty: l.qty, full: Math.floor(l.qty / k), loose, k, isNew: l.isNew });
+        }
+        return out.sort((a, b) => b.loose - a.loose);
+    }, [allLines, ppbForLine]);
+    const exportPartial = useCallback(() => {
+        exportToExcel(
+            partialDetail.map(d => ({ vendor: d.vendor, barcode: d.barcode, wb: d.wb, qty: d.qty, full: d.full, loose: d.loose, k: d.k })),
+            'Неполные_коробы',
+            [
+                { key: 'vendor', label: 'Артикул' },
+                { key: 'barcode', label: 'Баркод' },
+                { key: 'wb', label: 'WB-склад' },
+                { key: 'qty', label: 'Шт' },
+                { key: 'full', label: 'Полных коробов' },
+                { key: 'loose', label: 'Россыпь (шт)' },
+                { key: 'k', label: 'В коробе (кратность)' },
+            ],
+        );
+    }, [partialDetail]);
 
     const boxesOf = useCallback((l: PreviewLine) => {
-        const k = nmPpb.get(l.nmId);
+        const k = ppbForLine(l);
         return k && k > 0 ? Math.ceil(l.qty / k) : 0;
-    }, [nmPpb]);
+    }, [ppbForLine]);
     const boxesSum = useCallback((ls: PreviewLine[]) => ls.reduce((s, l) => s + boxesOf(l), 0), [boxesOf]);
 
     // ─── Паллеты (геометрия box_size) ─────────────────────────────────────
@@ -222,7 +271,7 @@ export default function DraftPreview({
         let pallets = 0, fill = 0, unknownLines = 0, unknownUnits = 0;
         for (const [pkg, lns] of byPkg) {
             const r = palletsForLines(
-                lns.map(l => ({ units: l.qty, boxQty: nmPpb.get(l.nmId), boxSize: nmBoxSize.get(l.nmId) ?? null })),
+                lns.map(l => ({ units: l.qty, boxQty: ppbForLine(l), boxSize: nmBoxSize.get(l.nmId) ?? null })),
                 height,
                 pkg === 'BOX' ? 'box' : 'mono',
                 palletOverrides,
@@ -230,7 +279,7 @@ export default function DraftPreview({
             pallets += r.pallets; fill += r.fill; unknownLines += r.unknownLines; unknownUnits += r.unknownUnits;
         }
         return { pallets, fill, unknownLines, unknownUnits };
-    }, [nmPpb, nmBoxSize, palletOverrides]);
+    }, [ppbForLine, nmBoxSize, palletOverrides]);
 
     const palletsForFf = useCallback((ls: PreviewLine[]): PalletCount => {
         let pallets = 0, fill = 0, unknownLines = 0, unknownUnits = 0;
@@ -261,7 +310,7 @@ export default function DraftPreview({
         const out: Record<string, number> = {};
         for (const [k, ls] of groups) {
             const r = palletsForLines(
-                ls.map(l => ({ units: l.qty, boxQty: nmPpb.get(l.nmId), boxSize: nmBoxSize.get(l.nmId) ?? null })),
+                ls.map(l => ({ units: l.qty, boxQty: ppbForLine(l), boxSize: nmBoxSize.get(l.nmId) ?? null })),
                 maxPalletHeightCm(ls[0].wbName),
                 ls[0].pkg === 'BOX' ? 'box' : 'mono',
                 palletOverrides,
@@ -269,7 +318,7 @@ export default function DraftPreview({
             out[k] = Math.max(1, r.pallets);
         }
         return out;
-    }, [allLines, nmPpb, nmBoxSize, palletOverrides]);
+    }, [allLines, ppbForLine, nmBoxSize, palletOverrides]);
 
     const palletBadge = useCallback((pc: PalletCount) => {
         const avg = pc.pallets > 0 ? pc.fill / pc.pallets : 0;
@@ -293,7 +342,7 @@ export default function DraftPreview({
     // ─── Excel export ────────────────────────────────────────────────────
     const today = new Date().toISOString().slice(0, 10);
     const toRow = useCallback((l: PreviewLine, withFf = false): Record<string, string | number> => {
-        const k = nmPpb.get(l.nmId) || 0;
+        const k = ppbForLine(l) || 0;
         return {
             ...(withFf ? { ff: warehouseNameById(l.ffId) } : {}),
             vendor: l.vendor,
@@ -305,7 +354,7 @@ export default function DraftPreview({
             pkg: PKG_LABEL_RU[l.pkg] || l.pkg,
             type: l.isNew ? 'Новинка' : 'Обычный',
         };
-    }, [warehouseNameById, nmPpb]);
+    }, [warehouseNameById, ppbForLine]);
     const sortForExport = (ls: PreviewLine[]) =>
         ls.slice().sort((a, b) => a.wbName.localeCompare(b.wbName) || a.vendor.localeCompare(b.vendor));
 
@@ -352,7 +401,7 @@ export default function DraftPreview({
         { key: 'type', label: 'Тип' },
     ], []);
     const tableData = useMemo(() => lines.map(l => {
-        const k = nmPpb.get(l.nmId);
+        const k = ppbForLine(l);
         return {
             ff: warehouseNameById(l.ffId),
             wb: l.wbName,
@@ -364,7 +413,7 @@ export default function DraftPreview({
             type: l.isNew ? 'Новинка' : 'Обычный',
             isNew: l.isNew,
         };
-    }), [lines, nmPpb, warehouseNameById]);
+    }), [lines, ppbForLine, warehouseNameById]);
 
     // ─── Матричный вид ───────────────────────────────────────────────────
     const matrixWbCols = useMemo(() => {
@@ -415,7 +464,7 @@ export default function DraftPreview({
             const saved = await ensureSaved();
             if (!saved) { setCommitting(false); return; }
             // package_type не передаём → commit_draft создаёт ВЕСЬ черновик (короб+моно+сейф).
-            const resp = await api.commitAssemblyDraft(draftId, undefined, palletCounts, wholeOnly ? wholeSupplies : undefined);
+            const resp = await api.commitAssemblyDraft(draftId, undefined, palletCounts, effectiveWholeOnly ? wholeSupplies : undefined);
             const ids = resp.created_request_ids || [];
             // whole-only мог снять неполные отгрузки → проверяем остаток.
             let leftoverRows = 0;
@@ -438,11 +487,198 @@ export default function DraftPreview({
             onToast(e instanceof Error ? e.message : 'Ошибка создания сборок', 'error');
             setCommitting(false);
         }
-    }, [draftId, ensureSaved, palletCounts, wholeOnly, wholeSupplies, router, slug, onToast, onReloadDraft]);
+    }, [draftId, ensureSaved, palletCounts, effectiveWholeOnly, wholeSupplies, router, slug, onToast, onReloadDraft]);
 
     const pkgBadge = (pkg: PackageType) => (
         <span className={`badge ${PKG_BADGE[pkg] || 'badge-secondary'}`} style={{ fontSize: 10 }}>{PKG_LABEL_RU[pkg] || pkg}</span>
     );
+
+    // ─── Карточка одной ФФ-группы (раскрываемая) ──────────────────────────
+    // Тело строится из переданных строк (в секциях — строки ОДНОГО типа упаковки,
+    // потому groupByWbPkg даст блоки этого же типа). Вынесено, чтобы переиспользовать
+    // в раздельных секциях по упаковке и в общем виде «Карточки».
+    const renderFfGroup = (g: { ffId: number; lines: PreviewLine[] }) => {
+        const isOpen = expanded.has(g.ffId);
+        const ffName = warehouseNameById(g.ffId);
+        const ffPallets = palletsForFf(g.lines).pallets;
+        return (
+            <div key={g.ffId} className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+                <div onClick={() => setExpanded(prev => { const n = new Set(prev); if (n.has(g.ffId)) n.delete(g.ffId); else n.add(g.ffId); return n; })} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', cursor: 'pointer' }}>
+                    <span style={{ fontSize: 12, width: 12, color: 'var(--color-text-muted)' }}>{isOpen ? '▾' : '▸'}</span>
+                    <span style={{ fontWeight: 700, fontSize: 15 }}>📦 {ffName}</span>
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        Σ {formatNumber(sumQty(g.lines), 0)} шт · {formatNumber(boxesSum(g.lines), 0)} кор · <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(ffPallets, 0)} пал</strong> · {reqCountOf(g.lines)} заявок · {skuCountOf(g.lines)} SKU
+                    </span>
+                    <div style={{ flex: 1 }} />
+                    <button className="btn btn-primary btn-sm" onClick={e => { e.stopPropagation(); openFf(g.ffId, g.lines[0]?.pkg ?? 'BOX'); }} title={`Открыть склад «${ffName}»: заявки-юниты, передать на ФФ / в сборку`}>
+                        Открыть →
+                    </button>
+                    <button className="btn btn-secondary btn-sm" onClick={e => { e.stopPropagation(); exportFf(g.ffId, g.lines); }} title={`Выгрузить пикинг-лист склада «${ffName}» в Excel`}>
+                        📥 Выгрузить
+                    </button>
+                </div>
+                {isOpen && (
+                    <div style={{ padding: '4px 16px 14px 34px', borderTop: '1px solid var(--color-border)' }}>
+                        {groupByWbPkg(g.lines).map(({ wb, pkg, items }) => {
+                            const pb = palletBadge(palletsForCell(items, wb));
+                            // Манифест физических паллет: тот же box/mono-ceil, что и бейдж выше,
+                            // потому Σ pallets.length === pb.pallets (реконсиляция по построению).
+                            const manifest = buildPalletManifest(
+                                items.map(l => ({
+                                    nmId: l.nmId, vendorCode: l.vendor, units: l.qty,
+                                    boxSize: nmBoxSize.get(l.nmId) ?? null, ppb: nmPpb.get(l.nmId) ?? null,
+                                })),
+                                { mode: pkg === 'BOX' ? 'box' : 'mono', maxHeightCm: maxPalletHeightCm(wb), overrides: palletOverrides },
+                            );
+                            const mKey = `${g.ffId}::${wb}::${pkg}`;
+                            const mOpen = manifestOpen.has(mKey);
+                            const hasManifest = manifest.pallets.length > 0 || manifest.unpalletized.length > 0;
+                            return (
+                                <div key={`${wb}::${pkg}`} style={{ marginTop: 10 }}>
+                                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-warning)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                        <span>→ {wb}</span>
+                                        {pkgBadge(pkg)}
+                                        <span style={{ color: 'var(--color-text-muted)', fontWeight: 500 }}>
+                                            (Σ {formatNumber(sumQty(items), 0)} шт · {formatNumber(boxesSum(items), 0)} кор
+                                            {pb.pallets > 0 && <> · <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(pb.pallets, 0)} пал</strong></>}
+                                            {pb.underfilled && <span style={{ color: 'var(--color-warning)' }} title={`Паллета заполнена ~${pb.pct}% — мало товара на это направление`}> · ⚠ ~{pb.pct}%</span>}
+                                            {pb.unknownUnits > 0 && <span style={{ color: 'var(--color-text-muted)' }} title="Нет габаритов коробки — паллеты не считаются"> · {formatNumber(pb.unknownUnits, 0)} шт б/габ</span>})
+                                        </span>
+                                    </div>
+                                    {hasManifest && (
+                                        <div style={{ marginBottom: 6 }}>
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                onClick={() => setManifestOpen(prev => toggleInSet(prev, mKey))}
+                                                style={{ fontSize: 11 }}
+                                                title={pkg === 'BOX'
+                                                    ? 'Раскладка по физическим паллетам (смешанные короба разных артикулов)'
+                                                    : 'Раскладка по физическим паллетам (по одному артикулу на паллету)'}
+                                            >
+                                                {mOpen ? '▾' : '▸'} 📐 Раскладка по паллетам ({formatNumber(manifest.pallets.length, 0)})
+                                            </button>
+                                            {mOpen && (
+                                                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                                    {manifest.pallets.map(p => {
+                                                        const pct = Math.round(p.fillPct * 100);
+                                                        const low = p.fillPct < 0.6;
+                                                        const palUnits = p.items.reduce((s, it) => s + it.units, 0);
+                                                        const palBoxes = p.items.reduce((s, it) => { const ppb = nmPpb.get(it.nmId) || 0; return s + (ppb > 0 ? Math.round(it.units / ppb) : 0); }, 0);
+                                                        // «Из предброни»: паллета содержит хоть один SKU, чей контент
+                                                        // приехал в черновик из предброни (Оставить так/Дозабить/консолидация).
+                                                        const fromPrebook = !!prebookOrigin && p.items.some(it => prebookOrigin.has(`${it.nmId}::${wb}`));
+                                                        return (
+                                                            <div key={p.palletNo} style={{ border: `1px solid ${low ? 'var(--color-warning)' : 'var(--color-border)'}`, borderRadius: 10, padding: '8px 10px' }}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+                                                                    <span className="badge badge-secondary" style={{ fontSize: 10 }}>Паллета {formatNumber(p.palletNo, 0)}</span>
+                                                                    {fromPrebook && (
+                                                                        <span className="badge badge-info" style={{ fontSize: 10 }} title="Содержимое этой паллеты приехало в черновик из предброни (Оставить так / Дозабить / авто-консолидация)">🅿️ из предброни</span>
+                                                                    )}
+                                                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{formatNumber(p.items.length, 0)} арт. · {formatNumber(palBoxes, 0)} кор · {formatNumber(palUnits, 0)} шт</span>
+                                                                    <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: low ? 700 : 600, color: low ? 'var(--color-warning)' : 'var(--color-success)' }} title={low ? 'Паллета заполнена менее 60% — неполная' : 'Заполнение паллеты'}>
+                                                                        {low && '⚠ '}{formatNumber(pct, 0)}%
+                                                                    </span>
+                                                                </div>
+                                                                <div style={{ height: 4, background: 'rgba(148,163,184,0.20)', borderRadius: 2, overflow: 'hidden', marginBottom: 8 }}>
+                                                                    <div style={{ width: `${Math.min(100, pct)}%`, height: '100%', background: low ? 'var(--color-warning)' : 'var(--color-success)' }} />
+                                                                </div>
+                                                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                                                    {p.items.map(it => {
+                                                                        const ppb = nmPpb.get(it.nmId) || 0;
+                                                                        const boxes = ppb > 0 ? Math.round(it.units / ppb) : 0;
+                                                                        const size = nmBoxSize.get(it.nmId) || null;
+                                                                        return (
+                                                                            <span key={it.nmId} style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, background: 'rgba(148,163,184,0.12)', display: 'inline-flex', gap: 6, alignItems: 'baseline' }}
+                                                                                title={`${formatNumber(it.units, 0)} шт${size ? ` · короб ${size}` : ''}`}>
+                                                                                <span style={{ color: 'var(--color-text)', fontWeight: 500 }}>{it.vendorCode}</span>
+                                                                                <span style={{ color: 'var(--color-text-muted)' }}>{boxes > 0 ? `${formatNumber(boxes, 0)} кор` : `${formatNumber(it.units, 0)} шт`}</span>
+                                                                                {size && <span style={{ color: 'var(--color-text-dim)' }}>{size}</span>}
+                                                                            </span>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                    {manifest.unpalletized.length > 0 && (
+                                                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title="Не набрали целую паллету (моно-недобор → предбронь) либо нет габаритов короба">
+                                                            <div style={{ marginBottom: 4 }}>Без целой паллеты (недобор → предбронь / нет габаритов):</div>
+                                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                                                {manifest.unpalletized.map(it => (
+                                                                    <span key={it.nmId} style={{ padding: '2px 8px', borderRadius: 6, background: 'rgba(245,158,11,0.12)', display: 'inline-flex', gap: 4, alignItems: 'baseline' }}>
+                                                                        <span style={{ color: 'var(--color-text)' }}>{it.vendorCode}</span>
+                                                                        <span style={{ fontWeight: 600 }}>×{formatNumber(it.units, 0)}</span>
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                                        <thead>
+                                            <tr style={{ color: 'var(--color-text-muted)', fontSize: 11 }}>
+                                                <th style={{ textAlign: 'left', padding: '2px 6px', fontWeight: 600 }}>Артикул</th>
+                                                <th style={{ textAlign: 'left', padding: '2px 6px', fontWeight: 600 }}>Баркод</th>
+                                                <th style={{ textAlign: 'right', padding: '2px 6px', fontWeight: 600, width: 80 }}>Коробок</th>
+                                                <th style={{ textAlign: 'right', padding: '2px 6px', fontWeight: 600, width: 70 }}>Шт</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {items.map(l => {
+                                                // Короб ФФ ЭТОЙ порции (l.ffId), не глобальный min — иначе целый
+                                                // короб чужого склада рисуется «N кор + M шт» (псевдо-россыпь:
+                                                // хамза 18 мерилась 13 → «1 кор + 5 шт», Газпром 30 → «1 кор + 8»).
+                                                const k = ppbForLine(l) || 0;
+                                                const full = k > 0 ? Math.floor(l.qty / k) : 0;
+                                                const rem = k > 0 ? l.qty % k : 0;
+                                                return (
+                                                    <tr key={`${l.nmId}-${l.pkg}`} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                                        <td style={{ padding: '3px 6px' }}>{l.isNew && <span style={{ marginRight: 4, color: '#a855f7', fontWeight: 700 }}>🆕</span>}{l.vendor}</td>
+                                                        <td style={{ padding: '3px 6px', color: 'var(--color-text-muted)' }}>{l.barcode}</td>
+                                                        <td style={{ padding: '3px 6px', textAlign: 'right', whiteSpace: 'nowrap' }} title={k > 0 ? `${full} полн. коробов по ${k} шт${rem > 0 ? ` + ${rem} шт россыпью` : ''}` : 'Без кратности короба'}>
+                                                            {k <= 0 ? <span style={{ color: 'var(--color-text-muted)' }}>—</span> : (
+                                                                <><span>{formatNumber(full, 0)} кор</span>{rem > 0 && <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}> + {formatNumber(rem, 0)} шт</span>}</>
+                                                            )}
+                                                        </td>
+                                                        <td style={{ padding: '3px 6px', textAlign: 'right', fontWeight: 600, whiteSpace: 'nowrap' }}>{formatNumber(l.qty, 0)}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    // ─── Секция упаковки в виде «Карточки»: заголовок-подытог + ФФ-карточки ──
+    // Строится на строках ОДНОГО типа упаковки. ФФ-группировка — повтор логики
+    // groupByFf для подмножества (тот же helper, новый список строк).
+    const renderPkgSection = (pkg: PackageType) => {
+        const pkgLines = lines.filter(l => l.pkg === pkg);
+        if (pkgLines.length === 0) return null;
+        const pkgFfGroups = groupByFf(pkgLines);
+        let pkgPallets = 0;
+        for (const g of pkgFfGroups) pkgPallets += palletsForFf(g.lines).pallets;
+        return (
+            <div key={pkg} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div className="glass-card" style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <span style={{ fontWeight: 700, fontSize: 15 }}>{PKG_EMOJI[pkg] || ''} {PKG_LABEL_RU[pkg] || pkg}</span>
+                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        Σ {formatNumber(sumQty(pkgLines), 0)} шт · {formatNumber(boxesSum(pkgLines), 0)} кор · <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(pkgPallets, 0)} пал</strong> · {reqCountOf(pkgLines)} заявок · {skuCountOf(pkgLines)} SKU
+                    </span>
+                </div>
+                {pkgFfGroups.map(renderFfGroup)}
+            </div>
+        );
+    };
 
     return (
         <div>
@@ -457,22 +693,10 @@ export default function DraftPreview({
                     📥 Отдельно по складам
                 </button>
                 <button
-                    className={`btn btn-sm ${wholeOnly ? 'btn-primary' : 'btn-secondary'}`}
-                    onClick={toggleWholeOnly}
-                    disabled={!geomReady}
-                    title={!geomReady
-                        ? 'Геометрия коробок ещё загружается…'
-                        : 'Оставить только ЦЕЛЫЕ паллеты на каждую отгрузку ФФ→склад: неполная отгрузка убирается полностью, у целых отгрузок неполный хвост снимается на ФФ.'}
-                >
-                    🟫 Только целые паллеты{wholeOnly ? ' ✓' : ''}
-                </button>
-                <button
                     className="btn btn-primary btn-sm"
                     onClick={handleCreate}
                     disabled={committing || totalAssemblies === 0}
-                    title={wholeOnly
-                        ? 'Создаёт только целые паллеты на каждую отгрузку ФФ→склад (неполные убраны).'
-                        : 'Создаёт все заявки черновика (короб + моно). Поиск и фильтры влияют только на отображение.'}
+                    title="Создаёт все заявки черновика (короб + моно). Поиск и фильтры влияют только на отображение."
                 >
                     {committing ? 'Создание…' : `✓ Создать ${totalAssemblies} заявок`}
                 </button>
@@ -485,8 +709,57 @@ export default function DraftPreview({
                 <KpiCard label="Коробок" value={formatNumber(boxesSum(allLines), 0)} icon="📦" color="var(--color-accent)" />
                 <KpiCard label="Паллет" value={formatNumber(palletTotals.pallets, 0)} icon="🟫" color="var(--color-accent)" sub={palletTotals.unknownUnits > 0 ? `${formatNumber(palletTotals.unknownUnits, 0)} шт без габаритов` : 'по габаритам коробки'} />
                 <KpiCard label="SKU" value={formatNumber(distinctSku, 0)} icon="🏷️" color="var(--color-warning)" sub="уникальных" />
-                <KpiCard label="Неполных коробов" value={formatNumber(partialBoxes, 0)} icon="🟧" color={partialBoxes > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)'} sub={partialBoxes > 0 ? `${formatNumber(looseUnits, 0)} шт россыпью` : 'все короба полные'} />
+                <div
+                    onClick={() => partialBoxes > 0 && setShowPartial(s => !s)}
+                    style={{ cursor: partialBoxes > 0 ? 'pointer' : 'default' }}
+                    title={partialBoxes > 0 ? 'Нажми — разбивка неполных коробов по артикулам' : undefined}
+                >
+                    <KpiCard label="Неполных коробов" value={formatNumber(partialBoxes, 0)} icon="🟧" color={partialBoxes > 0 ? 'var(--color-warning)' : 'var(--color-text-muted)'} sub={partialBoxes > 0 ? `${formatNumber(looseUnits, 0)} шт россыпью · ${showPartial ? 'скрыть' : 'разбивка ▾'}` : 'все короба полные'} />
+                </div>
             </div>
+
+            {/* Разбивка неполных коробов (по клику на KPI) */}
+            {showPartial && partialBoxes > 0 && (
+                <div className="glass-card animate-in" style={{ padding: 16, marginBottom: 12 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+                        <div style={{ fontSize: 15, fontWeight: 600 }}>🟧 Неполные коробы — {formatNumber(partialBoxes, 0)} строк · {formatNumber(looseUnits, 0)} шт россыпью</div>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            <button className="btn btn-sm btn-secondary" onClick={exportPartial}>⬇ Excel</button>
+                        </div>
+                    </div>
+                    <p style={{ fontSize: 12, color: 'var(--color-text-muted)', margin: '0 0 12px', lineHeight: 1.5 }}>
+                        <strong>Почему так:</strong> строгий режим — некратные коробу остатки в черновик <strong>не добавляются</strong>: если свободного стока ФФ хватает, порция добивается до целого короба; иначе остаток снимается на ФФ без резерва. Строки здесь — переходное состояние (вычистятся ближайшей синхронизацией) либо легаси до перезаполнения. Если список не пустеет — проверь кратность артикула на вкладке «Кратность».
+                    </p>
+                    <div style={{ overflowX: 'auto', maxHeight: 360, overflowY: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                            <thead>
+                                <tr style={{ textAlign: 'right', color: 'var(--color-text-muted)', position: 'sticky', top: 0, background: 'var(--color-bg-card)' }}>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>Артикул</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>WB-склад</th>
+                                    <th style={{ padding: '6px 8px' }}>Шт</th>
+                                    <th style={{ padding: '6px 8px' }}>Полных коробов</th>
+                                    <th style={{ padding: '6px 8px' }}>Россыпь</th>
+                                    <th style={{ padding: '6px 8px' }}>В коробе</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {partialDetail.map((d, i) => (
+                                    <tr key={`${d.nmId}-${d.wb}-${i}`} style={{ borderTop: '1px solid var(--color-border)' }}>
+                                        <td style={{ textAlign: 'left', padding: '6px 8px', whiteSpace: 'nowrap' }}>
+                                            {d.isNew && <span title="Новинка" style={{ marginRight: 4 }}>🆕</span>}{d.vendor}
+                                        </td>
+                                        <td style={{ textAlign: 'left', padding: '6px 8px', whiteSpace: 'nowrap' }}>{d.wb}</td>
+                                        <td style={{ textAlign: 'right', padding: '6px 8px' }}>{formatNumber(d.qty, 0)}</td>
+                                        <td style={{ textAlign: 'right', padding: '6px 8px' }}>{formatNumber(d.full, 0)}</td>
+                                        <td style={{ textAlign: 'right', padding: '6px 8px', color: 'var(--color-warning)', fontWeight: 600 }}>+{formatNumber(d.loose, 0)}</td>
+                                        <td style={{ textAlign: 'right', padding: '6px 8px', color: 'var(--color-text-muted)' }}>{formatNumber(d.k, 0)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
 
             {/* Поиск + фильтры (только отображение/выгрузка) */}
             <div className="glass-card" style={{ padding: 12, marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -610,142 +883,11 @@ export default function DraftPreview({
                     </table>
                 </div>
             ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    {ffGroups.map(g => {
-                        const isOpen = expanded.has(g.ffId);
-                        const ffName = warehouseNameById(g.ffId);
-                        const ffPallets = palletsForFf(g.lines).pallets;
-                        return (
-                            <div key={g.ffId} className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
-                                <div onClick={() => setExpanded(prev => { const n = new Set(prev); if (n.has(g.ffId)) n.delete(g.ffId); else n.add(g.ffId); return n; })} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', cursor: 'pointer' }}>
-                                    <span style={{ fontSize: 12, width: 12, color: 'var(--color-text-muted)' }}>{isOpen ? '▾' : '▸'}</span>
-                                    <span style={{ fontWeight: 700, fontSize: 15 }}>📦 {ffName}</span>
-                                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                        Σ {formatNumber(sumQty(g.lines), 0)} шт · {formatNumber(boxesSum(g.lines), 0)} кор · <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(ffPallets, 0)} пал</strong> · {reqCountOf(g.lines)} заявок · {skuCountOf(g.lines)} SKU
-                                    </span>
-                                    <div style={{ flex: 1 }} />
-                                    <button className="btn btn-primary btn-sm" onClick={e => { e.stopPropagation(); openFf(g.ffId, g.lines[0]?.pkg ?? 'BOX'); }} title={`Открыть склад «${ffName}»: заявки-юниты, передать на ФФ / в сборку`}>
-                                        Открыть →
-                                    </button>
-                                    <button className="btn btn-secondary btn-sm" onClick={e => { e.stopPropagation(); exportFf(g.ffId, g.lines); }} title={`Выгрузить пикинг-лист склада «${ffName}» в Excel`}>
-                                        📥 Выгрузить
-                                    </button>
-                                </div>
-                                {isOpen && (
-                                    <div style={{ padding: '4px 16px 14px 34px', borderTop: '1px solid var(--color-border)' }}>
-                                        {groupByWbPkg(g.lines).map(({ wb, pkg, items }) => {
-                                            const pb = palletBadge(palletsForCell(items, wb));
-                                            // Манифест физических паллет: тот же box/mono-ceil, что и бейдж выше,
-                                            // потому Σ pallets.length === pb.pallets (реконсиляция по построению).
-                                            const manifest = buildPalletManifest(
-                                                items.map(l => ({
-                                                    nmId: l.nmId, vendorCode: l.vendor, units: l.qty,
-                                                    boxSize: nmBoxSize.get(l.nmId) ?? null, ppb: nmPpb.get(l.nmId) ?? null,
-                                                })),
-                                                { mode: pkg === 'BOX' ? 'box' : 'mono', maxHeightCm: maxPalletHeightCm(wb), overrides: palletOverrides },
-                                            );
-                                            const mKey = `${g.ffId}::${wb}::${pkg}`;
-                                            const mOpen = manifestOpen.has(mKey);
-                                            const hasManifest = manifest.pallets.length > 0 || manifest.unpalletized.length > 0;
-                                            return (
-                                                <div key={`${wb}::${pkg}`} style={{ marginTop: 10 }}>
-                                                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-warning)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                                        <span>→ {wb}</span>
-                                                        {pkgBadge(pkg)}
-                                                        <span style={{ color: 'var(--color-text-muted)', fontWeight: 500 }}>
-                                                            (Σ {formatNumber(sumQty(items), 0)} шт · {formatNumber(boxesSum(items), 0)} кор
-                                                            {pb.pallets > 0 && <> · <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(pb.pallets, 0)} пал</strong></>}
-                                                            {pb.underfilled && <span style={{ color: 'var(--color-warning)' }} title={`Паллета заполнена ~${pb.pct}% — мало товара на это направление`}> · ⚠ ~{pb.pct}%</span>}
-                                                            {pb.unknownUnits > 0 && <span style={{ color: 'var(--color-text-muted)' }} title="Нет габаритов коробки — паллеты не считаются"> · {formatNumber(pb.unknownUnits, 0)} шт б/габ</span>})
-                                                        </span>
-                                                    </div>
-                                                    {hasManifest && (
-                                                        <div style={{ marginBottom: 6 }}>
-                                                            <button
-                                                                className="btn btn-secondary btn-sm"
-                                                                onClick={() => setManifestOpen(prev => toggleInSet(prev, mKey))}
-                                                                style={{ fontSize: 11 }}
-                                                                title={pkg === 'BOX'
-                                                                    ? 'Раскладка по физическим паллетам (смешанные короба разных артикулов)'
-                                                                    : 'Раскладка по физическим паллетам (по одному артикулу на паллету)'}
-                                                            >
-                                                                {mOpen ? '▾' : '▸'} 📐 Раскладка по паллетам ({formatNumber(manifest.pallets.length, 0)})
-                                                            </button>
-                                                            {mOpen && (
-                                                                <div style={{ marginTop: 6, paddingLeft: 6, display: 'flex', flexDirection: 'column', gap: 3 }}>
-                                                                    {manifest.pallets.map(p => {
-                                                                        const pct = Math.round(p.fillPct * 100);
-                                                                        const low = p.fillPct < 0.6;
-                                                                        return (
-                                                                            <div key={p.palletNo} style={{ fontSize: 12, display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
-                                                                                <span className="badge badge-secondary" style={{ fontSize: 10 }}>Паллета {formatNumber(p.palletNo, 0)}</span>
-                                                                                <span style={{ color: 'var(--color-text)' }}>
-                                                                                    {p.items.map((it, i) => (
-                                                                                        <Fragment key={it.nmId}>
-                                                                                            {i > 0 && <span style={{ color: 'var(--color-text-muted)' }}> + </span>}
-                                                                                            <span>{it.vendorCode}</span>
-                                                                                            <span style={{ color: 'var(--color-text-muted)' }}>×{formatNumber(it.units, 0)}</span>
-                                                                                        </Fragment>
-                                                                                    ))}
-                                                                                </span>
-                                                                                <span style={{ color: low ? 'var(--color-warning)' : 'var(--color-text-muted)', fontWeight: low ? 600 : 400 }} title={low ? 'Паллета заполнена менее 60% — неполная' : undefined}>
-                                                                                    {low && '⚠ '}— {formatNumber(pct, 0)}%
-                                                                                </span>
-                                                                            </div>
-                                                                        );
-                                                                    })}
-                                                                    {manifest.unpalletized.length > 0 && (
-                                                                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2 }} title="Нет габаритов короба — паллету не посчитать">
-                                                                            без паллетизации (нет габаритов):{' '}
-                                                                            {manifest.unpalletized.map((it, i) => (
-                                                                                <Fragment key={it.nmId}>
-                                                                                    {i > 0 && ', '}
-                                                                                    {it.vendorCode}×{formatNumber(it.units, 0)}
-                                                                                </Fragment>
-                                                                            ))}
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    )}
-                                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                                                        <thead>
-                                                            <tr style={{ color: 'var(--color-text-muted)', fontSize: 11 }}>
-                                                                <th style={{ textAlign: 'left', padding: '2px 6px', fontWeight: 600 }}>Артикул</th>
-                                                                <th style={{ textAlign: 'left', padding: '2px 6px', fontWeight: 600 }}>Баркод</th>
-                                                                <th style={{ textAlign: 'right', padding: '2px 6px', fontWeight: 600, width: 80 }}>Коробок</th>
-                                                                <th style={{ textAlign: 'right', padding: '2px 6px', fontWeight: 600, width: 70 }}>Шт</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody>
-                                                            {items.map(l => {
-                                                                const k = nmPpb.get(l.nmId) || 0;
-                                                                const full = k > 0 ? Math.floor(l.qty / k) : 0;
-                                                                const rem = k > 0 ? l.qty % k : 0;
-                                                                return (
-                                                                    <tr key={`${l.nmId}-${l.pkg}`} style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                                                        <td style={{ padding: '3px 6px' }}>{l.isNew && <span style={{ marginRight: 4, color: '#a855f7', fontWeight: 700 }}>🆕</span>}{l.vendor}</td>
-                                                                        <td style={{ padding: '3px 6px', color: 'var(--color-text-muted)' }}>{l.barcode}</td>
-                                                                        <td style={{ padding: '3px 6px', textAlign: 'right', whiteSpace: 'nowrap' }} title={k > 0 ? `${full} полн. коробов по ${k} шт${rem > 0 ? ` + ${rem} шт россыпью` : ''}` : 'Без кратности короба'}>
-                                                                            {k <= 0 ? <span style={{ color: 'var(--color-text-muted)' }}>—</span> : (
-                                                                                <><span>{formatNumber(full, 0)} кор</span>{rem > 0 && <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}> + {formatNumber(rem, 0)} шт</span>}</>
-                                                                            )}
-                                                                        </td>
-                                                                        <td style={{ padding: '3px 6px', textAlign: 'right', fontWeight: 600, whiteSpace: 'nowrap' }}>{formatNumber(l.qty, 0)}</td>
-                                                                    </tr>
-                                                                );
-                                                            })}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
+                // Вид «Карточки»: раздельные секции по упаковке (короб / моно / сейф),
+                // каждая со своими подытогами и ФФ-карточками. Combined-логика commit
+                // не меняется — секции это только отображение.
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                    {presentPkgs.map(renderPkgSection)}
                 </div>
             )}
         </div>

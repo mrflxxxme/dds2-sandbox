@@ -165,6 +165,101 @@ async def test_create_draft_happy_path(db_session):
 
 
 @pytest.mark.asyncio
+async def test_current_draft_creates_when_none(db_session):
+    """get_or_create_current_draft: пусто → создаёт пустой; повторный вызов → тот же (не плодим)."""
+    draft = await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+    assert draft.id is not None
+    assert draft.project_id == PROJECT_ID
+    assert draft.is_deleted is False
+
+    again = await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+    assert again.id == draft.id  # один черновик → возвращается тот же
+
+
+@pytest.mark.asyncio
+async def test_current_draft_returns_single(db_session):
+    """Один существующий черновик возвращается как есть (без merge)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    created = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5})],
+        ),
+    )
+    current = await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+    assert current.id == created.id
+
+
+@pytest.mark.asyncio
+async def test_current_draft_merges_multiple(db_session):
+    """Несколько черновиков → синглтон: остаётся ровно один активный со всеми строками."""
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+    d1 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5})],
+        ),
+    )
+    d2 = await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_b],
+            ["Казань"],
+            [AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_b): 3}, tgt={"Казань": 3})],
+        ),
+    )
+    current = await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+
+    # Ровно один активный черновик (остальные слиты и soft-deleted)
+    actives = await assembly_draft_service.list_drafts(db_session, PROJECT_ID)
+    assert len(actives) == 1
+    assert actives[0].id == current.id
+    assert current.id in {d1.id, d2.id}
+
+    # Объединённый черновик держит строки ОБОИХ
+    dist = AssemblyDraftDistribution.model_validate(current.distribution)
+    assert {r.nm_id for r in dist.rows} == {111, 222}
+
+
+@pytest.mark.asyncio
+async def test_current_draft_merges_multiple_multitenancy(db_session):
+    """Синглтон-консолидация не задевает чужой проект."""
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+    await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 1}, tgt={"Электросталь": 1})],
+        ),
+    )
+    await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_b],
+            ["Казань"],
+            [AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_b): 1}, tgt={"Казань": 1})],
+        ),
+    )
+    # Чужой проект со своим черновиком
+    other = await assembly_draft_service.create_draft(db_session, OTHER_PROJECT_ID, _build_payload([], ["Тула"], []))
+
+    await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+
+    other_actives = await assembly_draft_service.list_drafts(db_session, OTHER_PROJECT_ID)
+    assert {d.id for d in other_actives} == {other.id}  # чужой проект нетронут
+
+
+@pytest.mark.asyncio
 async def test_list_drafts_excludes_deleted(db_session):
     """list_drafts must hide soft-deleted drafts."""
     wh_a, _ = await _get_warehouse_ids(db_session)
@@ -2218,3 +2313,177 @@ async def test_add_rows_preserves_handed_units(db_session):
     assert dist.pallets_count == 3
     # Новая строка добавлена к существующей.
     assert {(r.nm_id, r.package_type or "BOX") for r in dist.rows} == {(222, "BOX"), (333, "BOX")}
+
+
+# ─── Tests: _allocate_pairs сохраняет ОБА маргинала ──────────────────────────
+
+
+def _assert_marginals(src: dict[str, int], tgt: dict[str, int]) -> None:
+    """Раскладка по парам (ФФ→WB) сохраняет per-ФФ и per-склад суммы (балансовая)."""
+    alloc = assembly_draft_service._allocate_pairs(src, tgt)
+    per_src: dict[int, int] = {}
+    per_tgt: dict[str, int] = {}
+    for (sid, tname), q in alloc.items():
+        assert q > 0
+        per_src[sid] = per_src.get(sid, 0) + q
+        per_tgt[tname] = per_tgt.get(tname, 0) + q
+    assert per_src == {int(k): v for k, v in src.items() if v > 0}
+    assert per_tgt == {k: v for k, v in tgt.items() if v > 0}
+
+
+def test_allocate_pairs_preserves_both_marginals():
+    """Регресс: каждый ФФ отгружает ровно свой запас, каждый склад получает ровно
+    свою потребность. Старая joint-pro-rata на src={1:1,2:1}, tgt={A:1,B:1} давала
+    ФФ1=2, ФФ2=0 → commit создавал заявку на склад без остатка."""
+    # Контрпример старого алгоритма: оба ФФ должны отгрузить по 1.
+    alloc = assembly_draft_service._allocate_pairs({"1": 1, "2": 1}, {"A": 1, "B": 1})
+    per_src: dict[int, int] = {}
+    for (sid, _), q in alloc.items():
+        per_src[sid] = per_src.get(sid, 0) + q
+    assert per_src == {1: 1, 2: 1}
+
+    # Прочие сбалансированные сетки — оба маргинала точны.
+    _assert_marginals({"1": 1, "2": 1}, {"A": 1, "B": 1})
+    _assert_marginals({"10": 6, "20": 4}, {"Электросталь": 5, "Казань": 5})
+    _assert_marginals({"10": 10}, {"A": 6, "B": 4})
+    _assert_marginals({"1": 7, "2": 11, "3": 5}, {"X": 9, "Y": 9, "Z": 5})
+    _assert_marginals({"5": 3, "1": 100}, {"Z": 50, "A": 53})  # ключи не отсортированы
+
+
+def test_allocate_pairs_empty():
+    """Пустые src/tgt → пустая раскладка."""
+    assert assembly_draft_service._allocate_pairs({}, {"A": 5}) == {}
+    assert assembly_draft_service._allocate_pairs({"1": 5}, {}) == {}
+
+
+# ─── Tests: идемпотентность синглтона и коммита ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_current_draft_idempotent_after_merge(db_session):
+    """После консолидации повторный вход возвращает тот же survivor, без новых
+    мутаций: ровно один активный, тот же id, строки обоих исходных сохранены."""
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+    await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_a],
+            ["Электросталь"],
+            [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5})],
+        ),
+    )
+    await assembly_draft_service.create_draft(
+        db_session,
+        PROJECT_ID,
+        _build_payload(
+            [wh_b],
+            ["Казань"],
+            [AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_b): 3}, tgt={"Казань": 3})],
+        ),
+    )
+    first = await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+    second = await assembly_draft_service.get_or_create_current_draft(db_session, PROJECT_ID)
+    assert second.id == first.id  # стабильный синглтон, второй вход не плодит/не сливает заново
+
+    actives = await assembly_draft_service.list_drafts(db_session, PROJECT_ID)
+    assert len(actives) == 1
+    dist = AssemblyDraftDistribution.model_validate(second.distribution)
+    assert {r.nm_id for r in dist.rows} == {111, 222}  # строки не потеряны на 2-м входе
+
+
+@pytest.mark.asyncio
+async def test_remove_rows_by_nm(db_session):
+    """remove_rows_by_nm убирает строки указанных SKU, остальные сохраняет."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5}),
+        AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_a): 3}, tgt={"Казань": 3}),
+    ]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh_a], ["Электросталь", "Казань"], rows)
+    )
+
+    updated = await assembly_draft_service.remove_rows_by_nm(db_session, PROJECT_ID, draft.id, [111])
+    dist = AssemblyDraftDistribution.model_validate(updated.distribution)
+    assert {r.nm_id for r in dist.rows} == {222}  # 111 убран, 222 остался
+
+
+@pytest.mark.asyncio
+async def test_remove_rows_clears_handed_units(db_session):
+    """remove_rows_by_nm чистит handed-юниты от удаляемых SKU; пустые юниты дропаются."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    handed = [
+        HandedUnit(
+            source_ff_id=wh_a, target_wb_name="Электросталь", package_type="BOX", status="handed",
+            items=[
+                HandedUnitItem(nm_id=111, barcode=TEST_BARCODE_1, vendor_code="", qty=5),
+                HandedUnitItem(nm_id=222, barcode=TEST_BARCODE_2, vendor_code="", qty=3),
+            ],
+        )
+    ]
+    create = AssemblyDraftCreate(
+        name="H", distribution=AssemblyDraftDistribution(
+            source_warehouse_ids=[wh_a], target_warehouse_names=["Электросталь"], rows=[], handed_units=handed,
+        ),
+    )
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, create)
+
+    updated = await assembly_draft_service.remove_rows_by_nm(db_session, PROJECT_ID, draft.id, [111])
+    dist = AssemblyDraftDistribution.model_validate(updated.distribution)
+    assert len(dist.handed_units) == 1  # юнит остался (есть 222)
+    assert {it.nm_id for it in dist.handed_units[0].items} == {222}  # 111 вычищен
+
+
+@pytest.mark.asyncio
+async def test_remove_rows_404(db_session):
+    """remove_rows_by_nm на несуществующем черновике → 404."""
+    with pytest.raises(HTTPException) as ei:
+        await assembly_draft_service.remove_rows_by_nm(db_session, PROJECT_ID, 999_999_999, [1])
+    assert ei.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_commit_draft_twice_is_404(db_session):
+    """Повторный commit того же черновика → 404 (первый его soft-delete'нул);
+    заявки не задваиваются (идемпотентный контракт, под FOR UPDATE — без гонки)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 4}, tgt={"Электросталь": 4}),
+    ]
+    payload = _build_payload([wh_a], ["Электросталь"], rows)
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert len(resp.created_request_ids) == 1
+
+    with pytest.raises(HTTPException) as ei:
+        await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert ei.value.status_code == 404
+
+
+# ─── _draft_nm_ids: rows + prebook (гистерезис признака новинки) ─────────────
+
+
+def test_draft_nm_ids_includes_prebook():
+    """nm_id собираются и из rows, И из prebook.
+
+    SKU, лежащий только в предброни, — часть черновика: без него новинка из
+    prebook выпадала из newcomer_nm_ids → фронт терял бейдж 🆕 и newcomer-логику
+    («одинаковые» товары вели себя по-разному в rows vs prebook).
+    """
+    draft = AssemblyDraft(
+        project_id=PROJECT_ID,
+        name="t",
+        distribution={
+            "rows": [{"nm_id": 111, "src": {}, "tgt": {}}],
+            "prebook": [{"nm_id": 222, "src": {}, "tgt": {}}, {"nm_id": "мусор"}],
+        },
+    )
+    assert assembly_draft_service._draft_nm_ids(draft) == {111, 222}
+
+
+def test_draft_nm_ids_tolerates_missing_parts():
+    """Отсутствующие/null rows и prebook не роняют чтение."""
+    draft = AssemblyDraft(project_id=PROJECT_ID, name="t", distribution={"rows": None})
+    assert assembly_draft_service._draft_nm_ids(draft) == set()

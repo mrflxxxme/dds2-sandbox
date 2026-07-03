@@ -25,17 +25,28 @@ from backend.schemas.assembly import (
     AssemblyRequestUpdate,
     AssignVehicle,
     AssignVehicleBulk,
+    BulkDeleteResult,
+    BulkStatusResult,
     CostForecastResponse,
     CreatedGroupResponse,
+    DeleteBulk,
     FfLinkInfo,
     FfReviewAction,
     JointSibling,
     LinkAnomaliesResponse,
     LogisticsAnalyticsResponse,
     LogisticsShipmentListResponse,
+    PreDistAdvanceResult,
+    PreDistributionCreate,
+    PreDistributionCreateResult,
+    PreDistVehicle,
+    PreDistVehiclePool,
+    PrebookingCreate,
+    PrebookingCreateResult,
     RefreshFromFboResponse,
     ReturnToWarehouse,
     ShipBulk,
+    StatusBulk,
     StockDistributionHistoryResponse,
     StockDistributionResponse,
 )
@@ -116,8 +127,40 @@ async def list_assembly_requests(
         response_items.append(AssemblyRequestResponse.model_validate(resp))
 
     await _enrich_ff_links(db, project.id, items, response_items)
+    await _enrich_source_vehicle_order_no(db, project.id, items, response_items)
     await _enrich_joint(db, project.id, items, response_items)
     return AssemblyListResponse(items=response_items, total=total)
+
+
+async def _enrich_source_vehicle_order_no(
+    db: AsyncSession,
+    project_id: int,
+    items: list,
+    response_items: list[AssemblyRequestResponse],
+) -> None:
+    """Заполнить source_vehicle_order_no для предраспределённых заявок (бейдж «машина {order_no}»).
+
+    Один батч-запрос по source_vehicle_id (без N+1). Только для is_pre_distribution-заявок.
+    """
+    from backend.models.cost import CostOrder
+
+    vehicle_ids = {req.source_vehicle_id for req in items if req.source_vehicle_id is not None}
+    if not vehicle_ids:
+        return
+    rows = await db.execute(
+        select(CostOrder.id, CostOrder.order_no).where(
+            CostOrder.id.in_(vehicle_ids),
+            CostOrder.project_id == project_id,
+        )
+    )
+    order_no_map = {vid: order_no for vid, order_no in rows.all()}
+    resp_by_id = {resp.id: resp for resp in response_items}
+    for req in items:
+        vid = req.source_vehicle_id
+        if vid is not None:
+            resp = resp_by_id.get(req.id)
+            if resp is not None:
+                resp.source_vehicle_order_no = order_no_map.get(vid)
 
 
 async def _enrich_ff_links(
@@ -488,6 +531,88 @@ async def create_assembly_request(
         raise HTTPException(400, str(e)) from None
 
 
+# --- Pre-distribution (машина в пути) ───────────────────────────────────────
+# Объявлены ДО `/{request_id}`, чтобы статический путь не перехватывался динамическим.
+
+
+@router.get("/pre-distribution/vehicles", response_model=list[PreDistVehicle])
+async def list_pre_distribution_vehicles(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Машины в пути (CUSTOMS/DISPATCHED), доступные для предраспределения."""
+    return await assembly_service.get_pre_distribution_vehicles(db, project.id)
+
+
+@router.get("/pre-distribution/vehicles/{vehicle_id}/pool", response_model=PreDistVehiclePool)
+async def get_pre_distribution_pool(
+    vehicle_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Пул машины: по каждому ШК — всего на машине, уже разнесено, доступно к раскладке."""
+    try:
+        return await assembly_service.get_vehicle_pre_dist_pool(db, project.id, vehicle_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post(
+    "/pre-distribution",
+    response_model=PreDistributionCreateResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_pre_distribution(
+    payload: PreDistributionCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Создать заявки PRE_DISTRIBUTED из строк раскладки (без приёмки)."""
+    try:
+        return await assembly_service.create_pre_distribution(db, project.id, payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post(
+    "/pre-distribution/vehicles/{vehicle_id}/advance",
+    response_model=PreDistAdvanceResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def advance_pre_distribution(
+    vehicle_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ручной перевод PRE_DISTRIBUTED→IN_PROGRESS для машины (фолбэк, если авто-хук не сработал)."""
+    try:
+        advanced = await assembly_service.advance_pre_distribution_manual(db, project.id, vehicle_id)
+        return PreDistAdvanceResult(advanced=advanced)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post(
+    "/prebooking",
+    response_model=PrebookingCreateResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def create_prebooking(
+    payload: PrebookingCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Создать заявки-предзаявки на моно (is_prebooking=True) из строк предброни.
+
+    Целые моно-паллеты на WB-склад без лимита приёмки (⌛) — сдаются предзаявкой.
+    ⌛/whitelist проверяет фронт (там загружена приёмка); здесь — обычная валидация стока.
+    """
+    try:
+        return await assembly_service.create_prebooking(db, project.id, payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
 # --- Get by ID --------------------------------------------------------------
 
 
@@ -807,6 +932,41 @@ async def ship_bulk(
         return response
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
+
+
+@router.post("/delete-bulk", response_model=BulkDeleteResult, dependencies=[Depends(rate_limit_write)])
+async def delete_bulk(
+    payload: DeleteBulk,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Массово удалить заявки на сборку, ещё не отгруженные на WB.
+
+    Отгруженные/на WB (SHIPPED/DELIVERED/RETURNED/CLOSED) пропускаются с причиной.
+    """
+    result = await assembly_service.delete_bulk(db, project.id, payload.ids)
+    return BulkDeleteResult.model_validate(result)
+
+
+@router.post("/status-bulk", response_model=BulkStatusResult, dependencies=[Depends(rate_limit_write)])
+async def set_status_bulk(
+    payload: StatusBulk,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Массово перевести заявки в статус (IN_PROGRESS | READY) одним запросом.
+
+    Невалидные для перехода заявки пропускаются с причиной (partial success).
+    """
+    try:
+        result = await assembly_service.set_status_bulk(db, project.id, payload.ids, payload.status)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    updated = []
+    for req in result["updated"]:
+        resp = await assembly_service._build_response(db, req)
+        updated.append(AssemblyRequestResponse.model_validate(resp))
+    return BulkStatusResult(updated=updated, skipped=result["skipped"])
 
 
 # --- History ----------------------------------------------------------------

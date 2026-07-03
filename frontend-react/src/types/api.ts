@@ -1819,6 +1819,12 @@ export interface AssemblyRequest {
   ff_links?: FfLinkInfo[] | null;
   /** состав сборки расходится с привязанной заявкой(ами) ФФ по наполнению (true — расхождение, null — неизвестно) */
   ff_mismatch?: boolean | null;
+  /** Предраспределение: машина-источник (CostOrder), флаг и её номер для бейджа. */
+  source_vehicle_id?: number | null;
+  is_pre_distribution?: boolean;
+  source_vehicle_order_no?: string | null;
+  /** Предзаявка (бронь) на моно: целая моно-паллета на WB-склад без лимита приёмки (⌛). */
+  is_prebooking?: boolean;
   /** ФФ предложил правку состава, ожидает согласования в DDS («Согласовать»/«Отказать») */
   ff_review_pending?: boolean;
   ff_proposed_items?: FfProposedItem[] | null;
@@ -1889,9 +1895,102 @@ export interface FfMismatchDetail {
   rows: FfMismatchDetailRow[];
 }
 
+// ─── Предраспределение машины в пути ─────────────────────────────────────────
+/** Машина (CostOrder) в статусе CUSTOMS/DISPATCHED — кандидат на предраспределение. */
+export interface PreDistVehicle {
+  id: number;
+  order_no: string;
+  status: string;
+  target_warehouse_id: number | null;
+  target_warehouse_name: string | null;
+  eta: string | null;
+  total_qty: number;
+  sku_count: number;
+  distributed_qty: number;
+  can_distribute: boolean;
+  block_reason: string | null;
+}
+
+/** Строка пула машины: товар и его доступный для раздачи остаток (gross − уже разнесённое). */
+export interface PreDistPoolRow {
+  barcode: string;
+  article_seller: string | null;
+  article_wb: string | null;
+  name: string | null;
+  brand: string | null;
+  gross_qty: number;
+  distributed_qty: number;
+  available_qty: number;
+}
+
+export interface PreDistVehiclePool {
+  vehicle: PreDistVehicle;
+  rows: PreDistPoolRow[];
+}
+
+/** Одна назначаемая строка: товар → WB-склад, количество, тип упаковки. */
+export interface PreDistRow {
+  barcode: string;
+  wb_warehouse_name: string;
+  qty: number;
+  package_type: PackageType;
+}
+
+export interface PreDistributionCreate {
+  vehicle_id: number;
+  wb_fbo_supply_id?: number | null;
+  rows: PreDistRow[];
+}
+
+export interface PreDistributionCreateResult {
+  created: number;
+  request_ids: number[];
+  requests: AssemblyRequest[];
+}
+
+/** Предзаявка (бронь) на моно: целые моно-паллеты на WB-склад без лимита приёмки. */
+export interface PrebookingRow {
+  warehouse_id: number;       // ФФ-склад-источник (где лежит товар предброни)
+  barcode: string;
+  wb_warehouse_name: string;  // склад назначения WB
+  qty: number;
+  package_type: PackageType;
+}
+
+export interface PrebookingCreate {
+  rows: PrebookingRow[];
+}
+
+export interface PrebookingCreateResult {
+  created: number;
+  request_ids: number[];
+  requests: AssemblyRequest[];
+}
+
 export interface AssemblyListResponse {
   items: AssemblyRequest[];
   total: number;
+}
+
+export interface AssemblyBulkDeleteSkip {
+  id: number;
+  number: string | null;
+  status: string | null;
+  reason: string;
+}
+
+export interface AssemblyBulkDeleteResult {
+  deleted: number;
+  skipped: AssemblyBulkDeleteSkip[];
+}
+
+/** Массовый перевод заявок в статус одним запросом (вместо N поштучных —
+ *  поштучные съедали общий write-лимит → 429 «Слишком много запросов»). */
+export type AssemblyBulkStatus = 'IN_PROGRESS' | 'READY';
+
+export interface AssemblyBulkStatusResult {
+  updated: AssemblyRequest[];
+  skipped: AssemblyBulkDeleteSkip[];
 }
 
 // ─── Gazelka integration ─────────────────────────────────────────────────────
@@ -4123,6 +4222,10 @@ export interface AssemblyDraftRow {
   /** WB acceptance package type — определяется через POST /warehouse/acceptance-check.
    *  Группирует строки в AssemblyRequest при commit_draft (одна заявка = один тип). */
   package_type?: PackageType;
+  /** Сознательно отгруженная ЧАСТИЧНАЯ паллета («Оставить так» в предброни).
+   *  normalizeDraft такие строки НЕ трогает; всё непомеченное приводится к
+   *  «целые коробы + целые паллеты» при загрузке страницы (self-heal). */
+  as_is?: boolean;
 }
 
 export interface HandedUnitItem {
@@ -4155,6 +4258,13 @@ export interface AssemblyDraftDistribution {
   cold_start_shares?: Record<string, number> | null;
   /** Замороженные заявки-юниты, переданные на ФФ (вырезаны из rows). */
   handed_units?: HandedUnit[];
+  /** Предбронь: целые коробы, не собравшиеся в целую паллету при «Заполнить черновик»
+   *  (под-паллетный хвост). Не теряются на ФФ — отдельный список с действиями. */
+  prebook?: AssemblyDraftRow[];
+  /** Провенанс «из предброни»: ключи `${nm_id}::${wb}`, чей контент попал в rows из
+   *  предброни (Оставить так / Дозабить / авто-консолидация). Только для бейджа на
+   *  паллете раскладки; сбрасывается при полном «Заполнить из потребности». */
+  prebook_origin?: string[];
 }
 
 /** Ссылка на заявку-юнит черновика (hand-off / revert / commit).
@@ -4203,6 +4313,86 @@ export interface CommitSupply {
   package_type: string;
   /** barcode → штук. */
   items: Record<string, number>;
+}
+
+// ─── Прогноз загрузки WB-складов (вкладка «Прогноз/Локализация») ─────────────
+export type TrafficLight = 'red' | 'orange' | 'yellow' | 'green';
+
+export interface ForecastLeadTime {
+  assembly_ship_days: number; // создание → отгрузка (сборка + отправка)
+  delivery_days: number;      // отгрузка → приёмка WB
+  total_days: number;
+  has_history: boolean;       // false = использованы дефолты
+}
+
+export interface ForecastItem {
+  warehouse_name: string;
+  district: string;
+  district_label: string;
+  nm_id: number;
+  vendor_code: string;
+  current_stock: number;
+  incoming: number;
+  avg_daily: number;          // скорость продаж на складе (шт/день)
+  projected_on_arrival: number; // остаток на момент прихода поставки (может быть <0)
+  days_cover: number;         // дней покрытия после поставки
+  traffic_light: TrafficLight;
+}
+
+export interface ForecastWarehouse {
+  warehouse_name: string;
+  district: string;
+  district_label: string;
+  sku_count: number;
+  current_stock: number;
+  incoming: number;
+  traffic_light_counts: Record<string, number>;
+}
+
+export interface ForecastLocalizationDistrict {
+  district: string;
+  label: string;
+  demand: number;
+  avail_current: number;
+  avail_after: number;
+  local_pct_current: number;
+  local_pct_after: number;
+}
+
+export interface ForecastLocalization {
+  index_current: number;      // ИЛ (КТР-взвеш.), НИЖЕ = лучше
+  index_after: number;
+  avg_loc_pct_current: number; // средняя доля локализации %, ВЫШЕ = лучше
+  avg_loc_pct_after: number;
+  status_current: string;     // excellent / neutral / weak / critical
+  status_after: string;
+  horizon_days: number;
+  by_district: ForecastLocalizationDistrict[];
+}
+
+export interface ForecastSkuLocalization {
+  nm_id: number;
+  loc_pct_current: number;
+  loc_pct_after: number;
+}
+
+export interface ForecastSummary {
+  sku_count: number;
+  warehouse_count: number;
+  total_incoming: number;
+  traffic_light_counts: Record<string, number>;
+}
+
+export interface ForecastResponse {
+  draft_id: number;
+  lead_time: ForecastLeadTime;
+  summary: ForecastSummary;
+  localization: ForecastLocalization;
+  sku_localization: ForecastSkuLocalization[];
+  newcomer_nm_ids: number[];
+  warehouses: ForecastWarehouse[];
+  items: ForecastItem[];
+  generated_at: string;
 }
 
 export interface AssemblyDraftMergeRequest {
@@ -4299,6 +4489,10 @@ export interface StockNeedSummary {
   deficit_count: number;
   can_send_count: number;
   no_wb_count: number;
+  /** Целевая локализация (%), до которой ведётся распределение (по умолч. 75). */
+  localization_target?: number;
+  /** Спрос гео-непривязанных заказов (СНГ и пр.): учтён в total_need, но НЕ локальный. */
+  unmapped_demand_qty?: number;
 }
 
 export interface StockNeedResponse {

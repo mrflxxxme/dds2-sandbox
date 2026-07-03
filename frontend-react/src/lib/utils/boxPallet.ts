@@ -227,6 +227,58 @@ const PALLET_FILL_EPS = 1e-9;
  * @param mode       'box' — смешанные паллеты; 'mono' — по SKU.
  * @param overrides  ручной «коробок на паллету» по канон-размеру.
  */
+/** Максимум артикулов на одной монопаллете (правило WB). */
+export const MONO_MAX_PALLET_ARTICLES = 3;
+
+/**
+ * Бин-пакинг МОНО в целые паллеты с лимитом ≤`maxArticles` артикулов на паллету
+ * (правило WB). В отличие от «по SKU = свои паллеты», мелкие моно-артикулы
+ * собираются ВМЕСТЕ на одну паллету (как смешанный короб, но кап на 3 артикула),
+ * чтобы не плодить полупустые паллеты. Жадно: крупнейший footprint (`units/cap`)
+ * первым; на паллету добираем артикулы по объёму, пока не заполнится или не
+ * наберём `maxArticles`. `cap` = штук в полной паллете SKU (boxesPerPallet×ppb).
+ * Возвращает раскладку: паллета → [{key, units}]. Чистая функция.
+ */
+export function monoPalletBins(
+    items: { key: string; units: number; cap: number; box?: number }[],
+    maxArticles: number = MONO_MAX_PALLET_ARTICLES,
+): { key: string; units: number }[][] {
+    const EPS = 1e-9;
+    const queue = items
+        .filter((i) => i.units > 0 && i.cap > 0)
+        .map((i) => ({ ...i, rem: i.units, box: i.box && i.box > 0 ? Math.floor(i.box) : 0 }))
+        .sort((a, b) => b.rem / b.cap - a.rem / a.cap || (a.key < b.key ? -1 : 1));
+    const pallets: { key: string; units: number }[][] = [];
+    while (queue.some((q) => q.rem > 0)) {
+        const pallet: { key: string; units: number }[] = [];
+        let frac = 0;
+        for (const q of queue) {
+            if (q.rem <= 0) continue;
+            if (pallet.length >= maxArticles) break;
+            if (frac >= 1 - EPS) break;
+            let fit = Math.floor((1 - frac) * q.cap + EPS);
+            if (q.box > 0) fit = Math.floor(fit / q.box) * q.box; // только ЦЕЛЫЕ коробы (не режем короб)
+            const take = Math.min(q.rem, Math.max(fit, 0));
+            if (take <= 0) continue;
+            pallet.push({ key: q.key, units: take });
+            q.rem -= take;
+            frac += take / q.cap;
+        }
+        // Предохранитель: по объёму ничего не влезло (паллета полна) — крупнейший остаток
+        // на новую паллету, целыми коробами (≤cap; если короб > cap — кладём как есть).
+        if (pallet.length === 0) {
+            const q = queue.find((x) => x.rem > 0);
+            if (!q) break;
+            const capBoxes = q.box > 0 ? Math.floor(q.cap / q.box) * q.box : q.cap;
+            const take = Math.min(q.rem, capBoxes > 0 ? capBoxes : q.rem);
+            pallet.push({ key: q.key, units: take });
+            q.rem -= take;
+        }
+        pallets.push(pallet);
+    }
+    return pallets;
+}
+
 export function palletsForLines(
     lines: PalletLine[],
     maxHeightCm: number,
@@ -234,9 +286,11 @@ export function palletsForLines(
     overrides?: Record<string, number>,
 ): PalletCount {
     let fill = 0;
-    let monoPallets = 0;
+    let tol = 0; // допуск дискретизации = одна штука «крупнейшего» (мин upp) SKU
     let unknownLines = 0;
     let unknownUnits = 0;
+    const monoItems: { key: string; units: number; cap: number; box?: number }[] = [];
+    let idx = 0;
     for (const line of lines) {
         const units = Math.max(0, Math.floor(line.units || 0));
         if (units <= 0) continue;
@@ -249,10 +303,30 @@ export function palletsForLines(
             continue;
         }
         fill += units / upp;
-        monoPallets += Math.ceil(units / upp - PALLET_FILL_EPS);
+        // Гранула допуска = короб (если кратность задана) — зеркало snapToWholePallets:
+        // после короб-гранулярного среза footprint садится в пределах короба от целого.
+        tol = Math.max(tol, (boxQty && boxQty > 1 ? boxQty : 1) / upp);
+        monoItems.push({ key: String(idx++), units, cap: upp, box: boxQty ?? 0 });
     }
-    const palletsRaw = mode === 'mono' ? monoPallets : Math.ceil(fill - PALLET_FILL_EPS);
-    const pallets = palletsRaw > 0 ? palletsRaw : 0; // нормализуем -0 (ceil(-eps)) → 0
+    tol = Math.min(tol, 0.5); // предохранитель (как в snapToWholePallets)
+    // mono — ≤3 артикула на паллету (бин-пакинг). box — смешанные паллеты: `ceil(fill − tol)`,
+    // а НЕ ceil(fill): после snapToWholePallets footprint садится чуть ВЫШЕ целого (сливер
+    // дискретизации ≤ tol, нужен для идемпотентности/не-потери товара). ceil(fill) посчитал
+    // бы лишнюю полупустую паллету (1.05 → 2); −tol поглощает сливер (1.05 → 1), а реальный
+    // хвост > tol (1.5 → 2) остаётся.
+    let palletsRaw: number;
+    if (mode === 'mono') {
+        // Авторитет = packMonoPallets: считаем только ГОТОВЫЕ (строго полные) паллеты —
+        // недобранные не едут (идут в предбронь/«Дозабить»). Показ = авторитет.
+        const km: Record<string, number> = {};
+        const capBy: Record<string, number> = {};
+        const boxBy: Record<string, number> = {};
+        for (const it of monoItems) { km[it.key] = (km[it.key] || 0) + it.units; capBy[it.key] = it.cap; boxBy[it.key] = it.box ?? 0; }
+        palletsRaw = packMonoPallets(km, (k) => capBy[k] ?? null, MONO_MAX_PALLET_ARTICLES, (k) => boxBy[k] ?? 0).pallets.length;
+    } else {
+        palletsRaw = Math.ceil(fill - Math.max(tol, PALLET_FILL_EPS));
+    }
+    const pallets = palletsRaw > 0 ? palletsRaw : 0; // нормализуем -0 → 0
     return { pallets, fill, unknownLines, unknownUnits };
 }
 
@@ -484,46 +558,105 @@ export interface SnapWholeResult {
  *
  * @param km    key → units (целые короба + возможный россыпь-хвост) одного склада-цели.
  * @param uppOf key → штук в полной паллете SKU (или null — не палетизируется).
+ * @param boxOf key → кратность короба (шт/короб) или null. Если задана и >1, срез идёт
+ *              ТОЛЬКО целыми коробами + исходной россыпью линии целиком: упаковка не
+ *              создаёт НОВОЙ некратности (инцидент Екб: хвост 14 при ppb=22 резался
+ *              поштучно на 3/11, после чего добивка до короба становилась невозможна).
+ *              Допуск tol расширяется до доли короба — иначе footprint, севший
+ *              «целое + сливер до короба», на повторном прогоне резался бы снова.
  */
 export function snapToWholePallets(
     km: Record<string, number>,
     uppOf: (key: string) => number | null,
+    boxOf?: (key: string) => number | null,
 ): SnapWholeResult {
     const EPS = 1e-9;
     const kept: Record<string, number> = {};
     const dropped: Record<string, number> = {};
     for (const [k, u] of Object.entries(km)) if (u > 0) kept[k] = u;
 
+    // Гранула среза линии: короб (если кратность задана) или штука.
+    const chunkOf = (k: string): number => {
+        const b = boxOf?.(k);
+        return b && b > 1 ? b : 1;
+    };
+
     let fill = 0;
-    let tol = 0; // допуск дискретизации = одна штука «крупнейшего» (мин upp) SKU
+    let tol = 0; // допуск дискретизации = одна ГРАНУЛА «крупнейшего» SKU (короб или штука)
     for (const [k, u] of Object.entries(kept)) {
         const upp = uppOf(k);
-        if (upp && upp > 0) { fill += u / upp; tol = Math.max(tol, 1 / upp); }
+        if (upp && upp > 0) { fill += u / upp; tol = Math.max(tol, chunkOf(k) / upp); }
     }
     if (tol <= 0) return { kept, dropped }; // нет палетизируемых линий — не режем
-    tol = Math.min(tol, 0.5); // предохранитель от вырожденного upp (≤2 шт/паллету)
+    tol = Math.min(tol, 0.5); // предохранитель от вырожденного upp (≤2 гранулы/паллету)
 
-    const keep = Math.floor(fill + tol);
-    let excess = fill - keep;
-    // keep ≥ 1 и хвост в пределах допуска → уже целое (с точностью до сливера) — не трогаем.
-    // Это и даёт идемпотентность повторного клика. При keep==0 (город < паллеты) — режем всё.
-    if (keep >= 1 && excess <= tol) return { kept, dropped };
+    // keep = floor(fill + tol) ТОЛЬКО в легаси-ветке (штучный tol ≤ 1 шт — сливер).
+    // В короб-гранулярной tol НЕ поднимает keep: гранула-короб «промоутила» бы
+    // недобранную до паллеты поставку в «целую» (при bpp=2 — полупустую), а в связке
+    // с кросс-ФФ добором фазы-A давала PUT-шторм (адверсарное ревью: 34 PUT подряд,
+    // весь свободный ФФ высасывался в предбронь). Допуск здесь работает только на
+    // «уже целое» СВЕРХУ: срез-цикл не снимает гранулу, ныряющую ниже keep, поэтому
+    // остаточный сливер ≤ гранулы over keep — и повторный прогон его не трогает.
+    const keep = boxOf ? Math.floor(fill + EPS) : Math.floor(fill + tol);
+    // keep < 1: вся смешанная поставка < целой паллеты → все палетизируемые units на ФФ.
+    if (keep < 1) {
+        for (const k of Object.keys(kept)) {
+            const upp = uppOf(k);
+            if (upp != null && upp > 0) { dropped[k] = (dropped[k] || 0) + kept[k]; delete kept[k]; }
+        }
+        return { kept, dropped };
+    }
+    const excess = fill - keep;
 
-    // Снимаем хвост с наименее объёмного палетизируемого SKU первым.
+    if (!boxOf) {
+        // ЛЕГАСИ (кратность не передана): поштучный floor-срез, строго не ниже keep.
+        // keep ≥ 1 и хвост в пределах допуска → уже целое (сливер) — не трогаем.
+        if (excess <= tol) return { kept, dropped };
+        let rem = excess;
+        const keys = Object.keys(kept)
+            .filter((k) => { const u = uppOf(k); return u != null && u > 0; })
+            .sort((a, b) => kept[a] - kept[b]);
+        for (const k of keys) {
+            if (rem <= EPS) break;
+            const upp = uppOf(k)!;
+            const rm = Math.min(kept[k], Math.floor(rem * upp + EPS));
+            if (rm > 0) {
+                kept[k] -= rm;
+                dropped[k] = (dropped[k] || 0) + rm;
+                rem -= rm / upp;
+                if (kept[k] <= 0) delete kept[k];
+            }
+        }
+        return { kept, dropped };
+    }
+
+    // КОРОБ-ГРАНУЛЯРНЫЙ срез: излишек снимается ГРАНУЛАМИ (сперва суб-коробочная
+    // россыпь линии целиком — kept становится кратным, затем целые коробы), СТРОГО
+    // НЕ НИЖЕ keep; гранула, ныряющая ниже keep, пропускается (у следующей линии
+    // гранула может быть мельче). Инвариант: kept ≡ 0 либо ≡ исходной россыпи
+    // (mod ppb) — новой некратности упаковка не создаёт.
+    // Фикс-поинт за ОДИН прогон: после цикла остаток излишка МЕНЬШЕ любой доступной
+    // гранулы оставшихся линий → повторный прогон не сможет снять ничего (kept не
+    // меняется), а keep стабилен (residual < tol, residual + tol < 1). Проверяется
+    // fuzz-тестом snapWholeBoxes.
+    if (excess <= EPS) return { kept, dropped };
+    let fp = fill;
     const keys = Object.keys(kept)
         .filter((k) => { const u = uppOf(k); return u != null && u > 0; })
         .sort((a, b) => kept[a] - kept[b]);
-    for (const k of keys) {
-        if (excess <= EPS) break;
+    outer: for (const k of keys) {
+        if (fp <= keep + EPS) break;
         const upp = uppOf(k)!;
-        const takeFp = Math.min(kept[k] / upp, excess);
-        // ceil — снять не меньше хвоста, чтобы footprint стал ≤ keep (не выше целого).
-        const rm = Math.min(kept[k], Math.ceil(takeFp * upp - EPS));
-        if (rm > 0) {
-            kept[k] -= rm;
-            dropped[k] = (dropped[k] || 0) + rm;
-            excess -= rm / upp;
-            if (kept[k] <= 0) delete kept[k];
+        const chunk = chunkOf(k);
+        while ((kept[k] || 0) > 0) {
+            if (fp <= keep + EPS) break outer;
+            const loose = chunk > 1 ? kept[k] % chunk : 0;
+            const take = loose > 0 ? loose : Math.min(kept[k], chunk);
+            if (fp - take / upp < keep - EPS) break; // гранула ныряет ниже keep — линию пропускаем
+            kept[k] -= take;
+            dropped[k] = (dropped[k] || 0) + take;
+            fp -= take / upp;
+            if (kept[k] <= 0) { delete kept[k]; break; }
         }
     }
     return { kept, dropped };
@@ -651,4 +784,107 @@ export function consolidateMixedDistrictPallets(input: MixedPalletInput): MixedP
         if (Object.keys(byWhKey[wh]).length === 0) delete byWhKey[wh];
     }
     return { byWhKey, droppedToFf };
+}
+
+export interface PackMonoResult {
+    /** key → units в ГОТОВЫХ паллетах (100% ИЛИ полный 3-арт слот). */
+    kept: Record<string, number>;
+    /** key → units недобранных паллет (<3 арт и <100%) — в предбронь/дозабор. */
+    dropped: Record<string, number>;
+    /** Готовые паллеты (bins) — раскладка строится на них (показ = авторитет). */
+    pallets: { key: string; units: number }[][];
+}
+
+/**
+ * Упаковка МОНО-распределения одного пункта назначения (ФФ→WB или anchor округа) в
+ * ЦЕЛЫЕ паллеты с лимитом ≤`maxArticles` артикулов на паллету — правило WB «на
+ * монопаллете максимум 3 артикула».
+ *
+ * Отгружаются ТОЛЬКО ЦЕЛЫЕ паллеты (строго). Две фазы:
+ *  1. Каждый артикул — свои ОДНОТОВАРНЫЕ целые паллеты (`floor(units/upp)`).
+ *  2. Под-паллетные хвосты собираются в ОБЩИЕ паллеты ≤`maxArticles` артикулов: берём
+ *     `maxArticles` крупнейших; если их footprint ≥1 — наполняем целую (до 1.0) и
+ *     повторяем. Как только даже они не набирают целой — остаток → `dropped` (предбронь).
+ *
+ * Возвращает `pallets` — сформированные целые паллеты (bins) — ЕДИНЫЙ АВТОРИТЕТ и для
+ * трима (kept/dropped), и для показа (`buildPalletManifest`/`palletsForLines('mono')`),
+ * поэтому «раскладка = то, что реально уедет» (нет фантомных неполных паллет).
+ *
+ * `uppOf(key)` — штук в полной паллете SKU (`boxesPerPallet × ppb`) или null (нет
+ * габаритов) → ключ НЕ палетизируем, проходит в `kept` как есть. Добор последнего
+ * артикула через `ceil` (footprint ≥1.0) — гарантия ИДЕМПОТЕНТНОСТИ (повторный прогон
+ * по `kept` стабилен). `Σ(kept)+Σ(dropped)==Σ(вход)`. Чистая функция.
+ */
+export function packMonoPallets(
+    km: Record<string, number>,
+    uppOf: (key: string) => number | null,
+    maxArticles = 3,
+    boxOf?: (key: string) => number | null,
+): PackMonoResult {
+    const EPS = 1e-9;
+    const kept: Record<string, number> = {};
+    const dropped: Record<string, number> = {};
+    const pallets: { key: string; units: number }[][] = []; // готовые (целые) паллеты — bins
+    const crumbs: Record<string, number> = {};
+    const uppCache: Record<string, number | null> = {};
+    const upp = (k: string): number | null => (k in uppCache ? uppCache[k] : (uppCache[k] = uppOf(k)));
+    // Размер короба ключа (для добора ЦЕЛЫМИ коробами); 0/нет → добор поштучно.
+    const box = (k: string): number => { const b = boxOf?.(k); return b && b > 0 ? Math.floor(b) : 0; };
+
+    // Фаза 1: однотоварные ЦЕЛЫЕ паллеты + сбор под-паллетных хвостов.
+    for (const [k, raw] of Object.entries(km)) {
+        const units = Math.max(0, Math.floor(raw || 0));
+        if (units <= 0) continue;
+        const u = upp(k);
+        if (u == null || u <= 0) { kept[k] = (kept[k] || 0) + units; continue; } // не палетизируем
+        const wholePallets = Math.floor(units / u);
+        const whole = wholePallets * u;
+        if (whole > 0) {
+            kept[k] = (kept[k] || 0) + whole;
+            for (let p = 0; p < wholePallets; p++) pallets.push([{ key: k, units: u }]);
+        }
+        const crumb = units - whole;
+        if (crumb > 0) crumbs[k] = crumb;
+    }
+
+    // Фаза 2: хвосты → ОБЩИЕ целые паллеты ≤maxArticles. Только когда top-maxArticles
+    // хвостов набирают ≥1 паллеты — иначе остаток в предбронь («только целые», строго).
+    // Добор последнего артикула ВВЕРХ (ceil) — гарантия footprint ≥1.0 → ИДЕМПОТЕНТНОСТЬ
+    // (иначе паллета сядет на <1.0, объявится «целой», повторный прогон уронит её хвост).
+    const fpOf = (k: string): number => { const u = upp(k); return u && u > 0 ? crumbs[k] / u : 0; };
+    for (;;) {
+        const keys = Object.keys(crumbs).filter((k) => crumbs[k] > 0);
+        if (keys.length === 0) break;
+        keys.sort((a, b) => fpOf(b) - fpOf(a) || (a < b ? -1 : a > b ? 1 : 0));
+        const top = keys.slice(0, maxArticles);
+        const topFp = top.reduce((s, k) => s + fpOf(k), 0);
+        if (topFp < 1 - EPS) {
+            // Даже maxArticles крупнейших хвостов не набирают целой паллеты → на ФФ (предбронь).
+            for (const k of keys) { dropped[k] = (dropped[k] || 0) + crumbs[k]; delete crumbs[k]; }
+            break;
+        }
+        let need = 1;
+        const bin: { key: string; units: number }[] = [];
+        for (const k of top) {
+            if (need <= EPS) break;
+            const u = upp(k)!;
+            const avFp = crumbs[k] / u;
+            let use: number;
+            if (avFp <= need + EPS) {
+                use = crumbs[k]; // весь хвост влезает
+            } else {
+                let rawUse = Math.max(1, Math.ceil(need * u - EPS));
+                const b = box(k);
+                if (b > 0) rawUse = Math.ceil(rawUse / b) * b; // добор ЦЕЛЫМИ коробами (нет россыпи)
+                use = Math.min(crumbs[k], rawUse);
+            }
+            kept[k] = (kept[k] || 0) + use;
+            bin.push({ key: k, units: use });
+            crumbs[k] -= use;
+            need -= use / u;
+            if (crumbs[k] <= 0) delete crumbs[k];
+        }
+        if (bin.length) pallets.push(bin);
+    }
+    return { kept, dropped, pallets };
 }

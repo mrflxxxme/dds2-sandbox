@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildPalletManifest, type ManifestLine } from '@/lib/utils/palletManifest';
-import { palletsForLines, type PalletLine } from '@/lib/utils/boxPallet';
+import { palletsForLines, snapToWholePallets, type PalletLine } from '@/lib/utils/boxPallet';
 
 // 60×40×40 @180 → 16 кор/паллету; ppb=10 → 160 шт/паллету.
 const SIZE = '60x40x40';
@@ -53,20 +53,38 @@ describe('buildPalletManifest · mode box (смешанные паллеты)', 
     });
 });
 
-describe('buildPalletManifest · mode mono (по SKU)', () => {
-    it('каждый SKU — свои паллеты', () => {
-        // A=200 → ⌈200/160⌉=2; B=160 → 1. Итого 3 паллеты, ни одной смешанной.
-        const m = buildPalletManifest([line(1, 200), line(2, 160)], { mode: 'mono', maxHeightCm: H });
-        expect(m.pallets.length).toBe(3);
-        for (const p of m.pallets) expect(p.items.length).toBe(1); // моно — один SKU
+describe('buildPalletManifest · mode mono (≤3 артикула на паллету)', () => {
+    it('моно-SKU собираются в ОДНУ целую паллету (≤3 артикула)', () => {
+        // 3 SKU вместе на ЦЕЛУЮ паллету (60+60+40=160, cap 160) → 1 паллета, 3 артикула.
+        const m = buildPalletManifest([line(1, 60), line(2, 60), line(3, 40)], { mode: 'mono', maxHeightCm: H });
+        expect(m.pallets.length).toBe(1);
+        expect(m.pallets[0].items.length).toBe(3);
+        expect(totalUnits(m)).toBe(160);
+    });
+
+    it('мелкие моно-SKU НЕ на целую (Σ0.75) → 0 паллет, всё в «без целой» (предбронь)', () => {
+        // 3 SKU по 40 (0.25 каждая, Σ0.75 < 1) → целой нет → 0 паллет, штуки не потеряны.
+        const m = buildPalletManifest([line(1, 40), line(2, 40), line(3, 40)], { mode: 'mono', maxHeightCm: H });
+        expect(m.pallets.length).toBe(0);
+        expect(totalUnits(m)).toBe(120); // 120 шт → unpalletized (уедут в предбронь «Дозабить»)
+    });
+
+    it('реконсиляция: Σ паллет манифеста == palletsForLines(mono)', () => {
+        const lines = [line(1, 200), line(2, 160)];
+        const m = buildPalletManifest(lines, { mode: 'mono', maxHeightCm: H });
+        expect(m.pallets.length).toBe(palletsForLines(toPalletLines(lines), H, 'mono').pallets);
         expect(totalUnits(m)).toBe(360);
     });
 
-    it('последняя паллета SKU неполная — fillPct дробный', () => {
+    it('под-паллетный хвост моно — не отдельная неполная паллета, а «без целой» (предбронь)', () => {
+        // 200 (cap 160) = 1 ЦЕЛАЯ (160) + хвост 40. Строго целые: хвост НЕ рисуется
+        // отдельной неполной паллетой, а уходит в «без целой» (→ предбронь). Штуки целы.
         const m = buildPalletManifest([line(1, 200)], { mode: 'mono', maxHeightCm: H });
-        expect(m.pallets.length).toBe(2);
+        expect(m.pallets.length).toBe(1);
         expect(m.pallets[0].fillPct).toBeCloseTo(1, 6);
-        expect(m.pallets[1].fillPct).toBeCloseTo(40 / 160, 6);
+        expect(m.unpalletized.length).toBe(1);
+        expect(m.unpalletized[0].units).toBe(40);
+        expect(totalUnits(m)).toBe(200);
     });
 });
 
@@ -96,7 +114,12 @@ describe('buildPalletManifest · реконсиляция с palletsForLines', (
         { name: 'один SKU 160', lines: [line(1, 160)] },
         { name: 'один SKU 350', lines: [line(1, 350)] },
         { name: 'два SKU микс', lines: [line(1, 100), line(2, 80)] },
-        { name: 'три SKU', lines: [line(1, 230), line(2, 90), line(3, 170)] },
+        // 500 = 3.125 пал: излишек больше короба (10/160) — счётчик и манифест сходятся.
+        // Суб-коробочный сливер (490 = 3.0625) разнёс бы их: счётчик округляет вниз
+        // (tol = короб, зеркало короб-гранулярного snapToWholePallets), манифест честно
+        // строит +1 паллету — но в черновике такого состояния не бывает (self-heal
+        // срезает сливер в предбронь); см. отдельный пост-snap тест ниже.
+        { name: 'три SKU', lines: [line(1, 230), line(2, 90), line(3, 180)] },
         { name: 'малая загрузка', lines: [line(1, 20)] },
         { name: 'много SKU дробные', lines: [line(1, 47), line(2, 153), line(3, 211), line(4, 99)] },
         {
@@ -124,6 +147,17 @@ describe('buildPalletManifest · реконсиляция с palletsForLines', (
         const unp = m.unpalletized.reduce((s, i) => s + i.units, 0);
         expect(unp).toBe(agg.unknownUnits);
         expect(m.unpalletized.length).toBe(agg.unknownLines);
+    });
+
+    it('суб-коробочный сливер (490 = 3.0625 пал): после snap показы сходятся на 3', () => {
+        // Пайплайн-инвариант: черновик всегда пост-snap; сливер-короб уходит в предбронь,
+        // а не в 4-ю паллету — манифест и счётчик согласованы на реальном состоянии.
+        const snap = snapToWholePallets({ 1: 230, 2: 90, 3: 170 }, () => 160, () => PPB);
+        const lines = Object.entries(snap.kept).map(([k, u]) => line(Number(k), u));
+        const m = buildPalletManifest(lines, { mode: 'box', maxHeightCm: H });
+        const agg = palletsForLines(toPalletLines(lines), H, 'box');
+        expect(m.pallets.length).toBe(agg.pallets);
+        expect(agg.pallets).toBe(3);
     });
 });
 

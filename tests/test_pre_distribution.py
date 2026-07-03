@@ -1,0 +1,327 @@
+# ruff: noqa: RUF001, RUF002, RUF003
+"""
+Тесты предраспределения машины в пути (services/assembly/pre_distribution.py).
+
+Проверяет хребет фичи: пул (net-математика), создание заявок PRE_DISTRIBUTED БЕЗ
+реального стока, отсутствие фейк-резерва ФФ-стока (C1), over-commit guard (H3),
+хард-блок без ФФ-склада назначения (M3), авто-перевод на разгрузке (H1) и ручной
+фолбэк (H2). См. .claude/PREDIST_DESIGN.md.
+"""
+
+import uuid
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.models.assembly import AssemblyRequest, AssemblyStatus
+from backend.models.cost import CostOrder, CostOrderItem
+from backend.models.enums import VehicleStatus
+from backend.schemas.assembly import PreDistributionCreate, PreDistRow
+from backend.services.assembly_service import (
+    _advance_pre_distribution_assemblies,
+    advance_pre_distribution_manual,
+    create_pre_distribution,
+    get_pre_distribution_vehicles,
+    get_vehicle_pre_dist_pool,
+)
+from backend.services.warehouse_crud import create_warehouse
+from backend.services.warehouse_inbound import accept_receipt, create_receipt
+from backend.services.warehouse_stock_engine import _get_reserved_map
+
+WB_A = "Электросталь"
+WB_B = "Коледино"
+
+
+def _uid() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+class _Env:
+    def __init__(self, pid: int, ff_wh_id: int, bc1: str, bc2: str, nom1: int, nom2: int, vehicle: CostOrder):
+        self.pid = pid
+        self.ff_wh_id = ff_wh_id
+        self.bc1 = bc1
+        self.bc2 = bc2
+        self.nom1 = nom1
+        self.nom2 = nom2
+        self.vehicle = vehicle
+
+
+async def _make_nomenclature(db: AsyncSession, pid: int, barcode: str) -> int:
+    result = await db.execute(
+        text(
+            "INSERT INTO nomenclature (project_id, barcode, subject, updated_at) "
+            "VALUES (:pid, :bc, :subj, NOW()) RETURNING id"
+        ),
+        {"pid": pid, "bc": barcode, "subj": "PreDist Item"},
+    )
+    return result.scalar()
+
+
+@pytest_asyncio.fixture
+async def env(db_session: AsyncSession, project) -> _Env:
+    """ФФ-склад разгрузки + 2 ШК + машина CUSTOMS (BC1×100, BC2×50). Стока НЕТ намеренно."""
+    pid = project.id
+    ff_wh = await create_warehouse(db_session, pid, {"name": f"FF-{_uid()}", "warehouse_type": "FULFILLMENT"})
+    bc1, bc2 = f"PD-{_uid()}", f"PD-{_uid()}"
+    nom1 = await _make_nomenclature(db_session, pid, bc1)
+    nom2 = await _make_nomenclature(db_session, pid, bc2)
+
+    vehicle = CostOrder(
+        project_id=pid,
+        order_no=f"PRDIST-{_uid()}",
+        status=VehicleStatus.CUSTOMS,
+        target_warehouse_id=ff_wh.id,
+    )
+    db_session.add(vehicle)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            CostOrderItem(project_id=pid, order_no=vehicle.order_no, barcode=bc1, qty=100),
+            CostOrderItem(project_id=pid, order_no=vehicle.order_no, barcode=bc2, qty=50),
+        ]
+    )
+    await db_session.commit()
+    return _Env(pid, ff_wh.id, bc1, bc2, nom1, nom2, vehicle)
+
+
+# ─── Пул (net-математика) ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_pool_net_math(db_session, env):
+    pool = await get_vehicle_pre_dist_pool(db_session, env.pid, env.vehicle.id)
+    assert pool.vehicle.total_qty == 150
+    assert pool.vehicle.sku_count == 2
+    assert pool.vehicle.can_distribute is True
+    by_bc = {r.barcode: r for r in pool.rows}
+    assert by_bc[env.bc1].gross_qty == 100
+    assert by_bc[env.bc1].available_qty == 100
+    assert by_bc[env.bc1].distributed_qty == 0
+
+    # После раскладки 30 шт BC1 — доступно 70, разнесено 30.
+    await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=30)]),
+    )
+    pool2 = await get_vehicle_pre_dist_pool(db_session, env.pid, env.vehicle.id)
+    by_bc2 = {r.barcode: r for r in pool2.rows}
+    assert by_bc2[env.bc1].distributed_qty == 30
+    assert by_bc2[env.bc1].available_qty == 70
+
+
+# ─── Создание заявок ───────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_groups_by_wb_and_skips_stock(db_session, env):
+    """Две WB-цели → 2 заявки PRE_DISTRIBUTED; склад-источник = ФФ машины; стока нет, но создаётся (C2: pallets=0)."""
+    result = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[
+                PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40),
+                PreDistRow(barcode=env.bc2, wb_warehouse_name=WB_B, qty=20),
+            ],
+        ),
+    )
+    assert result.created == 2
+    reqs = (
+        (
+            await db_session.execute(
+                select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(reqs) == 2
+    for r in reqs:
+        assert r.status == AssemblyStatus.PRE_DISTRIBUTED
+        assert r.is_pre_distribution is True
+        assert r.warehouse_id == env.ff_wh_id  # источник = ФФ разгрузки машины
+        assert r.pallets_count == 0  # C2: NOT NULL → 0
+    by_wb = {r.wb_warehouse_name_manual: r for r in reqs}
+    assert set(by_wb) == {WB_A, WB_B}
+
+
+@pytest.mark.asyncio
+async def test_predist_does_not_reserve_ff_stock(db_session, env):
+    """C1: PRE_DISTRIBUTED НЕ держит реальный ФФ-сток (_get_reserved_map исключает его)."""
+    await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40)]),
+    )
+    reserved = await _get_reserved_map(db_session, env.pid, env.ff_wh_id)
+    assert reserved.get(env.nom1, 0) == 0  # фейк-резерва нет
+
+    # А после разгрузки (→ IN_PROGRESS) — резерв уже законен.
+    await _advance_pre_distribution_assemblies(db_session, env.pid, env.vehicle.id)
+    await db_session.commit()
+    reserved2 = await _get_reserved_map(db_session, env.pid, env.ff_wh_id)
+    assert reserved2.get(env.nom1, 0) == 40
+
+
+@pytest.mark.asyncio
+async def test_over_commit_guard(db_session, env):
+    """H3: запрошено больше, чем на машине → ValueError, ничего не создано."""
+    with pytest.raises(ValueError, match="Превышение"):
+        await create_pre_distribution(
+            db_session,
+            env.pid,
+            PreDistributionCreate(
+                vehicle_id=env.vehicle.id,
+                rows=[
+                    PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=80),
+                    PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_B, qty=40),  # 120 > 100
+                ],
+            ),
+        )
+    count = (
+        await db_session.execute(
+            select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+        )
+    ).scalars().all()
+    assert len(count) == 0
+
+
+@pytest.mark.asyncio
+async def test_fbo_link_requires_single_wb(db_session, env):
+    """wb_fbo_supply_id при нескольких WB-складах → ValueError."""
+    with pytest.raises(ValueError, match="одном складе"):
+        await create_pre_distribution(
+            db_session,
+            env.pid,
+            PreDistributionCreate(
+                vehicle_id=env.vehicle.id,
+                wb_fbo_supply_id=123456,
+                rows=[
+                    PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=10),
+                    PreDistRow(barcode=env.bc2, wb_warehouse_name=WB_B, qty=10),
+                ],
+            ),
+        )
+
+
+# ─── M3: хард-блок без ФФ-склада назначения ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_m3_block_no_target_warehouse(db_session, env):
+    """Машина без target_warehouse_id → пул и создание падают; в списке can_distribute=False."""
+    env.vehicle.target_warehouse_id = None
+    await db_session.commit()
+
+    with pytest.raises(ValueError, match="склад назначения"):
+        await get_vehicle_pre_dist_pool(db_session, env.pid, env.vehicle.id)
+    with pytest.raises(ValueError, match="склад назначения"):
+        await create_pre_distribution(
+            db_session,
+            env.pid,
+            PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=10)]),
+        )
+
+    vehicles = await get_pre_distribution_vehicles(db_session, env.pid)
+    mine = [v for v in vehicles if v.id == env.vehicle.id]
+    assert mine and mine[0].can_distribute is False
+    assert mine[0].block_reason
+
+
+# ─── H1: авто-перевод на разгрузке через accept_receipt ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_advance_on_unload_via_accept_receipt(db_session, env):
+    """H1: разгрузка машины (accept_receipt с её cost_order_id) → PRE_DISTRIBUTED авто IN_PROGRESS."""
+    await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40)]),
+    )
+    # Приёмка на ФФ-склад, привязанная к машине.
+    receipt = await create_receipt(
+        db_session,
+        env.pid,
+        env.ff_wh_id,
+        {"items": [{"barcode": env.bc1, "expected_qty": 40, "actual_qty": 40}]},
+    )
+    await db_session.execute(
+        text("UPDATE inbound_receipts SET cost_order_id = :cid WHERE id = :rid"),
+        {"cid": env.vehicle.id, "rid": receipt.id},
+    )
+    await db_session.commit()
+
+    await accept_receipt(db_session, env.pid, receipt.id)
+
+    req = (
+        await db_session.execute(
+            select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+        )
+    ).scalar_one()
+    assert req.status == AssemblyStatus.IN_PROGRESS
+    assert req.is_pre_distribution is True  # флаг остаётся (бейдж/отчёты)
+
+    # Идемпотентно: повторный advance ничего не двигает.
+    again = await _advance_pre_distribution_assemblies(db_session, env.pid, env.vehicle.id)
+    assert again == 0
+
+
+# ─── H2: ручной фолбэк ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_advance_manual(db_session, env):
+    """H2: ручной перевод PRE_DISTRIBUTED→IN_PROGRESS."""
+    await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc2, wb_warehouse_name=WB_B, qty=15)]),
+    )
+    moved = await advance_pre_distribution_manual(db_session, env.pid, env.vehicle.id)
+    assert moved == 1
+    req = (
+        await db_session.execute(
+            select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+        )
+    ).scalar_one()
+    assert req.status == AssemblyStatus.IN_PROGRESS
+
+
+# ─── Список машин ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_vehicles_list_aggregates(db_session, env):
+    vehicles = await get_pre_distribution_vehicles(db_session, env.pid)
+    mine = [v for v in vehicles if v.id == env.vehicle.id]
+    assert mine
+    v = mine[0]
+    assert v.status == "CUSTOMS"
+    assert v.total_qty == 150
+    assert v.sku_count == 2
+    assert v.distributed_qty == 0
+    assert v.can_distribute is True
+
+    await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=25)]),
+    )
+    vehicles2 = await get_pre_distribution_vehicles(db_session, env.pid)
+    v2 = [x for x in vehicles2 if x.id == env.vehicle.id][0]
+    assert v2.distributed_qty == 25
+
+
+@pytest.mark.asyncio
+async def test_project_isolation(db_session, env, other_project):
+    """Машина чужого проекта не видна и не предраспределяется."""
+    with pytest.raises(ValueError, match="не найдена"):
+        await get_vehicle_pre_dist_pool(db_session, other_project.id, env.vehicle.id)
+    vehicles = await get_pre_distribution_vehicles(db_session, other_project.id)
+    assert all(v.id != env.vehicle.id for v in vehicles)

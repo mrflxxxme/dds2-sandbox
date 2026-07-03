@@ -142,6 +142,7 @@ async def start_assembly(db: AsyncSession, project_id: int, request_id: int) -> 
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
     return req
 
 
@@ -172,7 +173,46 @@ async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> Asse
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
     return req
+
+
+async def set_status_bulk(db: AsyncSession, project_id: int, ids: list[int], status: str) -> dict:
+    """
+    Массовый перевод заявок в статус (IN_PROGRESS | READY) — один запрос вместо N
+    поштучных (поштучные быстро съедают общий write-лимит → 429 на середине пачки).
+
+    Каждая заявка проходит обычную одиночную транзицию (валидации/история/кэш те же:
+    start_assembly / mark_ready). Невалидные пропускаются с причиной, остальные
+    переводятся — partial success, как delete_bulk.
+
+    Возвращает {"updated": [AssemblyRequest, ...], "skipped": [{id, number, status, reason}]}.
+    """
+    from .crud import get_assembly_request
+
+    if status not in ("IN_PROGRESS", "READY"):
+        raise ValueError(f"Недопустимый статус для массового перевода: {status}")
+    updated: list[AssemblyRequest] = []
+    skipped: list[dict] = []
+    for rid in dict.fromkeys(ids):  # дедуп с сохранением порядка
+        req = await get_assembly_request(db, project_id, rid)
+        if not req:
+            skipped.append({"id": rid, "number": None, "status": None, "reason": "не найдена"})
+            continue
+        # Уже в целевом статусе — идемпотентный no-op (как start_assembly для
+        # IN_PROGRESS), а не skip с технической причиной «Cannot transition».
+        if AssemblyStatus(req.status) == AssemblyStatus(status):
+            updated.append(req)
+            continue
+        number, old = req.number, req.status
+        try:
+            if status == "IN_PROGRESS":
+                updated.append(await start_assembly(db, project_id, rid))
+            else:
+                updated.append(await mark_ready(db, project_id, rid))
+        except ValueError as e:
+            skipped.append({"id": rid, "number": number, "status": old, "reason": str(e)})
+    return {"updated": updated, "skipped": skipped}
 
 
 async def _joint_active_siblings(
@@ -274,6 +314,7 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
     return req
 
 
@@ -301,6 +342,7 @@ async def unassign_vehicle(db: AsyncSession, project_id: int, request_id: int) -
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
     return req
 
 
@@ -426,6 +468,7 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
     await invalidate_cache("reports:balance")
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
 
     return req
 
@@ -529,6 +572,7 @@ async def cancel_request(db: AsyncSession, project_id: int, request_id: int) -> 
     await invalidate_cache("reports:balance")
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
 
     return req
 
@@ -713,6 +757,7 @@ async def return_to_warehouse(
     await invalidate_cache("reports:logistics_forecast")
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
 
     return req
 
@@ -763,6 +808,7 @@ async def reopen_for_reship(
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
     return req
 
 
@@ -799,6 +845,7 @@ async def close_request(
     await invalidate_cache("reports:logistics_forecast")
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
     return req
 
 
@@ -826,6 +873,7 @@ async def delete_request(db: AsyncSession, project_id: int, request_id: int) -> 
     await invalidate_cache("reports:balance")
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
 
 
 # --- Bulk operations --------------------------------------------------------
@@ -862,6 +910,58 @@ async def ship_bulk(
     return results
 
 
+# Статусы, которые УЖЕ ушли на WB (товар отгружён / поставка заведена) — массово
+# удалять нельзя (нужен ручной откат стока через отмену).
+_NON_DELETABLE_STATUSES = {
+    AssemblyStatus.SHIPPED,
+    AssemblyStatus.DELIVERED,
+    AssemblyStatus.RETURNED,
+    AssemblyStatus.CLOSED,
+}
+
+
+async def delete_bulk(db: AsyncSession, project_id: int, ids: list[int]) -> dict:
+    """
+    Массовое удаление заявок на сборку, ещё НЕ отгруженных на WB.
+
+    Удаляются pre-WB статусы (PENDING / IN_PROGRESS / READY / VEHICLE_ASSIGNED /
+    CANCELLED): товар физически не списан, висит только резерв — он снимается
+    soft-delete. Для не-отменённых делаем cancel→delete (как и одиночное удаление,
+    которое требует «сначала отмените»); отмена для pre-WB лишь меняет статус (стока
+    не трогает). Отгруженные на WB (SHIPPED/DELIVERED/RETURNED/CLOSED) пропускаем с
+    причиной — их сначала отменяют вручную (откат стока).
+
+    Возвращает {"deleted": int, "skipped": [{id, number, status, reason}, ...]}.
+    """
+    from .crud import get_assembly_request
+
+    deleted = 0
+    skipped: list[dict] = []
+    for rid in ids:
+        req = await get_assembly_request(db, project_id, rid)
+        if not req:
+            skipped.append({"id": rid, "number": None, "status": None, "reason": "не найдена"})
+            continue
+        status = AssemblyStatus(req.status)
+        number = req.number
+        if status in _NON_DELETABLE_STATUSES:
+            skipped.append({
+                "id": rid,
+                "number": number,
+                "status": status.value,
+                "reason": "уже отгружена на WB — сначала отмените заявку",
+            })
+            continue
+        try:
+            if status != AssemblyStatus.CANCELLED:
+                await cancel_request(db, project_id, rid)
+            await delete_request(db, project_id, rid)
+            deleted += 1
+        except ValueError as e:
+            skipped.append({"id": rid, "number": number, "status": status.value, "reason": str(e)})
+    return {"deleted": deleted, "skipped": skipped}
+
+
 # --- Deliver ----------------------------------------------------------------
 
 
@@ -888,6 +988,7 @@ async def deliver_request(
     await db.refresh(req)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
     return req
 
 

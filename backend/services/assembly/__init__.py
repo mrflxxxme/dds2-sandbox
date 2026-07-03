@@ -24,6 +24,14 @@ from .crud import (
     prefetch_list_maps,
     update_assembly_request,
 )
+from .pre_distribution import (
+    _advance_pre_distribution_assemblies,
+    advance_pre_distribution_manual,
+    create_pre_distribution,
+    get_pre_distribution_vehicles,
+    get_vehicle_pre_dist_pool,
+)
+from .prebooking import create_prebooking
 from .status import (
     _check_transition,
     _gazelka_linked_ids,
@@ -32,12 +40,14 @@ from .status import (
     assign_vehicle_bulk,
     cancel_request,
     close_request,
+    delete_bulk,
     delete_request,
     deliver_request,
     get_assembly_history,
     mark_ready,
     reopen_for_reship,
     return_to_warehouse,
+    set_status_bulk,
     ship_bulk,
     ship_joint_supply,
     ship_request,
@@ -66,12 +76,14 @@ __all__ = [
     "assign_vehicle_bulk",
     "cancel_request",
     "close_request",
+    "delete_bulk",
     "delete_request",
     "deliver_request",
     "get_assembly_history",
     "mark_ready",
     "reopen_for_reship",
     "return_to_warehouse",
+    "set_status_bulk",
     "ship_bulk",
     "ship_joint_supply",
     "ship_request",
@@ -81,4 +93,12 @@ __all__ = [
     "get_logistics_analytics",
     "refresh_active_assemblies_from_fbo",
     "refresh_from_fbo",
+    # pre-distribution (машина в пути)
+    "_advance_pre_distribution_assemblies",
+    "advance_pre_distribution_manual",
+    "create_pre_distribution",
+    "get_pre_distribution_vehicles",
+    "get_vehicle_pre_dist_pool",
+    # prebooking (предзаявка на моно)
+    "create_prebooking",
 ]

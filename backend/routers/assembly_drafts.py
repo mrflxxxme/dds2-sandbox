@@ -26,8 +26,9 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
     CommitDraftOptions,
+    ForecastResponse,
 )
-from backend.services import assembly_draft_service
+from backend.services import assembly_draft_service, assembly_load_forecast_service
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/assembly/drafts", tags=["Assembly Drafts"])
@@ -51,6 +52,56 @@ async def create_draft(
 ) -> AssemblyDraftRead:
     """Create a new draft."""
     draft = await assembly_draft_service.create_draft(db, project.id, payload)
+    return await assembly_draft_service.to_read_model(db, project.id, draft)
+
+
+@router.post("/current", response_model=AssemblyDraftRead, dependencies=[Depends(rate_limit_write)])
+async def get_or_create_current_draft(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftRead:
+    """Единственный «текущий» черновик проекта (синглтон).
+
+    Лениво консолидирует: нет → создаёт пустой; один → возвращает его; несколько →
+    объединяет все в один (merge_drafts) и возвращает survivor. Единая страница
+    «Сборка» зовёт это на входе — гарантия ровно одного активного черновика.
+
+    POST (не GET): может создавать/сливать/soft-delete'ить черновики → честнее по
+    семантике + покрыт `rate_limit_write`. Идемпотентен в установившемся состоянии
+    (один черновик → тот же объект).
+    """
+    draft = await assembly_draft_service.get_or_create_current_draft(db, project.id)
+    return await assembly_draft_service.to_read_model(db, project.id, draft)
+
+
+@router.get("/{draft_id}/forecast", response_model=ForecastResponse)
+async def forecast_draft(
+    draft_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> ForecastResponse:
+    """Предпросмотр загрузки WB-складов с учётом черновика (вкладка «Прогноз»).
+
+    Текущий остаток WB + входящая поставка − продажи за lead-time → прогноз
+    остатка, дней покрытия и светофор по складу; + примерный индекс локализации
+    до/после поставки. Read-only, без мутаций. 404 если черновик не найден.
+    """
+    return await assembly_load_forecast_service.forecast_draft_load(db, project.id, draft_id)
+
+
+@router.post("/{draft_id}/remove-rows", response_model=AssemblyDraftRead, dependencies=[Depends(rate_limit_write)])
+async def remove_rows(
+    draft_id: int,
+    nm_ids: list[int] = Body(..., embed=True, description="nm_id товаров для удаления из черновика"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> AssemblyDraftRead:
+    """Убрать указанные SKU из черновика (удаление неликвида из вкладки «Прогноз»).
+
+    Удаляет строки и очищает handed-юниты от этих nm_id. Дозабивку паллет фронт
+    делает следом (consolidatePalletsInDraftRows). 404 если черновик не найден.
+    """
+    draft = await assembly_draft_service.remove_rows_by_nm(db, project.id, draft_id, nm_ids)
     return await assembly_draft_service.to_read_model(db, project.id, draft)
 
 

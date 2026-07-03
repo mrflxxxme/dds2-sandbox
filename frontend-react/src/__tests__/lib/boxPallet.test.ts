@@ -542,13 +542,16 @@ describe('palletsForLines', () => {
         expect(r.fill).toBeCloseTo(0.125, 6);
     });
 
-    it('моно vs короб: моно округляет ПО SKU, короб — суммой', () => {
-        const lines = [
-            { units: 200, boxQty: BOXQTY, boxSize: SIZE },
-            { units: 200, boxQty: BOXQTY, boxSize: SIZE },
-        ];
-        expect(palletsForLines(lines, H, 'mono').pallets).toBe(4); // ⌈200/160⌉×2 = 2+2
-        expect(palletsForLines(lines, H, 'box').pallets).toBe(3); // ⌈400/160⌉ = 3
+    it('моно строго целые: ≤3 артикула собирают ЦЕЛУЮ, недобор не едет; короб — без капа', () => {
+        const mk = (u: number) => ({ units: u, boxQty: BOXQTY, boxSize: SIZE }); // cap = 160
+        // 3 моно-SKU вместе на ЦЕЛУЮ (60+60+40=160) → 1 паллета (≤3 артикула).
+        expect(palletsForLines([mk(60), mk(60), mk(40)], H, 'mono').pallets).toBe(1);
+        // 3 по 0.25 (Σ0.75) → целой не набирают → 0 (недобор в предбронь «Дозабить»).
+        expect(palletsForLines([mk(40), mk(40), mk(40)], H, 'mono').pallets).toBe(0);
+        // 4 по 0.25 = Σ1.0, но ≤3/паллету → top-3=0.75<1 → целой нет → 0; короб (без капа) → 1.
+        const four = [mk(40), mk(40), mk(40), mk(40)];
+        expect(palletsForLines(four, H, 'mono').pallets).toBe(0);
+        expect(palletsForLines(four, H, 'box').pallets).toBe(1);
     });
 
     it('без габаритов/кратности — в unknown, не в pallets', () => {
@@ -617,11 +620,12 @@ describe('snapToWholePallets', () => {
         expect(sum(r.kept) + sum(r.dropped)).toBe(331);          // сохранение
     });
 
-    it('смешанная РАЗНЫЙ upp: footprint ≤ keep, в пределах одной штуки', () => {
-        // a:163 (1.019) + c:151 (1.007) = 2.025 → keep 2; сливер < 0.02
+    it('смешанная РАЗНЫЙ upp: footprint ≥ keep (не ниже целого → идемпотентно), в пределах штуки', () => {
+        // a:163 (1.019) + c:151 (1.007) = 2.025 → keep 2; снимаем избыток floor-ом, чтобы
+        // footprint НЕ ушёл ниже 2 целых паллет (иначе повторный прогон уронил бы остаток).
         const r = snapToWholePallets({ a: 163, c: 151 }, upp);
         const f = fillOf(r.kept);
-        expect(f).toBeLessThanOrEqual(2 + 1e-9);
+        expect(f).toBeGreaterThanOrEqual(2 - 1e-9);
         expect(Math.abs(f - Math.round(f))).toBeLessThan(0.02);
         expect(sum(r.kept) + sum(r.dropped)).toBe(314);
     });

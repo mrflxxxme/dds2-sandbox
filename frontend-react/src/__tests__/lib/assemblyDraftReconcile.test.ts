@@ -15,14 +15,23 @@ function row(nm_id: number, package_type?: PackageType, tgtQty = 1): AssemblyDra
 }
 
 describe('draftRowKey', () => {
-    it('defaults missing package_type to BOX', () => {
-        expect(draftRowKey({ nm_id: 5 })).toBe('5-BOX');
-        expect(draftRowKey({ nm_id: 5, package_type: 'BOX' })).toBe('5-BOX');
+    it('defaults missing package_type to BOX and empty barcode', () => {
+        expect(draftRowKey({ nm_id: 5 })).toBe('5-BOX-');
+        expect(draftRowKey({ nm_id: 5, package_type: 'BOX' })).toBe('5-BOX-');
     });
 
     it('distinguishes package types', () => {
-        expect(draftRowKey({ nm_id: 5, package_type: 'MONOPALLET' })).toBe('5-MONOPALLET');
-        expect(draftRowKey({ nm_id: 5, package_type: 'SUPERSAFE' })).toBe('5-SUPERSAFE');
+        expect(draftRowKey({ nm_id: 5, package_type: 'MONOPALLET' })).toBe('5-MONOPALLET-');
+        expect(draftRowKey({ nm_id: 5, package_type: 'SUPERSAFE' })).toBe('5-SUPERSAFE-');
+    });
+
+    it('distinguishes barcodes of the same nm_id (size variants / nm_id=0)', () => {
+        // Зеркало backend 3-tuple: один nm_id с разными баркодами — разные строки.
+        expect(draftRowKey({ nm_id: 5, package_type: 'BOX', barcode: 'A' })).toBe('5-BOX-A');
+        expect(draftRowKey({ nm_id: 5, package_type: 'BOX', barcode: 'B' })).toBe('5-BOX-B');
+        expect(
+            draftRowKey({ nm_id: 5, package_type: 'BOX', barcode: 'A' }),
+        ).not.toBe(draftRowKey({ nm_id: 5, package_type: 'BOX', barcode: 'B' }));
     });
 });
 
@@ -62,5 +71,14 @@ describe('dropCommittedRows', () => {
     it('drops everything when the server draft is empty (full commit)', () => {
         const local = [row(1), row(2, 'MONOPALLET')];
         expect(dropCommittedRows(local, [])).toEqual([]);
+    });
+
+    it('matches by barcode — a second barcode of one nm_id is not dropped with the first', () => {
+        // Один nm_id, два баркода (размерные варианты). Сервер закоммитил только A;
+        // B ещё в черновике. Без barcode в ключе обе строки делили бы ключ 7-BOX и
+        // B ложно «выжила/умерла» вместе с A. С barcode — матч независимый.
+        const a: AssemblyDraftRow = { nm_id: 7, barcode: 'A', vendor_code: 'V', src: { '1': 1 }, tgt: { 'Коледино': 1 } };
+        const b: AssemblyDraftRow = { nm_id: 7, barcode: 'B', vendor_code: 'V', src: { '1': 1 }, tgt: { 'Коледино': 1 } };
+        expect(dropCommittedRows([a, b], [b]).map(r => r.barcode)).toEqual(['B']);
     });
 });

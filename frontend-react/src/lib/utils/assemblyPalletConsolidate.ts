@@ -32,10 +32,15 @@
  * консолидации, а src КАЖДОЙ строки урезается (`carveSrc`) ровно до новой Σtgt (= старая
  * Σtgt − снятые на ФФ штуки); снятые уходят с обеих сторон. Чистая функция.
  *
- * ПРЕДУСЛОВИЕ: ≤1 короб-строка на nm_id (caller дедупит — distribute через `dedupeRows`).
+ * ПРЕДУСЛОВИЕ: ≤1 короб-строка на (nm_id, barcode) (caller дедупит — distribute
+ * через `dedupeRows`). Идентичность строки — (nm_id, barcode), НЕ голый nm_id:
+ * одна WB-карточка несёт несколько баркодов (размеры), карточки без article_wb —
+ * все nm_id=0; схлоп по nm_id потерял бы/смешал бы разные физические товары.
+ * Геометрия (ppb/box_size) — по nm_id (общая у баркодов одной карточки).
  */
 import type { AssemblyDraftRow } from '@/types/api';
 import { consolidateMixedDistrictPallets, effectiveBoxesPerPallet, maxPalletHeightCm } from './boxPallet';
+import { carveSrcToTarget } from './assemblyCarve';
 
 export interface ConsolidatePalletsOpts {
     /** nm → кратность короба (шт/короб). */
@@ -46,8 +51,10 @@ export interface ConsolidatePalletsOpts {
     districtOf: (wb: string) => string;
     /** Ручной «коробов на паллету» по канон-размеру (override геометрии). */
     overrides?: Record<string, number>;
-    /** Порог заполненности финальной паллеты (0..1). По умолчанию 0.2. */
-    minFill?: number;
+    /** Порог заполненности финальной паллеты приоритетного склада (0..1). По умолчанию
+     *  0.2 (частичная паллета ≥20% едет). `null` — СТРОГО: любой остаток < паллеты
+     *  остаётся на ФФ (режим инварианта «только целые паллеты»). */
+    minFill?: number | null;
     /**
      * Можно ли свезти крошку SKU `nm` на приоритетный склад `wb` (приёмка короба).
      * Если SKU не box-приёмный на anchor — его крошка НЕ едет туда, а роняется на ФФ.
@@ -94,31 +101,19 @@ const sameDist = (a: Record<string, number>, b: Record<string, number>): boolean
     return true;
 };
 
-/** Урезать src (ff→units) до целевой суммы `target` (≤ Σsrc), сохранив целые числа и
- *  Σ == target (пропорционально, largest-remainder). Снятые штуки остаются на ФФ. */
-const carveSrc = (src: Record<string, number>, target: number): Record<string, number> => {
-    const entries = Object.entries(src).filter(([, v]) => v > 0);
-    const total = entries.reduce((s, [, v]) => s + v, 0);
-    if (target >= total) { const out: Record<string, number> = {}; for (const [k, v] of entries) out[k] = v; return out; }
-    if (target <= 0) return {};
-    const raw = entries.map(([ff, v]) => {
-        const exact = (v * target) / total;
-        const fl = Math.floor(exact);
-        return { ff, fl, rem: exact - fl };
-    });
-    const remainder = target - raw.reduce((s, r) => s + r.fl, 0);
-    raw.sort((a, b) => b.rem - a.rem || (a.ff < b.ff ? -1 : a.ff > b.ff ? 1 : 0));
-    const out: Record<string, number> = {};
-    raw.forEach((r, i) => { const q = r.fl + (i < remainder ? 1 : 0); if (q > 0) out[r.ff] = q; });
-    return out;
-};
+// Урезание src до новой Σtgt — общий помощник `carveSrcToTarget` (см. assemblyCarve.ts).
 
 export function consolidatePalletsInDraftRows(
     rows: AssemblyDraftRow[],
     opts: ConsolidatePalletsOpts,
 ): ConsolidatePalletsResult {
-    const minFill = opts.minFill ?? 0.2;
+    // null → строгий режим (без частичной якорь-паллеты); undefined → дефолт 0.2.
+    const minFill = opts.minFill === null ? null : (opts.minFill ?? 0.2);
     const otherRows = rows.filter((r) => (r.package_type || 'BOX') !== 'BOX');
+
+    // Идентичность строки — (nm_id, barcode). Геометрия — по nm_id (см. docstring).
+    const rowKey = (r: AssemblyDraftRow) => `${r.nm_id}::${r.barcode || ''}`;
+    const nmOfKey = (k: string) => Number(k.slice(0, k.indexOf('::')));
 
     // Короб-строки делим на консолидируемые (баланс Σsrc==Σtgt > 0) и passthrough:
     // НЕсбалансированные (ручная правка) и пустые (Σ=0) проходят как есть — их нельзя
@@ -133,28 +128,29 @@ export function consolidatePalletsInDraftRows(
         else passthroughBoxRows.push(r);
     }
 
-    // nm → исходная строка (для баркода/vendor_code/package_type при пересборке).
-    const meta = new Map<number, AssemblyDraftRow>();
-    for (const r of boxRows) if (!meta.has(r.nm_id)) meta.set(r.nm_id, r);
+    // (nm,barcode) → исходная строка (для баркода/vendor_code/package_type при пересборке).
+    const meta = new Map<string, AssemblyDraftRow>();
+    for (const r of boxRows) { const k = rowKey(r); if (!meta.has(k)) meta.set(k, r); }
 
-    // Группируем tgt НАПРЯМУ по округу (без ФФ): byWh = wb → nm(str) → units.
+    // Группируем tgt НАПРЯМУ по округу (без ФФ): byWh = wb → (nm::barcode) → units.
     const groups = new Map<string, { district: string; byWh: WhKeyMap }>();
     for (const r of boxRows) {
+        const rk = rowKey(r);
         for (const [wb, units] of Object.entries(r.tgt)) {
             if (units <= 0) continue;
             const district = opts.districtOf(wb) || 'unknown';
             let g = groups.get(district);
             if (!g) { g = { district, byWh: {} }; groups.set(district, g); }
             const km = (g.byWh[wb] ||= {});
-            km[String(r.nm_id)] = (km[String(r.nm_id)] || 0) + units;
+            km[rk] = (km[rk] || 0) + units;
         }
     }
 
-    // Новый tgt по nm (после консолидации) + снятые на ФФ штуки по nm.
-    const nmTgt = new Map<number, Record<string, number>>();
-    const addTgt = (nm: number, wb: string, units: number) => {
+    // Новый tgt по (nm,barcode) (после консолидации) + снятые на ФФ штуки.
+    const nmTgt = new Map<string, Record<string, number>>();
+    const addTgt = (key: string, wb: string, units: number) => {
         if (units <= 0) return;
-        const t = nmTgt.get(nm) || {}; t[wb] = (t[wb] || 0) + units; nmTgt.set(nm, t);
+        const t = nmTgt.get(key) || {}; t[wb] = (t[wb] || 0) + units; nmTgt.set(key, t);
     };
 
     let droppedUnits = 0;
@@ -164,7 +160,7 @@ export function consolidatePalletsInDraftRows(
     for (const g of groups.values()) {
         if (g.district === 'unknown') {
             for (const [wb, km] of Object.entries(g.byWh))
-                for (const [nmStr, u] of Object.entries(km)) addTgt(Number(nmStr), wb, u);
+                for (const [rk, u] of Object.entries(km)) addTgt(rk, wb, u);
             continue;
         }
         // Приоритетный склад округа — с наибольшими суммарными units (тай — по имени).
@@ -178,20 +174,21 @@ export function consolidatePalletsInDraftRows(
         const res = consolidateMixedDistrictPallets({
             byWhKey: g.byWh,
             anchorWh: anchor,
-            ppbOf: (key) => opts.ppbOf(Number(key)) || 0,
+            ppbOf: (key) => opts.ppbOf(nmOfKey(key)) || 0,
             palletUnitsOf: (key, wh) => {
-                const k = opts.ppbOf(Number(key));
-                const bpp = effectiveBoxesPerPallet(opts.boxSizeOf(Number(key)), maxPalletHeightCm(wh), opts.overrides);
+                const nm = nmOfKey(key);
+                const k = opts.ppbOf(nm);
+                const bpp = effectiveBoxesPerPallet(opts.boxSizeOf(nm), maxPalletHeightCm(wh), opts.overrides);
                 return bpp != null && k && k > 0 ? bpp * k : null;
             },
             canAnchor: opts.canAnchorOf
-                ? (key, wh) => opts.canAnchorOf!(Number(key), wh)
+                ? (key, wh) => opts.canAnchorOf!(nmOfKey(key), wh)
                 : undefined,
-            minAnchorFill: minFill,
+            minAnchorFill: minFill ?? undefined, // null → строго (undefined в ядре = без частичной)
         });
 
         for (const [wb, km] of Object.entries(res.byWhKey))
-            for (const [nmStr, u] of Object.entries(km)) addTgt(Number(nmStr), wb, u);
+            for (const [rk, u] of Object.entries(km)) addTgt(rk, wb, u);
         for (const u of Object.values(res.droppedToFf)) droppedUnits += u;
 
         const directionsAfter = Object.values(res.byWhKey).filter((km) => sumKm(km) > 0).length;
@@ -203,11 +200,12 @@ export function consolidatePalletsInDraftRows(
     // (= старая Σtgt − снятые штуки), баланс держится by construction. Полностью
     // отказанный SKU (Σtgt==0, весь хвост <порога) — строку выкидываем.
     const newBoxRows: AssemblyDraftRow[] = [];
-    for (const [nm, m] of meta) {
-        const tgt = nmTgt.get(nm) || {};
+    for (const [key, m] of meta) {
+        const tgt = nmTgt.get(key) || {};
         const newTotal = sumKm(tgt);
         if (newTotal <= 0) continue;
-        newBoxRows.push({ ...m, nm_id: nm, src: carveSrc(m.src, newTotal), tgt });
+        // m — исходная строка с верными nm_id и barcode; src урезаем до новой Σtgt.
+        newBoxRows.push({ ...m, src: carveSrcToTarget(m.src, newTotal), tgt });
     }
 
     // `changed` — диффом пересобранного tgt (по nm) против ВХОДНОГО tgt консолидируемых
@@ -215,20 +213,21 @@ export function consolidatePalletsInDraftRows(
     // ПЕРЕЛОЖИТЬ штуки между городами округа (напр. 290/190 → 320/160), ничего не
     // дропнув и не опустошив направление — это валидное изменение, его нельзя терять.
     // passthrough-строки (моно/несбаланс/пустые) в дифф не входят — они не менялись.
-    const origTgtByNm = new Map<number, Record<string, number>>();
+    const origTgtByKey = new Map<string, Record<string, number>>();
     for (const r of boxRows) {
+        const rk = rowKey(r);
         for (const [wb, q] of Object.entries(r.tgt)) {
             if (q > 0) {
-                const agg = origTgtByNm.get(r.nm_id) ?? {};
+                const agg = origTgtByKey.get(rk) ?? {};
                 agg[wb] = (agg[wb] || 0) + q;
-                origTgtByNm.set(r.nm_id, agg);
+                origTgtByKey.set(rk, agg);
             }
         }
     }
-    let changed = origTgtByNm.size !== nmTgt.size;
+    let changed = origTgtByKey.size !== nmTgt.size;
     if (!changed) {
-        for (const [nm, t] of nmTgt) {
-            const o = origTgtByNm.get(nm);
+        for (const [key, t] of nmTgt) {
+            const o = origTgtByKey.get(key);
             if (!o || !sameDist(o, t)) { changed = true; break; }
         }
     }

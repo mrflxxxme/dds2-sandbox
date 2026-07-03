@@ -4,16 +4,18 @@
  * `WarehouseNeedView` (skuBoxDistribution → skuPlans → okrugBoxConsolidated →
  * regularShipmentAlloc).
  *
- * Используется будущими панелями «добавить позиции в черновик» и «массовый
- * штрихкод → авто-распределение». Зеркалит подход матрицы потребности:
+ * Используется панелями «добавить позиции в черновик» и «массовый штрихкод →
+ * авто-распределение»:
  *   1. per-SKU box-распределение по WB-складам целыми коробами (`ppb`);
  *   2. сплит по типу упаковки (короб / моно / сейф);
- *   3. кросс-SKU консолидация КОРОБОВ округа в целые СМЕШАННЫЕ паллеты
- *      (`consolidateMixedDistrictPallets`) — только для типа «короб»;
- *   4. подбор источника из ФФ — Pass 1 целыми коробами (жадно по убыванию
+ *   3. подбор источника из ФФ — Pass 1 целыми коробами (жадно по убыванию
  *      доступности), Pass 2 россыпью для моно/сейф;
- *   5. при `wholePalletsOnly` — строгий срез каждой ff→wb отгрузки до целых
- *      паллет (`trimToWholePallets`).
+ *   4. округление каждой ff→wb отгрузки до ЦЕЛЫХ КОРОБОВ (`ppb`).
+ *
+ * ЦЕЛЫЕ ПАЛЛЕТЫ здесь НЕ режутся — это делает `normalizeDraft` (per-shipment
+ * ФФ→WB) ПОСЛЕ построителя, ЕДИНОЙ логикой для «Потребности», «Черновика» и
+ * «Заявок». Поэтому окружная консолидация крошек (`consolidateMixedDistrictPallets`)
+ * убрана: разные алгоритмы паллет в разных витринах давали расхождения.
  *
  * ЖЁСТКИЙ ИНВАРИАНТ каждой строки: `Σsrc === Σtgt` (требование `_allocate_pairs`
  * на бэке). Количества кратны коробу (`ppb`), капятся доступным ФФ-стоком.
@@ -22,12 +24,7 @@
  */
 import type { AssemblyDraftRow, PackageType } from '@/types/api';
 import { distributeByBoxMultiple } from '@/lib/utils/boxDistribution';
-import {
-    parseBoxSize,
-    maxPalletHeightCm,
-    effectiveBoxesPerPallet,
-    consolidateMixedDistrictPallets,
-} from '@/lib/utils/boxPallet';
+import { parseBoxSize } from '@/lib/utils/boxPallet';
 
 /** Геометрия короба + кратность одного SKU. */
 export interface DraftSkuInput {
@@ -71,9 +68,9 @@ function sumValues(o: Record<string, number>): number {
  * Каждая строка — `(nm_id × package_type)` с `Σsrc === Σtgt`.
  */
 export function buildDraftRows(input: BuildDraftRowsInput): AssemblyDraftRow[] {
-    const wholePalletsOnly = input.wholePalletsOnly !== false;
-    const districtOf = input.warehouseToDistrict ?? {};
-    const overrides = input.palletOverrides;
+    // Целые ПАЛЛЕТЫ (per-shipment) теперь делает нормализатор после построителя,
+    // поэтому `wholePalletsOnly`/`warehouseToDistrict`/`palletOverrides` тут больше
+    // не используются (оставлены в интерфейсе для совместимости вызывающих).
 
     // ── Pass A: per-SKU box-распределение + сплит по типу упаковки ──────────────
     interface SkuPlan {
@@ -173,48 +170,14 @@ export function buildDraftRows(input: BuildDraftRowsInput): AssemblyDraftRow[] {
         });
     }
 
-    // ── Pass B: кросс-SKU консолидация КОРОБОВ округа в целые смешанные паллеты ──
-    // Палетизируемые box-cells группируем по округам, остальные проходят как есть.
+    // ── Pass B: box-cells как есть (БЕЗ окружной консолидации) ─────────────────
+    // Канон распределения — per-shipment (ФФ→WB) целые паллеты; их режет нормализатор
+    // (normalizeDraft → trimLinesToWholePallets) ПОСЛЕ этого построителя. Окружной
+    // пуллинг крошек убран намеренно — чтобы «Потребность», «Черновик» и «Заявки»
+    // считали паллеты ОДИНАКОВО (per-shipment), а не по-разному.
     const consolidatedBox = new Map<string, Record<string, number>>();
-    const byOkrug = new Map<string, Record<string, Record<string, number>>>();
     for (const [skuKey, plan] of plans) {
-        if (!plan.palletizable) {
-            if (Object.keys(plan.boxTgt).length) consolidatedBox.set(skuKey, { ...plan.boxTgt });
-            continue;
-        }
-        for (const [wh, units] of Object.entries(plan.boxTgt)) {
-            if (units <= 0) continue;
-            const ok = districtOf[wh] || `__${wh}`;
-            const g = byOkrug.get(ok) ?? {};
-            (g[wh] ??= {})[skuKey] = units;
-            byOkrug.set(ok, g);
-        }
-    }
-    const ppbOf = (key: string) => plans.get(key)?.ppb || 1;
-    const palletUnitsOf = (key: string, wh: string): number | null => {
-        const plan = plans.get(key);
-        if (!plan) return null;
-        const bpp = effectiveBoxesPerPallet(plan.boxSize, maxPalletHeightCm(wh), overrides);
-        return bpp && bpp > 0 && plan.ppb > 0 ? bpp * plan.ppb : null;
-    };
-    for (const [, byWhKey] of byOkrug) {
-        // Приоритетный склад округа = крупнейший по суммарным units (тай — по имени).
-        let anchor = '';
-        let best = -1;
-        for (const [wh, km] of Object.entries(byWhKey)) {
-            const tot = sumValues(km);
-            if (tot > best || (tot === best && (anchor === '' || wh < anchor))) { best = tot; anchor = wh; }
-        }
-        const canAnchor = (key: string, wh: string) => plans.get(key)?.canBoxAt(wh) ?? true;
-        const out = consolidateMixedDistrictPallets({ byWhKey, anchorWh: anchor, ppbOf, palletUnitsOf, canAnchor });
-        for (const [wh, km] of Object.entries(out.byWhKey)) {
-            for (const [skuKey, units] of Object.entries(km)) {
-                if (units <= 0) continue;
-                const r = consolidatedBox.get(skuKey) ?? {};
-                r[wh] = (r[wh] || 0) + units;
-                consolidatedBox.set(skuKey, r);
-            }
-        }
+        if (Object.keys(plan.boxTgt).length) consolidatedBox.set(skuKey, { ...plan.boxTgt });
     }
 
     // ── Pass C: подбор источника из ФФ + строгий срез до целых паллет ───────────
@@ -307,11 +270,12 @@ export function buildDraftRows(input: BuildDraftRowsInput): AssemblyDraftRow[] {
                 }
             }
 
-            // Строгий срез до целых паллет: каждая ff→wb отгрузка либо целыми
-            // паллетами, либо ничего (под-паллетный хвост остаётся на ФФ).
-            if (wholePalletsOnly && pkg === 'BOX' && palletizable) {
-                const trimmed = trimToWholePalletsLocal(pkgTgt, plan, overrides);
-                pkgTgt = trimmed;
+            // ВСЕГДА целые коробы: неполный короб добиваем до целого из СВОБОДНОГО ФФ
+            // (ffPool, остаток после сорсинга); не хватает — срезаем хвост вниз. Россыпи
+            // не остаётся, Σsrc==Σtgt сохраняется. Целые ПАЛЛЕТЫ (per-shipment ФФ→WB)
+            // режет нормализатор отдельно — здесь паллеты не трогаем.
+            if (boxMode && ppb > 0 && pkg === 'BOX') {
+                roundTgtToWholeBoxes(pkgTgt, pkgSrc, ffOrder, ffPool, ppb);
                 pkgQty = sumValues(pkgTgt);
             }
 
@@ -339,29 +303,42 @@ export function buildDraftRows(input: BuildDraftRowsInput): AssemblyDraftRow[] {
 }
 
 /**
- * Строгий срез box-распределения SKU до ЦЕЛЫХ ПАЛЛЕТ. Когда `tgt` уже консолидирован
- * в целые паллеты (Pass B), но ФФ-сорсинг мог обрезать хвост — снимаем под-паллетные
- * остатки целыми паллетами со складов с наименьшим qty первыми.
+ * Округлить tgt каждого склада до ЦЕЛОГО КОРОБА (`ppb`): неполный короб ВВЕРХ —
+ * добить из свободного ФФ (`ffPool`, остаток после сорсинга); если на ФФ не хватает
+ * на полный короб — срезать хвост ВНИЗ (вернуть в `ffPool`). Россыпи не остаётся.
+ * Мутирует tgt/src/ffPool, держит Σsrc==Σtgt (правка обеих сторон поровну).
  */
-function trimToWholePalletsLocal(
+function roundTgtToWholeBoxes(
     tgt: Record<string, number>,
-    plan: { boxSize: string | null | undefined; ppb: number },
-    overrides: Record<string, number> | undefined,
-): Record<string, number> {
-    const palletUnitsForWh = (wh: string): number | null => {
-        const bpp = effectiveBoxesPerPallet(plan.boxSize, maxPalletHeightCm(wh), overrides);
-        return bpp && bpp > 0 && plan.ppb > 0 ? bpp * plan.ppb : null;
-    };
-    // Снимаем под-паллетный хвост КАЖДОГО склада (не общий cap, а per-wh целые паллеты).
-    const out: Record<string, number> = {};
-    for (const [wh, q] of Object.entries(tgt)) {
-        if (q <= 0) continue;
-        const pu = palletUnitsForWh(wh);
-        if (pu === null) { out[wh] = q; continue; } // не палетизируется — не трогаем
-        const keep = Math.floor(q / pu) * pu;
-        if (keep > 0) out[wh] = keep;
+    src: Record<string, number>,
+    ffOrder: number[],
+    ffPool: Record<number, number>,
+    ppb: number,
+): void {
+    for (const wh of Object.keys(tgt)) {
+        const rem = tgt[wh] % ppb;
+        if (rem === 0) continue;
+        const up = ppb - rem;
+        const spare = ffOrder.reduce((s, id) => s + (ffPool[id] || 0), 0);
+        if (spare >= up) {
+            // Вверх: добить короб из свободного ФФ (в tgt и src поровну).
+            tgt[wh] += up;
+            let toAdd = up;
+            for (const id of ffOrder) {
+                if (toAdd <= 0) break;
+                const take = Math.min(toAdd, ffPool[id] || 0);
+                if (take <= 0) continue;
+                src[String(id)] = (src[String(id)] || 0) + take;
+                ffPool[id] -= take;
+                toAdd -= take;
+            }
+        } else {
+            // Вниз: снять хвост (из tgt и src, src возвращается в ffPool).
+            tgt[wh] -= rem;
+            if (tgt[wh] <= 0) delete tgt[wh];
+            trimSrc(src, ffOrder, ffPool, rem);
+        }
     }
-    return out;
 }
 
 /** Снять `excess` штук из `src` (наименее объёмные ФФ первыми), вернув их в `ffPool`. */

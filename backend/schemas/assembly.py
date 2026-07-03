@@ -121,6 +121,43 @@ class ShipBulk(BaseModel):
     ids: list[int]
 
 
+class DeleteBulk(BaseModel):
+    ids: list[int]
+
+
+class BulkDeleteSkip(BaseModel):
+    """Одна пропущенная при массовом удалении заявка (с причиной)."""
+
+    id: int
+    number: str | None = None
+    status: str | None = None
+    reason: str
+
+
+class BulkDeleteResult(BaseModel):
+    """Итог массового удаления: сколько удалено + что пропущено и почему."""
+
+    deleted: int
+    skipped: list[BulkDeleteSkip] = []
+
+
+class StatusBulk(BaseModel):
+    """Массовый перевод заявок в статус — один запрос вместо N поштучных
+    (поштучные быстро съедают общий write-лимит → 429 «Слишком много запросов»)."""
+
+    ids: list[int]
+    status: Literal["IN_PROGRESS", "READY"]
+
+
+class BulkStatusSkip(BaseModel):
+    """Одна пропущенная при массовой смене статуса заявка (с причиной)."""
+
+    id: int
+    number: str | None = None
+    status: str | None = None
+    reason: str
+
+
 # ─── Response schemas ───────────────────────────────────────────────────────
 
 
@@ -188,6 +225,15 @@ class AssemblyRequestResponse(BaseModel):
     comment: str | None = None
     wb_warehouse_name_manual: str | None = None
     source_draft_id: int | None = None  # черновик-источник (поток распределения сборки)
+    # Предраспределение машины в пути: заявка создана под входящий товар машины
+    # (cost_orders.id) ДО физприёмки. На разгрузке статус авто → IN_PROGRESS, а
+    # is_pre_distribution остаётся True навсегда (бейдж/отчёты). order_no — для бейджа
+    # «Предраспределение машины {order_no}» (enrich в списке/деталке, иначе None).
+    source_vehicle_id: int | None = None
+    is_pre_distribution: bool = False
+    source_vehicle_order_no: str | None = None
+    # Предзаявка (бронь) на моно: целая моно-паллета на WB-склад без лимита приёмки (⌛).
+    is_prebooking: bool = False
     package_type: PackageTypeStr = "BOX"
     effective_wb_warehouse: str | None = None  # FBO warehouse_name or manual, whichever is set
     brands: str | None = None  # comma-separated unique brands from items
@@ -231,6 +277,114 @@ class AssemblyRequestResponse(BaseModel):
 class AssemblyListResponse(BaseModel):
     items: list[AssemblyRequestResponse]
     total: int
+
+
+class BulkStatusResult(BaseModel):
+    """Итог массовой смены статуса: обновлённые заявки + что пропущено и почему."""
+
+    updated: list[AssemblyRequestResponse] = []
+    skipped: list[BulkStatusSkip] = []
+
+
+# ─── Предраспределение машины в пути (pre-distribution) ─────────────────────
+# Машина (CostOrder CUSTOMS/DISPATCHED) везёт товар, ещё не на ФФ. До приёмки
+# раскладываем её входящий товар по WB-складам как заявки на сборку со статусом
+# PRE_DISTRIBUTED (без реального стока). На разгрузке машины (accept_receipt)
+# заявки авто → IN_PROGRESS. См. .claude/PREDIST_DESIGN.md.
+
+
+class PreDistVehicle(BaseModel):
+    """Машина в пути, доступная (или нет) для предраспределения."""
+
+    id: int
+    order_no: str
+    status: str  # CUSTOMS | DISPATCHED
+    target_warehouse_id: int | None = None  # ФФ-склад разгрузки (источник будущих сборок)
+    target_warehouse_name: str | None = None
+    eta: date | None = None  # estimated_arrival_date
+    total_qty: int  # Σ qty товара на машине (по позициям)
+    sku_count: int  # уникальных barcode
+    distributed_qty: int = 0  # уже разнесено в заявки этой машины (не CANCELLED)
+    can_distribute: bool = True  # target_warehouse_id задан и это FULFILLMENT-склад
+    block_reason: str | None = None  # почему нельзя (если can_distribute=False)
+
+
+class PreDistPoolRow(BaseModel):
+    """Строка пула машины: товар + сколько ещё можно предраспределить."""
+
+    barcode: str
+    article_seller: str | None = None
+    article_wb: str | None = None
+    name: str | None = None
+    brand: str | None = None
+    gross_qty: int  # всего на машине
+    distributed_qty: int  # уже разнесено в заявки этой машины
+    available_qty: int  # max(0, gross − distributed)
+
+
+class PreDistVehiclePool(BaseModel):
+    vehicle: PreDistVehicle
+    rows: list[PreDistPoolRow]
+
+
+class PreDistRow(BaseModel):
+    """Одна строка раскладки: сколько ШК отправить на конкретный WB-склад."""
+
+    barcode: str
+    wb_warehouse_name: str  # склад назначения WB (станет wb_warehouse_name_manual заявки)
+    qty: int
+    package_type: PackageTypeStr = "BOX"
+
+
+class PreDistributionCreate(BaseModel):
+    """Создать предраспределение: строки группируются в заявки по (WB-склад, упаковка).
+
+    Источник-склад заявок = vehicle.target_warehouse_id (ФФ разгрузки), не задаётся
+    вручную. wb_fbo_supply_id допустим только при одном WB-складе назначения.
+    """
+
+    vehicle_id: int
+    wb_fbo_supply_id: int | None = None
+    rows: list[PreDistRow]
+
+
+class PreDistributionCreateResult(BaseModel):
+    created: int  # сколько заявок создано
+    request_ids: list[int]
+    requests: list[AssemblyRequestResponse]
+
+
+# ─── Предзаявка (бронь) на моно ─────────────────────────────────────────────
+# Целая моно-паллета на WB-склад БЕЗ лимита приёмки (⌛) — сдать можно только
+# предзаявкой. Заявка на сборку создаётся сразу с флагом is_prebooking (реальный
+# сток на ФФ, статус IN_PROGRESS). Источник — ФФ-склад, где лежит товар предброни.
+
+
+class PrebookingRow(BaseModel):
+    """Одна строка предзаявки: ШК × ФФ-источник → WB-склад назначения (моно)."""
+
+    warehouse_id: int  # ФФ-склад-источник (где реально лежит товар предброни)
+    barcode: str
+    wb_warehouse_name: str  # склад назначения WB (→ wb_warehouse_name_manual заявки)
+    qty: int
+    package_type: PackageTypeStr = "MONOPALLET"
+
+
+class PrebookingCreate(BaseModel):
+    """Создать предзаявки: строки группируются в заявки по (ФФ-источник, WB-склад,
+    упаковка) → одна заявка на группу. Флаг is_prebooking=True на каждой."""
+
+    rows: list[PrebookingRow]
+
+
+class PrebookingCreateResult(BaseModel):
+    created: int
+    request_ids: list[int]
+    requests: list[AssemblyRequestResponse]
+
+
+class PreDistAdvanceResult(BaseModel):
+    advanced: int  # сколько PRE_DISTRIBUTED-заявок переведено в IN_PROGRESS
 
 
 class CreatedRequestBrief(BaseModel):

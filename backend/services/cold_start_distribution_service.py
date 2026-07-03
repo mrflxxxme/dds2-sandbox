@@ -111,6 +111,66 @@ def _cap_far_east_share(bench_share: dict[str, float]) -> dict[str, float]:
     return capped
 
 
+def concentrate_share_to_target(
+    bench_share: dict[str, float],
+    target_pct: int = 75,
+    skip_districts: set[str] | None = None,
+) -> dict[str, float]:
+    """Сконцентрировать доли ФО «до целевой локализации» (по умолчанию 75%).
+
+    Новинку (нет сигнала спроса) не размазываем тонким слоем по всем округам, а
+    сидируем КОНЦЕНТРИРОВАННО: округа берутся в порядке убывания bench_share и
+    включаются, пока кумулятивная доля (нормированная к ЛОКАЛИЗУЕМОЙ базе =
+    сумме долей не-skip ФО) не пересечёт ``target_pct``. Округ, на котором кумулятив
+    пересёк порог, — последний включённый; «хвост» дальних/мелких ФО сверх target
+    обнуляется (seed остаётся на ФФ — «не перетаривать тонким слоем по дальним»).
+
+    Доли включённых ФО пере-нормируются обратно к ИСХОДНОЙ сумме всех долей
+    (вкл. skip и хвост) → масса хвоста вливается в топ, total раздачи сохраняется
+    бит-в-бит (товар не теряется; downstream distribute берёт total_qty целиком).
+
+    Это district-level зеркало `localization_target.greedy_allocate_to_target`
+    (тот работает на уровне складов; здесь структура — доли по ФО, поэтому отдельная
+    кумулятивно-share-до-target реализация В ТОМ ЖЕ духе). skip-ФО (abroad/unknown)
+    не сидируемы и в базу target не входят, но и не зануляют общий total.
+
+    Возвращает НОВЫЙ dict (не мутирует вход). target_pct ≥ 100 → возвращает копию
+    без изменений (все локализуемые ФО остаются).
+    """
+    skip = skip_districts if skip_districts is not None else set(_SKIP_DISTRICTS_DEFAULT)
+    if not bench_share:
+        return {}
+
+    total_all = sum(bench_share.values())  # база нормировки результата (вкл. skip/хвост)
+    local_items = [(d, s) for d, s in bench_share.items() if d not in skip and s > 0]
+    local_base = sum(s for _, s in local_items)
+    if local_base <= 0 or total_all <= 0:
+        return dict(bench_share)
+    if target_pct >= 100:
+        return dict(bench_share)
+
+    target_frac = target_pct / 100.0
+    # Округа по убыванию доли; tie-break по имени для детерминизма.
+    ordered = sorted(local_items, key=lambda kv: (-kv[1], kv[0]))
+
+    kept: list[str] = []
+    cum = 0.0
+    for d, s in ordered:
+        kept.append(d)
+        cum += s / local_base
+        if cum >= target_frac:
+            break  # округ, пересёкший порог, — последний включённый
+
+    kept_base = sum(bench_share[d] for d in kept)
+    if kept_base <= 0:
+        return dict(bench_share)
+
+    # Пере-нормируем доли включённых ФО к ИСХОДНОЙ сумме (масса хвоста+skip
+    # вливается пропорционально) → Σ результата == Σ входа (total сохранён).
+    scale = total_all / kept_base
+    return {d: bench_share[d] * scale for d in kept}
+
+
 def _route_far_east_excess(alloc: dict[str, int], excess_qty: int) -> None:
     """Распределить излишек ДВ по складам-воришкам (FAR_EAST_EXCESS_ROUTING).
     `_cap_far_east_share` кладёт весь излишек на Екатеринбург (anchor); здесь часть
@@ -524,7 +584,12 @@ def distribute_multi(
 # ─── Главная функция: compute_distribution ─────────────────────────────────
 
 
-async def compute_distribution(db: AsyncSession, project_id: int, req: DistributeRequest) -> DistributeResponse:
+async def compute_distribution(
+    db: AsyncSession,
+    project_id: int,
+    req: DistributeRequest,
+    localization_target: int = 75,
+) -> DistributeResponse:
     """Cold-start: рассчитать план распределения SKU по WB-складам.
 
     1. Загружаем excluded warehouses через settings_service.
@@ -532,8 +597,9 @@ async def compute_distribution(db: AsyncSession, project_id: int, req: Distribut
     3. Для bench-источника считаем трафик по складам, выбираем главный
        склад в каждом ФО (не из excluded).
     4. Загружаем SKU-метаданные и активные сборки.
-    5. Распределяем total_qty (или весь rf_qty, если total_qty=None).
-    6. Вычитаем уже идущие сборки на каждый склад.
+    5. Распределяем total_qty (или весь rf_qty, если total_qty=None) — КОНЦЕНТРИРОВАННО
+       до ``localization_target``% локализации (хвост дальних ФО не сидируется).
+    6. Вычитаем уже идущие сборки на каждый склад (учёт транзита — статусы вкл. SHIPPED).
     """
     # 1. SKU + остатки
     sku = await fetch_sku(db, project_id, req.nm_id)
@@ -588,6 +654,11 @@ async def compute_distribution(db: AsyncSession, project_id: int, req: Distribut
         bench_wh_traffic = {}
         bench_source = "wb_fallback"
         bench_total = 0
+
+    # Концентрация «до target% локализации»: топ-ФО по доле, хвост дальних не
+    # сидируется (seed остаётся на ФФ). Применяем ДО far-east-капа, чтобы кап
+    # бил по уже сконцентрированной раздаче.
+    bench_share = concentrate_share_to_target(bench_share, localization_target)
 
     fe_excess_share = max(0.0, bench_share.get("far_east_siberia", 0.0) - FAR_EAST_MAX_SHARE)
     bench_share = _cap_far_east_share(bench_share)
@@ -785,6 +856,7 @@ async def compute_cold_start_table(
     bench_from_project_id: int | None = None,
     ship_fraction: float = 0.55,
     ship_floor: int = 50,
+    localization_target: int = 75,
 ) -> ColdStartTableResponse:
     """Cold-start таблица: список SKU из сегмента + per-SKU allocation.
 
@@ -796,6 +868,11 @@ async def compute_cold_start_table(
     ship_floor — пол: если свободного ФФ ≤ ship_floor шт, буфер держать бессмысленно
     → отгружаем 100% (кап не действует). Формула капа:
     `max(round(ФФ × ship_fraction), min(ФФ, ship_floor))`.
+
+    localization_target (%) — раздаём seed КОНЦЕНТРИРОВАННО до этой локализации:
+    топ-ФО по доле, хвост дальних/мелких округов сверх target НЕ сидируется (seed
+    остаётся на ФФ). Та же логика «до 75% / не перетаривать», что и для обычных SKU.
+    target=100 → концентрация выключена (сидируются все ФО, как раньше).
 
     Бенчмарк (доли по ФО + главный склад) считается ОДИН раз для всех SKU.
     Для каждого SKU делается distribute(rf_qty, ...) с тем же бенчмарком.
@@ -833,6 +910,11 @@ async def compute_cold_start_table(
         bench_source = "wb_fallback"
         bench_total = 0
 
+    # Концентрация «до target% локализации» (как у обычных SKU): топ-ФО по доле,
+    # хвост дальних/мелких округов сверх target НЕ сидируется. Применяем ДО far-east
+    # капа, чтобы кап бил по уже сконцентрированной раздаче.
+    bench_share = concentrate_share_to_target(bench_share, localization_target)
+
     # ДВ-кап: излишек доли Дальневосточного ФО (со склада не довезти) → на Урал
     # (часть позже уводится на Электросталь — см. _route_far_east_excess).
     fe_excess_share = max(0.0, bench_share.get("far_east_siberia", 0.0) - FAR_EAST_MAX_SHARE)
@@ -858,6 +940,20 @@ async def compute_cold_start_table(
         if speed_whs:
             wh_per_district[d] = speed_whs
 
+    # Канонизируем имена складов в stock-пространство (трафик заказов зовёт склад
+    # иначе, чем сток/матрица: «Алексин (Тула)» vs «Тула») + мёржим дубли по канону.
+    # Иначе аллокация уходит на имя, которого нет среди колонок матрицы (не рисуется —
+    # «отправить N, склад не показан»), и per-склад вычет WB/сборок ниже промахивается
+    # (active_asm/wb_by_warehouse — уже канон, а wh был сырой).
+    _canon_wpd: dict[str, list[tuple[str, int]]] = {}
+    for d, whs in wh_per_district.items():
+        merged: dict[str, int] = {}
+        for wh, cnt in whs:
+            c = _canonicalize_asm_warehouse(wh)
+            merged[c] = merged.get(c, 0) + cnt
+        _canon_wpd[d] = list(merged.items())
+    wh_per_district = _canon_wpd
+
     # main_warehouses meta — все склады каждого ФО (top-3), РФ-округа (abroad/unknown скрыты)
     # share_pct = доля округа × доля склада в трафике округа
     main_wh_meta: list[dict[str, Any]] = []
@@ -875,7 +971,7 @@ async def compute_cold_start_table(
                 {
                     "district_key": d,
                     "district_label": DISTRICT_LABELS.get(d, d),
-                    "warehouse": wh,
+                    "warehouse": wh,  # уже канонизирован (wh_per_district нормализован в корне)
                     "share_pct": round(wh_share * 100, 2),
                 }
             )

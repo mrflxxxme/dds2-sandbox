@@ -9,7 +9,7 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchModal } from '@/components/FfMismatchModal';
 import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, Warehouse } from '@/types/api';
+import type { AssemblyBulkStatus, AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, Warehouse } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -51,6 +51,12 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
 };
 
 const EDITABLE_STATUSES: AssemblyStatus[] = ['IN_PROGRESS', 'READY'];
+
+// Заявки, которые ещё НЕ отгружены на WB → можно массово удалить (товар физически
+// не списан, висит только резерв). Отгруженные (SHIPPED/DELIVERED/RETURNED/CLOSED)
+// удалять нельзя — сначала отмена с откатом стока.
+const BULK_DELETABLE_STATUSES = new Set<AssemblyStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED', 'CANCELLED']);
+const isBulkDeletable = (status: string): boolean => BULK_DELETABLE_STATUSES.has(status as AssemblyStatus);
 
 const STATUS_OPTIONS_FILTER: { value: string; label: string }[] = [
     { value: '', label: 'Все статусы' },
@@ -586,6 +592,86 @@ export default function AssemblyListPage() {
         }
     };
 
+    // ─── Массовое удаление (заявки из черновика, ещё не на WB) ───────────────
+    const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+    const [bulkDeleting, setBulkDeleting] = useState(false);
+    const deletableCount = useMemo(() => items.filter(i => isBulkDeletable(i.status)).length, [items]);
+
+    const toggleSelect = useCallback((id: number) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    }, []);
+    const selectAllDeletable = useCallback(() => {
+        setSelectedIds(new Set(items.filter(i => isBulkDeletable(i.status)).map(i => i.id)));
+    }, [items]);
+
+    const handleBulkDelete = useCallback(async () => {
+        const ids = [...selectedIds];
+        if (ids.length === 0) return;
+        if (!confirm(`Удалить ${formatNumber(ids.length, 0)} заявок? Это действие нельзя отменить.`)) return;
+        setBulkDeleting(true);
+        try {
+            const res = await api.deleteAssemblyBulk(ids);
+            const skippedIds = new Set(res.skipped.map(s => s.id));
+            const removed = ids.filter(id => !skippedIds.has(id));
+            setItems(prev => prev.filter(i => !removed.includes(i.id)));
+            setTotal(t => Math.max(0, t - res.deleted));
+            setSelectedIds(new Set());
+            const note = res.skipped.length > 0 ? ` · пропущено ${formatNumber(res.skipped.length, 0)} (уже на WB)` : '';
+            setToast({
+                message: `Удалено заявок: ${formatNumber(res.deleted, 0)}${note}`,
+                type: res.deleted > 0 ? 'success' : 'error',
+            });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка массового удаления', type: 'error' });
+        } finally {
+            setBulkDeleting(false);
+        }
+    }, [selectedIds]);
+
+    // ─── Массовая смена статуса (ОДИН запрос — поштучные смены съедали общий
+    // write-лимит и падали 429 «Слишком много запросов» на середине пачки) ───
+    const [bulkStatusing, setBulkStatusing] = useState<AssemblyBulkStatus | null>(null);
+    const handleBulkStatus = useCallback(async (status: AssemblyBulkStatus) => {
+        if (selectedIds.size === 0 || bulkStatusing) return;
+        // Бэкенд невалидные переходы отсеет и сам, но с технической причиной
+        // («Cannot transition…») — заведомо непереводимые статусы фильтруем заранее
+        // и говорим по-русски. READY достижим из сборки, IN_PROGRESS — ещё и из PENDING/READY.
+        const eligible = new Set<AssemblyStatus>(status === 'READY' ? ['IN_PROGRESS', 'READY'] : ['PENDING', 'IN_PROGRESS', 'READY']);
+        const selItems = items.filter(i => selectedIds.has(i.id));
+        const ids = selItems.filter(i => eligible.has(i.status)).map(i => i.id);
+        const ineligible = selItems.length - ids.length;
+        const label = status === 'READY' ? 'Готово' : 'В сборке';
+        if (ids.length === 0) {
+            setToast({ message: `Среди выбранных нет заявок, которые можно перевести в «${label}»`, type: 'error' });
+            return;
+        }
+        const inelNote = ineligible > 0 ? ` (${formatNumber(ineligible, 0)} из выбранных пропущу — статус не позволяет)` : '';
+        if (!confirm(`Перевести ${formatNumber(ids.length, 0)} заявок в «${label}»?${inelNote}`)) return;
+        setBulkStatusing(status);
+        try {
+            const res = await api.setAssemblyStatusBulk(ids, status);
+            const byId = new Map(res.updated.map(r => [r.id, r]));
+            setItems(prev => prev.map(i => byId.get(i.id) ?? i));
+            setSelectedIds(new Set());
+            const note = res.skipped.length > 0
+                ? ` · пропущено ${formatNumber(res.skipped.length, 0)}: ${res.skipped.slice(0, 3).map(s => `${s.number || s.id} — ${s.reason}`).join('; ')}${res.skipped.length > 3 ? ' …' : ''}`
+                : '';
+            const inelToast = ineligible > 0 ? ` · ${formatNumber(ineligible, 0)} не в подходящем статусе` : '';
+            setToast({
+                message: `Переведено в «${label}»: ${formatNumber(res.updated.length, 0)}${note}${inelToast}`,
+                type: res.updated.length > 0 ? 'success' : 'error',
+            });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка массовой смены статуса', type: 'error' });
+        } finally {
+            setBulkStatusing(null);
+        }
+    }, [selectedIds, items, bulkStatusing]);
+
     // ─── Columns (TanStackDataTable: сортировка + Excel) ────────────────────
     // Inline-редактирование (палеты/вес/дата/статус) и кнопки-действия живут
     // внутри render-ячеек; getValue даёт сортировку по вычисляемым колонкам,
@@ -593,10 +679,52 @@ export default function AssemblyListPage() {
     const itemsQty = (row: AssemblyRequest) => row.items ? row.items.reduce((s, i) => s + (i.quantity || 0), 0) : 0;
     const cols: Column[] = [
         {
+            key: '_select', label: '',
+            getValue: () => '',
+            exportValue: () => '',
+            // Вся ячейка — большая кликабельная зона переключения, клик НЕ открывает
+            // заявку (stopPropagation), чтобы не «проваливаться» при выборе галочек.
+            render: (_v, row: AssemblyRequest) => (
+                isBulkDeletable(row.status) ? (
+                    <div
+                        onClick={(e) => { e.stopPropagation(); toggleSelect(row.id); }}
+                        title="Выбрать для удаления"
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '10px 8px', margin: '-7px -6px', cursor: 'pointer' }}
+                    >
+                        <input
+                            type="checkbox"
+                            checked={selectedIds.has(row.id)}
+                            readOnly
+                            tabIndex={-1}
+                            style={{ pointerEvents: 'none', accentColor: '#3b82f6', width: 18, height: 18 }}
+                        />
+                    </div>
+                ) : null
+            ),
+        },
+        {
             key: 'number', label: '№',
             render: (_v, row: AssemblyRequest) => (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 500 }}>{row.number}</span>
+                    {row.is_pre_distribution && (
+                        <span
+                            className="badge badge-info"
+                            style={{ fontSize: 11 }}
+                            title="Заявка создана предраспределением машины в пути (до приёмки)"
+                        >
+                            🚚 Предраспределение{row.source_vehicle_order_no ? ` машины ${row.source_vehicle_order_no}` : ''}
+                        </span>
+                    )}
+                    {row.is_prebooking && (
+                        <span
+                            className="badge badge-warning"
+                            style={{ fontSize: 11 }}
+                            title="Предзаявка на моно: целые моно-паллеты на склад без лимита приёмки (⌛) — сдаются бронью"
+                        >
+                            🅿️ Предзаявка
+                        </span>
+                    )}
                     {row.ff_review_pending && (
                         <span className="badge badge-warning" style={{ fontSize: 11 }} title="ФФ предложил правку состава — требуется согласование">
                             ⏳ ФФ
@@ -913,10 +1041,46 @@ export default function AssemblyListPage() {
                 <TanStackDataTable
                     columns={cols}
                     data={items}
-                    onRowClick={(row: AssemblyRequest) => router.push(`/p/${slug}/warehouse/assembly/${row.id}`)}
-                    rowClassName={(row: AssemblyRequest) => highlightActive && justCreatedIds.has(row.id) ? 'assembly-row-just-created' : ''}
+                    onRowClick={(row: AssemblyRequest) => {
+                        // В режиме выбора (есть отмеченные) клик по строке переключает
+                        // её галочку и НЕ открывает заявку — чтобы выбор не слетал.
+                        if (selectedIds.size > 0) {
+                            if (isBulkDeletable(row.status)) toggleSelect(row.id);
+                            return;
+                        }
+                        router.push(`/p/${slug}/warehouse/assembly/${row.id}`);
+                    }}
+                    rowClassName={(row: AssemblyRequest) =>
+                        selectedIds.has(row.id) ? 'assembly-row-selected'
+                            : (highlightActive && justCreatedIds.has(row.id) ? 'assembly-row-just-created' : '')
+                    }
                     pageSize={CLIENT_PAGE_SIZE}
                     exportName="assembly_requests"
+                    actions={
+                        selectedIds.size > 0 ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedIds.size, 0)}</span>
+                                <button className="btn btn-secondary btn-sm" onClick={() => handleBulkStatus('IN_PROGRESS')} disabled={bulkDeleting || bulkStatusing != null}
+                                    title="Перевести все выбранные в «В сборке» одним запросом">
+                                    {bulkStatusing === 'IN_PROGRESS' ? 'Перевожу…' : '→ В сборке'}
+                                </button>
+                                <button className="btn btn-success btn-sm" onClick={() => handleBulkStatus('READY')} disabled={bulkDeleting || bulkStatusing != null}
+                                    title="Перевести все выбранные в «Готово» одним запросом (нужны поставка WB, палеты и вес)">
+                                    {bulkStatusing === 'READY' ? 'Перевожу…' : '→ Готово'}
+                                </button>
+                                <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting || bulkStatusing != null}>
+                                    {bulkDeleting ? 'Удаление…' : `🗑 Удалить выбранные (${formatNumber(selectedIds.size, 0)})`}
+                                </button>
+                                <button className="btn btn-secondary btn-sm" onClick={() => setSelectedIds(new Set())}>Снять</button>
+                            </div>
+                        ) : (
+                            deletableCount > 0 ? (
+                                <button className="btn btn-secondary btn-sm" onClick={selectAllDeletable} title="Выбрать все заявки, которые ещё не на WB">
+                                    ☑ Выбрать все удаляемые ({formatNumber(deletableCount, 0)})
+                                </button>
+                            ) : undefined
+                        )
+                    }
                 />
             )}
         </div>

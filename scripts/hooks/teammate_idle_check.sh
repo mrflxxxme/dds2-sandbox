@@ -53,8 +53,8 @@ done
 # Worktree abs-path leak
 for f in $(echo "$all_changed" | grep -vE '\.(md|lock|log)$' | head -50); do
     [ ! -f "$f" ] && continue
-    if grep -lF '/Users/a1/Desktop/dds_app' "$f" >/dev/null 2>&1; then
-        issues="${issues}\n[WORKTREE] $f: абсолютный путь /Users/a1/Desktop/dds_app — worktree leak"
+    if grep -lF '/Users/vlad/Desktop/dds2' "$f" >/dev/null 2>&1; then
+        issues="${issues}\n[WORKTREE] $f: абсолютный путь /Users/vlad/Desktop/dds2 — worktree leak"
         issue_count=$((issue_count+1))
     fi
 done
