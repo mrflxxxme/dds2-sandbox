@@ -897,10 +897,13 @@ export default function AssemblyDetailPage() {
                             : '—'}
                     />
                     {assembly.weight_missing_barcodes && assembly.weight_missing_barcodes.length > 0 && (
-                        <div style={{ gridColumn: '1 / -1', fontSize: 13, color: 'var(--color-warning)' }}>
-                            Нет веса у {formatNumber(assembly.weight_missing_barcodes.length, 0)} арт. —{' '}
+                        <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '10px 12px', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 8, fontSize: 13 }}>
+                            <span style={{ color: 'var(--color-warning)', fontWeight: 500 }}>
+                                ⚠️ Нет веса у {formatNumber(assembly.weight_missing_barcodes.length, 0)} арт.
+                            </span>
+                            <span style={{ color: 'var(--color-text-muted)' }}>— расчётный вес неполный.</span>
                             <Link href={`/p/${slug}/settings?tab=duties`} style={{ color: 'var(--color-accent)' }}>
-                                заполнить вес в настройках
+                                Заполнить вес в настройках
                             </Link>
                         </div>
                     )}
@@ -1210,8 +1213,20 @@ export default function AssemblyDetailPage() {
                     const k = ppbByBarcode.get(it.barcode) || 0;
                     return { ...it, _ppb: k, boxes: k > 0 ? Math.ceil(it.quantity / k) : null };
                 });
+                const missingWeightSet = new Set(assembly.weight_missing_barcodes || []);
                 const itemCols: Column[] = [
                     { key: 'barcode', label: 'ШК', render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span> },
+                    {
+                        key: '_wt', label: 'Вес', sortable: false,
+                        render: (_v: unknown, row: { barcode: string }) => missingWeightSet.has(row.barcode) ? (
+                            <span
+                                title="Нет веса — заполните в справочнике «Вес по баркодам»"
+                                style={{ fontSize: 10, padding: '1px 6px', borderRadius: 24, background: 'rgba(245,158,11,0.15)', color: 'var(--color-warning)', border: '1px solid rgba(245,158,11,0.3)', whiteSpace: 'nowrap' }}
+                            >
+                                нет веса
+                            </span>
+                        ) : <span style={{ color: 'var(--color-success)' }}>✓</span>,
+                    },
                     { key: 'product_name', label: 'Товар', render: (v: string) => <span style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>{v || '\u2014'}</span> },
                     { key: 'article', label: 'Артикул', render: (v: string) => <span style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', fontFamily: 'monospace', fontSize: 12 }}>{v || '—'}</span> },
                     {

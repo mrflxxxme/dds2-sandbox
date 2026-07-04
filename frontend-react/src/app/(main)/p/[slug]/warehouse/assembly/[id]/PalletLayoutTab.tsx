@@ -56,6 +56,13 @@ function ppbByBarcodePpb(ppbOf: PpbOf, bc: string): number {
     return p && p > 0 ? Math.floor(p) : 0;
 }
 
+/** Stable, distinct color per SKU (computed hue — not a hardcoded palette), for at-a-glance grouping. */
+function colorFor(bc: string): string {
+    let h = 0;
+    for (let i = 0; i < bc.length; i++) h = (h * 31 + bc.charCodeAt(i)) % 360;
+    return `hsl(${h}, 55%, 55%)`;
+}
+
 export default function PalletLayoutTab({ assembly, ppbByBarcode, slug, onSaved }: Props) {
     const items = useMemo(() => assembly.items ?? [], [assembly.items]);
     const ppbOf: PpbOf = useCallback((bc) => ppbByBarcode.get(bc) ?? null, [ppbByBarcode]);
@@ -220,63 +227,91 @@ export default function PalletLayoutTab({ assembly, ppbByBarcode, slug, onSaved 
                 <div className="glass-card" style={{ padding: 12, marginBottom: 12, fontSize: 13, color: 'var(--color-success)' }}>{savedNote}</div>
             )}
 
+            {/* Сводка */}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+                {[
+                    { label: 'Паллет', value: sortedPallets.filter(p => p.pallet_no !== BUFFER_PALLET_NO).length },
+                    { label: 'Коробов', value: sortedPallets.reduce((s, p) => p.pallet_no === BUFFER_PALLET_NO ? s : s + p.boxes.reduce((t, b) => t + b.box_count, 0), 0) },
+                    { label: 'Позиций', value: items.length },
+                    { label: 'Штук', value: totalUnits },
+                ].map(m => (
+                    <div key={m.label} style={{ background: 'var(--color-bg-card)', borderRadius: 12, padding: '8px 14px', minWidth: 84 }}>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{m.label}</div>
+                        <div style={{ fontSize: 20, fontWeight: 600 }}>{formatNumber(m.value, 0)}</div>
+                    </div>
+                ))}
+            </div>
+
             {view === 'cards' ? (
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
                     {sortedPallets.map(p => {
                         const isBuffer = p.pallet_no === BUFFER_PALLET_NO;
+                        const boxCount = p.boxes.reduce((s, b) => s + b.box_count, 0);
                         return (
                             <div
                                 key={p.pallet_no}
                                 onDragOver={e => e.preventDefault()}
                                 onDrop={() => onDropPallet(p.pallet_no)}
                                 style={{
-                                    width: 220,
-                                    minHeight: 120,
-                                    border: `1px solid var(--color-border)`,
+                                    width: 210,
+                                    border: isBuffer ? '1px dashed var(--color-border)' : '1px solid var(--color-border)',
                                     borderRadius: 12,
                                     padding: 12,
-                                    background: isBuffer ? 'var(--color-bg-card)' : 'transparent',
+                                    background: 'var(--color-bg-card)',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: 8,
                                 }}
                             >
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
                                     <strong style={{ fontSize: 13 }}>
                                         {isBuffer ? 'Не распределено' : `Паллета ${p.pallet_no}`}
                                     </strong>
-                                    <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                        {formatNumber(palletUnits(p, ppbOf), 0)} шт
+                                    <span className="badge badge-secondary" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>
+                                        {formatNumber(boxCount, 0)} кор · {formatNumber(palletUnits(p, ppbOf), 0)} шт
                                     </span>
                                 </div>
-                                {p.boxes.length === 0 && (
-                                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', textAlign: 'center', padding: 8 }}>
-                                        перетащите сюда
-                                    </div>
-                                )}
-                                {p.boxes.map(b => (
-                                    <div
-                                        key={b.barcode}
-                                        draggable
-                                        onDragStart={() => { dragRef.current = { barcode: b.barcode, fromNo: p.pallet_no }; }}
-                                        style={{
-                                            border: '1px solid var(--color-border)',
-                                            borderRadius: 8,
-                                            padding: '6px 8px',
-                                            marginBottom: 6,
-                                            cursor: 'grab',
-                                            fontSize: 13,
-                                        }}
-                                        title={b.barcode}
-                                    >
-                                        <div style={{ fontWeight: 500 }}>{nameOf.get(b.barcode) || b.barcode}</div>
-                                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                                            {formatNumber(b.box_count, 0)} кор.
-                                            {b.loose_units > 0 ? ` + ${formatNumber(b.loose_units, 0)} шт` : ''}
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minHeight: 44 }}>
+                                    {p.boxes.length === 0 && (
+                                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)', textAlign: 'center', padding: 10, border: '1px dashed var(--color-border)', borderRadius: 8 }}>
+                                            перетащите сюда
                                         </div>
-                                    </div>
-                                ))}
+                                    )}
+                                    {p.boxes.map(b => (
+                                        <div
+                                            key={b.barcode}
+                                            draggable
+                                            onDragStart={() => { dragRef.current = { barcode: b.barcode, fromNo: p.pallet_no }; }}
+                                            style={{
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: 8,
+                                                border: '1px solid var(--color-border)',
+                                                borderLeft: `3px solid ${colorFor(b.barcode)}`,
+                                                borderRadius: 8,
+                                                padding: '6px 8px',
+                                                cursor: 'grab',
+                                                background: 'var(--color-bg-input)',
+                                            }}
+                                            title={b.barcode}
+                                        >
+                                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: colorFor(b.barcode), flex: 'none' }} />
+                                            <div style={{ minWidth: 0, flex: 1 }}>
+                                                <div style={{ fontWeight: 500, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                    {nameOf.get(b.barcode) || b.barcode}
+                                                </div>
+                                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                    {formatNumber(b.box_count, 0)} кор.
+                                                    {b.loose_units > 0 ? ` + ${formatNumber(b.loose_units, 0)} шт` : ''}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
                                 {!isBuffer && (
                                     <button
                                         className="btn btn-secondary btn-sm"
-                                        style={{ width: '100%', marginTop: 4 }}
+                                        style={{ width: '100%' }}
                                         onClick={() => mutate(removePallet(pallets, p.pallet_no))}
                                     >
                                         Убрать паллету
