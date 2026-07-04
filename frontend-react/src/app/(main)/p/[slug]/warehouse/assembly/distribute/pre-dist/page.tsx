@@ -20,7 +20,7 @@ import { buildPrebookGroups } from '@/lib/assembly/buildPrebookGroups';
 import NeedMatrixCell from '../components/NeedMatrixCell';
 import AcceptanceBanner, { type AcceptanceSummary } from '../components/AcceptanceBanner';
 import PrebookView, { type PrebookAcceptanceMark } from '../components/PrebookView';
-import PreDistPreview from '../components/PreDistPreview';
+import DraftPreview from '../components/DraftPreview';
 import { seedNewcomerWholeBoxes, type SeedAnchor } from '@/lib/assembly/coldStartSeed';
 import type {
     AcceptanceCheckPerItem,
@@ -29,6 +29,7 @@ import type {
     PackageType,
     PreDistVehiclePool,
     StockNeedResponse,
+    Warehouse,
 } from '@/types/api';
 
 /** Сколько коробов из штук при кратности `ppb`. */
@@ -335,6 +336,26 @@ export default function PreDistVehiclePage() {
     // ─── Производные: позиции к созданию + обогащение + матрица ─────────────
     const submitRows = useMemo(() => rowsToPreDistRows(shipRows), [shipRows]);
 
+    // ─── Пропсы для реального «Предпросмотра заявок» (DraftPreview в машинном режиме) ──
+    const previewWarehouses = useMemo<Warehouse[]>(() => {
+        const tw = pool?.vehicle.target_warehouse_id;
+        return tw != null ? [{ id: tw, name: pool?.vehicle.target_warehouse_name || `ФФ ${tw}` } as Warehouse] : [];
+    }, [pool]);
+    const nmMeta = useMemo(() => {
+        const m = new Map<number, { subject: string; brand: string }>();
+        for (const pr of pool?.rows ?? []) {
+            const nm = pr.article_wb ? Number(pr.article_wb) : 0;
+            if (nm) m.set(nm, { subject: pr.name || '', brand: pr.brand || '' });
+        }
+        return m;
+    }, [pool]);
+    // «Из предброни»: направления, которые юзер промоутнул из предброни в отгрузку — бейдж в раскладке.
+    const prebookPromotedOrigin = useMemo(() => {
+        const s = new Set<string>();
+        for (const r of promotedRows) for (const wb of Object.keys(r.tgt)) s.add(`${r.nm_id}::${wb}`);
+        return s;
+    }, [promotedRows]);
+
     const enrichMap = useMemo(
         () => enrichPoolRows(pool?.rows ?? [], stockNeed, newcomerSet),
         [pool, stockNeed, newcomerSet],
@@ -623,15 +644,19 @@ export default function PreDistVehiclePage() {
                     />
                 )
             ) : subTab === 'preview' ? (
-                <PreDistPreview
-                    shipRows={shipRows}
+                <DraftPreview
+                    slug={slug}
+                    rows={shipRows}
                     newcomerNmIds={newcomerSet}
+                    warehouses={previewWarehouses}
                     nmPpb={nmPpb}
+                    nmMeta={nmMeta}
                     nmBoxSize={nmBoxSize}
                     palletOverrides={palletOverrides}
-                    vehicleNo={vehicle?.order_no || ''}
-                    onSubmit={handleSubmit}
-                    submitting={submitting}
+                    geomReady={geomReady}
+                    prebookOrigin={prebookPromotedOrigin}
+                    predist={{ commitAll: handleSubmit }}
+                    onToast={showToast}
                 />
             ) : (<>
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-muted)', fontSize: 13 }}>
