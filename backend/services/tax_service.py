@@ -112,7 +112,8 @@ async def save_tax_rates(
     await invalidate_cache(f"reports:wb_bdr:project_id={project_id}")
     await invalidate_cache(f"reports:opiu:project_id={project_id}")
     await invalidate_cache(f"reports:dashboard:project_id={project_id}")
-    await invalidate_cache(f"funnel:project_id={project_id}")
+    await invalidate_cache(f"funnel:tariff_map:project_id={project_id}")
+    await invalidate_cache(f"funnel:avg_buyout:project_id={project_id}")
 
     logger.info("Saved tax rates: project=%s year=%s regime=%s", project_id, year, tax_regime)
     return {"status": "ok", "year": year}

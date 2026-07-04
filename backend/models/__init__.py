@@ -245,6 +245,22 @@ from backend.models.wb_tariff import (
     WbTariff,
 )
 
+# Assembly (единая «Сборка»: заявки, черновики, распределение остатков)
+from backend.models.assembly import (
+    AssemblyDraft,
+    AssemblyRequest,
+    AssemblyRequestItem,
+    AssemblyStatus,
+    AssemblyStatusHistory,
+    AssemblyStockDistributionDaily,
+    PackageType,
+)
+
+# WB Goods Returns (возвраты товаров)
+from backend.models.wb_returns import (
+    WbGoodsReturn,
+)
+
 # Alias for backward compatibility
 WbApiKey = IntegrationKey
 
@@ -348,6 +364,16 @@ __all__ = [
     "PAYMENT_REQUEST_TRANSITIONS",
     # WB Tariffs
     "WbTariff",
+    # Assembly
+    "AssemblyDraft",
+    "AssemblyRequest",
+    "AssemblyRequestItem",
+    "AssemblyStatus",
+    "AssemblyStatusHistory",
+    "AssemblyStockDistributionDaily",
+    "PackageType",
+    # WB Goods Returns
+    "WbGoodsReturn",
     # Telegram bot
     "TelegramBotUser",
     "TelegramChatBinding",

@@ -166,11 +166,15 @@ async def sync_wb_sales(
     if date_from is None:
         date_from = date.today() - timedelta(days=7)
 
+    # Captured up front so the error path can log with a fresh row after rollback
+    # expunges sync_log (see except below).
+    key_id = key.id
+    started_at = utcnow()
     sync_log = SyncLog(
-        integration_id=key.id,
+        integration_id=key_id,
         service="wb",
         sync_type=sync_type,
-        started_at=utcnow(),
+        started_at=started_at,
         status="RUNNING",
     )
     db.add(sync_log)
@@ -236,12 +240,24 @@ async def sync_wb_sales(
         await db.refresh(sync_log)
 
     except Exception as e:
-        sync_log.status = "ERROR"
-        sync_log.error_msg = str(e)[:1000]
-        sync_log.finished_at = utcnow()
+        # The session may be in a failed state (a bad row rejected on commit); a bare
+        # commit here would raise PendingRollbackError and mask the real error. Roll
+        # back, then record the failure with a FRESH row — the flushed sync_log is
+        # expunged by rollback (mirrors sync_wb_nomenclature).
+        await db.rollback()
+        err_log = SyncLog(
+            integration_id=key_id,
+            service="wb",
+            sync_type=sync_type,
+            started_at=started_at,
+            finished_at=utcnow(),
+            status="ERROR",
+            error_msg=str(e)[:1000],
+        )
+        db.add(err_log)
         await db.commit()
-        await db.refresh(sync_log)
         logger.error("WB sync error: %s", e)
+        return err_log
 
     return sync_log
 

@@ -40,13 +40,15 @@ class TestSetTaxRate:
         with patch("backend.services.project_settings_service.invalidate_cache", new_callable=AsyncMock) as mock_inv:
             await set_tax_rate(mock_db, mock_project, Decimal("7.0"))
 
-        # Should invalidate 4 cache prefixes
-        assert mock_inv.await_count == 4
+        # 5 prefixes: wb_bdr, opiu, dashboard + the two real funnel caches
+        # (funnel:tariff_map, funnel:avg_buyout — the old bare "funnel:project_id" was a no-op).
+        assert mock_inv.await_count == 5
         call_args = [c.args[0] for c in mock_inv.call_args_list]
         assert any("wb_bdr" in a for a in call_args)
         assert any("opiu" in a for a in call_args)
         assert any("dashboard" in a for a in call_args)
-        assert any("funnel" in a for a in call_args)
+        assert any("funnel:tariff_map" in a for a in call_args)
+        assert any("funnel:avg_buyout" in a for a in call_args)
 
     @pytest.mark.asyncio
     async def test_float_input_converted(self):

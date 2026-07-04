@@ -276,6 +276,7 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
             log_status = "ERROR"
             log_error_msg = "Task cancelled (worker shutdown or restart)"
             logger.warning("💰 WB Finance %s: project %s — CANCELLED", job_label, pid)
+            raise  # propagate cancellation — never swallow it to keep looping
         except Exception as e:
             log_status = "ERROR"
             log_error_msg = str(e)[:500]

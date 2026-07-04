@@ -166,6 +166,17 @@ async def cb_setup_project(callback: CallbackQuery):
     project_id = int(callback.data.split(":")[2])
 
     async with AsyncSessionLocal() as db:
+        # project_id comes from client-controlled callback_data — verify membership,
+        # never treat it as an authorization token (else any linked user reads any
+        # project's brand list).
+        tg_user = await telegram_service.get_dds_user_by_telegram(db, callback.from_user.id)
+        if not tg_user:
+            await callback.answer("Ошибка: аккаунт не привязан.", show_alert=True)
+            return
+        projects = await telegram_service.get_user_projects(db, tg_user.user_id)
+        if project_id not in {p.id for p in projects}:
+            await callback.answer("Нет доступа к проекту.", show_alert=True)
+            return
         brands = await telegram_service.get_project_brands(db, project_id)
 
     buttons = [[InlineKeyboardButton(text="Все бренды", callback_data=f"setup:b:{project_id}:")]]
@@ -189,6 +200,14 @@ async def cb_setup_brand(callback: CallbackQuery):
         tg_user = await telegram_service.get_dds_user_by_telegram(db, tg_user_id)
         if not tg_user:
             await callback.answer("Ошибка: аккаунт не привязан.", show_alert=True)
+            return
+
+        # project_id is client-controlled (callback_data is forgeable) — verify the
+        # user actually belongs to it before binding the chat, or a linked user could
+        # bind their chat to another tenant's project and receive its push data.
+        projects = await telegram_service.get_user_projects(db, tg_user.user_id)
+        if project_id not in {p.id for p in projects}:
+            await callback.answer("Нет доступа к проекту.", show_alert=True)
             return
 
         await telegram_service.bind_chat(db, callback.message.chat.id, project_id, brand, tg_user.user_id)

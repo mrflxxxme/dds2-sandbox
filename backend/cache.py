@@ -119,7 +119,12 @@ async def invalidate_cache(prefix: str):
     try:
         pattern = f"{prefix}:*"
         cursor = 0
-        deleted = 0
+        # Readers called with all optional args at their defaults produce a key
+        # equal to the invalidation prefix itself (e.g. "reports:balance:project_id=4",
+        # since None args are skipped when building the key). The ":*" pattern requires
+        # at least one char after "prefix:", so it never matches that exact key —
+        # delete it explicitly before the scan. No-op when the exact key doesn't exist.
+        deleted = await r.delete(prefix)
         while True:
             cursor, keys = await r.scan(cursor, match=pattern, count=100)
             if keys:

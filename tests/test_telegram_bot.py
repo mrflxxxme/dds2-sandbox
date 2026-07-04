@@ -555,8 +555,14 @@ class TestCallbacks:
             patch("backend.integrations.telegram_bot.AsyncSessionLocal") as session_cls,
             patch("backend.integrations.telegram_bot.telegram_service") as svc,
         ):
+            proj = MagicMock()
+            proj.id = 4
+            tg_user = MagicMock()
+            tg_user.user_id = 7
             session_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
             session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            svc.get_dds_user_by_telegram = AsyncMock(return_value=tg_user)
+            svc.get_user_projects = AsyncMock(return_value=[proj])
             svc.get_project_brands = AsyncMock(return_value=["BrandA", "BrandB"])
 
             await cb_setup_project(cb)
@@ -579,7 +585,10 @@ class TestCallbacks:
         ):
             session_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
             session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            proj = MagicMock()
+            proj.id = 4
             svc.get_dds_user_by_telegram = AsyncMock(return_value=tg_user)
+            svc.get_user_projects = AsyncMock(return_value=[proj])
             svc.bind_chat = AsyncMock()
 
             await cb_setup_brand(cb)
@@ -602,7 +611,10 @@ class TestCallbacks:
         ):
             session_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
             session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            proj = MagicMock()
+            proj.id = 4
             svc.get_dds_user_by_telegram = AsyncMock(return_value=tg_user)
+            svc.get_user_projects = AsyncMock(return_value=[proj])
             svc.bind_chat = AsyncMock()
 
             await cb_setup_brand(cb)

@@ -121,6 +121,7 @@ async def ws_sync(
             select(ProjectMember).where(
                 ProjectMember.project_id == project_id,
                 ProjectMember.user_id == user_id,
+                ProjectMember.is_deleted == False,  # noqa: E712 — removed members must not keep the WS channel
             )
         )
     if not member:

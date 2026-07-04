@@ -17,6 +17,7 @@ from backend.project_context import get_current_project
 from backend.schemas.tariff import WbTariffSchema, WbTariffUploadResult
 from backend.services import funnel as funnel_service
 from backend.services.tariff_service import delete_tariff, list_tariffs, upload_tariffs
+from backend.utils.rate_limit import rate_limit_write
 
 logger = logging.getLogger("dds.funnel")
 
@@ -85,7 +86,7 @@ async def _load_bdr_rates(db: AsyncSession, project_id: int):
 # ─── Sync endpoints ─────────────────────────────────────────────────────────
 
 
-@router.post("/sync")
+@router.post("/sync", dependencies=[Depends(rate_limit_write)])
 async def sync_funnel(
     body: SyncRequest,
     project: Project = Depends(get_current_project),
@@ -98,7 +99,7 @@ async def sync_funnel(
     return result
 
 
-@router.post("/resync_ads")
+@router.post("/resync_ads", dependencies=[Depends(rate_limit_write)])
 async def resync_ads(
     project: Project = Depends(get_current_project),
 ):
@@ -135,7 +136,7 @@ async def get_sync_status(
     }
 
 
-@router.post("/backfill")
+@router.post("/backfill", dependencies=[Depends(rate_limit_write)])
 async def backfill_funnel(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -464,7 +465,7 @@ async def get_missing_costs(
     return await funnel_service.get_missing_costs(db, project.id)
 
 
-@router.post("/cost")
+@router.post("/cost", dependencies=[Depends(rate_limit_write)])
 async def set_cost_override(
     body: CostOverrideRequest,
     project: Project = Depends(get_current_project),
@@ -472,13 +473,14 @@ async def set_cost_override(
 ):
     """Set or update manual cost price for an nmId."""
     result = await funnel_service.set_cost_override(db, project.id, body.nm_id, body.cost_price)
-    from backend.cache import invalidate_cache
+    # Cost overrides feed BDR, ОПиУ and pricing_markup readers — invalidate all project reports.
+    from backend.cache import invalidate_project_reports
 
-    await invalidate_cache("reports:wb_bdr")
+    await invalidate_project_reports(project.id)
     return result
 
 
-@router.post("/costs/bulk")
+@router.post("/costs/bulk", dependencies=[Depends(rate_limit_write)])
 async def bulk_set_cost_overrides(
     body: BulkCostRequest,
     project: Project = Depends(get_current_project),
@@ -505,7 +507,7 @@ async def get_tax_rate(
     return {"tax_rate": float(project.tax_rate or 6)}
 
 
-@router.post("/tax")
+@router.post("/tax", dependencies=[Depends(rate_limit_write)])
 async def set_tax_rate(
     body: TaxRateRequest,
     project: Project = Depends(get_current_project),
@@ -657,7 +659,7 @@ async def get_tariffs(
     return await list_tariffs(db, project.id)
 
 
-@router.post("/tariffs/upload", response_model=WbTariffUploadResult)
+@router.post("/tariffs/upload", response_model=WbTariffUploadResult, dependencies=[Depends(rate_limit_write)])
 async def upload_tariffs_xlsx(
     file: UploadFile = File(...),
     project: Project = Depends(get_current_project),
@@ -688,7 +690,7 @@ async def upload_tariffs_xlsx(
     return result
 
 
-@router.delete("/tariffs/{tariff_id}")
+@router.delete("/tariffs/{tariff_id}", dependencies=[Depends(rate_limit_write)])
 async def remove_tariff(
     tariff_id: int,
     project: Project = Depends(get_current_project),
@@ -722,7 +724,7 @@ async def get_ad_tab(
     return await get_ad_tab_data(db, project.id, date_from, date_to, brand, subject)
 
 
-@router.post("/sync_campaigns")
+@router.post("/sync_campaigns", dependencies=[Depends(rate_limit_write)])
 async def sync_campaigns(
     project: Project = Depends(get_current_project),
 ):
@@ -747,7 +749,7 @@ async def sync_campaigns_progress(
     return get_sync_progress(project.id)
 
 
-@router.post("/sync_funnel_bg")
+@router.post("/sync_funnel_bg", dependencies=[Depends(rate_limit_write)])
 async def sync_funnel_bg(
     date_from: str = Query(...),
     date_to: str = Query(...),
@@ -777,7 +779,7 @@ async def sync_funnel_progress(
 # ─── Unified Sync ────────────────────────────────────────────────────────────
 
 
-@router.post("/unified_sync")
+@router.post("/unified_sync", dependencies=[Depends(rate_limit_write)])
 async def unified_sync(
     date_from: str = Query(...),
     date_to: str = Query(...),
@@ -808,7 +810,7 @@ async def unified_sync_progress(
     return get_unified_sync_progress(project.id)
 
 
-@router.post("/first_sync")
+@router.post("/first_sync", dependencies=[Depends(rate_limit_write)])
 async def first_sync(
     project: Project = Depends(get_current_project),
 ):

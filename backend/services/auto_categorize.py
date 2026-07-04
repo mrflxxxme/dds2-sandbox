@@ -11,6 +11,10 @@ from backend.models import CategoryChangeLog, CategoryRule, Transaction
 
 logger = logging.getLogger("dds.auto_categorize")
 
+# Safety cap for the preview scan — newest-first, so a fresh project with tens of
+# thousands of uncategorized rows can't load them all as ORM entities at once.
+_PREVIEW_LIMIT = 20_000
+
 
 async def get_rules(db: AsyncSession, project_id: int) -> list:
     """Get all active categorization rules for a project."""
@@ -108,9 +112,16 @@ async def preview_auto_categorize(db: AsyncSession, project_id: int) -> list[dic
             ),
         )
         .order_by(Transaction.date.desc())
+        .limit(_PREVIEW_LIMIT)
     )
     result = await db.execute(q)
     txns = result.scalars().all()
+    if len(txns) >= _PREVIEW_LIMIT:
+        logger.warning(
+            "auto_categorize preview capped at %d rows for project %d — newest first",
+            _PREVIEW_LIMIT,
+            project_id,
+        )
 
     matches = []
     for txn in txns:

@@ -24,6 +24,7 @@ from backend.services.telegram_service import (
     get_user_projects,
     verify_project_access,
 )
+from backend.utils.rate_limit import RateLimiter, rate_limit_write
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,11 @@ class TMAChatResponse(BaseModel):
 # ─── POST /tma/auth ──────────────────────────────────────────────────────────
 
 
-@router.post("/auth", response_model=TMAAuthResponse)
+@router.post(
+    "/auth",
+    response_model=TMAAuthResponse,
+    dependencies=[Depends(RateLimiter(limit=10, window=60, action="tma_auth"))],
+)
 async def tma_auth(
     body: TMAAuthRequest,
     db: AsyncSession = Depends(get_db),
@@ -95,7 +100,7 @@ async def tma_auth(
 # ─── POST /tma/chat ──────────────────────────────────────────────────────────
 
 
-@router.post("/chat", response_model=TMAChatResponse)
+@router.post("/chat", response_model=TMAChatResponse, dependencies=[Depends(rate_limit_write)])
 async def tma_chat(
     body: TMAChatRequest,
     user: User = Depends(get_current_user),

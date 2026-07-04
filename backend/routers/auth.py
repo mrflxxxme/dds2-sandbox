@@ -25,6 +25,7 @@ from backend.auth import (
 from backend.config import settings
 from backend.database import get_db
 from backend.models import User
+from backend.utils.rate_limit import rate_limit_write
 
 logger = logging.getLogger("dds.auth")
 
@@ -222,7 +223,7 @@ async def get_profile(current_user: User = Depends(get_current_user)):
     return current_user
 
 
-@router.put("/me", response_model=ProfileResponse)
+@router.put("/me", response_model=ProfileResponse, dependencies=[Depends(rate_limit_write)])
 async def update_profile(
     body: ProfileUpdateRequest,
     current_user: User = Depends(get_current_user),
@@ -244,7 +245,7 @@ async def update_profile(
 # ─── Change Password ─────────────────────────────────────────────────────────
 
 
-@router.post("/change_password")
+@router.post("/change_password", dependencies=[Depends(rate_limit_write)])
 async def change_password(
     body: ChangePasswordRequest,
     current_user: User = Depends(get_current_user),
@@ -274,7 +275,7 @@ class LogoutRequest(BaseModel):
     refresh_token: str
 
 
-@router.post("/logout")
+@router.post("/logout", dependencies=[Depends(rate_limit_write)])
 async def logout(
     body: LogoutRequest,
     current_user: User = Depends(get_current_user),
