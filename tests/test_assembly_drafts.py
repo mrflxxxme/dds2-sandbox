@@ -595,6 +595,73 @@ async def test_commit_draft_two_sources_two_targets_pro_rata(db_session):
 
 
 @pytest.mark.asyncio
+async def test_commit_draft_by_source_ff_partial(db_session):
+    """Партиальный коммит по складу-ФФ: заявки только из порций выбранного ФФ,
+    порции других ФФ (даже внутри ОДНОЙ строки) остаются в черновике."""
+    from backend.schemas.assembly_draft import AssemblyDraftDistribution
+
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+    # Одна строка сорсит с ДВУХ ФФ: 6 с A + 4 с B → 5 Казань, 5 Электросталь.
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111,
+            barcode=TEST_BARCODE_1,
+            src={str(wh_a): 6, str(wh_b): 4},
+            tgt={"Электросталь": 5, "Казань": 5},
+        )
+    ]
+    payload = _build_payload([wh_a, wh_b], ["Электросталь", "Казань"], rows)
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    # Коммитим ТОЛЬКО ФФ A.
+    resp = await assembly_draft_service.commit_draft(
+        db_session, PROJECT_ID, draft.id, source_ff_id=wh_a
+    )
+    res = await db_session.execute(
+        select(AssemblyRequest).where(AssemblyRequest.id.in_(resp.created_request_ids))
+    )
+    requests = list(res.scalars().all())
+    # Все заявки — только со склада A, суммарно ровно src[A] = 6.
+    assert requests
+    assert {r.warehouse_id for r in requests} == {wh_a}
+    item_q = await db_session.execute(
+        text("SELECT SUM(quantity) FROM assembly_request_items WHERE assembly_request_id = ANY(:ids)"),
+        {"ids": resp.created_request_ids},
+    )
+    assert item_q.scalar() == 6
+
+    # Черновик НЕ удалён: остаток ФФ B (4 шт) остался в rows, сбалансирован.
+    raw = await db_session.execute(select(AssemblyDraft).where(AssemblyDraft.id == draft.id))
+    raw_draft = raw.scalar_one()
+    assert raw_draft.is_deleted is False
+    dist = AssemblyDraftDistribution.model_validate(raw_draft.distribution)
+    left_src = sum(int(v) for r in dist.rows for v in r.src.values())
+    left_tgt = sum(int(v) for r in dist.rows for v in r.tgt.values())
+    assert left_src == 4 and left_tgt == 4  # ровно порция B, баланс сохранён
+    # Остаток сорсится ТОЛЬКО с B (порция A ушла в заявки).
+    assert all(str(wh_a) not in r.src for r in dist.rows)
+
+
+@pytest.mark.asyncio
+async def test_commit_draft_source_ff_not_in_draft_400(db_session):
+    """source_ff_id, которого нет среди источников черновика → 400 (нечего коммитить)."""
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111, barcode=TEST_BARCODE_1,
+            src={str(wh_a): 4}, tgt={"Электросталь": 4},
+        )
+    ]
+    payload = _build_payload([wh_a], ["Электросталь"], rows)
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+    with pytest.raises(HTTPException) as exc:
+        await assembly_draft_service.commit_draft(
+            db_session, PROJECT_ID, draft.id, source_ff_id=wh_b
+        )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_commit_draft_explicit_supplies(db_session):
     """supplies → заявки строятся РОВНО из явных отгрузок ФФ→склад (минуя pro-rata).
     Режим «только целые паллеты»: фронт прислал одну целую отгрузку, остальное снято."""

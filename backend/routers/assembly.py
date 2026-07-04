@@ -4,10 +4,12 @@ Router: /warehouse/assembly — Assembly request CRUD + workflow transitions.
 """
 
 from datetime import date
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import Response
 
 from backend.database import get_db
 from backend.models import Project
@@ -39,6 +41,8 @@ from backend.schemas.assembly import (
     PreDistAdvanceResult,
     PreDistributionCreate,
     PreDistributionCreateResult,
+    PalletManifest,
+    PalletManifestUpdate,
     PreDistVehicle,
     PreDistVehiclePool,
     PrebookingCreate,
@@ -685,6 +689,80 @@ async def update_assembly_request(
     """Update an assembly request."""
     try:
         req = await assembly_service.update_assembly_request(db, project.id, request_id, payload)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+# --- Pallet layout (раскладка по паллетам) ----------------------------------
+
+
+@router.patch(
+    "/{request_id}/pallet-manifest",
+    response_model=AssemblyRequestResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def update_pallet_manifest(
+    request_id: int,
+    payload: PalletManifestUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сохранить ручную раскладку коробов по паллетам или сбросить к «авто».
+
+    pallets=null → сброс (поле очищается). Иначе строгий инвариант
+    Σ(box_count·box_qty + loose_units) == quantity по каждой позиции; нарушение → 409.
+    ШК не из состава заявки → 400."""
+    manifest = None if payload.pallets is None else PalletManifest(pallets=payload.pallets)
+    try:
+        req = await assembly_service.update_pallet_manifest(db, project.id, request_id, manifest)
+    except assembly_service.PalletManifestConflict as e:
+        raise HTTPException(409, str(e)) from None
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+
+
+@router.get("/{request_id}/pallet-layout.xlsx")
+async def download_pallet_layout(
+    request_id: int,
+    format: str = Query("internal", pattern="^(internal|wb)$"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Выгрузить раскладку по паллетам в Excel.
+
+    format=internal — покоробочно с паллетами (для кладовщика);
+    format=wb — файл загрузки в WB (строка = короб; ШК короба и срок годности пусты)."""
+    req = await assembly_service.get_assembly_request(db, project.id, request_id)
+    if not req:
+        raise HTTPException(404, "Assembly request not found")
+    data = await assembly_service.build_pallet_layout_xlsx(db, project.id, req, fmt=format)
+    suffix = "wb" if format == "wb" else "pallets"
+    filename = f"{req.number}_{suffix}.xlsx"
+    disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": disposition},
+    )
+
+
+@router.post(
+    "/{request_id}/apply-goods-weight",
+    response_model=AssemblyRequestResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def apply_goods_weight(
+    request_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Проставить расчётный вес товаров в ручной вес паллеты (÷ кол-во паллет).
+
+    Нет ни одной позиции с весом → 400 (заполнить справочник веса в настройках)."""
+    try:
+        req = await assembly_service.apply_goods_weight(db, project.id, request_id)
         return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
     except ValueError as e:
         raise HTTPException(400, str(e)) from None

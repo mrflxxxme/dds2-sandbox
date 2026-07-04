@@ -8,6 +8,7 @@ import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchBlock } from '@/components/FfMismatchModal';
 import MigfullModal from './MigfullModal';
+import PalletLayoutTab from './PalletLayoutTab';
 import type { Column } from '@/components/DataTable';
 import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply } from '@/types/api';
 
@@ -48,6 +49,8 @@ export default function AssemblyDetailPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [actionLoading, setActionLoading] = useState(false);
+    // Вкладки деталки: «Заявка» (состав/логистика) | «Раскладка по паллетам».
+    const [tab, setTab] = useState<'request' | 'pallets'>('request');
 
     // Modals
     const [showVehicleModal, setShowVehicleModal] = useState(false);
@@ -708,6 +711,28 @@ export default function AssemblyDetailPage() {
                 </div>
             </div>
 
+            {/* Вкладки: «Заявка» | «Раскладка по паллетам» */}
+            <div className="glass-card" style={{ padding: 8, marginBottom: 16, display: 'flex', gap: 8 }}>
+                <button
+                    className={`btn btn-sm ${tab === 'request' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setTab('request')}
+                >
+                    Заявка
+                </button>
+                <button
+                    className={`btn btn-sm ${tab === 'pallets' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setTab('pallets')}
+                >
+                    Раскладка по паллетам
+                </button>
+            </div>
+
+            {tab === 'pallets' && (
+                <PalletLayoutTab assembly={assembly} ppbByBarcode={ppbByBarcode} slug={slug} onSaved={load} />
+            )}
+
+            {tab === 'request' && (<>
+
             {/* Error */}
             {error && (
                 <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-danger)' }}>
@@ -865,6 +890,23 @@ export default function AssemblyDetailPage() {
                     />
                     <InfoField label="Вес 1 палеты" value={assembly.pallet_weight_kg ? formatNumber(assembly.pallet_weight_kg, 1) + ' кг' : '\u2014'} />
                     <InfoField label="Общий вес" value={assembly.total_weight_kg ? formatNumber(assembly.total_weight_kg, 1) + ' кг' : '\u2014'} />
+                    <InfoField
+                        label="Вес товаров (расчёт)"
+                        value={assembly.goods_weight_kg != null && assembly.goods_weight_kg !== ''
+                            ? formatNumber(Number(assembly.goods_weight_kg), 1) + ' кг'
+                            : '—'}
+                    />
+                    {assembly.weight_missing_barcodes && assembly.weight_missing_barcodes.length > 0 && (
+                        <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '10px 12px', background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 8, fontSize: 13 }}>
+                            <span style={{ color: 'var(--color-warning)', fontWeight: 500 }}>
+                                ⚠️ Нет веса у {formatNumber(assembly.weight_missing_barcodes.length, 0)} арт.
+                            </span>
+                            <span style={{ color: 'var(--color-text-muted)' }}>— расчётный вес неполный.</span>
+                            <Link href={`/p/${slug}/settings?tab=duties`} style={{ color: 'var(--color-accent)' }}>
+                                Заполнить вес в настройках
+                            </Link>
+                        </div>
+                    )}
                     {(assembly.vehicle_info || canEditAlways) && (
                         <EditableInfoField
                             label="Машина"
@@ -1171,8 +1213,20 @@ export default function AssemblyDetailPage() {
                     const k = ppbByBarcode.get(it.barcode) || 0;
                     return { ...it, _ppb: k, boxes: k > 0 ? Math.ceil(it.quantity / k) : null };
                 });
+                const missingWeightSet = new Set(assembly.weight_missing_barcodes || []);
                 const itemCols: Column[] = [
                     { key: 'barcode', label: 'ШК', render: (v: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</span> },
+                    {
+                        key: '_wt', label: 'Вес', sortable: false,
+                        render: (_v: unknown, row: { barcode: string }) => missingWeightSet.has(row.barcode) ? (
+                            <span
+                                title="Нет веса — заполните в справочнике «Вес по баркодам»"
+                                style={{ fontSize: 10, padding: '1px 6px', borderRadius: 24, background: 'rgba(245,158,11,0.15)', color: 'var(--color-warning)', border: '1px solid rgba(245,158,11,0.3)', whiteSpace: 'nowrap' }}
+                            >
+                                нет веса
+                            </span>
+                        ) : <span style={{ color: 'var(--color-success)' }}>✓</span>,
+                    },
                     { key: 'product_name', label: 'Товар', render: (v: string) => <span style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>{v || '\u2014'}</span> },
                     { key: 'article', label: 'Артикул', render: (v: string) => <span style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', fontFamily: 'monospace', fontSize: 12 }}>{v || '—'}</span> },
                     {
@@ -1256,6 +1310,8 @@ export default function AssemblyDetailPage() {
                     </div>
                 </div>
             )}
+
+            </>)}
 
             {/* ─── Modals ──────────────────────────────────────────────────── */}
 

@@ -311,35 +311,108 @@ def _pick_package_type(
     return "BOX", ["Часть складов недоступна — выбран BOX, лишний qty будет перераспределён."]
 
 
+# package_type → (can_* flag key, *_meta key)
+_PKG_FLAG_META: dict[str, tuple[str, str]] = {
+    "BOX": ("can_box", "box_meta"),
+    "MONOPALLET": ("can_monopallet", "mono_meta"),
+    "SUPERSAFE": ("can_supersafe", "super_meta"),
+}
+
+
+def _meta_limit_days(meta: dict | None) -> int:
+    """Free+paid дней приёмки в 14-окне (0 = нет публичного лимита → ⌛)."""
+    if not meta:
+        return 0
+    return int(meta.get("free_days_14", 0)) + int(meta.get("paid_days_14", 0))
+
+
+def _coefficients_present(availability: dict[str, dict]) -> bool:
+    """Загружен ли календарь коэффициентов (хоть по одному складу/типу).
+
+    Real ⌛-склад (options=yes, но НЕТ в календаре WB) даёт meta=None ПРИ
+    загруженных коэффициентах → его надо блокировать (нет лимита). А полное
+    отсутствие меты = коэффициенты не загрузились (network/degradation) →
+    fail-open, как во всей acceptance-логике (иначе транзиентный сбой WB
+    заблокировал бы ВСЕ склады и уронил распределение)."""
+    return any(
+        av.get(mk) for av in availability.values() for mk in ("box_meta", "mono_meta", "super_meta")
+    )
+
+
 def _is_open_for(
     package_type: str,
     flags: dict | None,
+    preorder_allowed: set[str] | None = None,
+    wh_name: str | None = None,
 ) -> bool:
+    """Можно ли реально отгрузить `package_type` на склад.
+
+    `preorder_allowed is None` — legacy-режим: смотрим ТОЛЬКО опции кабинета
+    (`can_*`), лимит игнорируем. Используется чистыми юнит-тестами.
+
+    `preorder_allowed` передан (set, возможно пустой) — limit+whitelist-aware
+    режим прод-пути: склад открыт для типа ⟺ `can_X` И (есть реальный лимит
+    приёмки `free+paid > 0` ИЛИ склад в whitelist предзаявки). ⌛-без-лимита
+    (включая отсутствие меты — WB не дал коэффициентов) без whitelist = НЕ
+    отгрузить: на такой склад товар не кладём, а перераспределяем.
+    """
     if not flags:
         return False
-    if package_type == "BOX":
-        return bool(flags.get("can_box"))
-    if package_type == "MONOPALLET":
-        return bool(flags.get("can_monopallet"))
-    if package_type == "SUPERSAFE":
-        return bool(flags.get("can_supersafe"))
-    return False
+    entry = _PKG_FLAG_META.get(package_type)
+    if entry is None:
+        return False
+    flag_key, meta_key = entry
+    if not flags.get(flag_key):
+        return False
+    if preorder_allowed is None:
+        return True
+    if _meta_limit_days(flags.get(meta_key)) > 0:
+        return True
+    canon = _normalize_acceptance_wh(wh_name) if wh_name else ""
+    return bool(canon) and canon in preorder_allowed
 
 
-def _best_package_type_for_wh(flags: dict | None) -> str | None:
+def _best_package_type_for_wh(
+    flags: dict | None,
+    preorder_allowed: set[str] | None = None,
+    wh_name: str | None = None,
+) -> str | None:
     """Cheapest package_type a single warehouse accepts (BOX > MONO > SUPER).
 
     Returns None if the warehouse rejects all three types (treated as closed).
+    `preorder_allowed` включает limit+whitelist-aware режим (см. `_is_open_for`):
+    ⌛-тип без whitelist больше не считается «принимается».
     """
     if not flags:
         return None
-    if flags.get("can_box"):
-        return "BOX"
-    if flags.get("can_monopallet"):
-        return "MONOPALLET"
-    if flags.get("can_supersafe"):
-        return "SUPERSAFE"
+    for pkg in ("BOX", "MONOPALLET", "SUPERSAFE"):
+        if _is_open_for(pkg, flags, preorder_allowed, wh_name):
+            return pkg
     return None
+
+
+def _pick_destination(
+    candidates: list[str],
+    okrug: str,
+    new_dist: dict[str, int],
+    *,
+    priority: bool,
+) -> str | None:
+    """Выбрать склад-получатель среди `candidates`.
+
+    `priority=True` (limit-aware прод-путь, выбор пользователя «строго по
+    приоритету/индексу») — первый по speed-приоритету для ФО получателя
+    (`sort_warehouses_by_priority`; тай-брейк — канон-имя). `priority=False`
+    (legacy) — крупнейший по уже накопленному qty, тай-брейк по имени.
+    """
+    if not candidates:
+        return None
+    if priority:
+        from backend.services.warehouse_speed import sort_warehouses_by_priority
+
+        ordered = sort_warehouses_by_priority(candidates, okrug)
+        return ordered[0] if ordered else None
+    return max(candidates, key=lambda w: (new_dist.get(w, 0), w))
 
 
 def _split_distribution_by_package_type(
@@ -347,6 +420,7 @@ def _split_distribution_by_package_type(
     availability: dict[str, dict],
     *,
     min_pack: int = 5,
+    preorder_allowed: set[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Split a single SKU distribution into per-package-type sub-assemblies.
 
@@ -372,13 +446,18 @@ def _split_distribution_by_package_type(
     if not distribution:
         return [], []
 
-    # Шаг 1: каждому складу — лучший доступный тип.
+    # Шаг 1: каждому складу — лучший доступный тип (limit+whitelist-aware, если
+    # передан preorder_allowed И коэффициенты загружены: ⌛-тип без whitelist →
+    # склад «закрыт» для него; при пустом календаре — fail-open).
+    if preorder_allowed is not None and not _coefficients_present(availability):
+        preorder_allowed = None
+    priority = preorder_allowed is not None
     by_type: dict[str, dict[str, int]] = defaultdict(dict)
     closed: list[tuple[str, int]] = []
     for wh, qty in distribution.items():
         if qty <= 0:
             continue
-        pkg = _best_package_type_for_wh(availability.get(wh))
+        pkg = _best_package_type_for_wh(availability.get(wh), preorder_allowed, wh)
         if pkg is None:
             closed.append((wh, qty))
             continue
@@ -387,38 +466,42 @@ def _split_distribution_by_package_type(
     # Шаг 2: закрытые → consolidate-to-center (ЦФО), package_type выбирается
     # по тому, что поддерживает склад-получатель.
     open_central = [
-        (wh, _best_package_type_for_wh(availability.get(wh)))
+        wh
         for wh in availability
-        if warehouse_to_district(wh) == "central" and _best_package_type_for_wh(availability.get(wh)) is not None
+        if warehouse_to_district(wh) == "central"
+        and _best_package_type_for_wh(availability.get(wh), preorder_allowed, wh) is not None
     ]
     open_globally = [
-        (wh, _best_package_type_for_wh(availability.get(wh)))
+        wh
         for wh in availability
-        if _best_package_type_for_wh(availability.get(wh)) is not None
+        if _best_package_type_for_wh(availability.get(wh), preorder_allowed, wh) is not None
     ]
     moves: list[dict] = []
     if closed:
-        # Получатель — крупнейший по уже накопленному qty в by_type ЦФО-склад
-        def _accumulated(wh: str, pkg: str | None) -> int:
-            if pkg is None:
-                return -1
-            return by_type.get(pkg, {}).get(wh, 0)
+        # Получатель: priority-режим — первый по speed-приоритету ФО; legacy —
+        # крупнейший по уже накопленному qty. package_type — лучший у получателя.
+        def _acc_for(wh: str) -> dict[str, int]:
+            pkg = _best_package_type_for_wh(availability.get(wh), preorder_allowed, wh)
+            return {wh: by_type.get(pkg, {}).get(wh, 0)} if pkg else {}
 
-        if open_central:
-            dest_wh, dest_pkg = max(
-                open_central,
-                key=lambda t: (_accumulated(t[0], t[1]), t[0]),
+        dest_pool = open_central or open_globally
+        dest_wh = None
+        dest_pkg = None
+        if dest_pool:
+            acc: dict[str, int] = {}
+            for wh in dest_pool:
+                acc.update(_acc_for(wh))
+            dest_wh = _pick_destination(dest_pool, "central", acc, priority=priority)
+            dest_pkg = (
+                _best_package_type_for_wh(availability.get(dest_wh), preorder_allowed, dest_wh)
+                if dest_wh
+                else None
             )
-            reason_default = "consolidated_to_center"
-        elif open_globally:
-            dest_wh, dest_pkg = max(
-                open_globally,
-                key=lambda t: (_accumulated(t[0], t[1]), t[0]),
-            )
-            reason_default = "closed_no_central_open"
-        else:
-            dest_wh, dest_pkg = None, None
-            reason_default = "closed_no_open_anywhere"
+        reason_default = (
+            "consolidated_to_center"
+            if open_central
+            else ("closed_no_central_open" if open_globally else "closed_no_open_anywhere")
+        )
 
         for src, qty in closed:
             district = warehouse_to_district(src)
@@ -447,6 +530,7 @@ def _split_distribution_by_package_type(
             availability,
             pkg,
             min_pack=min_pack,
+            preorder_allowed=preorder_allowed,
         )
         # Накапливаем move'ы из под-redistribute (обычно пусто — это safety-net)
         moves.extend(sub_moves)
@@ -473,6 +557,7 @@ def redistribute_blocked_qty(
     *,
     mode: str = "consolidate_to_center",
     min_pack: int = 5,
+    preorder_allowed: set[str] | None = None,
 ) -> tuple[dict[str, int], list[dict]]:
     """Move qty away from warehouses that don't accept this package_type.
 
@@ -499,7 +584,11 @@ def redistribute_blocked_qty(
     # Все известные склады — из distribution + из availability (даже если в
     # distribution=0). Это даёт полный набор кандидатов для перенаправления.
     all_known = set(distribution.keys()) | set(availability.keys())
-    open_set = {w for w in all_known if _is_open_for(package_type, availability.get(w))}
+    # Fail-open при незагруженном календаре коэффициентов (см. _coefficients_present).
+    if preorder_allowed is not None and not _coefficients_present(availability):
+        preorder_allowed = None
+    priority = preorder_allowed is not None
+    open_set = {w for w in all_known if _is_open_for(package_type, availability.get(w), preorder_allowed, w)}
     closed = [(w, q) for w, q in distribution.items() if w not in open_set and q > 0]
 
     new_dist = {w: q for w, q in distribution.items() if w in open_set}
@@ -522,10 +611,10 @@ def redistribute_blocked_qty(
             # Все закрытые → в крупнейший открытый склад ЦФО (Электросталь).
             # Если ЦФО закрыт — fallback на open_globally.
             if central_open:
-                dest = max(central_open, key=lambda w: (new_dist.get(w, 0), w))
+                dest = _pick_destination(central_open, "central", new_dist, priority=priority)
                 reason = "consolidated_to_center" if district != "central" else "closed_in_district"
             elif open_globally:
-                dest = open_globally[0]
+                dest = _pick_destination(open_globally, district, new_dist, priority=priority)
                 reason = "closed_no_central_open"
             else:
                 dest = None
@@ -545,12 +634,11 @@ def redistribute_blocked_qty(
         # mode == "spread_in_district"
         candidates = open_by_district.get(district, [])
         if candidates:
-            # Сначала склад с уже большим qty (концентрация),
-            # при равенстве — стабильный порядок по имени.
-            dest = max(candidates, key=lambda w: (new_dist.get(w, 0), w))
+            # priority: первый по speed-приоритету ФО; legacy: крупнейший по qty.
+            dest = _pick_destination(candidates, district, new_dist, priority=priority)
             reason = "closed_in_district"
         elif open_globally:
-            dest = open_globally[0]
+            dest = _pick_destination(open_globally, district, new_dist, priority=priority)
             reason = "closed_no_open_in_district"
         else:
             dest = None
@@ -919,6 +1007,21 @@ async def check_acceptance_and_redistribute(
     if not barcodes:
         return {"items": [], "moves": [], "checked_at": utcnow(), "cache_hit": False}
 
+    # Whitelist «⌛ предзаявка без лимита»: склады, куда можно слать без публичного
+    # лимита приёмки. Товар на ⌛-склад НЕ из whitelist перераспределяется на
+    # свободный/whitelist склад по приоритету (см. _is_open_for / _pick_destination).
+    from backend.services.settings_service import get_preorder_allowed_warehouses
+
+    try:
+        _allowed_raw = await get_preorder_allowed_warehouses(db, project_id)
+        preorder_allowed: set[str] | None = {_normalize_acceptance_wh(w) for w in _allowed_raw if w}
+    except Exception as e:  # pragma: no cover — graceful degradation (settings load)
+        # Не смогли прочитать whitelist → None (полный legacy fail-open), НЕ set():
+        # блокировать ⌛-склады по «пустому» whitelist на транзиентном сбое настроек
+        # значило бы увести товар, который юзер, возможно, хотел предзаявить.
+        logger.warning(f"acceptance.preorder_whitelist_load_failed: {e}")
+        preorder_allowed = None
+
     redis = await get_redis() if _redis_client is None else _redis_client
 
     # Пер-баркодный кэш: живой вызов WB — только по недостающим баркодам.
@@ -937,7 +1040,9 @@ async def check_acceptance_and_redistribute(
     if not missing:
         # Distribution пересчитываем по СВЕЖИМ количествам запроса — кэш хранит
         # только availability.
-        return _apply_distribution(items, availability_per_barcode, cache_hit=True)
+        return _apply_distribution(
+            items, availability_per_barcode, cache_hit=True, preorder_allowed=preorder_allowed
+        )
 
     # Live WB API call — только missing (при force=true это все баркоды батча).
     api_key = await get_wb_key(db, project_id, "wb")
@@ -977,7 +1082,9 @@ async def check_acceptance_and_redistribute(
         except Exception as e:  # pragma: no cover
             logger.warning(f"acceptance.cache_set_failed: {e}")
 
-    return _apply_distribution(items, availability_per_barcode, cache_hit=False)
+    return _apply_distribution(
+        items, availability_per_barcode, cache_hit=False, preorder_allowed=preorder_allowed
+    )
 
 
 def _apply_distribution(
@@ -985,6 +1092,7 @@ def _apply_distribution(
     availability_per_barcode: dict[str, dict[str, dict]],
     *,
     cache_hit: bool,
+    preorder_allowed: set[str] | None = None,
 ) -> dict:
     """Run pure split + redistribute over per-item distributions.
 
@@ -1017,7 +1125,9 @@ def _apply_distribution(
             )
             continue
 
-        splits, moves = _split_distribution_by_package_type(distribution, availability)
+        splits, moves = _split_distribution_by_package_type(
+            distribution, availability, preorder_allowed=preorder_allowed
+        )
 
         for m in moves:
             out_moves.append(

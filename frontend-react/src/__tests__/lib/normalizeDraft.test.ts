@@ -310,4 +310,33 @@ describe('normalizeDraft — as_is («Оставить так»): частичн
         expect(second.changed).toBe(false);
         expect(sumTgt(second.rows)).toBe(sumTgt(first.rows));
     });
+
+    it('as_is-РОССЫПЬ добивается до целого короба из свободного ФФ (не везёт неполный короб)', () => {
+        // 86 шт, ppb=10 → 8 коробов + 6 россыпь. as_is освобождает от ПАЛЛЕТ-среза, но НЕ
+        // от короб-инварианта: россыпь добивается из свободного ФФ (4 шт) до 90 (9 коробов).
+        const res = normalizeDraft([asIsRow(300, 86)], { ...ctx, freeByNm: { 300: { 1: 4 } } });
+        expect(res.rows).toHaveLength(1);
+        expect(res.rows[0].as_is).toBe(true);                                       // остаётся частичной паллетой
+        expect(sumTgt(res.rows)).toBe(90);                                          // добито до целых коробов
+        for (const q of Object.values(res.rows[0].tgt)) expect(q % PPB).toBe(0);    // НЕТ россыпи
+        expect(res.changed).toBe(true);
+    });
+
+    it('as_is-РОССЫПЬ без свободного ФФ: под-коробочный остаток срезан на ФФ (не едет россыпью)', () => {
+        // 86 шт, ppb=10, ФФ пуст → срез до 80 (8 целых коробов), 6 на ФФ. as_is остаётся.
+        const res = normalizeDraft([asIsRow(300, 86)], ctx);
+        expect(res.rows).toHaveLength(1);
+        expect(res.rows[0].as_is).toBe(true);
+        expect(sumTgt(res.rows)).toBe(80);
+        for (const q of Object.values(res.rows[0].tgt)) expect(q % PPB).toBe(0);    // НЕТ россыпи
+        expect(res.releasedUnits).toBe(6);
+    });
+
+    it('as_is из ЦЕЛЫХ коробов (< паллеты) не трогается: короб-инвариант уже соблюдён', () => {
+        // 80 = 8 целых коробов → короб-округление no-op, паллет-срез пропущен (as_is).
+        const res = normalizeDraft([asIsRow(300, 80)], ctx);
+        expect(res.rows).toHaveLength(1);
+        expect(sumTgt(res.rows)).toBe(80);
+        expect(res.changed).toBe(false);
+    });
 });

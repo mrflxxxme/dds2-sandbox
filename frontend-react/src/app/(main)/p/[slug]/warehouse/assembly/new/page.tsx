@@ -479,9 +479,14 @@ export default function AssemblyNewPage() {
                                 type="number"
                                 min={0}
                                 step={0.1}
-                                value={palletWeightKg}
+                                value={palletWeightKg || ''}
                                 onChange={e => setPalletWeightKg(Number(e.target.value) || 0)}
+                                disabled
+                                title="Вес считается автоматически из справочника «Вес по баркодам»"
                             />
+                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                                Авто из справочника «Вес по баркодам»
+                            </div>
                         </div>
                         <div className="form-group" style={{ flex: 1 }}>
                             <label className="form-label">Общий вес</label>

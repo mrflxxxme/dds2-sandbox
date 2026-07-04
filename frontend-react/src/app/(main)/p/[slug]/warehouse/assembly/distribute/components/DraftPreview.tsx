@@ -103,6 +103,8 @@ export default function DraftPreview({
     const router = useRouter();
 
     const [committing, setCommitting] = useState(false);
+    // ФФ, по которому сейчас идёт частичный commit (для лейбла кнопки в его шапке).
+    const [committingFfId, setCommittingFfId] = useState<number | null>(null);
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
     // Раскрытые манифесты паллет «📐 Раскладка» по ключу `${ffId}::${wb}::${pkg}`.
     const [manifestOpen, setManifestOpen] = useState<Set<string>>(new Set());
@@ -185,6 +187,16 @@ export default function DraftPreview({
         });
     }, [allLines, query, selectedWbs, selectedSubjects, selectedBrands, nmMeta]);
     const ffGroups = useMemo(() => groupByFf(lines), [lines]);
+
+    // Commit «этого ФФ» шлёт ВЕСЬ склад-ФФ (backend игнорирует фильтры отображения),
+    // поэтому счётчик кнопки/подтверждения берём из ПОЛНОГО (нефильтрованного) состава,
+    // а не из отфильтрованного вида — иначе «показано ≠ создано» на необратимых заявках.
+    const ffAllReqCount = useMemo(() => {
+        const m = new Map<number, number>();
+        for (const g of groupByFf(allLines)) m.set(g.ffId, reqCountOf(g.lines));
+        return m;
+    }, [allLines]);
+    const filtersActive = query.trim() !== '' || selectedWbs.size > 0 || selectedSubjects.size > 0 || selectedBrands.size > 0;
 
     // Присутствующие типы упаковки в отфильтрованном наборе (для раздельных секций
     // в виде «Карточки»). Порядок фиксированный: короб → моно → сейф.
@@ -489,6 +501,43 @@ export default function DraftPreview({
         }
     }, [draftId, ensureSaved, palletCounts, effectiveWholeOnly, wholeSupplies, router, slug, onToast, onReloadDraft]);
 
+    // Частичный commit ТОЛЬКО одного склада-ФФ (источника): заявки из порций этого ФФ,
+    // порции других ФФ остаются в черновике (backend карвит остаток по allocatePairs).
+    const handleCreateFf = useCallback(async (ffId: number, ffName: string, reqCount: number) => {
+        if (!draftId) return;
+        if (!window.confirm(`Создать ${formatNumber(reqCount, 0)} заявок со ВСЕГО склада-ФФ «${ffName}» (весь его товар в черновике)? Порции других складов останутся в черновике.`)) return;
+        setCommitting(true);
+        setCommittingFfId(ffId);
+        try {
+            const saved = await ensureSaved();
+            if (!saved) { setCommitting(false); setCommittingFfId(null); return; }
+            const resp = await api.commitAssemblyDraft(draftId, undefined, palletCounts, undefined, ffId);
+            const ids = resp.created_request_ids || [];
+            let leftoverRows = 0;
+            try {
+                const fresh = await api.getAssemblyDraft(draftId);
+                leftoverRows = fresh.distribution.rows?.length ?? 0;
+            } catch { leftoverRows = 0; }
+            onToast(`Создано заявок со склада «${ffName}»: ${ids.length}${leftoverRows > 0 ? `. Осталось строк в черновике: ${leftoverRows}` : ''}`, 'success');
+            if (leftoverRows > 0) {
+                onReloadDraft();
+                setCommitting(false);
+                setCommittingFfId(null);
+            } else {
+                // Черновик опустел (это был единственный ФФ) → к списку/заявке.
+                setTimeout(() => {
+                    if (ids.length === 1) router.push(`/p/${slug}/warehouse/assembly/${ids[0]}`);
+                    else if (ids.length > 1) router.push(`/p/${slug}/warehouse/assembly?just_created=${ids.join(',')}`);
+                    else router.push(`/p/${slug}/warehouse/assembly`);
+                }, 700);
+            }
+        } catch (e: unknown) {
+            onToast(e instanceof Error ? e.message : 'Ошибка создания сборок', 'error');
+            setCommitting(false);
+            setCommittingFfId(null);
+        }
+    }, [draftId, ensureSaved, palletCounts, router, slug, onToast, onReloadDraft]);
+
     const pkgBadge = (pkg: PackageType) => (
         <span className={`badge ${PKG_BADGE[pkg] || 'badge-secondary'}`} style={{ fontSize: 10 }}>{PKG_LABEL_RU[pkg] || pkg}</span>
     );
@@ -515,6 +564,16 @@ export default function DraftPreview({
                     </button>
                     <button className="btn btn-secondary btn-sm" onClick={e => { e.stopPropagation(); exportFf(g.ffId, g.lines); }} title={`Выгрузить пикинг-лист склада «${ffName}» в Excel`}>
                         📥 Выгрузить
+                    </button>
+                    <button
+                        className="btn btn-success btn-sm"
+                        onClick={e => { e.stopPropagation(); handleCreateFf(g.ffId, ffName, ffAllReqCount.get(g.ffId) ?? reqCountOf(g.lines)); }}
+                        disabled={committing || effectiveWholeOnly || filtersActive}
+                        title={filtersActive
+                            ? 'Снимите фильтры отображения — commit создаёт ВЕСЬ склад-ФФ, а не отфильтрованный вид'
+                            : `Создать заявки ТОЛЬКО склада «${ffName}» (${formatNumber(ffAllReqCount.get(g.ffId) ?? reqCountOf(g.lines), 0)} заявок, весь ФФ); порции других складов останутся в черновике`}
+                    >
+                        {committingFfId === g.ffId ? 'Создание…' : `✓ Создать заявки этого ФФ (${formatNumber(ffAllReqCount.get(g.ffId) ?? reqCountOf(g.lines), 0)})`}
                     </button>
                 </div>
                 {isOpen && (
@@ -565,14 +624,15 @@ export default function DraftPreview({
                                                         const palUnits = p.items.reduce((s, it) => s + it.units, 0);
                                                         const palBoxes = p.items.reduce((s, it) => { const ppb = nmPpb.get(it.nmId) || 0; return s + (ppb > 0 ? Math.round(it.units / ppb) : 0); }, 0);
                                                         // «Из предброни»: паллета содержит хоть один SKU, чей контент
-                                                        // приехал в черновик из предброни (Оставить так/Дозабить/консолидация).
+                                                        // перенесён в черновик из предброни ВРУЧНУЮ (Оставить так/Дозабить/
+                                                        // Перенести паллеты). Авто-консолидация метку не ставит.
                                                         const fromPrebook = !!prebookOrigin && p.items.some(it => prebookOrigin.has(`${it.nmId}::${wb}`));
                                                         return (
                                                             <div key={p.palletNo} style={{ border: `1px solid ${low ? 'var(--color-warning)' : 'var(--color-border)'}`, borderRadius: 10, padding: '8px 10px' }}>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
                                                                     <span className="badge badge-secondary" style={{ fontSize: 10 }}>Паллета {formatNumber(p.palletNo, 0)}</span>
                                                                     {fromPrebook && (
-                                                                        <span className="badge badge-info" style={{ fontSize: 10 }} title="Содержимое этой паллеты приехало в черновик из предброни (Оставить так / Дозабить / авто-консолидация)">🅿️ из предброни</span>
+                                                                        <span className="badge badge-info" style={{ fontSize: 10 }} title="Эту паллету ты перенёс в черновик из предброни вручную (Оставить так / Дозабить / Перенести паллеты). Авто-консолидация по приёмке WB бейдж не ставит.">🅿️ из предброни</span>
                                                                     )}
                                                                     <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{formatNumber(p.items.length, 0)} арт. · {formatNumber(palBoxes, 0)} кор · {formatNumber(palUnits, 0)} шт</span>
                                                                     <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: low ? 700 : 600, color: low ? 'var(--color-warning)' : 'var(--color-success)' }} title={low ? 'Паллета заполнена менее 60% — неполная' : 'Заполнение паллеты'}>
