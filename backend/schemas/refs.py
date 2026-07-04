@@ -187,3 +187,11 @@ class PalletBoxesBySizePayload(BaseModel):
     `sizes`: {canonical box_size → коробок на паллету}. Перебивает геометрию."""
 
     sizes: dict[str, int]
+
+
+class BoxWeightPayload(BaseModel):
+    """Вес пустой коробки (кг) — одно число на проект. Входит в расчётный вес
+    отгрузки сборки: нетто товаров + вес_коробки × число коробов (тара паллеты
+    не учитывается). Отрицательное нормализуется в 0 в сервисе."""
+
+    weight_kg: Decimal

@@ -255,6 +255,12 @@ class AssemblyRequestResponse(BaseModel):
     goods_weight_kg: Decimal | None = None
     # ШК позиций без веса в справочнике (дозаполнить в настройках).
     weight_missing_barcodes: list[str] = []
+    # Число физических коробов = Σ ⌈quantity / кратность⌉ (кратность per склад заявки).
+    boxes_count: int = 0
+    # Расчётный ВЕС ОТГРУЗКИ = нетто товаров + вес_коробки × boxes_count (тара
+    # паллеты НЕ учитывается). Кандидат для авто-подстановки в общий вес. None —
+    # если нетто-веса нет. Ручной pallet_weight_kg НЕ перезаписывает.
+    suggested_total_weight_kg: Decimal | None = None
     vehicle_info: str | None = None
     vehicle_brand: str | None = None
     driver_phone: str | None = None

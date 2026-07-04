@@ -2499,8 +2499,9 @@ class TestListBuildBatched:
                 await _build_response(db_session, req)
         per_row = c2["n"]
 
-        # Батч-путь дешевле и ограничен константой (≤ число prefetch-запросов),
-        # per-row растёт с числом строк. Константа включает резолв веса товаров
-        # (Nomenclature + машина) в prefetch — не масштабируется по строкам.
+        # Батч-путь дешевле и ограничен КОНСТАНТОЙ (не масштабируется по строкам),
+        # per-row растёт с числом заявок. Константа включает prefetch веса товаров
+        # (Nomenclature + машина), кратности коробки (машина + ручные per-ФФ +
+        # SKU-override — один батч на ВСЕ склады) и вес коробки (настройка проекта).
         assert batched < per_row
-        assert batched <= 8
+        assert batched <= 12
