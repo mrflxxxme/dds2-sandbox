@@ -20,6 +20,7 @@ import { buildPrebookGroups } from '@/lib/assembly/buildPrebookGroups';
 import NeedMatrixCell from '../components/NeedMatrixCell';
 import AcceptanceBanner, { type AcceptanceSummary } from '../components/AcceptanceBanner';
 import PrebookView, { type PrebookAcceptanceMark } from '../components/PrebookView';
+import PreDistPreview from '../components/PreDistPreview';
 import { seedNewcomerWholeBoxes, type SeedAnchor } from '@/lib/assembly/coldStartSeed';
 import type {
     AcceptanceCheckPerItem,
@@ -75,7 +76,7 @@ export default function PreDistVehiclePage() {
     const [distRows, setDistRows] = useState<AssemblyDraftRow[] | null>(null);
     // Предбронь машины (под-паллетные хвосты pallet-mode): короб=«Дозабить» / моно=«Предзаявка».
     const [prebookRows, setPrebookRows] = useState<AssemblyDraftRow[]>([]);
-    const [subTab, setSubTab] = useState<'dist' | 'prebook'>('dist');
+    const [subTab, setSubTab] = useState<'dist' | 'preview' | 'prebook'>('dist');
     // Интерактив предброни — клиентские решения (сбрасываются при пересчёте раскладки).
     // Машина = один источник (ФФ разгрузки) + всё уходит в PRE_DISTRIBUTED-заявки, поэтому
     // «положительные» действия (Оставить так/Дозабить/Предзаявка) = ПЕРЕВОД направления в
@@ -585,6 +586,7 @@ export default function PreDistVehiclePage() {
             {/* Под-табы в скоупе машины (зеркалят раздел, данные — из машины). */}
             <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
                 <button className={`btn ${subTab === 'dist' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('dist')}>🚚 Раскладка</button>
+                <button className={`btn ${subTab === 'preview' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('preview')}>📋 Заявки</button>
                 <button className={`btn ${subTab === 'prebook' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('prebook')}>
                     🅿️ Предбронь{prebookUnits > 0 ? ` (${formatNumber(prebookUnits, 0)})` : ''}
                 </button>
@@ -620,6 +622,17 @@ export default function PreDistVehiclePage() {
                         onDraftPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
                     />
                 )
+            ) : subTab === 'preview' ? (
+                <PreDistPreview
+                    shipRows={shipRows}
+                    newcomerNmIds={newcomerSet}
+                    nmPpb={nmPpb}
+                    nmBoxSize={nmBoxSize}
+                    palletOverrides={palletOverrides}
+                    vehicleNo={vehicle?.order_no || ''}
+                    onSubmit={handleSubmit}
+                    submitting={submitting}
+                />
             ) : (<>
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-muted)', fontSize: 13 }}>
                 Раскладка груза машины по WB-складам как в «Потребность по складам» (потребность · приёмка · целые коробы и паллеты),
