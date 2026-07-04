@@ -359,8 +359,9 @@ async def authenticate_tma_user(
             detail="account_not_linked",
         )
 
-    # Generate tokens
-    access_token = create_access_token(dds_user.id, dds_user.username)
+    # Generate tokens — carry is_external so block_external_users enforces isolation
+    # on main-API paths (without it, external FF/lender accounts escape the guard).
+    access_token = create_access_token(dds_user.id, dds_user.username, is_external=dds_user.is_external)
     refresh_token = await create_refresh_token(dds_user.id)
 
     # Get user projects

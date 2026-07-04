@@ -10,6 +10,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas import CustomsAllocSchema, CustomsDTUpdate, CustomsTopupSchema
 from backend.services import planning as planning_service
+from backend.utils.rate_limit import rate_limit_import, rate_limit_write
 
 router = APIRouter()
 
@@ -43,7 +44,7 @@ async def get_customs_alloc(
     return await planning_service.get_customs_alloc(db, project.id, topup_txn_id)
 
 
-@router.post("/customs/alloc", response_model=CustomsAllocSchema)
+@router.post("/customs/alloc", response_model=CustomsAllocSchema, dependencies=[Depends(rate_limit_write)])
 async def create_alloc(
     payload: CustomsAllocSchema,
     project: Project = Depends(get_current_project),
@@ -52,7 +53,7 @@ async def create_alloc(
     return await planning_service.create_alloc(db, project.id, payload.model_dump(exclude={"id"}))
 
 
-@router.delete("/customs/alloc/{alloc_id}")
+@router.delete("/customs/alloc/{alloc_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_alloc(
     alloc_id: int,
     project: Project = Depends(get_current_project),
@@ -67,7 +68,7 @@ async def delete_alloc(
 # ─── Customs DT (FTS report) ─────────────────────────────────────────────────
 
 
-@router.post("/customs_dt/upload_fts")
+@router.post("/customs_dt/upload_fts", dependencies=[Depends(rate_limit_import)])
 async def upload_fts_report(
     file: UploadFile = File(...),
     project: Project = Depends(get_current_project),
@@ -114,7 +115,7 @@ async def get_customs_dt_list(
     ]
 
 
-@router.put("/customs_dt/{dt_id}")
+@router.put("/customs_dt/{dt_id}", dependencies=[Depends(rate_limit_write)])
 async def update_customs_dt(
     dt_id: int,
     payload: CustomsDTUpdate,
@@ -127,7 +128,7 @@ async def update_customs_dt(
     return {"ok": True}
 
 
-@router.delete("/customs_dt/{dt_id}")
+@router.delete("/customs_dt/{dt_id}", dependencies=[Depends(rate_limit_write)])
 async def delete_customs_dt(
     dt_id: int,
     project: Project = Depends(get_current_project),

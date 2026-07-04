@@ -53,16 +53,20 @@ async def get_sync_project_ids() -> list[int]:
         has_global = global_key.scalar() is not None
 
         if has_global:
-            result = await db.execute(select(Project.id))
+            result = await db.execute(
+                select(Project.id).where(Project.is_deleted == False)  # noqa: E712
+            )
             return [r[0] for r in result if r[0]]
         else:
             result = await db.execute(
                 select(IntegrationKey.project_id)
+                .join(Project, Project.id == IntegrationKey.project_id)
                 .where(
                     IntegrationKey.service.in_(["wb", "wb_analytics"]),
-                    IntegrationKey.is_active == True,
-                    IntegrationKey.is_deleted == False,
+                    IntegrationKey.is_active == True,  # noqa: E712
+                    IntegrationKey.is_deleted == False,  # noqa: E712
                     IntegrationKey.project_id.isnot(None),
+                    Project.is_deleted == False,  # noqa: E712
                 )
                 .distinct()
             )
