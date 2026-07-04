@@ -49,6 +49,43 @@ class JointSibling(BaseModel):
     ff_request_number: str | None = None  # внутренний номер заявки в ФФ-портале (склада-источника)
 
 
+# ─── Раскладка по паллетам (pallet manifest) ────────────────────────────────
+# Ручная перетасовка коробов по паллетам на деталке сборки. Хранится в JSONB
+# AssemblyRequest.pallet_manifest как список PalletBox; NULL = «авто» (раскладка
+# считается на лету). Инвариант сохранения (строгий, иначе 409):
+#   Σ(box_count · box_qty[barcode] + loose_units) по всем паллетам == quantity позиции.
+
+
+class BoxContent(BaseModel):
+    """Содержимое одного SKU внутри паллеты: целые короба + хвост-россыпь."""
+
+    barcode: str
+    box_count: int = 0  # целых коробов этого SKU на паллете
+    loose_units: int = 0  # штук россыпью (хвост < кратности короба)
+
+
+class PalletBox(BaseModel):
+    """Одна физическая паллета: номер + короба/россыпь по SKU."""
+
+    pallet_no: int
+    boxes: list[BoxContent] = []
+
+
+class PalletManifest(BaseModel):
+    """Полная раскладка отгрузки по паллетам (список PalletBox)."""
+
+    pallets: list[PalletBox] = []
+
+
+class PalletManifestUpdate(BaseModel):
+    """Тело PATCH .../pallet-manifest.
+
+    pallets=null → сброс к «авто» (очистить поле); непустой список → сохранить
+    ручную раскладку (проходит строгий инвариант Σ==quantity, иначе 409)."""
+
+    pallets: list[PalletBox] | None = None
+
+
 # ─── Request schemas ────────────────────────────────────────────────────────
 
 
@@ -209,7 +246,15 @@ class AssemblyRequestResponse(BaseModel):
     actual_ready_date: date | None = None
     pallets_count: int
     pallet_weight_kg: Decimal
-    total_weight_kg: Decimal | None = None  # computed: pallets x weight
+    total_weight_kg: Decimal | None = None  # computed: pallets x weight (тара, ручной)
+    # Ручная раскладка коробов по паллетам (NULL/[] = «авто», считается на лету).
+    pallet_manifest: list[PalletBox] | None = None
+    # Расчётный вес товаров (нетто) = Σ(quantity × Nomenclature.weight_kg[barcode]).
+    # None — если ни у одной позиции нет веса. Показывается отдельно, ручной
+    # pallet_weight_kg НЕ перезаписывает.
+    goods_weight_kg: Decimal | None = None
+    # ШК позиций без веса в справочнике (дозаполнить в настройках).
+    weight_missing_barcodes: list[str] = []
     vehicle_info: str | None = None
     vehicle_brand: str | None = None
     driver_phone: str | None = None
