@@ -1816,6 +1816,10 @@ export interface AssemblyRequest {
   goods_weight_kg?: number | string | null;
   /** ШК позиций без веса в справочнике (дозаполнить в настройках) */
   weight_missing_barcodes?: string[];
+  /** число коробов (для расчёта веса отгрузки = нетто + вес_коробки × коробов) */
+  boxes_count?: number;
+  /** расчётный ВЕС ОТГРУЗКИ (кандидат в «Общий вес»): нетто товаров + тара коробов; Decimal — приходит строкой; null если нет нетто-веса */
+  suggested_total_weight_kg?: number | string | null;
   vehicle_info?: string;
   vehicle_brand?: string;
   driver_phone?: string;
@@ -2015,6 +2019,12 @@ export type AssemblyBulkStatus = 'IN_PROGRESS' | 'READY';
 export interface AssemblyBulkStatusResult {
   updated: AssemblyRequest[];
   skipped: AssemblyBulkDeleteSkip[];
+}
+
+/** Массовое авто-заполнение «Общего веса» (нетто товаров + тара коробов) одним запросом. */
+export interface AssemblyApplyWeightBulkResult {
+  applied: AssemblyRequest[];
+  skipped: { id: number; number: string; reason: string }[];
 }
 
 // ─── Gazelka integration ─────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
 import type { AssemblyBulkStatus, AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, Warehouse } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
+import { isWeightAutofillEligible, weightAutofillIds } from '@/lib/utils/assemblyWeight';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -238,6 +239,71 @@ function EditableCell({
                 </svg>
             )}
             <span className="font-medium text-sm">{displayVal}</span>
+        </div>
+    );
+}
+
+// ─── Weight Cell (inline-edit + авто-подсказка) ──────────────────────────────
+// Обычная inline-редактируемая ячейка веса; если заявка «В сборке» с пустым весом,
+// а бэкенд отдал расчётный вес отгрузки — под инпутом показываем «≈ N кг» + кнопку
+// «✓» (применить). weight_missing_barcodes → жёлтый значок «нет веса у N арт.».
+
+function WeightCell({
+    row,
+    editable,
+    applying,
+    onSave,
+    onApply,
+}: {
+    row: AssemblyRequest;
+    editable: boolean;
+    applying: boolean;
+    onSave: (val: number) => void;
+    onApply: () => void;
+}) {
+    const eligible = isWeightAutofillEligible(row);
+    const missing = row.weight_missing_barcodes?.length ?? 0;
+    const suggested = eligible ? Number(row.suggested_total_weight_kg) : 0;
+
+    return (
+        <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+            <EditableCell
+                value={row.total_weight_kg || 0}
+                suffix="кг"
+                editable={editable}
+                highlight={row.status === 'IN_PROGRESS' && (!row.total_weight_kg || row.total_weight_kg <= 0)}
+                step={0.1}
+                onSave={onSave}
+            />
+            {eligible && (
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={(e) => e.stopPropagation()}>
+                    <span
+                        style={{ fontSize: 12, color: 'var(--color-text-muted)' }}
+                        title="Расчётный вес отгрузки: нетто товаров + тара коробов"
+                    >
+                        ≈ {formatNumber(suggested, 1)} кг
+                    </span>
+                    <button
+                        type="button"
+                        className="badge badge-info"
+                        style={{ fontSize: 11, padding: '1px 7px', cursor: 'pointer', border: 'none', opacity: applying ? 0.6 : 1 }}
+                        title="Проставить расчётный вес отгрузки в «Общий вес»"
+                        disabled={applying}
+                        onClick={(e) => { e.stopPropagation(); onApply(); }}
+                    >
+                        {applying ? '…' : '✓'}
+                    </button>
+                    {missing > 0 && (
+                        <span
+                            className="badge badge-warning"
+                            style={{ fontSize: 11, padding: '1px 6px' }}
+                            title="Нет веса у части артикулов — расчёт неполный, дозаполните вес в настройках"
+                        >
+                            ⚠ нет веса у {formatNumber(missing, 0)} арт.
+                        </span>
+                    )}
+                </div>
+            )}
         </div>
     );
 }
@@ -551,6 +617,23 @@ export default function AssemblyListPage() {
         }
     };
 
+    // Точечное авто-заполнение «Общего веса» из расчётного веса отгрузки (кнопка «✓»
+    // в ячейке-подсказке). Бэкенд возвращает обновлённую заявку — подменяем строку.
+    const [applyingWeightId, setApplyingWeightId] = useState<number | null>(null);
+    const handleApplyWeight = async (item: AssemblyRequest) => {
+        if (applyingWeightId != null) return;
+        setApplyingWeightId(item.id);
+        try {
+            const updated = await api.applyGoodsWeight(item.id);
+            updateItemLocal(item.id, updated);
+            setToast({ message: `Вес проставлен: ${formatNumber(Number(updated.total_weight_kg), 1)} кг`, type: 'success' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка расчёта веса', type: 'error' });
+        } finally {
+            setApplyingWeightId(null);
+        }
+    };
+
     const handleDateChange = async (item: AssemblyRequest, newDate: string) => {
         const oldDate = item.estimated_ready_date;
         updateItemLocal(item.id, { estimated_ready_date: newDate || undefined });
@@ -671,6 +754,36 @@ export default function AssemblyListPage() {
             setBulkStatusing(null);
         }
     }, [selectedIds, items, bulkStatusing]);
+
+    // ─── Массовое авто-заполнение «Общего веса» ──────────────────────────────
+    // Собирает id всех ВИДИМЫХ строк-кандидатов (IN_PROGRESS + пустой вес + есть
+    // расчётный вес отгрузки) и проставляет их одним запросом.
+    const [bulkWeighting, setBulkWeighting] = useState(false);
+    const weightAutofillCandidates = useMemo(() => weightAutofillIds(items), [items]);
+    const handleBulkApplyWeight = useCallback(async () => {
+        if (bulkWeighting) return;
+        const ids = weightAutofillIds(items);
+        if (ids.length === 0) return;
+        if (!confirm(`Проставить расчётный вес отгрузки для ${formatNumber(ids.length, 0)} заявок «В сборке»?`)) return;
+        setBulkWeighting(true);
+        try {
+            const res = await api.applyGoodsWeightBulk(ids);
+            const byId = new Map(res.applied.map(r => [r.id, r]));
+            setItems(prev => prev.map(i => byId.get(i.id) ?? i));
+            const note = res.skipped.length > 0
+                ? ` · пропущено ${formatNumber(res.skipped.length, 0)}: ${res.skipped.slice(0, 3).map(s => `${s.number || s.id} — ${s.reason}`).join('; ')}${res.skipped.length > 3 ? ' …' : ''}`
+                : '';
+            setToast({
+                message: `Вес проставлен: ${formatNumber(res.applied.length, 0)}${note}`,
+                type: res.applied.length > 0 ? 'success' : 'error',
+            });
+            await load();
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка массового расчёта веса', type: 'error' });
+        } finally {
+            setBulkWeighting(false);
+        }
+    }, [items, bulkWeighting, load]);
 
     // ─── Columns (TanStackDataTable: сортировка + Excel) ────────────────────
     // Inline-редактирование (палеты/вес/дата/статус) и кнопки-действия живут
@@ -826,13 +939,12 @@ export default function AssemblyListPage() {
             key: 'total_weight_kg', label: 'Общий вес', align: 'right',
             getValue: (row: AssemblyRequest) => row.total_weight_kg || 0,
             render: (_v, row: AssemblyRequest) => (
-                <EditableCell
-                    value={row.total_weight_kg || 0}
-                    suffix="кг"
+                <WeightCell
+                    row={row}
                     editable={EDITABLE_STATUSES.includes(row.status)}
-                    highlight={row.status === 'IN_PROGRESS' && (!row.total_weight_kg || row.total_weight_kg <= 0)}
-                    step={0.1}
+                    applying={applyingWeightId === row.id}
                     onSave={(val) => handleWeightChange(row, val)}
+                    onApply={() => handleApplyWeight(row)}
                 />
             ),
             exportValue: (row: AssemblyRequest) => row.total_weight_kg || 0,
@@ -1057,29 +1169,43 @@ export default function AssemblyListPage() {
                     pageSize={CLIENT_PAGE_SIZE}
                     exportName="assembly_requests"
                     actions={
-                        selectedIds.size > 0 ? (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedIds.size, 0)}</span>
-                                <button className="btn btn-secondary btn-sm" onClick={() => handleBulkStatus('IN_PROGRESS')} disabled={bulkDeleting || bulkStatusing != null}
-                                    title="Перевести все выбранные в «В сборке» одним запросом">
-                                    {bulkStatusing === 'IN_PROGRESS' ? 'Перевожу…' : '→ В сборке'}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            {/* Массовое авто-заполнение веса — всегда доступно, если есть кандидаты
+                                (IN_PROGRESS + пустой вес + расчётный вес отгрузки), независимо от выбора. */}
+                            {weightAutofillCandidates.length > 0 && (
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={handleBulkApplyWeight}
+                                    disabled={bulkWeighting || bulkDeleting || bulkStatusing != null}
+                                    title="Проставить расчётный вес отгрузки всем заявкам «В сборке» с пустым весом"
+                                >
+                                    {bulkWeighting ? 'Считаю…' : `⚖️ Проставить авто (вес) · ${formatNumber(weightAutofillCandidates.length, 0)}`}
                                 </button>
-                                <button className="btn btn-success btn-sm" onClick={() => handleBulkStatus('READY')} disabled={bulkDeleting || bulkStatusing != null}
-                                    title="Перевести все выбранные в «Готово» одним запросом (нужны поставка WB, палеты и вес)">
-                                    {bulkStatusing === 'READY' ? 'Перевожу…' : '→ Готово'}
-                                </button>
-                                <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting || bulkStatusing != null}>
-                                    {bulkDeleting ? 'Удаление…' : `🗑 Удалить выбранные (${formatNumber(selectedIds.size, 0)})`}
-                                </button>
-                                <button className="btn btn-secondary btn-sm" onClick={() => setSelectedIds(new Set())}>Снять</button>
-                            </div>
-                        ) : (
-                            deletableCount > 0 ? (
-                                <button className="btn btn-secondary btn-sm" onClick={selectAllDeletable} title="Выбрать все заявки, которые ещё не на WB">
-                                    ☑ Выбрать все удаляемые ({formatNumber(deletableCount, 0)})
-                                </button>
-                            ) : undefined
-                        )
+                            )}
+                            {selectedIds.size > 0 ? (
+                                <>
+                                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedIds.size, 0)}</span>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => handleBulkStatus('IN_PROGRESS')} disabled={bulkDeleting || bulkStatusing != null}
+                                        title="Перевести все выбранные в «В сборке» одним запросом">
+                                        {bulkStatusing === 'IN_PROGRESS' ? 'Перевожу…' : '→ В сборке'}
+                                    </button>
+                                    <button className="btn btn-success btn-sm" onClick={() => handleBulkStatus('READY')} disabled={bulkDeleting || bulkStatusing != null}
+                                        title="Перевести все выбранные в «Готово» одним запросом (нужны поставка WB, палеты и вес)">
+                                        {bulkStatusing === 'READY' ? 'Перевожу…' : '→ Готово'}
+                                    </button>
+                                    <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting || bulkStatusing != null}>
+                                        {bulkDeleting ? 'Удаление…' : `🗑 Удалить выбранные (${formatNumber(selectedIds.size, 0)})`}
+                                    </button>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => setSelectedIds(new Set())}>Снять</button>
+                                </>
+                            ) : (
+                                deletableCount > 0 ? (
+                                    <button className="btn btn-secondary btn-sm" onClick={selectAllDeletable} title="Выбрать все заявки, которые ещё не на WB">
+                                        ☑ Выбрать все удаляемые ({formatNumber(deletableCount, 0)})
+                                    </button>
+                                ) : null
+                            )}
+                        </div>
                     }
                 />
             )}
