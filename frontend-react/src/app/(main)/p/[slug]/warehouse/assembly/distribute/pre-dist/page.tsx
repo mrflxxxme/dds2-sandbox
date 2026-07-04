@@ -3,20 +3,22 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
-import { parseBoxSize, palletsForLines, maxPalletHeightCm, type PalletLine } from '@/lib/utils/boxPallet';
+import { parseBoxSize, palletsForLines, maxPalletHeightCm, effectiveBoxesPerPallet, type PalletLine } from '@/lib/utils/boxPallet';
+import { palletFootprint } from '@/lib/assembly/prebookFootprint';
 import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constants/localization';
 import { Toast } from '@/components';
-import BoxDetailCell from '@/components/BoxDetailCell';
 import {
     applyAcceptanceSplits,
     buildPoolSkus,
     enrichPoolRows,
-    finalizePoolRows,
+    finalizePoolDistribution,
     rowsToPreDistRows,
     type AcceptanceSplitMap,
     type EnrichedSku,
     type PoolDistInput,
 } from '@/lib/assembly/preDistribution';
+import NeedMatrixCell from '../components/NeedMatrixCell';
+import AcceptanceBanner, { type AcceptanceSummary } from '../components/AcceptanceBanner';
 import { seedNewcomerWholeBoxes, type SeedAnchor } from '@/lib/assembly/coldStartSeed';
 import type {
     AssemblyDraftRow,
@@ -24,8 +26,6 @@ import type {
     PreDistVehiclePool,
     StockNeedResponse,
 } from '@/types/api';
-
-const PKG_LABEL: Record<PackageType, string> = { BOX: 'Короб', MONOPALLET: 'Моно', SUPERSAFE: 'Сейф' };
 
 /** Сколько коробов из штук при кратности `ppb`. */
 const boxesOf = (qty: number, ppb: number | null | undefined): number =>
@@ -35,6 +35,98 @@ const districtRank = (d: string): number => {
     const i = (DISTRICT_ORDER as readonly string[]).indexOf(d);
     return i < 0 ? DISTRICT_ORDER.length : i;
 };
+
+/** Полупрозрачная тонировка фона колонки по округу (как в «Потребность по складам»). */
+const districtTint = (d: string): string | undefined => {
+    const c = DISTRICT_COLORS[d];
+    return c ? `color-mix(in srgb, ${c} 6%, transparent)` : undefined;
+};
+
+/** Свёрнутая группа предброни машины (короб «Дозабить» ИЛИ моно «Предзаявка»). */
+interface PrebookGroupView {
+    lines: { barcode: string; wb_warehouse_name: string; qty: number; package_type: PackageType; nm: number }[];
+    qty: number;
+    boxes: number;
+    pallets: number;
+}
+
+/** Таблица одной группы предброни (SKU × WB-склад × шт/коробов) + сводка по группе. */
+function PrebookGroupTable({ title, hint, group, nmPpb, accent }: {
+    title: string; hint: string; group: PrebookGroupView; nmPpb: Map<number, number | null>; accent: string;
+}) {
+    if (group.lines.length === 0) {
+        return (
+            <div className="glass-card" style={{ padding: 20, marginBottom: 16, color: 'var(--color-muted)', fontSize: 13 }}>
+                <div style={{ fontWeight: 600, color: 'var(--color-text)', marginBottom: 4 }}>{title}</div>
+                Пусто — хвостов этого типа нет.
+            </div>
+        );
+    }
+    return (
+        <div className="glass-card" style={{ padding: 0, marginBottom: 16, overflowX: 'auto' }}>
+            <div style={{ padding: '12px 16px', display: 'flex', gap: 16, alignItems: 'baseline', flexWrap: 'wrap', borderBottom: '1px solid var(--color-border)' }}>
+                <span style={{ fontWeight: 600, fontSize: 15, color: accent }}>{title}</span>
+                <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>{hint}</span>
+                <span style={{ marginLeft: 'auto', fontSize: 13 }}>
+                    <b>{formatNumber(group.qty, 0)}</b> шт · 📦 <b>{formatNumber(group.boxes, 0)}</b> · 🚚 ≈{formatNumber(group.pallets, 1)} паллет
+                </span>
+            </div>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead>
+                    <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-muted)', textAlign: 'right' }}>
+                        <th style={{ padding: '8px 12px', textAlign: 'left' }}>Товар (ШК)</th>
+                        <th style={{ padding: '8px 12px', textAlign: 'left' }}>WB-склад</th>
+                        <th style={{ padding: '8px 12px' }}>Шт</th>
+                        <th style={{ padding: '8px 12px' }}>Коробов</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {group.lines.map((l, i) => (
+                        <tr key={`${l.barcode}-${l.wb_warehouse_name}-${i}`} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                            <td style={{ padding: '6px 12px' }}>{l.barcode}</td>
+                            <td style={{ padding: '6px 12px' }}>{l.wb_warehouse_name}</td>
+                            <td style={{ padding: '6px 12px', textAlign: 'right' }}>{formatNumber(l.qty, 0)}</td>
+                            <td style={{ padding: '6px 12px', textAlign: 'right' }}>{formatNumber(boxesOf(l.qty, nmPpb.get(l.nm)), 0)}</td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
+/** Вкладка «🅿️ Предбронь» в скоупе машины: хвосты раскладки, поделённые
+ *  короб=«Дозабить» / моно=«Предзаявка» (из побочного выхода общего движка). */
+function PreDistPrebookTab({ box, mono, wholePallets, nmPpb }: {
+    box: PrebookGroupView; mono: PrebookGroupView; wholePallets: boolean; nmPpb: Map<number, number | null>;
+}) {
+    if (box.lines.length === 0 && mono.lines.length === 0) {
+        return (
+            <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
+                Предброни нет — вся раскладка машины набирается целыми паллетами (или ничего не разложено).
+            </div>
+        );
+    }
+    return (
+        <div>
+            <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--color-muted)' }}>
+                Хвосты раскладки машины, не набравшие целую паллету. {wholePallets
+                    ? 'В режиме «🚚 Паллеты» они остаются здесь под дозабор / предзаявку.'
+                    : 'В режиме «📦 Коробами» эти хвосты уезжают в раскладке — показаны справочно (что осталось бы под предбронь при отгрузке целыми паллетами).'}
+            </div>
+            <PrebookGroupTable
+                title="📦 Дозабить (короб)"
+                hint="целые коробы, не собравшиеся в паллету — добить до паллеты или отгрузить как есть"
+                group={box} nmPpb={nmPpb} accent="var(--color-accent)"
+            />
+            <PrebookGroupTable
+                title="📐 Предзаявка (моно)"
+                hint="моно — под предзаявку на склад без лимита приёмки (⌛)"
+                group={mono} nmPpb={nmPpb} accent="var(--color-success)"
+            />
+        </div>
+    );
+}
 
 /** Экран «Распределить машину» — открывается из вкладки «🚚 Предраспределение» (?vehicle=<id>).
  *  Полноэкранная матрица как «Потребность по складам», но источник = остатки машины (пул):
@@ -64,8 +156,11 @@ export default function PreDistVehiclePage() {
 
     // Раскладка.
     const [distRows, setDistRows] = useState<AssemblyDraftRow[] | null>(null);
+    // Предбронь машины (под-паллетные хвосты pallet-mode): короб=«Дозабить» / моно=«Предзаявка».
+    const [prebookRows, setPrebookRows] = useState<AssemblyDraftRow[]>([]);
+    const [subTab, setSubTab] = useState<'dist' | 'prebook'>('dist');
     const [distComputing, setDistComputing] = useState(false);
-    const [acceptanceNote, setAcceptanceNote] = useState<{ moved: number; dropped: number; failed: boolean } | null>(null);
+    const [acceptanceNote, setAcceptanceNote] = useState<AcceptanceSummary | null>(null);
     const [submitting, setSubmitting] = useState(false);
     // Округление: false = целые коробы (частичные паллеты ок), true = строго целые паллеты.
     // По умолчанию «коробами» — целые паллеты часто обнуляют мелкую потребность машины.
@@ -180,24 +275,35 @@ export default function PreDistVehiclePage() {
                 return;
             }
             let splitMap: AcceptanceSplitMap | null = null;
-            let moved = 0, dropped = 0, failed = false;
+            let summary: AcceptanceSummary | null = null;
             try {
                 const resp = await api.checkWbAcceptance({
                     items: skus.map(s => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
                 });
                 splitMap = new Map();
+                let moved = 0, dropped = 0, monoCount = 0, splitCount = 0;
                 for (const it of resp.items) {
                     const splits = it.splits?.length
                         ? it.splits.map(sp => ({ package_type: sp.package_type, distribution: sp.distribution }))
                         : [{ package_type: it.package_type, distribution: it.distribution }];
                     splitMap.set(`${it.nm_id}::${it.barcode}`, splits);
+                    if (splits.some(s => s.package_type === 'MONOPALLET')) monoCount++;
+                    if (splits.length > 1) splitCount++;
                 }
                 for (const m of resp.moves ?? []) { if (m.to_warehouse) moved += m.quantity; else dropped += m.quantity; }
+                summary = {
+                    checked: true, failed: false, skuCount: resp.items.length,
+                    monoCount, splitCount, movedQty: moved, droppedQty: dropped,
+                    checkedAt: resp.checked_at ?? null,
+                };
             } catch {
-                failed = true;
+                summary = { checked: false, failed: true, skuCount: 0, monoCount: 0, splitCount: 0, movedQty: 0, droppedQty: 0, checkedAt: null };
             }
             const effective = applyAcceptanceSplits(skus, splitMap);
-            const needRows = finalizePoolRows(effective, distInput, wholePallets);
+            // Pallet-mode всегда — из него берём ПРЕДБРОНЬ (под-паллетные хвосты). Раскладка экрана
+            // mode-dependent: в «🚚 Паллеты» хвосты остаются в предброни; в «📦 Коробами» — уезжают.
+            const palletDist = finalizePoolDistribution(effective, distInput, true);
+            const needRows = wholePallets ? palletDist.rows : finalizePoolDistribution(effective, distInput, false).rows;
 
             // Засев НОВИНОК (cold-start): у них нет истории продаж → потребность=0 → они
             // не попадают в раскладку по потребности (buildPoolSkus их пропускает). По
@@ -245,10 +351,11 @@ export default function PreDistVehiclePage() {
             const rows = [...needRows, ...seededRows];
             if (!signal.aborted) {
                 setDistRows(rows);
-                setAcceptanceNote({ moved, dropped, failed });
+                setPrebookRows(palletDist.prebook);
+                setAcceptanceNote(summary);
             }
         } catch (e) {
-            if (!signal.aborted) { setDistRows([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
+            if (!signal.aborted) { setDistRows([]); setPrebookRows([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
@@ -350,6 +457,28 @@ export default function PreDistVehiclePage() {
         [pool, derived],
     );
 
+    // ─── Предбронь машины: короб=«Дозабить» / моно=«Предзаявка» (из хвостов раскладки) ──
+    const prebookView = useMemo(() => {
+        // units-per-паллету per nm (footprint) = boxesPerPallet(размер) × ppb.
+        const uppOf = (nm: number): number => {
+            const ppb = nmPpb.get(nm);
+            const bpp = effectiveBoxesPerPallet(nmBoxSize.get(nm) ?? null, maxPalletHeightCm(''), palletOverrides);
+            return bpp != null && ppb && ppb > 0 ? bpp * ppb : 0;
+        };
+        const summarize = (rows: AssemblyDraftRow[]) => {
+            const lines = rowsToPreDistRows(rows)
+                .map(l => ({ ...l, nm: nmByBc.get(l.barcode) ?? 0 }))
+                .sort((a, b) => b.qty - a.qty);
+            const qty = lines.reduce((s, l) => s + l.qty, 0);
+            const boxes = lines.reduce((s, l) => s + boxesOf(l.qty, nmPpb.get(l.nm)), 0);
+            const items = rows.map(r => ({ nmId: r.nm_id, qty: Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0) }));
+            return { lines, qty, boxes, pallets: palletFootprint(items, uppOf) };
+        };
+        const box = prebookRows.filter(r => (r.package_type ?? 'BOX') === 'BOX');
+        const mono = prebookRows.filter(r => (r.package_type ?? 'BOX') !== 'BOX');
+        return { box: summarize(box), mono: summarize(mono), total: prebookRows.length };
+    }, [prebookRows, nmPpb, nmBoxSize, nmByBc, palletOverrides]);
+
     // Строки таблицы: сначала те, что отправляем (по убыванию), потом остальные.
     const sortedRows = useMemo(() => {
         const rows = [...(pool?.rows ?? [])];
@@ -440,19 +569,18 @@ export default function PreDistVehiclePage() {
             {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
             {header}
 
-            <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-muted)', fontSize: 13 }}>
-                Раскладка груза машины по WB-складам как в «Потребность по складам» (потребность · приёмка · целые коробы и паллеты),
-                но источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · <b style={{ color: 'var(--color-text)' }}>что отправляем</b>.
-                Заявки создаются со статусом «Предраспределение» (без фейкового стока) — при разгрузке машины станут обычными сборками.
-            </div>
+            <AcceptanceBanner summary={acceptanceNote} />
 
-            {/* KPI-сводка */}
+            {/* Машинная KPI-сводка + управление раскладкой — общая над табами. */}
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'center', fontSize: 14 }}>
                 <span>К отправке: <b style={{ fontSize: 18 }}>{formatNumber(derived.totalShip, 0)}</b> шт</span>
                 <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(derived.totalBoxes, 0)}</b></span>
                 <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(footer.totalPallets, 0)}</b></span>
                 <span style={{ color: 'var(--color-muted)' }}>Заявок: <b style={{ color: 'var(--color-text)' }}>{formatNumber(derived.requestCount, 0)}</b></span>
                 <span style={{ color: 'var(--color-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
+                {prebookView.total > 0 && (
+                    <span style={{ color: 'var(--color-muted)' }}>🅿️ Предбронь: <b style={{ color: 'var(--color-text)' }}>{formatNumber(prebookView.box.qty + prebookView.mono.qty, 0)}</b> шт</span>
+                )}
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
                     <div style={{ display: 'flex', gap: 4, alignItems: 'center' }} title="Целые паллеты часто обнуляют мелкую потребность машины — «Коробами» показывает то, что набирается коробами">
                         <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>Округление:</span>
@@ -465,13 +593,27 @@ export default function PreDistVehiclePage() {
                 </div>
             </div>
 
-            {acceptanceNote && (acceptanceNote.failed || acceptanceNote.moved > 0 || acceptanceNote.dropped > 0) && (
-                <div style={{ marginBottom: 12, fontSize: 13, color: acceptanceNote.failed ? 'var(--color-warning)' : 'var(--color-muted)' }}>
-                    {acceptanceNote.failed
-                        ? '⚠️ Приёмка WB недоступна — разложено без проверки складов.'
-                        : `Приёмка:${acceptanceNote.moved > 0 ? ` ↪ ${formatNumber(acceptanceNote.moved, 0)} перераспределено с закрытых` : ''}${acceptanceNote.dropped > 0 ? ` · ⛔ ${formatNumber(acceptanceNote.dropped, 0)} на закрытых складах` : ''}`}
-                </div>
-            )}
+            {/* Под-табы в скоупе машины (зеркалят раздел, данные — из машины). */}
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+                <button className={`btn ${subTab === 'dist' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('dist')}>🚚 Раскладка</button>
+                <button className={`btn ${subTab === 'prebook' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('prebook')}>
+                    🅿️ Предбронь{prebookView.total > 0 ? ` (${formatNumber(prebookView.box.qty + prebookView.mono.qty, 0)})` : ''}
+                </button>
+            </div>
+
+            {subTab === 'prebook' ? (
+                <PreDistPrebookTab
+                    box={prebookView.box}
+                    mono={prebookView.mono}
+                    wholePallets={wholePallets}
+                    nmPpb={nmPpb}
+                />
+            ) : (<>
+            <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-muted)', fontSize: 13 }}>
+                Раскладка груза машины по WB-складам как в «Потребность по складам» (потребность · приёмка · целые коробы и паллеты),
+                но источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · <b style={{ color: 'var(--color-text)' }}>что отправляем</b>.
+                Заявки создаются со статусом «Предраспределение» (без фейкового стока) — при разгрузке машины станут обычными сборками.
+            </div>
 
             {computing ? (
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>Считаю раскладку (потребность · приёмка · коробы · паллеты)…</div>
@@ -503,7 +645,7 @@ export default function PreDistVehiclePage() {
                                 <th style={{ padding: '8px 8px' }} title="Уже в сборке на WB">В сборке</th>
                                 <th style={{ padding: '8px 8px' }} title="Остаток на Wildberries">На WB</th>
                                 {wbCols.map(c => (
-                                    <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap' }}>{c.name}</th>
+                                    <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap', background: districtTint(c.district) }}>{c.name}</th>
                                 ))}
                                 <th style={{ padding: '8px 8px' }}>Σ отпр.</th>
                                 <th style={{ padding: '8px 8px' }} title="Коробов к отправке">Мест</th>
@@ -538,22 +680,16 @@ export default function PreDistVehiclePage() {
                                             const cell = cells?.get(c.name);
                                             const ctx = e?.byWh[c.name];
                                             const ctxBusy = (ctx?.asm ?? 0) + (ctx?.transit ?? 0);
-                                            const hasCtx = ctx && (ctx.stock > 0 || ctxBusy > 0 || ctx.need > 0);
                                             return (
-                                                <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right', verticalAlign: 'top' }}>
-                                                    {cell ? (
-                                                        <div style={{ fontWeight: 700, color: 'var(--color-accent)' }}>
-                                                            {formatNumber(cell.qty, 0)}{cell.pkg !== 'BOX' && <span style={{ fontSize: 9, color: 'var(--color-muted)' }}> {PKG_LABEL[cell.pkg]}</span>}
-                                                            <span style={{ fontSize: 10, color: 'var(--color-muted)', marginLeft: 4 }}>📦<BoxDetailCell qty={cell.qty} pcsPerBox={ppb ?? 0} /></span>
-                                                        </div>
-                                                    ) : (ctx && ctx.need > 0 ? <div style={{ color: 'var(--color-dim)' }}>↗{formatNumber(ctx.need, 0)}</div> : <div style={{ color: 'var(--color-dim)' }}>·</div>)}
-                                                    {hasCtx && (
-                                                        <div style={{ fontSize: 10, color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
-                                                            {ctx.stock > 0 && <span title="Остаток на WB">🏬{formatNumber(ctx.stock, 0)}</span>}
-                                                            {ctxBusy > 0 && <span title="В сборке / в пути" style={{ marginLeft: 4 }}>🚚{formatNumber(ctxBusy, 0)}</span>}
-                                                        </div>
-                                                    )}
-                                                </td>
+                                                <NeedMatrixCell
+                                                    key={c.name}
+                                                    ship={cell ?? null}
+                                                    ppb={ppb}
+                                                    stock={ctx?.stock ?? 0}
+                                                    onWay={ctxBusy}
+                                                    need={ctx?.need ?? 0}
+                                                    tint={districtTint(c.district)}
+                                                />
                                             );
                                         })}
                                         <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600 }}>{ship > 0 ? formatNumber(ship, 0) : '·'}</td>
@@ -595,6 +731,7 @@ export default function PreDistVehiclePage() {
                     </table>
                 </div>
             )}
+            </>)}
         </div>
     );
 }

@@ -130,6 +130,16 @@ export function finalizePoolRows(
     return finalizeDistribution(effectiveSkus, poolGeom(input), wholePallets).rows;
 }
 
+/** Как `finalizePoolRows`, но ВОЗВРАЩАЕТ И предбронь-остаток (под-паллетные хвосты) —
+ *  для машинно-скоупленной вкладки «🅿️ Предбронь» (короб=«Дозабить» / моно=«Предзаявка»). */
+export function finalizePoolDistribution(
+    effectiveSkus: DraftSkuInput[],
+    input: PoolDistInput,
+    wholePallets = true,
+): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } {
+    return finalizeDistribution(effectiveSkus, poolGeom(input), wholePallets);
+}
+
 /** Обогащение строки пула данными «Потребности по складам» (для матрицы экрана машины):
  *  есть ли товар в сборке / на WB-остатке / новинка, плюс per-WB-склад срезы. Матч по
  *  nm_id (= `PreDistPoolRow.article_wb`); товар без потребности → нули (фолбэк, не падаем). */
