@@ -39,6 +39,7 @@ from backend.schemas.assembly import (
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
 )
+from backend.services.assembly.weight import compute_goods_weight
 from backend.services.warehouse_service import (
     _next_number,
     get_warehouse,
@@ -435,6 +436,16 @@ async def _build_response(
                 }
             )
 
+    # Расчётный вес товаров (нетто) + ШК без веса. В list-контексте вес берётся
+    # из уже загруженного nom_map (0 запросов на строку); одиночный вызов делает
+    # один батч-SELECT по barcode внутри compute_goods_weight.
+    weight_by_barcode = (
+        {n.barcode: n.weight_kg for n in nom_map.values()} if nom_map is not None else None
+    )
+    goods_weight_kg, weight_missing_barcodes = await compute_goods_weight(
+        db, request.project_id, request, weight_by_barcode=weight_by_barcode
+    )
+
     return {
         "id": request.id,
         "warehouse_id": request.warehouse_id,
@@ -454,6 +465,9 @@ async def _build_response(
         "pallets_count": request.pallets_count,
         "pallet_weight_kg": request.pallet_weight_kg,
         "total_weight_kg": total_weight,
+        "pallet_manifest": request.pallet_manifest,
+        "goods_weight_kg": goods_weight_kg,
+        "weight_missing_barcodes": weight_missing_barcodes,
         "vehicle_info": request.vehicle_info,
         "vehicle_brand": request.vehicle_brand,
         "driver_phone": request.driver_phone,

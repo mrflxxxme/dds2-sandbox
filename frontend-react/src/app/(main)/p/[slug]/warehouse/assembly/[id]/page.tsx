@@ -8,6 +8,7 @@ import { formatDate, formatDateTime, formatNumber } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchBlock } from '@/components/FfMismatchModal';
 import MigfullModal from './MigfullModal';
+import PalletLayoutTab from './PalletLayoutTab';
 import type { Column } from '@/components/DataTable';
 import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply } from '@/types/api';
 
@@ -48,6 +49,8 @@ export default function AssemblyDetailPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [actionLoading, setActionLoading] = useState(false);
+    // Вкладки деталки: «Заявка» (состав/логистика) | «Раскладка по паллетам».
+    const [tab, setTab] = useState<'request' | 'pallets'>('request');
 
     // Modals
     const [showVehicleModal, setShowVehicleModal] = useState(false);
@@ -708,6 +711,28 @@ export default function AssemblyDetailPage() {
                 </div>
             </div>
 
+            {/* Вкладки: «Заявка» | «Раскладка по паллетам» */}
+            <div className="glass-card" style={{ padding: 8, marginBottom: 16, display: 'flex', gap: 8 }}>
+                <button
+                    className={`btn btn-sm ${tab === 'request' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setTab('request')}
+                >
+                    Заявка
+                </button>
+                <button
+                    className={`btn btn-sm ${tab === 'pallets' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setTab('pallets')}
+                >
+                    Раскладка по паллетам
+                </button>
+            </div>
+
+            {tab === 'pallets' && (
+                <PalletLayoutTab assembly={assembly} ppbByBarcode={ppbByBarcode} slug={slug} onSaved={load} />
+            )}
+
+            {tab === 'request' && (<>
+
             {/* Error */}
             {error && (
                 <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-danger)' }}>
@@ -865,6 +890,20 @@ export default function AssemblyDetailPage() {
                     />
                     <InfoField label="Вес 1 палеты" value={assembly.pallet_weight_kg ? formatNumber(assembly.pallet_weight_kg, 1) + ' кг' : '\u2014'} />
                     <InfoField label="Общий вес" value={assembly.total_weight_kg ? formatNumber(assembly.total_weight_kg, 1) + ' кг' : '\u2014'} />
+                    <InfoField
+                        label="Вес товаров (расчёт)"
+                        value={assembly.goods_weight_kg != null && assembly.goods_weight_kg !== ''
+                            ? formatNumber(Number(assembly.goods_weight_kg), 1) + ' кг'
+                            : '—'}
+                    />
+                    {assembly.weight_missing_barcodes && assembly.weight_missing_barcodes.length > 0 && (
+                        <div style={{ gridColumn: '1 / -1', fontSize: 13, color: 'var(--color-warning)' }}>
+                            Нет веса у {formatNumber(assembly.weight_missing_barcodes.length, 0)} арт. —{' '}
+                            <Link href={`/p/${slug}/settings?tab=duties`} style={{ color: 'var(--color-accent)' }}>
+                                заполнить вес в настройках
+                            </Link>
+                        </div>
+                    )}
                     {(assembly.vehicle_info || canEditAlways) && (
                         <EditableInfoField
                             label="Машина"
@@ -1256,6 +1295,8 @@ export default function AssemblyDetailPage() {
                     </div>
                 </div>
             )}
+
+            </>)}
 
             {/* ─── Modals ──────────────────────────────────────────────────── */}
 

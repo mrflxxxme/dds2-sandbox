@@ -391,6 +391,31 @@ export function addWarehouseMethods(api: ApiClient) {
         updateAssemblyRequest(id: number, data: AssemblyRequestUpdate) {
             return api.request<AssemblyRequest>('PUT', `/api/v1/warehouse/assembly/${id}`, data);
         },
+        /** Сохранить ручную раскладку коробов по паллетам; pallets=null → сброс к «авто». */
+        updatePalletManifest(id: number, pallets: import('@/types/api').PalletBox[] | null) {
+            return api.request<AssemblyRequest>(
+                'PATCH',
+                `/api/v1/warehouse/assembly/${id}/pallet-manifest`,
+                { pallets } satisfies import('@/types/api').PalletManifestUpdate,
+            );
+        },
+        /** Проставить расчётный вес товаров в ручной вес паллеты (÷ кол-во паллет). */
+        applyGoodsWeight(id: number) {
+            return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/apply-goods-weight`);
+        },
+        /** Скачать раскладку по паллетам (Excel): format=internal (кладовщик) | wb (загрузка в WB).
+         *  Через requestBlob — авторизация + X-Project-Id + рефреш (сырой <a href> не несёт JWT). */
+        async downloadPalletLayout(id: number, format: 'internal' | 'wb', filename: string): Promise<void> {
+            const blob = await api.requestBlob(`/api/v1/warehouse/assembly/${id}/pallet-layout.xlsx?format=${format}`);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        },
         /** Решение по предложенной ФФ правке состава: применить («approve») или отклонить («reject»). */
         assemblyFfReview(id: number, action: 'approve' | 'reject') {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ff-review`, { action });

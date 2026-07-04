@@ -24,6 +24,12 @@ from .crud import (
     prefetch_list_maps,
     update_assembly_request,
 )
+from .pallets import (
+    PalletManifestConflict,
+    apply_goods_weight,
+    build_pallet_layout_xlsx,
+    update_pallet_manifest,
+)
 from .pre_distribution import (
     _advance_pre_distribution_assemblies,
     advance_pre_distribution_manual,
@@ -32,6 +38,7 @@ from .pre_distribution import (
     get_vehicle_pre_dist_pool,
 )
 from .prebooking import create_prebooking
+from .weight import compute_goods_weight
 from .status import (
     _check_transition,
     _gazelka_linked_ids,
@@ -101,4 +108,11 @@ __all__ = [
     "get_vehicle_pre_dist_pool",
     # prebooking (предзаявка на моно)
     "create_prebooking",
+    # pallets (раскладка по паллетам)
+    "PalletManifestConflict",
+    "apply_goods_weight",
+    "build_pallet_layout_xlsx",
+    "update_pallet_manifest",
+    # weight (расчётный вес товаров)
+    "compute_goods_weight",
 ]
