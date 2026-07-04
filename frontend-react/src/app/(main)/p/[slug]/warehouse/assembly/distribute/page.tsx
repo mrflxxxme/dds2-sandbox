@@ -612,6 +612,41 @@ export default function AssemblyDraftPage() {
         return out.sort((x, y) => y.rf - x.rf);
     }, [geomState, stockNeed, nmPpb]);
 
+    // ── ЧАСТИЧНАЯ КРАТНОСТЬ: кратность задана НЕ на всех складах, где лежит остаток. ──
+    // Товар едет со склада без своей кратности (машинная кратность есть на ЧУЖОМ складе,
+    // где остатка нет) → эта порция поедет россыпью/псевдо-кратно. Показываем, чтобы
+    // проставить кратность на складе-источнике. `nmPpbByWh` пуст = глобальный override
+    // (кратно везде) → не частичная.
+    const partialPpbArticles = useMemo(() => {
+        if (geomState !== 'ready') return [];
+        const out: { nm_id: number; vendor: string; rf: number }[] = [];
+        for (const a of stockNeed?.articles ?? []) {
+            if ((nmPpb.get(a.nm_id) || 0) <= 0) continue;   // совсем без кратности — соседний блок
+            const perWh = nmPpbByWh.get(a.nm_id);
+            if (!perWh) continue;                            // глобальный override → кратно везде
+            const uncovered = Object.entries(a.rf_stocks || {})
+                .filter(([ff, st]) => (st.available || 0) > 0 && !(Number(ff) in perWh));
+            if (uncovered.length === 0) continue;            // кратность на всех складах с остатком
+            const rf = uncovered.reduce((s, [, st]) => s + (st.available || 0), 0);
+            out.push({ nm_id: a.nm_id, vendor: a.vendor_code || `nm ${a.nm_id}`, rf });
+        }
+        return out.sort((x, y) => y.rf - x.rf);
+    }, [geomState, stockNeed, nmPpb, nmPpbByWh]);
+
+    // ── БЕЗ РАЗМЕРА КОРОБКИ: кратность есть, а габаритов нет. Короба собрать можно,
+    // паллету — нет (уедет монопаллетой/крупногабаритом). Показываем, чтобы задать размер.
+    const noBoxSizeArticles = useMemo(() => {
+        if (geomState !== 'ready') return [];
+        const out: { nm_id: number; vendor: string; rf: number }[] = [];
+        for (const a of stockNeed?.articles ?? []) {
+            if ((nmPpb.get(a.nm_id) || 0) <= 0) continue;   // без кратности — соседний блок
+            if (nmBoxSize.get(a.nm_id)) continue;           // размер коробки есть
+            const rf = Object.values(a.rf_stocks || {}).reduce((s, st) => s + (st.available || 0), 0);
+            if (rf > 0) out.push({ nm_id: a.nm_id, vendor: a.vendor_code || `nm ${a.nm_id}`, rf });
+        }
+        return out.sort((x, y) => y.rf - x.rf);
+    }, [geomState, stockNeed, nmPpb, nmBoxSize]);
+
     // ── ПРЕДБРОНЬ: целые коробы, не собравшие паллету при заполнении. ──
     // Группы предброни: (упаковка × направление), с оценкой возможности дозабора.
     const prebookGroups = useMemo<PrebookGroup[]>(() => {
@@ -1900,6 +1935,54 @@ export default function AssemblyDraftPage() {
                                 ))}
                                 {noPpbArticles.length > 40 && (
                                     <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>…ещё {formatNumber(noPpbArticles.length - 40, 0)}</span>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                    {partialPpbArticles.length > 0 && (
+                        <div className="glass-card" style={{ padding: 12, marginBottom: 12 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
+                                <span style={{ fontWeight: 700, color: 'var(--color-warning)' }}>🧩 Частичная кратность — {formatNumber(partialPpbArticles.length, 0)} арт.</span>
+                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                    кратность есть, но НЕ на складе с остатком → эта порция уедет россыпью; задайте кратность на складе-источнике
+                                </span>
+                                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setTab('box')}>
+                                    📦 Указать кратность →
+                                </button>
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                {partialPpbArticles.slice(0, 40).map(a => (
+                                    <span key={a.nm_id} title={`nm ${a.nm_id} · остаток на складах без кратности: ${formatNumber(a.rf, 0)} шт`}
+                                        style={{ fontSize: 11, padding: '1px 7px', borderRadius: 5, background: 'rgba(245,158,11,0.12)', color: 'var(--color-warning)' }}>
+                                        {a.vendor} · {formatNumber(a.rf, 0)} шт
+                                    </span>
+                                ))}
+                                {partialPpbArticles.length > 40 && (
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>…ещё {formatNumber(partialPpbArticles.length - 40, 0)}</span>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                    {noBoxSizeArticles.length > 0 && (
+                        <div className="glass-card" style={{ padding: 12, marginBottom: 12 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
+                                <span style={{ fontWeight: 700, color: 'var(--color-warning)' }}>📐 Без размера коробки — {formatNumber(noBoxSizeArticles.length, 0)} арт.</span>
+                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                    кратность есть, а габаритов нет → короба соберутся, но паллета не сформируется (моно/крупногабарит); задайте размер
+                                </span>
+                                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setTab('box')}>
+                                    📐 Указать размер →
+                                </button>
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                {noBoxSizeArticles.slice(0, 40).map(a => (
+                                    <span key={a.nm_id} title={`nm ${a.nm_id} · свободный сток ФФ: ${formatNumber(a.rf, 0)} шт`}
+                                        style={{ fontSize: 11, padding: '1px 7px', borderRadius: 5, background: 'rgba(245,158,11,0.12)', color: 'var(--color-warning)' }}>
+                                        {a.vendor} · {formatNumber(a.rf, 0)} шт
+                                    </span>
+                                ))}
+                                {noBoxSizeArticles.length > 40 && (
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>…ещё {formatNumber(noBoxSizeArticles.length - 40, 0)}</span>
                                 )}
                             </div>
                         </div>
