@@ -631,6 +631,7 @@ async def commit_draft(
     package_type: str | None = None,
     pallet_counts: dict[str, int] | None = None,
     supplies: list[CommitSupply] | None = None,
+    source_ff_id: int | None = None,
 ) -> AssemblyDraftCommitResponse:
     """
     Validate the distribution, then create one AssemblyRequest per
@@ -642,6 +643,10 @@ async def commit_draft(
     фильтра коммитит весь черновик и soft-delete'ит его. Новинки и обычные товары
     на один склад идут ОДНОЙ заявкой (заявка с новинкой получает префикс 🆕 в
     комментарии).
+
+    Партиальный коммит по ФФ-источнику: `source_ff_id` — создаём заявки ТОЛЬКО из
+    порций, отгружаемых этим складом-ФФ; порции строк с других ФФ остаются в черновике
+    (построчный карвинг pro-rata-пар). Идёт всегда через pro-rata (не через `supplies`).
 
     Идемпотентность: черновик берётся `FOR UPDATE`, поэтому два параллельных
     (или повторный после двойного клика/таймаута) коммита одного черновика
@@ -728,9 +733,11 @@ async def commit_draft(
         draft_bc_total[row.barcode] = draft_bc_total.get(row.barcode, 0) + sum(int(v or 0) for v in row.tgt.values())
         draft_bc_nm[row.barcode] = row.nm_id
 
-    if supplies is not None:
+    if supplies is not None and source_ff_id is None:
         # Явные отгрузки ФФ→склад (режим «только целые паллеты»): заявки строим ровно
         # из них, минуя pro-rata. Берём только отгрузки выбранного среза упаковки.
+        # Партиальный коммит по ФФ (source_ff_id) идёт всегда через pro-rata-ветку
+        # ниже — ей нужен построчный карвинг остатка в черновик (supplies его не дают).
         supplied_bc: dict[str, int] = {}
         for s in supplies:
             spkg = (s.package_type or "BOX").strip().upper() or "BOX"
@@ -758,20 +765,48 @@ async def commit_draft(
         # Убираем пустые корзины (могли остаться от нулевых отгрузок).
         pair_items = {k: v for k, v in pair_items.items() if any(q > 0 for q in v.values())}
     else:
+        # Партиальный коммит по ФФ-источнику (source_ff_id): пары ЭТОГО ФФ коммитим,
+        # порции строки с ДРУГИХ ФФ возвращаем в черновик отдельными строками. Остаток
+        # сбалансирован: выбранный ФФ отгружает ровно свой src (allocatePairs хранит
+        # маргиналы), поэтому Σsrc_ост == Σtgt_ост. source_ff_id=None → коммитим все пары.
+        ff_leftover_rows: list[AssemblyDraftRow] = []
         for row in commit_rows:
             alloc = _allocate_pairs(row.src, row.tgt)
             pkg = row.package_type or "BOX"
             is_new = row.nm_id in newcomer_nm_ids
+            rest_src: dict[str, int] = {}
+            rest_tgt: dict[str, int] = {}
             for (src_id, wb_name), qty in alloc.items():
                 if qty <= 0:
+                    continue
+                if source_ff_id is not None and src_id != source_ff_id:
+                    rest_src[str(src_id)] = rest_src.get(str(src_id), 0) + qty
+                    rest_tgt[wb_name] = rest_tgt.get(wb_name, 0) + qty
                     continue
                 key = (src_id, wb_name, pkg)
                 bucket = pair_items.setdefault(key, {})
                 bucket[row.barcode] = bucket.get(row.barcode, 0) + qty
                 if is_new:
                     pair_has_newcomer[key] = True
+            if source_ff_id is not None and rest_tgt:
+                ff_leftover_rows.append(
+                    AssemblyDraftRow(
+                        nm_id=row.nm_id,
+                        barcode=row.barcode,
+                        vendor_code=row.vendor_code,
+                        src=rest_src,
+                        tgt=rest_tgt,
+                        package_type=row.package_type or "BOX",
+                        as_is=row.as_is,
+                    )
+                )
+        if source_ff_id is not None:
+            # Непокрытые ФФ выбранного среза + строки другой упаковки — всё остаётся.
+            leftover_rows = leftover_rows + ff_leftover_rows
 
     if not pair_items:
+        if source_ff_id is not None:
+            raise HTTPException(status_code=400, detail="Нет строк этого склада-ФФ для сборки")
         raise HTTPException(status_code=400, detail="No (source, target) pairs with non-zero quantity")
 
     # 4. Resolve barcodes -> nomenclature in one batch
@@ -821,9 +856,9 @@ async def commit_draft(
 
     created_ids: list[int] = []
     try:
-        for (source_ff_id, target_wb_name, package_type), barcodes in pair_items.items():
+        for (pair_src_id, target_wb_name, package_type), barcodes in pair_items.items():
             number = await _next_number(db, project_id, "ASM", AssemblyRequest)
-            if pair_has_newcomer.get((source_ff_id, target_wb_name, package_type)):
+            if pair_has_newcomer.get((pair_src_id, target_wb_name, package_type)):
                 pieces = [NEWCOMER_COMMENT_PREFIX]
                 if base_comment:
                     pieces.append(base_comment)
@@ -833,13 +868,13 @@ async def commit_draft(
 
             assembly_req = AssemblyRequest(
                 project_id=project_id,
-                warehouse_id=source_ff_id,
+                warehouse_id=pair_src_id,
                 number=number,
                 status=AssemblyStatus.IN_PROGRESS,
                 wb_fbo_supply_id=None,  # not linked — manual WB warehouse
                 wb_warehouse_name_manual=target_wb_name,
                 estimated_ready_date=eta,
-                pallets_count=_pallets_for(source_ff_id, target_wb_name, package_type),
+                pallets_count=_pallets_for(pair_src_id, target_wb_name, package_type),
                 pallet_weight_kg=pallet_weight,
                 comment=req_comment,
                 package_type=package_type,

@@ -601,9 +601,11 @@ export function addWarehouseMethods(api: ApiClient) {
             packageType?: string,
             palletCounts?: Record<string, number>,
             supplies?: CommitSupply[],
+            sourceFfId?: number,
         ) {
             const qs = new URLSearchParams();
             if (packageType) qs.set('package_type', packageType);
+            if (sourceFfId != null) qs.set('source_ff_id', String(sourceFfId));
             const q = qs.toString();
             const hasPallets = palletCounts && Object.keys(palletCounts).length > 0;
             const hasSupplies = supplies && supplies.length > 0;

@@ -187,6 +187,10 @@ async def commit_draft(
         default=None,
         description="Коммитить только этот тип упаковки (BOX/MONOPALLET); остальное остаётся в черновике",
     ),
+    source_ff_id: int | None = Query(
+        default=None,
+        description="Коммитить только заявки этого склада-ФФ (источник); порции других ФФ остаются в черновике",
+    ),
     options: CommitDraftOptions = Body(default_factory=CommitDraftOptions),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -197,11 +201,15 @@ async def commit_draft(
     остаётся в черновике. Без фильтра коммитит весь черновик. Новинки и обычные
     товары на один склад идут одной заявкой.
 
+    `source_ff_id` — партиальный коммит по складу-ФФ: заявки только из порций этого
+    ФФ, остальное (другие ФФ) остаётся в черновике. Идёт через pro-rata, не supplies.
+
     `options.pallet_counts` (опц.) — паллет на заявку по ключу
     `"{ff_id}::{wb_name}::{pkg}"`; иначе плоский `distribution.pallets_count`.
     """
     return await assembly_draft_service.commit_draft(
         db, project.id, draft_id, package_type, options.pallet_counts, options.supplies,
+        source_ff_id=source_ff_id,
     )
 
 
