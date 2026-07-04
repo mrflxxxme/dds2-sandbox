@@ -176,12 +176,14 @@ class TestSaveTaxRates:
         ) as mock_inv:
             await save_tax_rates(db_session, project.id, 2026, "usn_income_expense_vat", months)
 
-        # Exactly the 4 cache prefixes dictated by security.md for tax_rate mutation
-        assert mock_inv.await_count == 4
+        # 5 prefixes: wb_bdr, opiu, dashboard + the two real funnel caches
+        # (funnel:tariff_map, funnel:avg_buyout — the old bare "funnel:project_id" matched nothing).
+        assert mock_inv.await_count == 5
         call_args = [c.args[0] for c in mock_inv.call_args_list]
         assert any("reports:wb_bdr" in a for a in call_args)
         assert any("reports:opiu" in a for a in call_args)
         assert any("reports:dashboard" in a for a in call_args)
-        assert any("funnel" in a for a in call_args)
+        assert any("funnel:tariff_map" in a for a in call_args)
+        assert any("funnel:avg_buyout" in a for a in call_args)
         # Every key must be scoped to the mutating project
         assert all(f"project_id={project.id}" in a for a in call_args)

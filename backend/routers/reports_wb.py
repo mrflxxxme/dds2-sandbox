@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter()
 
@@ -195,7 +196,7 @@ async def get_opiu(
     return {"computing": True, "message": "Отчёт рассчитывается, обновите через несколько секунд"}
 
 
-@router.post("/wb_bdr/sync")
+@router.post("/wb_bdr/sync", dependencies=[Depends(rate_limit_write)])
 async def trigger_wb_bdr_sync(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),

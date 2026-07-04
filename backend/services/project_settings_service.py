@@ -25,7 +25,8 @@ async def set_tax_rate(db: AsyncSession, project: Project, tax_rate: Decimal) ->
     await invalidate_cache(f"reports:wb_bdr:project_id={pid}")
     await invalidate_cache(f"reports:opiu:project_id={pid}")
     await invalidate_cache(f"reports:dashboard:project_id={pid}")
-    await invalidate_cache(f"funnel:project_id={pid}")
+    await invalidate_cache(f"funnel:tariff_map:project_id={pid}")
+    await invalidate_cache(f"funnel:avg_buyout:project_id={pid}")
 
     logger.info("tax_rate updated: project_id=%d, value=%s", pid, project.tax_rate)
     return project.tax_rate

@@ -309,6 +309,7 @@ async def sync_ad_campaigns_all_projects():
             status = "ERROR"
             error_msg = "Task cancelled (worker shutdown or restart)"
             logger.warning(f"Ad campaigns sync CANCELLED for project {pid}")
+            raise  # propagate cancellation — never swallow it to keep looping
         except Exception as e:
             error_msg = str(e)[:500]
             logger.error(f"Ad campaigns sync failed for project {pid}: {e}")

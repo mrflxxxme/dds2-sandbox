@@ -264,9 +264,24 @@ async def refresh_wb_forecast(
     if daily_avg <= 0:
         return {"ok": True, "daily_avg": 0, "message": "Нет данных WB за последние 28 дней"}
 
-    # Delete stale auto-forecast
+    # Dates the user explicitly hid = soft-deleted WB_AUTO rows (delete_income → soft_delete).
+    # Collect them BEFORE regenerating so the loop below doesn't resurrect them.
+    hidden_result = await db.execute(
+        select(PlannedIncome.date).where(
+            PlannedIncome.source == "WB_AUTO",
+            PlannedIncome.project_id == project_id,
+            PlannedIncome.is_deleted == True,  # noqa: E712
+        )
+    )
+    hidden_dates = {row[0] for row in hidden_result}
+
+    # Regenerate: drop only the ACTIVE auto-forecast (recomputed cache, no fact-links),
+    # never the is_deleted=true tombstones that encode the user's hidden dates.
     await db.execute(
-        text("DELETE FROM planned_incomes WHERE source = 'WB_AUTO' AND project_id = :pid"),
+        text(
+            "DELETE FROM planned_incomes "
+            "WHERE source = 'WB_AUTO' AND is_deleted = false AND project_id = :pid"
+        ),
         {"pid": project_id},
     )
 
@@ -284,7 +299,7 @@ async def refresh_wb_forecast(
     weekday_detail = {}
     for i in range(1, forecast_days + 1):
         d = today + timedelta(days=i)
-        if d in manual_dates:
+        if d in manual_dates or d in hidden_dates:
             continue
         wd = d.weekday()
         amount = weekday_avg.get(wd, Decimal("0"))

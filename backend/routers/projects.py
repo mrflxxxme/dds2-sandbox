@@ -17,6 +17,7 @@ from backend.auth import get_current_user
 from backend.database import get_db
 from backend.models import Project, ProjectInvite, ProjectMember, User
 from backend.rbac import ALL_PAGES, ROLE_HIERARCHY, get_effective_pages, parse_pages
+from backend.utils.rate_limit import rate_limit_write
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ def _make_slug(name: str) -> str:
     return f"{slug}-{uuid.uuid4().hex[:6]}"
 
 
-@router.post("", response_model=ProjectResponse)
+@router.post("", response_model=ProjectResponse, dependencies=[Depends(rate_limit_write)])
 async def create_project(
     body: ProjectCreate,
     user: User = Depends(get_current_user),
@@ -179,7 +180,7 @@ async def get_project(
     return {**project.__dict__, "members_count": cnt}
 
 
-@router.delete("/{slug}")
+@router.delete("/{slug}", dependencies=[Depends(rate_limit_write)])
 async def delete_project(
     slug: str,
     user: User = Depends(get_current_user),
@@ -231,7 +232,7 @@ async def list_members(
     ]
 
 
-@router.delete("/{slug}/members/{user_id}")
+@router.delete("/{slug}/members/{user_id}", dependencies=[Depends(rate_limit_write)])
 async def remove_member(
     slug: str,
     user_id: int,
@@ -292,7 +293,7 @@ async def remove_member(
 # ─── Role management ─────────────────────────────────────────────────────────
 
 
-@router.put("/{slug}/members/{user_id}/role")
+@router.put("/{slug}/members/{user_id}/role", dependencies=[Depends(rate_limit_write)])
 async def update_member_role(
     slug: str,
     user_id: int,
@@ -371,7 +372,7 @@ class UpdateTelegramUsernameRequest(BaseModel):
 _TG_USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{5,32}$")
 
 
-@router.put("/{slug}/members/{user_id}/telegram-username")
+@router.put("/{slug}/members/{user_id}/telegram-username", dependencies=[Depends(rate_limit_write)])
 async def update_telegram_username(
     slug: str,
     user_id: int,
@@ -479,7 +480,7 @@ async def get_my_permissions(
 # ─── Invitations ──────────────────────────────────────────────────────────────
 
 
-@router.post("/{slug}/invite", response_model=InviteResponse)
+@router.post("/{slug}/invite", response_model=InviteResponse, dependencies=[Depends(rate_limit_write)])
 async def invite_by_email(
     slug: str,
     email: str,
@@ -576,7 +577,7 @@ async def list_invites(
 # ─── Accept invite (public, auth needed) ──────────────────────────────────────
 
 
-@router.post("/invite/accept/{token}")
+@router.post("/invite/accept/{token}", dependencies=[Depends(rate_limit_write)])
 async def accept_invite(
     token: str,
     user: User = Depends(get_current_user),

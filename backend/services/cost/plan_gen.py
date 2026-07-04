@@ -5,7 +5,7 @@ Cost — Payment plan generation from CostOrder data.
 from datetime import timedelta
 from decimal import Decimal
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import (
@@ -111,71 +111,95 @@ async def generate_payment_plan(
 
     await db.flush()
 
-    # 6. Delete existing planned payments for this order (regenerate)
-    await db.execute(
-        delete(PlannedPayment).where(
-            PlannedPayment.order_no == order_no_int,
-            PlannedPayment.project_id == project_id,
-        )
-    )
+    # 6-7. Regenerate planned payments via UPSERT by direction. Hard-delete would
+    # 500 on any PaymentFactLink FK and wipe paid_rub/paid_amount/is_paid — instead
+    # update rows in place (id survives → fact-links survive) and soft-delete only
+    # directions that dropped out of the plan.
+    existing = {
+        p.direction: p
+        for p in (
+            await db.execute(
+                select(PlannedPayment).where(
+                    PlannedPayment.order_no == order_no_int,
+                    PlannedPayment.project_id == project_id,
+                    PlannedPayment.is_deleted == False,  # noqa: E712
+                )
+            )
+        ).scalars()
+    }
 
-    # 7. Create planned payments
-    payments = []
-
+    desired: list[dict] = []
     if order_cny > 0:
-        payments.append(
-            PlannedPayment(
-                project_id=project_id,
-                order_no=order_no_int,
-                direction="ЗАКАЗ",
-                pay_date=pay_date_order,
-                amount=Decimal(str(round(order_cny, 2))),
-                currency="CNY",
-                fx_rate=cost_order.rate_cny,
-                amount_rub=Decimal(str(round(order_rub, 2))),
-                is_paid=False,
-            )
+        desired.append(
+            {
+                "direction": "ЗАКАЗ",
+                "pay_date": pay_date_order,
+                "amount": Decimal(str(round(order_cny, 2))),
+                "currency": "CNY",
+                "fx_rate": cost_order.rate_cny,
+                "amount_rub": Decimal(str(round(order_rub, 2))),
+            }
         )
-
     if delivery_rub > 0:
-        payments.append(
-            PlannedPayment(
-                project_id=project_id,
-                order_no=order_no_int,
-                direction="ДОСТАВКА",
-                pay_date=pay_date_delivery,
-                amount=cost_order.delivery_cost_cny + cost_order.delivery_cost_usd,
-                currency="CNY/USD",
-                fx_rate=None,
-                amount_rub=Decimal(str(round(delivery_rub, 2))),
-                is_paid=False,
-            )
+        desired.append(
+            {
+                "direction": "ДОСТАВКА",
+                "pay_date": pay_date_delivery,
+                "amount": cost_order.delivery_cost_cny + cost_order.delivery_cost_usd,
+                "currency": "CNY/USD",
+                "fx_rate": None,
+                "amount_rub": Decimal(str(round(delivery_rub, 2))),
+            }
         )
-
     if customs_rub > 0:
-        payments.append(
-            PlannedPayment(
-                project_id=project_id,
-                order_no=order_no_int,
-                direction="ТАМОЖНЯ",
-                pay_date=pay_date_customs,
-                amount=Decimal(str(round(customs_rub, 2))),
-                currency="RUB",
-                fx_rate=Decimal("1"),
-                amount_rub=Decimal(str(round(customs_rub, 2))),
-                is_paid=False,
-            )
+        desired.append(
+            {
+                "direction": "ТАМОЖНЯ",
+                "pay_date": pay_date_customs,
+                "amount": Decimal(str(round(customs_rub, 2))),
+                "currency": "RUB",
+                "fx_rate": Decimal("1"),
+                "amount_rub": Decimal(str(round(customs_rub, 2))),
+            }
         )
 
-    for p in payments:
-        db.add(p)
+    desired_dirs = {d["direction"] for d in desired}
+    for d in desired:
+        row = existing.get(d["direction"])
+        if row is not None:
+            row.pay_date = d["pay_date"]
+            row.amount = d["amount"]
+            row.currency = d["currency"]
+            row.fx_rate = d["fx_rate"]
+            row.amount_rub = d["amount_rub"]
+            # amount may have changed — recompute paid state (mirrors update_payment_paid_amount)
+            row.is_paid = row.paid_rub >= d["amount_rub"]
+        else:
+            db.add(
+                PlannedPayment(
+                    project_id=project_id,
+                    order_no=order_no_int,
+                    direction=d["direction"],
+                    pay_date=d["pay_date"],
+                    amount=d["amount"],
+                    currency=d["currency"],
+                    fx_rate=d["fx_rate"],
+                    amount_rub=d["amount_rub"],
+                    is_paid=False,
+                )
+            )
+
+    # Directions no longer in the plan → soft-delete (keeps fact-links intact)
+    for direction, row in existing.items():
+        if direction not in desired_dirs:
+            row.soft_delete()
 
     await db.commit()
 
     return {
         "ok": True,
         "order_no": order_no,
-        "payments_created": len(payments),
+        "payments_created": len(desired),
         "plan": {
             "order_cny": float(round(order_cny, 2)),
             "order_rub": float(round(order_rub, 2)),
