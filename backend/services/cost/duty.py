@@ -5,11 +5,11 @@ Cost — Duty Rules CRUD + Nomenclature area_m2.
 
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import DutyException, DutyRule
-from backend.models.cost import Nomenclature
+from backend.models.cost import CostOrderItem, Nomenclature
 from backend.services.cost.recalc import (
     find_orders_by_articles,
     find_orders_by_barcodes,
@@ -174,22 +174,44 @@ async def bulk_update_nomenclature_weight(
     project_id: int,
     items: list[dict],
 ) -> tuple[int, list[str]]:
-    """Update reference weight_kg for nomenclature items by barcode."""
+    """Update reference weight_kg for nomenclature items by barcode.
+
+    The weight is also propagated into vehicle lines (наполнение машины) of the same barcode
+    that have no weight yet, so it shows up in the machine and every downstream reader (assembly
+    weight, duty) picks it up automatically. Lines that already carry an explicit weight are left
+    intact.
+    """
     result = await db.execute(select(Nomenclature).where(Nomenclature.project_id == project_id))
     nom_map = {n.barcode: n for n in result.scalars().all()}
 
     updated = 0
     not_found: list[str] = []
     changed: list[str] = []
+    weight_by_bc: dict[str, Decimal] = {}
     for item in items:
         bc = str(item["barcode"]).strip()
         nom = nom_map.get(bc)
         if nom:
-            nom.weight_kg = Decimal(str(item["weight_kg"]))
+            w = Decimal(str(item["weight_kg"]))
+            nom.weight_kg = w
+            weight_by_bc[bc] = w
             updated += 1
             changed.append(bc)
         else:
             not_found.append(bc)
+
+    # Backfill the weight into vehicle lines that have none yet (fill blanks only, never clobber).
+    for bc, w in weight_by_bc.items():
+        await db.execute(
+            update(CostOrderItem)
+            .where(
+                CostOrderItem.project_id == project_id,
+                CostOrderItem.barcode == bc,
+                CostOrderItem.is_deleted == False,  # noqa: E712
+                or_(CostOrderItem.weight_kg.is_(None), CostOrderItem.weight_kg == 0),
+            )
+            .values(weight_kg=w)
+        )
 
     await db.commit()
     # Auto-recalc себес of orders containing these barcodes (WEIGHT-basis duty depends on weight).
