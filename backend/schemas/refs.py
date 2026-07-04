@@ -5,7 +5,7 @@ Reference schemas: Account, CounterpartyCategory, Override, OpeningBalance, Cate
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AccountSchema(BaseModel):
@@ -192,6 +192,7 @@ class PalletBoxesBySizePayload(BaseModel):
 class BoxWeightPayload(BaseModel):
     """Вес пустой коробки (кг) — одно число на проект. Входит в расчётный вес
     отгрузки сборки: нетто товаров + вес_коробки × число коробов (тара паллеты
-    не учитывается). Отрицательное нормализуется в 0 в сервисе."""
+    не учитывается). Неотрицательное (декларативно 422; сервис дополнительно
+    нормализует отрицательное в 0 как защита)."""
 
-    weight_kg: Decimal
+    weight_kg: Decimal = Field(ge=0)

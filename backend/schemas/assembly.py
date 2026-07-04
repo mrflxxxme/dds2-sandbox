@@ -8,7 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 PackageTypeStr = Literal["BOX", "MONOPALLET", "SUPERSAFE"]
 
@@ -340,7 +340,9 @@ class BulkStatusResult(BaseModel):
 class ApplyGoodsWeightBulkPayload(BaseModel):
     """Тело массового авто-веса: id заявок, которым проставить расчётный вес."""
 
-    ids: list[int]
+    # Каждый id = отдельная заявка с коммитом + резолвом кратности/веса — кап,
+    # чтобы один запрос не превратился в тяжёлый O(N) проход.
+    ids: list[int] = Field(max_length=500)
 
 
 class ApplyGoodsWeightSkip(BaseModel):

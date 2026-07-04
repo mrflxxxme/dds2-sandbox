@@ -268,10 +268,10 @@ function WeightCell({
     return (
         <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
             <EditableCell
-                value={row.total_weight_kg || 0}
+                value={Number(row.total_weight_kg) || 0}
                 suffix="кг"
                 editable={editable}
-                highlight={row.status === 'IN_PROGRESS' && (!row.total_weight_kg || row.total_weight_kg <= 0)}
+                highlight={row.status === 'IN_PROGRESS' && (!row.total_weight_kg || Number(row.total_weight_kg) <= 0)}
                 step={0.1}
                 onSave={onSave}
             />

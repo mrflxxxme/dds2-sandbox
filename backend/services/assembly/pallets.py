@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_cache
-from backend.models.assembly import AssemblyRequest
+from backend.models.assembly import AssemblyRequest, PackageType
 from backend.models.cost import Nomenclature
 from backend.schemas.assembly import PalletManifest
 from backend.services.assembly.crud import get_assembly_request
@@ -261,12 +261,16 @@ async def _suggest_pallets_count(
     request: AssemblyRequest,
     box_qty_by_wh_bc: dict[tuple[int, str], int | None],
 ) -> int | None:
-    """Оценка числа паллет = `ceil(Σ qtyᵢ / units_per_palletᵢ)` по геометрии коробки.
+    """Оценка числа паллет по геометрии коробки (`units_per_pallet =
+    коробок_на_паллету(box_size, лимит склада, override) × кратность`).
 
-    Footprint смешанной паллеты (каждый SKU по своей геометрии), зеркало фронта.
-    `units_per_pallet = коробок_на_паллету(box_size, лимит склада, override) ×
-    кратность`. None — если ни по одной позиции нет габаритов И кратности (нечего
-    оценивать → `pallets_count` не трогаем). Оценка приблизительная (правится вручную).
+    Режим зависит от `package_type` заявки (зеркало фронта):
+      - BOX (смешанная паллета) → `ceil(Σ qtyᵢ / units_per_palletᵢ)` — SKU кладутся
+        на общие паллеты, один суммарный footprint;
+      - MONOPALLET → `Σ ceil(qtyᵢ / units_per_palletᵢ)` — моно-паллеты НЕ смешивают
+        SKU широко (целые паллеты по каждому), иначе число паллет занижается.
+    None — если ни по одной позиции нет габаритов И кратности (нечего оценивать →
+    `pallets_count` не трогаем). Оценка приблизительная (правится вручную).
     """
     from backend.models.warehouse import Warehouse
     from backend.services.box_multiplicity_service import _resolve_machine_box_qty
@@ -282,8 +286,10 @@ async def _suggest_pallets_count(
     max_h = max_pallet_height_cm(wh_name)
     machine = await _resolve_machine_box_qty(db, project_id, [it.barcode for it in items])
     overrides = await get_pallet_boxes_by_size(db, project_id)
+    is_mono = (request.package_type or "") == PackageType.MONOPALLET.value
 
-    footprint = Decimal("0")
+    box_footprint = Decimal("0")  # BOX: суммарный дробный след → один ceil в конце
+    mono_pallets = 0  # MONOPALLET: целые паллеты по каждому SKU
     any_geo = False
     for it in items:
         bq = box_qty_by_wh_bc.get((request.warehouse_id, it.barcode))
@@ -294,13 +300,18 @@ async def _suggest_pallets_count(
         bpp = effective_boxes_per_pallet(box_size, max_h, overrides)
         if not bpp or bpp <= 0:
             continue
-        units_per_pallet = bpp * bq
-        footprint += Decimal(int(it.quantity)) / Decimal(units_per_pallet)
+        frac = Decimal(int(it.quantity)) / Decimal(bpp * bq)  # доля паллеты для SKU
+        if is_mono:
+            mono_pallets += int(math.ceil(frac))
+        else:
+            box_footprint += frac
         any_geo = True
 
-    if not any_geo or footprint <= 0:
+    if not any_geo:
         return None
-    return int(math.ceil(footprint))
+    if is_mono:
+        return mono_pallets or None
+    return int(math.ceil(box_footprint)) if box_footprint > 0 else None
 
 
 async def apply_goods_weight(
