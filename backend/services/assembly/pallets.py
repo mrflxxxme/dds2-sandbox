@@ -13,6 +13,7 @@
                всегда пусто), срок годности — всегда пусто (одежда).
 """
 
+import math
 from decimal import Decimal
 from io import BytesIO
 
@@ -25,6 +26,7 @@ from backend.models.assembly import AssemblyRequest
 from backend.models.cost import Nomenclature
 from backend.schemas.assembly import PalletManifest
 from backend.services.assembly.crud import get_assembly_request
+from backend.services.assembly.pallet_geo import effective_boxes_per_pallet, max_pallet_height_cm
 from backend.services.box_multiplicity_service import resolve_box_qty_map
 
 XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -253,16 +255,73 @@ def _build_internal_xlsx(
     return buf.getvalue()
 
 
+async def _suggest_pallets_count(
+    db: AsyncSession,
+    project_id: int,
+    request: AssemblyRequest,
+    box_qty_by_wh_bc: dict[tuple[int, str], int | None],
+) -> int | None:
+    """Оценка числа паллет = `ceil(Σ qtyᵢ / units_per_palletᵢ)` по геометрии коробки.
+
+    Footprint смешанной паллеты (каждый SKU по своей геометрии), зеркало фронта.
+    `units_per_pallet = коробок_на_паллету(box_size, лимит склада, override) ×
+    кратность`. None — если ни по одной позиции нет габаритов И кратности (нечего
+    оценивать → `pallets_count` не трогаем). Оценка приблизительная (правится вручную).
+    """
+    from backend.models.warehouse import Warehouse
+    from backend.services.box_multiplicity_service import _resolve_machine_box_qty
+    from backend.services.settings_service import get_pallet_boxes_by_size
+
+    items = [it for it in (request.items or []) if it.barcode and (it.quantity or 0) > 0]
+    if not items:
+        return None
+
+    wh_name = (
+        await db.execute(select(Warehouse.name).where(Warehouse.id == request.warehouse_id))
+    ).scalar_one_or_none()
+    max_h = max_pallet_height_cm(wh_name)
+    machine = await _resolve_machine_box_qty(db, project_id, [it.barcode for it in items])
+    overrides = await get_pallet_boxes_by_size(db, project_id)
+
+    footprint = Decimal("0")
+    any_geo = False
+    for it in items:
+        bq = box_qty_by_wh_bc.get((request.warehouse_id, it.barcode))
+        if not bq or bq <= 0:
+            continue
+        machine_entry = machine.get((it.barcode, request.warehouse_id))
+        box_size = machine_entry.get("box_size") if machine_entry else None
+        bpp = effective_boxes_per_pallet(box_size, max_h, overrides)
+        if not bpp or bpp <= 0:
+            continue
+        units_per_pallet = bpp * bq
+        footprint += Decimal(int(it.quantity)) / Decimal(units_per_pallet)
+        any_geo = True
+
+    if not any_geo or footprint <= 0:
+        return None
+    return int(math.ceil(footprint))
+
+
 async def apply_goods_weight(
     db: AsyncSession,
     project_id: int,
     request_id: int,
 ) -> AssemblyRequest:
-    """Проставить расчётный вес товаров в ручной `pallet_weight_kg` (÷ паллеты).
+    """Проставить расчётный ВЕС ОТГРУЗКИ в ручной `pallet_weight_kg` (÷ паллеты) и,
+    если считается геометрия, авто-число паллет.
 
-    Удобная кнопка: `pallet_weight_kg = goods_weight_kg / pallets_count`. Если у
-    заявки нет позиций с весом — ValueError (→ 400)."""
-    from backend.services.assembly.weight import compute_goods_weight
+    Вес отгрузки = нетто товаров (Σ qty × вес/шт) + вес_коробки × число коробов
+    (тара паллеты НЕ учитывается). `pallet_weight_kg = вес_отгрузки / pallets_count`.
+    Кол-во паллет оценивается по геометрии коробки (footprint) и затем правится
+    вручную. Нет ни одной позиции с весом → ValueError (→ 400)."""
+    from backend.services.assembly.weight import (
+        compute_boxes_count,
+        compute_goods_weight,
+        compute_suggested_total_weight,
+        resolve_box_qty_by_warehouse,
+    )
+    from backend.services.settings_service import get_box_weight_kg
 
     request = await get_assembly_request(db, project_id, request_id)
     if request is None:
@@ -272,11 +331,45 @@ async def apply_goods_weight(
     if goods_weight is None:
         raise ValueError("Ни у одной позиции нет веса — заполните справочник веса в настройках")
 
+    barcodes = [it.barcode for it in (request.items or [])]
+    box_qty_by_wh_bc = await resolve_box_qty_by_warehouse(db, project_id, {request.warehouse_id: barcodes})
+    boxes_count = compute_boxes_count(request, box_qty_by_wh_bc)
+    box_weight = await get_box_weight_kg(db, project_id)
+    # Вес отгрузки = нетто + тара коробов; без веса коробки = чистое нетто (fallback).
+    total = compute_suggested_total_weight(goods_weight, boxes_count, box_weight) or goods_weight
+
+    suggested_pallets = await _suggest_pallets_count(db, project_id, request, box_qty_by_wh_bc)
+    if suggested_pallets and suggested_pallets > 0:
+        request.pallets_count = suggested_pallets
+
     pallets = request.pallets_count or 1
-    per_pallet = (goods_weight / Decimal(pallets)).quantize(Decimal("0.01"))
-    request.pallet_weight_kg = per_pallet
+    request.pallet_weight_kg = (total / Decimal(pallets)).quantize(Decimal("0.01"))
     await db.commit()
     await _invalidate(project_id)
     await invalidate_cache("reports:logistics_analytics_v2")  # вес паллеты → тоталы аналитики
     await db.refresh(request, ["items", "warehouse", "wb_fbo_supply"])
     return request
+
+
+async def apply_goods_weight_bulk(
+    db: AsyncSession,
+    project_id: int,
+    ids: list[int],
+) -> tuple[list[AssemblyRequest], list[dict]]:
+    """Массово проставить расчётный вес отгрузки для набора заявок.
+
+    Частичный успех: заявки без веса (или ненайденные) попадают в `skipped` с
+    причиной, остальные применяются. Возвращает `(applied, skipped)`, где
+    `skipped` — список `{id, number, reason}`. Дедуп id с сохранением порядка.
+    """
+    applied: list[AssemblyRequest] = []
+    skipped: list[dict] = []
+    for rid in dict.fromkeys(ids):
+        try:
+            applied.append(await apply_goods_weight(db, project_id, rid))
+        except ValueError as e:
+            existing = await get_assembly_request(db, project_id, rid)
+            skipped.append(
+                {"id": rid, "number": existing.number if existing else str(rid), "reason": str(e)}
+            )
+    return applied, skipped

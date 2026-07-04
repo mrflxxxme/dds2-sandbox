@@ -27,6 +27,7 @@ from .crud import (
 from .pallets import (
     PalletManifestConflict,
     apply_goods_weight,
+    apply_goods_weight_bulk,
     build_pallet_layout_xlsx,
     update_pallet_manifest,
 )
@@ -111,6 +112,7 @@ __all__ = [
     # pallets (раскладка по паллетам)
     "PalletManifestConflict",
     "apply_goods_weight",
+    "apply_goods_weight_bulk",
     "build_pallet_layout_xlsx",
     "update_pallet_manifest",
     # weight (расчётный вес товаров)

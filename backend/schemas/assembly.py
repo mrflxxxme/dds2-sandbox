@@ -337,6 +337,27 @@ class BulkStatusResult(BaseModel):
     skipped: list[BulkStatusSkip] = []
 
 
+class ApplyGoodsWeightBulkPayload(BaseModel):
+    """Тело массового авто-веса: id заявок, которым проставить расчётный вес."""
+
+    ids: list[int]
+
+
+class ApplyGoodsWeightSkip(BaseModel):
+    """Заявка, пропущенная при массовом авто-весе (нет веса / не найдена)."""
+
+    id: int
+    number: str
+    reason: str
+
+
+class ApplyGoodsWeightBulkResult(BaseModel):
+    """Итог массового авто-веса: применённые заявки + пропущенные с причиной."""
+
+    applied: list[AssemblyRequestResponse] = []
+    skipped: list[ApplyGoodsWeightSkip] = []
+
+
 # ─── Предраспределение машины в пути (pre-distribution) ─────────────────────
 # Машина (CostOrder CUSTOMS/DISPATCHED) везёт товар, ещё не на ФФ. До приёмки
 # раскладываем её входящий товар по WB-складам как заявки на сборку со статусом

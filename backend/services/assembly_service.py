@@ -22,6 +22,7 @@ from backend.services.assembly import (  # noqa: F401
     _validate_stock_for_ship,
     advance_pre_distribution_manual,
     apply_goods_weight,
+    apply_goods_weight_bulk,
     assign_vehicle,
     assign_vehicle_bulk,
     build_pallet_layout_xlsx,

@@ -27,6 +27,8 @@ from backend.schemas.assembly import (
     AssemblyRequestUpdate,
     AssignVehicle,
     AssignVehicleBulk,
+    ApplyGoodsWeightBulkPayload,
+    ApplyGoodsWeightBulkResult,
     BulkDeleteResult,
     BulkStatusResult,
     CostForecastResponse,
@@ -1045,6 +1047,26 @@ async def set_status_bulk(
         resp = await assembly_service._build_response(db, req)
         updated.append(AssemblyRequestResponse.model_validate(resp))
     return BulkStatusResult(updated=updated, skipped=result["skipped"])
+
+
+@router.post(
+    "/apply-goods-weight-bulk",
+    response_model=ApplyGoodsWeightBulkResult,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def apply_goods_weight_bulk(
+    payload: ApplyGoodsWeightBulkPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Массово проставить расчётный вес отгрузки (нетто + вес коробки × коробов) и
+    авто-число паллет для набора заявок. Заявки без веса пропускаются с причиной."""
+    applied, skipped = await assembly_service.apply_goods_weight_bulk(db, project.id, payload.ids)
+    applied_resp = [
+        AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+        for req in applied
+    ]
+    return ApplyGoodsWeightBulkResult(applied=applied_resp, skipped=skipped)
 
 
 # --- History ----------------------------------------------------------------
