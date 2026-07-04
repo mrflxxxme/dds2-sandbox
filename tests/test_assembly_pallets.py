@@ -15,6 +15,7 @@ import pytest_asyncio
 from openpyxl import load_workbook
 from sqlalchemy import text
 
+from backend.models.cost import CostOrder, CostOrderItem
 from backend.schemas.assembly import (
     AssemblyItemCreate,
     AssemblyRequestCreate,
@@ -97,6 +98,18 @@ async def _wh_id(db_session) -> int:
     ).scalar()
 
 
+async def _seed_machine_weight(db_session, order_no: str, barcode: str, weight: Decimal):
+    """Строка машины (CostOrderItem) с весом для barcode — источник fallback-веса.
+
+    Через ORM (а не raw SQL): применяет python-дефолты обязательных полей заказа
+    (delivery_cost_cny, rate_*, country и т.п.), которых нет в raw INSERT."""
+    db_session.add(CostOrder(project_id=PROJECT_ID, order_no=order_no))
+    db_session.add(
+        CostOrderItem(project_id=PROJECT_ID, order_no=order_no, barcode=barcode, qty=1, weight_kg=weight)
+    )
+    await db_session.commit()
+
+
 async def _make_request(db_session, items: list[tuple[str, int]]):
     payload = AssemblyRequestCreate(
         warehouse_id=await _wh_id(db_session),
@@ -127,6 +140,31 @@ async def test_goods_weight_none_when_no_weights(db_session):
     weight, missing = await compute_goods_weight(db_session, PROJECT_ID, req)
     assert weight is None
     assert missing == [BC2]
+
+
+@pytest.mark.asyncio
+async def test_goods_weight_machine_fallback(db_session):
+    """BC2 без веса в справочнике, но есть ненулевой вес в машине (CostOrderItem)
+    → берётся из машины, BC2 НЕ в missing."""
+    await _seed_machine_weight(db_session, f"V-PAL-{PROJECT_ID}", BC2, Decimal("0.8"))
+
+    req = await _make_request(db_session, [(BC2, 4)])
+    req = await get_assembly_request(db_session, PROJECT_ID, req.id)
+    weight, missing = await compute_goods_weight(db_session, PROJECT_ID, req)
+    assert weight == Decimal("3.200")  # 4 × 0.8 из машины
+    assert missing == []
+
+
+@pytest.mark.asyncio
+async def test_goods_weight_nomenclature_wins_over_machine(db_session):
+    """Справочник приоритетнее машины: BC1 имеет вес 0.5 в справочнике; даже если
+    в машине другой вес — берётся справочный."""
+    await _seed_machine_weight(db_session, f"V-PALB-{PROJECT_ID}", BC1, Decimal("9.0"))
+
+    req = await _make_request(db_session, [(BC1, 2)])
+    req = await get_assembly_request(db_session, PROJECT_ID, req.id)
+    weight, _ = await compute_goods_weight(db_session, PROJECT_ID, req)
+    assert weight == Decimal("1.000")  # 2 × 0.5 (справочник), не 9.0 из машины
 
 
 @pytest.mark.asyncio

@@ -39,7 +39,7 @@ from backend.schemas.assembly import (
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
 )
-from backend.services.assembly.weight import compute_goods_weight
+from backend.services.assembly.weight import compute_goods_weight, resolve_unit_weights
 from backend.services.warehouse_service import (
     _next_number,
     get_warehouse,
@@ -350,6 +350,7 @@ async def _build_response(
     cp_map: dict[int, Any] | None = None,
     prop_nom_map: dict[str, Nomenclature] | None = None,
     via_gazelka_ids: set[int] | None = None,
+    weight_by_barcode: dict[str, Decimal | None] | None = None,
 ) -> dict:
     """
     Build AssemblyRequestResponse dict from ORM model.
@@ -436,12 +437,10 @@ async def _build_response(
                 }
             )
 
-    # Расчётный вес товаров (нетто) + ШК без веса. В list-контексте вес берётся
-    # из уже загруженного nom_map (0 запросов на строку); одиночный вызов делает
-    # один батч-SELECT по barcode внутри compute_goods_weight.
-    weight_by_barcode = (
-        {n.barcode: n.weight_kg for n in nom_map.values()} if nom_map is not None else None
-    )
+    # Расчётный вес товаров (нетто) + ШК без веса. Вес за 1 шт резолвится цепочкой
+    # Nomenclature.weight_kg → машина (CostOrderItem). В list-контексте карта
+    # weight_by_barcode приходит из prefetch (0 запросов на строку — паритет с
+    # per-row); одиночный вызов резолвит цепочку сам (2 батч-запроса).
     goods_weight_kg, weight_missing_barcodes = await compute_goods_weight(
         db, request.project_id, request, weight_by_barcode=weight_by_barcode
     )
@@ -524,6 +523,7 @@ async def prefetch_list_maps(
     wh_ids: set[int] = set()
     cp_ids: set[int] = set()
     proposal_barcodes: set[str] = set()
+    item_barcodes: set[str] = set()
     for req in requests:
         if req.warehouse_id:
             wh_ids.add(req.warehouse_id)
@@ -532,6 +532,8 @@ async def prefetch_list_maps(
         for item in req.items:
             if item.nomenclature_id:
                 nom_ids.add(item.nomenclature_id)
+            if item.barcode:
+                item_barcodes.add(item.barcode)
         proposal = req.ff_proposed_items
         if proposal:
             for i in proposal:
@@ -596,12 +598,18 @@ async def prefetch_list_maps(
             if rid is not None:
                 via_gazelka_ids.add(rid)
 
+    # Вес за 1 шт по цепочке Nomenclature.weight_kg → машина (CostOrderItem) —
+    # один резолв на всю страницу (константа запросов), чтобы goods_weight в
+    # списке считался без N+1 и совпадал с per-row сборкой.
+    weight_by_barcode = await resolve_unit_weights(db, project_id, sorted(item_barcodes))
+
     return {
         "nom_map": nom_map,
         "stock_by_wh_nom": stock_by_wh_nom,
         "cp_map": cp_map,
         "prop_nom_map": prop_nom_map,
         "via_gazelka_ids": via_gazelka_ids,
+        "weight_by_barcode": weight_by_barcode,
     }
 
 

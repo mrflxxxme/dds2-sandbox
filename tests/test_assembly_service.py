@@ -2500,6 +2500,7 @@ class TestListBuildBatched:
         per_row = c2["n"]
 
         # Батч-путь дешевле и ограничен константой (≤ число prefetch-запросов),
-        # per-row растёт с числом строк.
+        # per-row растёт с числом строк. Константа включает резолв веса товаров
+        # (Nomenclature + машина) в prefetch — не масштабируется по строкам.
         assert batched < per_row
-        assert batched <= 6
+        assert batched <= 8
