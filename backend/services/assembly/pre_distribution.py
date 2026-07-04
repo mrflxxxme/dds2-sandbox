@@ -198,7 +198,9 @@ async def _vehicle_box_meta_by_barcode(
 
     out: dict[str, tuple[int, str | None]] = {}
     for barcode, qmap in ppb_qty.items():
-        primary = max(qmap.items(), key=lambda x: x[1])[0]  # mode: ppb с наибольшей Σqty
+        # mode: ppb с наибольшей Σqty; при точной ничьей — МЕНЬШИЙ ppb (детерминизм: запрос
+        # без ORDER BY → dict-порядок = порядок строк БД; иначе показанная кратность «плавает»).
+        primary = max(qmap.items(), key=lambda x: (x[1], -x[0]))[0]
         out[barcode] = (primary, ppb_size.get(barcode, {}).get(primary))
     return out
 

@@ -459,10 +459,12 @@ export default function PreDistVehiclePage() {
 
     // ─── Предбронь машины: короб=«Дозабить» / моно=«Предзаявка» (из хвостов раскладки) ──
     const prebookView = useMemo(() => {
-        // units-per-паллету per nm (footprint) = boxesPerPallet(размер) × ppb.
-        const uppOf = (nm: number): number => {
+        // units-per-паллету per nm НА КОНКРЕТНОМ WB-складе = boxesPerPallet(размер, высота склада) × ppb.
+        // Высоту берём по складу назначения (зеркалит normalizeDraft/prebookFootprint — авторитет,
+        // решающий, что попадает в предбронь), иначе footprint врёт для складов с высотой ≠ 180см.
+        const uppOf = (nm: number, wb: string): number => {
             const ppb = nmPpb.get(nm);
-            const bpp = effectiveBoxesPerPallet(nmBoxSize.get(nm) ?? null, maxPalletHeightCm(''), palletOverrides);
+            const bpp = effectiveBoxesPerPallet(nmBoxSize.get(nm) ?? null, maxPalletHeightCm(wb), palletOverrides);
             return bpp != null && ppb && ppb > 0 ? bpp * ppb : 0;
         };
         const summarize = (rows: AssemblyDraftRow[]) => {
@@ -471,8 +473,16 @@ export default function PreDistVehiclePage() {
                 .sort((a, b) => b.qty - a.qty);
             const qty = lines.reduce((s, l) => s + l.qty, 0);
             const boxes = lines.reduce((s, l) => s + boxesOf(l.qty, nmPpb.get(l.nm)), 0);
-            const items = rows.map(r => ({ nmId: r.nm_id, qty: Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0) }));
-            return { lines, qty, boxes, pallets: palletFootprint(items, uppOf) };
+            // Footprint суммируем ПО СКЛАДУ (у каждого своя вместимость паллеты по высоте).
+            const byWh = new Map<string, { nmId: number; qty: number }[]>();
+            for (const l of lines) {
+                const arr = byWh.get(l.wb_warehouse_name) ?? [];
+                arr.push({ nmId: l.nm, qty: l.qty });
+                byWh.set(l.wb_warehouse_name, arr);
+            }
+            let pallets = 0;
+            for (const [wb, items] of byWh) pallets += palletFootprint(items, nm => uppOf(nm, wb));
+            return { lines, qty, boxes, pallets };
         };
         const box = prebookRows.filter(r => (r.package_type ?? 'BOX') === 'BOX');
         const mono = prebookRows.filter(r => (r.package_type ?? 'BOX') !== 'BOX');

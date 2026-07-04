@@ -153,6 +153,32 @@ async def test_pool_returns_machine_box_qty(db_session, project):
     assert by_bc[bc_none].box_size is None
 
 
+@pytest.mark.asyncio
+async def test_pool_box_qty_tie_break_deterministic(db_session, project):
+    """При точной ничьей Σqty двух кратностей выбираем МЕНЬШУЮ — детерминированно (не порядок БД)."""
+    pid = project.id
+    ff_wh = await create_warehouse(db_session, pid, {"name": f"FF-{_uid()}", "warehouse_type": "FULFILLMENT"})
+    bc = f"PD-{_uid()}"
+    await _make_nomenclature(db_session, pid, bc)
+    vehicle = CostOrder(
+        project_id=pid, order_no=f"PRDIST-{_uid()}", status=VehicleStatus.CUSTOMS, target_warehouse_id=ff_wh.id
+    )
+    db_session.add(vehicle)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            # Равная суммарная qty (50) у ppb=12 и ppb=6 → ничья → побеждает МЕНЬШИЙ (6).
+            CostOrderItem(project_id=pid, order_no=vehicle.order_no, barcode=bc, qty=50, pcs_per_box_override=12),
+            CostOrderItem(project_id=pid, order_no=vehicle.order_no, barcode=bc, qty=50, pcs_per_box_override=6),
+        ]
+    )
+    await db_session.commit()
+
+    pool = await get_vehicle_pre_dist_pool(db_session, pid, vehicle.id)
+    row = next(r for r in pool.rows if r.barcode == bc)
+    assert row.box_qty == 6  # ничья Σqty → меньший ppb
+
+
 # ─── Создание заявок ───────────────────────────────────────────────────────
 
 
