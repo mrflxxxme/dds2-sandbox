@@ -87,7 +87,11 @@ export default function PreDistVehiclePage() {
             try {
                 const [poolData, need, cold, boxMult, palletOv] = await Promise.all([
                     api.getPreDistVehiclePool(vehicleId),
-                    (api.getStockNeed(14, 14, 'actual') as Promise<StockNeedResponse | null>).catch(() => null),
+                    // Форма спроса ТА ЖЕ, что у «Черновика сборки»: localizationOptimized=true
+                    // (локализованное распределение по округам). НО onlyAvailable=false — машинный
+                    // кап нельзя стекать поверх серверного ФФ-капа (источник = пул машины, не ФФ);
+                    // кап применяется клиентски в buildDraftRows (min(pool, need)). См. план, часть A.
+                    (api.getStockNeed(14, 14, 'actual', true, false, 0) as Promise<StockNeedResponse | null>).catch(() => null),
                     api.getColdStartTable(14).catch(() => null),  // окно 14д — как getStockNeed(14,14) и «Потребность»
                     api.getBoxMultiplicity().catch(() => null),
                     api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
@@ -101,8 +105,13 @@ export default function PreDistVehiclePage() {
                 setNewcomerSet(ncs);
                 setAnchors((cold?.main_warehouses ?? []).map(w => ({ warehouse: w.warehouse, share_pct: w.share_pct })));
 
+                // Кратность/габарит короба — приоритет: pool-row машины → справочник.
+                // Машина ещё в пути → её кратность НЕ попала в справочник принятых приёмок
+                // (getBoxMultiplicity), поэтому кратность прямо со строк cost_order (pool.box_qty)
+                // старше и НЕ гейтится use_box_multiplicity справочника (тот флаг про приёмку).
                 const ppbMap = new Map<number, number | null>();
                 const sizeMap = new Map<number, string | null>();
+                // 1) Справочник — fallback (принятые приёмки, per-склад/override).
                 for (const r of boxMult?.items ?? []) {
                     let ppb: number | null = null;
                     if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
@@ -122,6 +131,19 @@ export default function PreDistVehiclePage() {
                     }
                     ppbMap.set(r.nm_id, ppb);
                     sizeMap.set(r.nm_id, boxSize);
+                }
+                // 2) Пул машины — приоритетнее справочника. Несколько ШК на один nm →
+                //    берём строку с наибольшим доступным остатком (детерминированно).
+                const poolBestAvail = new Map<number, number>();
+                for (const pr of poolData.rows) {
+                    const nm = pr.article_wb ? Number(pr.article_wb) : 0;
+                    if (!nm || !pr.box_qty || pr.box_qty <= 0) continue;
+                    const avail = Math.max(0, Number(pr.available_qty) || 0);
+                    if (avail > (poolBestAvail.get(nm) ?? -1)) {
+                        poolBestAvail.set(nm, avail);
+                        ppbMap.set(nm, pr.box_qty);
+                        if (pr.box_size && parseBoxSize(pr.box_size)) sizeMap.set(nm, pr.box_size);
+                    }
                 }
                 setNmPpb(ppbMap);
                 setNmBoxSize(sizeMap);

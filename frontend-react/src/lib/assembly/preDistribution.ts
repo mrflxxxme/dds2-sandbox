@@ -22,9 +22,20 @@ import type {
     PreDistPoolRow,
     StockNeedResponse,
 } from '@/types/api';
-import { buildDraftRows, type DraftSkuInput } from '@/lib/assembly/buildDraftRows';
-import { roundDraftRowsToWholeBoxes } from '@/lib/utils/assemblyRoundBoxes';
-import { normalizeDraft, type NormalizeDraftCtx } from '@/lib/utils/normalizeDraft';
+import { type DraftSkuInput } from '@/lib/assembly/buildDraftRows';
+import {
+    applyAcceptanceSplits,
+    buildDistributionSkus,
+    finalizeDistribution,
+    type AcceptanceSplitMap,
+    type AvailabilityOf,
+    type DistSku,
+    type DistributionGeom,
+} from '@/lib/assembly/buildAssemblyDistribution';
+
+// Приёмка и сплиты — общий движок (`buildAssemblyDistribution`); реэкспорт для call-site.
+export { applyAcceptanceSplits };
+export type { AcceptanceSplitMap };
 
 export interface PoolDistInput {
     /** Пул машины: товар + доступно к раздаче (per barcode). */
@@ -48,147 +59,75 @@ export interface PoolAcceptanceItem {
     distribution: Record<string, number>;
 }
 
-/** Применённый результат приёмки: per (nm_id::barcode) → набор сплитов. */
-export type AcceptanceSplitMap = Map<
-    string,
-    { package_type: PackageType; distribution: Record<string, number> }[]
->;
+/** Геометрия движка из PoolDistInput (кратность/габарит per nm + паллет-override). */
+function poolGeom(input: PoolDistInput): DistributionGeom {
+    return {
+        ppbOf: (nm) => input.nmPpb.get(nm),
+        boxSizeOf: (nm) => input.nmBoxSize.get(nm) ?? null,
+        palletOverrides: input.palletOverrides,
+    };
+}
 
-/** Базовые `DraftSkuInput` ДО приёмки: пул × потребность (источник = пул машины). */
-export function buildPoolSkus(input: PoolDistInput): {
-    skus: DraftSkuInput[];
-    /** barcode → nm_id (для матрицы/обратного маппинга). */
-    nmByBarcode: Map<string, number>;
-} {
-    const { poolRows, targetWarehouseId, stockNeed } = input;
-    const skus: DraftSkuInput[] = [];
-    const nmByBarcode = new Map<string, number>();
-
-    // Потребность per nm_id per WB-склад: warehouses[].articles[nm].need.
-    const needByNm = new Map<number, Record<string, number>>();
-    for (const w of stockNeed?.warehouses ?? []) {
-        for (const [nmStr, cell] of Object.entries(w.articles ?? {})) {
-            const nm = Number(nmStr);
-            const need = Number(cell?.need) || 0;  // Decimal сериализуется строкой → Number до арифметики
-            if (need <= 0) continue;
-            const t = needByNm.get(nm) ?? {};
-            t[w.name] = (t[w.name] || 0) + need;
-            needByNm.set(nm, t);
-        }
+/** Источник доступности МАШИНЫ: весь остаток пула сидит на ФФ-складе разгрузки. */
+function poolAvailabilityOf(input: PoolDistInput): AvailabilityOf {
+    const availByBarcode = new Map<string, number>();
+    for (const row of input.poolRows) {
+        availByBarcode.set(row.barcode, Math.max(0, Math.floor(Number(row.available_qty) || 0)));
     }
-    // vendor_code per nm_id (для подписи строки).
-    const vendorByNm = new Map<number, string>();
-    for (const a of stockNeed?.articles ?? []) vendorByNm.set(a.nm_id, a.vendor_code);
+    return (_nm, barcode) => {
+        const avail = availByBarcode.get(barcode) ?? 0;
+        return avail > 0 ? { [input.targetWarehouseId]: avail } : {};
+    };
+}
 
-    for (const row of poolRows) {
-        const avail = Math.max(0, Math.floor(Number(row.available_qty) || 0));
-        if (avail <= 0) continue;
+/** Строки пула машины как кандидаты движка (все — обычные; новинки засеваются отдельно). */
+function poolToDistSkus(input: PoolDistInput): { skus: DistSku[]; nmByBarcode: Map<string, number> } {
+    const vendorByNm = new Map<number, string>();
+    for (const a of input.stockNeed?.articles ?? []) vendorByNm.set(a.nm_id, a.vendor_code);
+    const skus: DistSku[] = [];
+    const nmByBarcode = new Map<string, number>();
+    for (const row of input.poolRows) {
         const nm = row.article_wb ? Number(row.article_wb) : 0;
         nmByBarcode.set(row.barcode, nm);
-        const target = nm ? needByNm.get(nm) : undefined;
-        if (!target || Object.keys(target).length === 0) continue; // нет потребности → на хранение
         skus.push({
             nm_id: nm,
             barcode: row.barcode,
             vendor_code: row.article_seller || vendorByNm.get(nm) || row.barcode,
-            target: { ...target },
-            ffStock: { [targetWarehouseId]: avail },
-            ppb: input.nmPpb.get(nm),
-            box_size: input.nmBoxSize.get(nm) ?? null,
-            packageType: 'BOX',
+            is_newcomer: false,
+            available: Math.max(0, Math.floor(Number(row.available_qty) || 0)),
         });
     }
     return { skus, nmByBarcode };
 }
 
-/** Применить сплиты приёмки к базовым скусам (closed→open + тип упаковки per WB). */
-export function applyAcceptanceSplits(
-    skus: DraftSkuInput[],
-    splitMap: AcceptanceSplitMap | null,
-): DraftSkuInput[] {
-    if (!splitMap) return skus;
-    const out: DraftSkuInput[] = [];
-    for (const s of skus) {
-        const splits = splitMap.get(`${s.nm_id}::${s.barcode}`);
-        if (!splits || splits.length === 0) {
-            out.push(s);
-            continue;
-        }
-        for (const sp of splits) {
-            const target = Object.fromEntries(
-                Object.entries(sp.distribution || {}).filter(([, q]) => (q || 0) > 0),
-            );
-            if (Object.keys(target).length === 0) continue;
-            out.push({ ...s, target, packageType: sp.package_type });
-        }
-    }
-    return out;
+/** Базовые `DraftSkuInput` ДО приёмки: пул × потребность (источник = пул машины).
+ *  Тонкий адаптер над общим движком `buildDistributionSkus` (источник = ФФ разгрузки). */
+export function buildPoolSkus(input: PoolDistInput): {
+    skus: DraftSkuInput[];
+    /** barcode → nm_id (для матрицы/обратного маппинга). */
+    nmByBarcode: Map<string, number>;
+} {
+    const { skus: distSkus, nmByBarcode } = poolToDistSkus(input);
+    const skus = buildDistributionSkus(distSkus, input.stockNeed, poolAvailabilityOf(input), poolGeom(input));
+    return { skus, nmByBarcode };
 }
 
 /**
- * Финальная раскладка: buildDraftRows (целые коробы) → добивка коробов из пула →
- * normalizeDraft (целые паллеты). Источник у всех строк = `targetWarehouseId`.
+ * Финальная раскладка машины — тонкий адаптер над общим движком `finalizeDistribution`
+ * (celye koroby → добивка из остатка пула → целые паллеты). Источник у всех строк =
+ * `targetWarehouseId` (задан в `effectiveSkus[].ffStock` из `buildPoolSkus`).
  *
  * `wholePallets=true` — строго целые паллеты (хвост < паллеты остаётся на ФФ);
- * `false` — только целые коробы (частичные паллеты допускаются). На мелкой
- * потребности машины целые паллеты часто обнуляют раскладку — режим «коробами»
- * показывает то, что реально набирается коробами (зеркало тумблера «Потребности»).
+ * `false` — только целые коробы (частичные паллеты допускаются). На мелкой потребности
+ * машины целые паллеты часто обнуляют раскладку — режим «коробами» показывает то, что
+ * реально набирается коробами (зеркало тумблера «Потребности»/«Черновика»).
  */
 export function finalizePoolRows(
     effectiveSkus: DraftSkuInput[],
     input: PoolDistInput,
     wholePallets = true,
 ): AssemblyDraftRow[] {
-    const { nmPpb, nmBoxSize, palletOverrides } = input;
-    if (effectiveSkus.length === 0) return [];
-
-    let rows = buildDraftRows({ skus: effectiveSkus, palletOverrides });
-    if (rows.length === 0) return [];
-
-    // Добить неполные коробы из ОСТАВШЕГОСЯ пула (как в AddFromNeedPanel).
-    const used: Record<number, Record<number, number>> = {};
-    for (const r of rows) {
-        const m = (used[r.nm_id] ??= {});
-        for (const [ff, q] of Object.entries(r.src)) m[Number(ff)] = (m[Number(ff)] || 0) + (q || 0);
-    }
-    const freeAfter: Record<number, Record<number, number>> = {};
-    for (const s of effectiveSkus) {
-        if (freeAfter[s.nm_id]) continue;
-        const pool: Record<number, number> = {};
-        for (const [ff, q] of Object.entries(s.ffStock)) {
-            const free = (q || 0) - (used[s.nm_id]?.[Number(ff)] || 0);
-            if (free > 0) pool[Number(ff)] = free;
-        }
-        if (Object.keys(pool).length) freeAfter[s.nm_id] = pool;
-    }
-    rows = roundDraftRowsToWholeBoxes(rows, (nm) => nmPpb.get(nm), freeAfter, () => false).rows;
-
-    if (!wholePallets) return rows; // режим «коробами»: частичные паллеты ок
-
-    // Целые ПАЛЛЕТЫ (per-shipment ФФ→WB) — тот же нормализатор, что у черновика/потребности.
-    const inDraft: Record<number, Record<number, number>> = {};
-    for (const r of rows) {
-        const m = (inDraft[r.nm_id] ??= {});
-        for (const [ff, q] of Object.entries(r.src)) m[Number(ff)] = (m[Number(ff)] || 0) + (q || 0);
-    }
-    const freeByNm: Record<number, Record<number, number>> = {};
-    for (const s of effectiveSkus) {
-        if (freeByNm[s.nm_id]) continue;
-        const pool: Record<number, number> = {};
-        for (const [ff, q] of Object.entries(s.ffStock)) {
-            const free = (q || 0) - (inDraft[s.nm_id]?.[Number(ff)] || 0);
-            if (free > 0) pool[Number(ff)] = free;
-        }
-        if (Object.keys(pool).length) freeByNm[s.nm_id] = pool;
-    }
-    const ctx: NormalizeDraftCtx = {
-        ppbOf: (nm) => nmPpb.get(nm),
-        boxSizeOf: (nm) => nmBoxSize.get(nm) ?? null,
-        overrides: palletOverrides,
-        isNewcomer: () => false,
-        freeByNm,
-    };
-    return normalizeDraft(rows, ctx).rows;
+    return finalizeDistribution(effectiveSkus, poolGeom(input), wholePallets).rows;
 }
 
 /** Обогащение строки пула данными «Потребности по складам» (для матрицы экрана машины):

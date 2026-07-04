@@ -365,6 +365,10 @@ class PreDistPoolRow(BaseModel):
     gross_qty: int  # всего на машине
     distributed_qty: int  # уже разнесено в заявки этой машины
     available_qty: int  # max(0, gross − distributed)
+    # Кратность/габарит короба ИЗ САМОЙ машины (qty-weighted mode строк cost_order):
+    # машина ещё в пути → её кратность нет в справочнике приёмок, читаем прямо со строк.
+    box_qty: int | None = None  # шт/короб (None — не задана на машине)
+    box_size: str | None = None  # «ДxШxВ» см, спарен с выбранной кратностью
 
 
 class PreDistVehiclePool(BaseModel):

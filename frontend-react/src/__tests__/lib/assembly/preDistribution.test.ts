@@ -20,7 +20,7 @@ const FF = 500; // ФФ-склад разгрузки машины
 function poolRow(over: Partial<PreDistPoolRow>): PreDistPoolRow {
     return {
         barcode: 'B1', article_seller: 'ART1', article_wb: '1', name: 'Ковёр', brand: 'НУ',
-        gross_qty: 100, distributed_qty: 0, available_qty: 100, ...over,
+        gross_qty: 100, distributed_qty: 0, available_qty: 100, box_qty: null, box_size: null, ...over,
     };
 }
 

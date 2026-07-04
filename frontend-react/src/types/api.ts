@@ -1945,6 +1945,12 @@ export interface PreDistPoolRow {
   gross_qty: number;
   distributed_qty: number;
   available_qty: number;
+  /** Кратность короба (шт/короб) ИЗ САМОЙ машины (qty-weighted mode строк cost_order).
+   *  Машина ещё в пути → её кратность нет в справочнике принятых приёмок; берём отсюда.
+   *  null — у машины нет заданной кратности. Приоритет на фронте: pool-row → справочник. */
+  box_qty: number | null;
+  /** Габариты короба «ДxШxВ» (см) машины, спаренные с выбранной кратностью. null — нет. */
+  box_size: string | null;
 }
 
 export interface PreDistVehiclePool {

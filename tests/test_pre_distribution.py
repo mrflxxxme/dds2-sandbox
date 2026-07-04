@@ -113,6 +113,46 @@ async def test_pool_net_math(db_session, env):
     assert by_bc2[env.bc1].available_qty == 70
 
 
+@pytest.mark.asyncio
+async def test_pool_returns_machine_box_qty(db_session, project):
+    """[B] Кратность/габарит короба берутся ИЗ САМОЙ машины (строки cost_order), qty-weighted
+    mode — едущая машина ещё не в справочнике принятых приёмок, но её кратность уже видна."""
+    pid = project.id
+    ff_wh = await create_warehouse(db_session, pid, {"name": f"FF-{_uid()}", "warehouse_type": "FULFILLMENT"})
+    bc_k = f"PD-{_uid()}"  # с кратностью
+    bc_none = f"PD-{_uid()}"  # без кратности
+    await _make_nomenclature(db_session, pid, bc_k)
+    await _make_nomenclature(db_session, pid, bc_none)
+    vehicle = CostOrder(
+        project_id=pid, order_no=f"PRDIST-{_uid()}", status=VehicleStatus.CUSTOMS, target_warehouse_id=ff_wh.id
+    )
+    db_session.add(vehicle)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            # bc_k: две строки — ppb=6 (qty 100) доминирует над ppb=10 (qty 20) по qty-weighted mode.
+            CostOrderItem(
+                project_id=pid, order_no=vehicle.order_no, barcode=bc_k, qty=100,
+                pcs_per_box_override=6, box_size_override="60x40x40",
+            ),
+            CostOrderItem(
+                project_id=pid, order_no=vehicle.order_no, barcode=bc_k, qty=20,
+                pcs_per_box_override=10, box_size_override="30x20x20",
+            ),
+            # bc_none: без override и без FOI → кратности нет.
+            CostOrderItem(project_id=pid, order_no=vehicle.order_no, barcode=bc_none, qty=50),
+        ]
+    )
+    await db_session.commit()
+
+    pool = await get_vehicle_pre_dist_pool(db_session, pid, vehicle.id)
+    by_bc = {r.barcode: r for r in pool.rows}
+    assert by_bc[bc_k].box_qty == 6  # mode: ppb с наибольшей суммарной qty
+    assert by_bc[bc_k].box_size == "60x40x40"  # габарит спарен с выбранной кратностью
+    assert by_bc[bc_none].box_qty is None
+    assert by_bc[bc_none].box_size is None
+
+
 # ─── Создание заявок ───────────────────────────────────────────────────────
 
 
