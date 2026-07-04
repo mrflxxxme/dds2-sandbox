@@ -10,6 +10,7 @@ import { topUpPrebookLooseBoxes, releaseUnfixableLooseBoxes } from '@/lib/utils/
 import { allocatePairs } from '@/lib/utils/assemblyPreview';
 import { scopedNormalizeDraft, mergeDraftRows, directionKey } from '@/lib/utils/scopedNormalizeDraft';
 import { palletFootprint, planTopUpBoxes, type TopUpCandidate } from '@/lib/assembly/prebookFootprint';
+import { applyAcceptanceRedistToPrebook } from '@/lib/assembly/prebookRedistribute';
 import { Toast } from '@/components';
 import TabLayout from '@/components/TabLayout';
 import DraftPreview from './components/DraftPreview';
@@ -130,6 +131,9 @@ export default function AssemblyDraftPage() {
     const [accRefreshTick, setAccRefreshTick] = useState(0);
     // Whitelist складов, куда можно делать предзаявку без лимита приёмки (для кнопки «Создать предзаявку»).
     const [preorderWbs, setPreorderWbs] = useState<Set<string>>(new Set());
+    const [preorderLoaded, setPreorderLoaded] = useState(false);
+    const redistBusyRef = useRef(false);
+    const redistSigRef = useRef<string>('');
 
     const lastSavedJsonRef = useRef<string>('');
     const initialLoadRef = useRef(false);
@@ -425,7 +429,7 @@ export default function AssemblyDraftPage() {
     const selfHealKeyRef = useRef<string>('');
     const selfHealBusyRef = useRef(false);
     useEffect(() => {
-        if (!draftId || geomState !== 'ready' || loading || selfHealBusyRef.current) return;
+        if (!draftId || geomState !== 'ready' || loading || selfHealBusyRef.current || redistBusyRef.current) return;
         const key = `${draftId}::${draft?.updated_at || ''}`;
         if (selfHealKeyRef.current === key) return;
         selfHealKeyRef.current = key;
@@ -894,7 +898,7 @@ export default function AssemblyDraftPage() {
     const consAccSigRef = useRef<string>('');
     const [consRearmTick, setConsRearmTick] = useState(0);
     useEffect(() => {
-        if (!draftId || geomState !== 'ready' || consolidatingRef.current) return;
+        if (!draftId || geomState !== 'ready' || consolidatingRef.current || redistBusyRef.current) return;
         // Приёмка ещё не загружена → ждём (эффект перезапустится по смене prebookAcceptance).
         if (prebookAcceptance.size === 0) return;
         if (rows.length === 0 && prebook.length === 0) return;
@@ -1032,12 +1036,86 @@ export default function AssemblyDraftPage() {
         return () => { cancelled = true; };
     }, [draftId, draft, geomState, prebook, prebookGroups, rows, prebookAcceptance, readyPkgWbs, checkedPkgWbs, consRearmTick, buildNormalizeCtx, buildDistribution, applyDraft, showToast]);
 
-    // Whitelist «складов с разрешённой предзаявкой» — грузим один раз (для кнопки «Создать предзаявку»).
+    // АВТО-РЕДИСТРИБУЦИЯ ПРЕДБРОНИ по приёмке WB (self-heal на загрузке).
+    // ⌛-склад (нет лимита приёмки), которого НЕТ в whitelist «Предзаявка без лимита»,
+    // отгрузить нельзя — товар «висит» в под-вкладке «Предзаявка». Бэк
+    // (check_acceptance_and_redistribute) уводит его на свободный/whitelist склад по
+    // приоритету; здесь применяем splits к предброни, СОХРАНЯЯ источник ФФ. Триггер —
+    // наличие ⌛-не-whitelist направления (checked, не ready, не в whitelist). Идемпотентно:
+    // после переноса на whitelist/open splits цель не меняют → PUT не идёт. Координация с
+    // self-heal/консолидацией — общие busy-refs (не PUT-им одновременно) + wait-loop.
+    useEffect(() => {
+        if (!draftId || geomState !== 'ready' || loading) return;
+        if (redistBusyRef.current || consolidatingRef.current || selfHealBusyRef.current) return;
+        if (prebookAcceptance.size === 0 || !preorderLoaded) return;   // ждём приёмку И whitelist
+        if (prebook.length === 0) return;
+        const isDead = (r: AssemblyDraftRow) => !r.as_is && Object.keys(r.tgt).some(wb => {
+            const k = `${r.package_type || 'BOX'}::${wb}`;
+            return checkedPkgWbs.has(k) && !readyPkgWbs.has(k) && !preorderWbs.has(wb);
+        });
+        if (!prebook.some(isDead)) return;
+        // Прогон, не давший изменений, взводит sig и больше не бежит (до смены приёмки/whitelist/версии).
+        const sig = `${draft?.updated_at || ''}|${[...checkedPkgWbs].sort().join(',')}|${[...readyPkgWbs].sort().join(',')}|${[...preorderWbs].sort().join(',')}`;
+        if (redistSigRef.current === sig) return;
+        redistSigRef.current = sig;
+        redistBusyRef.current = true;
+        let cancelled = false;
+        void (async () => {
+            try {
+                while (selfHealBusyRef.current || consolidatingRef.current) await new Promise((r) => setTimeout(r, 120));
+                if (cancelled) return;
+                // Один item на баркод: суммируем цель по всем строкам предброни (as_is не трогаем).
+                const bySku = new Map<string, { nm_id: number; barcode: string; distribution: Record<string, number> }>();
+                for (const r of prebook) {
+                    if (r.as_is) continue;
+                    const key = `${r.nm_id}::${r.barcode}`;
+                    const e = bySku.get(key) ?? { nm_id: r.nm_id, barcode: r.barcode, distribution: {} };
+                    for (const [wb, q] of Object.entries(r.tgt)) e.distribution[wb] = (e.distribution[wb] || 0) + (q || 0);
+                    bySku.set(key, e);
+                }
+                const items = [...bySku.values()].filter(it => Object.keys(it.distribution).length > 0);
+                if (items.length === 0) return;
+                const resp = await api.checkWbAcceptance({ items });
+                if (cancelled) return;
+                const byKey = new Map(resp.items.map(it => [`${it.nm_id}::${it.barcode}`, it]));
+                const { rows: newPrebook, changed } = applyAcceptanceRedistToPrebook(prebook, byKey);
+                if (!changed || cancelled) return;
+                const merged = mergeDraftRows(newPrebook);
+                const before: Record<string, number> = {};
+                for (const r of prebook) for (const [wb, q] of Object.entries(r.tgt)) before[wb] = (before[wb] || 0) + (q || 0);
+                const after: Record<string, number> = {};
+                for (const r of merged) for (const [wb, q] of Object.entries(r.tgt)) after[wb] = (after[wb] || 0) + (q || 0);
+                const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: merged } });
+                applyDraft(updated);
+                const off: string[] = []; const onto: string[] = [];
+                for (const wb of new Set([...Object.keys(before), ...Object.keys(after)])) {
+                    const d = (after[wb] || 0) - (before[wb] || 0);
+                    if (d < 0) off.push(`${wb} −${formatNumber(-d, 0)} шт`);
+                    if (d > 0) onto.push(`${wb} +${formatNumber(d, 0)} шт`);
+                }
+                if (off.length || onto.length) {
+                    showToast(`Предбронь синхронизирована с приёмкой WB — ⌛-склады без права предзаявки перераспределены: ${off.join(' · ')} → ${onto.join(' · ')}`, 'success');
+                }
+            } catch { /* best-effort — не блокируем страницу */ }
+            finally {
+                redistBusyRef.current = false;
+                // StrictMode/отменённый прогон: sig уже взведён на ЭТУ версию, но PUT не
+                // случился → без re-arm эффект не перезапустится сам. Сбрасываем sig, чтобы
+                // следующая инвокация переоценила (idempotent: нет ⌛-не-whitelist → no-op).
+                if (cancelled) redistSigRef.current = '';
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [draftId, draft, geomState, loading, prebook, prebookAcceptance, preorderLoaded, checkedPkgWbs, readyPkgWbs, preorderWbs, buildDistribution, applyDraft, showToast]);
+
+    // Whitelist «складов с разрешённой предзаявкой» — грузим один раз (для кнопки «Создать
+    // предзаявку» И для авто-редистрибуции предброни). `preorderLoaded` отличает «ещё не
+    // загружен» от «загружен пустой» — редистрибуция не должна считать ВСЁ не-whitelist до загрузки.
     useEffect(() => {
         let cancelled = false;
         void api.getPreorderAllowedWarehouses()
-            .then(list => { if (!cancelled) setPreorderWbs(new Set(list)); })
-            .catch(() => { /* whitelist не критичен — кнопка предзаявки просто будет неактивна */ });
+            .then(list => { if (!cancelled) { setPreorderWbs(new Set(list)); setPreorderLoaded(true); } })
+            .catch(() => { if (!cancelled) setPreorderLoaded(true); /* пустой whitelist — кнопка неактивна */ });
         return () => { cancelled = true; };
     }, []);
 
