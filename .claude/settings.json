@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/pre_tool_check.sh",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && bash scripts/hooks/pre_tool_check.sh",
             "timeout": 3
           }
         ],
@@ -54,12 +54,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 scripts/hooks/post_edit_check.py",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && python3 scripts/hooks/post_edit_check.py",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "python3 scripts/hooks/frontend_check.py",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && python3 scripts/hooks/frontend_check.py",
             "timeout": 5
           }
         ],
@@ -72,7 +72,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/post_stop_check.sh",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && bash scripts/hooks/post_stop_check.sh",
             "timeout": 10
           }
         ],
@@ -85,12 +85,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/prompt-team-detect.sh",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && bash scripts/hooks/prompt-team-detect.sh",
             "timeout": 3
           },
           {
             "type": "command",
-            "command": "python3 scripts/hooks/prompt_quality_check.py",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && python3 scripts/hooks/prompt_quality_check.py",
             "timeout": 3
           }
         ],
@@ -103,7 +103,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/session_start.sh",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && bash scripts/hooks/session_start.sh",
             "timeout": 5
           }
         ],
@@ -114,7 +114,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/session_start.sh",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && bash scripts/hooks/session_start.sh",
             "timeout": 2
           }
         ],
@@ -127,11 +127,37 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/teammate_idle_check.sh",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && bash scripts/hooks/teammate_idle_check.sh",
             "timeout": 15
           }
         ],
         "description": "Quality gate перед idle worktree-teammate: iron rules (Float/utcnow/db.delete/f-string SQL), types-first FE, абсолютные пути, check_conventions.sh. Exit 2 → teammate получит feedback и продолжит фиксить, не возвращая управление lead-агенту"
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && bash scripts/hooks/pre_compact_snapshot.sh",
+            "timeout": 5
+          }
+        ],
+        "description": "Снапшот git-состояния (status/diffstat/pending-learn) в .claude/.pre-compact-latest.log перед компактом — защита in-flight контекста в длинных сессиях"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && bash scripts/hooks/subagent_findings_aggregate.sh",
+            "timeout": 3
+          }
+        ],
+        "description": "Лёгкий breadcrumb завершения субагентов в .claude/.last-review.log (append, cap 200 строк)"
       }
     ]
   },
