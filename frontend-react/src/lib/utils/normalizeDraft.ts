@@ -97,17 +97,15 @@ export function normalizeDraft(
     rows: AssemblyDraftRow[],
     ctx: NormalizeDraftCtx,
 ): NormalizeDraftResult {
-    // Строки `as_is` («Оставить так» — сознательно отгруженная частичная паллета)
-    // проходят НАСКВОЗЬ без нормализации: их нельзя срезать до целых паллет —
-    // пользователь явно решил везти частичную. Всё непомеченное нормализуется,
-    // что даёт self-heal легаси-недобора при прогоне нормализатора на загрузке.
-    const asIsRows = rows.filter((r) => r.as_is === true);
-    const workRows = asIsRows.length ? rows.filter((r) => r.as_is !== true) : rows;
     // freeByNm мутируется обоими шагами округления (короб расходует пул ФФ первым,
     // моно — что осталось), поэтому ОДИН объект на оба шага.
     const freeByNm = ctx.freeByNm ?? {};
     // 1. Целые коробы: BOX-строки (добор/срез) + МОНО (вариант A: добор короба из ФФ,
     //    иначе срез под-коробочного остатка на ФФ — моно едет только целыми коробами).
+    // ВАЖНО: короб-округление применяется к ВСЕМ строкам, ВКЛЮЧАЯ `as_is` («Оставить
+    // так»). `as_is` освобождает лишь от ПАЛЛЕТ-среза (юзер осознанно везёт неполную
+    // паллету), но НЕ от короб-инварианта: НЕПОЛНЫЙ КОРОБ РОССЫПЬЮ НЕДОПУСТИМ — добираем
+    // до целого короба из свободного ФФ, некратный остаток < короба уходит на ФФ (строго).
     // Россыпь-исключение = новинка cold-start БЕЗ заданной кратности короба (`ppb`).
     // Новинка С `ppb` едет ЦЕЛЫМИ коробами и МИКСуется в смешанные/моно-паллеты как
     // обычный box-SKU (по требованию пользователя): её НЕ исключаем из box+pallet шагов.
@@ -117,14 +115,18 @@ export function normalizeDraft(
         const ppb = ctx.ppbOf(nm);
         return !(ppb && ppb > 0);
     };
-    const boxed = roundDraftRowsToWholeBoxes(workRows, ctx.ppbOf, freeByNm, isLoose, ctx.ppbAt);
+    const boxed = roundDraftRowsToWholeBoxes(rows, ctx.ppbOf, freeByNm, isLoose, ctx.ppbAt);
     const monoRows = roundMonoToWholeBoxes(boxed.rows, ctx.ppbOf, freeByNm, isLoose, ctx.ppbAt);
+    // `as_is` (уже приведённые к ЦЕЛЫМ коробам выше) минуют ПАЛЛЕТ-срез ниже — юзер
+    // осознанно везёт неполную паллету из целых коробов. Остальное режется до целых паллет.
+    const asIsRows = monoRows.filter((r) => r.as_is === true);
+    const workRows = asIsRows.length ? monoRows.filter((r) => r.as_is !== true) : monoRows;
 
     // 2. Целые паллеты на каждую отгрузку ФФ→WB (короб смешанные, моно ≤3 АРТИКУЛА,
     //    добор ЦЕЛЫМИ коробами). Разворачиваем в линии, режем, сворачиваем обратно.
     // `isNew` для линии = только россыпь-новинка (б/ppb): она остаётся россыпью в trim.
     // Новинка С ppb имеет upp != null → режется до целых паллет/входит в микс как обычная.
-    const newcomerSet = new Set(monoRows.map((r) => r.nm_id).filter((nm) => isLoose(nm)));
+    const newcomerSet = new Set(workRows.map((r) => r.nm_id).filter((nm) => isLoose(nm)));
     // upp per-ФФ: вместимость паллеты = bpp × короб ЭТОГО ФФ. Глобальный min резал
     // физически целые паллеты мульти-кратных SKU и давал моно-паллеты, некратные
     // коробу ФФ (PUT-шторм, адверсарное ревью).
@@ -140,7 +142,7 @@ export function normalizeDraft(
         const pw = ffId != null ? ctx.ppbAt?.(nm, ffId) : null;
         return pw && pw > 0 ? pw : (ctx.ppbOf(nm) ?? null);
     };
-    const lines = buildPreviewLines(monoRows, newcomerSet);
+    const lines = buildPreviewLines(workRows, newcomerSet);
     const trim = trimLinesToWholePallets(lines, uppOf, boxOf);
     const outRows = linesToRows(trim.kept);
     const dropped = linesToRows(trim.droppedLines);
@@ -149,16 +151,17 @@ export function normalizeDraft(
     // показали изменение, строковую подпись всего черновика НЕ строим. Подпись считаем
     // только когда счётчики «тихие», но lines↔rows мог пере-собрать раскладку (детект
     // re-pairing без дропа). Так в горячем пути нет двойной пере-сборки подписи.
+    const finalRows = [...outRows, ...asIsRows];
     const counterChanged = boxed.changed > 0 || trim.droppedUnits > 0 || trim.removedSupplies > 0;
-    const changed = counterChanged || signature(workRows) !== signature(outRows);
+    // Сравниваем ВЕСЬ вход с ВЕСЬ выходом: as_is теперь тоже короб-округляется (шаг 1).
+    const changed = counterChanged || signature(rows) !== signature(finalRows);
 
-    // droppedUnits = всё, что ушло на ФФ (box-округление моно + срез до целых паллет) =
-    // Σвход − Σвыход. Точнее, чем только паллет-срез (моно-россыпь тоже на ФФ).
-    // as_is-строки не участвуют: они не нормализуются, их Σ не меняется.
+    // droppedUnits = всё, что ушло на ФФ (box-округление + срез до целых паллет) =
+    // Σвход − Σвыход. as_is-строки теперь тоже участвуют (их под-коробочный остаток на ФФ).
     const sumTgt = (rs: AssemblyDraftRow[]) => rs.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
-    const droppedUnits = Math.max(0, sumTgt(workRows) - sumTgt(outRows));
+    const droppedUnits = Math.max(0, sumTgt(rows) - sumTgt(finalRows));
 
-    return { rows: [...outRows, ...asIsRows], droppedUnits, changed, dropped, releasedUnits: boxed.trimmedDown };
+    return { rows: finalRows, droppedUnits, changed, dropped, releasedUnits: boxed.trimmedDown };
 }
 
 export interface PrebookConsolidateResult {

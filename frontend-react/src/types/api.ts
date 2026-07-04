@@ -1770,6 +1770,24 @@ export interface AssemblyRequestItem {
   stock_quantity: number;
 }
 
+/** Содержимое одного SKU внутри паллеты: целые короба + хвост-россыпь. */
+export interface BoxContent {
+  barcode: string;
+  box_count: number;
+  loose_units: number;
+}
+
+/** Одна физическая паллета раскладки: номер + короба/россыпь по SKU. */
+export interface PalletBox {
+  pallet_no: number;
+  boxes: BoxContent[];
+}
+
+/** Тело PATCH .../pallet-manifest. pallets=null → сброс к «авто». */
+export interface PalletManifestUpdate {
+  pallets: PalletBox[] | null;
+}
+
 export interface AssemblyRequest {
   id: number;
   warehouse_id: number;
@@ -1792,6 +1810,12 @@ export interface AssemblyRequest {
   pallets_count: number;
   pallet_weight_kg: number;
   total_weight_kg?: number;
+  /** ручная раскладка коробов по паллетам (null/[] = «авто», считается на лету) */
+  pallet_manifest?: PalletBox[] | null;
+  /** расчётный вес товаров (нетто) = Σ(qty × вес SKU); Decimal — приходит строкой */
+  goods_weight_kg?: number | string | null;
+  /** ШК позиций без веса в справочнике (дозаполнить в настройках) */
+  weight_missing_barcodes?: string[];
   vehicle_info?: string;
   vehicle_brand?: string;
   driver_phone?: string;

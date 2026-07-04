@@ -237,6 +237,108 @@ class TestRedistributeBlockedQty:
         assert moves[0]["to_warehouse"] == "Коледино"
 
 
+class TestNoLimitWhitelistRedistribution:
+    """⌛ (нет лимита приёмки) + whitelist предзаявки: товар на ⌛-склад НЕ из
+    whitelist перераспределяется на свободный/whitelist склад по приоритету.
+
+    Триггер: `_is_open_for` в limit-aware режиме (передан preorder_allowed) —
+    склад открыт для типа только если `can_X` И (free+paid>0 ИЛИ в whitelist).
+    """
+
+    def _avail_mono(self, koledino_days: int, elektrostal_days: int) -> dict:
+        return {
+            "Коледино": {
+                "can_box": False,
+                "can_monopallet": True,
+                "mono_meta": {"free_days_14": koledino_days, "paid_days_14": 0},
+            },
+            "Электросталь": {
+                "can_box": False,
+                "can_monopallet": True,
+                "mono_meta": {"free_days_14": elektrostal_days, "paid_days_14": 0},
+            },
+        }
+
+    def test_no_limit_not_whitelisted_is_blocked_and_moved(self):
+        # Коледино ⌛ (0 дней) НЕ в whitelist → его моно-qty уезжает на Электросталь
+        # (реальный лимит free=3). Электросталь остаётся.
+        dist = {"Коледино": 10, "Электросталь": 4}
+        avail = self._avail_mono(koledino_days=0, elektrostal_days=3)
+        new_dist, moves = redistribute_blocked_qty(dist, avail, "MONOPALLET", preorder_allowed=set())
+        assert "Коледино" not in new_dist
+        assert new_dist["Электросталь"] == 14
+        moved = [m for m in moves if m["from_warehouse"] == "Коледино"]
+        assert moved and moved[0]["to_warehouse"] == "Электросталь"
+        assert moved[0]["quantity"] == 10
+
+    def test_no_limit_whitelisted_is_kept(self):
+        # Тот же Коледино ⌛, но в whitelist → остаётся (предзаявку сделать можно).
+        dist = {"Коледино": 10, "Электросталь": 4}
+        avail = self._avail_mono(koledino_days=0, elektrostal_days=3)
+        new_dist, moves = redistribute_blocked_qty(
+            dist, avail, "MONOPALLET", preorder_allowed={"Коледино"}
+        )
+        assert new_dist == dist
+        assert moves == []
+
+    def test_legacy_mode_ignores_limit_meta(self):
+        # preorder_allowed=None (legacy) → мета лимита игнорируется, оба открыты.
+        dist = {"Коледино": 10, "Электросталь": 4}
+        avail = self._avail_mono(koledino_days=0, elektrostal_days=3)
+        new_dist, moves = redistribute_blocked_qty(dist, avail, "MONOPALLET")
+        assert new_dist == dist
+        assert moves == []
+
+    def test_real_limit_not_in_whitelist_is_kept(self):
+        # Склад со СВОБОДНЫМ лимитом (free+paid>0) не требует whitelist — остаётся.
+        dist = {"Коледино": 10, "Электросталь": 4}
+        avail = self._avail_mono(koledino_days=2, elektrostal_days=3)
+        new_dist, moves = redistribute_blocked_qty(dist, avail, "MONOPALLET", preorder_allowed=set())
+        assert new_dist == dist
+        assert moves == []
+
+    def test_destination_chosen_strictly_by_priority_not_qty(self):
+        # Два открытых ЦФО-склада + закрытый Подольск. В priority-режиме получатель
+        # = первый по speed-приоритету ФО (НЕ крупнейший по qty, как в legacy).
+        from backend.services.warehouse_speed import sort_warehouses_by_priority
+
+        central = ["Электросталь", "Коледино"]
+        prio_first = sort_warehouses_by_priority(central, "central")[0]
+        prio_second = sort_warehouses_by_priority(central, "central")[1]
+        # Кладём БОЛЬШЕ qty на приоритетно-второй склад — чтобы legacy (max-qty) и
+        # priority разошлись и тест реально проверял приоритет.
+        dist = {prio_second: 50, prio_first: 5, "Подольск": 8}
+        avail = {
+            prio_first: {"can_box": True, "can_monopallet": True,
+                         "box_meta": {"free_days_14": 3, "paid_days_14": 0}},
+            prio_second: {"can_box": True, "can_monopallet": True,
+                          "box_meta": {"free_days_14": 3, "paid_days_14": 0}},
+            "Подольск": {"can_box": False, "can_monopallet": False, "can_supersafe": False},
+        }
+        new_dist, moves = redistribute_blocked_qty(dist, avail, "BOX", preorder_allowed=set())
+        moved = next(m for m in moves if m["from_warehouse"] == "Подольск")
+        assert moved["to_warehouse"] == prio_first
+
+    def test_split_threads_whitelist_moves_mono_off_no_limit_wh(self):
+        # SKU: WhA принимает короб (реальный лимит), WhB — только моно ⌛ не в whitelist.
+        # Моно-qty WhB должен уехать (не зависнуть на ⌛-складе без предзаявки).
+        distribution = {"Коледино": 10, "Электросталь": 6}
+        availability = {
+            "Коледино": {"can_box": True, "can_monopallet": False,
+                         "box_meta": {"free_days_14": 4, "paid_days_14": 0}},
+            "Электросталь": {"can_box": False, "can_monopallet": True,
+                             "mono_meta": {"free_days_14": 0, "paid_days_14": 0}},
+        }
+        splits, moves = _split_distribution_by_package_type(
+            distribution, availability, preorder_allowed=set()
+        )
+        # Электросталь моно ⌛ не в whitelist → её qty перераспределён на Коледино (короб).
+        assert any(m["from_warehouse"] == "Электросталь" for m in moves)
+        total = sum(sum(s["distribution"].values()) for s in splits)
+        assert total == 16  # консервация
+        assert all("Электросталь" not in s["distribution"] for s in splits)
+
+
 @pytest.mark.parametrize(
     "package_type,expected_open",
     [

@@ -153,13 +153,13 @@ function SkuSourcesSection({ barcode }: { barcode: string }) {
                                         }}>
                                             {row.warehouse_name || '—'}
                                         </td>
-                                        <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(row.qty)}</td>
+                                        <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(row.qty, 0)}</td>
                                         <td style={{ padding: '6px 8px', textAlign: 'right' }}>
                                             <span style={{
                                                 color: row.box_qty !== null ? undefined : 'var(--color-text-dim)',
                                                 fontWeight: row.box_qty !== null ? 500 : 400,
                                             }}>
-                                                {row.box_qty !== null ? `${formatNumber(row.box_qty)} шт` : 'не задана'}
+                                                {row.box_qty !== null ? `${formatNumber(row.box_qty, 0)} шт` : 'не задана'}
                                             </span>
                                         </td>
                                         <td style={{
@@ -526,7 +526,7 @@ function SkuExpandPanel({
                         {machineOptions.length === 1 ? (
                             <div style={{ fontSize: 13 }}>
                                 <strong style={{ color: 'var(--color-accent)' }}>
-                                    {formatNumber(machineOptions[0].qty)} шт
+                                    {formatNumber(machineOptions[0].qty, 0)} шт
                                 </strong>
                                 {machineOptions[0].size && (
                                     <span style={{ color: 'var(--color-text)', marginLeft: 6 }}>
@@ -555,7 +555,7 @@ function SkuExpandPanel({
                                                 onChange={() => setAutofillKey(key)}
                                                 style={{ cursor: 'pointer' }}
                                             />
-                                            <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(opt.qty)} шт</strong>
+                                            <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(opt.qty, 0)} шт</strong>
                                             {opt.size && (
                                                 <span style={{ color: 'var(--color-text)' }}>· {opt.size}</span>
                                             )}
@@ -588,7 +588,7 @@ function SkuExpandPanel({
                                     />
                                     <span style={{ fontWeight: 500 }}>{wh.warehouse_name}</span>
                                     <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-                                        · сток {formatNumber(wh.rf_stock)}
+                                        · сток {formatNumber(wh.rf_stock, 0)}
                                     </span>
                                 </label>
                             ))}
@@ -657,7 +657,7 @@ function SkuExpandPanel({
                                         padding: '6px 8px', textAlign: 'right',
                                         color: wh.rf_stock > 0 ? 'var(--color-success)' : 'var(--color-text-dim)',
                                     }}>
-                                        {wh.rf_stock > 0 ? formatNumber(wh.rf_stock) : '—'}
+                                        {wh.rf_stock > 0 ? formatNumber(wh.rf_stock, 0) : '—'}
                                     </td>
                                     <td style={{ padding: '6px 8px' }}>
                                         {showEdit && wh.editable ? (
@@ -707,7 +707,7 @@ function SkuExpandPanel({
                                                     color: wh.box_qty !== null ? 'var(--color-accent)' : 'var(--color-text-dim)',
                                                     fontWeight: wh.box_qty !== null ? 600 : 400,
                                                 }}>
-                                                    {wh.box_qty !== null ? `${formatNumber(wh.box_qty)} шт` : 'не задана'}
+                                                    {wh.box_qty !== null ? `${formatNumber(wh.box_qty, 0)} шт` : 'не задана'}
                                                 </span>
                                                 <SourceBadge wh={wh} />
                                                 {wh.editable ? (
@@ -800,14 +800,14 @@ function SkuExpandPanel({
                                         {fullBoxes !== null ? (
                                             <>
                                                 <strong style={{ color: fullBoxes === 0 ? 'var(--color-warning)' : undefined }}>
-                                                    {formatNumber(fullBoxes)}
+                                                    {formatNumber(fullBoxes, 0)}
                                                 </strong>
                                                 <span style={{ color: 'var(--color-text-muted)' }}> кор</span>
                                                 {remPcs > 0 && (
                                                     <span
                                                         style={{ color: 'var(--color-warning)' }}
                                                         title="Неполная коробка — остаток не кратен"
-                                                    > +{formatNumber(remPcs)} шт</span>
+                                                    > +{formatNumber(remPcs, 0)} шт</span>
                                                 )}
                                             </>
                                         ) : (
@@ -1441,7 +1441,7 @@ export function BoxMultiplicityView() {
                     <div style={{ fontSize: 12, lineHeight: 1.4 }}>
                         {parts.map(p => (
                             <div key={p.label} style={{ color: p.color }}>
-                                {p.label}: <strong>{formatNumber(p.value)}</strong>
+                                {p.label}: <strong>{formatNumber(p.value, 0)}</strong>
                             </div>
                         ))}
                     </div>
@@ -1990,7 +1990,7 @@ export function BoxMultiplicityView() {
                             title={active ? 'Фильтр активен' : `Включить фильтр «${c.label}»`}
                         >
                             <div style={{ fontSize: 26, fontWeight: 700, color: c.color }}>
-                                {formatNumber(c.count)}
+                                {formatNumber(c.count, 0)}
                             </div>
                             <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{c.label}</div>
                         </div>
@@ -2053,7 +2053,7 @@ export function BoxMultiplicityView() {
                                 className={`btn btn-sm ${stockFilter === c.key ? 'btn-primary' : 'btn-secondary'}`}
                                 onClick={() => setStockFilter(c.key)}
                             >
-                                {c.label} ({formatNumber(c.count)})
+                                {c.label} ({formatNumber(c.count, 0)})
                             </button>
                         ))}
                     </div>

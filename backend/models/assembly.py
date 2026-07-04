@@ -146,6 +146,13 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     pallets_count: Mapped[int] = mapped_column(Integer, nullable=False)
     pallet_weight_kg: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
 
+    # Ручная раскладка коробов по паллетам («Раскладка по паллетам» на деталке).
+    # NULL = «авто» (раскладка считается на лету из pallets_count/геометрии);
+    # непустой список = оператор перетасовал короба. Форма — см.
+    # schemas/assembly.PalletBox/BoxContent:
+    #   [{"pallet_no": int, "boxes": [{"barcode", "box_count", "loose_units"}]}]
+    pallet_manifest: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+
     # Vehicle & shipping
     vehicle_info: Mapped[str | None] = mapped_column(String(300), nullable=True)
     vehicle_brand: Mapped[str | None] = mapped_column(String(100), nullable=True)

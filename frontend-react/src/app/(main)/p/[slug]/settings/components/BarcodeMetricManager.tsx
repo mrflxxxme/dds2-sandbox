@@ -19,6 +19,10 @@ interface Props {
     basisLabel: string;
     /** Subtitle under the title. */
     hint: string;
+    /** Optional override for the "missing" warning heading (defaults to a duty-by-basis wording). */
+    missingHeading?: string;
+    /** Optional override for the "missing" warning body text. */
+    missingBody?: string;
     nomenclature: Nomenclature[];
     missing: MissingAreaBarcode[];
     onBulkUpdate: (items: { barcode: string; value: number }[]) => Promise<{ updated: number; not_found: string[] }>;
@@ -31,7 +35,7 @@ interface Props {
  *  Excel-paste grid, and an inline-editable table of existing values. Shared by the
  *  «Площадь по баркодам» and «Вес по баркодам» sections so they stay identical. */
 export function BarcodeMetricManager({
-    metricKey, title, unit, basisLabel, hint, nomenclature, missing, onBulkUpdate, onReload, setMsg, exportName,
+    metricKey, title, unit, basisLabel, hint, missingHeading, missingBody, nomenclature, missing, onBulkUpdate, onReload, setMsg, exportName,
 }: Props) {
     const [rows, setRows] = useState<MetricRow[]>(() => Array.from({ length: 5 }, EMPTY_ROW));
     const [saving, setSaving] = useState(false);
@@ -227,7 +231,7 @@ export function BarcodeMetricManager({
                 <div style={{ marginBottom: 16, padding: 12, background: 'rgba(245,158,11,0.08)', borderRadius: 8, border: '1px solid rgba(245,158,11,0.2)' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
                         <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-warning)' }}>
-                            ⚠️ В машинах без значения (пошлина «{basisLabel}»): {missing.length}
+                            ⚠️ {missingHeading ?? `В машинах без значения (пошлина «${basisLabel}»)`}: {missing.length}
                         </div>
                         <div style={{ display: 'flex', gap: 8 }}>
                             <button className="btn btn-secondary btn-sm" onClick={loadMissingToGrid}>✎ Заполнить в форме ниже</button>
@@ -235,7 +239,7 @@ export function BarcodeMetricManager({
                         </div>
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-                        Эти баркоды есть в машинах, но без значения ({unit}) — пошлина «{basisLabel}» не посчитается. Заполните здесь или загрузите в форму ниже.
+                        {missingBody ?? `Эти баркоды есть в машинах, но без значения (${unit}) — пошлина «${basisLabel}» не посчитается. Заполните здесь или загрузите в форму ниже.`}
                     </div>
                     <TanStackDataTable columns={missingColumns} data={missing} emptyText="" enableSorting enablePagination={false} />
                 </div>

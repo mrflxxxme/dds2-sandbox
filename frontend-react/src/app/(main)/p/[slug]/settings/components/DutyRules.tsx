@@ -265,7 +265,9 @@ export function DutyRules() {
                 title="Вес по баркодам (кг)"
                 unit="кг"
                 basisLabel="От веса"
-                hint="Для расчёта пошлины по весу (базис «От веса»)."
+                hint="Вес за 1 шт (кг) — для авто-расчёта веса сборки и пошлины по весу."
+                missingHeading="Товары без веса (есть остаток или в пути в машинах)"
+                missingBody="У этих товаров есть остаток или они едут в машине, но не задан вес (кг) — нужен для авто-расчёта веса сборки и пошлины по весу. Заполните здесь или загрузите в форму ниже."
                 nomenclature={nomenclature}
                 missing={missingWeight}
                 onBulkUpdate={(items) => api.bulkUpdateNomenclatureWeight(items.map(i => ({ barcode: i.barcode, weight_kg: i.value })))}
