@@ -3,8 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
-import { parseBoxSize, palletsForLines, maxPalletHeightCm, effectiveBoxesPerPallet, type PalletLine } from '@/lib/utils/boxPallet';
-import { palletFootprint } from '@/lib/assembly/prebookFootprint';
+import { parseBoxSize, palletsForLines, maxPalletHeightCm, type PalletLine } from '@/lib/utils/boxPallet';
 import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constants/localization';
 import { Toast } from '@/components';
 import {
@@ -17,10 +16,14 @@ import {
     type EnrichedSku,
     type PoolDistInput,
 } from '@/lib/assembly/preDistribution';
+import { buildPrebookGroups } from '@/lib/assembly/buildPrebookGroups';
 import NeedMatrixCell from '../components/NeedMatrixCell';
 import AcceptanceBanner, { type AcceptanceSummary } from '../components/AcceptanceBanner';
+import PrebookView, { type PrebookAcceptanceMark } from '../components/PrebookView';
 import { seedNewcomerWholeBoxes, type SeedAnchor } from '@/lib/assembly/coldStartSeed';
 import type {
+    AcceptanceCheckPerItem,
+    AcceptanceFlags,
     AssemblyDraftRow,
     PackageType,
     PreDistVehiclePool,
@@ -41,92 +44,6 @@ const districtTint = (d: string): string | undefined => {
     const c = DISTRICT_COLORS[d];
     return c ? `color-mix(in srgb, ${c} 6%, transparent)` : undefined;
 };
-
-/** Свёрнутая группа предброни машины (короб «Дозабить» ИЛИ моно «Предзаявка»). */
-interface PrebookGroupView {
-    lines: { barcode: string; wb_warehouse_name: string; qty: number; package_type: PackageType; nm: number }[];
-    qty: number;
-    boxes: number;
-    pallets: number;
-}
-
-/** Таблица одной группы предброни (SKU × WB-склад × шт/коробов) + сводка по группе. */
-function PrebookGroupTable({ title, hint, group, nmPpb, accent }: {
-    title: string; hint: string; group: PrebookGroupView; nmPpb: Map<number, number | null>; accent: string;
-}) {
-    if (group.lines.length === 0) {
-        return (
-            <div className="glass-card" style={{ padding: 20, marginBottom: 16, color: 'var(--color-muted)', fontSize: 13 }}>
-                <div style={{ fontWeight: 600, color: 'var(--color-text)', marginBottom: 4 }}>{title}</div>
-                Пусто — хвостов этого типа нет.
-            </div>
-        );
-    }
-    return (
-        <div className="glass-card" style={{ padding: 0, marginBottom: 16, overflowX: 'auto' }}>
-            <div style={{ padding: '12px 16px', display: 'flex', gap: 16, alignItems: 'baseline', flexWrap: 'wrap', borderBottom: '1px solid var(--color-border)' }}>
-                <span style={{ fontWeight: 600, fontSize: 15, color: accent }}>{title}</span>
-                <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>{hint}</span>
-                <span style={{ marginLeft: 'auto', fontSize: 13 }}>
-                    <b>{formatNumber(group.qty, 0)}</b> шт · 📦 <b>{formatNumber(group.boxes, 0)}</b> · 🚚 ≈{formatNumber(group.pallets, 1)} паллет
-                </span>
-            </div>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                <thead>
-                    <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-muted)', textAlign: 'right' }}>
-                        <th style={{ padding: '8px 12px', textAlign: 'left' }}>Товар (ШК)</th>
-                        <th style={{ padding: '8px 12px', textAlign: 'left' }}>WB-склад</th>
-                        <th style={{ padding: '8px 12px' }}>Шт</th>
-                        <th style={{ padding: '8px 12px' }}>Коробов</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {group.lines.map((l, i) => (
-                        <tr key={`${l.barcode}-${l.wb_warehouse_name}-${i}`} style={{ borderBottom: '1px solid var(--color-border)' }}>
-                            <td style={{ padding: '6px 12px' }}>{l.barcode}</td>
-                            <td style={{ padding: '6px 12px' }}>{l.wb_warehouse_name}</td>
-                            <td style={{ padding: '6px 12px', textAlign: 'right' }}>{formatNumber(l.qty, 0)}</td>
-                            <td style={{ padding: '6px 12px', textAlign: 'right' }}>{formatNumber(boxesOf(l.qty, nmPpb.get(l.nm)), 0)}</td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-        </div>
-    );
-}
-
-/** Вкладка «🅿️ Предбронь» в скоупе машины: хвосты раскладки, поделённые
- *  короб=«Дозабить» / моно=«Предзаявка» (из побочного выхода общего движка). */
-function PreDistPrebookTab({ box, mono, wholePallets, nmPpb }: {
-    box: PrebookGroupView; mono: PrebookGroupView; wholePallets: boolean; nmPpb: Map<number, number | null>;
-}) {
-    if (box.lines.length === 0 && mono.lines.length === 0) {
-        return (
-            <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
-                Предброни нет — вся раскладка машины набирается целыми паллетами (или ничего не разложено).
-            </div>
-        );
-    }
-    return (
-        <div>
-            <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--color-muted)' }}>
-                Хвосты раскладки машины, не набравшие целую паллету. {wholePallets
-                    ? 'В режиме «🚚 Паллеты» они остаются здесь под дозабор / предзаявку.'
-                    : 'В режиме «📦 Коробами» эти хвосты уезжают в раскладке — показаны справочно (что осталось бы под предбронь при отгрузке целыми паллетами).'}
-            </div>
-            <PrebookGroupTable
-                title="📦 Дозабить (короб)"
-                hint="целые коробы, не собравшиеся в паллету — добить до паллеты или отгрузить как есть"
-                group={box} nmPpb={nmPpb} accent="var(--color-accent)"
-            />
-            <PrebookGroupTable
-                title="📐 Предзаявка (моно)"
-                hint="моно — под предзаявку на склад без лимита приёмки (⌛)"
-                group={mono} nmPpb={nmPpb} accent="var(--color-success)"
-            />
-        </div>
-    );
-}
 
 /** Экран «Распределить машину» — открывается из вкладки «🚚 Предраспределение» (?vehicle=<id>).
  *  Полноэкранная матрица как «Потребность по складам», но источник = остатки машины (пул):
@@ -159,6 +76,16 @@ export default function PreDistVehiclePage() {
     // Предбронь машины (под-паллетные хвосты pallet-mode): короб=«Дозабить» / моно=«Предзаявка».
     const [prebookRows, setPrebookRows] = useState<AssemblyDraftRow[]>([]);
     const [subTab, setSubTab] = useState<'dist' | 'prebook'>('dist');
+    // Интерактив предброни — клиентские решения (сбрасываются при пересчёте раскладки).
+    // Машина = один источник (ФФ разгрузки) + всё уходит в PRE_DISTRIBUTED-заявки, поэтому
+    // «положительные» действия (Оставить так/Дозабить/Предзаявка) = ПЕРЕВОД направления в
+    // отгрузку, «отрицательные» (Удалить/Освободить) = скрыть (остаётся на машине).
+    const [promotedDirs, setPromotedDirs] = useState<Set<string>>(new Set());  // → в отгрузку
+    const [hiddenDirs, setHiddenDirs] = useState<Set<string>>(new Set());       // остаётся на машине
+    const [hiddenSkus, setHiddenSkus] = useState<Set<string>>(new Set());       // убран один ШК
+    const [prebookOpKey, setPrebookOpKey] = useState<string | null>(null);
+    const [acceptanceByNm, setAcceptanceByNm] = useState<Map<number, AcceptanceCheckPerItem>>(new Map());
+    const [preorderWbs, setPreorderWbs] = useState<Set<string>>(new Set());
     const [distComputing, setDistComputing] = useState(false);
     const [acceptanceNote, setAcceptanceNote] = useState<AcceptanceSummary | null>(null);
     const [submitting, setSubmitting] = useState(false);
@@ -180,7 +107,7 @@ export default function PreDistVehiclePage() {
             setLoading(true);
             setError(null);
             try {
-                const [poolData, need, cold, boxMult, palletOv] = await Promise.all([
+                const [poolData, need, cold, boxMult, palletOv, preorder] = await Promise.all([
                     api.getPreDistVehiclePool(vehicleId),
                     // Форма спроса ТА ЖЕ, что у «Черновика сборки»: localizationOptimized=true
                     // (локализованное распределение по округам). НО onlyAvailable=false — машинный
@@ -190,10 +117,12 @@ export default function PreDistVehiclePage() {
                     api.getColdStartTable(14).catch(() => null),  // окно 14д — как getStockNeed(14,14) и «Потребность»
                     api.getBoxMultiplicity().catch(() => null),
                     api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
+                    api.getPreorderAllowedWarehouses().catch(() => [] as string[]),  // whitelist предзаявки (⌛)
                 ]);
                 if (controller.signal.aborted) return;
                 setPool(poolData);
                 setStockNeed(need);
+                setPreorderWbs(new Set(preorder));
 
                 const ncs = new Set<number>();
                 for (const r of cold?.rows ?? []) if (r.is_newcomer) ncs.add(r.nm_id);
@@ -276,6 +205,7 @@ export default function PreDistVehiclePage() {
             }
             let splitMap: AcceptanceSplitMap | null = null;
             let summary: AcceptanceSummary | null = null;
+            const accByNm = new Map<number, AcceptanceCheckPerItem>();  // для меток приёмки предброни
             try {
                 const resp = await api.checkWbAcceptance({
                     items: skus.map(s => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
@@ -287,6 +217,7 @@ export default function PreDistVehiclePage() {
                         ? it.splits.map(sp => ({ package_type: sp.package_type, distribution: sp.distribution }))
                         : [{ package_type: it.package_type, distribution: it.distribution }];
                     splitMap.set(`${it.nm_id}::${it.barcode}`, splits);
+                    accByNm.set(it.nm_id, it);
                     if (splits.some(s => s.package_type === 'MONOPALLET')) monoCount++;
                     if (splits.length > 1) splitCount++;
                 }
@@ -353,6 +284,11 @@ export default function PreDistVehiclePage() {
                 setDistRows(rows);
                 setPrebookRows(palletDist.prebook);
                 setAcceptanceNote(summary);
+                setAcceptanceByNm(accByNm);
+                // Новая раскладка — прежние решения по предброни неактуальны.
+                setPromotedDirs(new Set());
+                setHiddenDirs(new Set());
+                setHiddenSkus(new Set());
             }
         } catch (e) {
             if (!signal.aborted) { setDistRows([]); setPrebookRows([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
@@ -368,8 +304,35 @@ export default function PreDistVehiclePage() {
         return () => controller.abort();
     }, [pool, geomReady, computeDistribution]);
 
+    // ─── Предбронь: атомарные направления (pkg×WB×ФФ) + решения юзера ───────
+    const targetWh = pool?.vehicle.target_warehouse_id ?? null;
+    const dirKeyOf = (r: AssemblyDraftRow): string =>
+        `${r.package_type ?? 'BOX'}::${Object.keys(r.tgt)[0] ?? ''}::${Object.keys(r.src)[0] ?? ''}`;
+    // Разбиваем каждую строку предброни на атомарные (один WB-склад): источник машины
+    // один (ФФ разгрузки), поэтому src порции = её же qty. Скрытые ШК отсеиваем.
+    const atomicPrebook = useMemo<AssemblyDraftRow[]>(() => {
+        const out: AssemblyDraftRow[] = [];
+        for (const r of prebookRows) {
+            const ff = Object.keys(r.src)[0] ?? String(targetWh ?? '');
+            const pkg = r.package_type ?? 'BOX';
+            for (const [wb, q] of Object.entries(r.tgt)) {
+                if ((q || 0) <= 0 || hiddenSkus.has(`${r.nm_id}::${wb}::${pkg}`)) continue;
+                out.push({ nm_id: r.nm_id, barcode: r.barcode, vendor_code: r.vendor_code, src: { [ff]: q }, tgt: { [wb]: q }, package_type: pkg });
+            }
+        }
+        return out;
+    }, [prebookRows, hiddenSkus, targetWh]);
+    const effPrebook = useMemo(
+        () => atomicPrebook.filter(r => { const k = dirKeyOf(r); return !promotedDirs.has(k) && !hiddenDirs.has(k); }),
+        [atomicPrebook, promotedDirs, hiddenDirs],
+    );
+    const promotedRows = useMemo(() => atomicPrebook.filter(r => promotedDirs.has(dirKeyOf(r))), [atomicPrebook, promotedDirs]);
+    // Отгрузка = авто-раскладка + направления предброни, переведённые юзером в отгрузку.
+    const shipRows = useMemo(() => [...(distRows ?? []), ...promotedRows], [distRows, promotedRows]);
+    const prebookUnits = useMemo(() => effPrebook.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0), [effPrebook]);
+
     // ─── Производные: позиции к созданию + обогащение + матрица ─────────────
-    const submitRows = useMemo(() => (distRows ? rowsToPreDistRows(distRows) : []), [distRows]);
+    const submitRows = useMemo(() => rowsToPreDistRows(shipRows), [shipRows]);
 
     const enrichMap = useMemo(
         () => enrichPoolRows(pool?.rows ?? [], stockNeed, newcomerSet),
@@ -457,37 +420,53 @@ export default function PreDistVehiclePage() {
         [pool, derived],
     );
 
-    // ─── Предбронь машины: короб=«Дозабить» / моно=«Предзаявка» (из хвостов раскладки) ──
-    const prebookView = useMemo(() => {
-        // units-per-паллету per nm НА КОНКРЕТНОМ WB-складе = boxesPerPallet(размер, высота склада) × ppb.
-        // Высоту берём по складу назначения (зеркалит normalizeDraft/prebookFootprint — авторитет,
-        // решающий, что попадает в предбронь), иначе footprint врёт для складов с высотой ≠ 180см.
-        const uppOf = (nm: number, wb: string): number => {
-            const ppb = nmPpb.get(nm);
-            const bpp = effectiveBoxesPerPallet(nmBoxSize.get(nm) ?? null, maxPalletHeightCm(wb), palletOverrides);
-            return bpp != null && ppb && ppb > 0 ? bpp * ppb : 0;
-        };
-        const summarize = (rows: AssemblyDraftRow[]) => {
-            const lines = rowsToPreDistRows(rows)
-                .map(l => ({ ...l, nm: nmByBc.get(l.barcode) ?? 0 }))
-                .sort((a, b) => b.qty - a.qty);
-            const qty = lines.reduce((s, l) => s + l.qty, 0);
-            const boxes = lines.reduce((s, l) => s + boxesOf(l.qty, nmPpb.get(l.nm)), 0);
-            // Footprint суммируем ПО СКЛАДУ (у каждого своя вместимость паллеты по высоте).
-            const byWh = new Map<string, { nmId: number; qty: number }[]>();
-            for (const l of lines) {
-                const arr = byWh.get(l.wb_warehouse_name) ?? [];
-                arr.push({ nmId: l.nm, qty: l.qty });
-                byWh.set(l.wb_warehouse_name, arr);
-            }
-            let pallets = 0;
-            for (const [wb, items] of byWh) pallets += palletFootprint(items, nm => uppOf(nm, wb));
-            return { lines, qty, boxes, pallets };
-        };
-        const box = prebookRows.filter(r => (r.package_type ?? 'BOX') === 'BOX');
-        const mono = prebookRows.filter(r => (r.package_type ?? 'BOX') !== 'BOX');
-        return { box: summarize(box), mono: summarize(mono), total: prebookRows.length };
-    }, [prebookRows, nmPpb, nmBoxSize, nmByBc, palletOverrides]);
+    // ─── Предбронь машины: карточки направлений через ТОТ ЖЕ движок, что и раздел ──
+    // v1: articles=[] → без кнопки «Дозабить» (дозабор из пула машины — отдельный шаг;
+    // источник машины один, честный дозабор требует достройки строк, пока не вводим).
+    const prebookGroups = useMemo(() => {
+        if (targetWh == null) return [];
+        return buildPrebookGroups({
+            prebook: effPrebook,
+            usedRows: shipRows,
+            articles: [],
+            ffName: (ff) => (ff === targetWh ? (vehicle?.target_warehouse_name || `ФФ ${ff}`) : `ФФ ${ff}`),
+            ppbOf: (nm) => nmPpb.get(nm) || 0,
+            ppbAt: (nm) => nmPpb.get(nm) || 0,
+            boxSizeOf: (nm) => nmBoxSize.get(nm) ?? null,
+            palletOverrides,
+        });
+    }, [effPrebook, shipRows, targetWh, vehicle, nmPpb, nmBoxSize, palletOverrides]);
+
+    // Метки приёмки предброни (зеркало раздела) из уже проверенной приёмки раскладки.
+    const prebookAcceptanceMarks = useMemo<Map<string, PrebookAcceptanceMark>>(() => {
+        const out = new Map<string, PrebookAcceptanceMark>();
+        if (acceptanceByNm.size === 0) return out;
+        for (const g of prebookGroups) {
+            const key = `${g.pkg}::${g.wb}::${g.ffId}`;
+            let flags: AcceptanceFlags | undefined;
+            for (const it of g.items) { const f = acceptanceByNm.get(it.nm_id)?.availability?.[g.wb]; if (f) { flags = f; break; } }
+            if (!flags) { out.set(key, { checked: false, open: false, closed: false, noLimit: false }); continue; }
+            const closed = !flags.can_box && !flags.can_monopallet && !flags.can_supersafe;
+            const meta = g.pkg === 'MONOPALLET' ? flags.mono_meta : g.pkg === 'SUPERSAFE' ? flags.super_meta : flags.box_meta;
+            const open = g.pkg === 'MONOPALLET' ? !!flags.can_monopallet : g.pkg === 'SUPERSAFE' ? !!flags.can_supersafe : !!flags.can_box;
+            const freeDays = meta?.free_days_14, paidDays = meta?.paid_days_14;
+            const noLimit = open && (freeDays ?? 0) + (paidDays ?? 0) <= 0;
+            out.set(key, { checked: true, open, closed, freeDays, paidDays, noLimit });
+        }
+        return out;
+    }, [prebookGroups, acceptanceByNm]);
+
+    // Действия предброни (машина): «+» → перевод направления в отгрузку, «−» → скрыть
+    // (остаётся на машине). Всё уедет в PRE_DISTRIBUTED на «Создать заявки».
+    const promoteDir = useCallback((pkg: PackageType, wb: string, ffId: number) => {
+        const k = `${pkg}::${wb}::${ffId}`;
+        setPrebookOpKey(k);
+        setPromotedDirs(s => new Set(s).add(k));
+        setTimeout(() => setPrebookOpKey(null), 250);
+    }, []);
+    const hideDir = useCallback((pkg: PackageType, wb: string, ffId: number) => {
+        setHiddenDirs(s => new Set(s).add(`${pkg}::${wb}::${ffId}`));
+    }, []);
 
     // Строки таблицы: сначала те, что отправляем (по убыванию), потом остальные.
     const sortedRows = useMemo(() => {
@@ -588,8 +567,8 @@ export default function PreDistVehiclePage() {
                 <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(footer.totalPallets, 0)}</b></span>
                 <span style={{ color: 'var(--color-muted)' }}>Заявок: <b style={{ color: 'var(--color-text)' }}>{formatNumber(derived.requestCount, 0)}</b></span>
                 <span style={{ color: 'var(--color-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
-                {prebookView.total > 0 && (
-                    <span style={{ color: 'var(--color-muted)' }}>🅿️ Предбронь: <b style={{ color: 'var(--color-text)' }}>{formatNumber(prebookView.box.qty + prebookView.mono.qty, 0)}</b> шт</span>
+                {prebookUnits > 0 && (
+                    <span style={{ color: 'var(--color-muted)' }}>🅿️ Предбронь: <b style={{ color: 'var(--color-text)' }}>{formatNumber(prebookUnits, 0)}</b> шт</span>
                 )}
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
                     <div style={{ display: 'flex', gap: 4, alignItems: 'center' }} title="Целые паллеты часто обнуляют мелкую потребность машины — «Коробами» показывает то, что набирается коробами">
@@ -607,17 +586,40 @@ export default function PreDistVehiclePage() {
             <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
                 <button className={`btn ${subTab === 'dist' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('dist')}>🚚 Раскладка</button>
                 <button className={`btn ${subTab === 'prebook' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('prebook')}>
-                    🅿️ Предбронь{prebookView.total > 0 ? ` (${formatNumber(prebookView.box.qty + prebookView.mono.qty, 0)})` : ''}
+                    🅿️ Предбронь{prebookUnits > 0 ? ` (${formatNumber(prebookUnits, 0)})` : ''}
                 </button>
             </div>
 
             {subTab === 'prebook' ? (
-                <PreDistPrebookTab
-                    box={prebookView.box}
-                    mono={prebookView.mono}
-                    wholePallets={wholePallets}
-                    nmPpb={nmPpb}
-                />
+                prebookGroups.length === 0 ? (
+                    <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
+                        Предброни нет — вся раскладка машины набирается целыми паллетами (или ничего не разложено).
+                    </div>
+                ) : (
+                    <PrebookView
+                        groups={prebookGroups}
+                        toppingUpKey={prebookOpKey}
+                        shipAsIsKey={prebookOpKey}
+                        deletingKey={null}
+                        prebookingKey={prebookOpKey}
+                        tailTopUpKey={prebookOpKey}
+                        trimTailKey={null}
+                        palletOpKey={null}
+                        acceptanceMarks={prebookAcceptanceMarks}
+                        acceptanceLoading={false}
+                        preorderWbs={preorderWbs}
+                        onTopUp={promoteDir}
+                        onShipAsIs={promoteDir}
+                        onDelete={(nm, wb, pkg) => setHiddenSkus(s => new Set(s).add(`${nm}::${wb}::${pkg}`))}
+                        onDeleteDirection={hideDir}
+                        onCreatePrebooking={promoteDir}
+                        onTopUpPrebook={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
+                        onTrimTail={(wb, ffId) => hideDir('MONOPALLET', wb, ffId)}
+                        onBookPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
+                        onReleasePallets={(wb, ffId) => hideDir('MONOPALLET', wb, ffId)}
+                        onDraftPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
+                    />
+                )
             ) : (<>
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-muted)', fontSize: 13 }}>
                 Раскладка груза машины по WB-складам как в «Потребность по складам» (потребность · приёмка · целые коробы и паллеты),
