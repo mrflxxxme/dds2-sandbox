@@ -23,9 +23,12 @@ FIFO and method-independent; the *method* only changes the money attached to
 each consumed/remaining unit. All three method COGS are computed in a single
 pass so the UI can toggle between them with no re-query.
 
-SKU key = ``lower(article_seller)`` — the same key the legacy avg uses, so
-``lifetime_avg`` reproduces (FORMING-excluded) ``load_avg_costs`` bit-for-bit.
-``barcode``/``nm_id`` are carried only as display metadata.
+SKU key = the WB article ``lower(nomenclature.article_seller)``, resolved for
+cost batches via the item's barcode (COALESCE fallback to the raw
+``lower(article_seller)`` when a barcode has no card). This is the same key the
+legacy avg uses once its own barcode bridge is applied, so ``lifetime_avg`` still
+reproduces (FORMING-excluded) ``load_avg_costs`` bit-for-bit. ``barcode``/``nm_id``
+are carried as display metadata.
 """
 
 import logging
@@ -89,12 +92,26 @@ class _SkuRaw:
 
 
 async def _load_batches(db: AsyncSession, pid: int) -> dict[str, list[_Batch]]:
-    """Active, non-FORMING cost_order_items as inventory layers, keyed by
-    lower(article_seller). avail_date = actual_arrival_date → ship_date →
+    """Active, non-FORMING cost_order_items as inventory layers, keyed by the WB
+    article (lower(nomenclature.article_seller) resolved via the item's barcode),
+    falling back to lower(article_seller) when the barcode has no card.
+
+    Sales (``_load_sales``) and metadata (``_load_meta``) are keyed by the WB
+    article (sa_name / nomenclature.article_seller). The purchase-order
+    ``article_seller`` is often a factory/descriptive name that differs entirely
+    ('Кас_наб_...' vs 'K-147'); keying batches by it alone orphaned the cost layer
+    so FIFO/moving found sales with no cost → COGS silently 0. Bridging via barcode
+    (UNIQUE per project → no fan-out) re-unites cost with sales. When purchase and
+    WB articles already agree the COALESCE is a no-op, so matched SKUs are
+    unchanged bit-for-bit. avail_date = actual_arrival_date → ship_date →
     created_at (arrival_known False on the latter two)."""
+    sku_expr = sa_func.coalesce(
+        sa_func.lower(Nomenclature.article_seller),
+        sa_func.lower(CostOrderItem.article_seller),
+    ).label("sku")
     rows = await db.execute(
         select(
-            sa_func.lower(CostOrderItem.article_seller).label("sku"),
+            sku_expr,
             CostOrderItem.qty,
             CostOrderItem.total_rub,
             CostOrder.order_no,
@@ -103,6 +120,12 @@ async def _load_batches(db: AsyncSession, pid: int) -> dict[str, list[_Batch]]:
             CostOrder.created_at,
         )
         .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
+        .outerjoin(
+            Nomenclature,
+            (Nomenclature.barcode == CostOrderItem.barcode)
+            & (Nomenclature.project_id == pid)
+            & (Nomenclature.article_seller.isnot(None)),
+        )
         .where(
             CostOrder.project_id == pid,
             CostOrder.is_deleted == False,  # noqa: E712
