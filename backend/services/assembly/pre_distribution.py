@@ -43,7 +43,6 @@ from backend.schemas.assembly import (
 
 from .crud import _build_response, create_assembly_request, get_assembly_request
 from .status import _check_transition, _log_status_change
-from .weight import resolve_unit_weights
 
 logger = logging.getLogger(__name__)
 
@@ -428,28 +427,19 @@ async def create_pre_distribution(
     if payload.wb_fbo_supply_id is not None and len(groups) > 1:
         raise ValueError("Привязка поставки WB возможна только при одном складе назначения")
 
-    # Вес за 1 шт (справочник → машина) один раз на все ШК — заявка получит вес товаров,
-    # разложенный на паллеты (`pallet_weight_kg = goods / pallets`), чтобы «Общий вес»
-    # (= паллеты × вес-паллеты) совпадал с нетто-весом товаров, как у прочих поставок.
-    unit_weights = await resolve_unit_weights(db, project_id, list(requested.keys()))
-
     created: list[AssemblyRequest] = []
     for (wb_name, pkg), bc_qty in groups.items():
         items = [AssemblyItemCreate(barcode=bc, quantity=q) for bc, q in bc_qty.items()]
-        # Паллеты — из фронта (геометрия коробов = фронт); нет ключа → 0 (как раньше).
+        # Паллеты — из фронта (геометрию коробов считает фронт); нет ключа → 0 (как раньше).
         pallets = max(0, int(payload.pallets_by_group.get(f"{wb_name}::{pkg}", 0)))
-        # Вес товаров группы (нетто) ÷ паллеты → вес одной паллеты. Нет веса/паллет → 0.
-        goods = Decimal("0")
-        for bc, q in bc_qty.items():
-            w = unit_weights.get(bc)
-            if w is not None and w > 0:
-                goods += w * q
-        pallet_weight = (goods / pallets).quantize(Decimal("0.01")) if pallets > 0 and goods > 0 else Decimal("0")
+        # Вес НЕ форсим: `pallet_weight_kg=0` → `_build_response` покажет авто-вес
+        # (нетто товаров + тара коробов, «≈ N кг», флаг weight_is_estimated) — как у прочих
+        # поставок; `mark_ready` подставит финальный вес. Ручной вес (>0) заблокировал бы авто.
         create_payload = AssemblyRequestCreate(
             warehouse_id=target_wh.id,
             wb_fbo_supply_id=payload.wb_fbo_supply_id if len(groups) == 1 else None,
             pallets_count=pallets,
-            pallet_weight_kg=pallet_weight,
+            pallet_weight_kg=Decimal("0"),
             wb_warehouse_name_manual=wb_name,
             package_type=cast(PackageTypeStr, pkg),
             items=items,
