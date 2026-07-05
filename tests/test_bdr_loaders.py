@@ -67,8 +67,13 @@ async def _create_cost_order_with_item(
     article_seller: str,
     total_rub: float,
     qty: int,
+    barcode: str | None = None,
 ):
-    """Insert a CostOrder + CostOrderItem pair."""
+    """Insert a CostOrder + CostOrderItem pair.
+
+    ``barcode`` defaults to ``article_seller`` (matching-article case); pass an
+    explicit value to model a purchase article that differs from the WB article.
+    """
     await db.execute(
         text(
             "INSERT INTO cost_orders (project_id, order_no, is_deleted, "
@@ -88,7 +93,25 @@ async def _create_cost_order_with_item(
             "INSERT INTO cost_order_items (order_no, article_seller, total_rub, qty, barcode, price_cny, unrecognized, project_id) "
             "VALUES (:ono, :art, :cost, :qty, :bar, 0, false, :pid)"
         ),
-        {"ono": order_no, "art": article_seller, "cost": total_rub, "qty": qty, "bar": article_seller, "pid": pid},
+        {"ono": order_no, "art": article_seller, "cost": total_rub, "qty": qty, "bar": barcode or article_seller, "pid": pid},
+    )
+    await db.commit()
+
+
+async def _create_nomenclature(
+    db: AsyncSession,
+    project_id: int,
+    barcode: str,
+    article_seller: str,
+    article_wb: int | None = None,
+):
+    """Insert a Nomenclature row linking barcode → WB article (article_seller)."""
+    await db.execute(
+        text(
+            "INSERT INTO nomenclature (project_id, barcode, article_seller, article_wb, updated_at) "
+            "VALUES (:pid, :bar, :art, :nm, NOW()) ON CONFLICT DO NOTHING"
+        ),
+        {"pid": project_id, "bar": barcode, "art": article_seller, "nm": article_wb},
     )
     await db.commit()
 
@@ -255,6 +278,46 @@ class TestLoadAvgCosts:
         assert "palatka_зеленая" in result
         assert "PALATKA_зеленая" not in result
         assert round(result["palatka_зеленая"], 2) == round((100 * 10 + 200 * 5) / 15, 2)
+
+    @pytest.mark.asyncio
+    async def test_barcode_alias_for_mismatched_wb_article(self, db_session: AsyncSession, project):
+        """Cost keyed by purchase article is ALSO reachable by the WB article.
+
+        Purchase order carries a factory article ('Кас_наб_...'), but WB / the
+        funnel look the product up by its WB article ('K-147'). The two share a
+        barcode, so the cost must be resolvable under both keys — otherwise the
+        product wrongly shows as 'no cost'. Regression for the prod расихрон.
+        """
+        import uuid as _uuid
+
+        ono = f"ORD-BDR-{_uuid.uuid4().hex[:6]}"
+        bc = "2049759975199"
+        await _create_cost_order_with_item(
+            db_session, project.id, ono, "Кас_наб_2,1*3,9*2,9л", total_rub=150, qty=10, barcode=bc
+        )
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="K-147", article_wb=896271202)
+
+        result = await load_avg_costs(db_session, project.id)
+        # Reachable both by the raw purchase article (backward compat)…
+        assert round(result["кас_наб_2,1*3,9*2,9л"], 2) == 150.0
+        # …and by the WB article via the barcode bridge (the fix).
+        assert "k-147" in result
+        assert round(result["k-147"], 2) == 150.0
+
+    @pytest.mark.asyncio
+    async def test_matching_article_not_overwritten_by_alias(self, db_session: AsyncSession, project):
+        """When purchase article already equals the WB article, value is unchanged."""
+        import uuid as _uuid
+
+        ono = f"ORD-BDR-{_uuid.uuid4().hex[:6]}"
+        bc = "111000111"
+        await _create_cost_order_with_item(
+            db_session, project.id, ono, "DIVANDEK_210x90", total_rub=300, qty=5, barcode=bc
+        )
+        await _create_nomenclature(db_session, project.id, barcode=bc, article_seller="DIVANDEK_210x90", article_wb=550502606)
+
+        result = await load_avg_costs(db_session, project.id)
+        assert round(result["divandek_210x90"], 2) == 300.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
