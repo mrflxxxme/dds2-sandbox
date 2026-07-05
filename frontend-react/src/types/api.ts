@@ -1820,6 +1820,8 @@ export interface AssemblyRequest {
   weight_missing_barcodes?: string[];
   /** число коробов (для расчёта веса отгрузки = нетто + вес_коробки × коробов) */
   boxes_count?: number;
+  /** геометрическая оценка числа паллет (footprint по коробам); только на детали */
+  suggested_pallets_count?: number | null;
   /** расчётный ВЕС ОТГРУЗКИ (кандидат в «Общий вес»): нетто товаров + тара коробов; Decimal — приходит строкой; null если нет нетто-веса */
   suggested_total_weight_kg?: number | string | null;
   vehicle_info?: string;

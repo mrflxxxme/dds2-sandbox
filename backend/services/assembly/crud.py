@@ -457,6 +457,7 @@ async def _build_response(
     # Число коробов + расчётный вес отгрузки (нетто + вес_коробки × коробов). Карта
     # кратности per (склад, ШК) и вес коробки приходят из prefetch (0 запросов на
     # строку); одиночный вызов резолвит для своего склада и читает настройку сам.
+    single_row = box_qty_by_wh_bc is None  # детальный/одиночный путь (не список)
     if box_qty_by_wh_bc is None:
         box_qty_by_wh_bc = await resolve_box_qty_by_warehouse(
             db, request.project_id, {request.warehouse_id: [it.barcode for it in (request.items or [])]}
@@ -464,6 +465,17 @@ async def _build_response(
         box_weight_kg = await get_box_weight_kg(db, request.project_id)
     boxes_count = compute_boxes_count(request, box_qty_by_wh_bc)
     suggested_total_weight_kg = compute_suggested_total_weight(goods_weight_kg, boxes_count, box_weight_kg)
+
+    # Геометрическая оценка числа паллет (footprint по коробам, БЕЗ веса) — только на
+    # детальном пути, чтобы не плодить N+1 в списке (warehouse-имя + машинный
+    # box_size + override). Кнопка «Авто» в раскладке проставляет её в pallets_count.
+    suggested_pallets_count = None
+    if single_row:
+        from backend.services.assembly.pallets import _suggest_pallets_count
+
+        suggested_pallets_count = await _suggest_pallets_count(
+            db, request.project_id, request, box_qty_by_wh_bc
+        )
 
     # Авто-вес: если ручной «Общий вес» не задан (0), показываем расчётный вес
     # отгрузки как значение (примерный, флаг weight_is_estimated) — без кнопок
@@ -499,6 +511,7 @@ async def _build_response(
         "weight_missing_barcodes": weight_missing_barcodes,
         "boxes_count": boxes_count,
         "suggested_total_weight_kg": suggested_total_weight_kg,
+        "suggested_pallets_count": suggested_pallets_count,
         "vehicle_info": request.vehicle_info,
         "vehicle_brand": request.vehicle_brand,
         "driver_phone": request.driver_phone,

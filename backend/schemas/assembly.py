@@ -263,6 +263,8 @@ class AssemblyRequestResponse(BaseModel):
     # паллеты НЕ учитывается). Кандидат для авто-подстановки в общий вес. None —
     # если нетто-веса нет. Ручной pallet_weight_kg НЕ перезаписывает.
     suggested_total_weight_kg: Decimal | None = None
+    # Геометрическая оценка числа паллет (footprint по коробам). Только на детали.
+    suggested_pallets_count: int | None = None
     vehicle_info: str | None = None
     vehicle_brand: str | None = None
     driver_phone: str | None = None
