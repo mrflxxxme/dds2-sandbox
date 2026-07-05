@@ -465,6 +465,15 @@ async def _build_response(
     boxes_count = compute_boxes_count(request, box_qty_by_wh_bc)
     suggested_total_weight_kg = compute_suggested_total_weight(goods_weight_kg, boxes_count, box_weight_kg)
 
+    # Авто-вес: если ручной «Общий вес» не задан (0), показываем расчётный вес
+    # отгрузки как значение (примерный, флаг weight_is_estimated) — без кнопок
+    # «Указать»/«применить». Оператор при желании перебивает вручную; при переходе
+    # в «Готово» расчёт сохраняется в реальный вес (mark_ready).
+    weight_is_estimated = False
+    if total_weight <= 0 and suggested_total_weight_kg is not None and suggested_total_weight_kg > 0:
+        total_weight = suggested_total_weight_kg
+        weight_is_estimated = True
+
     return {
         "id": request.id,
         "warehouse_id": request.warehouse_id,
@@ -484,6 +493,7 @@ async def _build_response(
         "pallets_count": request.pallets_count,
         "pallet_weight_kg": request.pallet_weight_kg,
         "total_weight_kg": total_weight,
+        "weight_is_estimated": weight_is_estimated,
         "pallet_manifest": request.pallet_manifest,
         "goods_weight_kg": goods_weight_kg,
         "weight_missing_barcodes": weight_missing_barcodes,

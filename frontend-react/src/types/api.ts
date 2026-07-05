@@ -1810,6 +1810,8 @@ export interface AssemblyRequest {
   pallets_count: number;
   pallet_weight_kg: number;
   total_weight_kg?: number;
+  /** true — «Общий вес» показан РАСЧЁТНЫМ (ручной не задан): нетто + тара коробов */
+  weight_is_estimated?: boolean;
   /** ручная раскладка коробов по паллетам (null/[] = «авто», считается на лету) */
   pallet_manifest?: PalletBox[] | null;
   /** расчётный вес товаров (нетто) = Σ(qty × вес SKU); Decimal — приходит строкой */

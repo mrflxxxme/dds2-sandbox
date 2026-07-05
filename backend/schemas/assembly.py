@@ -247,6 +247,8 @@ class AssemblyRequestResponse(BaseModel):
     pallets_count: int
     pallet_weight_kg: Decimal
     total_weight_kg: Decimal | None = None  # computed: pallets x weight (тара, ручной)
+    # True — «Общий вес» показан как РАСЧЁТНЫЙ (ручной не задан): нетто + тара коробов.
+    weight_is_estimated: bool = False
     # Ручная раскладка коробов по паллетам (NULL/[] = «авто», считается на лету).
     pallet_manifest: list[PalletBox] | None = None
     # Расчётный вес товаров (нетто) = Σ(quantity × Nomenclature.weight_kg[barcode]).
