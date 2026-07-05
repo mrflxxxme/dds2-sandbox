@@ -16,8 +16,14 @@ import type {
 } from '@/types/api';
 import { parseBoxMultiplicityPaste } from '@/lib/utils/boxMultiplicityPaste';
 import { parseBoxSize, effectiveBoxesPerPallet, palletsForBoxes, maxPalletHeightCm, canonBoxSize } from '@/lib/utils/boxPallet';
-
-type StockFilter = 'all' | 'rf' | 'partial' | 'mixed' | 'no_box_qty' | 'no_pallet';
+import {
+    type StockFilter,
+    skuHasBoxQty,
+    skuCanPalletize,
+    skuHasPartialBoxQty,
+    skuHasMixedBoxQty,
+    passesRowFilter,
+} from '@/lib/utils/boxMultiplicityFilter';
 
 const SOURCE_TYPE_META: Record<string, { label: string; icon: string }> = {
     vehicle: { label: 'Машина', icon: '🚚' },
@@ -862,20 +868,6 @@ function SkuExpandPanel({
     );
 }
 
-// Резолв «применяемой» кратности SKU для сводки: ФФ с остатком и заданной кратностью.
-function skuHasBoxQty(row: BoxMultiplicityRow): boolean {
-    return row.per_warehouse.some(p => p.rf_stock > 0 && p.box_qty !== null);
-}
-
-// Можно ли SKU палетизировать: есть ФФ с остатком, у которого И кратность, И
-// габариты коробки (box_size парсится). Без обоих паллету не сформировать и
-// корректно распределить нельзя — такие SKU подсвечиваем («Нет габаритов»).
-function skuCanPalletize(row: BoxMultiplicityRow): boolean {
-    return row.per_warehouse.some(
-        p => p.rf_stock > 0 && p.box_qty !== null && parseBoxSize(p.box_size) !== null,
-    );
-}
-
 // Размеры коробки SKU по ФФ-складам. У одного товара на разных ФФ коробки могут
 // отличаться → собираем все уникальные размеры + раскладку «склад: размер».
 function skuBoxSizeInfo(row: BoxMultiplicityRow): { sizes: string[]; perFf: Array<{ wh: string; size: string }> } {
@@ -892,29 +884,7 @@ function skuBoxSizeInfo(row: BoxMultiplicityRow): { sizes: string[]; perFf: Arra
     return { sizes: Array.from(byCanon.values()), perFf };
 }
 
-// Частичная кратность: среди ФФ с остатком есть И с заданной, И без — не везде заполнено.
-function skuHasPartialBoxQty(row: BoxMultiplicityRow): boolean {
-    const stocked = row.per_warehouse.filter(p => p.rf_stock > 0);
-    if (stocked.length === 0) return false;
-    const withQty = stocked.filter(p => p.box_qty !== null).length;
-    return withQty > 0 && withQty < stocked.length;
-}
-
-// Разные кратности: у одного товара возможно несколько разных кратностей.
-// Срабатывает, если: (а) backend нашёл >1 ppb в истории всех машин (любой статус приёмки), ИЛИ
-// (б) среди резолвнутых ФФ есть >1 различных box_qty, ИЛИ
-// (в) на каком-то ФФ принято несколько машин с разной кратностью (machine_variants > 0).
-function skuHasMixedBoxQty(row: BoxMultiplicityRow): boolean {
-    if (row.has_mixed_ppb) return true;
-    if (row.per_warehouse.some(p => p.machine_variants > 0)) return true;
-    const distinct = new Set<number>();
-    for (const p of row.per_warehouse) {
-        if (p.box_qty !== null) distinct.add(p.box_qty);
-    }
-    return distinct.size > 1;
-}
-
-export function BoxMultiplicityView() {
+export function BoxMultiplicityView({ onSaved }: { onSaved?: () => void } = {}) {
     const { slug } = useParams() as { slug: string };
     const [rows, setRows] = useState<BoxMultiplicityRow[]>([]);
     const [loading, setLoading] = useState(true);
@@ -933,6 +903,15 @@ export function BoxMultiplicityView() {
     const [subjectFilter, setSubjectFilter] = useState('');
     const [stockFilter, setStockFilter] = useState<StockFilter>('all');
     const [search, setSearch] = useState('');
+
+    // «Липкие» строки: только что отредактированные не выпадают из активного фильтра сразу
+    // после сохранения (иначе, задав кратность в «Нет кратности», строка исчезает и нельзя
+    // дозадать размер коробки). Сбрасывается при смене chip-фильтра.
+    const [stickyNmIds, setStickyNmIds] = useState<ReadonlySet<number>>(new Set());
+    useEffect(() => { setStickyNmIds(new Set()); }, [stockFilter]);
+    const markSticky = useCallback((nmId: number) => {
+        setStickyNmIds(prev => new Set(prev).add(nmId));
+    }, []);
 
     // Bulk-paste inline editor — 5+ редактируемых строк. Колонки:
     //   barcode  — ключ (обязателен)
@@ -1195,6 +1174,8 @@ export function BoxMultiplicityView() {
             if (resp.updated.length > 0) {
                 const updMap = new Map(resp.updated.map(r => [r.nm_id, r]));
                 setRows(prev => prev.map(r => updMap.get(r.nm_id) || r));
+                for (const u of resp.updated) markSticky(u.nm_id);
+                onSaved?.();
             }
             setPasteResult({
                 matched: resp.matched_count,
@@ -1228,6 +1209,8 @@ export function BoxMultiplicityView() {
                 row.barcode, wh.warehouse_id, { box_qty: value },
             );
             setRows(prev => prev.map(r => r.nm_id === row.nm_id ? updated : r));
+            markSticky(row.nm_id);
+            onSaved?.();
             setPerRfEdit(prev => {
                 const next = { ...prev };
                 delete next[key];
@@ -1248,6 +1231,8 @@ export function BoxMultiplicityView() {
                 row.barcode, wh.warehouse_id, { box_size: value },
             );
             setRows(prev => prev.map(r => r.nm_id === row.nm_id ? updated : r));
+            markSticky(row.nm_id);
+            onSaved?.();
             setPerRfSizeEdit(prev => {
                 const next = { ...prev };
                 delete next[key];
@@ -1270,11 +1255,13 @@ export function BoxMultiplicityView() {
                 ),
             };
         }));
+        markSticky(row.nm_id);
         try {
             const updated = await api.patchPerWarehouseBoxMultiplicity(
                 row.barcode, wh.warehouse_id, { use_box_multiplicity: next },
             );
             setRows(prev => prev.map(r => r.nm_id === row.nm_id ? updated : r));
+            onSaved?.();
         } catch (e: unknown) {
             // rollback
             setRows(prev => prev.map(r => {
@@ -1293,9 +1280,11 @@ export function BoxMultiplicityView() {
     const toggleUse = async (nmId: number, next: boolean) => {
         // Optimistic flip — откат при ошибке
         setRows(prev => prev.map(r => r.nm_id === nmId ? { ...r, use_box_multiplicity: next } : r));
+        markSticky(nmId);
         try {
             const updated = await api.patchBoxMultiplicity(nmId, { use_box_multiplicity: next });
             setRows(prev => prev.map(r => r.nm_id === nmId ? updated : r));
+            onSaved?.();
         } catch (e: unknown) {
             setRows(prev => prev.map(r => r.nm_id === nmId ? { ...r, use_box_multiplicity: !next } : r));
             alert(e instanceof Error ? e.message : 'Ошибка сохранения');
@@ -1326,23 +1315,17 @@ export function BoxMultiplicityView() {
     const filteredRows = useMemo(() => {
         const q = search.trim().toLowerCase();
         return rows.filter(r => {
+            // Бренд/предмет/поиск — жёсткие гейты (липкость их не обходит).
             if (brandFilter && r.brand !== brandFilter) return false;
             if (subjectFilter && r.subject !== subjectFilter) return false;
             if (q) {
                 const haystack = `${r.vendor_code || ''} ${r.barcode} ${r.nm_id}`.toLowerCase();
                 if (!haystack.includes(q)) return false;
             }
-            switch (stockFilter) {
-                case 'rf': return r.rf_stock > 0;
-                case 'partial': return skuHasPartialBoxQty(r);
-                case 'mixed': return skuHasMixedBoxQty(r);
-                case 'no_box_qty': return r.rf_stock > 0 && !skuHasBoxQty(r);
-                // «Нет габаритов» — кратность есть, но размер коробки не задан → паллету не сформировать.
-                case 'no_pallet': return r.rf_stock > 0 && skuHasBoxQty(r) && !skuCanPalletize(r);
-                default: return true;
-            }
+            // Chip-фильтр остатков ЛИБО «липкая» строка (только что отредактирована).
+            return passesRowFilter(r, stockFilter, stickyNmIds);
         });
-    }, [rows, brandFilter, subjectFilter, stockFilter, search]);
+    }, [rows, brandFilter, subjectFilter, stockFilter, search, stickyNmIds]);
 
     // KPI и chip-каунты — по scope бренд+предмет (без чипов остатков и без search),
     // чтобы при выборе предмета шапка показывала числа в рамках этого предмета.
@@ -2093,8 +2076,11 @@ export function BoxMultiplicityView() {
                                     onSavePerRfPpb={savePerRfPpb}
                                     onSavePerRfSize={savePerRfSize}
                                     onTogglePerRfUse={togglePerRfUse}
-                                    onRowUpdated={updated =>
-                                        setRows(prev => prev.map(x => x.nm_id === updated.nm_id ? updated : x))}
+                                    onRowUpdated={updated => {
+                                        setRows(prev => prev.map(x => x.nm_id === updated.nm_id ? updated : x));
+                                        markSticky(updated.nm_id);
+                                        onSaved?.();
+                                    }}
                                     palletOverrides={palletOverrides}
                                 />
                             )}

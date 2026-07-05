@@ -268,6 +268,28 @@ export default function AssemblyDraftPage() {
         prevTabRef.current = activeTab;
     }, [activeTab, loadGeometry]);
 
+    // Кратность могли править в ДРУГОЙ вкладке браузера (черновик и «Кратность» открыты
+    // порознь) — там нет внутри-аппного перехода таба, и карта nmPpb жила бы до F5.
+    // Перечитываем геометрию при возврате фокуса/видимости. geomState остаётся 'ready' —
+    // без мигания; бэкенд get_box_multiplicity не кэшируется, GET дешёвый.
+    useEffect(() => {
+        // Возврат таба даёт и visibilitychange, и focus — коалесцируем, чтобы не слать GET дважды.
+        let last = 0;
+        const refresh = () => {
+            if (document.visibilityState !== 'visible') return;
+            const now = Date.now();
+            if (now - last < 500) return;
+            last = now;
+            loadGeometry();
+        };
+        window.addEventListener('visibilitychange', refresh);
+        window.addEventListener('focus', refresh);
+        return () => {
+            window.removeEventListener('visibilitychange', refresh);
+            window.removeEventListener('focus', refresh);
+        };
+    }, [loadGeometry]);
+
     useEffect(() => {
         let cancelled = false;
         api.getPalletBoxesBySize()
@@ -1937,7 +1959,7 @@ export default function AssemblyDraftPage() {
             )}
 
             {/* Вкладка «Кратность» */}
-            {activeTab === 'box' && <BoxMultiplicityView />}
+            {activeTab === 'box' && <BoxMultiplicityView onSaved={() => loadGeometry()} />}
 
             {/* Вкладка «Паллеты» */}
             {activeTab === 'pallets' && <PalletSizesView />}
