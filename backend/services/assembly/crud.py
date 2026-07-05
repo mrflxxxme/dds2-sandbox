@@ -523,6 +523,7 @@ async def _build_response(
         "shipped_at": request.shipped_at,
         "comment": request.comment,
         "wb_warehouse_name_manual": request.wb_warehouse_name_manual,
+        "package_type": request.package_type,  # тип поставки (короб/моно/сейф) — колонка списка
         "source_draft_id": request.source_draft_id,
         "source_vehicle_id": request.source_vehicle_id,
         "is_pre_distribution": request.is_pre_distribution,

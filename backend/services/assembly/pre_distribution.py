@@ -13,6 +13,7 @@
 """
 
 import logging
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -23,7 +24,11 @@ from backend.cache import invalidate_cache
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import VehicleStatus
+from backend.models.supply_chain import FactoryOrderItem
 from backend.models.warehouse import Warehouse, WarehouseType
+# Единый источник «эффективной» кратности/габарита FactoryOrderItem (mix-вариант учтён) —
+# переиспользуем, чтобы кратность машины на экране совпадала со справочником приёмок.
+from backend.services.box_multiplicity_service import _foi_effective_box_size, _foi_effective_ppb
 from backend.schemas.assembly import (
     AssemblyItemCreate,
     AssemblyRequestCreate,
@@ -48,6 +53,17 @@ PRE_DIST_VEHICLE_STATUSES = (VehicleStatus.CUSTOMS, VehicleStatus.DISPATCHED)
 def _vehicle_status_str(status: str | None) -> str:
     """VehicleStatus-член → его строковое значение ('CUSTOMS'/'DISPATCHED')."""
     return status.value if isinstance(status, VehicleStatus) else (status or "")
+
+
+def _is_machine_newcomer(first_sale: date | None) -> bool:
+    """Новинка cold-start по первой продаже, БЕЗ требования ФФ-остатка (источник — машина).
+
+    Зеркалит правило ``fetch_cold_start_segment``: нет продаж (``first_sale_date IS NULL``)
+    ИЛИ первая продажа < 14 дней назад. Cold-start-сегмент дополнительно требует ``rf_qty>0``
+    (товар уже на ФФ) — но машина везёт товар, которого на ФФ ещё нет, поэтому здесь этот
+    гейт снят: засев машинных новинок идёт из остатка самой машины.
+    """
+    return first_sale is None or first_sale >= date.today() - timedelta(days=14)
 
 
 # ─── Загрузка/валидация машины ─────────────────────────────────────────────
@@ -143,6 +159,64 @@ async def _resolve_nomenclature(db: AsyncSession, project_id: int, barcodes: lis
     return {n.barcode: n for n in rows}
 
 
+async def _vehicle_box_meta_by_barcode(
+    db: AsyncSession, project_id: int, order_no: str
+) -> dict[str, tuple[int, str | None]]:
+    """barcode → (box_qty, box_size) ИЗ САМОЙ машины: qty-weighted mode её строк.
+
+    Кратность едущей машины ещё НЕ в справочнике приёмок (``_resolve_machine_box_qty``
+    читает только ACCEPTED-приёмки), поэтому берём прямо со строк ``cost_order``:
+    ``pcs_per_box_override`` → эффективная кратность связанного FactoryOrderItem.
+    Габарит короба — параллельно, спарен с выбранной кратностью. ШК без валидной
+    кратности (ppb NULL/≤0) в результат не попадают.
+    """
+    coi_result = await db.execute(
+        select(
+            CostOrderItem.barcode,
+            CostOrderItem.qty,
+            CostOrderItem.pcs_per_box_override,
+            CostOrderItem.box_size_override,
+            FactoryOrderItem.pcs_per_box.label("foi_pcs_per_box"),
+            FactoryOrderItem.mix_pcs_per_box.label("foi_mix_pcs_per_box"),
+            FactoryOrderItem.box_size.label("foi_box_size"),
+            FactoryOrderItem.mix_box_size.label("foi_mix_box_size"),
+            FactoryOrderItem.mix_group_id.label("foi_mix_group_id"),
+        )
+        .outerjoin(FactoryOrderItem, FactoryOrderItem.id == CostOrderItem.factory_order_item_id)
+        .where(
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.order_no == order_no,
+            CostOrderItem.is_deleted == False,  # noqa: E712
+        )
+    )
+    # barcode → {ppb: Σqty}, {ppb: box_size (first seen)}
+    ppb_qty: dict[str, dict[int, int]] = {}
+    ppb_size: dict[str, dict[int, str | None]] = {}
+    for row in coi_result:  # type: ignore[assignment]
+        if not row.barcode:
+            continue
+        ppb = row.pcs_per_box_override or _foi_effective_ppb(
+            row.foi_pcs_per_box, row.foi_mix_pcs_per_box, row.foi_mix_group_id
+        )
+        box_size = row.box_size_override or _foi_effective_box_size(
+            row.foi_box_size, row.foi_mix_box_size, row.foi_mix_group_id
+        )
+        qty = int(row.qty or 0)
+        if ppb is None or ppb <= 0 or qty <= 0:
+            continue
+        ppb_int = int(ppb)
+        ppb_qty.setdefault(row.barcode, {})[ppb_int] = ppb_qty.get(row.barcode, {}).get(ppb_int, 0) + qty
+        ppb_size.setdefault(row.barcode, {}).setdefault(ppb_int, box_size)
+
+    out: dict[str, tuple[int, str | None]] = {}
+    for barcode, qmap in ppb_qty.items():
+        # mode: ppb с наибольшей Σqty; при точной ничьей — МЕНЬШИЙ ppb (детерминизм: запрос
+        # без ORDER BY → dict-порядок = порядок строк БД; иначе показанная кратность «плавает»).
+        primary = max(qmap.items(), key=lambda x: (x[1], -x[0]))[0]
+        out[barcode] = (primary, ppb_size.get(barcode, {}).get(primary))
+    return out
+
+
 async def get_vehicle_pre_dist_pool(db: AsyncSession, project_id: int, vehicle_id: int) -> PreDistVehiclePool:
     """Пул машины: по каждому ШК — всего на машине, уже разнесено, доступно к раскладке."""
     vehicle = await _load_distributable_vehicle(db, project_id, vehicle_id)
@@ -151,6 +225,7 @@ async def get_vehicle_pre_dist_pool(db: AsyncSession, project_id: int, vehicle_i
     gross = await _vehicle_gross_by_barcode(db, project_id, vehicle.order_no)
     reserved = await _reserved_by_barcode(db, project_id, vehicle_id)
     nom_map = await _resolve_nomenclature(db, project_id, list(gross.keys()))
+    box_meta = await _vehicle_box_meta_by_barcode(db, project_id, vehicle.order_no)
 
     rows: list[PreDistPoolRow] = []
     total_qty = 0
@@ -158,6 +233,7 @@ async def get_vehicle_pre_dist_pool(db: AsyncSession, project_id: int, vehicle_i
         g = gross[barcode]
         used = reserved.get(barcode, 0)
         nom = nom_map.get(barcode)
+        box_qty, box_size = box_meta.get(barcode, (None, None))
         total_qty += g
         rows.append(
             PreDistPoolRow(
@@ -169,6 +245,9 @@ async def get_vehicle_pre_dist_pool(db: AsyncSession, project_id: int, vehicle_i
                 gross_qty=g,
                 distributed_qty=used,
                 available_qty=max(0, g - used),
+                box_qty=box_qty,
+                box_size=box_size,
+                is_newcomer=_is_machine_newcomer(nom.first_sale_date if nom else None),
             )
         )
 
@@ -351,10 +430,15 @@ async def create_pre_distribution(
     created: list[AssemblyRequest] = []
     for (wb_name, pkg), bc_qty in groups.items():
         items = [AssemblyItemCreate(barcode=bc, quantity=q) for bc, q in bc_qty.items()]
+        # Паллеты — из фронта (геометрию коробов считает фронт); нет ключа → 0 (как раньше).
+        pallets = max(0, int(payload.pallets_by_group.get(f"{wb_name}::{pkg}", 0)))
+        # Вес НЕ форсим: `pallet_weight_kg=0` → `_build_response` покажет авто-вес
+        # (нетто товаров + тара коробов, «≈ N кг», флаг weight_is_estimated) — как у прочих
+        # поставок; `mark_ready` подставит финальный вес. Ручной вес (>0) заблокировал бы авто.
         create_payload = AssemblyRequestCreate(
             warehouse_id=target_wh.id,
             wb_fbo_supply_id=payload.wb_fbo_supply_id if len(groups) == 1 else None,
-            pallets_count=0,  # C2: pallets_count/pallet_weight_kg NOT NULL → 0 при создании
+            pallets_count=pallets,
             pallet_weight_kg=Decimal("0"),
             wb_warehouse_name_manual=wb_name,
             package_type=cast(PackageTypeStr, pkg),

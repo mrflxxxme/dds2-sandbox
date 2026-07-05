@@ -22,6 +22,11 @@ export function distributeByBoxMultiple(
     totalCanSend: number,
     ppb: number,
     looseTail = true,
+    /** «Не менее 1 короба на склад»: бюджет = весь доступный сток (не капим суммарной
+     *  потребностью), чтобы КАЖДЫЙ склад с потребностью получил ≥1 целый короб, даже если
+     *  это перебор над его потребностью. Кап — только физический сток (totalCanSend);
+     *  приоритет тот же (по убыванию потребности = speed-локализация). Для pre-dist-матрицы. */
+    minOneBoxPerWh = false,
 ): Record<string, number> {
     if (ppb <= 0 || totalCanSend <= 0) return {};
     const sorted = [...needs]
@@ -31,8 +36,9 @@ export function distributeByBoxMultiple(
 
     const totalNeed = sorted.reduce((s, w) => s + w.need, 0);
     const tgt: Record<string, number> = {};
-    // Бюджет — вся доступная потребность (короба + хвост). Сверх потребности не шлём.
-    const budget = Math.min(totalCanSend, totalNeed);
+    // Бюджет: обычно = потребность (сверх потребности не шлём); в режиме «≥1 короб на
+    // склад» = весь сток (перебор допускается ради минимального короба каждому складу).
+    const budget = minOneBoxPerWh ? totalCanSend : Math.min(totalCanSend, totalNeed);
     let remaining = Math.floor(budget / ppb) * ppb; // целые коробки
 
     // Pass 1: минимум по 1 коробке, приоритет — самым нуждающимся.

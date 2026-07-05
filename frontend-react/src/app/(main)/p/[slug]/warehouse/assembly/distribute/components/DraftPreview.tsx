@@ -21,8 +21,8 @@ import {
     PREVIEW_EXPORT_COLUMNS_FF,
     type PreviewLine,
 } from '@/lib/utils/assemblyPreview';
-import { palletsForLines, maxPalletHeightCm, effectiveBoxesPerPallet, type PalletCount } from '@/lib/utils/boxPallet';
-import { buildPalletManifest } from '@/lib/utils/palletManifest';
+import { palletsForLines, maxPalletHeightCm, effectiveBoxesPerPallet, MONO_MAX_PALLET_ARTICLES, type PalletCount } from '@/lib/utils/boxPallet';
+import { buildPalletManifest, type PalletBin } from '@/lib/utils/palletManifest';
 
 const PKG_BADGE: Record<string, string> = {
     BOX: 'badge-info', MONOPALLET: 'badge-warning', SUPERSAFE: 'badge-secondary',
@@ -69,8 +69,10 @@ function FilterChipRow({ label, options, selected, onToggle, titleFn }: {
 
 interface DraftPreviewProps {
     slug: string;
-    draftId: number;
-    /** Живые строки черновика из родителя (редактор их мутирует) — НЕ draft.distribution.rows. */
+    /** Draft-режим: id черновика (commit через commitAssemblyDraft). Опц. — нет в predist-режиме. */
+    draftId?: number;
+    /** Живые строки черновика из родителя (редактор их мутирует) — НЕ draft.distribution.rows.
+     *  В машинном (predist) режиме — то, что реально уедет (раскладка + промоут из предброни). */
     rows: AssemblyDraftRow[];
     newcomerNmIds: Set<number>;
     warehouses: Warehouse[];
@@ -86,11 +88,15 @@ interface DraftPreviewProps {
     /** Провенанс «из предброни»: ключи `${nm_id}::${wb}`. Паллета, содержащая хоть один
      *  такой SKU, помечается бейджем «из предброни» в раскладке. */
     prebookOrigin?: Set<string>;
-    /** Сбросить правки редактора на сервер перед commit (родитель). Возвращает успех. */
-    ensureSaved: () => Promise<boolean>;
+    /** Draft-режим: сбросить правки редактора на сервер перед commit. Опц. (нет в predist). */
+    ensureSaved?: () => Promise<boolean>;
     onToast: (message: string, type: 'success' | 'error') => void;
-    /** Коммит оставил строки в черновике (whole-only снял неполные) — родитель перезагружает. */
-    onReloadDraft: () => void;
+    /** Draft-режим: перезагрузить черновик после частичного commit. Опц. (нет в predist). */
+    onReloadDraft?: () => void;
+    /** Машинный режим (предраспределение): коммит через свой колбэк (createPreDistribution),
+     *  без черновика. Когда задан — заменяет draft-commit и per-ФФ-commit; «Открыть →»
+     *  (draft-подмаршрут склада) скрывается (у машины один ФФ-источник). */
+    predist?: { commitAll: () => Promise<void> };
 }
 
 /** Предпросмотр заявок + commit. Показывает ВЕСЬ черновик (короб + моно + сейф)
@@ -98,7 +104,7 @@ interface DraftPreviewProps {
 export default function DraftPreview({
     slug, draftId, rows, newcomerNmIds, warehouses,
     nmPpb, nmPpbByWh, nmMeta, nmBoxSize, palletOverrides, geomReady, prebookOrigin,
-    ensureSaved, onToast, onReloadDraft,
+    ensureSaved, onToast, onReloadDraft, predist,
 }: DraftPreviewProps) {
     const router = useRouter();
 
@@ -469,11 +475,17 @@ export default function DraftPreview({
 
     // ─── Commit ──────────────────────────────────────────────────────────
     const handleCreate = useCallback(async () => {
+        // Машинный режим: коммит через свой колбэк (createPreDistribution), без черновика.
+        if (predist) {
+            setCommitting(true);
+            try { await predist.commitAll(); } finally { setCommitting(false); }
+            return;
+        }
         if (!draftId) return;
         setCommitting(true);
         try {
             // Сбросить правки редактора на сервер — commit читает серверный черновик.
-            const saved = await ensureSaved();
+            const saved = ensureSaved ? await ensureSaved() : true;
             if (!saved) { setCommitting(false); return; }
             // package_type не передаём → commit_draft создаёт ВЕСЬ черновик (короб+моно+сейф).
             const resp = await api.commitAssemblyDraft(draftId, undefined, palletCounts, effectiveWholeOnly ? wholeSupplies : undefined);
@@ -486,7 +498,7 @@ export default function DraftPreview({
             } catch { leftoverRows = 0; }
             onToast(`Создано заявок: ${ids.length}${leftoverRows > 0 ? `. Осталось строк: ${leftoverRows}` : ''}`, 'success');
             if (leftoverRows > 0) {
-                onReloadDraft();
+                onReloadDraft?.();
                 setCommitting(false);
             } else {
                 setTimeout(() => {
@@ -499,17 +511,24 @@ export default function DraftPreview({
             onToast(e instanceof Error ? e.message : 'Ошибка создания сборок', 'error');
             setCommitting(false);
         }
-    }, [draftId, ensureSaved, palletCounts, effectiveWholeOnly, wholeSupplies, router, slug, onToast, onReloadDraft]);
+    }, [predist, draftId, ensureSaved, palletCounts, effectiveWholeOnly, wholeSupplies, router, slug, onToast, onReloadDraft]);
 
     // Частичный commit ТОЛЬКО одного склада-ФФ (источника): заявки из порций этого ФФ,
     // порции других ФФ остаются в черновике (backend карвит остаток по allocatePairs).
     const handleCreateFf = useCallback(async (ffId: number, ffName: string, reqCount: number) => {
+        // Машинный режим: у машины один ФФ-источник → «этот ФФ» = вся раскладка.
+        if (predist) {
+            setCommitting(true);
+            setCommittingFfId(ffId);
+            try { await predist.commitAll(); } finally { setCommitting(false); setCommittingFfId(null); }
+            return;
+        }
         if (!draftId) return;
         if (!window.confirm(`Создать ${formatNumber(reqCount, 0)} заявок со ВСЕГО склада-ФФ «${ffName}» (весь его товар в черновике)? Порции других складов останутся в черновике.`)) return;
         setCommitting(true);
         setCommittingFfId(ffId);
         try {
-            const saved = await ensureSaved();
+            const saved = ensureSaved ? await ensureSaved() : true;
             if (!saved) { setCommitting(false); setCommittingFfId(null); return; }
             const resp = await api.commitAssemblyDraft(draftId, undefined, palletCounts, undefined, ffId);
             const ids = resp.created_request_ids || [];
@@ -520,7 +539,7 @@ export default function DraftPreview({
             } catch { leftoverRows = 0; }
             onToast(`Создано заявок со склада «${ffName}»: ${ids.length}${leftoverRows > 0 ? `. Осталось строк в черновике: ${leftoverRows}` : ''}`, 'success');
             if (leftoverRows > 0) {
-                onReloadDraft();
+                onReloadDraft?.();
                 setCommitting(false);
                 setCommittingFfId(null);
             } else {
@@ -536,7 +555,7 @@ export default function DraftPreview({
             setCommitting(false);
             setCommittingFfId(null);
         }
-    }, [draftId, ensureSaved, palletCounts, router, slug, onToast, onReloadDraft]);
+    }, [predist, draftId, ensureSaved, palletCounts, router, slug, onToast, onReloadDraft]);
 
     const pkgBadge = (pkg: PackageType) => (
         <span className={`badge ${PKG_BADGE[pkg] || 'badge-secondary'}`} style={{ fontSize: 10 }}>{PKG_LABEL_RU[pkg] || pkg}</span>
@@ -559,9 +578,11 @@ export default function DraftPreview({
                         Σ {formatNumber(sumQty(g.lines), 0)} шт · {formatNumber(boxesSum(g.lines), 0)} кор · <strong style={{ color: 'var(--color-accent)' }}>{formatNumber(ffPallets, 0)} пал</strong> · {reqCountOf(g.lines)} заявок · {skuCountOf(g.lines)} SKU
                     </span>
                     <div style={{ flex: 1 }} />
-                    <button className="btn btn-primary btn-sm" onClick={e => { e.stopPropagation(); openFf(g.ffId, g.lines[0]?.pkg ?? 'BOX'); }} title={`Открыть склад «${ffName}»: заявки-юниты, передать на ФФ / в сборку`}>
-                        Открыть →
-                    </button>
+                    {!predist && (
+                        <button className="btn btn-primary btn-sm" onClick={e => { e.stopPropagation(); openFf(g.ffId, g.lines[0]?.pkg ?? 'BOX'); }} title={`Открыть склад «${ffName}»: заявки-юниты, передать на ФФ / в сборку`}>
+                            Открыть →
+                        </button>
+                    )}
                     <button className="btn btn-secondary btn-sm" onClick={e => { e.stopPropagation(); exportFf(g.ffId, g.lines); }} title={`Выгрузить пикинг-лист склада «${ffName}» в Excel`}>
                         📥 Выгрузить
                     </button>
@@ -590,8 +611,42 @@ export default function DraftPreview({
                                 { mode: pkg === 'BOX' ? 'box' : 'mono', maxHeightCm: maxPalletHeightCm(wb), overrides: palletOverrides },
                             );
                             const mKey = `${g.ffId}::${wb}::${pkg}`;
-                            const mOpen = manifestOpen.has(mKey);
-                            const hasManifest = manifest.pallets.length > 0 || manifest.unpalletized.length > 0;
+                            // Машинный режим (predist): НЕПОЛНЫЕ моно-паллеты (недобор с габаритами)
+                            // показываем КАРТОЧКАМИ (нарезка ≤3 арт, как в предброни), а не прячем в
+                            // свёрнутый бакет «Без целой паллеты» — иначе перенос неполной моно из
+                            // предброни «пропадал» без карточки и без бейджа «🅿️ из предброни».
+                            const isMonoPredist = !!predist && pkg === 'MONOPALLET';
+                            const uppOfNm = (nmId: number): number => {
+                                const bpp = effectiveBoxesPerPallet(nmBoxSize.get(nmId) ?? null, maxPalletHeightCm(wb), palletOverrides);
+                                const ppb = nmPpb.get(nmId) || 0;
+                                return bpp && ppb ? bpp * ppb : 0;
+                            };
+                            const monoTailBins: PalletBin[] = [];
+                            let noGeomItems = manifest.unpalletized;
+                            if (isMonoPredist && manifest.unpalletized.length > 0) {
+                                noGeomItems = manifest.unpalletized.filter(it => uppOfNm(it.nmId) <= 0);
+                                const geom = manifest.unpalletized
+                                    .filter(it => uppOfNm(it.nmId) > 0)
+                                    .map(it => ({ it, fp: it.units / uppOfNm(it.nmId) }))
+                                    .sort((a, b) => b.fp - a.fp);
+                                for (let i = 0; i < geom.length; i += MONO_MAX_PALLET_ARTICLES) {
+                                    const chunk = geom.slice(i, i + MONO_MAX_PALLET_ARTICLES);
+                                    monoTailBins.push({
+                                        palletNo: manifest.pallets.length + monoTailBins.length + 1,
+                                        items: chunk.map(c => {
+                                            const ppb = nmPpb.get(c.it.nmId) || 0;
+                                            return { nmId: c.it.nmId, vendorCode: c.it.vendorCode, units: c.it.units, boxes: ppb > 0 ? Math.ceil(c.it.units / ppb) : 0 };
+                                        }),
+                                        fillPct: Math.min(1, chunk.reduce((s, c) => s + c.fp, 0)),
+                                    });
+                                }
+                            }
+                            const renderPallets = monoTailBins.length ? [...manifest.pallets, ...monoTailBins] : manifest.pallets;
+                            // Автораскрытие — только если среди неполных есть ПЕРЕНЕСЁННАЯ из предброни
+                            // (перенос сразу виден); авто-недобор раскрывается по клику (не шумим на всех).
+                            const forceOpen = monoTailBins.some(p => !!prebookOrigin && p.items.some(it => prebookOrigin.has(`${it.nmId}::${wb}`)));
+                            const mOpen = manifestOpen.has(mKey) || forceOpen;
+                            const hasManifest = renderPallets.length > 0 || noGeomItems.length > 0;
                             return (
                                 <div key={`${wb}::${pkg}`} style={{ marginTop: 10 }}>
                                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-warning)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -614,11 +669,11 @@ export default function DraftPreview({
                                                     ? 'Раскладка по физическим паллетам (смешанные короба разных артикулов)'
                                                     : 'Раскладка по физическим паллетам (по одному артикулу на паллету)'}
                                             >
-                                                {mOpen ? '▾' : '▸'} 📐 Раскладка по паллетам ({formatNumber(manifest.pallets.length, 0)})
+                                                {mOpen ? '▾' : '▸'} 📐 Раскладка по паллетам ({formatNumber(renderPallets.length, 0)})
                                             </button>
                                             {mOpen && (
                                                 <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                                    {manifest.pallets.map(p => {
+                                                    {renderPallets.map(p => {
                                                         const pct = Math.round(p.fillPct * 100);
                                                         const low = p.fillPct < 0.6;
                                                         const palUnits = p.items.reduce((s, it) => s + it.units, 0);
@@ -660,11 +715,11 @@ export default function DraftPreview({
                                                             </div>
                                                         );
                                                     })}
-                                                    {manifest.unpalletized.length > 0 && (
+                                                    {noGeomItems.length > 0 && (
                                                         <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title="Не набрали целую паллету (моно-недобор → предбронь) либо нет габаритов короба">
-                                                            <div style={{ marginBottom: 4 }}>Без целой паллеты (недобор → предбронь / нет габаритов):</div>
+                                                            <div style={{ marginBottom: 4 }}>{isMonoPredist ? 'Без габаритов короба (не палетизируется):' : 'Без целой паллеты (недобор → предбронь / нет габаритов):'}</div>
                                                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                                                                {manifest.unpalletized.map(it => (
+                                                                {noGeomItems.map(it => (
                                                                     <span key={it.nmId} style={{ padding: '2px 8px', borderRadius: 6, background: 'rgba(245,158,11,0.12)', display: 'inline-flex', gap: 4, alignItems: 'baseline' }}>
                                                                         <span style={{ color: 'var(--color-text)' }}>{it.vendorCode}</span>
                                                                         <span style={{ fontWeight: 600 }}>×{formatNumber(it.units, 0)}</span>
@@ -861,7 +916,7 @@ export default function DraftPreview({
                     ) : 'Нет позиций в черновике — добавьте товары сверху.'}
                 </div>
             ) : viewMode === 'table' ? (
-                <TanStackDataTable columns={tableColumns} data={tableData} exportName={`Сборка_заявки_${draftId}`} enablePagination pageSize={100} />
+                <TanStackDataTable columns={tableColumns} data={tableData} exportName={`Сборка_заявки_${draftId ?? 'машина'}`} enablePagination pageSize={100} />
             ) : viewMode === 'matrix' ? (
                 <div className="glass-card" style={{ overflowX: 'auto', padding: 0 }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>

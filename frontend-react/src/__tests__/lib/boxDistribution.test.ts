@@ -186,4 +186,46 @@ describe('distributeByBoxMultiple', () => {
             expect(result).toEqual({ A: 30, B: 10, C: 10 });
         });
     });
+
+    describe('minOneBoxPerWh — не менее 1 короба на склад (pre-dist)', () => {
+        it('без флага: бюджет = Σпотребность → на все склады короба не хватает', () => {
+            // 3 склада по need=10, ppb=26, стока вдоволь. budget=min(200,30)=30 → 1 короб (26).
+            const result = distributeByBoxMultiple(
+                [{ name: 'A', need: 10 }, { name: 'B', need: 10 }, { name: 'C', need: 10 }],
+                200, 26, false, false,
+            );
+            const boxed = Object.values(result).filter(q => q === 26).length;
+            expect(boxed).toBe(1);   // только один склад получил короб
+        });
+
+        it('с флагом: каждый склад с потребностью получает ≥1 целый короб (перебор ок)', () => {
+            // тот же кейс: budget=сток(200) → каждому по коробу 26 (перебор над need=10).
+            const result = distributeByBoxMultiple(
+                [{ name: 'A', need: 10 }, { name: 'B', need: 10 }, { name: 'C', need: 10 }],
+                200, 26, false, true,
+            );
+            expect(result).toEqual({ A: 26, B: 26, C: 26 });
+        });
+
+        it('с флагом: кап физическим стоком — не хватило на всех, низший приоритет без короба', () => {
+            // стока только на 2 короба (52), 3 склада (сорт по need убыв.) → 2 верхних.
+            const result = distributeByBoxMultiple(
+                [{ name: 'A', need: 30 }, { name: 'B', need: 20 }, { name: 'C', need: 10 }],
+                52, 26, false, true,
+            );
+            expect(result.A).toBe(26);
+            expect(result.B).toBe(26);
+            expect(result.C ?? 0).toBe(0);   // стока не осталось
+        });
+
+        it('с флагом: крупная потребность добивается сверх 1 короба по спросу', () => {
+            // A need=60 (>2 коробов), B need=5. сток вдоволь. A → 2 короба (52), B → 1 короб (26).
+            const result = distributeByBoxMultiple(
+                [{ name: 'A', need: 60 }, { name: 'B', need: 5 }],
+                500, 26, false, true,
+            );
+            expect(result.A).toBe(52);
+            expect(result.B).toBe(26);
+        });
+    });
 });

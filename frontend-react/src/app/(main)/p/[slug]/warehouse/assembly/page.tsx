@@ -29,6 +29,9 @@ function ffLinksOf(row: AssemblyRequest): FfLinkInfo[] {
     return [];
 }
 
+// Подпись типа поставки WB для колонки «Тип поставки».
+const PKG_TYPE_LABEL: Record<string, string> = { BOX: '📦 Короб', MONOPALLET: '📐 Моно', SUPERSAFE: '🔒 Сейф' };
+
 // Подпись-тултип бейджа «Совместная»: другие сборки той же WB-поставки.
 function jointTitle(row: AssemblyRequest): string {
     const sibs = row.joint_siblings || [];
@@ -860,15 +863,30 @@ export default function AssemblyListPage() {
         },
         {
             key: 'wb_supply_name', label: 'FBO поставка',
-            render: (_v, row: AssemblyRequest) => (
-                <span style={{ fontSize: 13 }}>
-                    {row.wb_supply_name || '—'}
-                    {row.wb_warehouse_name && (
-                        <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>{row.wb_warehouse_name}</span>
-                    )}
-                </span>
-            ),
-            exportValue: (row: AssemblyRequest) => row.wb_supply_name || '',
+            render: (_v, row: AssemblyRequest) => {
+                // Склад назначения WB известен из заявки (wb_warehouse_name_manual) ещё до
+                // связки с FBO-поставкой → показываем его сразу; после связки добавится номер
+                // поставки (wb_supply_name). effective_wb_warehouse = supply-склад → manual.
+                const wbWh = row.effective_wb_warehouse || row.wb_warehouse_name;
+                return (
+                    <span style={{ fontSize: 13 }}>
+                        {row.wb_supply_name || '—'}
+                        {wbWh && (
+                            <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>{wbWh}</span>
+                        )}
+                    </span>
+                );
+            },
+            exportValue: (row: AssemblyRequest) => row.wb_supply_name || row.effective_wb_warehouse || '',
+        },
+        {
+            key: 'package_type', label: 'Тип поставки',
+            render: (_v, row: AssemblyRequest) => {
+                const pkg = row.package_type || 'BOX';
+                const badge = pkg === 'MONOPALLET' ? 'badge-warning' : pkg === 'SUPERSAFE' ? 'badge-danger' : 'badge-info';
+                return <span className={`badge ${badge}`} style={{ fontSize: 11 }}>{PKG_TYPE_LABEL[pkg]}</span>;
+            },
+            exportValue: (row: AssemblyRequest) => PKG_TYPE_LABEL[row.package_type || 'BOX'],
         },
         {
             key: 'items_qty', label: 'Товары', align: 'right',
