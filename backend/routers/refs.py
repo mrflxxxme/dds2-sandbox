@@ -17,6 +17,7 @@ from backend.schemas import (
 )
 from backend.schemas.refs import (
     CategoryOverrideBulkPayload,
+    BoxWeightPayload,
     CategoryRefUpdate,
     ExcludedWarehousesPayload,
     ForecastRfDefaultDaysPayload,
@@ -271,6 +272,32 @@ async def set_pallet_boxes_by_size(
 
     result = await settings_service.set_pallet_boxes_by_size(db, project.id, payload.sizes)
     return {"ok": True, "sizes": result}
+
+
+@router.get("/box-weight")
+async def get_box_weight(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Вес пустой коробки (кг) для расчётного веса отгрузки сборки. None — не задан."""
+    from backend.services import settings_service
+
+    weight = await settings_service.get_box_weight_kg(db, project.id)
+    return {"weight_kg": weight}
+
+
+@router.put("/box-weight")
+async def set_box_weight(
+    payload: BoxWeightPayload,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+):
+    """Задать вес пустой коробки. Body: {"weight_kg": 0.35}. Отрицательное → 0."""
+    from backend.services import settings_service
+
+    result = await settings_service.set_box_weight_kg(db, project.id, payload.weight_kg)
+    return {"ok": True, "weight_kg": result}
 
 
 @router.get("/forecast-rf-default-days")

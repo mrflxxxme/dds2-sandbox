@@ -120,3 +120,63 @@ async def compute_goods_weight(
 
     goods_weight = total.quantize(_WEIGHT_Q) if any_weight else None
     return goods_weight, sorted(missing)
+
+
+# ─── Коробочная тара: число коробов и расчётный вес отгрузки ──────────────────
+#
+# Итоговый вес отгрузки = нетто товаров + `box_weight_kg` × число коробов. Вес
+# паллеты (деревянной тары) НЕ учитываем (решение пользователя). Кратность коробки
+# резолвится per (склад заявки, barcode) — тем же движком, что раскладка/манифест
+# (`resolve_box_qty_map`: machine → manual → override → none).
+
+
+async def resolve_box_qty_by_warehouse(
+    db: AsyncSession,
+    project_id: int,
+    wh_to_barcodes: dict[int, list[str]],
+) -> dict[tuple[int, str], int | None]:
+    """Кратность коробки per (warehouse_id, barcode) для НАБОРА складов сборок.
+
+    Делегирует в `resolve_box_qty_map_multi` (один батч на все склады, ≈4 запроса
+    total, не O(строк) и не O(складов×4)) — держим бюджет запросов списка без N+1.
+    """
+    from backend.services.box_multiplicity_service import resolve_box_qty_map_multi
+
+    return await resolve_box_qty_map_multi(db, project_id, wh_to_barcodes)
+
+
+def compute_boxes_count(
+    request: AssemblyRequest,
+    box_qty_by_wh_bc: dict[tuple[int, str], int | None],
+) -> int:
+    """Число ФИЗИЧЕСКИХ коробов заявки = Σ ⌈кол-во / кратность⌉ по позициям.
+
+    Хвост < короба считается отдельным (неполным) коробом — физически это тоже
+    коробка с тарой. Позиции без заданной кратности короба в счёт не идут.
+    """
+    wh_id = request.warehouse_id
+    total = 0
+    for it in request.items or []:
+        bq = box_qty_by_wh_bc.get((wh_id, it.barcode))
+        qty = int(it.quantity or 0)
+        if bq and bq > 0 and qty > 0:
+            total += -(-qty // bq)  # ceil(qty / bq)
+    return total
+
+
+def compute_suggested_total_weight(
+    goods_weight_kg: Decimal | None,
+    boxes_count: int,
+    box_weight_kg: Decimal | None,
+) -> Decimal | None:
+    """Расчётный вес отгрузки = нетто товаров + вес_коробки × коробов.
+
+    None, если нетто-веса нет (нечего предлагать — оператор заполнит справочник
+    веса). Коробочная тара прибавляется только когда задан `box_weight_kg`.
+    """
+    if goods_weight_kg is None:
+        return None
+    total = goods_weight_kg
+    if box_weight_kg is not None and box_weight_kg > 0 and boxes_count > 0:
+        total = total + box_weight_kg * boxes_count
+    return total.quantize(_WEIGHT_Q)
