@@ -398,6 +398,11 @@ class PreDistributionCreate(BaseModel):
     vehicle_id: int
     wb_fbo_supply_id: int | None = None
     rows: list[PreDistRow]
+    # Число целых паллет по группе `"{wb_warehouse_name}::{package_type}"` — геометрию
+    # коробов/паллет считает фронт (как у обычных заявок из черновика), бэк её не дублирует.
+    # Отсутствует ключ → 0 (заявка создастся без паллет, как раньше). Вес заявки бэк
+    # досчитывает сам из веса товаров (÷ паллеты), чтобы «Общий вес» был как у прочих поставок.
+    pallets_by_group: dict[str, int] = {}
 
 
 class PreDistributionCreateResult(BaseModel):

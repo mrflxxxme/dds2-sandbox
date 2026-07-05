@@ -9,6 +9,7 @@
 """
 
 import uuid
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -214,6 +215,78 @@ async def test_create_groups_by_wb_and_skips_stock(db_session, env):
         assert r.pallets_count == 0  # C2: NOT NULL → 0
     by_wb = {r.wb_warehouse_name_manual: r for r in reqs}
     assert set(by_wb) == {WB_A, WB_B}
+
+
+@pytest.mark.asyncio
+async def test_create_sets_pallets_and_weight(db_session, env):
+    """pallets_by_group проставляет pallets_count; вес заявки = нетто товаров ÷ паллеты →
+    «Общий вес» (= паллеты × вес-паллеты) равен нетто-весу товаров, как у обычных поставок."""
+    # Вес за 1 шт bc1 = 2 кг (справочник).
+    await db_session.execute(
+        text("UPDATE nomenclature SET weight_kg = 2.0 WHERE project_id = :pid AND barcode = :bc"),
+        {"pid": env.pid, "bc": env.bc1},
+    )
+    await db_session.commit()
+    result = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40)],
+            pallets_by_group={f"{WB_A}::BOX": 2},
+        ),
+    )
+    assert result.created == 1
+    r = (
+        await db_session.execute(
+            select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+        )
+    ).scalars().one()
+    assert r.pallets_count == 2
+    # нетто = 40 × 2 = 80 кг; вес паллеты = 80 / 2 = 40.00; Общий вес = 2 × 40 = 80.
+    assert r.pallet_weight_kg == Decimal("40.00")
+    assert r.pallets_count * r.pallet_weight_kg == Decimal("80.00")
+
+
+@pytest.mark.asyncio
+async def test_create_weight_zero_without_unit_weight(db_session, env):
+    """Нет веса ни у одного ШК (ни справочник, ни машина) → pallet_weight_kg = 0
+    (Общий вес не выдумывается), pallets_count всё равно проставлен."""
+    result = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40)],
+            pallets_by_group={f"{WB_A}::BOX": 2},
+        ),
+    )
+    r = (
+        await db_session.execute(
+            select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+        )
+    ).scalars().one()
+    assert r.pallets_count == 2
+    assert r.pallet_weight_kg == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_create_emits_package_type_in_response(db_session, env):
+    """Ответ заявки несёт реальный package_type (колонка «Тип поставки»), не дефолт BOX."""
+    result = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[
+                PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40, package_type="MONOPALLET"),
+                PreDistRow(barcode=env.bc2, wb_warehouse_name=WB_B, qty=20, package_type="BOX"),
+            ],
+        ),
+    )
+    by_wb = {r.wb_warehouse_name_manual: r for r in result.requests}
+    assert by_wb[WB_A].package_type == "MONOPALLET"
+    assert by_wb[WB_B].package_type == "BOX"
 
 
 @pytest.mark.asyncio
