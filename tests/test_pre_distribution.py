@@ -9,6 +9,7 @@
 """
 
 import uuid
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -113,6 +114,72 @@ async def test_pool_net_math(db_session, env):
     assert by_bc2[env.bc1].available_qty == 70
 
 
+@pytest.mark.asyncio
+async def test_pool_returns_machine_box_qty(db_session, project):
+    """[B] Кратность/габарит короба берутся ИЗ САМОЙ машины (строки cost_order), qty-weighted
+    mode — едущая машина ещё не в справочнике принятых приёмок, но её кратность уже видна."""
+    pid = project.id
+    ff_wh = await create_warehouse(db_session, pid, {"name": f"FF-{_uid()}", "warehouse_type": "FULFILLMENT"})
+    bc_k = f"PD-{_uid()}"  # с кратностью
+    bc_none = f"PD-{_uid()}"  # без кратности
+    await _make_nomenclature(db_session, pid, bc_k)
+    await _make_nomenclature(db_session, pid, bc_none)
+    vehicle = CostOrder(
+        project_id=pid, order_no=f"PRDIST-{_uid()}", status=VehicleStatus.CUSTOMS, target_warehouse_id=ff_wh.id
+    )
+    db_session.add(vehicle)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            # bc_k: две строки — ppb=6 (qty 100) доминирует над ppb=10 (qty 20) по qty-weighted mode.
+            CostOrderItem(
+                project_id=pid, order_no=vehicle.order_no, barcode=bc_k, qty=100,
+                pcs_per_box_override=6, box_size_override="60x40x40",
+            ),
+            CostOrderItem(
+                project_id=pid, order_no=vehicle.order_no, barcode=bc_k, qty=20,
+                pcs_per_box_override=10, box_size_override="30x20x20",
+            ),
+            # bc_none: без override и без FOI → кратности нет.
+            CostOrderItem(project_id=pid, order_no=vehicle.order_no, barcode=bc_none, qty=50),
+        ]
+    )
+    await db_session.commit()
+
+    pool = await get_vehicle_pre_dist_pool(db_session, pid, vehicle.id)
+    by_bc = {r.barcode: r for r in pool.rows}
+    assert by_bc[bc_k].box_qty == 6  # mode: ppb с наибольшей суммарной qty
+    assert by_bc[bc_k].box_size == "60x40x40"  # габарит спарен с выбранной кратностью
+    assert by_bc[bc_none].box_qty is None
+    assert by_bc[bc_none].box_size is None
+
+
+@pytest.mark.asyncio
+async def test_pool_box_qty_tie_break_deterministic(db_session, project):
+    """При точной ничьей Σqty двух кратностей выбираем МЕНЬШУЮ — детерминированно (не порядок БД)."""
+    pid = project.id
+    ff_wh = await create_warehouse(db_session, pid, {"name": f"FF-{_uid()}", "warehouse_type": "FULFILLMENT"})
+    bc = f"PD-{_uid()}"
+    await _make_nomenclature(db_session, pid, bc)
+    vehicle = CostOrder(
+        project_id=pid, order_no=f"PRDIST-{_uid()}", status=VehicleStatus.CUSTOMS, target_warehouse_id=ff_wh.id
+    )
+    db_session.add(vehicle)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            # Равная суммарная qty (50) у ppb=12 и ppb=6 → ничья → побеждает МЕНЬШИЙ (6).
+            CostOrderItem(project_id=pid, order_no=vehicle.order_no, barcode=bc, qty=50, pcs_per_box_override=12),
+            CostOrderItem(project_id=pid, order_no=vehicle.order_no, barcode=bc, qty=50, pcs_per_box_override=6),
+        ]
+    )
+    await db_session.commit()
+
+    pool = await get_vehicle_pre_dist_pool(db_session, pid, vehicle.id)
+    row = next(r for r in pool.rows if r.barcode == bc)
+    assert row.box_qty == 6  # ничья Σqty → меньший ppb
+
+
 # ─── Создание заявок ───────────────────────────────────────────────────────
 
 
@@ -148,6 +215,55 @@ async def test_create_groups_by_wb_and_skips_stock(db_session, env):
         assert r.pallets_count == 0  # C2: NOT NULL → 0
     by_wb = {r.wb_warehouse_name_manual: r for r in reqs}
     assert set(by_wb) == {WB_A, WB_B}
+
+
+@pytest.mark.asyncio
+async def test_create_sets_pallets_from_group(db_session, env):
+    """pallets_by_group проставляет pallets_count на заявку (геометрию считает фронт).
+    Вес НЕ форсится (pallet_weight_kg=0) — авто-вес (нетто+тара) считает _build_response,
+    как у прочих поставок; ручной вес заблокировал бы авто-оценку. Нет ключа группы → 0."""
+    result = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[
+                PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40),
+                PreDistRow(barcode=env.bc2, wb_warehouse_name=WB_B, qty=20),
+            ],
+            pallets_by_group={f"{WB_A}::BOX": 3},  # WB_B ключа нет → 0
+        ),
+    )
+    assert result.created == 2
+    by_wb = {r.wb_warehouse_name_manual: r for r in result.requests}
+    assert by_wb[WB_A].pallets_count == 3
+    assert by_wb[WB_B].pallets_count == 0
+    # Вес не форсится — pallet_weight_kg=0 (авто-оценка идёт в total_weight_kg ответа).
+    reqs = (
+        await db_session.execute(
+            select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+        )
+    ).scalars().all()
+    assert all(r.pallet_weight_kg == Decimal("0") for r in reqs)
+
+
+@pytest.mark.asyncio
+async def test_create_emits_package_type_in_response(db_session, env):
+    """Ответ заявки несёт реальный package_type (колонка «Тип поставки»), не дефолт BOX."""
+    result = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[
+                PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40, package_type="MONOPALLET"),
+                PreDistRow(barcode=env.bc2, wb_warehouse_name=WB_B, qty=20, package_type="BOX"),
+            ],
+        ),
+    )
+    by_wb = {r.wb_warehouse_name_manual: r for r in result.requests}
+    assert by_wb[WB_A].package_type == "MONOPALLET"
+    assert by_wb[WB_B].package_type == "BOX"
 
 
 @pytest.mark.asyncio

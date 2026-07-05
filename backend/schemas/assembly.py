@@ -398,6 +398,13 @@ class PreDistPoolRow(BaseModel):
     gross_qty: int  # всего на машине
     distributed_qty: int  # уже разнесено в заявки этой машины
     available_qty: int  # max(0, gross − distributed)
+    # Кратность/габарит короба ИЗ САМОЙ машины (qty-weighted mode строк cost_order):
+    # машина ещё в пути → её кратность нет в справочнике приёмок, читаем прямо со строк.
+    box_qty: int | None = None  # шт/короб (None — не задана на машине)
+    box_size: str | None = None  # «ДxШxВ» см, спарен с выбранной кратностью
+    # Новинка cold-start: first_sale_date IS NULL ИЛИ ≥ today-14 (та же классификация,
+    # что в cold_start_distribution_service, но БЕЗ требования ФФ-остатка — источник машина).
+    is_newcomer: bool = False
 
 
 class PreDistVehiclePool(BaseModel):
@@ -424,6 +431,11 @@ class PreDistributionCreate(BaseModel):
     vehicle_id: int
     wb_fbo_supply_id: int | None = None
     rows: list[PreDistRow]
+    # Число целых паллет по группе `"{wb_warehouse_name}::{package_type}"` — геометрию
+    # коробов/паллет считает фронт (как у обычных заявок из черновика), бэк её не дублирует.
+    # Отсутствует ключ → 0 (заявка создастся без паллет, как раньше). Вес заявки бэк
+    # досчитывает сам из веса товаров (÷ паллеты), чтобы «Общий вес» был как у прочих поставок.
+    pallets_by_group: dict[str, int] = {}
 
 
 class PreDistributionCreateResult(BaseModel):

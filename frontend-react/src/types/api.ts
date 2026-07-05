@@ -1953,6 +1953,15 @@ export interface PreDistPoolRow {
   gross_qty: number;
   distributed_qty: number;
   available_qty: number;
+  /** Кратность короба (шт/короб) ИЗ САМОЙ машины (qty-weighted mode строк cost_order).
+   *  Машина ещё в пути → её кратность нет в справочнике принятых приёмок; берём отсюда.
+   *  null — у машины нет заданной кратности. Приоритет на фронте: pool-row → справочник. */
+  box_qty: number | null;
+  /** Габариты короба «ДxШxВ» (см) машины, спаренные с выбранной кратностью. null — нет. */
+  box_size: string | null;
+  /** Новинка cold-start (first_sale_date IS NULL или ≥ today-14) — засеваем с машины,
+   *  даже без ФФ-остатка (cold-start-справочник её не видит, т.к. требует rf_qty>0). */
+  is_newcomer: boolean;
 }
 
 export interface PreDistVehiclePool {
@@ -1972,6 +1981,9 @@ export interface PreDistributionCreate {
   vehicle_id: number;
   wb_fbo_supply_id?: number | null;
   rows: PreDistRow[];
+  /** Число целых паллет по группе `"{wb_warehouse_name}::{package_type}"` — геометрию
+   *  считает фронт (как у обычных заявок); вес заявки бэк досчитывает из веса товаров. */
+  pallets_by_group?: Record<string, number>;
 }
 
 export interface PreDistributionCreateResult {
