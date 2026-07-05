@@ -5,7 +5,7 @@ import type { PreDistPoolRow, StockNeedResponse, StockNeedArticle } from '@/type
 function poolRow(over: Partial<PreDistPoolRow>): PreDistPoolRow {
     return {
         barcode: 'B1', article_seller: 'ART1', article_wb: '1', name: 'Ковёр', brand: 'НУ',
-        gross_qty: 100, distributed_qty: 0, available_qty: 100, box_qty: null, box_size: null, ...over,
+        gross_qty: 100, distributed_qty: 0, available_qty: 100, box_qty: null, box_size: null, is_newcomer: false, ...over,
     };
 }
 

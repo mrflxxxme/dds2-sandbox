@@ -1951,6 +1951,9 @@ export interface PreDistPoolRow {
   box_qty: number | null;
   /** Габариты короба «ДxШxВ» (см) машины, спаренные с выбранной кратностью. null — нет. */
   box_size: string | null;
+  /** Новинка cold-start (first_sale_date IS NULL или ≥ today-14) — засеваем с машины,
+   *  даже без ФФ-остатка (cold-start-справочник её не видит, т.к. требует rf_qty>0). */
+  is_newcomer: boolean;
 }
 
 export interface PreDistVehiclePool {

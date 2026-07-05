@@ -369,6 +369,9 @@ class PreDistPoolRow(BaseModel):
     # машина ещё в пути → её кратность нет в справочнике приёмок, читаем прямо со строк.
     box_qty: int | None = None  # шт/короб (None — не задана на машине)
     box_size: str | None = None  # «ДxШxВ» см, спарен с выбранной кратностью
+    # Новинка cold-start: first_sale_date IS NULL ИЛИ ≥ today-14 (та же классификация,
+    # что в cold_start_distribution_service, но БЕЗ требования ФФ-остатка — источник машина).
+    is_newcomer: bool = False
 
 
 class PreDistVehiclePool(BaseModel):

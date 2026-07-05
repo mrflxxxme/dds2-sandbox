@@ -167,11 +167,13 @@ export function finalizeDistribution(
      *  вливаются ДО паллет-нормализации, чтобы паллетизироваться вместе с потребностью, а их
      *  под-паллетный хвост тоже ушёл в предбронь, а НЕ уехал частичной паллетой. */
     extraRows: AssemblyDraftRow[] = [],
+    /** «Не менее 1 короба на нуждающийся склад» (pre-dist-матрица) — прокидывается в `buildDraftRows`. */
+    minOneBoxPerWh = false,
 ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } {
     if (effectiveSkus.length === 0 && extraRows.length === 0) return { rows: [], prebook: [] };
     const { ppbOf, boxSizeOf, palletOverrides } = geom;
 
-    let rows = buildDraftRows({ skus: effectiveSkus, palletOverrides });
+    let rows = buildDraftRows({ skus: effectiveSkus, palletOverrides, minOneBoxPerWh });
 
     // Свободный источник per nm = доступно − уже засорсенное (для добивки/паллет).
     const freeAfter = (current: AssemblyDraftRow[]): Record<number, Record<number, number>> => {

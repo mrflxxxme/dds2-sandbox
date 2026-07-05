@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
@@ -20,7 +20,7 @@ import {
     type PoolDistInput,
 } from '@/lib/assembly/preDistribution';
 import { buildPrebookGroups } from '@/lib/assembly/buildPrebookGroups';
-import NeedMatrixCell from '../components/NeedMatrixCell';
+import NeedMatrixCell, { type CellMark } from '../components/NeedMatrixCell';
 import AcceptanceBanner, { type AcceptanceSummary } from '../components/AcceptanceBanner';
 import PrebookView, { type PrebookAcceptanceMark } from '../components/PrebookView';
 import DraftPreview from '../components/DraftPreview';
@@ -50,6 +50,63 @@ const districtTint = (d: string): string | undefined => {
     return c ? `color-mix(in srgb, ${c} 6%, transparent)` : undefined;
 };
 
+/** Ключ сортировки таблицы раскладки. Фиксированные колонки + `wb:<склад>` (сколько сдаём туда). */
+type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
+
+/** Агрегаты одной раскладки (позиции · ячейки матрицы · итоги по складам · коробы/паллеты).
+ *  Считается дважды: для коммита (целые паллеты → Заявки) и для матрицы (коробное покрытие). */
+interface DistAgg {
+    submitRows: { barcode: string; wb_warehouse_name: string; qty: number; package_type: PackageType }[];
+    allocByBc: Map<string, number>;
+    cellByBc: Map<string, Map<string, { qty: number; pkg: PackageType }>>;
+    requestCount: number;
+    totalShip: number;
+    totalBoxes: number;
+    shipByWh: Map<string, number>;
+    boxesByWh: Map<string, number>;
+    palletsByWh: Map<string, number>;
+    totalPallets: number;
+}
+function buildDistAgg(
+    rows: AssemblyDraftRow[],
+    nmByBc: Map<string, number>,
+    nmPpb: Map<number, number | null>,
+    nmBoxSize: Map<number, string | null>,
+    palletOverrides: Record<string, number>,
+): DistAgg {
+    const submitRows = rowsToPreDistRows(rows);
+    const allocByBc = new Map<string, number>();
+    const cellByBc = new Map<string, Map<string, { qty: number; pkg: PackageType }>>();
+    const shipByWh = new Map<string, number>();
+    const boxesByWh = new Map<string, number>();
+    const linesByWhPkg = new Map<string, { wh: string; pkg: PackageType; lines: PalletLine[] }>();
+    for (const r of submitRows) {
+        const nm = nmByBc.get(r.barcode) ?? 0;
+        allocByBc.set(r.barcode, (allocByBc.get(r.barcode) ?? 0) + r.qty);
+        const cell = cellByBc.get(r.barcode) ?? new Map();
+        const cur = cell.get(r.wb_warehouse_name);
+        cell.set(r.wb_warehouse_name, { qty: (cur?.qty ?? 0) + r.qty, pkg: r.package_type });
+        cellByBc.set(r.barcode, cell);
+        shipByWh.set(r.wb_warehouse_name, (shipByWh.get(r.wb_warehouse_name) ?? 0) + r.qty);
+        boxesByWh.set(r.wb_warehouse_name, (boxesByWh.get(r.wb_warehouse_name) ?? 0) + boxesOf(r.qty, nmPpb.get(nm)));
+        const key = `${r.wb_warehouse_name}::${r.package_type}`;
+        const g = linesByWhPkg.get(key) ?? { wh: r.wb_warehouse_name, pkg: r.package_type, lines: [] };
+        g.lines.push({ units: r.qty, boxQty: nmPpb.get(nm), boxSize: nmBoxSize.get(nm) ?? null });
+        linesByWhPkg.set(key, g);
+    }
+    const palletsByWh = new Map<string, number>();
+    let totalPallets = 0;
+    for (const g of linesByWhPkg.values()) {
+        const p = palletsForLines(g.lines, maxPalletHeightCm(g.wh), g.pkg === 'BOX' ? 'box' : 'mono', palletOverrides).pallets;
+        palletsByWh.set(g.wh, (palletsByWh.get(g.wh) ?? 0) + p);
+        totalPallets += p;
+    }
+    const groupKeys = new Set(submitRows.map(r => `${r.wb_warehouse_name}::${r.package_type}`));
+    const totalShip = submitRows.reduce((s, r) => s + r.qty, 0);
+    const totalBoxes = submitRows.reduce((s, r) => s + boxesOf(r.qty, nmPpb.get(nmByBc.get(r.barcode) ?? 0)), 0);
+    return { submitRows, allocByBc, cellByBc, requestCount: groupKeys.size, totalShip, totalBoxes, shipByWh, boxesByWh, palletsByWh, totalPallets };
+}
+
 /** Экран «Распределить машину» — открывается из вкладки «🚚 Предраспределение» (?vehicle=<id>).
  *  Полноэкранная матрица как «Потребность по складам», но источник = остатки машины (пул):
  *  per-WB-склад остаток 🏬 / в сборке-в пути 🚚 / потребность + что отправляем (коробá),
@@ -76,8 +133,10 @@ export default function PreDistVehiclePage() {
     const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
     const [geomReady, setGeomReady] = useState(false);
 
-    // Раскладка.
+    // Раскладка. `distRows` — целые паллеты (коммит/Заявки); `distRowsBox` — коробное
+    // покрытие для матрицы (частичные паллеты ок). Две независимые раскладки одного пула.
     const [distRows, setDistRows] = useState<AssemblyDraftRow[] | null>(null);
+    const [distRowsBox, setDistRowsBox] = useState<AssemblyDraftRow[]>([]);
     // Предбронь машины (под-паллетные хвосты pallet-mode): короб=«Дозабить» / моно=«Предзаявка».
     const [prebookRows, setPrebookRows] = useState<AssemblyDraftRow[]>([]);
     const [subTab, setSubTab] = useState<'dist' | 'preview' | 'prebook'>('dist');
@@ -100,6 +159,20 @@ export default function PreDistVehiclePage() {
     const [distComputing, setDistComputing] = useState(false);
     const [acceptanceNote, setAcceptanceNote] = useState<AcceptanceSummary | null>(null);
     const [submitting, setSubmitting] = useState(false);
+
+    // Сортировка таблицы раскладки (клик по заголовку). Дефолт — Σ отпр. по убыванию
+    // (прежнее поведение: сначала то, что отправляем).
+    const [sortKey, setSortKey] = useState<SortKey>('ship');
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+    const toggleSort = useCallback((key: SortKey) => {
+        setSortKey(prev => {
+            if (prev === key) { setSortDir(d => (d === 'asc' ? 'desc' : 'asc')); return prev; }
+            setSortDir(key === 'label' ? 'asc' : 'desc');  // текст — по возрастанию, числа — по убыванию
+            return key;
+        });
+    }, []);
+    const sortArrow = (key: SortKey): string => (sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '');
+    const sortableTh: CSSProperties = { cursor: 'pointer', userSelect: 'none' };
 
     const showToast = useCallback((message: string, type: 'success' | 'error') => setToast({ message, type }), []);
     const backToList = useCallback(
@@ -141,6 +214,12 @@ export default function PreDistVehiclePage() {
 
                 const ncs = new Set<number>();
                 for (const r of cold?.rows ?? []) if (r.is_newcomer) ncs.add(r.nm_id);
+                // Новинки САМОЙ машины (нет ФФ-остатка → cold-start-справочник их не видит,
+                // требует rf_qty>0). Засеваем их с остатка машины по главным складам округов.
+                for (const pr of poolData.rows) {
+                    const nm = pr.article_wb ? Number(pr.article_wb) : 0;
+                    if (nm && pr.is_newcomer) ncs.add(nm);
+                }
                 setNewcomerSet(ncs);
                 setAnchors((cold?.main_warehouses ?? []).map(w => ({ warehouse: w.warehouse, share_pct: w.share_pct })));
 
@@ -310,15 +389,28 @@ export default function PreDistVehiclePage() {
                 reservedByBc.set(r.barcode, (reservedByBc.get(r.barcode) ?? 0) + s);
             }
             const topUpRows = buildTopUpRows(manualTopUp, poolData.rows, targetWh, nmPpb, reservedByBc);
-            const { rows, prebook } = finalizePoolDistribution(effective, distInput, true, [...seededRows, ...topUpRows]);
+            const extra = [...seededRows, ...topUpRows];
+            // ДВЕ независимые раскладки одного пула (по решению юзера):
+            //  • whole — строго целые паллеты → ЗАЯВКИ (коммит) + под-паллетные хвосты в ПРЕДБРОНЬ.
+            //  • box   — целые коробы под потребность (частичные паллеты ок) → МАТРИЦА «Раскладка»
+            //            (коробное покрытие: Краснодар/Шушары с потребностью видят короб).
+            // Числа матрицы и Заявок могут расходиться — матрица шлёт короб, а в Заявку он попадёт
+            // только целой паллетой либо после решения в Предброни (Дозабить/Оставить так/На ФФ).
+            // minOneBoxPerWh=true: каждый склад с потребностью получает ≥1 целый короб
+            // (перебор над потребностью, кап машинным стоком) — по требованию юзера, как
+            // speed-локализация «но не менее одной коробки на склад». Действует на обе
+            // раскладки: матрица показывает короб, в whole неполная паллета уйдёт в Предбронь.
+            const whole = finalizePoolDistribution(effective, distInput, true, extra, true);
+            const box = finalizePoolDistribution(effective, distInput, false, extra, true);
             if (!signal.aborted) {
-                setDistRows(rows);
-                setPrebookRows(prebook);
+                setDistRows(whole.rows);
+                setPrebookRows(whole.prebook);
+                setDistRowsBox(box.rows);
                 setAcceptanceNote(summary);
                 setAcceptanceByNm(accByNm);
             }
         } catch (e) {
-            if (!signal.aborted) { setDistRows([]); setPrebookRows([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
+            if (!signal.aborted) { setDistRows([]); setPrebookRows([]); setDistRowsBox([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
@@ -358,8 +450,19 @@ export default function PreDistVehiclePage() {
     const shipRows = useMemo(() => [...(distRows ?? []), ...promotedRows], [distRows, promotedRows]);
     const prebookUnits = useMemo(() => effPrebook.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0), [effPrebook]);
 
-    // ─── Производные: позиции к созданию + обогащение + матрица ─────────────
-    const submitRows = useMemo(() => rowsToPreDistRows(shipRows), [shipRows]);
+    // barcode → nm_id (для геометрии коробов/паллет по строкам отправки).
+    const nmByBc = useMemo(() => {
+        const m = new Map<string, number>();
+        for (const r of pool?.rows ?? []) m.set(r.barcode, r.article_wb ? Number(r.article_wb) : 0);
+        return m;
+    }, [pool]);
+
+    // ─── Производные: коммит (целые паллеты → Заявки) vs матрица (коробное покрытие) ──
+    // Две независимые раскладки. `commit` = целые паллеты (Заявки/создание/KPI), `matrix` =
+    // коробное покрытие (ячейки/колонки/сортировка/итоги «Сдаём»). Числа могут расходиться.
+    const commit = useMemo(() => buildDistAgg(shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides), [shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+    const matrix = useMemo(() => buildDistAgg(distRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides), [distRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+    const submitRows = commit.submitRows;
 
     // ─── Пропсы для реального «Предпросмотра заявок» (DraftPreview в машинном режиме) ──
     const previewWarehouses = useMemo<Warehouse[]>(() => {
@@ -386,35 +489,13 @@ export default function PreDistVehiclePage() {
         [pool, stockNeed, newcomerSet],
     );
 
-    // barcode → nm_id (для геометрии коробов/паллет по строкам отправки).
-    const nmByBc = useMemo(() => {
-        const m = new Map<string, number>();
-        for (const r of pool?.rows ?? []) m.set(r.barcode, r.article_wb ? Number(r.article_wb) : 0);
-        return m;
-    }, [pool]);
-
-    const derived = useMemo(() => {
-        const allocByBc = new Map<string, number>();
-        const cellByBc = new Map<string, Map<string, { qty: number; pkg: PackageType }>>();
-        for (const r of submitRows) {
-            allocByBc.set(r.barcode, (allocByBc.get(r.barcode) ?? 0) + r.qty);
-            const cell = cellByBc.get(r.barcode) ?? new Map();
-            const cur = cell.get(r.wb_warehouse_name);
-            cell.set(r.wb_warehouse_name, { qty: (cur?.qty ?? 0) + r.qty, pkg: r.package_type });
-            cellByBc.set(r.barcode, cell);
-        }
-        const groupKeys = new Set(submitRows.map(r => `${r.wb_warehouse_name}::${r.package_type}`));
-        const totalShip = submitRows.reduce((s, r) => s + r.qty, 0);
-        const totalBoxes = submitRows.reduce((s, r) => s + boxesOf(r.qty, nmPpb.get(nmByBc.get(r.barcode) ?? 0)), 0);
-        return { allocByBc, cellByBc, requestCount: groupKeys.size, totalShip, totalBoxes };
-    }, [submitRows, nmPpb, nmByBc]);
-
-    // Колонки WB-складов (релевантные: куда отправляем ИЛИ где есть потребность) + округа.
+    // Колонки WB-складов матрицы (куда шлём короба ИЛИ где есть потребность) + округа.
+    // Источник — matrix (коробное покрытие), чтобы box-only склады (Краснодар/Шушары) были колонками.
     const wbCols = useMemo(() => {
         const distByWh = new Map<string, string>();
         for (const w of stockNeed?.warehouses ?? []) if (w.name) distByWh.set(w.name, w.district_key || 'unknown');
         const names = new Set<string>();
-        for (const r of submitRows) names.add(r.wb_warehouse_name);
+        for (const r of matrix.submitRows) names.add(r.wb_warehouse_name);
         for (const e of enrichMap.values()) {
             for (const [wh, c] of Object.entries(e.byWh)) if (c.need > 0) names.add(wh);
         }
@@ -424,7 +505,7 @@ export default function PreDistVehiclePage() {
             return ra !== rb ? ra - rb : a.name.localeCompare(b.name, 'ru');
         });
         return arr;
-    }, [submitRows, enrichMap, stockNeed]);
+    }, [matrix, enrichMap, stockNeed]);
 
     const districtGroups = useMemo(() => {
         const groups: { label: string; color: string; count: number }[] = [];
@@ -438,33 +519,15 @@ export default function PreDistVehiclePage() {
         return groups;
     }, [wbCols]);
 
-    // Итоги по WB-складам (низ матрицы): отправить / коробов / паллет.
-    const footer = useMemo(() => {
-        const shipByWh = new Map<string, number>();
-        const boxesByWh = new Map<string, number>();
-        const linesByWhPkg = new Map<string, { wh: string; pkg: PackageType; lines: PalletLine[] }>();
-        for (const r of submitRows) {
-            const nm = nmByBc.get(r.barcode) ?? 0;
-            shipByWh.set(r.wb_warehouse_name, (shipByWh.get(r.wb_warehouse_name) ?? 0) + r.qty);
-            boxesByWh.set(r.wb_warehouse_name, (boxesByWh.get(r.wb_warehouse_name) ?? 0) + boxesOf(r.qty, nmPpb.get(nm)));
-            const key = `${r.wb_warehouse_name}::${r.package_type}`;
-            const g = linesByWhPkg.get(key) ?? { wh: r.wb_warehouse_name, pkg: r.package_type, lines: [] };
-            g.lines.push({ units: r.qty, boxQty: nmPpb.get(nm), boxSize: nmBoxSize.get(nm) ?? null });
-            linesByWhPkg.set(key, g);
-        }
-        const palletsByWh = new Map<string, number>();
-        let totalPallets = 0;
-        for (const g of linesByWhPkg.values()) {
-            const p = palletsForLines(g.lines, maxPalletHeightCm(g.wh), g.pkg === 'BOX' ? 'box' : 'mono', palletOverrides).pallets;
-            palletsByWh.set(g.wh, (palletsByWh.get(g.wh) ?? 0) + p);
-            totalPallets += p;
-        }
-        return { shipByWh, boxesByWh, palletsByWh, totalPallets };
-    }, [submitRows, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
-
+    // Остаётся на ФФ по коммиту (целые паллеты) — для KPI «На хранение».
     const onHoldQty = useMemo(
-        () => (pool?.rows ?? []).reduce((s, r) => s + Math.max(0, (Number(r.available_qty) || 0) - (derived.allocByBc.get(r.barcode) ?? 0)), 0),
-        [pool, derived],
+        () => (pool?.rows ?? []).reduce((s, r) => s + Math.max(0, (Number(r.available_qty) || 0) - (commit.allocByBc.get(r.barcode) ?? 0)), 0),
+        [pool, commit],
+    );
+    // Остаётся на ФФ по матрице (коробное покрытие) — для строки итогов «Сдаём».
+    const matrixOnHold = useMemo(
+        () => (pool?.rows ?? []).reduce((s, r) => s + Math.max(0, (Number(r.available_qty) || 0) - (matrix.allocByBc.get(r.barcode) ?? 0)), 0),
+        [pool, matrix],
     );
 
     // Артикулы машины БЕЗ кратности короба: округлять до целого короба нечем → россыпь
@@ -550,7 +613,7 @@ export default function PreDistVehiclePage() {
     const topUpBox = useCallback((pkg: PackageType, wb: string, ffId: number) => {
         if (pkg !== 'BOX') { promoteDir(pkg, wb, ffId); return; }
         const g = prebookGroups.find(x => x.pkg === 'BOX' && x.wb === wb && x.ffId === ffId);
-        const adds = g?.topUp ? planBoxTopUp(g.topUp.candidates, wb, pool?.rows ?? [], derived.allocByBc, nmPpb) : [];
+        const adds = g?.topUp ? planBoxTopUp(g.topUp.candidates, wb, pool?.rows ?? [], commit.allocByBc, nmPpb) : [];
         if (adds.length === 0) { showToast('Нет остатка машины, чтобы дозабрать паллету', 'error'); return; }
         setPrebookOpKey(`${pkg}::${wb}::${ffId}`);
         setManualTopUp(prev => {
@@ -563,19 +626,53 @@ export default function PreDistVehiclePage() {
             return next;
         });
         setTimeout(() => setPrebookOpKey(null), 250);
-    }, [prebookGroups, pool, derived, nmPpb, promoteDir, showToast]);
+    }, [prebookGroups, pool, commit, nmPpb, promoteDir, showToast]);
 
-    // Строки таблицы: сначала те, что отправляем (по убыванию), потом остальные.
+    // Метка приёмки WB ячейки отгрузки: ⌛ нет лимита приёмки (нужна предзаявка).
+    // Тип для выбора meta — по факту отправки (shipPkg), иначе высший доступный.
+    const markFor = useCallback((nm: number, wh: string, shipPkg: PackageType | null): CellMark | null => {
+        const flags = acceptanceByNm.get(nm)?.availability?.[wh];
+        if (!flags) return null;
+        const type = shipPkg === 'MONOPALLET' ? 'mono' : shipPkg === 'SUPERSAFE' ? 'super' : shipPkg === 'BOX' ? 'box'
+            : flags.can_box ? 'box' : flags.can_monopallet ? 'mono' : flags.can_supersafe ? 'super' : null;
+        if (!type) return null;
+        const meta = type === 'box' ? flags.box_meta : type === 'mono' ? flags.mono_meta : flags.super_meta;
+        return { noLimit: ((meta?.free_days_14 ?? 0) + (meta?.paid_days_14 ?? 0)) <= 0 };
+    }, [acceptanceByNm]);
+
+    // Значение строки для сортировки по ключу колонки.
+    const sortValue = useCallback((row: PreDistVehiclePool['rows'][number], key: SortKey): number | string => {
+        const nm = nmByBc.get(row.barcode) ?? 0;
+        const e = enrichMap.get(nm);
+        const ship = matrix.allocByBc.get(row.barcode) ?? 0;
+        switch (key) {
+            case 'label': return (row.article_seller || row.article_wb || row.barcode).toLowerCase();
+            case 'avail': return Number(row.available_qty) || 0;
+            case 'inAssembly': return e?.inAssembly ?? 0;
+            case 'stocksWb': return e?.stocksWb ?? 0;
+            case 'ship': return ship;
+            case 'boxes': return boxesOf(ship, nmPpb.get(nm));
+            case 'stays': return Math.max(0, (Number(row.available_qty) || 0) - ship);
+            default:  // wb:<склад> — сколько сдаём в этот WB-склад
+                return matrix.cellByBc.get(row.barcode)?.get(key.slice(3))?.qty ?? 0;
+        }
+    }, [nmByBc, enrichMap, matrix, nmPpb]);
+
+    // Строки таблицы, отсортированные по активной колонке (клик по заголовку).
     const sortedRows = useMemo(() => {
         const rows = [...(pool?.rows ?? [])];
+        const dir = sortDir === 'asc' ? 1 : -1;
         rows.sort((a, b) => {
-            const sa = derived.allocByBc.get(a.barcode) ?? 0;
-            const sb = derived.allocByBc.get(b.barcode) ?? 0;
-            if (sa !== sb) return sb - sa;
+            const va = sortValue(a, sortKey), vb = sortValue(b, sortKey);
+            const cmp = typeof va === 'string' || typeof vb === 'string'
+                ? String(va).localeCompare(String(vb), 'ru')
+                : va - vb;
+            if (cmp !== 0) return cmp * dir;
+            // Тай-брейк — по названию (стабильный порядок).
             return (a.article_seller || a.barcode).localeCompare(b.article_seller || b.barcode, 'ru');
         });
         return rows;
-    }, [pool, derived]);
+    }, [pool, sortKey, sortDir, sortValue]);
 
     const handleSubmit = useCallback(async () => {
         if (!vehicleId || submitRows.length === 0 || submitting) return;
@@ -681,20 +778,20 @@ export default function PreDistVehiclePage() {
 
             {/* Машинная KPI-сводка + управление раскладкой — общая над табами. */}
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'center', fontSize: 14 }}>
-                <span>К отправке: <b style={{ fontSize: 18 }}>{formatNumber(derived.totalShip, 0)}</b> шт</span>
-                <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(derived.totalBoxes, 0)}</b></span>
-                <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(footer.totalPallets, 0)}</b></span>
-                <span style={{ color: 'var(--color-muted)' }}>Заявок: <b style={{ color: 'var(--color-text)' }}>{formatNumber(derived.requestCount, 0)}</b></span>
+                <span>К отправке: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalShip, 0)}</b> шт</span>
+                <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalBoxes, 0)}</b></span>
+                <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalPallets, 0)}</b></span>
+                <span style={{ color: 'var(--color-muted)' }}>Заявок: <b style={{ color: 'var(--color-text)' }}>{formatNumber(commit.requestCount, 0)}</b></span>
                 <span style={{ color: 'var(--color-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
                 {prebookUnits > 0 && (
                     <span style={{ color: 'var(--color-muted)' }}>🅿️ Предбронь: <b style={{ color: 'var(--color-text)' }}>{formatNumber(prebookUnits, 0)}</b> шт</span>
                 )}
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
-                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="Отгрузка только целыми коробами в целых паллетах; неполная паллета уходит в предбронь — там её можно дозабрать из остатка машины">
-                        🚚 Целые паллеты · неполные → предбронь
+                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="Матрица «Раскладка» = коробное покрытие потребности. В Заявки идут только целые паллеты; неполные — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ).">
+                        📦 Матрица — покрытие · 🚚 Заявки — целые паллеты
                     </span>
                     <button className="btn btn-primary" onClick={handleSubmit} disabled={submitting || submitRows.length === 0}>
-                        {submitting ? 'Создание…' : `Создать заявки (${formatNumber(derived.requestCount, 0)})`}
+                        {submitting ? 'Создание…' : `Создать заявки (${formatNumber(commit.requestCount, 0)})`}
                     </button>
                 </div>
             </div>
@@ -755,17 +852,16 @@ export default function PreDistVehiclePage() {
                 />
             ) : (<>
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-muted)', fontSize: 13 }}>
-                Раскладка груза машины по WB-складам как в «Потребность по складам» (потребность · приёмка · целые коробы и паллеты),
-                но источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · <b style={{ color: 'var(--color-text)' }}>что отправляем</b>.
-                Заявки создаются со статусом «Предраспределение» (без фейкового стока) — при разгрузке машины станут обычными сборками.
+                Матрица показывает <b style={{ color: 'var(--color-text)' }}>коробное покрытие</b> потребности (целые коробы под потребность каждого WB-склада, как «Потребность по складам»),
+                источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · что сдаём коробом.
+                В <b style={{ color: 'var(--color-text)' }}>Заявки</b> идут только целые паллеты; неполные — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ). Поэтому числа матрицы и Заявок могут расходиться.
             </div>
 
             {computing ? (
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>Считаю раскладку (потребность · приёмка · коробы · паллеты)…</div>
-            ) : derived.totalShip === 0 ? (
+            ) : matrix.totalShip === 0 ? (
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
-                    Ни одно направление не набирает целую паллету — неполные хвосты ушли в 🅿️ Предбронь.
-                    Дозаберите их из остатка машины во вкладке «Предбронь», чтобы собрать паллету к отгрузке.
+                    Нечего разложить: ни у одного артикула машины нет потребности по WB-складам (или не задана кратность короба).
                 </div>
             ) : (
                 <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
@@ -782,18 +878,31 @@ export default function PreDistVehiclePage() {
                                 {/* хвост: Σ отпр. + Мест + Остаётся ФФ = 3 колонки */}
                                 <th colSpan={3} />
                             </tr>
-                            {/* Шапка колонок */}
+                            {/* Шапка колонок — клик по заголовку сортирует строки */}
                             <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-muted)', textAlign: 'right' }}>
-                                <th style={{ padding: '8px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }}>Товар</th>
-                                <th style={{ padding: '8px 8px' }}>На машине</th>
-                                <th style={{ padding: '8px 8px' }} title="Уже в сборке на WB">В сборке</th>
-                                <th style={{ padding: '8px 8px' }} title="Остаток на Wildberries">На WB</th>
+                                <th style={{ padding: '8px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2, ...sortableTh }} onClick={() => toggleSort('label')} title="Сортировать по названию">Товар{sortArrow('label')}</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('avail')} title="Сортировать по остатку на машине">На машине{sortArrow('avail')}</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('inAssembly')} title="Уже в сборке на WB">В сборке{sortArrow('inAssembly')}</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('stocksWb')} title="Остаток на Wildberries">На WB{sortArrow('stocksWb')}</th>
                                 {wbCols.map(c => (
-                                    <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap', background: districtTint(c.district) }}>{c.name}</th>
+                                    <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap', background: districtTint(c.district), ...sortableTh }} onClick={() => toggleSort(`wb:${c.name}`)} title={`Сортировать по отправке в «${c.name}»`}>{c.name}{sortArrow(`wb:${c.name}`)}</th>
                                 ))}
-                                <th style={{ padding: '8px 8px' }}>Σ отпр.</th>
-                                <th style={{ padding: '8px 8px' }} title="Коробов к отправке">Мест</th>
-                                <th style={{ padding: '8px 8px' }}>Остаётся ФФ</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('ship')} title="Сортировать по сумме отправки">Σ отпр.{sortArrow('ship')}</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('boxes')} title="Коробов к отправке">Мест{sortArrow('boxes')}</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('stays')} title="Сортировать по остатку на ФФ">Остаётся ФФ{sortArrow('stays')}</th>
+                            </tr>
+                            {/* Итоги сдачи на склад — сразу под шапкой (зеркало нижнего футера, чтобы видеть без скролла) */}
+                            <tr style={{ borderBottom: '2px solid var(--color-border)', fontWeight: 700, background: 'rgba(59,130,246,0.06)', textAlign: 'right' }}>
+                                <td style={{ padding: '6px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }}>Сдаём, шт</td>
+                                <td colSpan={3} />
+                                {wbCols.map(c => (
+                                    <td key={c.name} style={{ padding: '6px 8px', color: 'var(--color-accent)', background: districtTint(c.district) }}>
+                                        {formatNumber(matrix.shipByWh.get(c.name) ?? 0, 0)}
+                                    </td>
+                                ))}
+                                <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }}>{formatNumber(matrix.totalShip, 0)}</td>
+                                <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего коробов к отправке">{formatNumber(matrix.totalBoxes, 0)}</td>
+                                <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Остаётся на хранении ФФ">{formatNumber(matrixOnHold, 0)}</td>
                             </tr>
                         </thead>
                         <tbody>
@@ -801,9 +910,9 @@ export default function PreDistVehiclePage() {
                                 const nm = nmByBc.get(row.barcode) ?? 0;
                                 const e: EnrichedSku | undefined = enrichMap.get(nm);
                                 const avail = Number(row.available_qty) || 0;
-                                const ship = derived.allocByBc.get(row.barcode) ?? 0;
+                                const ship = matrix.allocByBc.get(row.barcode) ?? 0;
                                 const stays = Math.max(0, avail - ship);
-                                const cells = derived.cellByBc.get(row.barcode);
+                                const cells = matrix.cellByBc.get(row.barcode);
                                 const ppb = nmPpb.get(nm);
                                 const label = row.article_seller || row.article_wb || row.barcode;
                                 const rowBoxes = boxesOf(ship, ppb);
@@ -828,11 +937,10 @@ export default function PreDistVehiclePage() {
                                                 <NeedMatrixCell
                                                     key={c.name}
                                                     ship={cell ?? null}
-                                                    ppb={ppb}
                                                     stock={ctx?.stock ?? 0}
                                                     onWay={ctxBusy}
-                                                    need={ctx?.need ?? 0}
                                                     tint={districtTint(c.district)}
+                                                    mark={markFor(nm, c.name, cell?.pkg ?? null)}
                                                 />
                                             );
                                         })}
@@ -848,27 +956,27 @@ export default function PreDistVehiclePage() {
                                 <td style={{ padding: '8px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>Отправить, шт</td>
                                 <td colSpan={3} />
                                 {wbCols.map(c => (
-                                    <td key={c.name} style={{ padding: '8px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{formatNumber(footer.shipByWh.get(c.name) ?? 0, 0)}</td>
+                                    <td key={c.name} style={{ padding: '8px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{formatNumber(matrix.shipByWh.get(c.name) ?? 0, 0)}</td>
                                 ))}
-                                <td style={{ padding: '8px 8px', textAlign: 'right' }}>{formatNumber(derived.totalShip, 0)}</td>
+                                <td style={{ padding: '8px 8px', textAlign: 'right' }}>{formatNumber(matrix.totalShip, 0)}</td>
                                 <td colSpan={2} />
                             </tr>
                             <tr style={{ color: 'var(--color-muted)' }}>
                                 <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>📦 Коробов</td>
                                 <td colSpan={3} />
                                 {wbCols.map(c => (
-                                    <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(footer.boxesByWh.get(c.name) ?? 0, 0)}</td>
+                                    <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrix.boxesByWh.get(c.name) ?? 0, 0)}</td>
                                 ))}
-                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(derived.totalBoxes, 0)}</td>
+                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrix.totalBoxes, 0)}</td>
                                 <td colSpan={2} />
                             </tr>
                             <tr style={{ color: 'var(--color-muted)' }}>
                                 <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>🚚 Паллет</td>
                                 <td colSpan={3} />
                                 {wbCols.map(c => (
-                                    <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(footer.palletsByWh.get(c.name) ?? 0, 0)}</td>
+                                    <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrix.palletsByWh.get(c.name) ?? 0, 0)}</td>
                                 ))}
-                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(footer.totalPallets, 0)}</td>
+                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrix.totalPallets, 0)}</td>
                                 <td colSpan={2} />
                             </tr>
                         </tfoot>

@@ -56,6 +56,9 @@ export interface BuildDraftRowsInput {
     warehouseToDistrict?: Record<string, string>;
     /** Ручной override «коробок на паллету» по канон-размеру короба. */
     palletOverrides?: Record<string, number>;
+    /** «Не менее 1 короба на нуждающийся склад» (перебор над потребностью, кап стоком) —
+     *  для pre-dist-матрицы: каждый склад с потребностью получает ≥1 целый короб. */
+    minOneBoxPerWh?: boolean;
 }
 
 /** Сумма значений `Record<*, number>`. */
@@ -116,13 +119,16 @@ export function buildDraftRows(input: BuildDraftRowsInput): AssemblyDraftRow[] {
             .map(([name, need]) => ({ name, need: Math.max(0, Math.floor(need || 0)) }))
             .filter(w => w.need > 0);
         const totalNeed = whNeeds.reduce((s, w) => s + w.need, 0);
-        const qty0 = Math.min(totalAvail, totalNeed);
+        // «≥1 короб на склад» → бюджет = весь ФФ-сток (перебор над потребностью допускается);
+        // иначе — min(сток, потребность) (сверх потребности не шлём).
+        const minOneBox = input.minOneBoxPerWh === true;
+        const qty0 = minOneBox ? totalAvail : Math.min(totalAvail, totalNeed);
 
         let tgt: Record<string, number> = {};
         if (qty0 > 0 && whNeeds.length > 0) {
             if (boxMode && qty0 >= ppb) {
                 // Палет-режим — СТРОГАЯ кратность (хвост < короба остаётся на ФФ).
-                tgt = distributeByBoxMultiple(whNeeds, qty0, ppb, !palletizable);
+                tgt = distributeByBoxMultiple(whNeeds, qty0, ppb, !palletizable, minOneBox);
             } else {
                 let rem = qty0;
                 for (const w of whNeeds) {

@@ -139,8 +139,10 @@ export function finalizePoolDistribution(
     input: PoolDistInput,
     wholePallets = true,
     extraRows: AssemblyDraftRow[] = [],
+    /** «Не менее 1 короба на нуждающийся склад» — для матрицы pre-dist. */
+    minOneBoxPerWh = false,
 ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } {
-    return finalizeDistribution(effectiveSkus, poolGeom(input), wholePallets, extraRows);
+    return finalizeDistribution(effectiveSkus, poolGeom(input), wholePallets, extraRows, minOneBoxPerWh);
 }
 
 /**

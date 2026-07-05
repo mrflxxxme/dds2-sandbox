@@ -13,6 +13,7 @@
 """
 
 import logging
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -52,6 +53,17 @@ PRE_DIST_VEHICLE_STATUSES = (VehicleStatus.CUSTOMS, VehicleStatus.DISPATCHED)
 def _vehicle_status_str(status: str | None) -> str:
     """VehicleStatus-член → его строковое значение ('CUSTOMS'/'DISPATCHED')."""
     return status.value if isinstance(status, VehicleStatus) else (status or "")
+
+
+def _is_machine_newcomer(first_sale: date | None) -> bool:
+    """Новинка cold-start по первой продаже, БЕЗ требования ФФ-остатка (источник — машина).
+
+    Зеркалит правило ``fetch_cold_start_segment``: нет продаж (``first_sale_date IS NULL``)
+    ИЛИ первая продажа < 14 дней назад. Cold-start-сегмент дополнительно требует ``rf_qty>0``
+    (товар уже на ФФ) — но машина везёт товар, которого на ФФ ещё нет, поэтому здесь этот
+    гейт снят: засев машинных новинок идёт из остатка самой машины.
+    """
+    return first_sale is None or first_sale >= date.today() - timedelta(days=14)
 
 
 # ─── Загрузка/валидация машины ─────────────────────────────────────────────
@@ -235,6 +247,7 @@ async def get_vehicle_pre_dist_pool(db: AsyncSession, project_id: int, vehicle_i
                 available_qty=max(0, g - used),
                 box_qty=box_qty,
                 box_size=box_size,
+                is_newcomer=_is_machine_newcomer(nom.first_sale_date if nom else None),
             )
         )
 
