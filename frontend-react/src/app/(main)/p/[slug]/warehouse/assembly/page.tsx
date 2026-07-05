@@ -647,6 +647,22 @@ export default function AssemblyListPage() {
     const [bulkDeleting, setBulkDeleting] = useState(false);
     const deletableCount = useMemo(() => items.filter(i => isBulkDeletable(i.status)).length, [items]);
 
+    // Уникальные товары без веса, участвующие в сборках (по всем загруженным заявкам) —
+    // для баннера «заполнить вес». Имя резолвим из позиций той же заявки.
+    const missingWeightItems = useMemo(() => {
+        const byBarcode = new Map<string, string>();
+        for (const req of items) {
+            const missing = req.weight_missing_barcodes;
+            if (!missing || missing.length === 0) continue;
+            const nameByBc = new Map<string, string>();
+            for (const it of req.items || []) nameByBc.set(it.barcode, it.article || it.product_name || it.barcode);
+            for (const bc of missing) {
+                if (!byBarcode.has(bc)) byBarcode.set(bc, nameByBc.get(bc) || bc);
+            }
+        }
+        return [...byBarcode.values()];
+    }, [items]);
+
     const toggleSelect = useCallback((id: number) => {
         setSelectedIds(prev => {
             const next = new Set(prev);
@@ -931,6 +947,32 @@ export default function AssemblyListPage() {
                     </Link>
                 )}
             </div>
+
+            {/* Баннер: товары без веса, участвующие в сборках → расчёт веса неполный. */}
+            {missingWeightItems.length > 0 && (
+                <div
+                    className="glass-card"
+                    style={{
+                        padding: '12px 16px', marginBottom: 16,
+                        display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+                        borderLeft: '3px solid var(--color-warning)',
+                    }}
+                >
+                    <span style={{ fontSize: 18 }}>⚠️</span>
+                    <div style={{ flex: 1, minWidth: 240 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>
+                            Нет веса у {formatNumber(missingWeightItems.length, 0)} товаров в сборках — расчётный вес неполный
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {missingWeightItems.slice(0, 8).join(', ')}
+                            {missingWeightItems.length > 8 && ` и ещё ${formatNumber(missingWeightItems.length - 8, 0)}`}
+                        </div>
+                    </div>
+                    <Link href={`/p/${slug}/settings?tab=duties`}>
+                        <button className="btn btn-secondary btn-sm">📝 Заполнить вес</button>
+                    </Link>
+                </div>
+            )}
 
             {/* Полоска-сводка «Распределение» — блоки переехали на /warehouse/assembly/distribution */}
             {(drafts.length > 0 || createdGroups.length > 0) && (
