@@ -1973,6 +1973,9 @@ export interface PreDistributionCreate {
   vehicle_id: number;
   wb_fbo_supply_id?: number | null;
   rows: PreDistRow[];
+  /** Число целых паллет по группе `"{wb_warehouse_name}::{package_type}"` — геометрию
+   *  считает фронт (как у обычных заявок); вес заявки бэк досчитывает из веса товаров. */
+  pallets_by_group?: Record<string, number>;
 }
 
 export interface PreDistributionCreateResult {

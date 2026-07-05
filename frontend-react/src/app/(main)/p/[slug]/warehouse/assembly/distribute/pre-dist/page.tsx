@@ -8,6 +8,7 @@ import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constant
 import { Toast } from '@/components';
 import {
     applyAcceptanceSplits,
+    buildPinnedRows,
     buildPoolSkus,
     buildTopUpRows,
     enrichPoolRows,
@@ -16,7 +17,9 @@ import {
     rowsToPreDistRows,
     splitByKratnost,
     type AcceptanceSplitMap,
+    type CellEdits,
     type EnrichedSku,
+    type PinnedPkgOf,
     type PoolDistInput,
 } from '@/lib/assembly/preDistribution';
 import { buildPrebookGroups } from '@/lib/assembly/buildPrebookGroups';
@@ -65,6 +68,8 @@ interface DistAgg {
     shipByWh: Map<string, number>;
     boxesByWh: Map<string, number>;
     palletsByWh: Map<string, number>;
+    /** Паллеты по группе `"{wb-склад}::{package_type}"` — для передачи в create (бэк-группировка). */
+    palletsByGroup: Map<string, number>;
     totalPallets: number;
 }
 function buildDistAgg(
@@ -95,16 +100,18 @@ function buildDistAgg(
         linesByWhPkg.set(key, g);
     }
     const palletsByWh = new Map<string, number>();
+    const palletsByGroup = new Map<string, number>();
     let totalPallets = 0;
-    for (const g of linesByWhPkg.values()) {
+    for (const [key, g] of linesByWhPkg) {
         const p = palletsForLines(g.lines, maxPalletHeightCm(g.wh), g.pkg === 'BOX' ? 'box' : 'mono', palletOverrides).pallets;
         palletsByWh.set(g.wh, (palletsByWh.get(g.wh) ?? 0) + p);
+        palletsByGroup.set(key, p);  // key = `${wh}::${pkg}` — совпадает с бэк-группировкой
         totalPallets += p;
     }
     const groupKeys = new Set(submitRows.map(r => `${r.wb_warehouse_name}::${r.package_type}`));
     const totalShip = submitRows.reduce((s, r) => s + r.qty, 0);
     const totalBoxes = submitRows.reduce((s, r) => s + boxesOf(r.qty, nmPpb.get(nmByBc.get(r.barcode) ?? 0)), 0);
-    return { submitRows, allocByBc, cellByBc, requestCount: groupKeys.size, totalShip, totalBoxes, shipByWh, boxesByWh, palletsByWh, totalPallets };
+    return { submitRows, allocByBc, cellByBc, requestCount: groupKeys.size, totalShip, totalBoxes, shipByWh, boxesByWh, palletsByWh, palletsByGroup, totalPallets };
 }
 
 /** Экран «Распределить машину» — открывается из вкладки «🚚 Предраспределение» (?vehicle=<id>).
@@ -150,6 +157,12 @@ export default function PreDistVehiclePage() {
     // Ручной дозабор из остатка машины: barcode → { wb → добранные штуки (целыми коробами) }.
     // Вливается в раскладку как extraRows → неполная паллета набирается и уходит в отгрузку.
     const [manualTopUp, setManualTopUp] = useState<Map<string, Record<string, number>>>(new Map());
+    // Ручное редактирование ячеек матрицы «Раскладка»: barcode → { WB-склад → коробов }.
+    // Абсолютный пин (не дельта). Баркод с любым пином полностью управляется вручную
+    // (исключается из авто-раскладки), проходит приёмку и общий движок паллет/предброни.
+    const [cellEdits, setCellEdits] = useState<CellEdits>(new Map());
+    // Режим редактирования матрицы (тумблер «✏️») — показывает +/− степперы в ячейках.
+    const [editMode, setEditMode] = useState(false);
     // Кэш приёмки WB по сигнатуре skus (приёмка НЕ зависит от дозабора) — клик «Дозабить»
     // (меняет только manualTopUp) пересчитывает раскладку БЕЗ повторного сетевого запроса.
     const acceptanceCacheRef = useRef<{ sig: string; splitMap: AcceptanceSplitMap | null; summary: AcceptanceSummary | null; accByNm: Map<number, AcceptanceCheckPerItem> } | null>(null);
@@ -210,6 +223,7 @@ export default function PreDistVehiclePage() {
                 setHiddenDirs(new Set());
                 setHiddenSkus(new Set());
                 setManualTopUp(new Map());
+                setCellEdits(new Map());             // новая машина → сбросить ручные правки ячеек
                 acceptanceCacheRef.current = null;   // новая машина → приёмку перепроверить
 
                 const ncs = new Set<number>();
@@ -296,13 +310,36 @@ export default function PreDistVehiclePage() {
             // Россыпь запрещена (как в «Черновике»): SKU без кратности короба округлять нечем
             // → НЕ отгружаем; остаются на машине, показываются баннером «без кратности».
             const { shippable: skus } = splitByKratnost(allSkus, (nm) => nmPpb.get(nm));
-            if (skus.length === 0 && anchors.length === 0) {
+            if (skus.length === 0 && cellEdits.size === 0 && anchors.length === 0) {
                 if (!signal.aborted) { setDistRows([]); setPrebookRows([]); setAcceptanceNote(null); }
                 return;
             }
+            // Ручные правки ячеек: баркоды с пинами исключаются из авто-раскладки и
+            // управляются целиком через `buildPinnedRows` (extraRows общего движка).
+            // Приёмку по ним проверяем отдельными item'ами (nm→pkg-флаги для pinnedPkgOf).
+            const nmByBarcodePool = new Map<string, number>();
+            for (const pr of poolData.rows) nmByBarcodePool.set(pr.barcode, pr.article_wb ? Number(pr.article_wb) : 0);
+            const autoSkus = skus.filter(s => !cellEdits.has(s.barcode));
+            const pinnedItems: { nm_id: number; barcode: string; distribution: Record<string, number> }[] = [];
+            for (const [bc, whBoxes] of cellEdits) {
+                const nm = nmByBarcodePool.get(bc) ?? 0;
+                const ppb = nmPpb.get(nm) || 0;
+                if (!nm || ppb <= 0) continue;
+                const dist: Record<string, number> = {};
+                for (const [wb, boxes] of Object.entries(whBoxes)) {
+                    if ((boxes || 0) > 0) dist[wb] = Math.floor(boxes) * ppb;
+                }
+                if (Object.keys(dist).length > 0) pinnedItems.push({ nm_id: nm, barcode: bc, distribution: dist });
+            }
             // Приёмка WB зависит ТОЛЬКО от skus (не от дозабора) → кэшируем по сигнатуре: клик
             // «Дозабить» (меняет лишь manualTopUp) пересчитывает раскладку без запроса к сети.
-            const accSig = JSON.stringify(skus.map(s => [s.nm_id, s.barcode, s.target]));
+            // Сигнатура приёмки: авто-скусы по target + пины ТОЛЬКО по набору складов (не по
+            // числу коробов) — правка кратности того же склада переиспользует кэш (без сети),
+            // приёмка зависит от набора складов, а не количества.
+            const accSig = JSON.stringify([
+                ...autoSkus.map(s => [s.nm_id, s.barcode, s.target]),
+                ...pinnedItems.map(p => [p.nm_id, p.barcode, Object.keys(p.distribution).sort()]),
+            ]);
             let splitMap: AcceptanceSplitMap | null = null;
             let summary: AcceptanceSummary | null = null;
             let accByNm = new Map<number, AcceptanceCheckPerItem>();  // для меток приёмки предброни
@@ -312,7 +349,10 @@ export default function PreDistVehiclePage() {
             } else {
                 try {
                     const resp = await api.checkWbAcceptance({
-                        items: skus.map(s => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
+                        items: [
+                            ...autoSkus.map(s => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
+                            ...pinnedItems.map(p => ({ nm_id: p.nm_id, barcode: p.barcode, distribution: p.distribution })),
+                        ],
                     });
                     splitMap = new Map();
                     let moved = 0, dropped = 0, monoCount = 0, splitCount = 0;
@@ -336,7 +376,18 @@ export default function PreDistVehiclePage() {
                 }
                 acceptanceCacheRef.current = { sig: accSig, splitMap, summary, accByNm };
             }
-            const effective = applyAcceptanceSplits(skus, splitMap);
+            const effective = applyAcceptanceSplits(autoSkus, splitMap);
+
+            // Пин-строки ручных правок: тип упаковки — из приёмки (короб > моно > сейф),
+            // источник = ФФ разгрузки, Σ капится остатком машины. Вливаются в extraRows →
+            // паллеты/предбронь считает общий движок (как авто): неполная паллета уйдёт в
+            // 🅿️ Предбронь, где решается дозабор из остатка машины либо предзаявка (⌛).
+            const pinnedPkgOf: PinnedPkgOf = (nm, wb) => {
+                const f = accByNm.get(nm)?.availability?.[wb];
+                if (!f) return 'BOX';
+                return f.can_box ? 'BOX' : f.can_monopallet ? 'MONOPALLET' : f.can_supersafe ? 'SUPERSAFE' : 'BOX';
+            };
+            const pinnedRows = buildPinnedRows(cellEdits, poolData.rows, targetWh, nmPpb, pinnedPkgOf);
 
             // Раскладка ВСЕГДА строго целыми паллетами (как «Черновик»): под-паллетные хвосты
             // уходят в ПРЕДБРОНЬ (там — дозабор из остатка машины), россыпь запрещена. Засев
@@ -384,12 +435,12 @@ export default function PreDistVehiclePage() {
             // Кап по ОСТАТКУ баркода (available − занятое потребностью/засевом) не даёт гонке
             // двойного клика пере-подписать баркод сверх наличия (Σsrc баркода ≤ available).
             const reservedByBc = new Map<string, number>();
-            for (const r of [...needBoxRows, ...seededRows]) {
+            for (const r of [...needBoxRows, ...seededRows, ...pinnedRows]) {
                 const s = Object.values(r.src).reduce((a, v) => a + (v || 0), 0);
                 reservedByBc.set(r.barcode, (reservedByBc.get(r.barcode) ?? 0) + s);
             }
             const topUpRows = buildTopUpRows(manualTopUp, poolData.rows, targetWh, nmPpb, reservedByBc);
-            const extra = [...seededRows, ...topUpRows];
+            const extra = [...seededRows, ...topUpRows, ...pinnedRows];
             // ДВЕ независимые раскладки одного пула (по решению юзера):
             //  • whole — строго целые паллеты → ЗАЯВКИ (коммит) + под-паллетные хвосты в ПРЕДБРОНЬ.
             //  • box   — целые коробы под потребность (частичные паллеты ок) → МАТРИЦА «Раскладка»
@@ -414,7 +465,7 @@ export default function PreDistVehiclePage() {
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
-    }, [stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, newcomerSet, anchors, showToast]);
+    }, [stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, newcomerSet, anchors, showToast]);
 
     useEffect(() => {
         if (!pool || !geomReady) return;
@@ -454,6 +505,12 @@ export default function PreDistVehiclePage() {
     const nmByBc = useMemo(() => {
         const m = new Map<string, number>();
         for (const r of pool?.rows ?? []) m.set(r.barcode, r.article_wb ? Number(r.article_wb) : 0);
+        return m;
+    }, [pool]);
+    // barcode → доступный остаток машины (шт) — кап ручных правок ячеек.
+    const availByBc = useMemo(() => {
+        const m = new Map<string, number>();
+        for (const r of pool?.rows ?? []) m.set(r.barcode, Math.max(0, Math.floor(Number(r.available_qty) || 0)));
         return m;
     }, [pool]);
 
@@ -633,12 +690,46 @@ export default function PreDistVehiclePage() {
     const markFor = useCallback((nm: number, wh: string, shipPkg: PackageType | null): CellMark | null => {
         const flags = acceptanceByNm.get(nm)?.availability?.[wh];
         if (!flags) return null;
-        const type = shipPkg === 'MONOPALLET' ? 'mono' : shipPkg === 'SUPERSAFE' ? 'super' : shipPkg === 'BOX' ? 'box'
-            : flags.can_box ? 'box' : flags.can_monopallet ? 'mono' : flags.can_supersafe ? 'super' : null;
-        if (!type) return null;
+        // Закрыто по всем типам → ⛔ (важно для ручных пинов: авто-раскладка сюда не поедет,
+        // а пин юзера — да, поэтому предупреждаем, что склад физически не принимает).
+        if (!flags.can_box && !flags.can_monopallet && !flags.can_supersafe) return { noLimit: false, closed: true };
+        // Тип для meta — заявленный shipPkg, если он реально доступен; иначе лучший доступный.
+        const canOf = (t: 'box' | 'mono' | 'super') => t === 'box' ? flags.can_box : t === 'mono' ? flags.can_monopallet : flags.can_supersafe;
+        const wanted: 'box' | 'mono' | 'super' | null = shipPkg === 'MONOPALLET' ? 'mono' : shipPkg === 'SUPERSAFE' ? 'super' : shipPkg === 'BOX' ? 'box' : null;
+        const type = wanted && canOf(wanted) ? wanted : flags.can_box ? 'box' : flags.can_monopallet ? 'mono' : 'super';
         const meta = type === 'box' ? flags.box_meta : type === 'mono' ? flags.mono_meta : flags.super_meta;
         return { noLimit: ((meta?.free_days_14 ?? 0) + (meta?.paid_days_14 ?? 0)) <= 0 };
     }, [acceptanceByNm]);
+
+    // Правка ячейки матрицы на ±1 короб. Первая правка баркода «замораживает» текущую
+    // авто-раскладку строки в пины (соседние ячейки не прыгают — меняется только кликнутая).
+    // Σ коробов баркода капится остатком машины (нельзя дорисовать больше, чем стоит).
+    const editCellBoxes = useCallback((barcode: string, nm: number, wh: string, delta: number) => {
+        const ppb = nmPpb.get(nm) || 0;
+        if (ppb <= 0) return;
+        const maxBoxes = Math.floor((availByBc.get(barcode) ?? 0) / ppb);
+        setCellEdits(prev => {
+            const next = new Map(prev);
+            let rec: Record<string, number>;
+            if (next.has(barcode)) {
+                rec = { ...next.get(barcode)! };
+            } else {
+                rec = {};
+                const cells = matrix.cellByBc.get(barcode);
+                if (cells) for (const [w, c] of cells) { const b = boxesOf(c.qty, ppb); if (b > 0) rec[w] = b; }
+            }
+            let val = Math.max(0, (rec[wh] ?? 0) + delta);
+            const others = Object.entries(rec).reduce((s, [w, b]) => s + (w === wh ? 0 : b), 0);
+            if (others + val > maxBoxes) val = Math.max(0, maxBoxes - others);  // кап остатком машины
+            if (val <= 0) delete rec[wh]; else rec[wh] = val;
+            next.set(barcode, rec);
+            return next;
+        });
+    }, [nmPpb, availByBc, matrix]);
+    const resetRowEdits = useCallback((barcode: string) => {
+        setCellEdits(prev => { if (!prev.has(barcode)) return prev; const n = new Map(prev); n.delete(barcode); return n; });
+    }, []);
+    const resetAllEdits = useCallback(() => setCellEdits(new Map()), []);
 
     // Значение строки для сортировки по ключу колонки.
     const sortValue = useCallback((row: PreDistVehiclePool['rows'][number], key: SortKey): number | string => {
@@ -678,7 +769,13 @@ export default function PreDistVehiclePage() {
         if (!vehicleId || submitRows.length === 0 || submitting) return;
         setSubmitting(true);
         try {
-            const res = await api.createPreDistribution({ vehicle_id: vehicleId, rows: submitRows });
+            const res = await api.createPreDistribution({
+                vehicle_id: vehicleId,
+                rows: submitRows,
+                // Паллеты по группе (бэк-группировка `${wb}::${pkg}`) — чтобы «Палеты»/«Общий вес»
+                // проставились при создании, как у обычных поставок (вес бэк досчитает сам).
+                pallets_by_group: Object.fromEntries(commit.palletsByGroup),
+            });
             showToast(`Создано ${formatNumber(res.created, 0)} заявок`, 'success');
             backToList();
         } catch (e) {
@@ -686,7 +783,7 @@ export default function PreDistVehiclePage() {
         } finally {
             setSubmitting(false);
         }
-    }, [vehicleId, submitRows, submitting, showToast, backToList]);
+    }, [vehicleId, submitRows, commit, submitting, showToast, backToList]);
 
     // ─── States ────────────────────────────────────────────────────────────
     const header = (
@@ -851,10 +948,27 @@ export default function PreDistVehiclePage() {
                     onToast={showToast}
                 />
             ) : (<>
-            <div className="glass-card" style={{ padding: 16, marginBottom: 16, color: 'var(--color-muted)', fontSize: 13 }}>
-                Матрица показывает <b style={{ color: 'var(--color-text)' }}>коробное покрытие</b> потребности (целые коробы под потребность каждого WB-склада, как «Потребность по складам»),
-                источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · что сдаём коробом.
-                В <b style={{ color: 'var(--color-text)' }}>Заявки</b> идут только целые паллеты; неполные — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ). Поэтому числа матрицы и Заявок могут расходиться.
+            <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
+                    <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setEditMode(m => !m)}>
+                        {editMode ? '✓ Готово с правкой' : '✏️ Редактировать раскладку'}
+                    </button>
+                    {editMode && (
+                        <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>
+                            −/+ в ячейке = ∓1 короб на склад. Кап — остаток машины. Приёмка перепроверяется, неполная паллета уходит в 🅿️ Предбронь.
+                        </span>
+                    )}
+                    {cellEdits.size > 0 && (
+                        <button className="btn btn-sm btn-secondary" style={{ marginLeft: 'auto' }} onClick={resetAllEdits}>
+                            ↺ Сбросить все правки ({formatNumber(cellEdits.size, 0)})
+                        </button>
+                    )}
+                </div>
+                <div style={{ color: 'var(--color-muted)', fontSize: 13 }}>
+                    Матрица показывает <b style={{ color: 'var(--color-text)' }}>коробное покрытие</b> потребности (целые коробы под потребность каждого WB-склада, как «Потребность по складам»),
+                    источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · что сдаём коробом.
+                    В <b style={{ color: 'var(--color-text)' }}>Заявки</b> идут только целые паллеты; неполные — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ). Поэтому числа матрицы и Заявок могут расходиться.
+                </div>
             </div>
 
             {computing ? (
@@ -916,13 +1030,21 @@ export default function PreDistVehiclePage() {
                                 const ppb = nmPpb.get(nm);
                                 const label = row.article_seller || row.article_wb || row.barcode;
                                 const rowBoxes = boxesOf(ship, ppb);
+                                const editRec = cellEdits.get(row.barcode);
+                                const rowEditable = editMode && !!ppb && ppb > 0;
+                                const rowAtCap = ship + (ppb || 0) > avail;  // «+» упрётся в остаток машины
                                 return (
-                                    <tr key={row.barcode} style={{ borderBottom: '1px solid var(--color-border)', background: ship > 0 ? 'rgba(59,130,246,0.04)' : undefined }}>
-                                        <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: ship > 0 ? 'var(--color-bg-card)' : 'var(--color-bg-card)', zIndex: 1 }}>
+                                    <tr key={row.barcode} style={{ borderBottom: '1px solid var(--color-border)', background: editRec ? 'rgba(255,159,10,0.07)' : ship > 0 ? 'rgba(59,130,246,0.04)' : undefined }}>
+                                        <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 1 }}>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                                 <span style={{ fontWeight: 600 }}>{label}</span>
                                                 {e?.isNew && <span className="badge" style={{ background: 'rgba(168,85,247,0.16)', color: '#a855f7', fontSize: 10, padding: '1px 6px' }}>🆕 новинка</span>}
                                                 {ppb ? <span className="badge badge-secondary" style={{ fontSize: 10, padding: '1px 6px' }}>📦 кратно {formatNumber(ppb, 0)}</span> : <span className="badge" style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>без кратности</span>}
+                                                {editRec && (
+                                                    <button type="button" className="badge" title="Сбросить ручные правки строки"
+                                                        style={{ background: 'rgba(255,159,10,0.16)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px', border: 'none', cursor: 'pointer' }}
+                                                        onClick={() => resetRowEdits(row.barcode)}>✏️ вручную · ↺</button>
+                                                )}
                                             </div>
                                             <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>{row.name ? `${row.name} · ` : ''}ШК {row.barcode}</div>
                                         </td>
@@ -941,6 +1063,12 @@ export default function PreDistVehiclePage() {
                                                     onWay={ctxBusy}
                                                     tint={districtTint(c.district)}
                                                     mark={markFor(nm, c.name, cell?.pkg ?? null)}
+                                                    edit={rowEditable && ppb ? {
+                                                        boxes: editRec ? (editRec[c.name] ?? 0) : boxesOf(cell?.qty ?? 0, ppb),
+                                                        ppb,
+                                                        onDelta: (d: number) => editCellBoxes(row.barcode, nm, c.name, d),
+                                                        disableInc: rowAtCap,
+                                                    } : null}
                                                 />
                                             );
                                         })}

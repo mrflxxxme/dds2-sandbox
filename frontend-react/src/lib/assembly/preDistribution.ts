@@ -245,6 +245,70 @@ export function buildTopUpRows(
     return rows;
 }
 
+/** Ручное редактирование ячеек матрицы «Раскладка»: barcode → { WB-склад → коробов }.
+ *  Абсолютный пин (не дельта): сколько ЦЕЛЫХ коробов юзер хочет отправить в этот склад.
+ *  Ноль/отсутствие ключа = ничего в этот склад. Баркод с любым пином полностью
+ *  управляется вручную (исключается из авто-раскладки), см. `buildPinnedRows`. */
+export type CellEdits = Map<string, Record<string, number>>;
+
+/** Резолвер типа упаковки пин-ячейки по флагам приёмки WB: короб приоритетнее моно/сейфа
+ *  (как в авто-сплите). Нет флагов приёмки → короб (фолбэк). */
+export type PinnedPkgOf = (nm_id: number, wb: string) => PackageType;
+
+/**
+ * Отредактированные вручную ячейки матрицы (пины) → строки ЦЕЛЫХ коробов для общего движка
+ * (`finalizeDistribution` как `extraRows`): паллеты/предбронь досчитаются там же, что и авто.
+ *
+ * Каждый пин (barcode × WB) = `boxes × ppb` штук; тип упаковки — из приёмки (`pinnedPkgOf`);
+ * источник = ФФ разгрузки (`targetWh`). Σ по баркоду капится доступным остатком машины
+ * (`available_qty`, детерминированный порядок складов по имени) — юзер не может «дорисовать»
+ * больше, чем реально стоит на машине. Одна строка на (barcode × package_type), Σsrc==Σtgt.
+ * Чистая — юнит-тестируется.
+ */
+export function buildPinnedRows(
+    cellEdits: CellEdits,
+    poolRows: PreDistPoolRow[],
+    targetWh: number,
+    nmPpb: Map<number, number | null>,
+    pinnedPkgOf: PinnedPkgOf,
+): AssemblyDraftRow[] {
+    if (cellEdits.size === 0) return [];
+    const metaByBc = new Map<string, { nm: number; vendor: string; avail: number }>();
+    for (const pr of poolRows) {
+        metaByBc.set(pr.barcode, {
+            nm: pr.article_wb ? Number(pr.article_wb) : 0,
+            vendor: pr.article_seller || String(pr.article_wb ?? pr.barcode),
+            avail: Math.max(0, Math.floor(Number(pr.available_qty) || 0)),
+        });
+    }
+    const rows: AssemblyDraftRow[] = [];
+    for (const [bc, whBoxes] of cellEdits) {
+        const meta = metaByBc.get(bc);
+        if (!meta || !meta.nm) continue;
+        const ppb = nmPpb.get(meta.nm) || 0;
+        if (ppb <= 0) continue;
+        let cap = meta.avail;
+        const byPkg = new Map<PackageType, Record<string, number>>();
+        for (const wb of Object.keys(whBoxes).sort()) {
+            const boxes = Math.max(0, Math.floor(whBoxes[wb] || 0));
+            if (boxes <= 0) continue;
+            const units = Math.min(boxes * ppb, Math.floor(cap / ppb) * ppb);
+            if (units <= 0) continue;
+            cap -= units;
+            const pkg = pinnedPkgOf(meta.nm, wb);
+            const rec = byPkg.get(pkg) ?? {};
+            rec[wb] = (rec[wb] ?? 0) + units;
+            byPkg.set(pkg, rec);
+        }
+        for (const [pkg, tgt] of byPkg) {
+            const total = Object.values(tgt).reduce((s, v) => s + v, 0);
+            if (total <= 0) continue;
+            rows.push({ nm_id: meta.nm, barcode: bc, vendor_code: meta.vendor, src: { [String(targetWh)]: total }, tgt, package_type: pkg });
+        }
+    }
+    return rows;
+}
+
 /** Обогащение строки пула данными «Потребности по складам» (для матрицы экрана машины):
  *  есть ли товар в сборке / на WB-остатке / новинка, плюс per-WB-склад срезы. Матч по
  *  nm_id (= `PreDistPoolRow.article_wb`); товар без потребности → нули (фолбэк, не падаем). */
