@@ -21,8 +21,8 @@ import {
     PREVIEW_EXPORT_COLUMNS_FF,
     type PreviewLine,
 } from '@/lib/utils/assemblyPreview';
-import { palletsForLines, maxPalletHeightCm, effectiveBoxesPerPallet, type PalletCount } from '@/lib/utils/boxPallet';
-import { buildPalletManifest } from '@/lib/utils/palletManifest';
+import { palletsForLines, maxPalletHeightCm, effectiveBoxesPerPallet, MONO_MAX_PALLET_ARTICLES, type PalletCount } from '@/lib/utils/boxPallet';
+import { buildPalletManifest, type PalletBin } from '@/lib/utils/palletManifest';
 
 const PKG_BADGE: Record<string, string> = {
     BOX: 'badge-info', MONOPALLET: 'badge-warning', SUPERSAFE: 'badge-secondary',
@@ -611,8 +611,42 @@ export default function DraftPreview({
                                 { mode: pkg === 'BOX' ? 'box' : 'mono', maxHeightCm: maxPalletHeightCm(wb), overrides: palletOverrides },
                             );
                             const mKey = `${g.ffId}::${wb}::${pkg}`;
-                            const mOpen = manifestOpen.has(mKey);
-                            const hasManifest = manifest.pallets.length > 0 || manifest.unpalletized.length > 0;
+                            // Машинный режим (predist): НЕПОЛНЫЕ моно-паллеты (недобор с габаритами)
+                            // показываем КАРТОЧКАМИ (нарезка ≤3 арт, как в предброни), а не прячем в
+                            // свёрнутый бакет «Без целой паллеты» — иначе перенос неполной моно из
+                            // предброни «пропадал» без карточки и без бейджа «🅿️ из предброни».
+                            const isMonoPredist = !!predist && pkg === 'MONOPALLET';
+                            const uppOfNm = (nmId: number): number => {
+                                const bpp = effectiveBoxesPerPallet(nmBoxSize.get(nmId) ?? null, maxPalletHeightCm(wb), palletOverrides);
+                                const ppb = nmPpb.get(nmId) || 0;
+                                return bpp && ppb ? bpp * ppb : 0;
+                            };
+                            const monoTailBins: PalletBin[] = [];
+                            let noGeomItems = manifest.unpalletized;
+                            if (isMonoPredist && manifest.unpalletized.length > 0) {
+                                noGeomItems = manifest.unpalletized.filter(it => uppOfNm(it.nmId) <= 0);
+                                const geom = manifest.unpalletized
+                                    .filter(it => uppOfNm(it.nmId) > 0)
+                                    .map(it => ({ it, fp: it.units / uppOfNm(it.nmId) }))
+                                    .sort((a, b) => b.fp - a.fp);
+                                for (let i = 0; i < geom.length; i += MONO_MAX_PALLET_ARTICLES) {
+                                    const chunk = geom.slice(i, i + MONO_MAX_PALLET_ARTICLES);
+                                    monoTailBins.push({
+                                        palletNo: manifest.pallets.length + monoTailBins.length + 1,
+                                        items: chunk.map(c => {
+                                            const ppb = nmPpb.get(c.it.nmId) || 0;
+                                            return { nmId: c.it.nmId, vendorCode: c.it.vendorCode, units: c.it.units, boxes: ppb > 0 ? Math.ceil(c.it.units / ppb) : 0 };
+                                        }),
+                                        fillPct: Math.min(1, chunk.reduce((s, c) => s + c.fp, 0)),
+                                    });
+                                }
+                            }
+                            const renderPallets = monoTailBins.length ? [...manifest.pallets, ...monoTailBins] : manifest.pallets;
+                            // Автораскрытие — только если среди неполных есть ПЕРЕНЕСЁННАЯ из предброни
+                            // (перенос сразу виден); авто-недобор раскрывается по клику (не шумим на всех).
+                            const forceOpen = monoTailBins.some(p => !!prebookOrigin && p.items.some(it => prebookOrigin.has(`${it.nmId}::${wb}`)));
+                            const mOpen = manifestOpen.has(mKey) || forceOpen;
+                            const hasManifest = renderPallets.length > 0 || noGeomItems.length > 0;
                             return (
                                 <div key={`${wb}::${pkg}`} style={{ marginTop: 10 }}>
                                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-warning)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -635,11 +669,11 @@ export default function DraftPreview({
                                                     ? 'Раскладка по физическим паллетам (смешанные короба разных артикулов)'
                                                     : 'Раскладка по физическим паллетам (по одному артикулу на паллету)'}
                                             >
-                                                {mOpen ? '▾' : '▸'} 📐 Раскладка по паллетам ({formatNumber(manifest.pallets.length, 0)})
+                                                {mOpen ? '▾' : '▸'} 📐 Раскладка по паллетам ({formatNumber(renderPallets.length, 0)})
                                             </button>
                                             {mOpen && (
                                                 <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                                    {manifest.pallets.map(p => {
+                                                    {renderPallets.map(p => {
                                                         const pct = Math.round(p.fillPct * 100);
                                                         const low = p.fillPct < 0.6;
                                                         const palUnits = p.items.reduce((s, it) => s + it.units, 0);
@@ -681,11 +715,11 @@ export default function DraftPreview({
                                                             </div>
                                                         );
                                                     })}
-                                                    {manifest.unpalletized.length > 0 && (
+                                                    {noGeomItems.length > 0 && (
                                                         <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }} title="Не набрали целую паллету (моно-недобор → предбронь) либо нет габаритов короба">
-                                                            <div style={{ marginBottom: 4 }}>Без целой паллеты (недобор → предбронь / нет габаритов):</div>
+                                                            <div style={{ marginBottom: 4 }}>{isMonoPredist ? 'Без габаритов короба (не палетизируется):' : 'Без целой паллеты (недобор → предбронь / нет габаритов):'}</div>
                                                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                                                                {manifest.unpalletized.map(it => (
+                                                                {noGeomItems.map(it => (
                                                                     <span key={it.nmId} style={{ padding: '2px 8px', borderRadius: 6, background: 'rgba(245,158,11,0.12)', display: 'inline-flex', gap: 4, alignItems: 'baseline' }}>
                                                                         <span style={{ color: 'var(--color-text)' }}>{it.vendorCode}</span>
                                                                         <span style={{ fontWeight: 600 }}>×{formatNumber(it.units, 0)}</span>

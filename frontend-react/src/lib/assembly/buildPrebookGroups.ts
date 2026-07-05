@@ -181,7 +181,7 @@ export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
                     ff: ffName(g.ffId),
                     needBoxes: plan.needBoxes,
                     pallets: Math.max(1, Math.ceil(footprint)),
-                    candidates: plan.rows.map(pr => ({ vendor: nmVendor.get(pr.nmId) || `nm ${pr.nmId}`, boxes: pr.boxes })),
+                    candidates: plan.rows.map(pr => ({ vendor: nmVendor.get(pr.nmId) || `nm ${pr.nmId}`, boxes: pr.boxes, nmId: pr.nmId })),
                 };
             }
         }
@@ -209,7 +209,7 @@ export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
                         ff: ffName(g.ffId),
                         needBoxes: plan.needBoxes,
                         pallets: monoWhole + 1,
-                        candidates: plan.rows.map(pr => ({ vendor: nmVendor.get(pr.nmId) || `nm ${pr.nmId}`, boxes: pr.boxes })),
+                        candidates: plan.rows.map(pr => ({ vendor: nmVendor.get(pr.nmId) || `nm ${pr.nmId}`, boxes: pr.boxes, nmId: pr.nmId })),
                     };
                 }
             }

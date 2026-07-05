@@ -2,8 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
     applyAcceptanceSplits,
     buildPoolSkus,
+    buildTopUpRows,
     finalizePoolRows,
+    planBoxTopUp,
     rowsToPreDistRows,
+    splitByKratnost,
     type AcceptanceSplitMap,
     type PoolDistInput,
 } from '@/lib/assembly/preDistribution';
@@ -198,5 +201,59 @@ describe('finalizePoolRows · режим коробами vs целые палл
     it('по умолчанию (без флага) = строго целые паллеты', () => {
         const { input, skus } = mkSmall();
         expect(shipped(finalizePoolRows(skus, input))).toBeLessThan(30);
+    });
+});
+
+describe('splitByKratnost · россыпь запрещена (SKU без кратности не отгружаем)', () => {
+    it('делит по наличию ppb: с кратностью → shippable, без (0/null) → heldNoPpb', () => {
+        const skus = [{ nm_id: 1 }, { nm_id: 2 }, { nm_id: 3 }];
+        const ppb = new Map<number, number | null>([[1, 10], [2, 0], [3, null]]);
+        const { shippable, heldNoPpb } = splitByKratnost(skus, (nm) => ppb.get(nm));
+        expect(shippable.map(s => s.nm_id)).toEqual([1]);
+        expect(heldNoPpb.map(s => s.nm_id)).toEqual([2, 3]);
+    });
+});
+
+describe('planBoxTopUp · дозабор кандидатов из ОСТАТКА машины', () => {
+    it('маппит nm-кандидата на баркоды с остатком (onHold), целыми коробами, крупнейший первым', () => {
+        const pool = [
+            poolRow({ barcode: 'B1a', article_wb: '1', available_qty: 100 }),
+            poolRow({ barcode: 'B1b', article_wb: '1', available_qty: 40 }),
+        ];
+        // Разложено: B1a 95 (остаток 5 < короб → исключён), B1b 0 (остаток 40 = 4 короба).
+        const alloc = new Map<string, number>([['B1a', 95]]);
+        const adds = planBoxTopUp([{ nmId: 1, boxes: 3 }], 'Коледино', pool, alloc, new Map([[1, PPB]]));
+        expect(adds).toEqual([{ barcode: 'B1b', wb: 'Коледино', units: 30 }]); // 3 короба = 30, с B1b
+    });
+
+    it('весь остаток разложен → дозабирать нечем (пусто)', () => {
+        const pool = [poolRow({ barcode: 'B1', article_wb: '1', available_qty: 100 })];
+        const alloc = new Map<string, number>([['B1', 100]]);
+        expect(planBoxTopUp([{ nmId: 1, boxes: 2 }], 'Коледино', pool, alloc, new Map([[1, PPB]]))).toEqual([]);
+    });
+});
+
+describe('buildTopUpRows · накопленный дозабор → строки ЦЕЛЫХ коробов', () => {
+    it('materializ: barcode→wb→штук в строку BOX, источник = склад машины', () => {
+        const pool = [poolRow({ barcode: 'B1', article_wb: '1', article_seller: 'ART1', available_qty: 50 })];
+        const manual = new Map<string, Record<string, number>>([['B1', { 'Коледино': 30 }]]);
+        const rows = buildTopUpRows(manual, pool, FF, new Map([[1, PPB]]));
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ nm_id: 1, barcode: 'B1', package_type: 'BOX', src: { [FF]: 30 }, tgt: { 'Коледино': 30 } });
+    });
+
+    it('кап по остатку машины: не больше available, целыми коробами', () => {
+        const pool = [poolRow({ barcode: 'B1', article_wb: '1', available_qty: 25 })]; // 25 → 2 короба
+        const manual = new Map<string, Record<string, number>>([['B1', { 'Коледино': 50 }]]); // просят 50
+        const rows = buildTopUpRows(manual, pool, FF, new Map([[1, PPB]]));
+        expect(sum(rows[0].tgt)).toBe(20); // min(50, floor(25/10)*10) = 20
+    });
+
+    it('reserved-кап: топап не пере-подписывает баркод сверх (available − занятое потребностью)', () => {
+        const pool = [poolRow({ barcode: 'B1', article_wb: '1', available_qty: 100 })];
+        const manual = new Map<string, Record<string, number>>([['B1', { 'Коледино': 90 }]]); // просят 90 (гонка клика)
+        const reserved = new Map<string, number>([['B1', 60]]); // потребность уже заняла 60
+        const rows = buildTopUpRows(manual, pool, FF, new Map([[1, PPB]]), reserved);
+        expect(sum(rows[0].tgt)).toBe(40); // min(90, floor((100-60)/10)*10) = 40 → Σsrc(B1)=60+40=100 ≤ avail
     });
 });

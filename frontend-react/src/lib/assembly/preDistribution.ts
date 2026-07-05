@@ -126,18 +126,121 @@ export function finalizePoolRows(
     effectiveSkus: DraftSkuInput[],
     input: PoolDistInput,
     wholePallets = true,
+    extraRows: AssemblyDraftRow[] = [],
 ): AssemblyDraftRow[] {
-    return finalizeDistribution(effectiveSkus, poolGeom(input), wholePallets).rows;
+    return finalizeDistribution(effectiveSkus, poolGeom(input), wholePallets, extraRows).rows;
 }
 
 /** Как `finalizePoolRows`, но ВОЗВРАЩАЕТ И предбронь-остаток (под-паллетные хвосты) —
- *  для машинно-скоупленной вкладки «🅿️ Предбронь» (короб=«Дозабить» / моно=«Предзаявка»). */
+ *  для машинно-скоупленной вкладки «🅿️ Предбронь» (короб=«Дозабить» / моно=«Предзаявка»).
+ *  `extraRows` — пред-построенные целые коробы (засев новинок / дозабор из остатка машины). */
 export function finalizePoolDistribution(
     effectiveSkus: DraftSkuInput[],
     input: PoolDistInput,
     wholePallets = true,
+    extraRows: AssemblyDraftRow[] = [],
 ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } {
-    return finalizeDistribution(effectiveSkus, poolGeom(input), wholePallets);
+    return finalizeDistribution(effectiveSkus, poolGeom(input), wholePallets, extraRows);
+}
+
+/**
+ * Разделить SKU на отгружаемые и удержанные по наличию кратности короба (`ppb`).
+ * Правило машины (как в «Черновике»): россыпь запрещена — SKU без кратности НЕ едет
+ * (округлять до целого короба нечем), остаётся на машине и показывается баннером.
+ * Чистая — юнит-тестируется.
+ */
+export function splitByKratnost<T extends { nm_id: number }>(
+    skus: T[],
+    ppbOf: (nm: number) => number | null | undefined,
+): { shippable: T[]; heldNoPpb: T[] } {
+    const shippable: T[] = [];
+    const heldNoPpb: T[] = [];
+    for (const s of skus) ((ppbOf(s.nm_id) ?? 0) > 0 ? shippable : heldNoPpb).push(s);
+    return { shippable, heldNoPpb };
+}
+
+/** Кандидат дозабора направления (из `buildPrebookGroups.topUp.candidates`): nm + коробы. */
+export interface BoxTopUpCandidate {
+    nmId?: number;
+    boxes: number;
+}
+
+/**
+ * Разложить дозабор BOX-направления (кандидаты nm+коробы) на конкретные баркоды ОСТАТКА
+ * машины (onHold = доступно − уже разложено), ЦЕЛЫМИ коробами, крупнейший остаток первым.
+ * Возвращает добавки (barcode→wb→штук) для накопления в manualTopUp. Чистая.
+ */
+export function planBoxTopUp(
+    candidates: BoxTopUpCandidate[],
+    wb: string,
+    poolRows: PreDistPoolRow[],
+    allocByBc: Map<string, number>,
+    nmPpb: Map<number, number | null>,
+): { barcode: string; wb: string; units: number }[] {
+    const out: { barcode: string; wb: string; units: number }[] = [];
+    for (const c of candidates) {
+        if (c.nmId == null) continue;
+        const ppb = nmPpb.get(c.nmId) || 0;
+        if (ppb <= 0 || c.boxes <= 0) continue;
+        let need = c.boxes * ppb;
+        const bcs = poolRows
+            .filter(pr => (pr.article_wb ? Number(pr.article_wb) : 0) === c.nmId)
+            .map(pr => ({ bc: pr.barcode, free: Math.max(0, Math.floor(Number(pr.available_qty) || 0) - (allocByBc.get(pr.barcode) ?? 0)) }))
+            .filter(x => x.free >= ppb)
+            .sort((a, b) => b.free - a.free);
+        for (const x of bcs) {
+            if (need <= 0) break;
+            const take = Math.min(need, Math.floor(x.free / ppb) * ppb);
+            if (take <= 0) continue;
+            out.push({ barcode: x.bc, wb, units: take });
+            need -= take;
+        }
+    }
+    return out;
+}
+
+/**
+ * Ручной дозабор (накопленный по баркодам: barcode→wb→штук) → строки ЦЕЛЫХ коробов для
+ * нормализации (extraRows). Кап по остатку машины (страховка): целыми коробами и не
+ * больше available баркода. Источник = ФФ разгрузки (`targetWh`). Чистая.
+ */
+export function buildTopUpRows(
+    manualTopUp: Map<string, Record<string, number>>,
+    poolRows: PreDistPoolRow[],
+    targetWh: number,
+    nmPpb: Map<number, number | null>,
+    /** Уже занятое потребностью/засевом per баркод (Σsrc): топап капится по available −
+     *  reserved, чтобы Σsrc баркода не превысил наличие даже при гонке двойного клика. */
+    reservedByBc?: Map<string, number>,
+): AssemblyDraftRow[] {
+    if (manualTopUp.size === 0) return [];
+    const metaByBc = new Map<string, { nm: number; vendor: string; avail: number }>();
+    for (const pr of poolRows) {
+        metaByBc.set(pr.barcode, {
+            nm: pr.article_wb ? Number(pr.article_wb) : 0,
+            vendor: pr.article_seller || String(pr.article_wb ?? pr.barcode),
+            avail: Math.max(0, Math.floor(Number(pr.available_qty) || 0)),
+        });
+    }
+    const rows: AssemblyDraftRow[] = [];
+    for (const [bc, wbMap] of manualTopUp) {
+        const meta = metaByBc.get(bc);
+        if (!meta || !meta.nm) continue;
+        const ppb = nmPpb.get(meta.nm) || 0;
+        if (ppb <= 0) continue;
+        let cap = Math.max(0, meta.avail - (reservedByBc?.get(bc) ?? 0));
+        const tgt: Record<string, number> = {};
+        let total = 0;
+        for (const [wb, q] of Object.entries(wbMap)) {
+            const units = Math.min(Math.floor((q || 0) / ppb) * ppb, Math.floor(cap / ppb) * ppb);
+            if (units <= 0) continue;
+            tgt[wb] = (tgt[wb] ?? 0) + units;
+            total += units;
+            cap -= units;
+        }
+        if (total > 0) rows.push({ nm_id: meta.nm, barcode: bc, vendor_code: meta.vendor, src: { [String(targetWh)]: total }, tgt, package_type: 'BOX' });
+    }
+    return rows;
 }
 
 /** Обогащение строки пула данными «Потребности по складам» (для матрицы экрана машины):

@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDate, formatNumber } from '@/lib/utils';
@@ -9,9 +9,12 @@ import { Toast } from '@/components';
 import {
     applyAcceptanceSplits,
     buildPoolSkus,
+    buildTopUpRows,
     enrichPoolRows,
     finalizePoolDistribution,
+    planBoxTopUp,
     rowsToPreDistRows,
+    splitByKratnost,
     type AcceptanceSplitMap,
     type EnrichedSku,
     type PoolDistInput,
@@ -85,15 +88,18 @@ export default function PreDistVehiclePage() {
     const [promotedDirs, setPromotedDirs] = useState<Set<string>>(new Set());  // → в отгрузку
     const [hiddenDirs, setHiddenDirs] = useState<Set<string>>(new Set());       // остаётся на машине
     const [hiddenSkus, setHiddenSkus] = useState<Set<string>>(new Set());       // убран один ШК
+    // Ручной дозабор из остатка машины: barcode → { wb → добранные штуки (целыми коробами) }.
+    // Вливается в раскладку как extraRows → неполная паллета набирается и уходит в отгрузку.
+    const [manualTopUp, setManualTopUp] = useState<Map<string, Record<string, number>>>(new Map());
+    // Кэш приёмки WB по сигнатуре skus (приёмка НЕ зависит от дозабора) — клик «Дозабить»
+    // (меняет только manualTopUp) пересчитывает раскладку БЕЗ повторного сетевого запроса.
+    const acceptanceCacheRef = useRef<{ sig: string; splitMap: AcceptanceSplitMap | null; summary: AcceptanceSummary | null; accByNm: Map<number, AcceptanceCheckPerItem> } | null>(null);
     const [prebookOpKey, setPrebookOpKey] = useState<string | null>(null);
     const [acceptanceByNm, setAcceptanceByNm] = useState<Map<number, AcceptanceCheckPerItem>>(new Map());
     const [preorderWbs, setPreorderWbs] = useState<Set<string>>(new Set());
     const [distComputing, setDistComputing] = useState(false);
     const [acceptanceNote, setAcceptanceNote] = useState<AcceptanceSummary | null>(null);
     const [submitting, setSubmitting] = useState(false);
-    // Округление: false = целые коробы (частичные паллеты ок), true = строго целые паллеты.
-    // По умолчанию «коробами» — целые паллеты часто обнуляют мелкую потребность машины.
-    const [wholePallets, setWholePallets] = useState(false);
 
     const showToast = useCallback((message: string, type: 'success' | 'error') => setToast({ message, type }), []);
     const backToList = useCallback(
@@ -125,6 +131,13 @@ export default function PreDistVehiclePage() {
                 setPool(poolData);
                 setStockNeed(need);
                 setPreorderWbs(new Set(preorder));
+                // Новый пул машины → сбрасываем клиентские решения предброни и ручной дозабор
+                // (пересчёт раскладки их больше НЕ трогает — дозабор должен переживать recompute).
+                setPromotedDirs(new Set());
+                setHiddenDirs(new Set());
+                setHiddenSkus(new Set());
+                setManualTopUp(new Map());
+                acceptanceCacheRef.current = null;   // новая машина → приёмку перепроверить
 
                 const ncs = new Set<number>();
                 for (const r of cold?.rows ?? []) if (r.is_newcomer) ncs.add(r.nm_id);
@@ -200,63 +213,71 @@ export default function PreDistVehiclePage() {
                 nmBoxSize,
                 palletOverrides,
             };
-            const { skus } = buildPoolSkus(distInput);
-            if (skus.length === 0) {
-                if (!signal.aborted) { setDistRows([]); setAcceptanceNote(null); }
+            const { skus: allSkus } = buildPoolSkus(distInput);
+            // Россыпь запрещена (как в «Черновике»): SKU без кратности короба округлять нечем
+            // → НЕ отгружаем; остаются на машине, показываются баннером «без кратности».
+            const { shippable: skus } = splitByKratnost(allSkus, (nm) => nmPpb.get(nm));
+            if (skus.length === 0 && anchors.length === 0) {
+                if (!signal.aborted) { setDistRows([]); setPrebookRows([]); setAcceptanceNote(null); }
                 return;
             }
+            // Приёмка WB зависит ТОЛЬКО от skus (не от дозабора) → кэшируем по сигнатуре: клик
+            // «Дозабить» (меняет лишь manualTopUp) пересчитывает раскладку без запроса к сети.
+            const accSig = JSON.stringify(skus.map(s => [s.nm_id, s.barcode, s.target]));
             let splitMap: AcceptanceSplitMap | null = null;
             let summary: AcceptanceSummary | null = null;
-            const accByNm = new Map<number, AcceptanceCheckPerItem>();  // для меток приёмки предброни
-            try {
-                const resp = await api.checkWbAcceptance({
-                    items: skus.map(s => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
-                });
-                splitMap = new Map();
-                let moved = 0, dropped = 0, monoCount = 0, splitCount = 0;
-                for (const it of resp.items) {
-                    const splits = it.splits?.length
-                        ? it.splits.map(sp => ({ package_type: sp.package_type, distribution: sp.distribution }))
-                        : [{ package_type: it.package_type, distribution: it.distribution }];
-                    splitMap.set(`${it.nm_id}::${it.barcode}`, splits);
-                    accByNm.set(it.nm_id, it);
-                    if (splits.some(s => s.package_type === 'MONOPALLET')) monoCount++;
-                    if (splits.length > 1) splitCount++;
+            let accByNm = new Map<number, AcceptanceCheckPerItem>();  // для меток приёмки предброни
+            const accCache = acceptanceCacheRef.current;
+            if (accCache && accCache.sig === accSig) {
+                splitMap = accCache.splitMap; summary = accCache.summary; accByNm = accCache.accByNm;
+            } else {
+                try {
+                    const resp = await api.checkWbAcceptance({
+                        items: skus.map(s => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
+                    });
+                    splitMap = new Map();
+                    let moved = 0, dropped = 0, monoCount = 0, splitCount = 0;
+                    for (const it of resp.items) {
+                        const splits = it.splits?.length
+                            ? it.splits.map(sp => ({ package_type: sp.package_type, distribution: sp.distribution }))
+                            : [{ package_type: it.package_type, distribution: it.distribution }];
+                        splitMap.set(`${it.nm_id}::${it.barcode}`, splits);
+                        accByNm.set(it.nm_id, it);
+                        if (splits.some(s => s.package_type === 'MONOPALLET')) monoCount++;
+                        if (splits.length > 1) splitCount++;
+                    }
+                    for (const m of resp.moves ?? []) { if (m.to_warehouse) moved += m.quantity; else dropped += m.quantity; }
+                    summary = {
+                        checked: true, failed: false, skuCount: resp.items.length,
+                        monoCount, splitCount, movedQty: moved, droppedQty: dropped,
+                        checkedAt: resp.checked_at ?? null,
+                    };
+                } catch {
+                    summary = { checked: false, failed: true, skuCount: 0, monoCount: 0, splitCount: 0, movedQty: 0, droppedQty: 0, checkedAt: null };
                 }
-                for (const m of resp.moves ?? []) { if (m.to_warehouse) moved += m.quantity; else dropped += m.quantity; }
-                summary = {
-                    checked: true, failed: false, skuCount: resp.items.length,
-                    monoCount, splitCount, movedQty: moved, droppedQty: dropped,
-                    checkedAt: resp.checked_at ?? null,
-                };
-            } catch {
-                summary = { checked: false, failed: true, skuCount: 0, monoCount: 0, splitCount: 0, movedQty: 0, droppedQty: 0, checkedAt: null };
+                acceptanceCacheRef.current = { sig: accSig, splitMap, summary, accByNm };
             }
             const effective = applyAcceptanceSplits(skus, splitMap);
-            // Pallet-mode всегда — из него берём ПРЕДБРОНЬ (под-паллетные хвосты). Раскладка экрана
-            // mode-dependent: в «🚚 Паллеты» хвосты остаются в предброни; в «📦 Коробами» — уезжают.
-            const palletDist = finalizePoolDistribution(effective, distInput, true);
-            const needRows = wholePallets ? palletDist.rows : finalizePoolDistribution(effective, distInput, false).rows;
 
-            // Засев НОВИНОК (cold-start): у них нет истории продаж → потребность=0 → они
-            // не попадают в раскладку по потребности (buildPoolSkus их пропускает). По
-            // требованию — раскладываем остаток машины целыми коробами по топ-складам
-            // округов (по доле), а не держим на ФФ. Только в режиме «📦 Коробами»: на
-            // мелком засеве целые паллеты обнуляются, а экран в режиме «🚚 Паллеты»
-            // обещает «хвост < паллеты остаётся на ФФ» — не противоречим.
+            // Раскладка ВСЕГДА строго целыми паллетами (как «Черновик»): под-паллетные хвосты
+            // уходят в ПРЕДБРОНЬ (там — дозабор из остатка машины), россыпь запрещена. Засев
+            // новинок вливается в нормализацию как extraRows — паллетизируется вместе с
+            // потребностью, а его хвост < паллеты тоже уходит в предбронь (не частичной паллетой).
+
+            // Предварительная box-раскладка потребности — для ПОКРЫТИЯ засева (сколько уже
+            // уедет по потребности per баркод/склад, чтобы не сеять поверх того же склада).
+            const needBoxRows = finalizePoolDistribution(effective, distInput, false).rows;
             const seededRows: AssemblyDraftRow[] = [];
-            if (!wholePallets && anchors.length > 0) {
-                // Уже запланировано по потребности: всего по баркоду (кап остатка) и
-                // per WB-склад (чтобы засев не пилил ПОВЕРХ того же склада — это тоже покрытие).
+            if (anchors.length > 0) {
                 const shippedByBc = new Map<string, number>();
                 const needShipByBcWh = new Map<string, Map<string, number>>();
-                for (const r of rowsToPreDistRows(needRows)) {
+                for (const r of rowsToPreDistRows(needBoxRows)) {
                     shippedByBc.set(r.barcode, (shippedByBc.get(r.barcode) ?? 0) + r.qty);
                     const wh = needShipByBcWh.get(r.barcode) ?? new Map<string, number>();
                     wh.set(r.wb_warehouse_name, (wh.get(r.wb_warehouse_name) ?? 0) + r.qty);
                     needShipByBcWh.set(r.barcode, wh);
                 }
-                // Покрытие per nm per WB-склад (остаток WB + в сборке + в пути).
+                // Покрытие per nm per WB-склад (остаток WB + в сборке + в пути + уже по потребности).
                 const enrich = enrichPoolRows(poolData.rows, stockNeed, newcomerSet);
                 for (const pr of poolData.rows) {
                     const nm = pr.article_wb ? Number(pr.article_wb) : 0;
@@ -267,7 +288,6 @@ export default function PreDistVehiclePage() {
                     const needWh = needShipByBcWh.get(pr.barcode);
                     const covAnchors = anchors.map(a => {
                         const c = byWh?.[a.warehouse];
-                        // покрытие = остаток WB + сборка + пути + уже запланированное по потребности сюда в этом же расчёте.
                         const existing = (c ? c.stock + c.asm + c.transit : 0) + (needWh?.get(a.warehouse) ?? 0);
                         return { warehouse: a.warehouse, share_pct: a.share_pct, existing };
                     });
@@ -281,23 +301,28 @@ export default function PreDistVehiclePage() {
                     }
                 }
             }
-            const rows = [...needRows, ...seededRows];
+            // Ручной дозабор из остатка машины (кнопка «Дозабить» предброни) — целые коробы.
+            // Кап по ОСТАТКУ баркода (available − занятое потребностью/засевом) не даёт гонке
+            // двойного клика пере-подписать баркод сверх наличия (Σsrc баркода ≤ available).
+            const reservedByBc = new Map<string, number>();
+            for (const r of [...needBoxRows, ...seededRows]) {
+                const s = Object.values(r.src).reduce((a, v) => a + (v || 0), 0);
+                reservedByBc.set(r.barcode, (reservedByBc.get(r.barcode) ?? 0) + s);
+            }
+            const topUpRows = buildTopUpRows(manualTopUp, poolData.rows, targetWh, nmPpb, reservedByBc);
+            const { rows, prebook } = finalizePoolDistribution(effective, distInput, true, [...seededRows, ...topUpRows]);
             if (!signal.aborted) {
                 setDistRows(rows);
-                setPrebookRows(palletDist.prebook);
+                setPrebookRows(prebook);
                 setAcceptanceNote(summary);
                 setAcceptanceByNm(accByNm);
-                // Новая раскладка — прежние решения по предброни неактуальны.
-                setPromotedDirs(new Set());
-                setHiddenDirs(new Set());
-                setHiddenSkus(new Set());
             }
         } catch (e) {
             if (!signal.aborted) { setDistRows([]); setPrebookRows([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
-    }, [stockNeed, nmPpb, nmBoxSize, palletOverrides, wholePallets, newcomerSet, anchors, showToast]);
+    }, [stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, newcomerSet, anchors, showToast]);
 
     useEffect(() => {
         if (!pool || !geomReady) return;
@@ -442,22 +467,51 @@ export default function PreDistVehiclePage() {
         [pool, derived],
     );
 
+    // Артикулы машины БЕЗ кратности короба: округлять до целого короба нечем → россыпь
+    // запрещена, их НЕ отгружаем (остаются на машине) и показываем баннером — как «Черновик».
+    const noKratnostArticles = useMemo(() => {
+        const byNm = new Map<number, { vendor: string; qty: number }>();
+        for (const pr of pool?.rows ?? []) {
+            const nm = pr.article_wb ? Number(pr.article_wb) : 0;
+            if (!nm || (nmPpb.get(nm) || 0) > 0) continue;
+            const avail = Math.max(0, Math.floor(Number(pr.available_qty) || 0));
+            if (avail <= 0) continue;
+            const cur = byNm.get(nm) ?? { vendor: pr.article_seller || String(nm), qty: 0 };
+            cur.qty += avail;
+            byNm.set(nm, cur);
+        }
+        return [...byNm.entries()].map(([nm, v]) => ({ nm_id: nm, vendor: v.vendor, qty: v.qty })).sort((a, b) => b.qty - a.qty);
+    }, [pool, nmPpb]);
+
     // ─── Предбронь машины: карточки направлений через ТОТ ЖЕ движок, что и раздел ──
-    // v1: articles=[] → без кнопки «Дозабить» (дозабор из пула машины — отдельный шаг;
-    // источник машины один, честный дозабор требует достройки строк, пока не вводим).
+    // Кандидаты дозабора = ОСТАТОК машины per nm (Σ по баркодам) на ФФ разгрузки; движок сам
+    // вычтет уже разложенное (inUse) → свободные целые коробы = onHold → кнопка «Дозабить».
+    const prebookArticles = useMemo(() => {
+        if (targetWh == null) return [];
+        const byNm = new Map<number, { vendor: string; avail: number }>();
+        for (const pr of pool?.rows ?? []) {
+            const nm = pr.article_wb ? Number(pr.article_wb) : 0;
+            if (!nm) continue;
+            const cur = byNm.get(nm) ?? { vendor: pr.article_seller || String(nm), avail: 0 };
+            cur.avail += Math.max(0, Math.floor(Number(pr.available_qty) || 0));
+            byNm.set(nm, cur);
+        }
+        return [...byNm.entries()].map(([nm, v]) => ({ nm_id: nm, vendor_code: v.vendor, rfStocks: { [targetWh]: v.avail } }));
+    }, [pool, targetWh]);
+
     const prebookGroups = useMemo(() => {
         if (targetWh == null) return [];
         return buildPrebookGroups({
             prebook: effPrebook,
             usedRows: shipRows,
-            articles: [],
+            articles: prebookArticles,
             ffName: (ff) => (ff === targetWh ? (vehicle?.target_warehouse_name || `ФФ ${ff}`) : `ФФ ${ff}`),
             ppbOf: (nm) => nmPpb.get(nm) || 0,
             ppbAt: (nm) => nmPpb.get(nm) || 0,
             boxSizeOf: (nm) => nmBoxSize.get(nm) ?? null,
             palletOverrides,
         });
-    }, [effPrebook, shipRows, targetWh, vehicle, nmPpb, nmBoxSize, palletOverrides]);
+    }, [effPrebook, shipRows, prebookArticles, targetWh, vehicle, nmPpb, nmBoxSize, palletOverrides]);
 
     // Метки приёмки предброни (зеркало раздела) из уже проверенной приёмки раскладки.
     const prebookAcceptanceMarks = useMemo<Map<string, PrebookAcceptanceMark>>(() => {
@@ -489,6 +543,27 @@ export default function PreDistVehiclePage() {
     const hideDir = useCallback((pkg: PackageType, wb: string, ffId: number) => {
         setHiddenDirs(s => new Set(s).add(`${pkg}::${wb}::${ffId}`));
     }, []);
+
+    // «Дозабить» (BOX): добрать неполную паллету направления ЦЕЛЫМИ коробами из ОСТАТКА
+    // машины → накопить в manualTopUp → пересчёт вольёт коробы в раскладку, паллета
+    // наберётся и уедет в отгрузку (каноника «Черновика»: дозабор из остатка). Нечем — тост.
+    const topUpBox = useCallback((pkg: PackageType, wb: string, ffId: number) => {
+        if (pkg !== 'BOX') { promoteDir(pkg, wb, ffId); return; }
+        const g = prebookGroups.find(x => x.pkg === 'BOX' && x.wb === wb && x.ffId === ffId);
+        const adds = g?.topUp ? planBoxTopUp(g.topUp.candidates, wb, pool?.rows ?? [], derived.allocByBc, nmPpb) : [];
+        if (adds.length === 0) { showToast('Нет остатка машины, чтобы дозабрать паллету', 'error'); return; }
+        setPrebookOpKey(`${pkg}::${wb}::${ffId}`);
+        setManualTopUp(prev => {
+            const next = new Map(prev);
+            for (const a of adds) {
+                const wbMap = { ...(next.get(a.barcode) ?? {}) };
+                wbMap[a.wb] = (wbMap[a.wb] ?? 0) + a.units;
+                next.set(a.barcode, wbMap);
+            }
+            return next;
+        });
+        setTimeout(() => setPrebookOpKey(null), 250);
+    }, [prebookGroups, pool, derived, nmPpb, promoteDir, showToast]);
 
     // Строки таблицы: сначала те, что отправляем (по убыванию), потом остальные.
     const sortedRows = useMemo(() => {
@@ -582,6 +657,28 @@ export default function PreDistVehiclePage() {
 
             <AcceptanceBanner summary={acceptanceNote} />
 
+            {noKratnostArticles.length > 0 && (
+                <div className="glass-card" style={{ padding: 12, marginBottom: 16 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
+                        <span style={{ fontWeight: 700, color: 'var(--color-warning)' }}>🧩 Без кратности короба — {formatNumber(noKratnostArticles.length, 0)} арт.</span>
+                        <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>
+                            кратность короба не задана → отгружать нечем (россыпь запрещена), остаются на машине; укажите кратность на вкладке «Кратность»
+                        </span>
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                        {noKratnostArticles.slice(0, 40).map(a => (
+                            <span key={a.nm_id} title={`nm ${a.nm_id} · остаток на машине: ${formatNumber(a.qty, 0)} шт`}
+                                style={{ fontSize: 11, padding: '1px 7px', borderRadius: 5, background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)' }}>
+                                {a.vendor} · {formatNumber(a.qty, 0)} шт
+                            </span>
+                        ))}
+                        {noKratnostArticles.length > 40 && (
+                            <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>…ещё {formatNumber(noKratnostArticles.length - 40, 0)}</span>
+                        )}
+                    </div>
+                </div>
+            )}
+
             {/* Машинная KPI-сводка + управление раскладкой — общая над табами. */}
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'center', fontSize: 14 }}>
                 <span>К отправке: <b style={{ fontSize: 18 }}>{formatNumber(derived.totalShip, 0)}</b> шт</span>
@@ -593,11 +690,9 @@ export default function PreDistVehiclePage() {
                     <span style={{ color: 'var(--color-muted)' }}>🅿️ Предбронь: <b style={{ color: 'var(--color-text)' }}>{formatNumber(prebookUnits, 0)}</b> шт</span>
                 )}
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
-                    <div style={{ display: 'flex', gap: 4, alignItems: 'center' }} title="Целые паллеты часто обнуляют мелкую потребность машины — «Коробами» показывает то, что набирается коробами">
-                        <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>Округление:</span>
-                        <button className={`btn btn-sm ${!wholePallets ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setWholePallets(false)}>📦 Коробами</button>
-                        <button className={`btn btn-sm ${wholePallets ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setWholePallets(true)}>🚚 Паллеты</button>
-                    </div>
+                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="Отгрузка только целыми коробами в целых паллетах; неполная паллета уходит в предбронь — там её можно дозабрать из остатка машины">
+                        🚚 Целые паллеты · неполные → предбронь
+                    </span>
                     <button className="btn btn-primary" onClick={handleSubmit} disabled={submitting || submitRows.length === 0}>
                         {submitting ? 'Создание…' : `Создать заявки (${formatNumber(derived.requestCount, 0)})`}
                     </button>
@@ -631,7 +726,7 @@ export default function PreDistVehiclePage() {
                         acceptanceMarks={prebookAcceptanceMarks}
                         acceptanceLoading={false}
                         preorderWbs={preorderWbs}
-                        onTopUp={promoteDir}
+                        onTopUp={topUpBox}
                         onShipAsIs={promoteDir}
                         onDelete={(nm, wb, pkg) => setHiddenSkus(s => new Set(s).add(`${nm}::${wb}::${pkg}`))}
                         onDeleteDirection={hideDir}
@@ -669,9 +764,8 @@ export default function PreDistVehiclePage() {
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>Считаю раскладку (потребность · приёмка · коробы · паллеты)…</div>
             ) : derived.totalShip === 0 ? (
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
-                    {wholePallets
-                        ? 'В режиме «🚚 Паллеты» ничего не набирается на целую паллету — мелкая потребность по складам остаётся на ФФ. Переключите на «📦 Коробами», чтобы отгрузить целыми коробами.'
-                        : 'По товару машины нет потребности WB (или не набирается целый короб) — весь груз остаётся на ФФ.'}
+                    Ни одно направление не набирает целую паллету — неполные хвосты ушли в 🅿️ Предбронь.
+                    Дозаберите их из остатка машины во вкладке «Предбронь», чтобы собрать паллету к отгрузке.
                 </div>
             ) : (
                 <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>

@@ -163,12 +163,15 @@ export function finalizeDistribution(
     effectiveSkus: DraftSkuInput[],
     geom: DistributionGeom,
     wholePalletsOnly: boolean,
+    /** Пред-построенные ЦЕЛЫЕ коробы (засев новинок / ручной дозабор из остатка машины):
+     *  вливаются ДО паллет-нормализации, чтобы паллетизироваться вместе с потребностью, а их
+     *  под-паллетный хвост тоже ушёл в предбронь, а НЕ уехал частичной паллетой. */
+    extraRows: AssemblyDraftRow[] = [],
 ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } {
-    if (effectiveSkus.length === 0) return { rows: [], prebook: [] };
+    if (effectiveSkus.length === 0 && extraRows.length === 0) return { rows: [], prebook: [] };
     const { ppbOf, boxSizeOf, palletOverrides } = geom;
 
     let rows = buildDraftRows({ skus: effectiveSkus, palletOverrides });
-    if (rows.length === 0) return { rows: [], prebook: [] };
 
     // Свободный источник per nm = доступно − уже засорсенное (для добивки/паллет).
     const freeAfter = (current: AssemblyDraftRow[]): Record<number, Record<number, number>> => {
@@ -193,7 +196,11 @@ export function finalizeDistribution(
     // Добить неполные коробы из ОСТАВШЕГОСЯ источника (как в AddFromNeedPanel/finalizePoolRows).
     rows = roundDraftRowsToWholeBoxes(rows, (nm) => ppbOf(nm), freeAfter(rows), () => false).rows;
 
-    if (!wholePalletsOnly) return { rows, prebook: [] }; // режим «коробами»: частичные паллеты ок
+    // Пред-построенные целые коробы (засев/дозабор) вливаем в набор ДО нормализации.
+    const merged = extraRows.length ? [...rows, ...extraRows] : rows;
+    if (merged.length === 0) return { rows: [], prebook: [] };
+
+    if (!wholePalletsOnly) return { rows: merged, prebook: [] }; // режим «коробами»: частичные паллеты ок
 
     // Целые ПАЛЛЕТЫ (per-shipment ФФ→WB) — тот же нормализатор, что у черновика/потребности.
     // Побочный выход `dropped` = под-паллетные хвосты целых коробов → предбронь.
@@ -202,9 +209,9 @@ export function finalizeDistribution(
         boxSizeOf: (nm) => boxSizeOf(nm) ?? null,
         overrides: palletOverrides,
         isNewcomer: () => false,
-        freeByNm: freeAfter(rows),
+        freeByNm: freeAfter(merged),
     };
-    const norm = normalizeDraft(rows, ctx);
+    const norm = normalizeDraft(merged, ctx);
     return { rows: norm.rows, prebook: norm.dropped };
 }
 

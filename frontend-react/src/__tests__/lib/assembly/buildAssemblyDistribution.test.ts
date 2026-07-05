@@ -109,6 +109,26 @@ describe('buildAssemblyDistribution · форма черновик ≡ маши�
         const { rows, prebook } = finalizeDistribution(skus, GEOM, true);
         expect(sum(wbForm(rows))).toBe(160);       // одна целая паллета
         expect(sum(wbForm(prebook))).toBe(10);      // хвост < паллеты → предбронь
+        // Инвариант «россыпь запрещена»: всё отгружаемое — целыми коробами (кратно ppb).
+        for (const q of Object.values(wbForm(rows))) expect(q % PPB).toBe(0);
+    });
+
+    it('extraRows (дозабор из остатка) вливаются ДО нормализации → неполная паллета набирается и уезжает', () => {
+        // Спрос 100 шт = 10 коробов < паллеты (160) → без дозабора всё в предбронь.
+        const stockNeed = mkNeed([{ name: 'Электросталь', need: { 1: 100 } }]);
+        const avail: AvailabilityOf = () => ({ 500: 1000 });
+        const skus = buildDistributionSkus(SKUS, stockNeed, avail, GEOM);
+        const base = finalizeDistribution(skus, GEOM, true);
+        expect(sum(wbForm(base.rows))).toBe(0);        // ничего не набрало паллету
+        expect(sum(wbForm(base.prebook))).toBe(100);    // всё в предброни (дозабрать)
+
+        // Дозабор: +60 шт (6 коробов) того же nm на тот же склад → 160 = целая паллета уезжает.
+        const extra: AssemblyDraftRow[] = [
+            { nm_id: 1, barcode: 'B1', vendor_code: 'ART1', src: { 500: 60 }, tgt: { 'Электросталь': 60 }, package_type: 'BOX' },
+        ];
+        const topped = finalizeDistribution(skus, GEOM, true, extra);
+        expect(sum(wbForm(topped.rows))).toBe(160);     // целая паллета собралась и уехала
+        expect(sum(wbForm(topped.prebook))).toBe(0);      // хвоста в предброни больше нет
     });
 
     it('новинки: засев целыми коробами по анкерам из доступности, coverage-aware', () => {
