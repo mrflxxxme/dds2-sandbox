@@ -405,6 +405,60 @@ class TestComputeProjectValuationDB:
         other_val = await compute_project_valuation(db_session, other_project.id, skus={art})
         assert art.lower() not in other_val
 
+    @pytest.mark.asyncio
+    async def test_batch_barcode_bridge_mismatched_article(self, db_session, project):
+        """Cost batch booked under the PURCHASE article still feeds sales booked
+        under the WB article when they share a barcode.
+
+        Prod расихрон: cost_order_items carried a factory article ('Кас_наб_...')
+        while WB sales/nomenclature use 'K-147'. Batches were keyed by the purchase
+        article and sales by the WB article, so under FIFO the SKU had sales but
+        NO cost layer → COGS silently 0. The barcode bridge re-keys batches to the
+        WB article so cost and sales meet.
+        """
+        pid = project.id
+        purchase_art = f"ФАБ-{pid}"  # factory article on the purchase order
+        wb_art = f"WB-{pid}"  # WB seller article — sales + nomenclature use this
+        bc = f"BCBR-{pid}"
+        from backend.models import CostOrder, CostOrderItem, Nomenclature, VehicleStatus
+
+        db_session.add(
+            CostOrder(
+                order_no=f"BR-A-{pid}", project_id=pid, country="CHINA",
+                status=VehicleStatus.DELIVERED, actual_arrival_date=date(2025, 1, 1),
+                rate_cny=Decimal("1"), rate_eur=Decimal("1"), rate_usd=Decimal("1"),
+                delivery_cost_cny=Decimal("0"), delivery_cost_usd=Decimal("0"),
+            )
+        )
+        # nomenclature maps the shared barcode → WB article (differs from purchase)
+        db_session.add(
+            Nomenclature(
+                project_id=pid, barcode=bc, subject="Ковры", brand="ACME",
+                article_seller=wb_art, article_wb=None,
+            )
+        )
+        # cost item carries the PURCHASE article + the shared barcode
+        db_session.add(
+            CostOrderItem(
+                project_id=pid, order_no=f"BR-A-{pid}", barcode=bc, subject="Ковры",
+                article_seller=purchase_art, qty=10, price_cny=Decimal("0"),
+                volume_m3=Decimal("0"), duty_rub=Decimal("0"), total_rub=Decimal("500.00"),
+            )
+        )
+        await db_session.commit()
+        # sale booked under the WB article
+        await _seed_sale(db_session, pid, rrd_id=pid * 1000 + 77, article=wb_art, d=date(2025, 2, 10), qty=4)
+        await db_session.commit()
+
+        val = await compute_project_valuation(db_session, pid)
+        # keyed by the WB article; the purchase-article batch reaches it via barcode
+        v = val[wb_art.lower()]
+        assert v["total_received"] == 10
+        assert _approx(v["lifetime_avg"], "500.00")
+        fifo = slice_window(val, date(2025, 2, 1), date(2025, 2, 28), "fifo")[wb_art.lower()]
+        assert fifo["qty"] == 4
+        assert _approx(fifo["cogs"], "2000.00")  # 4 × 500, not 0
+
 
 class TestBdrSubMonthWindowCogs:
     """Regression: FIFO/moving COGS in the BDR must span the SAME days as the

@@ -172,6 +172,17 @@ export default function AssemblyDetailPage() {
         return m;
     }, [bmRows, warehouseId]);
 
+    // Размер коробки по баркоду (из машины): свой ФФ → любой доступный.
+    const boxSizeByBarcode = useMemo(() => {
+        const m = new Map<string, string | null>();
+        for (const r of bmRows) {
+            const own = warehouseId != null ? r.per_warehouse.find(p => p.warehouse_id === warehouseId) : undefined;
+            const bs = own?.box_size || r.per_warehouse.find(p => p.box_size)?.box_size || null;
+            if (r.barcode) m.set(r.barcode, bs);
+        }
+        return m;
+    }, [bmRows, warehouseId]);
+
     // Конфиг migfull-портала («Натали») — грузим один раз; кнопку показываем,
     // только если интеграция настроена и её склад совпадает со складом сборки.
     useEffect(() => {
@@ -1211,7 +1222,7 @@ export default function AssemblyDetailPage() {
                 // Доп. поля: _ppb (кратность по баркоду) и boxes (⌈шт/K⌉ — для Excel).
                 const itemsData = (assembly.items || []).map(it => {
                     const k = ppbByBarcode.get(it.barcode) || 0;
-                    return { ...it, _ppb: k, boxes: k > 0 ? Math.ceil(it.quantity / k) : null };
+                    return { ...it, _ppb: k, _box_size: boxSizeByBarcode.get(it.barcode) || null, boxes: k > 0 ? Math.ceil(it.quantity / k) : null };
                 });
                 const missingWeightSet = new Set(assembly.weight_missing_barcodes || []);
                 const itemCols: Column[] = [
@@ -1243,6 +1254,15 @@ export default function AssemblyDetailPage() {
                                 </span>
                             );
                         },
+                    },
+                    {
+                        key: '_box_size', label: 'Размер коробки', align: 'right',
+                        render: (v: string | null) => (
+                            <span style={{ fontFamily: 'monospace', fontSize: 12, whiteSpace: 'nowrap', color: v ? 'var(--color-text)' : 'var(--color-text-muted)' }}
+                                title={v ? undefined : 'Размер коробки не задан (нет данных из машины) — можно указать во вкладке «Кратность»'}>
+                                {v || '—'}
+                            </span>
+                        ),
                     },
                     { key: 'quantity', label: 'В поставке', align: 'right', render: (v: number) => <span style={{ fontWeight: 500 }}>{v}</span> },
                     { key: 'stock_quantity', label: 'На складе', align: 'right', render: (v: number, row: any) => <span style={{ fontWeight: 500, color: v < row.quantity ? 'var(--color-danger)' : 'var(--color-success)' }}>{v}</span> },

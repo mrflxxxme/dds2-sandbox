@@ -48,6 +48,9 @@ export function addRefMethods(api: ApiClient) {
         setPalletBoxesBySize(sizes: Record<string, number>) { return api.request<{ ok: boolean; sizes: Record<string, number> }>('PUT', '/api/v1/refs/pallet-boxes-by-size', { sizes }); },
         getForecastRfDefaultDays() { return api.request<{ days: number }>('GET', '/api/v1/refs/forecast-rf-default-days'); },
         setForecastRfDefaultDays(days: number) { return api.request<{ ok: boolean; days: number }>('PUT', '/api/v1/refs/forecast-rf-default-days', { days }); },
+        // Вес коробки (кг) — одно число на проект; прибавляется к нетто товаров × число коробов при авто-расчёте веса отгрузки. null = не задан.
+        getBoxWeight() { return api.request<{ weight_kg: number | null }>('GET', '/api/v1/refs/box-weight'); },
+        setBoxWeight(weightKg: number) { return api.request<{ ok: boolean; weight_kg: number }>('PUT', '/api/v1/refs/box-weight', { weight_kg: weightKg }); },
 
         // Product Tags
         getProductTags() { return api.request<ProductTag[]>('GET', '/api/v1/refs/tags'); },

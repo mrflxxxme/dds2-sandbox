@@ -19,6 +19,7 @@ import AddFromNeedPanel from './components/AddFromNeedPanel';
 import { WarehouseNeedView } from '../../analytics/components/WarehouseNeedView';
 import { BoxMultiplicityView } from '../../box-multiplicity/BoxMultiplicityView';
 import { PalletSizesView } from '../../pallet-sizes/PalletSizesView';
+import { BoxWeightSetting } from './components/BoxWeightSetting';
 import ForecastView from './components/ForecastView';
 import PreDistributionView from './components/PreDistributionView';
 import PrebookView, { type PrebookGroup, type PrebookAcceptanceMark, type PrebookMonoPallet } from './components/PrebookView';
@@ -1962,7 +1963,14 @@ export default function AssemblyDraftPage() {
             {activeTab === 'box' && <BoxMultiplicityView onSaved={() => loadGeometry()} />}
 
             {/* Вкладка «Паллеты» */}
-            {activeTab === 'pallets' && <PalletSizesView />}
+            {activeTab === 'pallets' && (
+                <>
+                    <div style={{ maxWidth: 1100, margin: '16px auto 0' }}>
+                        <BoxWeightSetting />
+                    </div>
+                    <PalletSizesView />
+                </>
+            )}
 
             {/* Вкладка «Предраспределение машины в пути» — раздача груза по WB-складам до приёмки */}
             {activeTab === 'pre-dist' && <PreDistributionView />}

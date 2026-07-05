@@ -20,6 +20,7 @@ import type {
     StockDistributionHistoryResponse,
     HandedUnitItem,
     AssemblyAttempt,
+    AssemblyApplyWeightBulkResult,
     AssemblyBulkDeleteResult,
     AssemblyBulkStatus,
     AssemblyBulkStatusResult,
@@ -402,6 +403,10 @@ export function addWarehouseMethods(api: ApiClient) {
         /** Проставить расчётный вес товаров в ручной вес паллеты (÷ кол-во паллет). */
         applyGoodsWeight(id: number) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/apply-goods-weight`);
+        },
+        /** Массовое авто-заполнение «Общего веса» (нетто + тара коробов) ОДНИМ запросом. Невалидные пропускаются с причиной. */
+        applyGoodsWeightBulk(ids: number[]) {
+            return api.request<AssemblyApplyWeightBulkResult>('POST', '/api/v1/warehouse/assembly/apply-goods-weight-bulk', { ids });
         },
         /** Скачать раскладку по паллетам (Excel): format=internal (кладовщик) | wb (загрузка в WB).
          *  Через requestBlob — авторизация + X-Project-Id + рефреш (сырой <a href> не несёт JWT). */

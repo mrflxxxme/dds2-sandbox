@@ -137,30 +137,56 @@ async def load_avg_costs(db: AsyncSession, pid: int) -> dict[str, float]:
     (e.g. 'palatka_зеленая' vs 'PALATKA_зеленая'). All callers must lowercase their
     lookup key. Aggregation is done on lowercased key in SQL so weighted average
     stays correct even if same article was entered with different casing.
+
+    Barcode bridge: the purchase-order article_seller (a factory/descriptive name)
+    can differ ENTIRELY from the WB seller article the funnel/BDR look up by
+    (e.g. cost carries 'Кас_наб_...' while WB reports 'K-147'). Both sides share a
+    barcode, so we additionally emit each cost keyed by the WB article resolved via
+    nomenclature.barcode → nomenclature.article_seller. This alias is added with
+    setdefault, so it NEVER overwrites a direct article_seller match — products
+    where the two articles already agree stay bit-for-bit unchanged.
     """
+    from backend.models import Nomenclature
     from backend.models.cost import CostOrder
+
+    weighted_avg = (
+        func.sum(CostOrderItem.total_rub * CostOrderItem.qty) / func.nullif(func.sum(CostOrderItem.qty), 0)
+    )
+    base_where = (
+        CostOrder.project_id == pid,
+        CostOrder.is_deleted == False,
+        CostOrderItem.is_deleted == False,
+        CostOrderItem.total_rub.isnot(None),
+        CostOrderItem.qty > 0,
+        or_(CostOrder.status.is_(None), CostOrder.status != VehicleStatus.FORMING),
+    )
 
     article_lower = func.lower(CostOrderItem.article_seller).label("article_seller_lower")
     result = await db.execute(
-        select(
-            article_lower,
-            (func.sum(CostOrderItem.total_rub * CostOrderItem.qty) / func.nullif(func.sum(CostOrderItem.qty), 0)).label(
-                "avg_cost"
-            ),
-        )
+        select(article_lower, weighted_avg.label("avg_cost"))
         .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
-        .where(
-            CostOrder.project_id == pid,
-            CostOrder.is_deleted == False,
-            CostOrderItem.is_deleted == False,
-            CostOrderItem.article_seller.isnot(None),
-            CostOrderItem.total_rub.isnot(None),
-            CostOrderItem.qty > 0,
-            or_(CostOrder.status.is_(None), CostOrder.status != VehicleStatus.FORMING),
-        )
+        .where(*base_where, CostOrderItem.article_seller.isnot(None))
         .group_by(article_lower)
     )
-    return {r.article_seller_lower: float(r.avg_cost or 0) for r in result if r.article_seller_lower}
+    costs = {r.article_seller_lower: float(r.avg_cost or 0) for r in result if r.article_seller_lower}
+
+    # Alias: reach the same cost by the WB article (via barcode → nomenclature).
+    wb_article_lower = func.lower(Nomenclature.article_seller).label("wb_article_lower")
+    alias_result = await db.execute(
+        select(wb_article_lower, weighted_avg.label("avg_cost"))
+        .join(CostOrder, CostOrderItem.order_no == CostOrder.order_no)
+        .join(
+            Nomenclature,
+            (Nomenclature.barcode == CostOrderItem.barcode) & (Nomenclature.project_id == pid),
+        )
+        .where(*base_where, CostOrderItem.barcode.isnot(None), Nomenclature.article_seller.isnot(None))
+        .group_by(wb_article_lower)
+    )
+    for r in alias_result:
+        if r.wb_article_lower:
+            costs.setdefault(r.wb_article_lower, float(r.avg_cost or 0))
+
+    return costs
 
 
 # ─── Cost overrides loader ───────────────────────────────────────────────────
