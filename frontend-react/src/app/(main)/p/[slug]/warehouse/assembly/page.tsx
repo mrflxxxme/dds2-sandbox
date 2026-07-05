@@ -163,6 +163,7 @@ function EditableCell({
     editable,
     highlight,
     estimated,
+    emptyLabel,
     step,
     onSave,
 }: {
@@ -171,6 +172,7 @@ function EditableCell({
     editable: boolean;
     highlight?: boolean;
     estimated?: boolean;  // значение показано как РАСЧЁТНОЕ (примерное) → префикс «≈», приглушённый цвет
+    emptyLabel?: string;  // подпись при пустом значении вместо «—» (напр. «нет веса»)
     step?: number;
     onSave: (val: number) => void;
 }) {
@@ -217,7 +219,7 @@ function EditableCell({
     }
 
     const numTxt = suffix ? `${formatNumber(value, 1)} ${suffix}` : String(value);
-    const displayVal = value > 0 ? (estimated ? `≈ ${numTxt}` : numTxt) : (highlight ? 'Указать...' : '\u2014');
+    const displayVal = value > 0 ? (estimated ? `≈ ${numTxt}` : numTxt) : (highlight ? 'Указать...' : emptyLabel || '\u2014');
 
     return (
         <div
@@ -231,7 +233,7 @@ function EditableCell({
                 group inline-flex items-center justify-end px-2 py-1 rounded-md transition-colors
                 border border-transparent
                 ${editable ? 'cursor-pointer hover:bg-slate-50 hover:border-slate-200' : ''}
-                ${estimated ? 'text-slate-400' : highlight ? 'bg-red-50 text-red-600' : 'text-slate-700'}
+                ${estimated || (emptyLabel && value <= 0) ? 'text-slate-400' : highlight ? 'bg-red-50 text-red-600' : 'text-slate-700'}
             `}
             title={editable ? 'Нажмите для редактирования' : undefined}
         >
@@ -247,9 +249,10 @@ function EditableCell({
 
 // ─── Weight Cell (авто-вес) ──────────────────────────────────────────────────
 // «Общий вес» проставляется АВТОМАТИЧЕСКИ: если ручной вес не задан, показываем
-// расчётный вес отгрузки (нетто + тара коробов) как значение с префиксом «≈»
-// (приглушённо). Без кнопок «Указать»/«применить». Клик — ручное переопределение.
-// weight_missing_barcodes → жёлтый значок «нет веса у N арт.» (расчёт неполный).
+// расчётный вес отгрузки (нетто + тара коробов) как «≈ N кг» (приглушённо). Без
+// кнопок «Указать»/«применить». Клик — ручное переопределение.
+//  · частичный расчёт (у части арт. нет веса) → компактный значок «⚠» с тултипом;
+//  · нет веса ни у одного товара → «нет веса» (заполнить справочник в настройках).
 
 function WeightCell({
     row,
@@ -262,24 +265,27 @@ function WeightCell({
 }) {
     const estimated = !!row.weight_is_estimated;
     const missing = row.weight_missing_barcodes?.length ?? 0;
+    const total = Number(row.total_weight_kg) || 0;
+    // Нет ни ручного, ни расчётного веса — у товаров заявки нет веса нигде.
+    const noWeightData = row.status === 'IN_PROGRESS' && total <= 0 && !estimated;
 
     return (
-        <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
+        <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4, whiteSpace: 'nowrap' }}>
             <EditableCell
-                value={Number(row.total_weight_kg) || 0}
+                value={total}
                 suffix="кг"
                 editable={editable}
                 estimated={estimated}
+                emptyLabel={noWeightData ? 'нет веса' : undefined}
                 step={0.1}
                 onSave={onSave}
             />
             {estimated && missing > 0 && (
                 <span
-                    className="badge badge-warning"
-                    style={{ fontSize: 11, padding: '1px 6px' }}
-                    title="Нет веса у части артикулов — расчёт неполный, дозаполните вес в настройках"
+                    title={`Нет веса у ${formatNumber(missing, 0)} арт. — расчёт неполный, дозаполните «Вес по баркодам» в настройках`}
+                    style={{ fontSize: 14, lineHeight: 1, color: 'var(--color-warning, #d97706)', cursor: 'help' }}
                 >
-                    ⚠ нет веса у {formatNumber(missing, 0)} арт.
+                    ⚠
                 </span>
             )}
         </div>
