@@ -8,7 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 PackageTypeStr = Literal["BOX", "MONOPALLET", "SUPERSAFE"]
 
@@ -247,6 +247,8 @@ class AssemblyRequestResponse(BaseModel):
     pallets_count: int
     pallet_weight_kg: Decimal
     total_weight_kg: Decimal | None = None  # computed: pallets x weight (тара, ручной)
+    # True — «Общий вес» показан как РАСЧЁТНЫЙ (ручной не задан): нетто + тара коробов.
+    weight_is_estimated: bool = False
     # Ручная раскладка коробов по паллетам (NULL/[] = «авто», считается на лету).
     pallet_manifest: list[PalletBox] | None = None
     # Расчётный вес товаров (нетто) = Σ(quantity × Nomenclature.weight_kg[barcode]).
@@ -255,6 +257,14 @@ class AssemblyRequestResponse(BaseModel):
     goods_weight_kg: Decimal | None = None
     # ШК позиций без веса в справочнике (дозаполнить в настройках).
     weight_missing_barcodes: list[str] = []
+    # Число физических коробов = Σ ⌈quantity / кратность⌉ (кратность per склад заявки).
+    boxes_count: int = 0
+    # Расчётный ВЕС ОТГРУЗКИ = нетто товаров + вес_коробки × boxes_count (тара
+    # паллеты НЕ учитывается). Кандидат для авто-подстановки в общий вес. None —
+    # если нетто-веса нет. Ручной pallet_weight_kg НЕ перезаписывает.
+    suggested_total_weight_kg: Decimal | None = None
+    # Геометрическая оценка числа паллет (footprint по коробам). Только на детали.
+    suggested_pallets_count: int | None = None
     vehicle_info: str | None = None
     vehicle_brand: str | None = None
     driver_phone: str | None = None
@@ -329,6 +339,29 @@ class BulkStatusResult(BaseModel):
 
     updated: list[AssemblyRequestResponse] = []
     skipped: list[BulkStatusSkip] = []
+
+
+class ApplyGoodsWeightBulkPayload(BaseModel):
+    """Тело массового авто-веса: id заявок, которым проставить расчётный вес."""
+
+    # Каждый id = отдельная заявка с коммитом + резолвом кратности/веса — кап,
+    # чтобы один запрос не превратился в тяжёлый O(N) проход.
+    ids: list[int] = Field(max_length=500)
+
+
+class ApplyGoodsWeightSkip(BaseModel):
+    """Заявка, пропущенная при массовом авто-весе (нет веса / не найдена)."""
+
+    id: int
+    number: str
+    reason: str
+
+
+class ApplyGoodsWeightBulkResult(BaseModel):
+    """Итог массового авто-веса: применённые заявки + пропущенные с причиной."""
+
+    applied: list[AssemblyRequestResponse] = []
+    skipped: list[ApplyGoodsWeightSkip] = []
 
 
 # ─── Предраспределение машины в пути (pre-distribution) ─────────────────────

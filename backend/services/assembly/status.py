@@ -159,6 +159,18 @@ async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> Asse
 
     if not req.wb_fbo_supply_id:
         raise ValueError("Нельзя перевести заявку в статус ГОТОВО без привязанной поставки WB")
+
+    # Авто-вес: если ручной вес паллеты не задан — подставляем расчётный вес
+    # отгрузки (нетто + тара коробов) и авто-число паллет, чтобы «Готово» не
+    # требовало ручного ввода. Нет веса ни у одной позиции → ValueError ниже.
+    if not req.pallet_weight_kg or req.pallet_weight_kg <= 0:
+        from .pallets import apply_goods_weight
+
+        try:
+            req = await apply_goods_weight(db, project_id, request_id)
+        except ValueError:
+            pass
+
     if not req.pallets_count or req.pallets_count <= 0:
         raise ValueError("Укажите количество палет перед завершением сборки")
     if not req.pallet_weight_kg or req.pallet_weight_kg <= 0:

@@ -816,6 +816,31 @@ async def resolve_effective_ppb_for_assembly(
     return None, True
 
 
+def _pick_box_qty(
+    machine_entry: dict | None,
+    manual_row: "BoxQtyPerWarehouse | None",
+    sku_override: int | None,
+    sku_use: bool,
+) -> int | None:
+    """Единая цепочка кратности per (barcode, ФФ): machine → manual → SKU-override.
+
+    use-флаг per-ФФ строки важнее SKU-уровня (зеркало table-builder). Источник
+    истины для `resolve_box_qty_map` И `resolve_box_qty_map_multi` — держать
+    выбор в ОДНОМ месте, чтобы список/раскладка/apply не расходились.
+    """
+    use_flag = manual_row.use_box_multiplicity if manual_row is not None else sku_use
+    if not use_flag:
+        return None
+    if machine_entry is not None:
+        bq = machine_entry.get("box_qty")
+        return int(bq) if bq is not None else None
+    if manual_row is not None and manual_row.box_qty is not None:
+        return manual_row.box_qty
+    if sku_override is not None:
+        return sku_override
+    return None
+
+
 async def resolve_box_qty_map(
     db: AsyncSession,
     project_id: int,
@@ -865,22 +890,59 @@ async def resolve_box_qty_map(
 
     out: dict[str, int | None] = {}
     for bc in uniq:
-        manual = manual_by_bc.get(bc)
         override, sku_use = nom_by_bc.get(bc, (None, True))
-        # use-флаг: per-ФФ строка важнее SKU-уровня (зеркало table-builder).
-        use_flag = manual.use_box_multiplicity if manual is not None else sku_use
-        if not use_flag:
-            out[bc] = None
+        out[bc] = _pick_box_qty(machine_map.get((bc, warehouse_id)), manual_by_bc.get(bc), override, sku_use)
+    return out
+
+
+async def resolve_box_qty_map_multi(
+    db: AsyncSession,
+    project_id: int,
+    wh_to_barcodes: dict[int, list[str]],
+) -> dict[tuple[int, str], int | None]:
+    """Кратность коробки per (warehouse_id, barcode) для НЕСКОЛЬКИХ ФФ-складов.
+
+    Как `resolve_box_qty_map`, но warehouse-независимые части (машинный резолв,
+    SKU-override) и ручные строки грузятся ОДНИМ батчем на ВСЕ склады (≈4 запроса
+    total, НЕ ×складов) — для списка сборок без N+1. Та же цепочка `_pick_box_qty`.
+    """
+    all_bcs = sorted({bc for bcs in wh_to_barcodes.values() for bc in bcs if bc})
+    wh_ids = [wh for wh in wh_to_barcodes if wh is not None]
+    if not all_bcs or not wh_ids:
+        return {}
+
+    machine_map = await _resolve_machine_box_qty(db, project_id, all_bcs)
+
+    manual_rows = await db.execute(
+        select(BoxQtyPerWarehouse).where(
+            BoxQtyPerWarehouse.project_id == project_id,
+            BoxQtyPerWarehouse.warehouse_id.in_(wh_ids),
+            BoxQtyPerWarehouse.barcode.in_(all_bcs),
+        )
+    )
+    manual_by_key: dict[tuple[int, str], BoxQtyPerWarehouse] = {
+        (r.warehouse_id, r.barcode): r for r in manual_rows.scalars().all()
+    }
+
+    nom_rows = await db.execute(
+        select(Nomenclature.barcode, Nomenclature.box_qty_override, Nomenclature.use_box_multiplicity).where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.barcode.in_(all_bcs),
+        )
+    )
+    nom_by_bc: dict[str, tuple[int | None, bool]] = {
+        bc: (override, bool(use)) for bc, override, use in nom_rows.all()
+    }
+
+    out: dict[tuple[int, str], int | None] = {}
+    for wh_id, bcs in wh_to_barcodes.items():
+        if wh_id is None:
             continue
-        machine = machine_map.get((bc, warehouse_id))
-        if machine is not None:
-            out[bc] = machine["box_qty"]
-        elif manual is not None and manual.box_qty is not None:
-            out[bc] = manual.box_qty
-        elif override is not None:
-            out[bc] = override
-        else:
-            out[bc] = None
+        for bc in {b for b in bcs if b}:
+            override, sku_use = nom_by_bc.get(bc, (None, True))
+            out[(wh_id, bc)] = _pick_box_qty(
+                machine_map.get((bc, wh_id)), manual_by_key.get((wh_id, bc)), override, sku_use
+            )
     return out
 
 

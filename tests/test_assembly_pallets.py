@@ -266,3 +266,77 @@ async def test_xlsx_internal_and_wb(db_session):
     assert len(rows) == 3
     assert all(r[2] in (None, "") and r[3] in (None, "") for r in rows)
     assert sorted(r[1] for r in rows) == [3, 10, 10]
+
+
+# ─── boxes_count + расчётный вес отгрузки + apply ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_boxes_count_ceil(db_session):
+    """Число коробов = Σ ⌈qty/кратность⌉ (неполный хвост = отдельный короб)."""
+    from backend.services.assembly.weight import compute_boxes_count, resolve_box_qty_by_warehouse
+
+    req = await _make_request(db_session, [(BC1, 20), (BC2, 3)])
+    req = await get_assembly_request(db_session, PROJECT_ID, req.id)
+    box_qty = await resolve_box_qty_by_warehouse(db_session, PROJECT_ID, {req.warehouse_id: [BC1, BC2]})
+    # BC1 20/10 = 2 короба; BC2 ⌈3/10⌉ = 1 (неполный) → 3.
+    assert compute_boxes_count(req, box_qty) == 3
+
+
+def test_suggested_total_weight_adds_box_tara():
+    from backend.services.assembly.weight import compute_suggested_total_weight
+
+    # нетто 10.0 + вес_коробки 0.4 × 3 короба = 11.2.
+    assert compute_suggested_total_weight(Decimal("10.0"), 3, Decimal("0.4")) == Decimal("11.200")
+    # без веса коробки → чистое нетто.
+    assert compute_suggested_total_weight(Decimal("10.0"), 3, None) == Decimal("10.000")
+    # нет нетто → нечего предлагать.
+    assert compute_suggested_total_weight(None, 3, Decimal("0.4")) is None
+
+
+@pytest.mark.asyncio
+async def test_apply_goods_weight_includes_box_tara(db_session):
+    """apply_goods_weight: вес паллеты = (нетто + вес_коробки×коробов) / паллеты."""
+    from backend.services.assembly_service import apply_goods_weight
+    from backend.services.settings_service import set_box_weight_kg
+
+    await set_box_weight_kg(db_session, PROJECT_ID, Decimal("0.4"))
+    req = await _make_request(db_session, [(BC1, 20)])  # нетто 10, 2 короба, pallets=2
+    req = await apply_goods_weight(db_session, PROJECT_ID, req.id)
+    # total = 10 + 0.4×2 = 10.8; габаритов нет → pallets остаётся 2; 10.8/2 = 5.40.
+    assert req.pallets_count == 2
+    assert req.pallet_weight_kg == Decimal("5.40")
+
+
+@pytest.mark.asyncio
+async def test_apply_goods_weight_raises_without_weight(db_session):
+    from backend.services.assembly_service import apply_goods_weight
+
+    req = await _make_request(db_session, [(BC2, 5)])  # BC2 без веса
+    with pytest.raises(ValueError):
+        await apply_goods_weight(db_session, PROJECT_ID, req.id)
+
+
+@pytest.mark.asyncio
+async def test_apply_goods_weight_bulk_partial(db_session):
+    """Массовый авто-вес: заявка с весом применяется, без веса — в skipped."""
+    from backend.services.assembly_service import apply_goods_weight_bulk
+
+    r1 = await _make_request(db_session, [(BC1, 20)])  # есть вес
+    r2 = await _make_request(db_session, [(BC2, 5)])  # нет веса
+    applied, skipped = await apply_goods_weight_bulk(db_session, PROJECT_ID, [r1.id, r2.id])
+    assert [r.id for r in applied] == [r1.id]
+    assert len(skipped) == 1
+    assert skipped[0]["id"] == r2.id and skipped[0]["number"] == r2.number
+
+
+@pytest.mark.asyncio
+async def test_resolve_box_qty_map_multi_matches_single(db_session):
+    """Батч-резолв на неск. складов == per-складу resolve_box_qty_map."""
+    from backend.services.box_multiplicity_service import resolve_box_qty_map, resolve_box_qty_map_multi
+
+    wh_id = await _wh_id(db_session)
+    single = await resolve_box_qty_map(db_session, PROJECT_ID, wh_id, [BC1, BC2])
+    multi = await resolve_box_qty_map_multi(db_session, PROJECT_ID, {wh_id: [BC1, BC2]})
+    assert multi.get((wh_id, BC1)) == single.get(BC1) == 10  # box_qty_override
+    assert multi.get((wh_id, BC2)) == single.get(BC2) == 10

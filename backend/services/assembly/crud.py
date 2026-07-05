@@ -39,7 +39,14 @@ from backend.schemas.assembly import (
     AssemblyRequestCreate,
     AssemblyRequestUpdate,
 )
-from backend.services.assembly.weight import compute_goods_weight, resolve_unit_weights
+from backend.services.assembly.weight import (
+    compute_boxes_count,
+    compute_goods_weight,
+    compute_suggested_total_weight,
+    resolve_box_qty_by_warehouse,
+    resolve_unit_weights,
+)
+from backend.services.settings_service import get_box_weight_kg
 from backend.services.warehouse_service import (
     _next_number,
     get_warehouse,
@@ -351,6 +358,8 @@ async def _build_response(
     prop_nom_map: dict[str, Nomenclature] | None = None,
     via_gazelka_ids: set[int] | None = None,
     weight_by_barcode: dict[str, Decimal | None] | None = None,
+    box_qty_by_wh_bc: dict[tuple[int, str], int | None] | None = None,
+    box_weight_kg: Decimal | None = None,
 ) -> dict:
     """
     Build AssemblyRequestResponse dict from ORM model.
@@ -445,6 +454,38 @@ async def _build_response(
         db, request.project_id, request, weight_by_barcode=weight_by_barcode
     )
 
+    # Число коробов + расчётный вес отгрузки (нетто + вес_коробки × коробов). Карта
+    # кратности per (склад, ШК) и вес коробки приходят из prefetch (0 запросов на
+    # строку); одиночный вызов резолвит для своего склада и читает настройку сам.
+    single_row = box_qty_by_wh_bc is None  # детальный/одиночный путь (не список)
+    if box_qty_by_wh_bc is None:
+        box_qty_by_wh_bc = await resolve_box_qty_by_warehouse(
+            db, request.project_id, {request.warehouse_id: [it.barcode for it in (request.items or [])]}
+        )
+        box_weight_kg = await get_box_weight_kg(db, request.project_id)
+    boxes_count = compute_boxes_count(request, box_qty_by_wh_bc)
+    suggested_total_weight_kg = compute_suggested_total_weight(goods_weight_kg, boxes_count, box_weight_kg)
+
+    # Геометрическая оценка числа паллет (footprint по коробам, БЕЗ веса) — только на
+    # детальном пути, чтобы не плодить N+1 в списке (warehouse-имя + машинный
+    # box_size + override). Кнопка «Авто» в раскладке проставляет её в pallets_count.
+    suggested_pallets_count = None
+    if single_row:
+        from backend.services.assembly.pallets import _suggest_pallets_count
+
+        suggested_pallets_count = await _suggest_pallets_count(
+            db, request.project_id, request, box_qty_by_wh_bc
+        )
+
+    # Авто-вес: если ручной «Общий вес» не задан (0), показываем расчётный вес
+    # отгрузки как значение (примерный, флаг weight_is_estimated) — без кнопок
+    # «Указать»/«применить». Оператор при желании перебивает вручную; при переходе
+    # в «Готово» расчёт сохраняется в реальный вес (mark_ready).
+    weight_is_estimated = False
+    if total_weight <= 0 and suggested_total_weight_kg is not None and suggested_total_weight_kg > 0:
+        total_weight = suggested_total_weight_kg
+        weight_is_estimated = True
+
     return {
         "id": request.id,
         "warehouse_id": request.warehouse_id,
@@ -464,9 +505,13 @@ async def _build_response(
         "pallets_count": request.pallets_count,
         "pallet_weight_kg": request.pallet_weight_kg,
         "total_weight_kg": total_weight,
+        "weight_is_estimated": weight_is_estimated,
         "pallet_manifest": request.pallet_manifest,
         "goods_weight_kg": goods_weight_kg,
         "weight_missing_barcodes": weight_missing_barcodes,
+        "boxes_count": boxes_count,
+        "suggested_total_weight_kg": suggested_total_weight_kg,
+        "suggested_pallets_count": suggested_pallets_count,
         "vehicle_info": request.vehicle_info,
         "vehicle_brand": request.vehicle_brand,
         "driver_phone": request.driver_phone,
@@ -524,6 +569,7 @@ async def prefetch_list_maps(
     cp_ids: set[int] = set()
     proposal_barcodes: set[str] = set()
     item_barcodes: set[str] = set()
+    wh_to_barcodes: dict[int, set[str]] = {}  # склад → ШК (кратность резолвится per-склад)
     for req in requests:
         if req.warehouse_id:
             wh_ids.add(req.warehouse_id)
@@ -534,6 +580,8 @@ async def prefetch_list_maps(
                 nom_ids.add(item.nomenclature_id)
             if item.barcode:
                 item_barcodes.add(item.barcode)
+                if req.warehouse_id:
+                    wh_to_barcodes.setdefault(req.warehouse_id, set()).add(item.barcode)
         proposal = req.ff_proposed_items
         if proposal:
             for i in proposal:
@@ -603,6 +651,14 @@ async def prefetch_list_maps(
     # списке считался без N+1 и совпадал с per-row сборкой.
     weight_by_barcode = await resolve_unit_weights(db, project_id, sorted(item_barcodes))
 
+    # Кратность коробки per (склад, ШК) — один проход на склад (складов мало) +
+    # вес пустой коробки (одно число на проект): расчётный вес отгрузки в списке
+    # считается без N+1 и совпадает с per-row/детальной сборкой.
+    box_qty_by_wh_bc = await resolve_box_qty_by_warehouse(
+        db, project_id, {wh: list(bcs) for wh, bcs in wh_to_barcodes.items()}
+    )
+    box_weight_kg = await get_box_weight_kg(db, project_id)
+
     return {
         "nom_map": nom_map,
         "stock_by_wh_nom": stock_by_wh_nom,
@@ -610,6 +666,8 @@ async def prefetch_list_maps(
         "prop_nom_map": prop_nom_map,
         "via_gazelka_ids": via_gazelka_ids,
         "weight_by_barcode": weight_by_barcode,
+        "box_qty_by_wh_bc": box_qty_by_wh_bc,
+        "box_weight_kg": box_weight_kg,
     }
 
 

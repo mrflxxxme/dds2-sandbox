@@ -127,13 +127,23 @@ export default function PalletLayoutTab({ assembly, ppbByBarcode, slug, onSaved 
 
     const resetToAuto = async () => {
         // «Авто» = сброс серверного манифеста к геометрии + локальный пересбор.
+        // Если число паллет НЕ задано (0) — берём геометрическую оценку из бэка
+        // (suggested_pallets_count) и проставляем в pallets_count автоматически.
         setError('');
         setSavedNote('');
-        mutate(buildAuto());
+        const cur = assembly.pallets_count || 0;
+        const targetCount = cur > 0 ? cur : Math.max(1, assembly.suggested_pallets_count || 1);
+        mutate(autoManifest(items, ppbOf, targetCount));
         try {
+            if (targetCount !== cur) {
+                await api.updateAssemblyRequest(assembly.id, {
+                    pallets_count: targetCount,
+                    pallet_weight_kg: assembly.pallet_weight_kg ?? 0,
+                });
+            }
             await api.updatePalletManifest(assembly.id, null);
             await onSaved();
-            setSavedNote('Сброшено к «авто»');
+            setSavedNote(targetCount !== cur ? `Сброшено к «авто» · ${targetCount} паллет` : 'Сброшено к «авто»');
         } catch (e) {
             setError(e instanceof Error ? e.message : 'Ошибка сброса');
         }

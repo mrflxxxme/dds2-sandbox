@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from datetime import date
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -259,3 +260,46 @@ async def get_valuation_start_date(db: AsyncSession, project_id: int) -> date | 
 async def set_valuation_start_date(db: AsyncSession, project_id: int, d: date | None) -> None:
     await set_setting(db, project_id, _VALUATION_START_KEY, d.isoformat() if d else "")
     logger.info("Set valuation_start_date for project %s: %s", project_id, d)
+
+
+# ─── Вес пустой коробки (тара картона) — для расчётного веса отгрузки сборки ──
+#
+# Одно число на проект. Итоговый вес заявки = нетто товаров (Σ шт × вес/шт) +
+# `box_weight_kg` × число коробов. Вес паллеты (деревянной тары) НЕ учитываем —
+# решение пользователя. None/пусто = коробочную тару не прибавляем.
+
+
+_BOX_WEIGHT_KG_KEY = "box_weight_kg"
+
+
+async def get_box_weight_kg(db: AsyncSession, project_id: int) -> Decimal | None:
+    """Вес пустой коробки (кг) для проекта. None — не задан (тара не прибавляется)."""
+    raw = await get_setting(db, project_id, _BOX_WEIGHT_KG_KEY)
+    if not raw:
+        return None
+    try:
+        v = Decimal(raw)
+    except (InvalidOperation, TypeError):
+        return None
+    return v if v >= 0 else None
+
+
+async def set_box_weight_kg(db: AsyncSession, project_id: int, weight_kg: Decimal | float | str) -> Decimal:
+    """Сохранить вес пустой коробки. Отрицательное → 0; точность до грамма."""
+    from backend.cache import invalidate_cache
+
+    try:
+        w = Decimal(str(weight_kg))
+    except (InvalidOperation, TypeError):
+        w = Decimal("0")
+    if w < 0:
+        w = Decimal("0")
+    w = w.quantize(Decimal("0.001"))
+    await set_setting(db, project_id, _BOX_WEIGHT_KG_KEY, str(w))
+    # Вес коробки входит в расчётный вес отгрузки (аналитика логиста по весу). Iron rule 7.
+    try:
+        await invalidate_cache("reports:logistics_analytics_v2")
+    except Exception as e:
+        logger.warning("invalidate reports:logistics_analytics_v2 failed: %s", e)
+    logger.info("Set box_weight_kg for project %s: %s", project_id, w)
+    return w

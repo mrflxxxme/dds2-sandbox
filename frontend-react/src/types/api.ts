@@ -1810,12 +1810,20 @@ export interface AssemblyRequest {
   pallets_count: number;
   pallet_weight_kg: number;
   total_weight_kg?: number;
+  /** true — «Общий вес» показан РАСЧЁТНЫМ (ручной не задан): нетто + тара коробов */
+  weight_is_estimated?: boolean;
   /** ручная раскладка коробов по паллетам (null/[] = «авто», считается на лету) */
   pallet_manifest?: PalletBox[] | null;
   /** расчётный вес товаров (нетто) = Σ(qty × вес SKU); Decimal — приходит строкой */
   goods_weight_kg?: number | string | null;
   /** ШК позиций без веса в справочнике (дозаполнить в настройках) */
   weight_missing_barcodes?: string[];
+  /** число коробов (для расчёта веса отгрузки = нетто + вес_коробки × коробов) */
+  boxes_count?: number;
+  /** геометрическая оценка числа паллет (footprint по коробам); только на детали */
+  suggested_pallets_count?: number | null;
+  /** расчётный ВЕС ОТГРУЗКИ (кандидат в «Общий вес»): нетто товаров + тара коробов; Decimal — приходит строкой; null если нет нетто-веса */
+  suggested_total_weight_kg?: number | string | null;
   vehicle_info?: string;
   vehicle_brand?: string;
   driver_phone?: string;
@@ -2015,6 +2023,12 @@ export type AssemblyBulkStatus = 'IN_PROGRESS' | 'READY';
 export interface AssemblyBulkStatusResult {
   updated: AssemblyRequest[];
   skipped: AssemblyBulkDeleteSkip[];
+}
+
+/** Массовое авто-заполнение «Общего веса» (нетто товаров + тара коробов) одним запросом. */
+export interface AssemblyApplyWeightBulkResult {
+  applied: AssemblyRequest[];
+  skipped: { id: number; number: string; reason: string }[];
 }
 
 // ─── Gazelka integration ─────────────────────────────────────────────────────

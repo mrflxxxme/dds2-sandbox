@@ -162,6 +162,8 @@ function EditableCell({
     suffix,
     editable,
     highlight,
+    estimated,
+    emptyLabel,
     step,
     onSave,
 }: {
@@ -169,6 +171,8 @@ function EditableCell({
     suffix?: string;
     editable: boolean;
     highlight?: boolean;
+    estimated?: boolean;  // значение показано как РАСЧЁТНОЕ (примерное) → префикс «≈», приглушённый цвет
+    emptyLabel?: string;  // подпись при пустом значении вместо «—» (напр. «нет веса»)
     step?: number;
     onSave: (val: number) => void;
 }) {
@@ -214,7 +218,8 @@ function EditableCell({
         );
     }
 
-    const displayVal = value > 0 ? (suffix ? `${formatNumber(value, 1)} ${suffix}` : String(value)) : (highlight ? 'Указать...' : '\u2014');
+    const numTxt = suffix ? `${formatNumber(value, 1)} ${suffix}` : String(value);
+    const displayVal = value > 0 ? (estimated ? `≈ ${numTxt}` : numTxt) : (highlight ? 'Указать...' : emptyLabel || '\u2014');
 
     return (
         <div
@@ -228,7 +233,7 @@ function EditableCell({
                 group inline-flex items-center justify-end px-2 py-1 rounded-md transition-colors
                 border border-transparent
                 ${editable ? 'cursor-pointer hover:bg-slate-50 hover:border-slate-200' : ''}
-                ${highlight ? 'bg-red-50 text-red-600' : 'text-slate-700'}
+                ${estimated || (emptyLabel && value <= 0) ? 'text-slate-400' : highlight ? 'bg-red-50 text-red-600' : 'text-slate-700'}
             `}
             title={editable ? 'Нажмите для редактирования' : undefined}
         >
@@ -238,6 +243,51 @@ function EditableCell({
                 </svg>
             )}
             <span className="font-medium text-sm">{displayVal}</span>
+        </div>
+    );
+}
+
+// ─── Weight Cell (авто-вес) ──────────────────────────────────────────────────
+// «Общий вес» проставляется АВТОМАТИЧЕСКИ: если ручной вес не задан, показываем
+// расчётный вес отгрузки (нетто + тара коробов) как «≈ N кг» (приглушённо). Без
+// кнопок «Указать»/«применить». Клик — ручное переопределение.
+//  · частичный расчёт (у части арт. нет веса) → компактный значок «⚠» с тултипом;
+//  · нет веса ни у одного товара → «нет веса» (заполнить справочник в настройках).
+
+function WeightCell({
+    row,
+    editable,
+    onSave,
+}: {
+    row: AssemblyRequest;
+    editable: boolean;
+    onSave: (val: number) => void;
+}) {
+    const estimated = !!row.weight_is_estimated;
+    const missing = row.weight_missing_barcodes?.length ?? 0;
+    const total = Number(row.total_weight_kg) || 0;
+    // Нет ни ручного, ни расчётного веса — у товаров заявки нет веса нигде.
+    const noWeightData = row.status === 'IN_PROGRESS' && total <= 0 && !estimated;
+
+    return (
+        <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4, whiteSpace: 'nowrap' }}>
+            <EditableCell
+                value={total}
+                suffix="кг"
+                editable={editable}
+                estimated={estimated}
+                emptyLabel={noWeightData ? 'нет веса' : undefined}
+                step={0.1}
+                onSave={onSave}
+            />
+            {estimated && missing > 0 && (
+                <span
+                    title={`Нет веса у ${formatNumber(missing, 0)} арт. — расчёт неполный, дозаполните «Вес по баркодам» в настройках`}
+                    style={{ fontSize: 14, lineHeight: 1, color: 'var(--color-warning, #d97706)', cursor: 'help' }}
+                >
+                    ⚠
+                </span>
+            )}
         </div>
     );
 }
@@ -597,6 +647,22 @@ export default function AssemblyListPage() {
     const [bulkDeleting, setBulkDeleting] = useState(false);
     const deletableCount = useMemo(() => items.filter(i => isBulkDeletable(i.status)).length, [items]);
 
+    // Уникальные товары без веса, участвующие в сборках (по всем загруженным заявкам) —
+    // для баннера «заполнить вес». Имя резолвим из позиций той же заявки.
+    const missingWeightItems = useMemo(() => {
+        const byBarcode = new Map<string, string>();
+        for (const req of items) {
+            const missing = req.weight_missing_barcodes;
+            if (!missing || missing.length === 0) continue;
+            const nameByBc = new Map<string, string>();
+            for (const it of req.items || []) nameByBc.set(it.barcode, it.article || it.product_name || it.barcode);
+            for (const bc of missing) {
+                if (!byBarcode.has(bc)) byBarcode.set(bc, nameByBc.get(bc) || bc);
+            }
+        }
+        return [...byBarcode.values()];
+    }, [items]);
+
     const toggleSelect = useCallback((id: number) => {
         setSelectedIds(prev => {
             const next = new Set(prev);
@@ -826,12 +892,9 @@ export default function AssemblyListPage() {
             key: 'total_weight_kg', label: 'Общий вес', align: 'right',
             getValue: (row: AssemblyRequest) => row.total_weight_kg || 0,
             render: (_v, row: AssemblyRequest) => (
-                <EditableCell
-                    value={row.total_weight_kg || 0}
-                    suffix="кг"
+                <WeightCell
+                    row={row}
                     editable={EDITABLE_STATUSES.includes(row.status)}
-                    highlight={row.status === 'IN_PROGRESS' && (!row.total_weight_kg || row.total_weight_kg <= 0)}
-                    step={0.1}
                     onSave={(val) => handleWeightChange(row, val)}
                 />
             ),
@@ -884,6 +947,32 @@ export default function AssemblyListPage() {
                     </Link>
                 )}
             </div>
+
+            {/* Баннер: товары без веса, участвующие в сборках → расчёт веса неполный. */}
+            {missingWeightItems.length > 0 && (
+                <div
+                    className="glass-card"
+                    style={{
+                        padding: '12px 16px', marginBottom: 16,
+                        display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+                        borderLeft: '3px solid var(--color-warning)',
+                    }}
+                >
+                    <span style={{ fontSize: 18 }}>⚠️</span>
+                    <div style={{ flex: 1, minWidth: 240 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>
+                            Нет веса у {formatNumber(missingWeightItems.length, 0)} товаров в сборках — расчётный вес неполный
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {missingWeightItems.slice(0, 8).join(', ')}
+                            {missingWeightItems.length > 8 && ` и ещё ${formatNumber(missingWeightItems.length - 8, 0)}`}
+                        </div>
+                    </div>
+                    <Link href={`/p/${slug}/settings?tab=duties`}>
+                        <button className="btn btn-secondary btn-sm">📝 Заполнить вес</button>
+                    </Link>
+                </div>
+            )}
 
             {/* Полоска-сводка «Распределение» — блоки переехали на /warehouse/assembly/distribution */}
             {(drafts.length > 0 || createdGroups.length > 0) && (
@@ -1057,29 +1146,31 @@ export default function AssemblyListPage() {
                     pageSize={CLIENT_PAGE_SIZE}
                     exportName="assembly_requests"
                     actions={
-                        selectedIds.size > 0 ? (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedIds.size, 0)}</span>
-                                <button className="btn btn-secondary btn-sm" onClick={() => handleBulkStatus('IN_PROGRESS')} disabled={bulkDeleting || bulkStatusing != null}
-                                    title="Перевести все выбранные в «В сборке» одним запросом">
-                                    {bulkStatusing === 'IN_PROGRESS' ? 'Перевожу…' : '→ В сборке'}
-                                </button>
-                                <button className="btn btn-success btn-sm" onClick={() => handleBulkStatus('READY')} disabled={bulkDeleting || bulkStatusing != null}
-                                    title="Перевести все выбранные в «Готово» одним запросом (нужны поставка WB, палеты и вес)">
-                                    {bulkStatusing === 'READY' ? 'Перевожу…' : '→ Готово'}
-                                </button>
-                                <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting || bulkStatusing != null}>
-                                    {bulkDeleting ? 'Удаление…' : `🗑 Удалить выбранные (${formatNumber(selectedIds.size, 0)})`}
-                                </button>
-                                <button className="btn btn-secondary btn-sm" onClick={() => setSelectedIds(new Set())}>Снять</button>
-                            </div>
-                        ) : (
-                            deletableCount > 0 ? (
-                                <button className="btn btn-secondary btn-sm" onClick={selectAllDeletable} title="Выбрать все заявки, которые ещё не на WB">
-                                    ☑ Выбрать все удаляемые ({formatNumber(deletableCount, 0)})
-                                </button>
-                            ) : undefined
-                        )
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            {selectedIds.size > 0 ? (
+                                <>
+                                    <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedIds.size, 0)}</span>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => handleBulkStatus('IN_PROGRESS')} disabled={bulkDeleting || bulkStatusing != null}
+                                        title="Перевести все выбранные в «В сборке» одним запросом">
+                                        {bulkStatusing === 'IN_PROGRESS' ? 'Перевожу…' : '→ В сборке'}
+                                    </button>
+                                    <button className="btn btn-success btn-sm" onClick={() => handleBulkStatus('READY')} disabled={bulkDeleting || bulkStatusing != null}
+                                        title="Перевести все выбранные в «Готово» одним запросом (нужны поставка WB, палеты и вес)">
+                                        {bulkStatusing === 'READY' ? 'Перевожу…' : '→ Готово'}
+                                    </button>
+                                    <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting || bulkStatusing != null}>
+                                        {bulkDeleting ? 'Удаление…' : `🗑 Удалить выбранные (${formatNumber(selectedIds.size, 0)})`}
+                                    </button>
+                                    <button className="btn btn-secondary btn-sm" onClick={() => setSelectedIds(new Set())}>Снять</button>
+                                </>
+                            ) : (
+                                deletableCount > 0 ? (
+                                    <button className="btn btn-secondary btn-sm" onClick={selectAllDeletable} title="Выбрать все заявки, которые ещё не на WB">
+                                        ☑ Выбрать все удаляемые ({formatNumber(deletableCount, 0)})
+                                    </button>
+                                ) : null
+                            )}
+                        </div>
                     }
                 />
             )}
