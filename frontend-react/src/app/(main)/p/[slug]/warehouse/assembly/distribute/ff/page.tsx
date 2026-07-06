@@ -23,6 +23,7 @@ const STATUS_BADGE: Record<string, { label: string; bg: string; color: string }>
 // со страницы warehouse/assembly.
 const ASM_STATUS: Record<AssemblyStatus, { label: string; className: string }> = {
     PENDING:          { label: 'В сборке',      className: 'badge-info' },
+    PRE_DISTRIBUTED:  { label: 'Распределено',  className: 'badge-secondary' },
     IN_PROGRESS:      { label: 'В сборке',      className: 'badge-info' },
     READY:            { label: 'Готово',        className: 'badge-success' },
     VEHICLE_ASSIGNED: { label: 'Машина',        className: 'badge-info' },
