@@ -10,6 +10,7 @@ interface FormItem {
     barcode: string;
     quantity: number;
     product_name?: string;
+    article?: string;
 }
 
 export default function AssemblyEditPage() {
@@ -92,6 +93,7 @@ export default function AssemblyEditPage() {
                             barcode: i.barcode,
                             quantity: i.quantity,
                             product_name: i.product_name || undefined,
+                            article: i.article || undefined,
                         })),
                         { barcode: '', quantity: 1 },
                     ]);
@@ -153,6 +155,7 @@ export default function AssemblyEditPage() {
                             barcode: item.barcode,
                             quantity: item.quantity,
                             product_name: item.product_name || item.article_seller || undefined,
+                            article: item.article_seller || undefined,
                         });
                     }
                 }
@@ -358,6 +361,7 @@ export default function AssemblyEditPage() {
                                                         barcode: item.barcode,
                                                         quantity: item.quantity,
                                                         product_name: item.product_name || item.article_seller || undefined,
+                                                        article: item.article_seller || undefined,
                                                     });
                                                 }
                                             }
@@ -532,6 +536,7 @@ export default function AssemblyEditPage() {
                         <tr>
                             <th style={{ width: 40 }}>#</th>
                             <th>Товар</th>
+                            <th style={{ width: 180 }}>Артикул</th>
                             <th style={{ width: 200 }}>ШК</th>
                             <th style={{ width: 100, textAlign: 'right' }}>Кол-во</th>
                             <th style={{ width: 100, textAlign: 'right' }}>На складе</th>
@@ -547,6 +552,9 @@ export default function AssemblyEditPage() {
                                     <td style={{ color: 'var(--color-text-muted)' }}>{idx + 1}</td>
                                     <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                                         {item.product_name || '\u2014'}
+                                    </td>
+                                    <td style={{ fontSize: 12, fontFamily: 'monospace' }}>
+                                        {item.article || '\u2014'}
                                     </td>
                                     <td>
                                         {canEditItems ? (
