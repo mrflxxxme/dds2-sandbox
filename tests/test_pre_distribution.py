@@ -16,16 +16,19 @@ import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models.assembly import AssemblyRequest, AssemblyStatus
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import CostOrder, CostOrderItem
 from backend.models.enums import VehicleStatus
 from backend.schemas.assembly import PreDistributionCreate, PreDistRow
+from backend.schemas.assembly import AssemblyItemCreate, AssemblyRequestCreate
+from backend.services.assembly.crud import create_assembly_request
 from backend.services.assembly_service import (
     _advance_pre_distribution_assemblies,
     advance_pre_distribution_manual,
     create_pre_distribution,
     get_pre_distribution_vehicles,
     get_vehicle_pre_dist_pool,
+    merge_assembly_requests,
 )
 from backend.services.warehouse_crud import create_warehouse
 from backend.services.warehouse_inbound import accept_receipt, create_receipt
@@ -441,3 +444,124 @@ async def test_project_isolation(db_session, env, other_project):
         await get_vehicle_pre_dist_pool(db_session, other_project.id, env.vehicle.id)
     vehicles = await get_pre_distribution_vehicles(db_session, other_project.id)
     assert all(v.id != env.vehicle.id for v in vehicles)
+
+
+@pytest.mark.asyncio
+async def test_create_pre_distribution_dedup_folds_second_call_same_direction(db_session, env):
+    """Повторное распределение ТОЙ ЖЕ машины на то же направление доливает позиции в
+    существующую сборку, а не плодит дубль (инкрементальный «дозабор» частями)."""
+    r1 = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=30)],
+            pallets_by_group={f"{WB_A}::BOX": 2},
+        ),
+    )
+    assert r1.created == 1
+    first_id = r1.requests[0].id
+
+    r2 = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[
+                PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=10),  # тот же ШК
+                PreDistRow(barcode=env.bc2, wb_warehouse_name=WB_A, qty=5),  # новый ШК на то же направление
+            ],
+            pallets_by_group={f"{WB_A}::BOX": 1},
+        ),
+    )
+    # Дедуп: та же сборка, не новая.
+    assert r2.created == 1
+    assert r2.requests[0].id == first_id
+
+    reqs = (
+        (
+            await db_session.execute(
+                select(AssemblyRequest).where(
+                    AssemblyRequest.source_vehicle_id == env.vehicle.id,
+                    AssemblyRequest.wb_warehouse_name_manual == WB_A,
+                    AssemblyRequest.is_deleted == False,  # noqa: E712
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(reqs) == 1 and reqs[0].id == first_id
+    assert reqs[0].pallets_count == 3  # 2 + 1
+
+    items = (
+        (
+            await db_session.execute(
+                select(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == first_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    qty_by_bc = {it.barcode: it.quantity for it in items}
+    assert qty_by_bc[env.bc1] == 40  # 30 + 10
+    assert qty_by_bc[env.bc2] == 5
+
+
+async def _mk_pre_dist_request(db_session, env, wb: str, bc: str, qty: int) -> int:
+    """Создать одну PRE_DISTRIBUTED сборку напрямую (в обход дедупа) — для тестов мёрджа."""
+    req = await create_assembly_request(
+        db_session,
+        env.pid,
+        AssemblyRequestCreate(
+            warehouse_id=env.ff_wh_id,
+            pallets_count=1,
+            pallet_weight_kg=Decimal("0"),
+            wb_warehouse_name_manual=wb,
+            package_type="BOX",
+            items=[AssemblyItemCreate(barcode=bc, quantity=qty)],
+        ),
+        skip_stock_validation=True,
+        status_override=AssemblyStatus.PRE_DISTRIBUTED,
+        source_vehicle_id=env.vehicle.id,
+        is_pre_distribution=True,
+    )
+    return req.id
+
+
+@pytest.mark.asyncio
+async def test_merge_allows_pre_distributed_same_vehicle(db_session, env):
+    """Мёрдж двух PRE_DISTRIBUTED одного направления/машины → одна сборка, суммирование."""
+    a = await _mk_pre_dist_request(db_session, env, WB_A, env.bc1, 30)
+    b = await _mk_pre_dist_request(db_session, env, WB_A, env.bc1, 10)
+    survivor = await merge_assembly_requests(db_session, env.pid, [a, b])
+    assert survivor.status == AssemblyStatus.PRE_DISTRIBUTED
+    items = (
+        (await db_session.execute(select(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == survivor.id)))
+        .scalars()
+        .all()
+    )
+    assert {it.barcode: it.quantity for it in items}[env.bc1] == 40
+
+
+@pytest.mark.asyncio
+async def test_merge_rejects_mixing_pre_distributed_with_in_progress(db_session, env):
+    """Смешивать PRE_DISTRIBUTED с обычной «В сборке» нельзя (нет реального стока)."""
+    a = await _mk_pre_dist_request(db_session, env, WB_A, env.bc1, 30)
+    # Обычная IN_PROGRESS на то же направление.
+    ip = await create_assembly_request(
+        db_session,
+        env.pid,
+        AssemblyRequestCreate(
+            warehouse_id=env.ff_wh_id,
+            pallets_count=1,
+            pallet_weight_kg=Decimal("0"),
+            wb_warehouse_name_manual=WB_A,
+            package_type="BOX",
+            items=[AssemblyItemCreate(barcode=env.bc1, quantity=5)],
+        ),
+        skip_stock_validation=True,
+        status_override=AssemblyStatus.IN_PROGRESS,
+    )
+    with pytest.raises(ValueError, match="смешивать"):
+        await merge_assembly_requests(db_session, env.pid, [a, ip.id])

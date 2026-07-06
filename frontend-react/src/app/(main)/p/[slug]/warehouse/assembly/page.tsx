@@ -43,6 +43,7 @@ function jointTitle(row: AssemblyRequest): string {
 const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
     // PENDING — legacy: больше не используется при создании, но может встретиться в истории.
     PENDING:          { label: 'В сборке',          className: 'badge-info' },
+    PRE_DISTRIBUTED:  { label: 'Распределено',      className: 'badge-secondary' },
     IN_PROGRESS:      { label: 'В сборке',          className: 'badge-info' },
     READY:            { label: 'Готово',             className: 'badge-success' },
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
@@ -60,6 +61,9 @@ const EDITABLE_STATUSES: AssemblyStatus[] = ['IN_PROGRESS', 'READY'];
 // удалять нельзя — сначала отмена с откатом стока.
 const BULK_DELETABLE_STATUSES = new Set<AssemblyStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED', 'CANCELLED']);
 const isBulkDeletable = (status: string): boolean => BULK_DELETABLE_STATUSES.has(status as AssemblyStatus);
+// Выбор строки в списке (чекбокс) — надмножество удаляемых + PRE_DISTRIBUTED, чтобы
+// дубли экрана «Распределить машину» можно было выделить и объединить кнопкой «🔗».
+const isRowSelectable = (status: string): boolean => isBulkDeletable(status) || status === 'PRE_DISTRIBUTED';
 
 const STATUS_OPTIONS_FILTER: { value: string; label: string }[] = [
     { value: '', label: 'Все статусы' },
@@ -747,17 +751,26 @@ export default function AssemblyListPage() {
     const [bulkMerging, setBulkMerging] = useState(false);
     const mergeDirKey = useCallback((r: AssemblyRequest) => {
         const pkg = r.package_type || 'BOX';
-        if (r.wb_fbo_supply_id != null) return `${r.warehouse_id}::${pkg}::sup${r.wb_fbo_supply_id}`;
-        return `${r.warehouse_id}::${pkg}::wh${(r.wb_warehouse_name_manual || r.wb_warehouse_name || '').trim()}`;
+        // Пре-дистрибуции разных машин на одно направление не сливаем (зеркалит backend).
+        const veh = r.source_vehicle_id != null ? `::veh${r.source_vehicle_id}` : '';
+        if (r.wb_fbo_supply_id != null) return `${r.warehouse_id}::${pkg}::sup${r.wb_fbo_supply_id}${veh}`;
+        return `${r.warehouse_id}::${pkg}::wh${(r.wb_warehouse_name_manual || r.wb_warehouse_name || '').trim()}${veh}`;
     }, []);
     const mergeEligibility = useMemo<{ ok: boolean; reason: string }>(() => {
         const sel = items.filter(i => selectedIds.has(i.id));
         if (sel.length < 2) return { ok: false, reason: 'Выберите ≥2 заявки одного направления' };
-        if (sel.some(i => i.status !== 'PENDING' && i.status !== 'IN_PROGRESS')) {
-            return { ok: false, reason: 'Объединять можно только заявки «В сборке»' };
+        // «В сборке» (PENDING/IN_PROGRESS) или «Распределено под машину» (PRE_DISTRIBUTED);
+        // смешивать PRE_DISTRIBUTED с обычными нельзя (у него нет реального стока).
+        const okStatus = (s: AssemblyStatus) => s === 'PENDING' || s === 'IN_PROGRESS' || s === 'PRE_DISTRIBUTED';
+        if (sel.some(i => !okStatus(i.status))) {
+            return { ok: false, reason: 'Объединять можно только «В сборке» / «Распределено»' };
+        }
+        const hasPre = sel.some(i => i.status === 'PRE_DISTRIBUTED');
+        if (hasPre && sel.some(i => i.status !== 'PRE_DISTRIBUTED')) {
+            return { ok: false, reason: 'Нельзя смешивать «Распределено под машину» с «В сборке»' };
         }
         if (new Set(sel.map(mergeDirKey)).size > 1) {
-            return { ok: false, reason: 'Выбраны разные склад / направление / упаковка' };
+            return { ok: false, reason: 'Выбраны разные склад / направление / упаковка / машина' };
         }
         return { ok: true, reason: '' };
     }, [items, selectedIds, mergeDirKey]);
@@ -795,10 +808,10 @@ export default function AssemblyListPage() {
             // Вся ячейка — большая кликабельная зона переключения, клик НЕ открывает
             // заявку (stopPropagation), чтобы не «проваливаться» при выборе галочек.
             render: (_v, row: AssemblyRequest) => (
-                isBulkDeletable(row.status) ? (
+                isRowSelectable(row.status) ? (
                     <div
                         onClick={(e) => { e.stopPropagation(); toggleSelect(row.id); }}
-                        title="Выбрать для удаления"
+                        title="Выбрать (удаление / объединение)"
                         style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '10px 8px', margin: '-7px -6px', cursor: 'pointer' }}
                     >
                         <input
@@ -1193,7 +1206,7 @@ export default function AssemblyListPage() {
                         // В режиме выбора (есть отмеченные) клик по строке переключает
                         // её галочку и НЕ открывает заявку — чтобы выбор не слетал.
                         if (selectedIds.size > 0) {
-                            if (isBulkDeletable(row.status)) toggleSelect(row.id);
+                            if (isRowSelectable(row.status)) toggleSelect(row.id);
                             return;
                         }
                         router.push(`/p/${slug}/warehouse/assembly/${row.id}`);

@@ -1036,10 +1036,17 @@ async def merge_assembly_requests(
     if len(requests) < 2:
         raise ValueError("Нужно ≥2 сборки для объединения")
 
-    mergeable = {AssemblyStatus.PENDING, AssemblyStatus.IN_PROGRESS}
+    # PRE_DISTRIBUTED («зарезервировано под машину в пути») тоже сливаем — это дубли
+    # экрана «Распределить машину». Но НЕ смешиваем их с обычными «В сборке»: у
+    # PRE_DISTRIBUTED нет реального стока (резерв под машину), слияние с IN_PROGRESS
+    # раздуло бы реальный резерв склада.
+    mergeable = {AssemblyStatus.PENDING, AssemblyStatus.IN_PROGRESS, AssemblyStatus.PRE_DISTRIBUTED}
     bad = [r.number for r in requests if AssemblyStatus(r.status) not in mergeable]
     if bad:
-        raise ValueError(f"Объединять можно только сборки «В сборке». Не подходят: {', '.join(bad)}")
+        raise ValueError(f"Объединять можно только сборки «В сборке»/«Распределено». Не подходят: {', '.join(bad)}")
+    statuses = {AssemblyStatus(r.status) for r in requests}
+    if AssemblyStatus.PRE_DISTRIBUTED in statuses and statuses != {AssemblyStatus.PRE_DISTRIBUTED}:
+        raise ValueError("Нельзя смешивать сборки «Распределено под машину» с обычными «В сборке»")
 
     def _dir_key(r: AssemblyRequest) -> tuple:
         return (
@@ -1047,6 +1054,9 @@ async def merge_assembly_requests(
             r.package_type or "BOX",
             r.wb_fbo_supply_id,
             None if r.wb_fbo_supply_id is not None else (r.wb_warehouse_name_manual or "").strip(),
+            # Пре-дистрибуции разных машин на одно направление НЕ сливаем (у обычных
+            # сборок source_vehicle_id=None → не влияет).
+            r.source_vehicle_id,
         )
 
     if len({_dir_key(r) for r in requests}) != 1:
