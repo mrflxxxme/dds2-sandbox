@@ -1,0 +1,1 @@
+- [Pre-dist over-commit invariant](pre-dist-overcommit-invariant.md) — pre-distribution guard is vehicle-pool-based (gross−reserved), not WarehouseStock; why IN_PROGRESS-fold is safe

@@ -374,6 +374,56 @@ async def get_pre_distribution_vehicles(db: AsyncSession, project_id: int) -> li
 # ─── Создание предраспределения ────────────────────────────────────────────
 
 
+async def _fold_into_pre_dist_request(
+    db: AsyncSession,
+    project_id: int,
+    req: AssemblyRequest,
+    bc_qty: dict[str, int],
+    nom_map: dict[str, Nomenclature],
+    *,
+    add_pallets: int,
+) -> None:
+    """Долить barcode→qty в уже существующую сборку ЭТОЙ ЖЕ машины на то же направление
+    (повторное «распределение машины» частями — штатный инкрементальный сценарий).
+    Позиции суммируются по (nomenclature_id, barcode); паллеты складываются. Вес не
+    трогаем (у пре-дистрибуции авто-вес). Так дозабор не плодит вторую сборку."""
+    existing_items = (
+        (
+            await db.execute(
+                select(AssemblyRequestItem).where(
+                    AssemblyRequestItem.project_id == project_id,
+                    AssemblyRequestItem.assembly_request_id == req.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_key: dict[tuple[int, str], AssemblyRequestItem] = {(it.nomenclature_id, it.barcode): it for it in existing_items}
+    for bc, qty in bc_qty.items():
+        if qty <= 0:
+            continue
+        nom = nom_map[bc]
+        key = (nom.id, bc)
+        cur = by_key.get(key)
+        if cur is not None:
+            cur.quantity += qty
+        else:
+            new_it = AssemblyRequestItem(
+                project_id=project_id,
+                assembly_request_id=req.id,
+                nomenclature_id=nom.id,
+                barcode=bc,
+                quantity=qty,
+            )
+            db.add(new_it)
+            by_key[key] = new_it
+    req.pallets_count = max(0, int(req.pallets_count or 0)) + max(0, int(add_pallets or 0))
+    await db.flush()
+    await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
+
+
 async def create_pre_distribution(
     db: AsyncSession, project_id: int, payload: PreDistributionCreate
 ) -> PreDistributionCreateResult:
@@ -432,12 +482,40 @@ async def create_pre_distribution(
         items = [AssemblyItemCreate(barcode=bc, quantity=q) for bc, q in bc_qty.items()]
         # Паллеты — из фронта (геометрию коробов считает фронт); нет ключа → 0 (как раньше).
         pallets = max(0, int(payload.pallets_by_group.get(f"{wb_name}::{pkg}", 0)))
+        supply_id = payload.wb_fbo_supply_id if len(groups) == 1 else None
+
+        # Дедуп повторного распределения ЭТОЙ ЖЕ машины на то же направление: если для
+        # неё (source_vehicle_id) уже есть не-терминальная сборка на (ФФ-склад, WB-склад,
+        # упаковка, поставка) — доливаем в неё, а не плодим дубль. Экран машины
+        # инкрементальный (over-commit-гард выше пускает дозабор частями), поэтому без
+        # дедупа второй заход на то же направление создавал бы вторую сборку.
+        existing_pd = (
+            await db.execute(
+                select(AssemblyRequest)
+                .where(
+                    AssemblyRequest.project_id == project_id,
+                    AssemblyRequest.source_vehicle_id == vehicle.id,
+                    AssemblyRequest.warehouse_id == target_wh.id,
+                    AssemblyRequest.wb_warehouse_name_manual == wb_name,
+                    AssemblyRequest.package_type == pkg,
+                    AssemblyRequest.wb_fbo_supply_id.is_not_distinct_from(supply_id),
+                    AssemblyRequest.status.in_((AssemblyStatus.PRE_DISTRIBUTED, AssemblyStatus.IN_PROGRESS)),
+                    AssemblyRequest.is_deleted == False,  # noqa: E712
+                )
+                .order_by(AssemblyRequest.id)  # детерминизм, если легаси-дубль ещё существует
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if existing_pd is not None:
+            await _fold_into_pre_dist_request(db, project_id, existing_pd, bc_qty, nom_map, add_pallets=pallets)
+            created.append(existing_pd)
+            continue
         # Вес НЕ форсим: `pallet_weight_kg=0` → `_build_response` покажет авто-вес
         # (нетто товаров + тара коробов, «≈ N кг», флаг weight_is_estimated) — как у прочих
         # поставок; `mark_ready` подставит финальный вес. Ручной вес (>0) заблокировал бы авто.
         create_payload = AssemblyRequestCreate(
             warehouse_id=target_wh.id,
-            wb_fbo_supply_id=payload.wb_fbo_supply_id if len(groups) == 1 else None,
+            wb_fbo_supply_id=supply_id,
             pallets_count=pallets,
             pallet_weight_kg=Decimal("0"),
             wb_warehouse_name_manual=wb_name,
