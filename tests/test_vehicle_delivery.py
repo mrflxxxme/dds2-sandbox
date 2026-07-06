@@ -345,6 +345,86 @@ class TestUpdateVehicleStatus:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Приёмка привязанной машины → DISPATCHED → DELIVERED (оба пути приёмки)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestReceiptAcceptDeliversVehicle:
+    """Принятие авто-приёмки, созданной из машины, обязано снять машину с
+    «Ожидаемых поставок» (DISPATCHED → DELIVERED) — и через нашу приёмку,
+    и через ФФ-портал (Хамза/Натали)."""
+
+    async def _dispatch_vehicle_with_receipt(self, db_session, project):
+        """FORMING→…→DISPATCHED, возвращает (order_no, receipt_id)."""
+        from sqlalchemy import text
+
+        from backend.services.warehouse_crud import create_warehouse
+
+        wh = await create_warehouse(
+            db_session, project.id, {"name": f"ff-{_uid()}", "warehouse_type": "FULFILLMENT"}
+        )
+        # Авто-приёмка из машины пропускает позиции без карточки в nomenclature —
+        # заводим её, чтобы у приёмки были items (иначе accept падает «no items»).
+        barcode = f"BC-DLV-{_uid()}"
+        await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, barcode, subject, updated_at) "
+                "VALUES (:pid, :bc, :subj, NOW())"
+            ),
+            {"pid": project.id, "bc": barcode, "subj": "Test Item"},
+        )
+        await db_session.commit()
+        order = await _create_factory_order_with_items(db_session, project.id, [(barcode, 10)])
+        item_id = order.items[0].id
+        order_no = f"V-DLV-{_uid()}"
+        await create_vehicle(db_session, project.id, VehicleCreate(order_no=order_no, rate_cny=Decimal("12.5")))
+        await split_to_vehicles(
+            db_session,
+            project.id,
+            order.id,
+            SplitToVehiclesRequest(
+                assignments=[SplitItem(factory_order_item_id=item_id, qty=10, vehicle_order_no=order_no)]
+            ),
+        )
+        await update_vehicle_status(db_session, project.id, order_no, VehicleStatusUpdate(status=VehicleStatus.SHIPPED))
+        await update_vehicle_status(
+            db_session, project.id, order_no, VehicleStatusUpdate(status=VehicleStatus.CUSTOMS, dt_number="DT-DLV")
+        )
+        await update_vehicle(
+            db_session, project.id, order_no, VehicleUpdate(invoice_no="INV-DLV", target_warehouse_id=wh.id)
+        )
+        result = await update_vehicle_status(
+            db_session, project.id, order_no, VehicleStatusUpdate(status=VehicleStatus.DISPATCHED)
+        )
+        return order_no, result["inbound_receipt_id"]
+
+    @pytest.mark.asyncio
+    async def test_our_accept_delivers_vehicle(self, db_session, project):
+        from backend.services.warehouse_inbound import accept_receipt
+
+        order_no, receipt_id = await self._dispatch_vehicle_with_receipt(db_session, project)
+        await accept_receipt(db_session, project.id, receipt_id)
+
+        vehicle = await get_vehicle(db_session, project.id, order_no)
+        assert vehicle.status == VehicleStatus.DELIVERED
+
+    @pytest.mark.asyncio
+    async def test_ff_accept_delivers_vehicle(self, db_session, project):
+        """Регресс: ФФ-приёмка (Хамза принял) должна снимать машину с
+        «Ожидаемых» — раньше accept_receipt_ff не трогал статус машины."""
+        from backend.services.warehouse_inbound import accept_receipt_ff, get_receipt
+
+        order_no, receipt_id = await self._dispatch_vehicle_with_receipt(db_session, project)
+
+        receipt = await get_receipt(db_session, project.id, receipt_id)
+        payload = [{"item_id": it.id, "actual_qty": it.expected_qty, "defect_qty": 0} for it in receipt.items]
+        await accept_receipt_ff(db_session, project.id, receipt_id, payload)
+
+        vehicle = await get_vehicle(db_session, project.id, order_no)
+        assert vehicle.status == VehicleStatus.DELIVERED
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # get_supply_chain_overview
 # ═══════════════════════════════════════════════════════════════════════════════
 
