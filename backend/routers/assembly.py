@@ -22,6 +22,7 @@ from backend.schemas.assembly import (
     AssemblyFlowAnalyticsResponse,
     AssemblyHistoryResponse,
     AssemblyListResponse,
+    AssemblyMergeRequest,
     AssemblyRequestCreate,
     AssemblyRequestResponse,
     AssemblyRequestUpdate,
@@ -959,6 +960,24 @@ async def delete_request(
 
 
 # --- Bulk operations --------------------------------------------------------
+
+
+@router.post("/merge", response_model=AssemblyRequestResponse, dependencies=[Depends(rate_limit_write)])
+async def merge_requests(
+    payload: AssemblyMergeRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Объединить ≥2 сборки одного склада·направления·упаковки (статус «В сборке»)
+    в одну: позиции суммируются, ФФ-связи переносятся, остальные — soft-delete.
+    Возвращает survivor'а."""
+    try:
+        req = await assembly_service.merge_assembly_requests(db, project.id, payload.request_ids)
+        return AssemblyRequestResponse.model_validate(await assembly_service._build_response(db, req))
+    except ValueError as e:
+        msg = str(e)
+        status = 404 if "не найден" in msg.lower() else 400
+        raise HTTPException(status, msg) from None
 
 
 @router.post(
