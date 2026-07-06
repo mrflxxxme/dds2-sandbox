@@ -379,6 +379,11 @@ export function addWarehouseMethods(api: ApiClient) {
         createAssemblyRequest(data: AssemblyRequestCreate) {
             return api.request<AssemblyRequest>('POST', '/api/v1/warehouse/assembly', data);
         },
+        /** Объединить ≥2 СОЗДАННЫХ сборки одного склада·направления·упаковки (статус «В сборке»)
+         *  в одну: позиции суммируются, ФФ-связи переносятся. Возвращает survivor. */
+        mergeAssemblyRequests(requestIds: number[]) {
+            return api.request<AssemblyRequest>('POST', '/api/v1/warehouse/assembly/merge', { request_ids: requestIds });
+        },
         /** Группы созданных заявок по черновику (IN_PROGRESS) — «Предпросмотр созданных». */
         getCreatedAssemblyGroups() {
             return api.request<CreatedAssemblyGroup[]>('GET', '/api/v1/warehouse/assembly/created-groups');

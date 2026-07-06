@@ -132,6 +132,13 @@ def _aggregate_coefficients(
         name = wh_id_to_name.get(int(wid)) or e.get("warehouseName")
         if not name:
             continue
+        # Спец-склады (СГТ/Питание/Горючее/СЦ/виртуальные) нормализуются в канон
+        # базового склада → их открытые дни ложно подмешивались бы в meta
+        # реального склада (прод-баг Казань-моно: реальный склад -1 все дни, а
+        # «Казань СГТ»/«Казань: Питание» coef=0 → free_days>0 → ложный «лимит»).
+        # Зеркало _flags_for_warehouse и _build_acceptance_limits.
+        if _is_spec_acceptance_wh(name):
+            continue
         canon = _normalize_acceptance_wh(name)
         if not canon:
             continue

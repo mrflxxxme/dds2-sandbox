@@ -996,6 +996,149 @@ async def get_assembly_request(
     return result.scalar_one_or_none()
 
 
+async def merge_assembly_requests(
+    db: AsyncSession,
+    project_id: int,
+    request_ids: list[int],
+) -> AssemblyRequest:
+    """Объединить N созданных сборок в одну.
+
+    Требования (иначе ValueError → 400 у роутера):
+      - все существуют, принадлежат проекту, не удалены;
+      - статус ∈ {PENDING, IN_PROGRESS} («В сборке», сток ещё не двигался);
+      - однородны по (склад-источник · направление · упаковка), где направление =
+        wb_fbo_supply_id (если задан) иначе wb_warehouse_name_manual.
+
+    Survivor — сборка с наибольшим числом позиций (tie-break — меньший id).
+    Позиции losers суммируются в survivor по (nomenclature_id, barcode); строки
+    losers удаляются. pallets_count = Σ; pallet_weight_kg = взвешенное среднее на
+    паллету. ФФ-связи (fulfillment_requests.assembly_request_id) losers → survivor.
+    Losers → soft_delete. Атомарно.
+
+    Сток не валидируем: тот же склад, товар лишь консолидируется — суммарный
+    резерв не меняется (losers уходят в soft-delete, их qty переходит в survivor).
+    """
+    result = await db.execute(
+        select(AssemblyRequest)
+        .options(selectinload(AssemblyRequest.items))
+        .where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.id.in_(request_ids),
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+        )
+    )
+    requests = list(result.scalars().all())
+
+    found_ids = {r.id for r in requests}
+    missing = [i for i in request_ids if i not in found_ids]
+    if missing:
+        raise ValueError(f"Сборки не найдены: {missing}")
+    if len(requests) < 2:
+        raise ValueError("Нужно ≥2 сборки для объединения")
+
+    # PRE_DISTRIBUTED («зарезервировано под машину в пути») тоже сливаем — это дубли
+    # экрана «Распределить машину». Но НЕ смешиваем их с обычными «В сборке»: у
+    # PRE_DISTRIBUTED нет реального стока (резерв под машину), слияние с IN_PROGRESS
+    # раздуло бы реальный резерв склада.
+    mergeable = {AssemblyStatus.PENDING, AssemblyStatus.IN_PROGRESS, AssemblyStatus.PRE_DISTRIBUTED}
+    bad = [r.number for r in requests if AssemblyStatus(r.status) not in mergeable]
+    if bad:
+        raise ValueError(f"Объединять можно только сборки «В сборке»/«Распределено». Не подходят: {', '.join(bad)}")
+    statuses = {AssemblyStatus(r.status) for r in requests}
+    if AssemblyStatus.PRE_DISTRIBUTED in statuses and statuses != {AssemblyStatus.PRE_DISTRIBUTED}:
+        raise ValueError("Нельзя смешивать сборки «Распределено под машину» с обычными «В сборке»")
+
+    def _dir_key(r: AssemblyRequest) -> tuple:
+        return (
+            r.warehouse_id,
+            r.package_type or "BOX",
+            r.wb_fbo_supply_id,
+            None if r.wb_fbo_supply_id is not None else (r.wb_warehouse_name_manual or "").strip(),
+            # Пре-дистрибуции разных машин на одно направление НЕ сливаем (у обычных
+            # сборок source_vehicle_id=None → не влияет).
+            r.source_vehicle_id,
+        )
+
+    if len({_dir_key(r) for r in requests}) != 1:
+        raise ValueError("Объединять можно только сборки одного склада-источника, направления и упаковки")
+
+    # Survivor — больше всего позиций; tie-break — меньший id.
+    survivor = max(requests, key=lambda r: (len(r.items), -r.id))
+    losers = [r for r in requests if r.id != survivor.id]
+    loser_ids = [r.id for r in losers]
+
+    # Слить позиции по (nomenclature_id, barcode): совпадение → сумма qty, иначе новая строка.
+    items_by_key: dict[tuple[int, str], AssemblyRequestItem] = {
+        (it.nomenclature_id, it.barcode): it for it in survivor.items
+    }
+    for loser in losers:
+        for it in loser.items:
+            key = (it.nomenclature_id, it.barcode)
+            existing = items_by_key.get(key)
+            if existing is not None:
+                existing.quantity += it.quantity
+            else:
+                new_it = AssemblyRequestItem(
+                    project_id=project_id,
+                    assembly_request_id=survivor.id,
+                    nomenclature_id=it.nomenclature_id,
+                    barcode=it.barcode,
+                    quantity=it.quantity,
+                )
+                db.add(new_it)
+                items_by_key[key] = new_it
+
+    # Позиции losers полностью поглощены survivor — удаляем, чтобы не задвоить в сырых суммах.
+    await db.execute(
+        delete(AssemblyRequestItem).where(
+            AssemblyRequestItem.project_id == project_id,
+            AssemblyRequestItem.assembly_request_id.in_(loser_ids),
+        )
+    )
+
+    # Паллеты — сумма; вес — взвешенное среднее на паллету (pallet_weight_kg = вес одной паллеты).
+    total_pallets = sum(max(0, int(r.pallets_count or 0)) for r in requests)
+    total_weight = sum(
+        (Decimal(int(r.pallets_count or 0)) * (r.pallet_weight_kg or Decimal("0")) for r in requests),
+        Decimal("0"),
+    )
+    survivor.pallets_count = max(1, total_pallets)
+    survivor.pallet_weight_kg = (
+        (total_weight / Decimal(total_pallets)).quantize(Decimal("0.01")) if total_pallets > 0 else Decimal("0")
+    )
+
+    # ФФ-связи losers → survivor (обратный аудит FF-портал → сборка не теряется).
+    ff_links = (
+        (
+            await db.execute(
+                select(FulfillmentRequest).where(
+                    FulfillmentRequest.project_id == project_id,
+                    FulfillmentRequest.assembly_request_id.in_(loser_ids),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for link in ff_links:
+        link.assembly_request_id = survivor.id
+
+    note = f"Объединено: {', '.join(r.number for r in losers)}"
+    survivor.comment = f"{survivor.comment} | {note}" if survivor.comment else note
+
+    for loser in losers:
+        loser.soft_delete()
+
+    await db.commit()
+    await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:balance")
+    db.expunge_all()
+    merged = await get_assembly_request(db, project_id, survivor.id)
+    assert merged is not None, "Survivor disappeared after merge"
+    return merged
+
+
 async def create_assembly_request(
     db: AsyncSession,
     project_id: int,

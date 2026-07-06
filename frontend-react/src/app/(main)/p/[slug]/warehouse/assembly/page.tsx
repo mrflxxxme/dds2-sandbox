@@ -43,6 +43,7 @@ function jointTitle(row: AssemblyRequest): string {
 const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
     // PENDING — legacy: больше не используется при создании, но может встретиться в истории.
     PENDING:          { label: 'В сборке',          className: 'badge-info' },
+    PRE_DISTRIBUTED:  { label: 'Распределено',      className: 'badge-secondary' },
     IN_PROGRESS:      { label: 'В сборке',          className: 'badge-info' },
     READY:            { label: 'Готово',             className: 'badge-success' },
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },
@@ -60,6 +61,9 @@ const EDITABLE_STATUSES: AssemblyStatus[] = ['IN_PROGRESS', 'READY'];
 // удалять нельзя — сначала отмена с откатом стока.
 const BULK_DELETABLE_STATUSES = new Set<AssemblyStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED', 'CANCELLED']);
 const isBulkDeletable = (status: string): boolean => BULK_DELETABLE_STATUSES.has(status as AssemblyStatus);
+// Выбор строки в списке (чекбокс) — надмножество удаляемых + PRE_DISTRIBUTED, чтобы
+// дубли экрана «Распределить машину» можно было выделить и объединить кнопкой «🔗».
+const isRowSelectable = (status: string): boolean => isBulkDeletable(status) || status === 'PRE_DISTRIBUTED';
 
 const STATUS_OPTIONS_FILTER: { value: string; label: string }[] = [
     { value: '', label: 'Все статусы' },
@@ -741,6 +745,56 @@ export default function AssemblyListPage() {
         }
     }, [selectedIds, items, bulkStatusing]);
 
+    // ─── Объединение выбранных сборок (дубли одного направления) ─────────────
+    // Бэкенд склеит только однородный набор (склад · направление · упаковка) в статусе
+    // «В сборке»; здесь то же условие проверяем заранее, чтобы гейтить кнопку и объяснить.
+    const [bulkMerging, setBulkMerging] = useState(false);
+    const mergeDirKey = useCallback((r: AssemblyRequest) => {
+        const pkg = r.package_type || 'BOX';
+        // Пре-дистрибуции разных машин на одно направление не сливаем (зеркалит backend).
+        const veh = r.source_vehicle_id != null ? `::veh${r.source_vehicle_id}` : '';
+        if (r.wb_fbo_supply_id != null) return `${r.warehouse_id}::${pkg}::sup${r.wb_fbo_supply_id}${veh}`;
+        return `${r.warehouse_id}::${pkg}::wh${(r.wb_warehouse_name_manual || r.wb_warehouse_name || '').trim()}${veh}`;
+    }, []);
+    const mergeEligibility = useMemo<{ ok: boolean; reason: string }>(() => {
+        const sel = items.filter(i => selectedIds.has(i.id));
+        if (sel.length < 2) return { ok: false, reason: 'Выберите ≥2 заявки одного направления' };
+        // «В сборке» (PENDING/IN_PROGRESS) или «Распределено под машину» (PRE_DISTRIBUTED);
+        // смешивать PRE_DISTRIBUTED с обычными нельзя (у него нет реального стока).
+        const okStatus = (s: AssemblyStatus) => s === 'PENDING' || s === 'IN_PROGRESS' || s === 'PRE_DISTRIBUTED';
+        if (sel.some(i => !okStatus(i.status))) {
+            return { ok: false, reason: 'Объединять можно только «В сборке» / «Распределено»' };
+        }
+        const hasPre = sel.some(i => i.status === 'PRE_DISTRIBUTED');
+        if (hasPre && sel.some(i => i.status !== 'PRE_DISTRIBUTED')) {
+            return { ok: false, reason: 'Нельзя смешивать «Распределено под машину» с «В сборке»' };
+        }
+        if (new Set(sel.map(mergeDirKey)).size > 1) {
+            return { ok: false, reason: 'Выбраны разные склад / направление / упаковка / машина' };
+        }
+        return { ok: true, reason: '' };
+    }, [items, selectedIds, mergeDirKey]);
+
+    const handleBulkMerge = useCallback(async () => {
+        const ids = [...selectedIds];
+        if (ids.length < 2 || bulkMerging) return;
+        if (!confirm(`Объединить ${formatNumber(ids.length, 0)} ${pluralRu(ids.length, ['заявку', 'заявки', 'заявок'])} в одну?`)) return;
+        setBulkMerging(true);
+        try {
+            const survivor = await api.mergeAssemblyRequests(ids);
+            setItems(prev => prev
+                .filter(i => !ids.includes(i.id) || i.id === survivor.id)
+                .map(i => (i.id === survivor.id ? survivor : i)));
+            setTotal(t => Math.max(0, t - (ids.length - 1)));
+            setSelectedIds(new Set());
+            setToast({ message: `Объединено в ${survivor.number}`, type: 'success' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка объединения', type: 'error' });
+        } finally {
+            setBulkMerging(false);
+        }
+    }, [selectedIds, bulkMerging]);
+
     // ─── Columns (TanStackDataTable: сортировка + Excel) ────────────────────
     // Inline-редактирование (палеты/вес/дата/статус) и кнопки-действия живут
     // внутри render-ячеек; getValue даёт сортировку по вычисляемым колонкам,
@@ -754,10 +808,10 @@ export default function AssemblyListPage() {
             // Вся ячейка — большая кликабельная зона переключения, клик НЕ открывает
             // заявку (stopPropagation), чтобы не «проваливаться» при выборе галочек.
             render: (_v, row: AssemblyRequest) => (
-                isBulkDeletable(row.status) ? (
+                isRowSelectable(row.status) ? (
                     <div
                         onClick={(e) => { e.stopPropagation(); toggleSelect(row.id); }}
-                        title="Выбрать для удаления"
+                        title="Выбрать (удаление / объединение)"
                         style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '10px 8px', margin: '-7px -6px', cursor: 'pointer' }}
                     >
                         <input
@@ -1152,7 +1206,7 @@ export default function AssemblyListPage() {
                         // В режиме выбора (есть отмеченные) клик по строке переключает
                         // её галочку и НЕ открывает заявку — чтобы выбор не слетал.
                         if (selectedIds.size > 0) {
-                            if (isBulkDeletable(row.status)) toggleSelect(row.id);
+                            if (isRowSelectable(row.status)) toggleSelect(row.id);
                             return;
                         }
                         router.push(`/p/${slug}/warehouse/assembly/${row.id}`);
@@ -1168,15 +1222,22 @@ export default function AssemblyListPage() {
                             {selectedIds.size > 0 ? (
                                 <>
                                     <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedIds.size, 0)}</span>
-                                    <button className="btn btn-secondary btn-sm" onClick={() => handleBulkStatus('IN_PROGRESS')} disabled={bulkDeleting || bulkStatusing != null}
+                                    <button className="btn btn-secondary btn-sm" onClick={() => handleBulkStatus('IN_PROGRESS')} disabled={bulkDeleting || bulkStatusing != null || bulkMerging}
                                         title="Перевести все выбранные в «В сборке» одним запросом">
                                         {bulkStatusing === 'IN_PROGRESS' ? 'Перевожу…' : '→ В сборке'}
                                     </button>
-                                    <button className="btn btn-success btn-sm" onClick={() => handleBulkStatus('READY')} disabled={bulkDeleting || bulkStatusing != null}
+                                    <button className="btn btn-success btn-sm" onClick={() => handleBulkStatus('READY')} disabled={bulkDeleting || bulkStatusing != null || bulkMerging}
                                         title="Перевести все выбранные в «Готово» одним запросом (нужны поставка WB, палеты и вес)">
                                         {bulkStatusing === 'READY' ? 'Перевожу…' : '→ Готово'}
                                     </button>
-                                    <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting || bulkStatusing != null}>
+                                    {selectedIds.size >= 2 && (
+                                        <button className="btn btn-secondary btn-sm" onClick={handleBulkMerge}
+                                            disabled={bulkDeleting || bulkStatusing != null || bulkMerging || !mergeEligibility.ok}
+                                            title={mergeEligibility.ok ? 'Объединить выбранные заявки одного направления в одну' : mergeEligibility.reason}>
+                                            {bulkMerging ? 'Объединение…' : `🔗 Объединить (${formatNumber(selectedIds.size, 0)})`}
+                                        </button>
+                                    )}
+                                    <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting || bulkStatusing != null || bulkMerging}>
                                         {bulkDeleting ? 'Удаление…' : `🗑 Удалить выбранные (${formatNumber(selectedIds.size, 0)})`}
                                     </button>
                                     <button className="btn btn-secondary btn-sm" onClick={() => setSelectedIds(new Set())}>Снять</button>

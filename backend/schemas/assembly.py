@@ -8,7 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PackageTypeStr = Literal["BOX", "MONOPALLET", "SUPERSAFE"]
 
@@ -123,6 +123,36 @@ class AssemblyRequestUpdate(BaseModel):
     driver_phone: str | None = None
     carrier_inn: str | None = None
     carrier_name: str | None = None
+
+
+class AssemblyMergeRequest(BaseModel):
+    """Тело POST /warehouse/assembly/merge — объединить N созданных сборок в одну.
+
+    Разрешено только для однородного набора (один склад-источник, одно
+    направление, одна упаковка) в статусах PENDING/IN_PROGRESS. Позиции
+    суммируются по (nomenclature_id, barcode), паллеты/вес пересчитываются,
+    ФФ-связи перевешиваются на survivor, остальные — soft-delete.
+    """
+
+    request_ids: list[int] = Field(
+        ...,
+        min_length=2,
+        description="ID сборок для объединения (≥2 различных значения)",
+    )
+
+    @field_validator("request_ids")
+    @classmethod
+    def dedup_and_validate(cls, v: list[int]) -> list[int]:
+        """Дедуп с сохранением порядка; требуется ≥2 различных id."""
+        seen: set[int] = set()
+        result: list[int] = []
+        for i in v:
+            if i not in seen:
+                seen.add(i)
+                result.append(i)
+        if len(result) < 2:
+            raise ValueError("Нужно ≥2 различных id сборок для объединения")
+        return result
 
 
 class AssignVehicle(BaseModel):

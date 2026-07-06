@@ -45,6 +45,7 @@ from backend.services.assembly import (  # noqa: F401
     list_assembly_requests,
     list_wb_warehouses,
     mark_ready,
+    merge_assembly_requests,
     prefetch_list_maps,
     refresh_from_fbo,
     reopen_for_reship,

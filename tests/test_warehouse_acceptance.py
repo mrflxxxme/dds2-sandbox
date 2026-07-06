@@ -608,6 +608,30 @@ class TestAggregateCoefficients:
         raw = [{"warehouseID": 507, "coefficient": 0, "allowUnload": True, "boxTypeID": 99}]
         assert _aggregate_coefficients(raw, wh_id_to_name) == {}
 
+    def test_spec_warehouse_excluded_from_meta(self):
+        """Спец-склады (СГТ/Питание/…) не подмешивают свои открытые дни в meta
+        реального склада. Прод-баг Казань-моно (ASM-601/602 2026-07-06): реальный
+        склад closed=-1 все дни, а «Казань СГТ»/«Казань: Питание» открыты
+        coef=0 → канон «Казань» ложно получал free_days>0 → «есть лимит» →
+        товар шёл в заявки вместо предброни. Зеркало _flags_for_warehouse /
+        _build_acceptance_limits, где spec-фильтр уже есть."""
+        wh_id_to_name = {
+            10: "Казань",  # реальный FBO
+            11: "Казань СГТ",  # спец — отсеять
+            12: "Казань: Питание",  # спец — отсеять
+        }
+        raw = [
+            {"warehouseID": 10, "coefficient": -1, "allowUnload": True, "boxTypeID": 5},  # real: closed
+            {"warehouseID": 11, "coefficient": 0, "allowUnload": True, "boxTypeID": 5},  # СГТ: open
+            {"warehouseID": 12, "coefficient": 0, "allowUnload": True, "boxTypeID": 5},  # Питание: open
+        ]
+        out = _aggregate_coefficients(raw, wh_id_to_name)
+        meta = out[("Казань", "mono")]
+        assert meta["free_days_14"] == 0  # spec-дни НЕ подмешаны
+        assert meta["paid_days_14"] == 0
+        assert meta["closed_days_14"] == 1  # только реальный склад (-1)
+        assert meta["total_days"] == 1
+
 
 class TestFlagsForWarehouseWithCoefficients:
     """can_X должно учитывать coefficients (free_days > 0)."""

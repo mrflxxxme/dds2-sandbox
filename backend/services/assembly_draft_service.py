@@ -12,6 +12,7 @@ See backend/DOMAIN_ASSEMBLY.md for context (assembly module).
 
 import logging
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import cast
 
 from fastapi import HTTPException
@@ -624,6 +625,67 @@ def _allocate_pairs(
     return allocation
 
 
+def _dec(x: object) -> Decimal:
+    """Безопасный коэрс в Decimal (вес паллеты бывает float 0.0 или Decimal из БД)."""
+    return Decimal(str(x or 0))
+
+
+async def _fold_barcodes_into_request(
+    db: AsyncSession,
+    project_id: int,
+    req: AssemblyRequest,
+    barcodes: dict[str, int],
+    nom_map: dict[str, Nomenclature],
+    *,
+    add_pallets: int,
+    add_pallet_weight: object,
+) -> None:
+    """Долить набор barcode→qty в уже существующую сборку (повторный commit того же
+    черновика на то же направление). Позиции суммируются по (nomenclature_id, barcode);
+    паллеты складываются, `pallet_weight_kg` (вес одной паллеты) пересчитывается как
+    взвешенное среднее. Так «дозабор из предброни» не плодит вторую заявку."""
+    existing_items = (
+        (
+            await db.execute(
+                select(AssemblyRequestItem).where(
+                    AssemblyRequestItem.project_id == project_id,
+                    AssemblyRequestItem.assembly_request_id == req.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_key: dict[tuple[int, str], AssemblyRequestItem] = {(it.nomenclature_id, it.barcode): it for it in existing_items}
+    for bc, qty in barcodes.items():
+        if qty <= 0:
+            continue
+        nom = nom_map[bc]
+        key = (nom.id, bc)
+        cur = by_key.get(key)
+        if cur is not None:
+            cur.quantity += qty
+        else:
+            new_it = AssemblyRequestItem(
+                project_id=project_id,
+                assembly_request_id=req.id,
+                nomenclature_id=nom.id,
+                barcode=bc,
+                quantity=qty,
+            )
+            db.add(new_it)
+            by_key[key] = new_it
+
+    old_pallets = max(0, int(req.pallets_count or 0))
+    add_p = max(0, int(add_pallets or 0))
+    total_pallets = old_pallets + add_p
+    if total_pallets > 0:
+        total_w = _dec(old_pallets) * _dec(req.pallet_weight_kg) + _dec(add_p) * _dec(add_pallet_weight)
+        req.pallet_weight_kg = (total_w / Decimal(total_pallets)).quantize(Decimal("0.01"))
+    req.pallets_count = max(1, total_pallets)
+    await db.flush()
+
+
 async def commit_draft(
     db: AsyncSession,
     project_id: int,
@@ -857,6 +919,48 @@ async def commit_draft(
     created_ids: list[int] = []
     try:
         for (pair_src_id, target_wb_name, package_type), barcodes in pair_items.items():
+            # Дедуп повторного commit ЭТОГО ЖЕ черновика: если на это направление
+            # (склад · WB · упаковка) уже есть не-отгруженная сборка ИЗ ЭТОГО черновика —
+            # доливаем позиции в неё, а не плодим дубль. Кейс: авто-раскладку закоммитили,
+            # потом «дозабили из предброни» и закоммитили снова тем же черновиком (черновик
+            # переживает commit, пока в нём осталась предбронь — см. ветку ниже). Скоуп
+            # source_draft_id гарантирует, что намеренно раздельные сборки других
+            # черновиков не затрагиваются.
+            # Скоуп статусов — PENDING/IN_PROGRESS намеренно: если первую сборку уже
+            # перевели в READY (собрана, готова к отгрузке), доливать в неё нельзя —
+            # это тихо «расготовит» уже собранный груз. Такой (редкий) повторный
+            # дозабор создаст отдельную сборку; её можно слить кнопкой «Объединить»
+            # (предварительно вернув в «В сборке»).
+            existing_sibling = (
+                await db.execute(
+                    select(AssemblyRequest)
+                    .where(
+                        AssemblyRequest.project_id == project_id,
+                        AssemblyRequest.source_draft_id == draft_id,
+                        AssemblyRequest.warehouse_id == pair_src_id,
+                        AssemblyRequest.wb_warehouse_name_manual == target_wb_name,
+                        AssemblyRequest.wb_fbo_supply_id.is_(None),
+                        AssemblyRequest.package_type == package_type,
+                        AssemblyRequest.status.in_((AssemblyStatus.PENDING, AssemblyStatus.IN_PROGRESS)),
+                        AssemblyRequest.is_deleted == False,  # noqa: E712
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if existing_sibling is not None:
+                await _fold_barcodes_into_request(
+                    db,
+                    project_id,
+                    existing_sibling,
+                    barcodes,
+                    nom_map,
+                    add_pallets=_pallets_for(pair_src_id, target_wb_name, package_type),
+                    add_pallet_weight=pallet_weight,
+                )
+                if existing_sibling.id not in created_ids:
+                    created_ids.append(existing_sibling.id)
+                continue
+
             number = await _next_number(db, project_id, "ASM", AssemblyRequest)
             if pair_has_newcomer.get((pair_src_id, target_wb_name, package_type)):
                 pieces = [NEWCOMER_COMMENT_PREFIX]

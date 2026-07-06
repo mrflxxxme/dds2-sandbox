@@ -164,6 +164,7 @@ function collapseJoint(items: AssemblyRequest[]): AssemblyRequest[] {
 
 const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> = {
     PENDING:          { label: 'Ожидает сборку',    className: 'badge-warning' },
+    PRE_DISTRIBUTED:  { label: 'Распределено',      className: 'badge-secondary' },
     IN_PROGRESS:      { label: 'В сборке',          className: 'badge-info' },
     READY:            { label: 'Готово',             className: 'badge-success' },
     VEHICLE_ASSIGNED: { label: 'Машина назначена',   className: 'badge-info' },

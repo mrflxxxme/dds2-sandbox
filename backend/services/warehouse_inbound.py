@@ -226,6 +226,53 @@ async def update_receipt(db: AsyncSession, project_id: int, receipt_id: int, pay
         raise ValueError(f"Cannot edit receipt in status {receipt.status}")
 
 
+async def _deliver_linked_vehicle(db: AsyncSession, project_id: int, cost_order_id: int | None) -> bool:
+    """Приёмка принята → машину DISPATCHED → DELIVERED + отметить FactoryOrderItems.
+
+    Общая логика для обоих путей приёмки (наша `accept_receipt` и ФФ-портальная
+    `accept_receipt_ff`). Раньше жила только в `accept_receipt`, из-за чего приёмка
+    через ФФ-портал (Хамза/Натали) принимала товар, но машина навсегда висела в
+    «Ожидаемых поставках» (DISPATCHED). Возвращает True, если статус изменился —
+    вызывающий инвалидирует кэш каталога поставщика (delivered_qty от него зависит).
+    """
+    if not cost_order_id:
+        return False
+
+    from backend.models.cost import CostOrder, CostOrderItem
+    from backend.models.enums import VehicleStatus
+    from backend.models.supply_chain import FactoryOrderItem
+
+    result = await db.execute(select(CostOrder).where(CostOrder.id == cost_order_id))
+    vehicle = result.scalar_one_or_none()
+    if not vehicle or vehicle.status != VehicleStatus.DISPATCHED:
+        return False
+
+    vehicle.status = VehicleStatus.DELIVERED
+
+    # Mark linked FactoryOrderItems as delivered
+    foi_ids_result = await db.execute(
+        select(CostOrderItem.factory_order_item_id).where(
+            CostOrderItem.order_no == vehicle.order_no,
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.is_deleted == False,  # noqa: E712
+            CostOrderItem.factory_order_item_id.isnot(None),
+        )
+    )
+    foi_ids = [row[0] for row in foi_ids_result.all()]
+    if foi_ids:
+        foi_result = await db.execute(
+            select(FactoryOrderItem).where(
+                FactoryOrderItem.id.in_(foi_ids),
+                FactoryOrderItem.project_id == project_id,
+                FactoryOrderItem.is_deleted == False,  # noqa: E712
+            )
+        )
+        for foi in foi_result.scalars().all():
+            foi.is_delivered = True
+
+    return True
+
+
 async def accept_receipt(
     db: AsyncSession,
     project_id: int,
@@ -322,40 +369,10 @@ async def accept_receipt(
     receipt.actual_date = date.today()
 
     # Auto-transition vehicle DISPATCHED → DELIVERED
-    vehicle_delivered = False
+    vehicle_delivered = await _deliver_linked_vehicle(db, project_id, receipt.cost_order_id)
+
     pre_dist_advanced = 0
     if receipt.cost_order_id:
-        from backend.models.cost import CostOrder, CostOrderItem
-        from backend.models.enums import VehicleStatus
-        from backend.models.supply_chain import FactoryOrderItem
-
-        result = await db.execute(select(CostOrder).where(CostOrder.id == receipt.cost_order_id))
-        vehicle = result.scalar_one_or_none()
-        if vehicle and vehicle.status == VehicleStatus.DISPATCHED:
-            vehicle.status = VehicleStatus.DELIVERED
-            vehicle_delivered = True
-
-            # Mark linked FactoryOrderItems as delivered
-            foi_ids_result = await db.execute(
-                select(CostOrderItem.factory_order_item_id).where(
-                    CostOrderItem.order_no == vehicle.order_no,
-                    CostOrderItem.project_id == project_id,
-                    CostOrderItem.is_deleted == False,  # noqa: E712
-                    CostOrderItem.factory_order_item_id.isnot(None),
-                )
-            )
-            foi_ids = [row[0] for row in foi_ids_result.all()]
-            if foi_ids:
-                foi_result = await db.execute(
-                    select(FactoryOrderItem).where(
-                        FactoryOrderItem.id.in_(foi_ids),
-                        FactoryOrderItem.project_id == project_id,
-                        FactoryOrderItem.is_deleted == False,  # noqa: E712
-                    )
-                )
-                for foi in foi_result.scalars().all():
-                    foi.is_delivered = True
-
         # Предраспределение машины в пути: заявки сборки, зарезервированные под товар
         # этой машины (source_vehicle_id) ДО приёмки, на разгрузке становятся обычными
         # (PRE_DISTRIBUTED → IN_PROGRESS) — резерв стал реальным стоком в ЭТОЙ же
@@ -544,9 +561,16 @@ async def accept_receipt_ff(
     receipt.status = InboundStatus.ACCEPTED
     receipt.actual_date = date.today()
 
+    # Auto-transition vehicle DISPATCHED → DELIVERED (как в accept_receipt).
+    # Без этого ФФ-приёмка (Хамза/Натали) принимала товар, а машина навсегда
+    # висела в «Ожидаемых поставках».
+    vehicle_delivered = await _deliver_linked_vehicle(db, project_id, receipt.cost_order_id)
+
     await db.commit()
     await db.refresh(receipt, ["items"])
 
     await invalidate_cache("reports:balance")
     await invalidate_cache("reports:assembly_link_anomalies")
+    if vehicle_delivered:
+        await invalidate_cache(f"supply_chain:supplier_catalog:project_id={project_id}")
     return receipt
