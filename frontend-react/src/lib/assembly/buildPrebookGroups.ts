@@ -111,6 +111,14 @@ export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
         }
     }
     const out: PrebookGroup[] = [];
+    // Дозабор резервируется МЕЖДУ направлениями: один и тот же свободный короб не
+    // должен предлагаться двум отгрузкам (иначе пересорт — физически коробов меньше,
+    // чем суммарно обещано). Сначала строим геометрию всех групп, копим кандидатов на
+    // дозабор, затем во втором проходе раздаём дефицитный пул из мутабельного клона.
+    interface BoxElig { grp: PrebookGroup; ffId: number; wb: string; shortfall: number; pallets: number }
+    interface MonoElig { grp: PrebookGroup; ffId: number; wb: string; shortfall: number; topNm: Set<number>; pallets: number }
+    const boxElig: BoxElig[] = [];
+    const monoElig: MonoElig[] = [];
     for (const g of map.values()) {
         // ИСТИННЫЙ footprint смешанной паллеты: КАЖДЫЙ SKU по своей геометрии
         // короба (Σ qty_i / upp_i), зеркало snapToWholePallets. Показ по одному
@@ -165,28 +173,18 @@ export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
         const boxes = g.items.reduce((sum, i) => sum + i.boxes, 0);
         const frac = footprint - Math.floor(footprint);
         const fillPct = footprint > 0 ? Math.min(0.99, frac || 0.99) : 0.5;
-        // Дозабор per-ФФ: неполную паллету этого ФФ на wb дособрать до целой из
-        // свободных коробов ЭТОГО ЖЕ ФФ (короб с двух ФФ собрать нельзя). Оценка
-        // ОПТИМИСТИЧНА (приёмку WB не дёргаем на рендере); точная — при клике «Дозабить».
-        let topUp: PrebookTopUp | null = null;
+        const ffLabel = g.ffId >= 0 ? ffName(g.ffId) : '—';
+        const looseUnits = g.items.reduce((sum, i) => sum + (i.looseUnits || 0), 0);
+        // topUp/tailTopUp считаются ВО ВТОРОМ проходе (с резервированием пула между
+        // направлениями) — здесь только копим геометрию дозабора.
+        const grp: PrebookGroup = { pkg: g.pkg, wb: g.wb, ff: ffLabel, ffId: g.ffId, items: g.items, boxes, qty: g.qty, looseUnits, footprint, fillPct, topUp: null, tailTopUp: null, monoPallets, monoPartials, monoTailFrac };
+        out.push(grp);
+        // BOX-дозабор: неполную паллету этого ФФ на wb дособрать до целой из свободных
+        // коробов ЭТОГО ЖЕ ФФ (короб с двух ФФ собрать нельзя).
         if (g.pkg === 'BOX' && footprint > 0 && g.ffId >= 0) {
-            const shortfall = Math.ceil(footprint) - footprint;
-            const candidates: TopUpCandidate[] = (freeBoxesByFf.get(g.ffId) ?? []).map(c => ({
-                nmId: c.nmId, ppb: c.ppb, freeBoxes: c.freeBoxes,
-                bpp: effectiveBoxesPerPallet(boxSizeOf(c.nmId) ?? null, maxPalletHeightCm(g.wb), palletOverrides),
-            }));
-            const plan = planTopUpBoxes(shortfall, candidates);
-            if (shortfall > 1e-9 && plan.feasible) {
-                topUp = {
-                    ff: ffName(g.ffId),
-                    needBoxes: plan.needBoxes,
-                    pallets: Math.max(1, Math.ceil(footprint)),
-                    candidates: plan.rows.map(pr => ({ vendor: nmVendor.get(pr.nmId) || `nm ${pr.nmId}`, boxes: pr.boxes, nmId: pr.nmId })),
-                };
-            }
+            boxElig.push({ grp, ffId: g.ffId, wb: g.wb, shortfall: Math.ceil(footprint) - footprint, pallets: Math.max(1, Math.ceil(footprint)) });
         }
         // МОНО-хвост: чем дозабрать до ещё одной ЦЕЛОЙ из свободного ФФ (ТОП-3 крупнейших хвоста).
-        let tailTopUp: PrebookTopUp | null = null;
         if (g.pkg === 'MONOPALLET' && g.ffId >= 0 && pmDropped) {
             const tails = Object.entries(pmDropped)
                 .map(([k, v]) => { const u = uppOf(Number(k)); return { nm: Number(k), fp: u > 0 ? v / u : 0 }; })
@@ -195,28 +193,51 @@ export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
                 .slice(0, MONO_MAX_PALLET_ARTICLES);
             const topFp = tails.reduce((sum, t) => sum + t.fp, 0);
             const shortfall = topFp > 1e-9 ? 1 - topFp : 0;
-            if (shortfall > 1e-9) {
-                const topNm = new Set(tails.map(t => t.nm));
-                const cands: TopUpCandidate[] = (freeBoxesByFf.get(g.ffId) ?? [])
-                    .filter(c => topNm.has(c.nmId))
-                    .map(c => ({
-                        nmId: c.nmId, ppb: c.ppb, freeBoxes: c.freeBoxes,
-                        bpp: effectiveBoxesPerPallet(boxSizeOf(c.nmId) ?? null, maxPalletHeightCm(g.wb), palletOverrides),
-                    }));
-                const plan = planTopUpBoxes(shortfall, cands);
-                if (plan.feasible && plan.rows.length > 0) {
-                    tailTopUp = {
-                        ff: ffName(g.ffId),
-                        needBoxes: plan.needBoxes,
-                        pallets: monoWhole + 1,
-                        candidates: plan.rows.map(pr => ({ vendor: nmVendor.get(pr.nmId) || `nm ${pr.nmId}`, boxes: pr.boxes, nmId: pr.nmId })),
-                    };
-                }
-            }
+            if (shortfall > 1e-9) monoElig.push({ grp, ffId: g.ffId, wb: g.wb, shortfall, topNm: new Set(tails.map(t => t.nm)), pallets: monoWhole + 1 });
         }
-        const ffLabel = g.ffId >= 0 ? ffName(g.ffId) : '—';
-        const looseUnits = g.items.reduce((sum, i) => sum + (i.looseUnits || 0), 0);
-        out.push({ pkg: g.pkg, wb: g.wb, ff: ffLabel, ffId: g.ffId, items: g.items, boxes, qty: g.qty, looseUnits, footprint, fillPct, topUp, tailTopUp, monoPallets, monoPartials, monoTailFrac });
+    }
+
+    // ── Второй проход: раздача дозабора с РЕЗЕРВИРОВАНИЕМ общего свободного пула ФФ.
+    // Мутабельный клон per-ФФ: направление, которому до целой паллеты не хватает
+    // МЕНЬШЕ всего (shortfall↑), получает дефицитный сток первым — так собирается
+    // максимум целых паллет, а один короб не обещается двум направлениям.
+    const poolByFf = new Map<number, Map<number, { ppb: number; freeBoxes: number }>>();
+    for (const [ff, arr] of freeBoxesByFf) {
+        const m = new Map<number, { ppb: number; freeBoxes: number }>();
+        for (const c of arr) m.set(c.nmId, { ppb: c.ppb, freeBoxes: c.freeBoxes });
+        poolByFf.set(ff, m);
+    }
+    // Кандидаты ФФ на текущий момент (учёт уже зарезервированного), отсортированы по остатку.
+    const ffCandidates = (ffId: number, wb: string, filterNm: Set<number> | null): TopUpCandidate[] => {
+        const m = poolByFf.get(ffId);
+        if (!m) return [];
+        const arr: TopUpCandidate[] = [];
+        for (const [nmId, v] of m) {
+            if (v.freeBoxes <= 0) continue;
+            if (filterNm && !filterNm.has(nmId)) continue;
+            arr.push({ nmId, ppb: v.ppb, freeBoxes: v.freeBoxes, bpp: effectiveBoxesPerPallet(boxSizeOf(nmId) ?? null, maxPalletHeightCm(wb), palletOverrides) });
+        }
+        arr.sort((x, y) => y.freeBoxes - x.freeBoxes);
+        return arr;
+    };
+    const reserve = (ffId: number, rows: { nmId: number; boxes: number }[]): void => {
+        const m = poolByFf.get(ffId);
+        if (!m) return;
+        for (const r of rows) { const v = m.get(r.nmId); if (v) v.freeBoxes = Math.max(0, v.freeBoxes - r.boxes); }
+    };
+    const asCandidate = (pr: { nmId: number; boxes: number }) => ({ vendor: nmVendor.get(pr.nmId) || `nm ${pr.nmId}`, boxes: pr.boxes, nmId: pr.nmId });
+    // BOX и МОНО-хвост тянут из ОДНОГО физического пула ФФ — обрабатываем вместе, по
+    // возрастанию shortfall (ближайшие к целой — первыми).
+    const eligAll = [
+        ...boxElig.map(e => ({ ...e, kind: 'box' as const, topNm: null as Set<number> | null })),
+        ...monoElig.map(e => ({ ...e, kind: 'mono' as const })),
+    ].sort((a, b) => a.shortfall - b.shortfall);
+    for (const e of eligAll) {
+        const plan = planTopUpBoxes(e.shortfall, ffCandidates(e.ffId, e.wb, e.topNm));
+        if (!plan.feasible || plan.rows.length === 0) continue;
+        reserve(e.ffId, plan.rows);
+        const topUp: PrebookTopUp = { ff: ffName(e.ffId), needBoxes: plan.needBoxes, pallets: e.pallets, candidates: plan.rows.map(asCandidate) };
+        if (e.kind === 'box') e.grp.topUp = topUp; else e.grp.tailTopUp = topUp;
     }
     return out;
 }
