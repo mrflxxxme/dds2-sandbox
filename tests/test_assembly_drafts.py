@@ -2554,3 +2554,136 @@ def test_draft_nm_ids_tolerates_missing_parts():
     """Отсутствующие/null rows и prebook не роняют чтение."""
     draft = AssemblyDraft(project_id=PROJECT_ID, name="t", distribution={"rows": None})
     assert assembly_draft_service._draft_nm_ids(draft) == set()
+
+
+# ─── Tests: commit-дедуп (фикс дубля «дозабор из предброни») ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_commit_draft_dedup_folds_second_commit_same_direction(db_session):
+    """Повторный commit ТОГО ЖЕ черновика на то же направление доливает позиции в
+    уже созданную сборку, а не плодит дубль (регресс: авто-раскладку закоммитили,
+    потом «дозабили из предброни» и закоммитили снова тем же черновиком)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    # Предбронь → черновик переживает первый commit (rows очистятся, prebook сохранится).
+    dist = AssemblyDraftDistribution(
+        source_warehouse_ids=[wh_a],
+        target_warehouse_names=["Тула"],
+        rows=[AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 6}, tgt={"Тула": 6})],
+        prebook=[AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_a): 3}, tgt={"Тула": 3})],
+        pallets_count=1,
+        pallet_weight_kg=100.0,
+    )
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, AssemblyDraftCreate(name="D", distribution=dist, comment="t")
+    )
+    resp1 = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert len(resp1.created_request_ids) == 1
+    first_id = resp1.created_request_ids[0]
+
+    # «Дозабор из предброни»: доливаем строки на ТО ЖЕ направление в тот же черновик.
+    await assembly_draft_service.add_rows_to_draft(
+        db_session,
+        PROJECT_ID,
+        draft.id,
+        [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 4}, tgt={"Тула": 4})],
+    )
+    resp2 = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    # Дедуп: тот же request, не новый.
+    assert resp2.created_request_ids == [first_id]
+
+    # Ровно одна не-удалённая сборка на Тулу из этого черновика.
+    res = await db_session.execute(
+        select(AssemblyRequest).where(
+            AssemblyRequest.source_draft_id == draft.id,
+            AssemblyRequest.wb_warehouse_name_manual == "Тула",
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+        )
+    )
+    reqs = list(res.scalars().all())
+    assert len(reqs) == 1 and reqs[0].id == first_id
+
+    # TEST_BARCODE_1 просуммирован: 6 (1-й commit) + 4 (дозабор) = 10.
+    item_q = await db_session.execute(
+        text("SELECT barcode, quantity FROM assembly_request_items WHERE assembly_request_id = :id"),
+        {"id": first_id},
+    )
+    qty_by_bc = {r.barcode: r.quantity for r in item_q.all()}
+    assert qty_by_bc[TEST_BARCODE_1] == 10
+
+
+# ─── Tests: merge_assembly_requests (объединение созданных сборок) ───────────
+
+
+async def _commit_one(db_session, wh: int, wb: str, items: dict[str, int], *, pallets: int = 1) -> int:
+    """Создать одну сборку через commit отдельного черновика (без валидации стока).
+    Возвращает id созданной AssemblyRequest."""
+    nm_by_bc = {TEST_BARCODE_1: 111, TEST_BARCODE_2: 222}
+    total = sum(items.values())
+    rows = [
+        AssemblyDraftRow(nm_id=nm_by_bc[bc], barcode=bc, src={str(wh): q}, tgt={wb: q}) for bc, q in items.items()
+    ]
+    dist = AssemblyDraftDistribution(
+        source_warehouse_ids=[wh],
+        target_warehouse_names=[wb],
+        rows=rows,
+        pallets_count=pallets,
+        pallet_weight_kg=100.0,
+    )
+    assert total > 0
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, AssemblyDraftCreate(name="D", distribution=dist, comment="t")
+    )
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert len(resp.created_request_ids) == 1
+    return resp.created_request_ids[0]
+
+
+@pytest.mark.asyncio
+async def test_merge_assembly_requests_sums_and_soft_deletes(db_session):
+    """merge: survivor — с наибольшим числом позиций; позиции суммируются, паллеты
+    складываются, losers → soft-delete, число не-удалённых сборок падает."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    a = await _commit_one(db_session, wh_a, "Тула", {TEST_BARCODE_1: 6}, pallets=6)
+    b = await _commit_one(db_session, wh_a, "Тула", {TEST_BARCODE_1: 4, TEST_BARCODE_2: 5}, pallets=1)
+
+    survivor = await assembly_service.merge_assembly_requests(db_session, PROJECT_ID, [a, b])
+    # Survivor — b (2 позиции > 1).
+    assert survivor.id == b
+    assert survivor.pallets_count == 7  # 6 + 1
+
+    item_q = await db_session.execute(
+        text("SELECT barcode, quantity FROM assembly_request_items WHERE assembly_request_id = :id"),
+        {"id": b},
+    )
+    qty_by_bc = {r.barcode: r.quantity for r in item_q.all()}
+    assert qty_by_bc[TEST_BARCODE_1] == 10  # 6 + 4
+    assert qty_by_bc[TEST_BARCODE_2] == 5
+
+    # Loser a — soft-deleted; его позиции удалены.
+    res = await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == a))
+    loser = res.scalar_one()
+    assert loser.is_deleted is True
+    cnt = await db_session.execute(
+        text("SELECT count(*) FROM assembly_request_items WHERE assembly_request_id = :id"), {"id": a}
+    )
+    assert cnt.scalar() == 0
+
+
+@pytest.mark.asyncio
+async def test_merge_assembly_requests_different_direction_rejected(db_session):
+    """Разные направления → 400 (нельзя объединять Тулу с Казанью)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    a = await _commit_one(db_session, wh_a, "Тула", {TEST_BARCODE_1: 6})
+    c = await _commit_one(db_session, wh_a, "Казань", {TEST_BARCODE_1: 4})
+    with pytest.raises(ValueError, match="одного склада"):
+        await assembly_service.merge_assembly_requests(db_session, PROJECT_ID, [a, c])
+
+
+@pytest.mark.asyncio
+async def test_merge_assembly_requests_missing_id_rejected(db_session):
+    """Несуществующий id (в т.ч. чужой проект) → «не найдены»."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    a = await _commit_one(db_session, wh_a, "Тула", {TEST_BARCODE_1: 6})
+    with pytest.raises(ValueError, match="не найдены"):
+        await assembly_service.merge_assembly_requests(db_session, PROJECT_ID, [a, 999_999_999])

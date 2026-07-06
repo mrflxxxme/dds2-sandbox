@@ -741,6 +741,47 @@ export default function AssemblyListPage() {
         }
     }, [selectedIds, items, bulkStatusing]);
 
+    // ─── Объединение выбранных сборок (дубли одного направления) ─────────────
+    // Бэкенд склеит только однородный набор (склад · направление · упаковка) в статусе
+    // «В сборке»; здесь то же условие проверяем заранее, чтобы гейтить кнопку и объяснить.
+    const [bulkMerging, setBulkMerging] = useState(false);
+    const mergeDirKey = useCallback((r: AssemblyRequest) => {
+        const pkg = r.package_type || 'BOX';
+        if (r.wb_fbo_supply_id != null) return `${r.warehouse_id}::${pkg}::sup${r.wb_fbo_supply_id}`;
+        return `${r.warehouse_id}::${pkg}::wh${(r.wb_warehouse_name_manual || r.wb_warehouse_name || '').trim()}`;
+    }, []);
+    const mergeEligibility = useMemo<{ ok: boolean; reason: string }>(() => {
+        const sel = items.filter(i => selectedIds.has(i.id));
+        if (sel.length < 2) return { ok: false, reason: 'Выберите ≥2 заявки одного направления' };
+        if (sel.some(i => i.status !== 'PENDING' && i.status !== 'IN_PROGRESS')) {
+            return { ok: false, reason: 'Объединять можно только заявки «В сборке»' };
+        }
+        if (new Set(sel.map(mergeDirKey)).size > 1) {
+            return { ok: false, reason: 'Выбраны разные склад / направление / упаковка' };
+        }
+        return { ok: true, reason: '' };
+    }, [items, selectedIds, mergeDirKey]);
+
+    const handleBulkMerge = useCallback(async () => {
+        const ids = [...selectedIds];
+        if (ids.length < 2 || bulkMerging) return;
+        if (!confirm(`Объединить ${formatNumber(ids.length, 0)} ${pluralRu(ids.length, ['заявку', 'заявки', 'заявок'])} в одну?`)) return;
+        setBulkMerging(true);
+        try {
+            const survivor = await api.mergeAssemblyRequests(ids);
+            setItems(prev => prev
+                .filter(i => !ids.includes(i.id) || i.id === survivor.id)
+                .map(i => (i.id === survivor.id ? survivor : i)));
+            setTotal(t => Math.max(0, t - (ids.length - 1)));
+            setSelectedIds(new Set());
+            setToast({ message: `Объединено в ${survivor.number}`, type: 'success' });
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка объединения', type: 'error' });
+        } finally {
+            setBulkMerging(false);
+        }
+    }, [selectedIds, bulkMerging]);
+
     // ─── Columns (TanStackDataTable: сортировка + Excel) ────────────────────
     // Inline-редактирование (палеты/вес/дата/статус) и кнопки-действия живут
     // внутри render-ячеек; getValue даёт сортировку по вычисляемым колонкам,
@@ -1168,15 +1209,22 @@ export default function AssemblyListPage() {
                             {selectedIds.size > 0 ? (
                                 <>
                                     <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedIds.size, 0)}</span>
-                                    <button className="btn btn-secondary btn-sm" onClick={() => handleBulkStatus('IN_PROGRESS')} disabled={bulkDeleting || bulkStatusing != null}
+                                    <button className="btn btn-secondary btn-sm" onClick={() => handleBulkStatus('IN_PROGRESS')} disabled={bulkDeleting || bulkStatusing != null || bulkMerging}
                                         title="Перевести все выбранные в «В сборке» одним запросом">
                                         {bulkStatusing === 'IN_PROGRESS' ? 'Перевожу…' : '→ В сборке'}
                                     </button>
-                                    <button className="btn btn-success btn-sm" onClick={() => handleBulkStatus('READY')} disabled={bulkDeleting || bulkStatusing != null}
+                                    <button className="btn btn-success btn-sm" onClick={() => handleBulkStatus('READY')} disabled={bulkDeleting || bulkStatusing != null || bulkMerging}
                                         title="Перевести все выбранные в «Готово» одним запросом (нужны поставка WB, палеты и вес)">
                                         {bulkStatusing === 'READY' ? 'Перевожу…' : '→ Готово'}
                                     </button>
-                                    <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting || bulkStatusing != null}>
+                                    {selectedIds.size >= 2 && (
+                                        <button className="btn btn-secondary btn-sm" onClick={handleBulkMerge}
+                                            disabled={bulkDeleting || bulkStatusing != null || bulkMerging || !mergeEligibility.ok}
+                                            title={mergeEligibility.ok ? 'Объединить выбранные заявки одного направления в одну' : mergeEligibility.reason}>
+                                            {bulkMerging ? 'Объединение…' : `🔗 Объединить (${formatNumber(selectedIds.size, 0)})`}
+                                        </button>
+                                    )}
+                                    <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting || bulkStatusing != null || bulkMerging}>
                                         {bulkDeleting ? 'Удаление…' : `🗑 Удалить выбранные (${formatNumber(selectedIds.size, 0)})`}
                                     </button>
                                     <button className="btn btn-secondary btn-sm" onClick={() => setSelectedIds(new Set())}>Снять</button>
