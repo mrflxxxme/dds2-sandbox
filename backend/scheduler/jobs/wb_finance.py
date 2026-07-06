@@ -265,6 +265,29 @@ async def _sync_finance_for_all(period: str | None, job_label: str):
                     cancel_err,
                 )
 
+            # Invalidate cached reports (БДР/ОПиУ/план-факт, ttl=1h) so freshly
+            # synced finance rows appear immediately instead of waiting out the
+            # cache TTL. Without this, the Monday weekly sync writes the closed
+            # week (incl. Sunday) but reports keep serving a stale pre-sync
+            # snapshot for up to an hour. Only invalidate when data actually
+            # landed (WB 204 → rows_synced=0 → nothing to refresh).
+            if rows_synced > 0:
+                try:
+                    from backend.cache import invalidate_project_reports
+
+                    await invalidate_project_reports(pid)
+                    logger.info(
+                        "💰 WB Finance %s: project %s — report cache invalidated",
+                        job_label,
+                        pid,
+                    )
+                except Exception as inv_err:
+                    logger.error(
+                        "Failed to invalidate report cache for project %s: %s",
+                        pid,
+                        inv_err,
+                    )
+
         except TimeoutError:
             log_status = "TIMEOUT"
             log_error_msg = "Timeout 600s exceeded"
