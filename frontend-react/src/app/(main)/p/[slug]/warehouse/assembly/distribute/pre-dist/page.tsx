@@ -8,6 +8,7 @@ import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constant
 import { Toast } from '@/components';
 import {
     applyAcceptanceSplits,
+    applyCellBoxDelta,
     buildPinnedRows,
     buildPoolSkus,
     buildTopUpRows,
@@ -314,14 +315,20 @@ export default function PreDistVehiclePage() {
                 if (!signal.aborted) { setDistRows([]); setPrebookRows([]); setAcceptanceNote(null); }
                 return;
             }
-            // Ручные правки ячеек: баркоды с пинами исключаются из авто-раскладки и
-            // управляются целиком через `buildPinnedRows` (extraRows общего движка).
-            // Приёмку по ним проверяем отдельными item'ами (nm→pkg-флаги для pinnedPkgOf).
+            // Режим правки = ПОЛНОСТЬЮ ручной: авто-раскладка ВЫКЛючена (чистый лист), матрицу
+            // формируют ТОЛЬКО ручные пины (`cellEdits`). Вне режима правки — авто-раскладка
+            // «по потребности», а пины дремлют (не влияют, но сохраняются до включения правки).
+            // Приёмку по пинам проверяем отдельными item'ами (nm→pkg-флаги для pinnedPkgOf/меток).
+            // Ручной режим активен, пока (а) включена правка ИЛИ (б) есть хоть один пин —
+            // чтобы «Готово» (спрятать степперы) НЕ откатывало ручную раскладку в авто. Возврат
+            // к авто — только «↺ Сбросить все правки» (очищает cellEdits).
+            const manualMode = editMode || cellEdits.size > 0;
+            const activeEdits: CellEdits = manualMode ? cellEdits : new Map();
             const nmByBarcodePool = new Map<string, number>();
             for (const pr of poolData.rows) nmByBarcodePool.set(pr.barcode, pr.article_wb ? Number(pr.article_wb) : 0);
-            const autoSkus = skus.filter(s => !cellEdits.has(s.barcode));
+            const autoSkus = manualMode ? [] : skus.filter(s => !activeEdits.has(s.barcode));
             const pinnedItems: { nm_id: number; barcode: string; distribution: Record<string, number> }[] = [];
-            for (const [bc, whBoxes] of cellEdits) {
+            for (const [bc, whBoxes] of activeEdits) {
                 const nm = nmByBarcodePool.get(bc) ?? 0;
                 const ppb = nmPpb.get(nm) || 0;
                 if (!nm || ppb <= 0) continue;
@@ -346,6 +353,10 @@ export default function PreDistVehiclePage() {
             const accCache = acceptanceCacheRef.current;
             if (accCache && accCache.sig === accSig) {
                 splitMap = accCache.splitMap; summary = accCache.summary; accByNm = accCache.accByNm;
+            } else if (autoSkus.length === 0 && pinnedItems.length === 0) {
+                // Ничего проверять (пустой ручной лист) — не дёргаем сеть пустым запросом.
+                splitMap = new Map();
+                acceptanceCacheRef.current = { sig: accSig, splitMap, summary, accByNm };
             } else {
                 try {
                     const resp = await api.checkWbAcceptance({
@@ -387,7 +398,7 @@ export default function PreDistVehiclePage() {
                 if (!f) return 'BOX';
                 return f.can_box ? 'BOX' : f.can_monopallet ? 'MONOPALLET' : f.can_supersafe ? 'SUPERSAFE' : 'BOX';
             };
-            const pinnedRows = buildPinnedRows(cellEdits, poolData.rows, targetWh, nmPpb, pinnedPkgOf);
+            const pinnedRows = buildPinnedRows(activeEdits, poolData.rows, targetWh, nmPpb, pinnedPkgOf);
 
             // Раскладка ВСЕГДА строго целыми паллетами (как «Черновик»): под-паллетные хвосты
             // уходят в ПРЕДБРОНЬ (там — дозабор из остатка машины), россыпь запрещена. Засев
@@ -398,7 +409,7 @@ export default function PreDistVehiclePage() {
             // уедет по потребности per баркод/склад, чтобы не сеять поверх того же склада).
             const needBoxRows = finalizePoolDistribution(effective, distInput, false).rows;
             const seededRows: AssemblyDraftRow[] = [];
-            if (anchors.length > 0) {
+            if (!manualMode && anchors.length > 0) {
                 const shippedByBc = new Map<string, number>();
                 const needShipByBcWh = new Map<string, Map<string, number>>();
                 for (const r of rowsToPreDistRows(needBoxRows)) {
@@ -439,7 +450,7 @@ export default function PreDistVehiclePage() {
                 const s = Object.values(r.src).reduce((a, v) => a + (v || 0), 0);
                 reservedByBc.set(r.barcode, (reservedByBc.get(r.barcode) ?? 0) + s);
             }
-            const topUpRows = buildTopUpRows(manualTopUp, poolData.rows, targetWh, nmPpb, reservedByBc);
+            const topUpRows = manualMode ? [] : buildTopUpRows(manualTopUp, poolData.rows, targetWh, nmPpb, reservedByBc);
             const extra = [...seededRows, ...topUpRows, ...pinnedRows];
             // ДВЕ независимые раскладки одного пула (по решению юзера):
             //  • whole — строго целые паллеты → ЗАЯВКИ (коммит) + под-паллетные хвосты в ПРЕДБРОНЬ.
@@ -465,7 +476,7 @@ export default function PreDistVehiclePage() {
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
-    }, [stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, newcomerSet, anchors, showToast]);
+    }, [stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, editMode, newcomerSet, anchors, showToast]);
 
     useEffect(() => {
         if (!pool || !geomReady) return;
@@ -707,25 +718,16 @@ export default function PreDistVehiclePage() {
     const editCellBoxes = useCallback((barcode: string, nm: number, wh: string, delta: number) => {
         const ppb = nmPpb.get(nm) || 0;
         if (ppb <= 0) return;
-        const maxBoxes = Math.floor((availByBc.get(barcode) ?? 0) / ppb);
+        const avail = availByBc.get(barcode) ?? 0;
         setCellEdits(prev => {
             const next = new Map(prev);
-            let rec: Record<string, number>;
-            if (next.has(barcode)) {
-                rec = { ...next.get(barcode)! };
-            } else {
-                rec = {};
-                const cells = matrix.cellByBc.get(barcode);
-                if (cells) for (const [w, c] of cells) { const b = boxesOf(c.qty, ppb); if (b > 0) rec[w] = b; }
-            }
-            let val = Math.max(0, (rec[wh] ?? 0) + delta);
-            const others = Object.entries(rec).reduce((s, [w, b]) => s + (w === wh ? 0 : b), 0);
-            if (others + val > maxBoxes) val = Math.max(0, maxBoxes - others);  // кап остатком машины
-            if (val <= 0) delete rec[wh]; else rec[wh] = val;
-            next.set(barcode, rec);
+            // Режим правки = чистый лист: новый баркод стартует ПУСТЫМ (0 везде), ставишь короба
+            // сам из остатка машины. Уже тронутый — продолжаем с его пинов.
+            const rec = next.get(barcode) ?? {};
+            next.set(barcode, applyCellBoxDelta(rec, wh, delta, ppb, avail));
             return next;
         });
-    }, [nmPpb, availByBc, matrix]);
+    }, [nmPpb, availByBc]);
     const resetRowEdits = useCallback((barcode: string) => {
         setCellEdits(prev => { if (!prev.has(barcode)) return prev; const n = new Map(prev); n.delete(barcode); return n; });
     }, []);
@@ -951,11 +953,11 @@ export default function PreDistVehiclePage() {
             <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
                     <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setEditMode(m => !m)}>
-                        {editMode ? '✓ Готово с правкой' : '✏️ Редактировать раскладку'}
+                        {editMode ? '✓ Готово с ручной раскладкой' : '✏️ Разложить вручную'}
                     </button>
                     {editMode && (
-                        <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>
-                            −/+ в ячейке = ∓1 короб на склад. Кап — остаток машины. Приёмка перепроверяется, неполная паллета уходит в 🅿️ Предбронь.
+                        <span style={{ fontSize: 12, color: 'var(--color-warning)' }}>
+                            Ручной режим: авто-раскладка выключена, всё на ФФ. Ставь короба сам (−/+) из остатка машины; лимит приёмки склада проверяется (⌛ предзаявка · ⛔ закрыт).
                         </span>
                     )}
                     {cellEdits.size > 0 && (
