@@ -46,6 +46,7 @@ from backend.services.supply_chain.factory_orders import (
 )
 from backend.services.supply_chain.supplier_catalog import invalidate_supplier_catalog as _invalidate_supplier_catalog
 from backend.services.warehouse_stock_engine import _next_number, _resolve_barcode
+from backend.utils.box_size import normalize_box_size
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -441,7 +442,8 @@ async def add_items_to_vehicle(
 
         fo_bs = fo_item.mix_box_size if fo_item.mix_group_id and fo_item.mix_box_size else fo_item.box_size
         fo_ppb = fo_item.mix_pcs_per_box if fo_item.mix_group_id and fo_item.mix_pcs_per_box else fo_item.pcs_per_box
-        effective_bs = item_req.box_size_override or fo_bs
+        box_size_override = normalize_box_size(item_req.box_size_override)
+        effective_bs = box_size_override or fo_bs
         effective_ppb = item_req.pcs_per_box_override or fo_ppb
         vol_m3 = parse_box_volume_m3(effective_bs, effective_ppb)
 
@@ -457,7 +459,7 @@ async def add_items_to_vehicle(
             weight_kg=fo_item.weight_kg,
             volume_m3=vol_m3 if vol_m3 > 0 else None,
             factory_order_item_id=fo_item.id,
-            box_size_override=item_req.box_size_override,
+            box_size_override=box_size_override,
             pcs_per_box_override=item_req.pcs_per_box_override,
         )
         db.add(cost_item)
@@ -555,7 +557,8 @@ async def add_items_post_shipment(
 
         fo_bs = fo_item.mix_box_size if fo_item.mix_group_id and fo_item.mix_box_size else fo_item.box_size
         fo_ppb = fo_item.mix_pcs_per_box if fo_item.mix_group_id and fo_item.mix_pcs_per_box else fo_item.pcs_per_box
-        effective_bs = item_req.box_size_override or fo_bs
+        box_size_override = normalize_box_size(item_req.box_size_override)
+        effective_bs = box_size_override or fo_bs
         effective_ppb = item_req.pcs_per_box_override or fo_ppb
         vol_m3 = parse_box_volume_m3(effective_bs, effective_ppb)
 
@@ -570,7 +573,7 @@ async def add_items_post_shipment(
             weight_kg=fo_item.weight_kg,
             volume_m3=vol_m3 if vol_m3 > 0 else None,
             factory_order_item_id=fo_item.id,
-            box_size_override=item_req.box_size_override,
+            box_size_override=box_size_override,
             pcs_per_box_override=item_req.pcs_per_box_override,
             added_after_ship=True,
         )
@@ -1654,11 +1657,14 @@ async def _enrich_vehicle(
                 vat_rub=_safe_decimal(cost_item.vat_rub),
                 total_rub=_safe_decimal(cost_item.total_rub),
                 factory_order_item_id=cost_item.factory_order_item_id,
-                box_size=box_size,
+                # Канон «x» — иначе '60x40x50' (латиница из ФЗ) и '60х40х50'
+                # (кириллица из override) читаются как разные коробки на наполнении
+                # машины. Нормализация на чтении лечит и уже сохранённые строки.
+                box_size=normalize_box_size(box_size),
                 pcs_per_box=pcs_per_box,
                 box_detail=box_detail,
                 mix_group_id=mix_group_id,
-                mix_box_size=mix_box_size,
+                mix_box_size=normalize_box_size(mix_box_size),
                 mix_pcs_per_box=mix_pcs_per_box,
                 factory_order_id=fo_order_id,
                 factory_order_number=fo_order_number,

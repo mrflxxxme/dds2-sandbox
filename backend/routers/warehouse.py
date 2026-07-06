@@ -353,21 +353,28 @@ async def get_expected_vehicles(
     from backend.services.warehouse_crud import get_expected_vehicles as _get_expected
 
     vehicles = await _get_expected(db, project.id, warehouse_id)
-    return [
-        {
-            "order_no": v.order_no,
-            "status": v.status,
-            "invoice_no": v.invoice_no,
-            "ship_date": v.ship_date.isoformat() if v.ship_date else None,
-            "estimated_arrival_date": v.estimated_arrival_date.isoformat() if v.estimated_arrival_date else None,
-            "actual_ship_date": v.actual_ship_date.isoformat() if v.actual_ship_date else None,
-            "items_count": len(v.items),
-            "total_qty": sum(i.qty for i in v.items),
-            "container_type": v.container_type,
-            "transport_type": v.transport_type,
-        }
-        for v in vehicles
-    ]
+    result = []
+    for v in vehicles:
+        # selectinload(CostOrder.items) грузит и soft-deleted строки (перезаливки
+        # Excel мягко удаляют старые, а не физически) — считать только активные,
+        # иначе «поз/шт» задваиваются (V-0027: 118 актив + 153 мёртвых = 271 поз /
+        # 10 442 шт вместо 5 221). Деталь машины давно считает active-only.
+        active = [i for i in v.items if not i.is_deleted]
+        result.append(
+            {
+                "order_no": v.order_no,
+                "status": v.status,
+                "invoice_no": v.invoice_no,
+                "ship_date": v.ship_date.isoformat() if v.ship_date else None,
+                "estimated_arrival_date": v.estimated_arrival_date.isoformat() if v.estimated_arrival_date else None,
+                "actual_ship_date": v.actual_ship_date.isoformat() if v.actual_ship_date else None,
+                "items_count": len(active),
+                "total_qty": sum(i.qty for i in active),
+                "container_type": v.container_type,
+                "transport_type": v.transport_type,
+            }
+        )
+    return result
 
 
 # ─── Inbound Receipts (Приёмка) ────────────────────────────────────────────

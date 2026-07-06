@@ -345,18 +345,42 @@ async def _other_linked_ff_all_ready(
     return all(_assembly_ready_signal(r.provider, r.stage_code, r.stage_title, r.is_completed) for r in result.all())
 
 
-def _inbound_accept_signal(is_completed: bool) -> bool:
+# skladbot: приёмка (тип 852/2644), доведённая до ТЕРМИНАЛЬНОЙ стадии
+# «Завершение» = принята на остатки. Живой кейс (FR 202523 / IN-186, склад
+# «Газпром»): stage_code='completion', stage_title='Завершение', но
+# is_completed=0 — провайдер не всегда выставляет is_completed на финальной
+# стадии, из-за чего приёмка навсегда висела EXPECTED. Стадию учитываем как
+# резервный сигнал приёма ТОЛЬКО для терминального «completion».
+SKLADBOT_INBOUND_DONE_STAGE_CODES = frozenset({"completion"})
+SKLADBOT_INBOUND_DONE_TITLES = frozenset({"завершение"})
+
+
+def _inbound_accept_signal(
+    provider: str,
+    stage_code: str | None,
+    stage_title: str | None,
+    is_completed: bool,
+) -> bool:
     """ФФ принял приёмку на остатки → нашу приёмку EXPECTED/DRAFT можно ACCEPT.
 
-    Сигнал прихода на остатки у всех провайдеров — is_completed: skladbot
-    (тип 852/2644) при завершении приёмки очищает стадию «Приемка» и ставит
-    is_completed; wmscelicom (терминальный статус разгрузки) и migfull
-    (submission closed) — так же. Строгий сигнал (в отличие от сборки,
-    _assembly_ready_signal): accept_receipt ПОСТИТ сток на склад, ложный приём
-    дороже ложного READY (откат — лишь ACCEPTED→CANCELLED со встречными
-    движениями). Отменённые приёмки приходят archived=True и отсекаются синком.
+    Основной сигнал у всех провайдеров — is_completed: skladbot (тип 852/2644)
+    при завершении приёмки обычно ставит is_completed; wmscelicom (терминальный
+    статус разгрузки) и migfull (submission closed) — так же. Резервно для
+    skladbot: терминальная стадия «Завершение» (stage_code=completion) — тоже
+    приём, т.к. провайдер не всегда выставляет is_completed на финальной стадии.
+    Строгий сигнал (в отличие от сборки, _assembly_ready_signal): accept_receipt
+    ПОСТИТ сток на склад, ложный приём дороже ложного READY (откат — лишь
+    ACCEPTED→CANCELLED со встречными движениями) — поэтому у skladbot берём ТОЛЬКО
+    терминальный «completion», не deny-list по WIP-стадиям. Отменённые приёмки
+    приходят archived=True и отсекаются синком.
     """
-    return bool(is_completed)
+    if is_completed:
+        return True
+    if provider == "skladbot":
+        code = (stage_code or "").strip().lower()
+        title = (stage_title or "").strip().lower()
+        return code in SKLADBOT_INBOUND_DONE_STAGE_CODES or title in SKLADBOT_INBOUND_DONE_TITLES
+    return False
 
 
 def _assembly_shipped_signal(is_completed: bool) -> bool:
@@ -2173,7 +2197,8 @@ async def _collect_inbound_accept_candidates(
     receipt_ids = {
         req.inbound_receipt_id
         for req in ff_requests
-        if req.inbound_receipt_id is not None and _inbound_accept_signal(req.is_completed)
+        if req.inbound_receipt_id is not None
+        and _inbound_accept_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
     }
     if not receipt_ids:
         return []
@@ -4677,7 +4702,7 @@ async def link_request(
         accept_inbound = (
             not req.archived
             and not req.local_archived
-            and _inbound_accept_signal(req.is_completed)
+            and _inbound_accept_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
             and inb_doc.status in (InboundStatus.DRAFT.value, InboundStatus.EXPECTED.value)
         )
         inbound_map = {inb_doc.id: (inb_doc.number, inb_doc.status)}

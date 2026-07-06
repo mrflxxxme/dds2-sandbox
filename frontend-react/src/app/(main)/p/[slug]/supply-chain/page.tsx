@@ -7,7 +7,7 @@ import { formatNumber, formatDate, exportToExcel, calcTotalBoxesWithMix } from '
 import { LanguageProvider, useT, LanguageToggle, currencySymbol, translateSubject } from './i18n';
 
 /** Нормализация габаритов → "60x40x40" */
-const normalizeBoxSize = (s: string): string => s.trim().replace(/[×*,/\\]/g, 'x');
+const normalizeBoxSize = (s: string): string => s.trim().replace(/[×*,/\\хХX]/g, 'x');
 
 /** Кол-во мест (коробок) для одной позиции */
 const calcBoxes = (qty: number, pcsPerBox: number | null): number =>
