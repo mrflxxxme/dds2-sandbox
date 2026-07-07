@@ -256,6 +256,29 @@ export type CellEdits = Map<string, Record<string, number>>;
 export type PinnedPkgOf = (nm_id: number, wb: string) => PackageType;
 
 /**
+ * Применить ±`delta` коробов к пину ячейки склада (клик −/+ в матрице). Σ коробов по
+ * баркоду КЛАМПИТСЯ до `floor(avail/ppb)` — нельзя дорисовать больше, чем реально стоит на
+ * машине (соседние склады при этом не трогаются: клампится только кликнутый). Ноль/минус →
+ * склад выкидывается. Возвращает НОВУЮ карту {склад→коробов}. Чистая — юнит-тестируется.
+ */
+export function applyCellBoxDelta(
+    rec: Record<string, number>,
+    wh: string,
+    delta: number,
+    ppb: number,
+    avail: number,
+): Record<string, number> {
+    const next = { ...rec };
+    if (ppb <= 0) return next;
+    const maxBoxes = Math.floor(Math.max(0, avail) / ppb);
+    let val = Math.max(0, (next[wh] ?? 0) + delta);
+    const others = Object.entries(next).reduce((s, [w, b]) => s + (w === wh ? 0 : b), 0);
+    if (others + val > maxBoxes) val = Math.max(0, maxBoxes - others);  // кап остатком машины
+    if (val <= 0) delete next[wh]; else next[wh] = val;
+    return next;
+}
+
+/**
  * Отредактированные вручную ячейки матрицы (пины) → строки ЦЕЛЫХ коробов для общего движка
  * (`finalizeDistribution` как `extraRows`): паллеты/предбронь досчитаются там же, что и авто.
  *

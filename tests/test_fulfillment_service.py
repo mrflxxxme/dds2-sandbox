@@ -2474,8 +2474,11 @@ async def test_link_request_wip_stage_keeps_in_progress(db_session, project, war
 
 def test_inbound_accept_signal():
     sig = fulfillment_service._inbound_accept_signal
-    assert sig(True) is True  # ФФ принял на остатки
-    assert sig(False) is False  # ещё в стадии «Приемка»
+    assert sig("skladbot", None, None, True) is True  # ФФ принял на остатки
+    assert sig("skladbot", "acceptance", "Приемка", False) is False  # ещё в стадии «Приемка»
+    # skladbot: терминальная стадия «Завершение» = принято, даже без is_completed
+    # (живой кейс FR 202523 / IN-186, склад «Газпром»).
+    assert sig("skladbot", "completion", "Завершение", False) is True
 
 
 @pytest.mark.asyncio

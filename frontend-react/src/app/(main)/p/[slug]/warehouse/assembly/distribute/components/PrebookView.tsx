@@ -294,6 +294,11 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                 const busyTailTop = tailTopUpKey === key;
                 const busyTrim = trimTailKey === key;
                 const busy = busyTop || busyShip || busyDel || busyPrebook || busyTailTop || busyTrim;
+                // Дозабор ЛЮБОГО другого направления в полёте блокирует кнопки дозабора
+                // здесь: дозабор тянет из общего свободного пула ФФ, а хендлер читает
+                // rows/prebook из замыкания — параллельные клики забронируют один и тот
+                // же короб дважды (пересорт) до того, как первый сейв обновит стейт.
+                const otherTopUpBusy = (toppingUpKey != null && toppingUpKey !== key) || (tailTopUpKey != null && tailTopUpKey !== key);
                 const preorderOk = preorderWbs.has(g.wb);
                 // Предзаявка (бронь → отдельная заявка на сборку) нужна ТОЛЬКО для ⌛ моно
                 // (приём открыт, но лимита нет). Для моно с ОТКРЫТЫМ лимитом предзаявка не
@@ -410,8 +415,10 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                         </span>
                                         <div style={{ marginLeft: 'auto', display: 'inline-flex', gap: 8, flexWrap: 'wrap' }}>
                                             {g.tailTopUp && (
-                                                <button className="btn btn-success btn-sm" disabled={busy}
-                                                    title={`Добрать целыми коробами из свободного ФФ «${g.tailTopUp.ff}» до ещё одной целой паллеты — останется в предброни под предзаявку`}
+                                                <button className="btn btn-success btn-sm" disabled={busy || otherTopUpBusy}
+                                                    title={otherTopUpBusy
+                                                        ? 'Дождитесь завершения дозабора другого направления — идёт бронь общего свободного ФФ'
+                                                        : `Добрать целыми коробами из свободного ФФ «${g.tailTopUp.ff}» до ещё одной целой паллеты — останется в предброни под предзаявку`}
                                                     onClick={() => onTopUpPrebook(g.wb, g.ffId)}>
                                                     {busyTailTop ? '…' : '🧩 Дозабить до целой'}
                                                 </button>
@@ -456,7 +463,8 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                             onClick={() => onShipAsIs(g.pkg, g.wb, g.ffId)}>
                                             {busyShip ? '…' : '📦 Оставить так'}
                                         </button>
-                                        <button className="btn btn-success btn-sm" disabled={busy}
+                                        <button className="btn btn-success btn-sm" disabled={busy || otherTopUpBusy}
+                                            title={otherTopUpBusy ? 'Дождитесь завершения дозабора другого направления — идёт бронь общего свободного ФФ' : undefined}
                                             onClick={() => onTopUp(g.pkg, g.wb, g.ffId)}>
                                             {busyTop ? '…' : `🧩 Дозабить из «${g.topUp.ff}»`}
                                         </button>

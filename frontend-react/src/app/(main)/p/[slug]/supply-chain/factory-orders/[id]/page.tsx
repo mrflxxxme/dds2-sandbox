@@ -24,7 +24,9 @@ const parseNum = (s: string) => (s || '').trim().replace(/\s/g, '').replace(',',
 const normalizeBoxSize = (s: string): string => {
     const trimmed = s.trim();
     if (!trimmed) return '';
-    return trimmed.replace(/[×*,/\\]/g, 'x');
+    // Все разделители → латинская «x»: знак умножения, *, запятая, слэши, а также
+    // кириллическая «х»/«Х» и латинская «X» (иначе '60х40х50' ≠ '60x40x50').
+    return trimmed.replace(/[×*,/\\хХX]/g, 'x');
 };
 
 /** Вычислить объём из box_size "60x40x40" (см → м³), qty, pcs_per_box */

@@ -59,6 +59,65 @@ async def test_status_disconnected(client, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_expected_vehicles_excludes_soft_deleted_items(client, auth_headers, db_session):
+    """«Ожидаемые поставки» (карточка N поз / M шт) не должна включать soft-deleted
+    позиции машины. Перезаливка Excel мягко удаляет старые строки — карточка
+    задваивала (V-0027: 118 актив + 153 мёртвых → 10 442 вместо 5 221)."""
+    import uuid
+    from decimal import Decimal
+
+    from backend.models.cost import CostOrder, CostOrderItem
+    from backend.models.enums import VehicleStatus
+
+    headers = await _project_headers(client, auth_headers)
+    pid = int(headers["X-Project-Id"])
+    wh_id = await _create_warehouse(client, headers)
+
+    order_no = f"V-EXP-SD-{uuid.uuid4().hex[:8]}"
+    vehicle = CostOrder(
+        project_id=pid,
+        order_no=order_no,
+        country="CHINA",
+        status=VehicleStatus.DISPATCHED,
+        target_warehouse_id=wh_id,
+        rate_cny=Decimal("1"),
+        rate_usd=Decimal("1"),
+        rate_eur=Decimal("1"),
+        delivery_cost_cny=Decimal("0"),
+        delivery_cost_usd=Decimal("0"),
+    )
+    db_session.add(vehicle)
+    await db_session.flush()
+
+    def _item(qty, *, deleted=False):
+        it = CostOrderItem(
+            project_id=pid,
+            order_no=order_no,
+            barcode="BC-EXP",
+            qty=qty,
+            price_cny=Decimal("1"),
+            cost_rub=Decimal("0"),
+            delivery_rub=Decimal("0"),
+            duty_rub=Decimal("0"),
+            vat_rub=Decimal("0"),
+            util_rub=Decimal("0"),
+            total_rub=Decimal("0"),
+        )
+        if deleted:
+            it.soft_delete()
+        return it
+
+    db_session.add_all([_item(100), _item(100, deleted=True)])
+    await db_session.commit()
+
+    resp = await client.get(f"/api/v1/warehouse/{wh_id}/expected-vehicles", headers=headers)
+    assert resp.status_code == 200, resp.text
+    row = next(v for v in resp.json() if v["order_no"] == order_no)
+    assert row["items_count"] == 1  # dead row excluded
+    assert row["total_qty"] == 100  # not 200
+
+
+@pytest.mark.asyncio
 async def test_endpoints_require_auth(client):
     resp = await client.get("/api/v1/warehouse/1/fulfillment/status")
     assert resp.status_code in (401, 403, 422)
