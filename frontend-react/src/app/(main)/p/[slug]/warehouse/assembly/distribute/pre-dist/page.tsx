@@ -733,6 +733,27 @@ export default function PreDistVehiclePage() {
     }, []);
     const resetAllEdits = useCallback(() => setCellEdits(new Map()), []);
 
+    // Вход в ручной режим: «замораживаем» ТЕКУЩУЮ авто-раскладку в редактируемые пины,
+    // чтобы правка начиналась с уже разложенных данных (а не с чистого листа). Сеем только
+    // если правок ещё нет (повторный вход не перетирает ручные изменения). `matrix.cellByBc`
+    // тут = авто-покрытие (editMode ещё false в момент клика).
+    const enterManual = useCallback(() => {
+        setCellEdits(prev => {
+            if (prev.size > 0) return prev;  // уже есть ручные правки — не перетираем
+            const seeded: CellEdits = new Map();
+            for (const [bc, cells] of matrix.cellByBc) {
+                const nm = nmByBc.get(bc) ?? 0;
+                const ppb = nmPpb.get(nm) || 0;
+                if (ppb <= 0) continue;
+                const rec: Record<string, number> = {};
+                for (const [wh, c] of cells) { const b = boxesOf(c.qty, ppb); if (b > 0) rec[wh] = b; }
+                if (Object.keys(rec).length > 0) seeded.set(bc, rec);
+            }
+            return seeded;
+        });
+        setEditMode(true);
+    }, [matrix, nmByBc, nmPpb]);
+
     // Значение строки для сортировки по ключу колонки.
     const sortValue = useCallback((row: PreDistVehiclePool['rows'][number], key: SortKey): number | string => {
         const nm = nmByBc.get(row.barcode) ?? 0;
@@ -952,12 +973,12 @@ export default function PreDistVehiclePage() {
             ) : (<>
             <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
-                    <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setEditMode(m => !m)}>
+                    <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={editMode ? () => setEditMode(false) : enterManual}>
                         {editMode ? '✓ Готово с ручной раскладкой' : '✏️ Разложить вручную'}
                     </button>
                     {editMode && (
                         <span style={{ fontSize: 12, color: 'var(--color-warning)' }}>
-                            Ручной режим: авто-раскладка выключена, всё на ФФ. Ставь короба сам (−/+) из остатка машины; лимит приёмки склада проверяется (⌛ предзаявка · ⛔ закрыт).
+                            Ручной режим: стартует с текущей авто-раскладки — правь короба (−/+) под себя из остатка машины; лимит приёмки склада проверяется (⌛ предзаявка · ⛔ закрыт).
                         </span>
                     )}
                     {cellEdits.size > 0 && (
