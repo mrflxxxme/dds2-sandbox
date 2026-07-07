@@ -975,7 +975,9 @@ export default function PreDistVehiclePage() {
 
             {computing ? (
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>Считаю раскладку (потребность · приёмка · коробы · паллеты)…</div>
-            ) : matrix.totalShip === 0 ? (
+            ) : matrix.totalShip === 0 && !editMode ? (
+                // В ручном режиме матрица стартует пустой (0 распределено) — таблицу ВСЕГДА
+                // показываем как чистый холст со степперами; заглушка только для авто-режима.
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
                     Нечего разложить: ни у одного артикула машины нет потребности по WB-складам (или не задана кратность короба).
                 </div>
