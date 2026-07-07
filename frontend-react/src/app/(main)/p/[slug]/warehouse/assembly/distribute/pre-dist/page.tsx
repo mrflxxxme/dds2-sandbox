@@ -24,6 +24,7 @@ import {
     type PoolDistInput,
 } from '@/lib/assembly/preDistribution';
 import { buildPrebookGroups } from '@/lib/assembly/buildPrebookGroups';
+import { applyAcceptanceRedistToPrebook } from '@/lib/assembly/prebookRedistribute';
 import NeedMatrixCell, { type CellMark } from '../components/NeedMatrixCell';
 import AcceptanceBanner, { type AcceptanceSummary } from '../components/AcceptanceBanner';
 import PrebookView, { type PrebookAcceptanceMark } from '../components/PrebookView';
@@ -167,6 +168,9 @@ export default function PreDistVehiclePage() {
     // Кэш приёмки WB по сигнатуре skus (приёмка НЕ зависит от дозабора) — клик «Дозабить»
     // (меняет только manualTopUp) пересчитывает раскладку БЕЗ повторного сетевого запроса.
     const acceptanceCacheRef = useRef<{ sig: string; splitMap: AcceptanceSplitMap | null; summary: AcceptanceSummary | null; accByNm: Map<number, AcceptanceCheckPerItem> } | null>(null);
+    // Кэш приёмки ЗАСЕВА новинок (отдельный запрос: засев не в autoSkus) — чтобы уводить
+    // закрытые склады-якоря на открытые того же округа, не дёргая сеть на каждый пересчёт.
+    const seedAccCacheRef = useRef<{ sig: string; byKey: Map<string, AcceptanceCheckPerItem> } | null>(null);
     const [prebookOpKey, setPrebookOpKey] = useState<string | null>(null);
     const [acceptanceByNm, setAcceptanceByNm] = useState<Map<number, AcceptanceCheckPerItem>>(new Map());
     const [preorderWbs, setPreorderWbs] = useState<Set<string>>(new Set());
@@ -226,6 +230,7 @@ export default function PreDistVehiclePage() {
                 setManualTopUp(new Map());
                 setCellEdits(new Map());             // новая машина → сбросить ручные правки ячеек
                 acceptanceCacheRef.current = null;   // новая машина → приёмку перепроверить
+                seedAccCacheRef.current = null;       // новая машина → приёмку засева перепроверить
 
                 const ncs = new Set<number>();
                 for (const r of cold?.rows ?? []) if (r.is_newcomer) ncs.add(r.nm_id);
@@ -442,16 +447,50 @@ export default function PreDistVehiclePage() {
                     }
                 }
             }
+            // Засев новинок НЕ проходил проверку приёмки (новинки не в autoSkus) → мог лечь на
+            // ЗАКРЫТЫЙ склад-якорь округа, куда сдать нельзя. Прогоняем засев через приёмку и
+            // уводим закрытые склады на ОТКРЫТЫЕ (backend: консолидация в Центр/Электросталь —
+            // «WB везёт этот регион из Москвы»), ровно как в черновике (`applyAcceptanceRedistToPrebook`).
+            // ДО паллетизации — чтобы закрытый склад не попал ни в Заявки, ни в Предбронь.
+            // Приёмка не ответила → засев оставляем как есть (товар не теряем).
+            let seededEffective = seededRows;
+            if (seededRows.length > 0) {
+                const bySku = new Map<string, { nm_id: number; barcode: string; distribution: Record<string, number> }>();
+                for (const r of seededRows) {
+                    const k = `${r.nm_id}::${r.barcode}`;
+                    const e = bySku.get(k) ?? { nm_id: r.nm_id, barcode: r.barcode, distribution: {} };
+                    for (const [wb, q] of Object.entries(r.tgt)) e.distribution[wb] = (e.distribution[wb] || 0) + (q || 0);
+                    bySku.set(k, e);
+                }
+                const seedItems = [...bySku.values()];
+                const seedSig = JSON.stringify(seedItems.map(i => [i.nm_id, i.barcode, i.distribution]));
+                let seedByKey: Map<string, AcceptanceCheckPerItem> | null = null;
+                const seedCache = seedAccCacheRef.current;
+                if (seedCache && seedCache.sig === seedSig) {
+                    seedByKey = seedCache.byKey;
+                    for (const it of seedByKey.values()) accByNm.set(it.nm_id, it);
+                } else {
+                    try {
+                        const seedResp = await api.checkWbAcceptance({ items: seedItems });
+                        seedByKey = new Map(seedResp.items.map(it => [`${it.nm_id}::${it.barcode}`, it]));
+                        for (const it of seedResp.items) accByNm.set(it.nm_id, it);  // метки приёмки новинок в матрице
+                        seedAccCacheRef.current = { sig: seedSig, byKey: seedByKey };
+                    } catch {
+                        seedByKey = null;  // приёмка не ответила — засев оставляем как есть (товар не теряем)
+                    }
+                }
+                if (seedByKey) seededEffective = applyAcceptanceRedistToPrebook(seededRows, seedByKey).rows;
+            }
             // Ручной дозабор из остатка машины (кнопка «Дозабить» предброни) — целые коробы.
             // Кап по ОСТАТКУ баркода (available − занятое потребностью/засевом) не даёт гонке
             // двойного клика пере-подписать баркод сверх наличия (Σsrc баркода ≤ available).
             const reservedByBc = new Map<string, number>();
-            for (const r of [...needBoxRows, ...seededRows, ...pinnedRows]) {
+            for (const r of [...needBoxRows, ...seededEffective, ...pinnedRows]) {
                 const s = Object.values(r.src).reduce((a, v) => a + (v || 0), 0);
                 reservedByBc.set(r.barcode, (reservedByBc.get(r.barcode) ?? 0) + s);
             }
             const topUpRows = manualMode ? [] : buildTopUpRows(manualTopUp, poolData.rows, targetWh, nmPpb, reservedByBc);
-            const extra = [...seededRows, ...topUpRows, ...pinnedRows];
+            const extra = [...seededEffective, ...topUpRows, ...pinnedRows];
             // ДВЕ независимые раскладки одного пула (по решению юзера):
             //  • whole — строго целые паллеты → ЗАЯВКИ (коммит) + под-паллетные хвосты в ПРЕДБРОНЬ.
             //  • box   — целые коробы под потребность (частичные паллеты ок) → МАТРИЦА «Раскладка»
