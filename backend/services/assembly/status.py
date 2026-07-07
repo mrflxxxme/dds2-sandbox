@@ -358,9 +358,21 @@ async def unassign_vehicle(db: AsyncSession, project_id: int, request_id: int) -
     return req
 
 
-async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> AssemblyRequest:
+async def ship_request(
+    db: AsyncSession,
+    project_id: int,
+    request_id: int,
+    *,
+    allow_gazelka_ready: bool = False,
+) -> AssemblyRequest:
     """
     VEHICLE_ASSIGNED -> SHIPPED.
+
+    allow_gazelka_ready — открывает переход READY -> SHIPPED для Gazelka-связанных
+    заявок. Ставит его ТОЛЬКО авто-шип по приёмке WB (`_ship_assemblies_best_effort`):
+    у Газельки логистику ведёт агрегатор, машину назначить нельзя → заявка навсегда
+    в READY, а WB-ACCEPTED = товар физически уехал. Ручные/bulk/ФФ-пути флаг не
+    ставят — там READY по-прежнему обязан пройти назначение машины.
     """
     from .crud import _validate_stock_for_ship, get_assembly_request
 
@@ -382,7 +394,20 @@ async def ship_request(db: AsyncSession, project_id: int, request_id: int) -> As
         )
     ).scalar_one()
 
-    _check_transition(AssemblyStatus(locked_status), AssemblyStatus.SHIPPED)
+    st = AssemblyStatus(locked_status)
+    # Газелька + авто-шип по приёмке WB: логистику ведёт агрегатор, назначить машину
+    # нельзя (assign_vehicle блокирует) → заявка навсегда в READY, а WB-ACCEPTED =
+    # товар физически уехал. Отгружаем прямо из READY (агрегатор = «машина»), но
+    # ТОЛЬКО когда вызвано авто-шипом (allow_gazelka_ready) и заявка Gazelka-связана.
+    # Ручной/bulk/ФФ-путь флаг не ставит → глобальная таблица READY→SHIPPED запрещает.
+    if (
+        st == AssemblyStatus.READY
+        and allow_gazelka_ready
+        and await _gazelka_linked_ids(db, project_id, [req.id])
+    ):
+        pass
+    else:
+        _check_transition(st, AssemblyStatus.SHIPPED)
 
     # 1. Validate stock
     deficits = await _validate_stock_for_ship(db, project_id, req.warehouse_id, req.items)

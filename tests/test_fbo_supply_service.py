@@ -24,6 +24,7 @@ from sqlalchemy import select, text
 
 from backend.models import IntegrationKey, Nomenclature, OutboundShipment, Warehouse, WarehouseStock
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.gazelka import GazelkaOrder, GazelkaOrderStatus
 from backend.models.wb_fbo import WbFboSupply, WbFboSupplyItem, WbSupplyStatus
 from backend.services.fbo_supply_service import (
     _collect_assembly_ship_on_wb_accepted,
@@ -1773,6 +1774,19 @@ async def _make_assembly_on_supply(
     return doc
 
 
+async def _link_gazelka(db_session, doc: AssemblyRequest, status: str = GazelkaOrderStatus.SENT) -> None:
+    """Пометить сборку отправленной в Газельку (аудит-строка)."""
+    db_session.add(
+        GazelkaOrder(
+            project_id=1,
+            assembly_request_id=doc.id,
+            status=status,
+            gazelka_ref="G-123",
+        )
+    )
+    await db_session.commit()
+
+
 @pytest.mark.asyncio
 class TestAutoShipOnWbAccepted:
     """WB принял поставку (ACCEPTED) + машина назначена (VEHICLE_ASSIGNED) → авто-SHIP."""
@@ -1876,6 +1890,98 @@ class TestAutoShipOnWbAccepted:
         assert again == 0
         await db_session.refresh(stock)
         assert stock.quantity == 15
+
+    async def test_collect_picks_ready_when_gazelka_linked(self, db_session):
+        """Газелька-связанная READY + поставка ACCEPTED → кандидат. Логистику ведёт
+        агрегатор, машину назначить нельзя → заявка навсегда в READY; WB принял =
+        товар уехал, отгружаем прямо из READY."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        doc = await _make_assembly_on_supply(db_session, wh, supply, nom, bc, status=AssemblyStatus.READY)
+        await _link_gazelka(db_session, doc)
+
+        ids = await _collect_assembly_ship_on_wb_accepted(db_session, 1, [supply])
+        assert ids == [doc.id]
+
+    async def test_collect_skips_ready_gazelka_inactive_link(self, db_session):
+        """READY со связью Газельки в статусе FAILED (не SENT/MATCHED) → не кандидат:
+        заявка в агрегатор фактически не ушла."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        doc = await _make_assembly_on_supply(db_session, wh, supply, nom, bc, status=AssemblyStatus.READY)
+        await _link_gazelka(db_session, doc, status=GazelkaOrderStatus.FAILED)
+
+        ids = await _collect_assembly_ship_on_wb_accepted(db_session, 1, [supply])
+        assert ids == []
+
+    async def test_ship_gazelka_ready_deducts_stock(self, db_session):
+        """ship-runner: Газелька-READY → SHIPPED + сток списан + OutboundShipment."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        doc = await _make_assembly_on_supply(
+            db_session, wh, supply, nom, bc, qty=5, stock_qty=20, status=AssemblyStatus.READY
+        )
+        await _link_gazelka(db_session, doc)
+
+        shipped = await _ship_assemblies_best_effort(1, [doc.id])
+        assert shipped == 1
+        await db_session.refresh(doc)
+        assert doc.status == AssemblyStatus.SHIPPED.value
+        assert doc.outbound_shipment_id is not None
+
+        stock = (
+            await db_session.execute(
+                select(WarehouseStock).where(
+                    WarehouseStock.project_id == 1,
+                    WarehouseStock.warehouse_id == wh.id,
+                    WarehouseStock.barcode == bc,
+                )
+            )
+        ).scalar_one()
+        assert stock.quantity == 15  # 20 − 5
+
+    async def test_ship_request_manual_rejects_gazelka_ready(self, db_session):
+        """Ручной путь (ship_request БЕЗ allow_gazelka_ready) НЕ отгружает Gazelka-READY:
+        послабление READY→SHIPPED строго за авто-шипом по приёмке WB. SENT в Газельке
+        ≠ «товар уехал» — вручную из READY отгружать рано. Пиннит скоуп флага."""
+        from backend.services.assembly.status import ship_request
+
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        doc = await _make_assembly_on_supply(
+            db_session, wh, supply, nom, bc, qty=5, stock_qty=20, status=AssemblyStatus.READY
+        )
+        await _link_gazelka(db_session, doc)
+
+        with pytest.raises(ValueError):
+            await ship_request(db_session, 1, doc.id)
+        await db_session.refresh(doc)
+        assert doc.status == AssemblyStatus.READY.value
+
+    async def test_ship_skips_ready_without_gazelka(self, db_session):
+        """Обычная READY (без Газельки), даже если id дошёл до раннера, НЕ отгружается:
+        глобальная таблица переходов READY→SHIPPED запрещает (обязано назначение машины).
+        Пиннит, что послабление строго Gazelka-only."""
+        wh = await _make_ff_warehouse(db_session)
+        bc = f"BC-{_uid()}"
+        nom = await _make_nom(db_session, bc)
+        supply = await _make_accepted_supply(db_session)
+        doc = await _make_assembly_on_supply(
+            db_session, wh, supply, nom, bc, qty=5, stock_qty=20, status=AssemblyStatus.READY
+        )
+
+        shipped = await _ship_assemblies_best_effort(1, [doc.id])
+        assert shipped == 0
+        await db_session.refresh(doc)
+        assert doc.status == AssemblyStatus.READY.value
 
     async def test_ship_stock_deficit_best_effort(self, db_session):
         """Дефицит стока: ship падает, счётчик 0, заявка остаётся VEHICLE_ASSIGNED."""

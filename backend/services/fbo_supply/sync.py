@@ -613,19 +613,33 @@ async def _collect_assembly_ship_on_wb_accepted(
     (внутри открытой транзакции его звать нельзя). Гейт VEHICLE_ASSIGNED: READY
     (машина не назначена) — рано; SHIPPED/далее — уже отгружена (там auto-deliver);
     прочие статусы ship_request отверг бы переходом.
+
+    Исключение — READY у Gazelka-связанных сборок: логистику ведёт агрегатор,
+    назначить машину нельзя (assign_vehicle блокирует) → заявка навсегда застревает
+    в READY и попадает в «Забыли отгрузить». Раз WB принял — товар уехал (Газелька =
+    «машина»), отгружаем прямо из READY. Обычный READY (без Газельки) не трогаем —
+    он обязан пройти назначение машины.
     """
     accepted_supply_ids = [s.id for s in supplies if s.wb_status == WbSupplyStatus.ACCEPTED]
     if not accepted_supply_ids:
         return []
     result = await db.execute(
-        select(AssemblyRequest.id).where(
+        select(AssemblyRequest.id, AssemblyRequest.status).where(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.wb_fbo_supply_id.in_(accepted_supply_ids),
             AssemblyRequest.is_deleted == False,  # noqa: E712
-            AssemblyRequest.status == AssemblyStatus.VEHICLE_ASSIGNED,
+            AssemblyRequest.status.in_([AssemblyStatus.VEHICLE_ASSIGNED, AssemblyStatus.READY]),
         )
     )
-    return [row[0] for row in result.all()]
+    rows = result.all()
+    ship_ids = [rid for rid, status in rows if status == AssemblyStatus.VEHICLE_ASSIGNED]
+    ready_ids = [rid for rid, status in rows if status == AssemblyStatus.READY]
+    if ready_ids:
+        from backend.services.assembly.status import _gazelka_linked_ids
+
+        gazelka_ready = await _gazelka_linked_ids(db, project_id, ready_ids)
+        ship_ids.extend(rid for rid in ready_ids if rid in gazelka_ready)
+    return ship_ids
 
 
 async def _ship_assemblies_best_effort(project_id: int, assembly_ids: list[int]) -> int:
@@ -645,7 +659,10 @@ async def _ship_assemblies_best_effort(project_id: int, assembly_ids: list[int])
     for asm_id in assembly_ids:
         try:
             async with AsyncSessionLocal() as ship_db:
-                await ship_request(ship_db, project_id, asm_id)
+                # allow_gazelka_ready: собранные READY-кандидаты — только Gazelka-
+                # связанные (см. _collect_assembly_ship_on_wb_accepted). Обычные
+                # VEHICLE_ASSIGNED флаг игнорируют (идут штатным переходом).
+                await ship_request(ship_db, project_id, asm_id, allow_gazelka_ready=True)
             shipped += 1
         except Exception as e:  # best-effort: синк уже зафиксирован
             logger.warning(
