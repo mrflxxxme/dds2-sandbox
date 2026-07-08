@@ -1,0 +1,247 @@
+"""
+Tests for wb_supply_service — занос заявки-сборки в FBW-поставку WB (реплей портала).
+
+WbPortalClient замокан: проверяем оркестрацию, персист статусов/id, изоляцию по
+project_id и обработку истёкшей сессии — без реальных HTTP к WB.
+"""
+
+from decimal import Decimal
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import text
+
+from backend.integrations.wb_portal_client import WbPortalError, WbSessionExpired
+from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.assembly_wb import WbSupplySyncStatus
+from backend.services import integrations_service, wb_supply_service
+from backend.services.wb_supply_service import WbSupplyError
+
+PROJECT_ID = 0
+OTHER_PROJECT_ID = 0
+BC = "TEST_BC_WBSUP_1"
+WH_NAME = "Волгоград"
+
+
+class FakeClient:
+    """Мок реплея портала. По флагам поднимает ошибки сессии/портала."""
+
+    def __init__(self, *, expire=False, portal_error=False, supplies=None):
+        self.expire = expire
+        self.portal_error = portal_error
+        self.supplies = supplies if supplies is not None else []
+        self.goods_sent = None
+        self.bind_sent = None
+        self.trn_saved = None
+
+    async def get_warehouse_filter_items(self):
+        return [{"warehouseID": 301983, "warehouseName": "Волгоград"}]
+
+    async def draft_create(self):
+        if self.expire:
+            raise WbSessionExpired("expired")
+        if self.portal_error:
+            raise WbPortalError("bad draft")
+        return "draft-uuid-1"
+
+    async def draft_update_goods(self, draft_id, barcodes):
+        self.goods_sent = barcodes
+
+    async def validate_warehouse_goods(self, draft_id, warehouse_id):
+        return {"items": [{"availableBoxTypes": [2]}]}
+
+    async def supply_create(self, draft_id, warehouse_id, box_type_id, **kw):
+        return 52670743
+
+    async def list_supplies(self, status_ids=None):
+        return self.supplies
+
+    async def create_box_barcodes(self, supply_id, count):
+        return [f"WB_{i}" for i in range(count)]
+
+    async def bind_barcodes(self, supply_id, bind):
+        self.bind_sent = bind
+
+    async def trn_details(self, supply_id):
+        return {"details": {"trns": [{"barcode": {"barcodeId": 999}}]}}
+
+    async def set_trn(self, **kw):
+        self.trn_saved = kw
+
+    async def pass_history(self):
+        return [{"firstName": "Иван", "lastName": "Иванов", "phone": "79001112233"}]
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def setup(db_session, project, other_project, monkeypatch):
+    global PROJECT_ID, OTHER_PROJECT_ID
+    PROJECT_ID = project.id
+    OTHER_PROJECT_ID = other_project.id
+
+    # FULFILLMENT-склад + номенклатура + баркод
+    await db_session.execute(
+        text(
+            "INSERT INTO warehouses (project_id, name, warehouse_type, sort_order, is_active, is_deleted, created_at, updated_at) "
+            "VALUES (:pid, 'WBSUP WH', 'FULFILLMENT', 1, true, false, NOW(), NOW())"
+        ),
+        {"pid": PROJECT_ID},
+    )
+    wh_id = (
+        await db_session.execute(
+            text("SELECT id FROM warehouses WHERE project_id = :pid ORDER BY id DESC LIMIT 1"),
+            {"pid": PROJECT_ID},
+        )
+    ).scalar()
+    await db_session.execute(
+        text("INSERT INTO nomenclature (project_id, barcode, updated_at) VALUES (:pid, :bc, NOW())"),
+        {"pid": PROJECT_ID, "bc": BC},
+    )
+    nom_id = (
+        await db_session.execute(
+            text("SELECT id FROM nomenclature WHERE project_id = :pid AND barcode = :bc"),
+            {"pid": PROJECT_ID, "bc": BC},
+        )
+    ).scalar()
+
+    req = AssemblyRequest(
+        project_id=PROJECT_ID,
+        warehouse_id=wh_id,
+        number="WBSUP-1",
+        status=AssemblyStatus.IN_PROGRESS,
+        pallets_count=2,
+        pallet_weight_kg=Decimal("100.00"),
+        wb_warehouse_name_manual=WH_NAME,
+    )
+    db_session.add(req)
+    await db_session.flush()
+    db_session.add(
+        AssemblyRequestItem(
+            project_id=PROJECT_ID,
+            assembly_request_id=req.id,
+            nomenclature_id=nom_id,
+            barcode=BC,
+            quantity=10,
+        )
+    )
+    await db_session.commit()
+
+    global ASSEMBLY_ID
+    ASSEMBLY_ID = req.id
+    yield
+
+
+async def _patch_client(monkeypatch, client):
+    async def fake_get(db, project_id):
+        return client
+
+    monkeypatch.setattr(integrations_service, "get_wb_portal_client", fake_get)
+
+
+@pytest.mark.asyncio
+async def test_create_preorder_happy(db_session, monkeypatch):
+    client = FakeClient()
+    await _patch_client(monkeypatch, client)
+
+    link = await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    assert link.sync_status == WbSupplySyncStatus.PREORDER.value
+    assert link.warehouse_id_wb == 301983
+    assert link.box_type_id == 2
+    assert link.draft_id == "draft-uuid-1"
+    assert link.preorder_id == 52670743
+    assert client.goods_sent == [{"barcode": BC, "quantity": 10}]
+
+
+@pytest.mark.asyncio
+async def test_create_preorder_no_goods(db_session, monkeypatch):
+    # Убрать позиции → ошибка «нет товаров»
+    await db_session.execute(
+        text("DELETE FROM assembly_request_items WHERE assembly_request_id = :id"),
+        {"id": ASSEMBLY_ID},
+    )
+    await db_session.commit()
+    await _patch_client(monkeypatch, FakeClient())
+    with pytest.raises(WbSupplyError, match="нет товаров"):
+        await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+
+@pytest.mark.asyncio
+async def test_session_expired_marks_and_raises(db_session, monkeypatch):
+    client = FakeClient(expire=True)
+    await _patch_client(monkeypatch, client)
+    called = {}
+
+    async def fake_mark(db, project_id):
+        called["marked"] = project_id
+
+    monkeypatch.setattr(integrations_service, "mark_wb_portal_expired", fake_mark)
+
+    with pytest.raises(WbSupplyError, match="истекла"):
+        await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert called.get("marked") == PROJECT_ID
+
+
+@pytest.mark.asyncio
+async def test_portal_error_sets_error_status(db_session, monkeypatch):
+    await _patch_client(monkeypatch, FakeClient(portal_error=True))
+    with pytest.raises(WbSupplyError, match="отклонил"):
+        await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    link = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.sync_status == WbSupplySyncStatus.ERROR.value
+    assert link.last_error
+
+
+@pytest.mark.asyncio
+async def test_project_isolation(db_session, monkeypatch):
+    await _patch_client(monkeypatch, FakeClient())
+    with pytest.raises(WbSupplyError, match="не найдена"):
+        await wb_supply_service.create_preorder(db_session, OTHER_PROJECT_ID, ASSEMBLY_ID)
+
+
+@pytest.mark.asyncio
+async def test_sync_supply_matches_preorder(db_session, monkeypatch):
+    client = FakeClient(supplies=[{"supplyId": 40699158, "preorders": [52670743]}])
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    link = await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.supply_id == 40699158
+    assert link.sync_status == WbSupplySyncStatus.BOOKED.value
+
+
+@pytest.mark.asyncio
+async def test_push_boxes_and_pass(db_session, monkeypatch):
+    client = FakeClient(supplies=[{"supplyId": 40699158, "preorders": [52670743]}])
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    # Короба
+    await wb_supply_service.save_boxes(
+        db_session, PROJECT_ID, ASSEMBLY_ID, [{"boxcode": None, "items": [{"barcode": BC, "quantity": 10}]}]
+    )
+    link = await wb_supply_service.push_boxes(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.sync_status == WbSupplySyncStatus.BOXED.value
+    assert link.boxes[0]["boxcode"] == "WB_0"
+    assert client.bind_sent[0]["barcodes"][0]["quantity"] == 10
+
+    # Пропуск
+    await wb_supply_service.save_pass(
+        db_session,
+        PROJECT_ID,
+        ASSEMBLY_ID,
+        {"driver_first": "Влад", "driver_last": "Вяткин", "car_number": "В815УН37", "car_model": "Газель", "driver_phone": "79001112233", "pallets": 2},
+    )
+    link = await wb_supply_service.push_pass(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.sync_status == WbSupplySyncStatus.PASSED.value
+    assert link.barcode_id == 999
+    assert client.trn_saved["first_name"] == "Влад"
+
+
+@pytest.mark.asyncio
+async def test_push_boxes_requires_supply(db_session, monkeypatch):
+    await _patch_client(monkeypatch, FakeClient())
+    await wb_supply_service.save_boxes(
+        db_session, PROJECT_ID, ASSEMBLY_ID, [{"boxcode": None, "items": [{"barcode": BC, "quantity": 10}]}]
+    )
+    with pytest.raises(WbSupplyError, match="забронируйте"):
+        await wb_supply_service.push_boxes(db_session, PROJECT_ID, ASSEMBLY_ID)

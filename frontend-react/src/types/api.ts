@@ -1788,6 +1788,71 @@ export interface PalletManifestUpdate {
   pallets: PalletBox[] | null;
 }
 
+// ─── WB portal supply (реплей кабинета) ──────────────────────────────────────
+
+export type WbSupplySyncStatus =
+  | 'NONE'
+  | 'DRAFT'
+  | 'PREORDER'
+  | 'BOOKED'
+  | 'BOXED'
+  | 'PASSED'
+  | 'ERROR';
+
+export interface WbBoxItem {
+  barcode: string;
+  quantity: number;
+}
+
+export interface WbBox {
+  boxcode: string | null;
+  items: WbBoxItem[];
+}
+
+export interface WbSupplyState {
+  assembly_request_id: number;
+  sync_status: WbSupplySyncStatus;
+  warehouse_id_wb: number | null;
+  box_type_id: number | null;
+  draft_id: string | null;
+  preorder_id: number | null;
+  supply_id: number | null;
+  barcode_id: number | null;
+  last_error: string | null;
+  last_synced_at: string | null;
+  boxes: WbBox[];
+  pass_driver_first: string | null;
+  pass_driver_last: string | null;
+  pass_driver_phone: string | null;
+  pass_car_model: string | null;
+  pass_car_number: string | null;
+  pass_pallets: number | null;
+}
+
+export interface WbBoxesUpdate {
+  boxes: WbBox[];
+}
+
+export interface WbPassUpdate {
+  driver_first?: string | null;
+  driver_last?: string | null;
+  driver_phone?: string | null;
+  car_model?: string | null;
+  car_number?: string | null;
+  pallets?: number | null;
+}
+
+export interface WbDriver {
+  firstName: string;
+  lastName: string;
+  phone: string;
+}
+
+export interface WbPortalStatus {
+  status: 'NONE' | 'ACTIVE' | 'EXPIRED';
+  updated_at?: string | null;
+}
+
 export interface AssemblyRequest {
   id: number;
   warehouse_id: number;

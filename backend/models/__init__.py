@@ -255,6 +255,10 @@ from backend.models.assembly import (
     AssemblyStockDistributionDaily,
     PackageType,
 )
+from backend.models.assembly_wb import (
+    AssemblyWbSupply,
+    WbSupplySyncStatus,
+)
 
 # WB Goods Returns (возвраты товаров)
 from backend.models.wb_returns import (
@@ -372,6 +376,8 @@ __all__ = [
     "AssemblyStatusHistory",
     "AssemblyStockDistributionDaily",
     "PackageType",
+    "AssemblyWbSupply",
+    "WbSupplySyncStatus",
     # WB Goods Returns
     "WbGoodsReturn",
     # Telegram bot

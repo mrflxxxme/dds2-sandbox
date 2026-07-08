@@ -883,5 +883,37 @@ export function addWarehouseMethods(api: ApiClient) {
                 throw e;
             }
         },
+
+        // ─── WB portal supply (занос заявки в кабинет WB) ────────────────
+        wbSessionStatus() {
+            return api.request<import('@/types/api').WbPortalStatus>('GET', '/api/v1/warehouse/assembly/wb-session/status');
+        },
+        wbSessionSet(authorizev3: string) {
+            return api.request<import('@/types/api').WbPortalStatus>('POST', '/api/v1/warehouse/assembly/wb-session', { authorizev3 });
+        },
+        wbSupplyGetState(assemblyId: number) {
+            return api.request<import('@/types/api').WbSupplyState>('GET', `/api/v1/warehouse/assembly/${assemblyId}/wb`);
+        },
+        wbSupplyCreatePreorder(assemblyId: number) {
+            return api.request<import('@/types/api').WbSupplyState>('POST', `/api/v1/warehouse/assembly/${assemblyId}/wb/preorder`);
+        },
+        wbSupplySyncSupply(assemblyId: number) {
+            return api.request<import('@/types/api').WbSupplyState>('POST', `/api/v1/warehouse/assembly/${assemblyId}/wb/sync-supply`);
+        },
+        wbSupplySaveBoxes(assemblyId: number, body: import('@/types/api').WbBoxesUpdate) {
+            return api.request<import('@/types/api').WbSupplyState>('PUT', `/api/v1/warehouse/assembly/${assemblyId}/wb/boxes`, body);
+        },
+        wbSupplyPushBoxes(assemblyId: number) {
+            return api.request<import('@/types/api').WbSupplyState>('POST', `/api/v1/warehouse/assembly/${assemblyId}/wb/boxes/push`);
+        },
+        wbSupplySavePass(assemblyId: number, body: import('@/types/api').WbPassUpdate) {
+            return api.request<import('@/types/api').WbSupplyState>('PUT', `/api/v1/warehouse/assembly/${assemblyId}/wb/pass`, body);
+        },
+        wbSupplyPushPass(assemblyId: number) {
+            return api.request<import('@/types/api').WbSupplyState>('POST', `/api/v1/warehouse/assembly/${assemblyId}/wb/pass/push`);
+        },
+        wbSupplyDrivers(assemblyId: number) {
+            return api.request<import('@/types/api').WbDriver[]>('GET', `/api/v1/warehouse/assembly/${assemblyId}/wb/drivers`);
+        },
     };
 }
