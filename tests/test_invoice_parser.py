@@ -15,6 +15,7 @@ from decimal import Decimal
 from backend.services import invoice_parser, invoice_split
 from backend.services.bank_directory import resolve_bank
 from backend.services.invoice_parser import (
+    _account_inn_mismatch,
     _extract_text,
     _finalize,
     _image_media_type,
@@ -93,6 +94,57 @@ def test_finalize_rejects_bad_account():
     assert r.payee_account is None
     assert any("контроль-ключ" in w for w in r.warnings)
     assert r.payee_name == "ООО Тест"
+
+
+def test_finalize_self_exclusion_drops_own_account():
+    """Кейс ОПЛ-00058: распозналка взяла банковский блок ПЛАТЕЛЬЩИКА (наш счёт) как получателя.
+    Если счёт получателя = наш → банковские реквизиты чистятся, имя/ИНН продавца остаются."""
+    r = _finalize(
+        {
+            "payee_name": "ИП Семенова Елена Юрьевна",
+            "payee_inn": "631409040955",   # верный ИНН продавца (из шапки счёта)
+            "payee_kpp": "370001001",       # КПП плательщика — тоже ошибочный
+            "payee_account": _RS_VALID,     # НАШ счёт (плательщика)
+            "payee_bik": _BIK,
+            "amount": "25000.00",
+        },
+        own_accounts=frozenset({_RS_VALID}),
+    )
+    assert r.payee_account is None
+    assert r.payee_bik is None
+    assert r.payee_bank_name is None
+    assert r.payee_corr_account is None
+    assert r.payee_kpp is None
+    assert r.payee_name == "ИП Семенова Елена Юрьевна"  # имя/ИНН продавца не трогаем
+    assert r.payee_inn == "631409040955"
+    assert any("плательщик" in w.lower() for w in r.warnings)
+    assert "payee_account" not in r.fields_found
+
+
+def test_account_inn_mismatch_helper():
+    """Тип счёта ↔ длина ИНН: 40702=юрлицо/10, 40802/40817=ИП-физлицо/12."""
+    assert _account_inn_mismatch("40702810400810052145", "631409040955") is True   # 12-зн ИНН + счёт юрлица
+    assert _account_inn_mismatch("40802810454740016591", "7707083893") is True     # 10-зн ИНН + счёт ИП
+    assert _account_inn_mismatch("40817810000000000001", "7707083893") is True      # 10-зн ИНН + счёт физлица
+    assert _account_inn_mismatch("40802810454740016591", "631409040955") is False  # 12 + ИП-счёт — ок
+    assert _account_inn_mismatch("40702810400810052145", "7707083893") is False    # 10 + юрлицо-счёт — ок
+    assert _account_inn_mismatch(None, "7707083893") is False
+    assert _account_inn_mismatch("40702810400810052145", None) is False
+
+
+def test_finalize_warns_on_account_inn_type_mismatch():
+    """12-значный ИНН (ИП) + счёт 40702 (юрлицо) → предупреждение (счёт surface'ится — advisory)."""
+    r = _finalize({"payee_inn": "631409040955", "payee_bik": _BIK, "payee_account": _RS_VALID, "payee_name": "ИП Тест"})
+    assert r.payee_account == _RS_VALID  # advisory, не дропаем
+    assert any("не соответствует" in w for w in r.warnings)
+
+
+def test_finalize_drops_kpp_for_ip_inn():
+    """У ИП/физлица (ИНН 12 цифр) нет КПП — ошибочно распознанный КПП убираем."""
+    r = _finalize({"payee_inn": "643921964912", "payee_kpp": "770701001", "payee_name": "ИП Тест"})
+    assert r.payee_inn == "643921964912"
+    assert r.payee_kpp is None
+    assert "payee_kpp" not in r.fields_found
 
 
 def test_payment_grid_name_and_purpose():
