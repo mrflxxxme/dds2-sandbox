@@ -42,6 +42,13 @@ class WbSupplyState(BaseModel):
     pass_pallets: int | None = None
 
 
+class WbPreorderCreate(BaseModel):
+    """Параметры создания преордера. package_type — тип упаковки
+    (BOX/MONOPALLET/SUPERSAFE); None → берётся тип заявки."""
+
+    package_type: str | None = None
+
+
 class WbBoxesUpdate(BaseModel):
     """Локальная правка раскладки коробов (до заноса в WB)."""
 

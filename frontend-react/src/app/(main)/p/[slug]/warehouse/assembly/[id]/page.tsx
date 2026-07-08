@@ -11,7 +11,18 @@ import MigfullModal from './MigfullModal';
 import PalletLayoutTab from './PalletLayoutTab';
 import WbSupplyPanel from './WbSupplyPanel';
 import type { Column } from '@/components/DataTable';
-import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply } from '@/types/api';
+import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply, WbSupplyState, WbSupplySyncStatus } from '@/types/api';
+
+// Статус заноса заявки в кабинет WB (для вкладки «Поставка WB»).
+const WB_SYNC_MAP: Record<WbSupplySyncStatus, { label: string; className: string }> = {
+    NONE:     { label: 'Не заведена',                    className: 'badge-secondary' },
+    DRAFT:    { label: 'Черновик',                        className: 'badge-info' },
+    PREORDER: { label: 'Преордер — нужна бронь даты',     className: 'badge-warning' },
+    BOOKED:   { label: 'Дата забронирована',             className: 'badge-info' },
+    BOXED:    { label: 'Короба занесены',                className: 'badge-info' },
+    PASSED:   { label: 'Пропуск занесён',                className: 'badge-success' },
+    ERROR:    { label: 'Ошибка',                          className: 'badge-danger' },
+};
 
 // Статусы, в которых заявку имеет смысл отправлять на ФФ (до отгрузки нашей стороной).
 const FF_PUSH_STATUSES: ReadonlySet<AssemblyStatus> = new Set<AssemblyStatus>(['PENDING', 'IN_PROGRESS', 'READY', 'VEHICLE_ASSIGNED']);
@@ -52,7 +63,7 @@ export default function AssemblyDetailPage() {
     const [error, setError] = useState('');
     const [actionLoading, setActionLoading] = useState(false);
     // Вкладки деталки: «Заявка» (состав/логистика) | «Раскладка по паллетам».
-    const [tab, setTab] = useState<'request' | 'pallets'>('request');
+    const [tab, setTab] = useState<'request' | 'pallets' | 'wb'>('request');
 
     // Modals
     const [showVehicleModal, setShowVehicleModal] = useState(false);
@@ -103,6 +114,9 @@ export default function AssemblyDetailPage() {
     // Сырые кратности коробов (per-nm + per-warehouse) — резолвим ниже с приоритетом склада заявки.
     const [bmRows, setBmRows] = useState<BoxMultiplicityRow[]>([]);
 
+    // Состояние заноса в кабинет WB — для вкладки «Поставка WB» (опционально).
+    const [wbState, setWbState] = useState<WbSupplyState | null>(null);
+
     // FBO supply editing
     const [editingFbo, setEditingFbo] = useState(false);
     const [fboSupplies, setFboSupplies] = useState<WbFboSupply[]>([]);
@@ -121,6 +135,8 @@ export default function AssemblyDetailPage() {
             setAssembly(data);
             api.getAssemblyHistory(id).then(setHistory).catch(() => {});
             api.getAssemblyAttempts(id).then(setAttempts).catch(() => {});
+            // Занос в кабинет WB — опционально: ошибку глотаем, карточка покажет дефолт.
+            api.wbSupplyGetState(id).then(setWbState).catch(() => {});
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
         }
@@ -738,10 +754,26 @@ export default function AssemblyDetailPage() {
                 >
                     Раскладка по паллетам
                 </button>
+                <button
+                    className={`btn btn-sm ${tab === 'wb' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => setTab('wb')}
+                >
+                    {wbState && wbState.sync_status !== 'NONE'
+                        ? `Поставка WB · ${WB_SYNC_MAP[wbState.sync_status].label}`
+                        : 'Поставка WB'}
+                </button>
             </div>
 
             {tab === 'pallets' && (
                 <PalletLayoutTab assembly={assembly} ppbByBarcode={ppbByBarcode} slug={slug} onSaved={load} />
+            )}
+
+            {tab === 'wb' && assembly && (
+                <WbSupplyPanel
+                    assemblyId={assembly.id}
+                    items={assembly.items ?? []}
+                    defaultPackageType={assembly.package_type}
+                />
             )}
 
             {tab === 'request' && (<>
@@ -854,7 +886,19 @@ export default function AssemblyDetailPage() {
                         >
                             <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 4 }}>FBO поставка</div>
                             <div style={{ fontSize: 14, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                                {assembly.wb_fbo_supply_id ? (assembly.wb_supply_name || String(assembly.wb_fbo_supply_id)) : 'Без поставки'}
+                                {assembly.wb_fbo_supply_id ? (
+                                    assembly.wb_supply_name || String(assembly.wb_fbo_supply_id)
+                                ) : wbState?.preorder_id ? (
+                                    <a
+                                        href={`https://seller.wildberries.ru/supplies-management/all-supplies/supply-detail?preorderId=${wbState.preorder_id}&supplyId=${wbState.supply_id ?? ''}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        style={{ color: 'var(--color-accent)' }}
+                                    >
+                                        {wbState.supply_id ? `FBW-${wbState.supply_id}` : `Преордер ${wbState.preorder_id}`}
+                                    </a>
+                                ) : 'Без поставки'}
                                 {canEditFbo && (
                                     <span style={{ color: 'var(--color-primary, #3b82f6)', fontSize: 13, opacity: 0.6 }}>&#x270E;</span>
                                 )}
@@ -1528,9 +1572,6 @@ export default function AssemblyDetailPage() {
                     </div>
                 </div>
             )}
-
-            {/* Поставка WB — занос заявки в кабинет через реплей портала */}
-            {assembly && <WbSupplyPanel assemblyId={assembly.id} items={assembly.items ?? []} />}
 
             {/* Migfull-портал («Натали») — заявка на отгрузку из сборки */}
             {showMigfullModal && assembly && (

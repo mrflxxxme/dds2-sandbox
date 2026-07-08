@@ -4,7 +4,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import type { Warehouse, WarehouseStockRow, WbFboSupply, WbFboSupplyItem } from '@/types/api';
+import type { PackageType, Warehouse, WarehouseStockRow, WbFboSupply, WbFboSupplyItem } from '@/types/api';
 
 interface FormItem {
     barcode: string;
@@ -29,6 +29,7 @@ export default function AssemblyNewPage() {
     const [palletWeightKg, setPalletWeightKg] = useState<number>(0);
     const [comment, setComment] = useState('');
     const [wbWarehouseName, setWbWarehouseName] = useState('');
+    const [packageType, setPackageType] = useState<PackageType>('BOX');
     const [formItems, setFormItems] = useState<FormItem[]>([{ barcode: '', quantity: 1 }]);
 
     // Reference data
@@ -268,6 +269,7 @@ export default function AssemblyNewPage() {
                 estimated_ready_date: estimatedReadyDate || undefined,
                 pallets_count: palletsCount,
                 pallet_weight_kg: palletWeightKg,
+                package_type: packageType,
                 comment: comment || undefined,
                 items: filledItems.map(i => ({ barcode: i.barcode, quantity: i.quantity })),
             });
@@ -317,6 +319,20 @@ export default function AssemblyNewPage() {
                             {warehouses.map(w => (
                                 <option key={w.id} value={w.id}>{w.name}</option>
                             ))}
+                        </select>
+                    </div>
+
+                    {/* Тип поставки (упаковка WB: короб / монопаллета / суперсейф) */}
+                    <div className="form-group">
+                        <label className="form-label">Тип поставки</label>
+                        <select
+                            className="form-input"
+                            value={packageType}
+                            onChange={e => setPackageType(e.target.value as PackageType)}
+                        >
+                            <option value="BOX">Короб</option>
+                            <option value="MONOPALLET">Монопаллета</option>
+                            <option value="SUPERSAFE">Суперсейф</option>
                         </select>
                     </div>
 

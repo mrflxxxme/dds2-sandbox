@@ -19,6 +19,7 @@ from backend.schemas.assembly_wb import (
     WbPassUpdate,
     WbPortalSessionSet,
     WbPortalStatus,
+    WbPreorderCreate,
     WbSupplyState,
 )
 from backend.services import integrations_service, wb_supply_service
@@ -77,11 +78,25 @@ async def get_wb_state(
 @router.post("/{assembly_id}/wb/preorder", response_model=WbSupplyState)
 async def create_preorder(
     assembly_id: int,
+    body: WbPreorderCreate | None = None,
     db: AsyncSession = Depends(get_db),
     project: Project = Depends(get_current_project),
     _: None = Depends(rate_limit_write),
 ) -> WbSupplyState:
-    return await _call(wb_supply_service.create_preorder(db, project.id, assembly_id))
+    package_type = body.package_type if body else None
+    return await _call(
+        wb_supply_service.create_preorder(db, project.id, assembly_id, package_type)
+    )
+
+
+@router.post("/{assembly_id}/wb/goods/push", response_model=WbSupplyState)
+async def push_goods(
+    assembly_id: int,
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+    _: None = Depends(rate_limit_write),
+) -> WbSupplyState:
+    return await _call(wb_supply_service.update_preorder_goods(db, project.id, assembly_id))
 
 
 @router.post("/{assembly_id}/wb/sync-supply", response_model=WbSupplyState)
