@@ -277,6 +277,24 @@ export default function PaymentsPanel({ embedded = false }: Props) {
         setDocUploading(null);
     };
 
+    const handleDownloadDoc = async (doc: PaymentRequestDocument) => {
+        if (!detail) return;
+        setDetailError('');
+        try {
+            const blob = await api.downloadPaymentRequestDocument(detail.id, doc.id);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = doc.original_filename || 'document';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (e: unknown) {
+            setDetailError(e instanceof Error ? e.message : 'Ошибка скачивания документа');
+        }
+    };
+
     const handleDeleteDoc = async (docId: number) => {
         if (!detail) return;
         if (!confirm('Удалить документ?')) return;
@@ -661,14 +679,12 @@ export default function PaymentsPanel({ embedded = false }: Props) {
                                                             <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{doc.original_filename ?? 'файл'}</span>
                                                         </div>
                                                         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-                                                            <a
-                                                                href={api.paymentRequestDocumentDownloadUrl(detail.id, doc.id)}
-                                                                target="_blank"
-                                                                rel="noopener noreferrer"
-                                                                style={{ fontSize: 12, color: 'var(--color-accent)', textDecoration: 'none' }}
+                                                            <button
+                                                                onClick={() => handleDownloadDoc(doc)}
+                                                                style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--color-accent)', padding: 0 }}
                                                             >
                                                                 Скачать
-                                                            </a>
+                                                            </button>
                                                             {canAttachDocs && (
                                                                 <button
                                                                     title="Удалить документ"

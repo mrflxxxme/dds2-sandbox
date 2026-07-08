@@ -69,6 +69,13 @@ def _build_payment_body(pr: PaymentRequest, payer: dict, guid: str, *, corr_acco
     bank:{bic,correspondentAccountNumber}}. Банк ждёт payerAccountId = внутренний id.
     """
     owner = payer.get("owner") or {}
+    # ИП/физлицо (ИНН = 12 цифр) НЕ имеют КПП. Непустой payeeKpp заставляет Faktura
+    # классифицировать получателя как юрлицо и проверять его ИНН по правилу «5 или 10 цифр»
+    # → отбой «ИНН/КИО получателя (юридического лица) должен содержать 5 или 10 цифр» на
+    # 12-значном ИНН ИП (кейс ОПЛ-00058: распозналка ошибочно залила КПП ИП). Для физлица/ИП
+    # КПП всегда пустой — тогда банк валидирует ИНН по правилу физлица (12 цифр).
+    inn_digits = "".join(c for c in (pr.payee_inn or "") if c.isdigit())
+    payee_kpp = "" if len(inn_digits) == 12 else (pr.payee_kpp or "")
     return {
         "amount": float(pr.amount),  # банк ждёт число (проба слала числовой amount)
         "docDate": utcnow().date().isoformat(),
@@ -83,7 +90,7 @@ def _build_payment_body(pr: PaymentRequest, payer: dict, guid: str, *, corr_acco
         "payeeBankAccount": corr_account,  # корр. счёт банка получателя (резолв по БИК из справочника ЦБ)
         "payeeName": pr.payee_name or "",
         "payeeInn": pr.payee_inn or "",
-        "payeeKpp": pr.payee_kpp or "",
+        "payeeKpp": payee_kpp,  # пусто для ИП/физлица (ИНН 12 цифр) — см. коммент выше
         "payerName": owner.get("name") or "",
         "payerKpp": owner.get("kpp") or "",
         "payerAccountId": payer.get("id"),

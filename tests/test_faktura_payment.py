@@ -65,6 +65,27 @@ def test_build_payment_body_matches_proven_contract():
         assert bad not in body
 
 
+def test_build_payment_body_drops_kpp_for_individual_payee():
+    """ИП/физлицо (ИНН 12 цифр) не имеют КПП: payeeKpp обязан быть пустым, даже если в
+    заявке ошибочно проставлен КПП (кейс ОПЛ-00058 — распозналка залила КПП ИП).
+    Непустой КПП заставляет Faktura трактовать получателя как юрлицо → отбой
+    «ИНН/КИО получателя (юридического лица) должен содержать 5 или 10 цифр»."""
+    pr = _pr()
+    pr.payee_inn = "631409040955"   # 12 цифр — ИП Семёнова Е.Ю.
+    pr.payee_kpp = "370001001"      # ошибочный КПП у ИП
+    pr.payee_name = "ИП Семенова Елена Юрьевна"
+    body = _build_payment_body(pr, _PAYER, "guid-ip", corr_account="30101810400000000225")
+    assert body["payeeInn"] == "631409040955"
+    assert body["payeeKpp"] == ""   # у ИП/физлица КПП всегда пустой
+
+
+def test_build_payment_body_keeps_kpp_for_legal_entity_payee():
+    """Юрлицо (ИНН 10 цифр) сохраняет свой КПП — регрессия к проверенному контракту."""
+    body = _build_payment_body(_pr(), _PAYER, "guid-ul", corr_account="30101810400000000225")
+    assert body["payeeInn"] == "7700000001"
+    assert body["payeeKpp"] == "770001001"
+
+
 def test_sanitize_purpose_strips_bank_invalid_chars():
     """Назначение → допустимый банком набор символов. Чинит «Поле "Назначение платежа"
     содержит недопустимые символы» (реальный кейс ОПЛ-00022: длинное тире из распозналки)."""

@@ -146,9 +146,9 @@ export function addPaymentRequestMethods(api: ApiClient) {
             return api.uploadFormData<InvoiceParseResult>('/api/v1/payment-requests/parse-invoice', formData);
         },
 
-        /** Returns the URL to open/download a document PDF */
-        paymentRequestDocumentDownloadUrl(id: number, docId: number): string {
-            return `/api/v1/payment-requests/${id}/documents/${docId}/download`;
+        /** Download a payment-request document as a Blob (auth + project headers handled by the client). */
+        downloadPaymentRequestDocument(id: number, docId: number): Promise<Blob> {
+            return api.requestBlob(`/api/v1/payment-requests/${id}/documents/${docId}/download`);
         },
 
         /** DELETE /api/v1/payment-requests/{id}/documents/{docId} */
