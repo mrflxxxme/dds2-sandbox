@@ -22,6 +22,7 @@ import { PalletSizesView } from '../../pallet-sizes/PalletSizesView';
 import { BoxWeightSetting } from './components/BoxWeightSetting';
 import ForecastView from './components/ForecastView';
 import PreDistributionView from './components/PreDistributionView';
+import DraftMatrixView from './components/DraftMatrixView';
 import PrebookView, { type PrebookGroup, type PrebookAcceptanceMark, type PrebookMonoPallet } from './components/PrebookView';
 import { WarehouseExclusionSettings } from '../../analytics/components/WarehouseExclusionSettings';
 import type {
@@ -38,9 +39,10 @@ import type {
 
 const AUTOSAVE_DEBOUNCE_MS = 5000;
 
-type AssemblyTab = 'draft' | 'need' | 'box' | 'pallets' | 'forecast' | 'settings' | 'pre-dist' | 'prebook';
+type AssemblyTab = 'draft' | 'matrix' | 'need' | 'box' | 'pallets' | 'forecast' | 'settings' | 'pre-dist' | 'prebook';
 const TABS: { key: AssemblyTab; label: string }[] = [
     { key: 'draft', label: '📝 Черновик сборки' },
+    { key: 'matrix', label: '✏️ Ручная раскладка' },
     { key: 'need', label: '🏬 Потребность по складам' },
     { key: 'box', label: '📦 Кратность' },
     { key: 'pallets', label: '🚚 Паллеты' },
@@ -79,7 +81,7 @@ export default function AssemblyDraftPage() {
     // Активная вкладка ← из ?tab=. useSearchParams пуст на 1-м рендере — дефолт 'draft'.
     const tabParam = searchParams.get('tab');
     const activeTab: AssemblyTab =
-        tabParam === 'need' || tabParam === 'box' || tabParam === 'pallets' || tabParam === 'forecast' || tabParam === 'settings' || tabParam === 'pre-dist' || tabParam === 'prebook'
+        tabParam === 'matrix' || tabParam === 'need' || tabParam === 'box' || tabParam === 'pallets' || tabParam === 'forecast' || tabParam === 'settings' || tabParam === 'pre-dist' || tabParam === 'prebook'
             ? tabParam
             : 'draft';
 
@@ -1970,6 +1972,21 @@ export default function AssemblyDraftPage() {
                     </div>
                     <PalletSizesView />
                 </>
+            )}
+
+            {/* Вкладка «Ручная раскладка» — матрица-редактор черновика, источник = весь ФФ-сток */}
+            {activeTab === 'matrix' && (
+                draftId ? (
+                    <DraftMatrixView
+                        draftId={draftId}
+                        ffNameById={new Map(warehouses.map(w => [w.id, w.name]))}
+                        onWritten={() => { reloadDraft(); setTab('draft'); }}
+                    />
+                ) : (
+                    <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>
+                        Сначала выберите или создайте черновик (вкладка «📝 Черновик сборки») — ручная раскладка пишет результат в него.
+                    </div>
+                )
             )}
 
             {/* Вкладка «Предраспределение машины в пути» — раздача груза по WB-складам до приёмки */}

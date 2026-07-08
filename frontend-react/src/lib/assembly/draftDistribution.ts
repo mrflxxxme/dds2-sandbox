@@ -1,0 +1,338 @@
+/**
+ * Раскладка ЧЕРНОВИКА по WB-складам — детерминированный движок ручного
+ * распределения. Зеркало `preDistribution.ts` (машина), но ИСТОЧНИК —
+ * свободный ФФ-сток проекта (`StockNeedArticle.rf_stocks`, мульти-склад), а
+ * не пул одной машины. Единственная развилка черновик↔машина в общем движке
+ * `buildAssemblyDistribution` — `availabilityOf(nm, barcode)`:
+ *   • черновик: availabilityOf(nm,bc) = article.rf_stocks[ffId].available (мульти-ФФ)
+ *   • машина:   availabilityOf(nm,bc) = { [targetWarehouseId]: pool.available_qty }
+ *
+ * Отличие от машины: остаток баркода размазан по НЕСКОЛЬКИМ ФФ, поэтому `src`
+ * ручных строк (пины/дозабор) раскладывается по складам-источникам
+ * (`allocSrcAcrossFf`, крупнейший остаток первым), а не сидит на одном ФФ.
+ * Авто-путь мульти-ФФ `src` уже умеет через `buildDraftRows`/`finalizeDistribution`.
+ *
+ * Чистая (без React/IO): acceptance-check вызывает компонент и передаёт сюда
+ * `applyAcceptanceSplits` уже применёнными скусами — полностью юнит-тестируется.
+ */
+import type {
+    AssemblyDraftRow,
+    PackageType,
+    StockNeedArticle,
+    StockNeedResponse,
+} from '@/types/api';
+import { type DraftSkuInput } from '@/lib/assembly/buildDraftRows';
+import {
+    applyAcceptanceSplits,
+    buildDistributionSkus,
+    finalizeDistribution,
+    type AcceptanceSplitMap,
+    type AvailabilityOf,
+    type DistSku,
+    type DistributionGeom,
+} from '@/lib/assembly/buildAssemblyDistribution';
+// Generic-хелперы ручного режима (источник-агностичные) — общий модуль с машиной.
+import {
+    applyCellBoxDelta,
+    rowsToPreDistRows,
+    splitByKratnost,
+    type BoxTopUpCandidate,
+    type CellEdits,
+    type EnrichedSku,
+    type PinnedPkgOf,
+} from '@/lib/assembly/preDistribution';
+
+// Приёмка/сплиты и generic-хелперы — реэкспорт для call-site черновика.
+export { applyAcceptanceSplits, applyCellBoxDelta, rowsToPreDistRows, splitByKratnost };
+export type { AcceptanceSplitMap, BoxTopUpCandidate, CellEdits, EnrichedSku, PinnedPkgOf };
+
+export interface DraftDistInput {
+    /** Артикулы «Потребности по складам» (`getStockNeed`) — источник ФФ-стока и спроса. */
+    articles: StockNeedArticle[];
+    /** Полный ответ потребности (per-WB спрос) — тот же объект. */
+    stockNeed: StockNeedResponse | null;
+    /** Кратность короба per nm_id (шт/короб). */
+    nmPpb: Map<number, number | null>;
+    /** Габариты короба «ДxШxВ» per nm_id. */
+    nmBoxSize: Map<number, string | null>;
+    /** Override «коробок на паллету» по канон-размеру короба. */
+    palletOverrides: Record<string, number>;
+    /** Новинки (cold-start) — засеваются отдельно, в base-skus помечаются is_newcomer. */
+    newcomerSet: Set<number>;
+}
+
+/** Геометрия движка из DraftDistInput (кратность/габарит per nm + паллет-override). */
+function draftGeom(input: DraftDistInput): DistributionGeom {
+    return {
+        ppbOf: (nm) => input.nmPpb.get(nm),
+        boxSizeOf: (nm) => input.nmBoxSize.get(nm) ?? null,
+        palletOverrides: input.palletOverrides,
+    };
+}
+
+/** Свободный ФФ-остаток артикула (мульти-склад): { ffId → available }, только >0. */
+function ffAvailOf(a: StockNeedArticle): Record<number, number> {
+    const rec: Record<number, number> = {};
+    for (const [ff, st] of Object.entries(a.rf_stocks || {})) {
+        const av = Math.max(0, Math.floor(Number(st?.available) || 0));
+        if (av > 0) rec[Number(ff)] = av;
+    }
+    return rec;
+}
+
+/** Источник доступности ЧЕРНОВИКА: свободный ФФ-сток per nm (мульти-склад). */
+function draftAvailabilityOf(articles: StockNeedArticle[]): AvailabilityOf {
+    const byNm = new Map<number, Record<number, number>>();
+    for (const a of articles) byNm.set(a.nm_id, ffAvailOf(a));
+    return (nm) => byNm.get(nm) ?? {};
+}
+
+/** Артикулы как кандидаты движка (обычные + пометка новинок для отдельного засева). */
+function articlesToDistSkus(
+    articles: StockNeedArticle[],
+    newcomerSet: Set<number>,
+): { skus: DistSku[]; nmByBarcode: Map<string, number> } {
+    const skus: DistSku[] = [];
+    const nmByBarcode = new Map<string, number>();
+    for (const a of articles) {
+        const avail = Object.values(ffAvailOf(a)).reduce((s, v) => s + v, 0);
+        nmByBarcode.set(a.barcode, a.nm_id);
+        skus.push({
+            nm_id: a.nm_id,
+            barcode: a.barcode,
+            vendor_code: a.vendor_code || a.barcode,
+            is_newcomer: newcomerSet.has(a.nm_id),
+            available: avail,
+        });
+    }
+    return { skus, nmByBarcode };
+}
+
+/** Базовые `DraftSkuInput` ДО приёмки: потребность × ФФ-сток (мульти-склад).
+ *  Тонкий адаптер над общим движком `buildDistributionSkus`. */
+export function buildDraftSkus(input: DraftDistInput): {
+    skus: DraftSkuInput[];
+    /** barcode → nm_id (для матрицы/обратного маппинга). */
+    nmByBarcode: Map<string, number>;
+} {
+    const { skus: distSkus, nmByBarcode } = articlesToDistSkus(input.articles, input.newcomerSet);
+    const skus = buildDistributionSkus(distSkus, input.stockNeed, draftAvailabilityOf(input.articles), draftGeom(input));
+    return { skus, nmByBarcode };
+}
+
+/**
+ * Финальная раскладка черновика — тонкий адаптер над общим движком
+ * `finalizeDistribution`. Источник (`ffStock`) — мульти-ФФ из `buildDraftSkus`.
+ * `wholePallets=true` — строго целые паллеты (хвост < паллеты → предбронь);
+ * `false` — только целые коробы (частичные паллеты ок → матрица покрытия).
+ */
+export function finalizeDraftDistribution(
+    effectiveSkus: DraftSkuInput[],
+    input: DraftDistInput,
+    wholePallets = true,
+    extraRows: AssemblyDraftRow[] = [],
+    /** «Не менее 1 короба на нуждающийся склад» — для матрицы. */
+    minOneBoxPerWh = false,
+): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } {
+    return finalizeDistribution(effectiveSkus, draftGeom(input), wholePallets, extraRows, minOneBoxPerWh);
+}
+
+/**
+ * Разложить `total` штук по ФФ-складам-источникам (крупнейший остаток первым),
+ * с учётом уже занятого (`reserved` per ff). Возвращает `src` (ffId → штук).
+ * Σ(src) === min(total, Σ свободного) — вызывающий гарантирует total ≤ свободного.
+ * Чистая.
+ */
+export function allocSrcAcrossFf(
+    total: number,
+    ffAvail: Record<number, number>,
+    reserved: Record<number, number> = {},
+): Record<string, number> {
+    const src: Record<string, number> = {};
+    if (total <= 0) return src;
+    const entries = Object.entries(ffAvail)
+        .map(([ff, av]) => ({ ff: Number(ff), free: Math.max(0, (av || 0) - (reserved[Number(ff)] || 0)) }))
+        .filter((x) => x.free > 0)
+        .sort((a, b) => b.free - a.free || a.ff - b.ff);
+    let need = total;
+    for (const e of entries) {
+        if (need <= 0) break;
+        const take = Math.min(need, e.free);
+        if (take <= 0) continue;
+        src[String(e.ff)] = take;
+        need -= take;
+    }
+    return src;
+}
+
+/**
+ * Отредактированные вручную ячейки матрицы (пины) → строки ЦЕЛЫХ коробов для
+ * общего движка (`finalizeDistribution` как `extraRows`). Отличие от машины:
+ * `src` РАСКЛАДЫВАЕТСЯ по нескольким ФФ (`allocSrcAcrossFf`) — остаток баркода
+ * размазан по складам, а не сидит на одном ФФ разгрузки.
+ *
+ * Каждый пин (barcode × WB) = `boxes × ppb`; тип упаковки — из приёмки
+ * (`pinnedPkgOf`). Σ по баркоду капится суммарным свободным ФФ-остатком. Одна
+ * строка на (barcode × package_type), Σsrc==Σtgt. Чистая — юнит-тестируется.
+ */
+export function buildPinnedRowsFf(
+    cellEdits: CellEdits,
+    articles: StockNeedArticle[],
+    nmPpb: Map<number, number | null>,
+    pinnedPkgOf: PinnedPkgOf,
+): AssemblyDraftRow[] {
+    if (cellEdits.size === 0) return [];
+    const byBc = new Map<string, StockNeedArticle>();
+    for (const a of articles) byBc.set(a.barcode, a);
+    const rows: AssemblyDraftRow[] = [];
+    for (const [bc, whBoxes] of cellEdits) {
+        const a = byBc.get(bc);
+        if (!a || !a.nm_id) continue;
+        const ppb = nmPpb.get(a.nm_id) || 0;
+        if (ppb <= 0) continue;
+        const ffAvail = ffAvailOf(a);
+        let cap = Object.values(ffAvail).reduce((s, v) => s + v, 0);
+        const byPkg = new Map<PackageType, Record<string, number>>();
+        for (const wb of Object.keys(whBoxes).sort()) {
+            const boxes = Math.max(0, Math.floor(whBoxes[wb] || 0));
+            if (boxes <= 0) continue;
+            const units = Math.min(boxes * ppb, Math.floor(cap / ppb) * ppb);
+            if (units <= 0) continue;
+            cap -= units;
+            const pkg = pinnedPkgOf(a.nm_id, wb);
+            const rec = byPkg.get(pkg) ?? {};
+            rec[wb] = (rec[wb] ?? 0) + units;
+            byPkg.set(pkg, rec);
+        }
+        // src делим по ФФ; reserved держит уже разложенное между pkg одного баркода.
+        const reserved: Record<number, number> = {};
+        for (const [pkg, tgt] of byPkg) {
+            const total = Object.values(tgt).reduce((s, v) => s + v, 0);
+            if (total <= 0) continue;
+            const src = allocSrcAcrossFf(total, ffAvail, reserved);
+            for (const [ff, q] of Object.entries(src)) reserved[Number(ff)] = (reserved[Number(ff)] || 0) + q;
+            rows.push({ nm_id: a.nm_id, barcode: bc, vendor_code: a.vendor_code || bc, src, tgt, package_type: pkg });
+        }
+    }
+    return rows;
+}
+
+/**
+ * Разложить дозабор BOX-направления (кандидаты nm+коробы) на баркоды свободного
+ * ФФ-стока, ЦЕЛЫМИ коробами. Артикул черновика = один баркод на nm; кап по
+ * суммарному свободному остатку (available − уже разложено, `allocByBc`).
+ * Возвращает добавки (barcode→wb→штук) для накопления в manualTopUp. Чистая.
+ */
+export function planBoxTopUpFf(
+    candidates: BoxTopUpCandidate[],
+    wb: string,
+    articles: StockNeedArticle[],
+    allocByBc: Map<string, number>,
+    nmPpb: Map<number, number | null>,
+): { barcode: string; wb: string; units: number }[] {
+    const byNm = new Map<number, StockNeedArticle>();
+    for (const a of articles) if (!byNm.has(a.nm_id)) byNm.set(a.nm_id, a);
+    const out: { barcode: string; wb: string; units: number }[] = [];
+    for (const c of candidates) {
+        if (c.nmId == null) continue;
+        const a = byNm.get(c.nmId);
+        if (!a) continue;
+        const ppb = nmPpb.get(c.nmId) || 0;
+        if (ppb <= 0 || c.boxes <= 0) continue;
+        const availSum = Object.values(ffAvailOf(a)).reduce((s, v) => s + v, 0);
+        const free = Math.max(0, availSum - (allocByBc.get(a.barcode) ?? 0));
+        const want = c.boxes * ppb;
+        const take = Math.min(want, Math.floor(free / ppb) * ppb);
+        if (take > 0) out.push({ barcode: a.barcode, wb, units: take });
+    }
+    return out;
+}
+
+/**
+ * Ручной дозабор (barcode→wb→штук) → строки ЦЕЛЫХ коробов (extraRows). `src`
+ * раскладывается по ФФ (`allocSrcAcrossFf`). Кап по суммарному свободному
+ * остатку баркода минус `reservedByBc` (потребность/пины) — Σsrc ≤ наличие
+ * даже при гонке двойного клика. Чистая.
+ */
+export function buildTopUpRowsFf(
+    manualTopUp: Map<string, Record<string, number>>,
+    articles: StockNeedArticle[],
+    nmPpb: Map<number, number | null>,
+    reservedByBc?: Map<string, number>,
+): AssemblyDraftRow[] {
+    if (manualTopUp.size === 0) return [];
+    const byBc = new Map<string, StockNeedArticle>();
+    for (const a of articles) byBc.set(a.barcode, a);
+    const rows: AssemblyDraftRow[] = [];
+    for (const [bc, wbMap] of manualTopUp) {
+        const a = byBc.get(bc);
+        if (!a || !a.nm_id) continue;
+        const ppb = nmPpb.get(a.nm_id) || 0;
+        if (ppb <= 0) continue;
+        const ffAvail = ffAvailOf(a);
+        const availSum = Object.values(ffAvail).reduce((s, v) => s + v, 0);
+        let cap = Math.max(0, availSum - (reservedByBc?.get(bc) ?? 0));
+        const tgt: Record<string, number> = {};
+        let total = 0;
+        for (const [wb, q] of Object.entries(wbMap)) {
+            const units = Math.min(Math.floor((q || 0) / ppb) * ppb, Math.floor(cap / ppb) * ppb);
+            if (units <= 0) continue;
+            tgt[wb] = (tgt[wb] ?? 0) + units;
+            total += units;
+            cap -= units;
+        }
+        if (total <= 0) continue;
+        const src = allocSrcAcrossFf(total, ffAvail);
+        rows.push({ nm_id: a.nm_id, barcode: bc, vendor_code: a.vendor_code || bc, src, tgt, package_type: 'BOX' });
+    }
+    return rows;
+}
+
+/** Обогащение артикула данными «Потребности по складам» (для матрицы черновика):
+ *  в сборке / на WB-остатке / новинка + per-WB срезы. Зеркало `enrichPoolRows`
+ *  машины, но источник строк — сами артикулы (не пул). Матч по nm_id. */
+export function enrichArticles(
+    articles: StockNeedArticle[],
+    stockNeed: StockNeedResponse | null,
+    coldStartSet: Set<number>,
+): Map<number, EnrichedSku> {
+    // per-WB-склад потребность+остаток из warehouses[].articles[nm].
+    const whCells = new Map<number, Record<string, { need: number; stock: number }>>();
+    for (const w of stockNeed?.warehouses ?? []) {
+        for (const [nmStr, cell] of Object.entries(w.articles ?? {})) {
+            const nm = Number(nmStr);
+            const m = whCells.get(nm) ?? {};
+            m[w.name] = { need: Number(cell?.need) || 0, stock: Number(cell?.stock) || 0 };
+            whCells.set(nm, m);
+        }
+    }
+    const out = new Map<number, EnrichedSku>();
+    for (const a of articles) {
+        const nm = a.nm_id;
+        if (!nm || out.has(nm)) continue;
+        const cells = whCells.get(nm) ?? {};
+        const names = new Set<string>([
+            ...Object.keys(cells),
+            ...Object.keys(a.asm_by_warehouse ?? {}),
+            ...Object.keys(a.transit_by_warehouse ?? {}),
+        ]);
+        const byWh: Record<string, { need: number; stock: number; asm: number; transit: number }> = {};
+        for (const name of names) {
+            byWh[name] = {
+                need: cells[name]?.need ?? 0,
+                stock: cells[name]?.stock ?? 0,
+                asm: Number(a.asm_by_warehouse?.[name]) || 0,
+                transit: Number(a.transit_by_warehouse?.[name]) || 0,
+            };
+        }
+        out.set(nm, {
+            nm_id: nm,
+            inAssembly: Number(a.in_assembly) || 0,
+            inTransit: Number(a.in_transit) || 0,
+            stocksWb: Number(a.stocks_wb) || 0,
+            isNew: coldStartSet.has(nm),
+            byWh,
+        });
+    }
+    return out;
+}
