@@ -5316,13 +5316,26 @@ async def create_assembly_from_ff(
     payload = AssemblyRequestCreate(
         warehouse_id=warehouse_id,
         pallets_count=1,
-        pallet_weight_kg=Decimal("1.00"),
-        comment=f"Создана из ФФ-заявки {ff_label} (паллеты/вес — заглушка 1×1 кг, уточните вручную)",
+        pallet_weight_kg=Decimal("0"),
+        comment=f"Создана из ФФ-заявки {ff_label} (вес — авто из состава; паллеты уточните вручную)",
         items=items,
     )
     # ValueError (дефицит доступного стока и т.п.) пробрасываем как есть —
     # текст человекочитаемый; commit + invalidate_cache внутри.
     doc = await create_assembly_request(db, project_id, payload)
+
+    # Авто-вес отгрузки: заменяем нулевую заглушку расчётным весом (нетто товаров
+    # + тара коробов) и авто-числом паллет по геометрии. Совместная поставка =
+    # несколько сборок (по одной на ФФ-источник); раньше каждая получала фейковый
+    # 1×1 кг и сиблинги висли с «1,0 кг». Веса нет ни у одной позиции →
+    # apply_goods_weight бросает ValueError, оставляем 0 (список честно подсветит
+    # «нет веса», total_weight_kg=0 без ложного значения).
+    from backend.services.assembly.pallets import apply_goods_weight
+
+    try:
+        doc = await apply_goods_weight(db, project_id, doc.id)
+    except ValueError:
+        pass
 
     # Пере-SELECT под row-lock: параллельный link мог занять ФФ-заявку,
     # пока создавалась сборка (create_assembly_request коммитит транзакцию)

@@ -4348,11 +4348,45 @@ export interface AssemblyDraftUpdate {
   name?: string | null;
   distribution?: AssemblyDraftDistribution | null;
   comment?: string | null;
+  /** Если задано — бэк логирует событие истории со снапшотом черновика (для отката). */
+  event?: DraftEventLog;
 }
 
 export interface AssemblyDraftCommitResponse {
   created_request_ids: number[];
   draft_id: number;
+}
+
+/** Опциональный маркер для updateAssemblyDraft — логирует событие истории со снапшотом. */
+export interface DraftEventLog {
+  event_type: 'PREBOOK_TOPUP' | 'MATRIX_WRITE';
+  summary?: string;
+}
+
+/** Событие истории изменений черновика (новейшие первыми в списке). */
+export interface DraftEvent {
+  id: number;
+  event_type: 'PREBOOK_TOPUP' | 'MATRIX_WRITE' | 'COMMIT_REQUEST' | string;
+  summary: string | null;
+  created_at: string;
+  created_by: string | null;
+  reverted_at: string | null;
+  reverted_by: string | null;
+  created_request_ids: number[] | null;
+  can_revert: boolean;
+  revert_blocked_reason: string | null;
+}
+
+export interface DraftHistoryResponse {
+  events: DraftEvent[];
+}
+
+export interface DraftEventRevertResponse {
+  reverted_event_id: number;
+  event_type: string;
+  restored_draft: boolean;
+  deleted_request_ids: number[];
+  draft: AssemblyDraft | null;
 }
 
 /** Явная отгрузка ФФ→склад для commit (режим «только целые паллеты»): заявка

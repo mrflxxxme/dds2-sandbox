@@ -544,6 +544,60 @@ async def test_create_assembly_from_ff_skipped_barcodes(db_session, project, war
 
 
 @pytest.mark.asyncio
+async def test_create_assembly_from_ff_autofills_weight(db_session, project, warehouse):
+    """Вес сборки автозаполняется из веса товаров — НЕ заглушка 1×1 кг.
+
+    Совместная поставка = N сборок (по одной на ФФ-источник); каждая раньше
+    получала pallet_weight_kg=1.00, из-за чего сиблинги висли с «1,0 кг».
+    Теперь вес считается из состава (нетто = Σ qty × вес/шт).
+    """
+    bc_a, bc_b = f"32{_uid()}", f"33{_uid()}"
+    nom_a = await _add(
+        db_session,
+        Nomenclature(project_id=project.id, barcode=bc_a, article_seller=f"ART-{_uid()[:6]}", weight_kg=Decimal("2.0")),
+    )
+    nom_b = await _add(
+        db_session,
+        Nomenclature(project_id=project.id, barcode=bc_b, article_seller=f"ART-{_uid()[:6]}", weight_kg=Decimal("3.0")),
+    )
+    await _seed_stock(db_session, project.id, warehouse.id, nom_a, bc_a, 10)
+    await _seed_stock(db_session, project.id, warehouse.id, nom_b, bc_b, 10)
+
+    ff = await _add(
+        db_session,
+        _mirror(project.id, warehouse.id, created=date(2026, 6, 8), raw=_wms_raw([(bc_a, 5), (bc_b, 3)])),
+    )
+
+    result = await fulfillment_service.create_assembly_from_ff(db_session, project.id, warehouse.id, ff.id)
+
+    doc = await db_session.get(AssemblyRequest, result["assembly_request_id"])
+    # Нетто = 5×2.0 + 3×3.0 = 19.0 кг; без веса коробки тара не прибавляется,
+    # без геометрии паллет остаётся 1 → pallet_weight_kg = 19.0 / 1.
+    assert doc.pallet_weight_kg == Decimal("19.00")
+    assert doc.pallet_weight_kg != Decimal("1.00")  # не заглушка
+
+
+@pytest.mark.asyncio
+async def test_create_assembly_from_ff_no_weight_stays_zero(db_session, project, warehouse):
+    """Веса нет ни у одной позиции → pallet_weight_kg=0 (не фейковая 1.00).
+
+    Ноль честно подсвечивается «нет веса» на списке, а не показывает ложный 1 кг.
+    """
+    bc = f"34{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)  # без weight_kg
+    await _seed_stock(db_session, project.id, warehouse.id, nom, bc, 10)
+    ff = await _add(
+        db_session,
+        _mirror(project.id, warehouse.id, created=date(2026, 6, 8), raw=_wms_raw([(bc, 5)])),
+    )
+
+    result = await fulfillment_service.create_assembly_from_ff(db_session, project.id, warehouse.id, ff.id)
+
+    doc = await db_session.get(AssemblyRequest, result["assembly_request_id"])
+    assert doc.pallet_weight_kg == Decimal("0")
+
+
+@pytest.mark.asyncio
 async def test_create_assembly_from_ff_auto_ready(db_session, project, warehouse):
     """Стадия ФФ уже «готов» (is_completed) → созданная сборка сразу READY, как в link_request."""
     bc = f"30{_uid()}"

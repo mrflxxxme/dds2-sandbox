@@ -26,9 +26,12 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
     CommitDraftOptions,
+    DraftEventRevertResponse,
+    DraftHistoryResponse,
     ForecastResponse,
 )
 from backend.services import assembly_draft_service, assembly_load_forecast_service
+from backend.services.assembly import draft_history
 from backend.utils.rate_limit import rate_limit_write
 
 router = APIRouter(prefix="/assembly/drafts", tags=["Assembly Drafts"])
@@ -126,7 +129,7 @@ async def update_draft(
     db: AsyncSession = Depends(get_db),
 ) -> AssemblyDraftRead:
     """Update mutable fields of a draft."""
-    draft = await assembly_draft_service.update_draft(db, project.id, draft_id, payload)
+    draft = await assembly_draft_service.update_draft(db, project.id, draft_id, payload, changed_by="user")
     return await assembly_draft_service.to_read_model(db, project.id, draft)
 
 
@@ -209,8 +212,35 @@ async def commit_draft(
     """
     return await assembly_draft_service.commit_draft(
         db, project.id, draft_id, package_type, options.pallet_counts, options.supplies,
-        source_ff_id=source_ff_id,
+        source_ff_id=source_ff_id, changed_by="user",
     )
+
+
+@router.get("/{draft_id}/history", response_model=DraftHistoryResponse)
+async def get_draft_history(
+    draft_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> DraftHistoryResponse:
+    """История изменений черновика (дозабор / запись из матрицы / создание заявки),
+    новейшие первыми, с флагом `can_revert` и причиной запрета отката."""
+    return await draft_history.get_draft_history(db, project.id, draft_id)
+
+
+@router.post(
+    "/{draft_id}/history/{event_id}/revert",
+    response_model=DraftEventRevertResponse,
+    dependencies=[Depends(rate_limit_write)],
+)
+async def revert_draft_event(
+    draft_id: int,
+    event_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> DraftEventRevertResponse:
+    """Откатить событие истории. 409 если откат недоступен (черновик изменился /
+    заявка на ФФ / уже WB-поставка)."""
+    return await draft_history.revert_draft_event(db, project.id, draft_id, event_id, changed_by="user")
 
 
 @router.post(

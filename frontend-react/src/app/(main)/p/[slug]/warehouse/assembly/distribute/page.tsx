@@ -23,6 +23,7 @@ import { BoxWeightSetting } from './components/BoxWeightSetting';
 import ForecastView from './components/ForecastView';
 import PreDistributionView from './components/PreDistributionView';
 import DraftMatrixView from './components/DraftMatrixView';
+import DraftHistoryView from './components/DraftHistoryView';
 import PrebookView, { type PrebookGroup, type PrebookAcceptanceMark, type PrebookMonoPallet } from './components/PrebookView';
 import { WarehouseExclusionSettings } from '../../analytics/components/WarehouseExclusionSettings';
 import type {
@@ -39,10 +40,11 @@ import type {
 
 const AUTOSAVE_DEBOUNCE_MS = 5000;
 
-type AssemblyTab = 'draft' | 'matrix' | 'need' | 'box' | 'pallets' | 'forecast' | 'settings' | 'pre-dist' | 'prebook';
+type AssemblyTab = 'draft' | 'matrix' | 'history' | 'need' | 'box' | 'pallets' | 'forecast' | 'settings' | 'pre-dist' | 'prebook';
 const TABS: { key: AssemblyTab; label: string }[] = [
     { key: 'draft', label: '📝 Черновик сборки' },
     { key: 'matrix', label: '✏️ Ручная раскладка' },
+    { key: 'history', label: '🕘 История' },
     { key: 'need', label: '🏬 Потребность по складам' },
     { key: 'box', label: '📦 Кратность' },
     { key: 'pallets', label: '🚚 Паллеты' },
@@ -81,7 +83,7 @@ export default function AssemblyDraftPage() {
     // Активная вкладка ← из ?tab=. useSearchParams пуст на 1-м рендере — дефолт 'draft'.
     const tabParam = searchParams.get('tab');
     const activeTab: AssemblyTab =
-        tabParam === 'matrix' || tabParam === 'need' || tabParam === 'box' || tabParam === 'pallets' || tabParam === 'forecast' || tabParam === 'settings' || tabParam === 'pre-dist' || tabParam === 'prebook'
+        tabParam === 'matrix' || tabParam === 'history' || tabParam === 'need' || tabParam === 'box' || tabParam === 'pallets' || tabParam === 'forecast' || tabParam === 'settings' || tabParam === 'pre-dist' || tabParam === 'prebook'
             ? tabParam
             : 'draft';
 
@@ -1189,7 +1191,7 @@ export default function AssemblyDraftPage() {
             nextPrebook.push(...norm.dropped.filter(r => pbNm.has(r.nm_id)), ...looseKept.filter(r => pbNm.has(r.nm_id)));
             const targetNames = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.tgt))));
             const sourceIds = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: mergedRows, prebook: nextPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames } });
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: mergedRows, prebook: nextPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames }, event: { event_type: 'PREBOOK_TOPUP', summary: 'Дозабор из предброни' } });
             healScopeRef.current = { ts: updated.updated_at, only: new Set([directionKey(pkg, wb)]) };
             applyDraft(updated);
             showToast(`Дособрано на «${wb}»: +${formatNumber(keptUnits, 0)} шт целыми паллетами`, 'success');
@@ -1465,7 +1467,7 @@ export default function AssemblyDraftPage() {
             });
             const addedUnits = additions.reduce((s, r) => s + (r.tgt[wb] || 0), 0);
             const nextPrebook = mergeDraftRows([...prebook, ...additions]);
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook } });
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook }, event: { event_type: 'PREBOOK_TOPUP', summary: 'Дозабор из предброни' } });
             healScopeRef.current = { ts: updated.updated_at, only: new Set([directionKey('MONOPALLET', wb)]) };
             applyDraft(updated);
             showToast(`Дозаброшено в предбронь «${wb}»: +${formatNumber(addedUnits, 0)} шт целыми коробами до целой паллеты`, 'success');
@@ -1985,6 +1987,17 @@ export default function AssemblyDraftPage() {
                 ) : (
                     <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>
                         Сначала выберите или создайте черновик (вкладка «📝 Черновик сборки») — ручная раскладка пишет результат в него.
+                    </div>
+                )
+            )}
+
+            {/* Вкладка «История» — журнал изменений черновика + откат событий */}
+            {activeTab === 'history' && (
+                draftId ? (
+                    <DraftHistoryView draftId={draftId} onReverted={() => { reloadDraft(); }} />
+                ) : (
+                    <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>
+                        Сначала выберите или создайте черновик (вкладка «📝 Черновик сборки») — история ведётся по нему.
                     </div>
                 )
             )}
