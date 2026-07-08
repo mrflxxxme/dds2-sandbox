@@ -491,6 +491,23 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
     };
 
     // ─── Step 2: upload docs (опционально) + финализация ─────────────────
+    const handleDownloadDoc = async (requestId: number, docId: number, filename: string | null) => {
+        setError('');
+        try {
+            const blob = await api.downloadPaymentRequestDocument(requestId, docId);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename || 'document';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Ошибка скачивания документа');
+        }
+    };
+
     // Заявка создаётся сразу «На проверке» — отдельной передачи в оплату нет.
     const handleUploadDocs = async () => {
         if (!created) return;
@@ -550,7 +567,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                         {created.documents.map(d => (
                             <div key={d.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 13 }}>
                                 <span>{d.doc_type === 'INVOICE' ? 'Счёт' : 'Акт'} · {d.original_filename ?? 'файл'}</span>
-                                <a href={api.paymentRequestDocumentDownloadUrl(created.id, d.id)} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-accent)' }}>Скачать</a>
+                                <button onClick={() => handleDownloadDoc(created.id, d.id, d.original_filename)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-accent)', padding: 0, fontSize: 13 }}>Скачать</button>
                             </div>
                         ))}
                     </div>
