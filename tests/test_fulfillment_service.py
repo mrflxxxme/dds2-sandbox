@@ -140,6 +140,19 @@ def _mock_requests(monkeypatch, by_type: dict):
     monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_fetch_request_detail)
 
 
+def _mock_request_detail(monkeypatch, products):
+    """Деталка заявки с per-line фактом: products=[{barcode, amount, acceptedAmount}].
+
+    Нужна авто-приёму приёмок (skladbot принимает по acceptedAmount, а не заявленному).
+    Вызывать ПОСЛЕ _mock_requests — он ставит дефолтную пустую деталку.
+    """
+
+    async def fake_fetch_request_detail(self, external_id):
+        return {"products": products}
+
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", fake_fetch_request_detail)
+
+
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
 
@@ -2526,18 +2539,20 @@ async def test_sync_accepts_linked_inbound_receipt(db_session, project, warehous
     await db_session.refresh(receipt)
     assert receipt.status == InboundStatus.EXPECTED
 
-    # ФФ завершил приёмку (is_completed) + ПРОСРОЧЕНА → наша приёмка ACCEPT + сток
+    # ФФ завершил приёмку (is_completed) + ПРОСРОЧЕНА → наша приёмка ACCEPT + сток.
+    # skladbot принимает по ФАКТУ — деталка отдаёт acceptedAmount=10 (= заявленному).
     _mock_requests(
         monkeypatch,
         {852: [_req(8801, status="new", completed=1, stage_title=None, stage_code=None, expired=1)]},
     )
+    _mock_request_detail(monkeypatch, [{"barcode": bc, "amount": 10, "acceptedAmount": 10}])
     result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
     assert result["inbound_receipts_accepted"] == 1
     await db_session.refresh(receipt)
     assert receipt.status == InboundStatus.ACCEPTED
     assert receipt.actual_date == date.today()
 
-    # Сток запостен: actual_qty (auto-fill из expected) = 10
+    # Сток запостен по факту ФФ (acceptedAmount) = 10
     stock = (
         await db_session.execute(
             select(WarehouseStock).where(
@@ -2554,6 +2569,72 @@ async def test_sync_accepts_linked_inbound_receipt(db_session, project, warehous
     assert result["inbound_receipts_accepted"] == 0
     await db_session.refresh(stock)
     assert stock.quantity == 10
+
+
+@pytest.mark.asyncio
+async def test_sync_accepts_inbound_by_ff_fact_undercount(db_session, project, warehouse, connected_key, monkeypatch):
+    """ФФ (skladbot) принял МЕНЬШЕ заявленного → на остаток встаёт факт, не заявленное.
+
+    Прод-баг (receipt 200 ↔ ff-request 555, Газпром): недовоз ФФ ложно вставал на
+    остаток целиком (auto-fill из expected). Теперь авто-приём берёт acceptedAmount.
+    """
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {852: [_req(8820, stage_title="Приемка", stage_code="acceptance")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    receipt = await _make_receipt_with_item(db_session, project, warehouse, nom, bc, expected_qty=10)
+    mirror = await _mirror_row(db_session, project.id, "8820")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, inbound_receipt_id=receipt.id)
+
+    # ФФ завершил, но принял 7 из 10 (недовоз 3)
+    _mock_requests(monkeypatch, {852: [_req(8820, status="new", completed=1, stage_title=None, stage_code=None)]})
+    _mock_request_detail(monkeypatch, [{"barcode": bc, "amount": 10, "acceptedAmount": 7}])
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["inbound_receipts_accepted"] == 1
+
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.ACCEPTED
+    item_qty = (
+        await db_session.execute(
+            select(InboundReceiptItem.actual_qty).where(InboundReceiptItem.receipt_id == receipt.id)
+        )
+    ).scalar_one()
+    assert item_qty == 7  # факт, не заявленные 10
+    stock = (
+        await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.project_id == project.id,
+                WarehouseStock.warehouse_id == warehouse.id,
+                WarehouseStock.barcode == bc,
+            )
+        )
+    ).scalar_one()
+    assert stock.quantity == 7
+
+
+@pytest.mark.asyncio
+async def test_sync_inbound_defers_accept_when_ff_fact_unavailable(
+    db_session, project, warehouse, connected_key, monkeypatch
+):
+    """Факт skladbot недоступен (деталка пустая) → приём ОТКЛАДЫВАЕТСЯ, не по заявленному."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {852: [_req(8821, stage_title="Приемка", stage_code="acceptance")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    receipt = await _make_receipt_with_item(db_session, project, warehouse, nom, bc, expected_qty=10)
+    mirror = await _mirror_row(db_session, project.id, "8821")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, inbound_receipt_id=receipt.id)
+
+    # Завершено, но деталка без состава (дрейф/сбой) → helper вернёт None
+    _mock_requests(monkeypatch, {852: [_req(8821, status="new", completed=1, stage_title=None, stage_code=None)]})
+    _mock_request_detail(monkeypatch, [])
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["inbound_receipts_accepted"] == 0
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.EXPECTED  # не приняли по заявленному
 
 
 @pytest.mark.asyncio
@@ -2603,8 +2684,9 @@ async def test_link_inbound_completed_auto_accepts(db_session, project, warehous
     bc = f"BC-{_uid()}"
     nom = await _make_nomenclature(db_session, project.id, bc)
     _mock_products(monkeypatch, [])
-    # ФФ уже завершил приёмку (is_completed)
+    # ФФ уже завершил приёмку (is_completed); деталка отдаёт факт acceptedAmount=10
     _mock_requests(monkeypatch, {852: [_req(8810, status="new", completed=1, stage_title=None)]})
+    _mock_request_detail(monkeypatch, [{"barcode": bc, "amount": 10, "acceptedAmount": 10}])
     await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
 
     receipt = await _make_receipt_with_item(db_session, project, warehouse, nom, bc, expected_qty=10)

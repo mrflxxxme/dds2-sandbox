@@ -278,11 +278,16 @@ async def accept_receipt(
     project_id: int,
     receipt_id: int,
     actual_quantities: list[dict] | None = None,
+    actual_by_barcode: dict[str, int] | None = None,
 ) -> InboundReceipt:
     """
     Accept receipt: DRAFT/EXPECTED → ACCEPTED.
     Adds actual_qty to warehouse stock for each item.
     If actual_quantities provided, updates actual_qty before accepting.
+
+    actual_by_barcode — фактически принятое ФФ по ШК (авто-приём по факту).
+    Позиция с явно заданным фактом (в любой из карт, включая 0) НЕ добивается
+    заявленным (expected) — иначе недовоз ФФ ложно встал бы на остаток целиком.
     """
     receipt = await get_receipt(db, project_id, receipt_id)
     if not receipt:
@@ -334,15 +339,39 @@ async def accept_receipt(
     if already_applied.first() is not None:
         raise ValueError("Receipt stock already applied")
 
-    # Apply provided actual quantities
+    # Apply provided actual quantities. Позиции с явно заданным фактом собираем в
+    # explicit_ids — их НЕ добиваем заявленным ниже (недовоз/0 остаётся фактом).
+    explicit_ids: set[int] = set()
     if actual_quantities:
         qty_map = {aq["item_id"]: aq["actual_qty"] for aq in actual_quantities}
         for item in receipt.items:
             if item.id in qty_map:
-                item.actual_qty = qty_map[item.id]
+                item.actual_qty = max(0, int(qty_map[item.id]))
+                explicit_ids.add(item.id)
+    if actual_by_barcode:
+        for item in receipt.items:
+            if item.barcode and item.barcode in actual_by_barcode:
+                item.actual_qty = max(0, int(actual_by_barcode[item.barcode]))
+                explicit_ids.add(item.id)
+        # Позиция приёмки, которой НЕТ в факте ФФ (дрейф/формат ШК), уйдёт в
+        # auto-fill по заявленному ниже — логируем, чтобы возможный перекниж был
+        # виден (иначе тихо вернём over-count, ровно то, что фикс и лечит).
+        unmatched = [
+            it.barcode for it in receipt.items if it.id not in explicit_ids and it.expected_qty > 0 and it.barcode
+        ]
+        if unmatched:
+            logger.warning(
+                "accept_receipt %s: %d позиций нет в факте ФФ, приняты по заявленному: %s",
+                receipt_id,
+                len(unmatched),
+                ", ".join(unmatched),
+            )
 
-    # Auto-fill actual_qty from expected_qty if not set
+    # Auto-fill actual_qty from expected_qty if not set — но только для позиций
+    # БЕЗ явного факта: явный недовоз (в т.ч. 0) не должен подмениться заявленным.
     for item in receipt.items:
+        if item.id in explicit_ids:
+            continue
         if item.actual_qty <= 0 and item.expected_qty > 0:
             item.actual_qty = item.expected_qty
 

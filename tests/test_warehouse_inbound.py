@@ -246,6 +246,90 @@ class TestAcceptReceipt:
             assert qty.scalar() == 162
 
 
+class TestAcceptReceiptByFact:
+    """Авто-приём по факту ФФ: actual_by_barcode кладёт фактически принятое,
+    заявленное (expected) НЕ подмешивается там, где факт известен."""
+
+    async def _stock_qty(self, db_session, project_id, warehouse_id, nom_id) -> int:
+        row = await db_session.execute(
+            text(
+                "SELECT quantity FROM warehouse_stock "
+                "WHERE project_id = :p AND warehouse_id = :w AND nomenclature_id = :n"
+            ),
+            {"p": project_id, "w": warehouse_id, "n": nom_id},
+        )
+        return row.scalar() or 0
+
+    @pytest.mark.asyncio
+    async def test_accept_by_barcode_books_fact_not_expected(
+        self, db_session, project, warehouse, nomenclature_id
+    ):
+        """ФФ принял 30 из заявленных 50 → на остаток встаёт 30, не 50."""
+        barcode, nom_id = nomenclature_id
+        receipt = await create_receipt(
+            db_session,
+            project.id,
+            warehouse.id,
+            {"items": [{"barcode": barcode, "expected_qty": 50, "actual_qty": 0}]},
+        )
+        accepted = await accept_receipt(
+            db_session, project.id, receipt.id, actual_by_barcode={barcode: 30}
+        )
+        assert accepted.status == InboundStatus.ACCEPTED
+        assert accepted.items[0].actual_qty == 30
+        assert await self._stock_qty(db_session, project.id, warehouse.id, nom_id) == 30
+
+    @pytest.mark.asyncio
+    async def test_accept_by_barcode_explicit_zero_not_overwritten_by_expected(
+        self, db_session, project, warehouse, nomenclature_id
+    ):
+        """ФФ не принял ничего (0 из 50) → авто-fill НЕ подменяет 0 заявленным."""
+        barcode, nom_id = nomenclature_id
+        receipt = await create_receipt(
+            db_session,
+            project.id,
+            warehouse.id,
+            {"items": [{"barcode": barcode, "expected_qty": 50, "actual_qty": 0}]},
+        )
+        accepted = await accept_receipt(
+            db_session, project.id, receipt.id, actual_by_barcode={barcode: 0}
+        )
+        assert accepted.items[0].actual_qty == 0
+        assert await self._stock_qty(db_session, project.id, warehouse.id, nom_id) == 0
+
+    @pytest.mark.asyncio
+    async def test_accept_by_barcode_unmatched_line_falls_back_to_expected(
+        self, db_session, project, warehouse, nomenclature_id
+    ):
+        """Позиция, которой нет в карте факта, принимается по заявленному (как раньше)."""
+        bc1, nom1 = nomenclature_id
+        bc2 = f"BC-{_uid()}"
+        result = await db_session.execute(
+            text(
+                "INSERT INTO nomenclature (project_id, barcode, subject, updated_at) "
+                "VALUES (:pid, :bc, :subj, NOW()) RETURNING id"
+            ),
+            {"pid": project.id, "bc": bc2, "subj": "Test Item 2"},
+        )
+        nom2 = result.scalar()
+        await db_session.commit()
+        receipt = await create_receipt(
+            db_session,
+            project.id,
+            warehouse.id,
+            {
+                "items": [
+                    {"barcode": bc1, "expected_qty": 50, "actual_qty": 0},
+                    {"barcode": bc2, "expected_qty": 20, "actual_qty": 0},
+                ]
+            },
+        )
+        # Факт есть только по bc1 (принято 30); bc2 в карте нет → берётся expected 20.
+        await accept_receipt(db_session, project.id, receipt.id, actual_by_barcode={bc1: 30})
+        assert await self._stock_qty(db_session, project.id, warehouse.id, nom1) == 30
+        assert await self._stock_qty(db_session, project.id, warehouse.id, nom2) == 20
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # accept_receipt — defect receipts (WB-возвраты с ПВЗ)
 # ═══════════════════════════════════════════════════════════════════════════════

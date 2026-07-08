@@ -832,6 +832,8 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         for r in inbound_reqs
         if r.inbound_receipt_id is not None
     }
+    # receipt_id → ФФ-заявка: нужна на авто-приёме, чтобы дотянуть факт (skladbot)
+    req_by_receipt = {r.inbound_receipt_id: r for r in inbound_reqs if r.inbound_receipt_id is not None}
     inbound_accept_ids = await _collect_inbound_accept_candidates(db, project_id, inbound_reqs)
 
     synced_at = utcnow()
@@ -862,13 +864,38 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         from backend.services.fulfillment_notify import build_accept_item
         from backend.services.warehouse_inbound import accept_receipt
 
+        # skladbot: приём по ФАКТУ (acceptedAmount) требует деталку заявки — клиент
+        # строим ОДИН раз (переиспользуем между приёмками), факт тянем ДО открытия
+        # accept_db (не держим DB-соединение во время HTTP), с cap на число деталей
+        # за синк (как enrich-циклы) — залп открытых приёмок не жжёт rate limit.
+        skl_accept_client = SkladbotClient(token, project_id=project_id) if provider == "skladbot" else None
+        detail_calls = 0
+
         # Каждый приём — в СВОЕЙ сессии: accept_receipt сам коммитит/рефрешит,
         # а на ошибке (напр. приёмка без позиций) откат не должен затрагивать
         # сессию синка/вызывающего — иначе ловим expired-attribute на их объектах.
         for receipt_id in inbound_accept_ids:
             try:
+                # skladbot: недовоз ФФ иначе ложно встал бы на остаток целиком. Факт
+                # не получили → откладываем приём до след. синка, не книжим заявленное.
+                # Прочие провайдеры — как раньше (accepted_by_barcode=None).
+                accepted_by_barcode = None
+                _req = req_by_receipt.get(receipt_id)
+                if skl_accept_client is not None and _req is not None:
+                    if detail_calls >= _ENRICH_DETAIL_CAP:
+                        logger.warning("FF auto-accept: cap деталей %d достигнут, хвост приёмок отложен", _ENRICH_DETAIL_CAP)
+                        break
+                    detail_calls += 1
+                    accepted_by_barcode = await _skladbot_accepted_by_barcode(skl_accept_client, _req.external_id)
+                    if accepted_by_barcode is None:
+                        logger.warning(
+                            "FF auto-accept: приёмка %s отложена — факт skladbot недоступен", receipt_id
+                        )
+                        continue
                 async with AsyncSessionLocal() as accept_db:
-                    await accept_receipt(accept_db, project_id, receipt_id)
+                    await accept_receipt(
+                        accept_db, project_id, receipt_id, actual_by_barcode=accepted_by_barcode
+                    )
                 inbound_receipts_accepted += 1
                 info = accept_info.get(receipt_id)
                 if info:
@@ -2179,6 +2206,47 @@ async def build_ff_board_text(db: AsyncSession, project_id: int, warehouse_id: i
         lines.append(f"{header}\n<blockquote expandable>" + "\n".join(body) + "</blockquote>")
         lines.append("")
     return "\n".join(lines).strip()
+
+
+async def _skladbot_accepted_by_barcode(
+    client: SkladbotClient,
+    external_id: str,
+) -> dict[str, int] | None:
+    """Фактически принятое ФФ по ШК (acceptedAmount) из живой деталки skladbot.
+
+    Списочный синк не отдаёт per-line принятое — тянем деталку заявки. Возвращает
+    {barcode: accepted_qty} (в т.ч. 0 = позиция не принята), либо None, если факт
+    получить не удалось (HTTP-ошибка / дрейф формы ответа). None → вызывающий НЕ
+    авто-принимает приёмку по заявленному, а ждёт следующего синка: лучше отложить
+    приём на 10 мин, чем поставить на остаток недовоз целиком. Клиент строится
+    вызывающим один раз (переиспользование между приёмками цикла).
+    """
+    try:
+        detail = await client.fetch_request_detail(external_id)
+    except (CircuitOpenError, RateLimitError, SkladbotApiError, httpx.HTTPError, ValueError) as e:
+        logger.warning("FF auto-accept: деталь заявки %s не получена (%s)", external_id, e)
+        return None
+    if not isinstance(detail, dict):
+        return None
+    accepted: dict[str, int] = {}
+    for p in detail.get("products") or []:
+        if not isinstance(p, dict):
+            continue
+        barcode = str(p.get("barcode") or "").strip()
+        if not barcode:
+            continue
+        accepted[barcode] = accepted.get(barcode, 0) + max(0, _safe_int(p.get("acceptedAmount")))
+    if not accepted:
+        # Деталь пришла, но состав без распознанных ШК (структурный дрейф формы, не
+        # транзиентная сеть) → отдаём None как «нет факта», но логируем ОТДЕЛЬНО:
+        # такой дефферал не самолечится синком, приёмка зависнет до ручного разбора.
+        logger.warning(
+            "FF auto-accept: заявка %s — деталь без распознанных ШК (%d позиций), приём не по факту",
+            external_id,
+            len(detail.get("products") or []),
+        )
+        return None
+    return accepted
 
 
 async def _collect_inbound_accept_candidates(
@@ -4720,8 +4788,22 @@ async def link_request(
         from backend.services.warehouse_inbound import accept_receipt
 
         try:
+            # skladbot: приём по ФАКТУ (acceptedAmount), а не по заявленному — как в
+            # sync_warehouse. Факт тянем ДО открытия accept_db; не получили →
+            # откладываем приём (синк добьёт). Прочие провайдеры — как раньше.
+            accepted_by_barcode = None
+            if req.provider == "skladbot":
+                _key = await get_integration(db, project_id, req.warehouse_id)
+                if not _key:
+                    raise ValueError("нет активного ключа skladbot — приём отложен до синка")
+                _client = SkladbotClient(_decrypt(_key.encrypted_key), project_id=project_id)
+                accepted_by_barcode = await _skladbot_accepted_by_barcode(_client, req.external_id)
+                if accepted_by_barcode is None:
+                    raise ValueError("факт skladbot недоступен — приём отложен до синка")
             async with AsyncSessionLocal() as accept_db:
-                await accept_receipt(accept_db, project_id, inbound_receipt_id)
+                await accept_receipt(
+                    accept_db, project_id, inbound_receipt_id, actual_by_barcode=accepted_by_barcode
+                )
             number = inbound_map[inbound_receipt_id][0]
             inbound_map[inbound_receipt_id] = (number, InboundStatus.ACCEPTED.value)
         except Exception as e:  # — best-effort, связь уже сохранена
