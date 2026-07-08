@@ -45,6 +45,7 @@ from backend.integrations.skladbot_client import (
     decode_jwt_exp,
 )
 from backend.integrations.wmscelicom_client import WmsCelicomApiError, WmsCelicomClient, normalize_base_url
+from backend.integrations.wmscelicom_portal_client import WmsCelicomPortalClient, WmsCelicomPortalError
 from backend.models import (
     FfRequestKind,
     FulfillmentBoxOverride,
@@ -5917,10 +5918,12 @@ async def create_ff_request_from_assembly(
         api_base = str((key.config or {}).get("api_base_url") or "")
         if not api_base:
             raise ValueError("В конфигурации ключа нет адреса инстанса — переподключите фулфилмент")
+        wms_portal = _build_wms_portal(key, project_id)
         await db.commit()  # закрыть read-транзакцию до внешних HTTP-вызовов
         wms_client = WmsCelicomClient(api_base, token, project_id=project_id)
         res = await _push_assembly_to_wms(
-            db, project_id, warehouse_id, assembly_request_id, client=wms_client, comment=payload.comment
+            db, project_id, warehouse_id, assembly_request_id,
+            client=wms_client, comment=payload.comment, portal_client=wms_portal,
         )
     else:
         raise ValueError(f"Создание заявки на ФФ не поддерживается для провайдера {_provider_human(provider)}")
@@ -6140,6 +6143,30 @@ def _wms_dispatch_comment(base: str, wb_warehouse: str | None, fbo_supply: str |
     return " · ".join(parts)
 
 
+def _build_wms_portal(key: IntegrationKey, project_id: int) -> WmsCelicomPortalClient | None:
+    """Собрать клиент кабинета «Целиком» из config ключа, если заведены портал-креды.
+
+    Кабинет живёт на том же хосте, что и API (`api_base_url`). Пароль в config хранится
+    шифрованным (`_encrypt`). Без портал-кред возвращает None — тогда склад сдачи
+    проставляется по-старому (только в comment)."""
+    cfg = key.config or {}
+    login = cfg.get("portal_login")
+    enc_pw = cfg.get("portal_password")
+    client_id = cfg.get("portal_client_id")
+    target_id = cfg.get("portal_target_id")
+    host = cfg.get("api_base_url")
+    if not (login and enc_pw and client_id and target_id and host):
+        return None
+    return WmsCelicomPortalClient(
+        str(host),
+        str(login),
+        _decrypt(str(enc_pw)),
+        project_id=project_id,
+        client_id=str(client_id),
+        target_id=str(target_id),
+    )
+
+
 async def _push_assembly_to_wms(
     db: AsyncSession,
     project_id: int,
@@ -6148,6 +6175,7 @@ async def _push_assembly_to_wms(
     *,
     client: WmsCelicomClient,
     comment: str | None,
+    portal_client: WmsCelicomPortalClient | None = None,
 ) -> dict:
     """Создать заявку на отгрузку (зОГ) у wmscelicom «Целиком» из нашей сборки.
 
@@ -6213,6 +6241,20 @@ async def _push_assembly_to_wms(
     if not external_id or external_id == "None":
         return _result("error", message="«Целиком» не вернул id созданной заявки — проверьте кабинет ФФ вручную")
 
+    # 1.5) Проставить склад сдачи через кабинет (API его структурно не берёт). Best-effort:
+    # ДО send (после send заявка уходит в сборку и шапка не редактируется). Любой сбой не
+    # ломает создание — заявка уже есть, склад просто останется в comment для оператора.
+    portal_dest: str | None = None
+    if portal_client is not None and wb_warehouse:
+        try:
+            async with portal_client:
+                await portal_client.authenticate()
+                portal_dest = await portal_client.set_order_warehouse(external_id, wb_warehouse)
+        except WmsCelicomPortalError as e:
+            logger.warning("WMS-портал: склад «%s» не проставлен на заявке %s (%s)", wb_warehouse, external_id, e)
+        except (CircuitOpenError, httpx.HTTPError, ValueError) as e:
+            logger.warning("WMS-портал: ошибка проставления склада на заявке %s (%s)", external_id, e)
+
     # 2) Авто-подтверждение в сборку (send). Ошибку не теряем: заявка уже создана.
     send_error: str | None = None
     shipment_id: object = None
@@ -6240,7 +6282,8 @@ async def _push_assembly_to_wms(
         "archived": False,
         "expired": False,
         "total_qty": total_qty,
-        "dest_warehouse": None,  # склад WB подтянется из привязки на синке
+        # склад сдачи: если проставили через кабинет — сразу зеркалим; иначе подтянется с синка
+        "dest_warehouse": portal_dest,
         "external_created_at": date.today(),
         "raw": {"orderid": external_id, "shipmentid": shipment_id, "items": items, "_dds_created": True},
     }
@@ -6311,6 +6354,7 @@ async def bulk_create_ff_requests(
     # Подготовка клиента/справочников ДО создания реальных заказов (валидация валится тут)
     sk_client: SkladbotClient | None = None
     wms_client: WmsCelicomClient | None = None
+    wms_portal: WmsCelicomPortalClient | None = None
     customer_id_val: int | None = None
     wh_options: list[dict] = []
     if provider == "skladbot":
@@ -6325,6 +6369,7 @@ async def bulk_create_ff_requests(
         api_base = str((key.config or {}).get("api_base_url") or "")
         if not api_base:
             raise ValueError("В конфигурации ключа нет адреса инстанса — переподключите фулфилмент")
+        wms_portal = _build_wms_portal(key, project_id)
         await db.commit()
         wms_client = WmsCelicomClient(api_base, token, project_id=project_id)
     else:
@@ -6352,7 +6397,8 @@ async def bulk_create_ff_requests(
         else:
             assert wms_client is not None  # provider == wmscelicom
             res = await _push_assembly_to_wms(
-                db, project_id, warehouse_id, aid, client=wms_client, comment=payload.comment
+                db, project_id, warehouse_id, aid,
+                client=wms_client, comment=payload.comment, portal_client=wms_portal,
             )
         if res["status"] == "not_found":
             res = {

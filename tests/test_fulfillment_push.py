@@ -19,6 +19,10 @@ from sqlalchemy import select
 from backend.integrations.resilience import RateLimitError
 from backend.integrations.skladbot_client import SkladbotApiError, SkladbotClient
 from backend.integrations.wmscelicom_client import WmsCelicomApiError, WmsCelicomClient
+from backend.integrations.wmscelicom_portal_client import (
+    WmsCelicomPortalError,
+    resolve_warehouse_id,
+)
 from backend.models import (
     FulfillmentRequest,
     FulfillmentStatusEvent,
@@ -960,3 +964,156 @@ async def test_wms_bulk_push_creates(db_session, project, warehouse, connected_w
     assert res["created_count"] == 2
     assert res["failed_count"] == 0
     assert {r["status"] for r in res["results"]} == {"created"}
+
+
+# ─── wmscelicom портал: проставление склада сдачи (WareHouse) ─────────────────
+
+def test_resolve_warehouse_id_exact_and_fuzzy():
+    """Мэппинг имени WB-склада → id склада «Целиком»: точное, скобочное, неоднозначное."""
+    opts = [
+        {"name": "Коледино", "id": 2},
+        {"name": "Электросталь", "id": 3},
+        {"name": "Краснодар (Тихорецкая)", "id": 9},
+        {"name": "Санкт-Петербург (Уткина Заводь)", "id": 12},
+    ]
+    # точное
+    assert resolve_warehouse_id("Электросталь", opts) == ("3", "Электросталь")
+    # скобочное уточнение игнорируется
+    assert resolve_warehouse_id("Краснодар", opts) == ("9", "Краснодар (Тихорецкая)")
+    # нет совпадения → None
+    assert resolve_warehouse_id("Хабаровск", opts) is None
+    # пусто → None
+    assert resolve_warehouse_id("", opts) is None
+    assert resolve_warehouse_id("Электросталь", []) is None
+
+
+def test_resolve_warehouse_id_ambiguous_returns_none():
+    """Несколько равно-подходящих складов → None (не угадываем чужой)."""
+    opts = [{"name": "Подольск", "id": 5}, {"name": "Подольск", "id": 6}]
+    assert resolve_warehouse_id("Подольск", opts) is None
+
+
+def test_build_wms_portal_none_without_creds(db_session, project, warehouse, connected_wms_key):
+    """Без портал-кред в config _build_wms_portal возвращает None (старое поведение)."""
+    assert fulfillment_service._build_wms_portal(connected_wms_key, project.id) is None
+
+
+class _FakePortal:
+    """Фейковый кабинет: async-контекст + authenticate + set_order_warehouse."""
+
+    def __init__(self, holder: dict, *, result: str = "Электросталь", exc: Exception | None = None):
+        self.holder = holder
+        self.result = result
+        self.exc = exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def authenticate(self):
+        self.holder["auth"] = True
+
+    async def set_order_warehouse(self, order_id, wh_name):
+        self.holder["portal"] = {"order_id": order_id, "wh_name": wh_name}
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
+
+async def _assembly_with_wb_warehouse(db_session, project, warehouse, wh_name: str):
+    bc = f"20{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 4)])
+    doc.wb_warehouse_name_manual = wh_name
+    await db_session.commit()
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_wms_push_sets_warehouse_via_portal(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """Если заведены портал-креды — склад сдачи проставляется через кабинет и зеркалится."""
+    doc = await _assembly_with_wb_warehouse(db_session, project, warehouse, "Электросталь")
+    holder: dict = {}
+    _mock_wms_create(monkeypatch, holder, order_id=515151)
+    fake = _FakePortal(holder, result="Электросталь")
+    monkeypatch.setattr(fulfillment_service, "_build_wms_portal", lambda key, pid: fake)
+
+    result = await fulfillment_service.create_ff_request_from_assembly(
+        db_session, project.id, warehouse.id, doc.id, _wms_payload()
+    )
+
+    assert result["external_id"] == "515151"
+    # кабинет вызван с id заявки и нашим именем склада
+    assert holder["auth"] is True
+    assert holder["portal"] == {"order_id": "515151", "wh_name": "Электросталь"}
+    # склад сдачи зеркалится сразу
+    row = await _get_wms_request(db_session, project.id, "515151")
+    assert row is not None and row.dest_warehouse == "Электросталь"
+
+
+@pytest.mark.asyncio
+async def test_wms_push_portal_failure_non_fatal(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """Сбой кабинета (склад не сопоставлен) не ломает создание заявки — просто без склада."""
+    doc = await _assembly_with_wb_warehouse(db_session, project, warehouse, "Неведомоград")
+    holder: dict = {}
+    _mock_wms_create(monkeypatch, holder, order_id=515151)
+    fake = _FakePortal(holder, exc=WmsCelicomPortalError("склад не сопоставлен"))
+    monkeypatch.setattr(fulfillment_service, "_build_wms_portal", lambda key, pid: fake)
+
+    result = await fulfillment_service.create_ff_request_from_assembly(
+        db_session, project.id, warehouse.id, doc.id, _wms_payload()
+    )
+
+    # заявка создана несмотря на сбой кабинета
+    assert result["external_id"] == "515151"
+    assert str(holder["send"]) == "515151"  # send всё равно вызван
+    row = await _get_wms_request(db_session, project.id, "515151")
+    assert row is not None and row.dest_warehouse is None
+
+
+@pytest.mark.asyncio
+async def test_wms_bulk_push_sets_warehouse_via_portal(db_session, project, warehouse, connected_wms_key, monkeypatch):
+    """Bulk-путь тоже проставляет склад через кабинет — по одному вызову на заявку."""
+    bc1, bc2 = f"20{_uid()}", f"21{_uid()}"
+    n1 = await _make_nomenclature(db_session, project.id, bc1)
+    n2 = await _make_nomenclature(db_session, project.id, bc2)
+    d1 = await _make_assembly(db_session, project, warehouse, [(bc1, n1.id, 2)])
+    d1.wb_warehouse_name_manual = "Электросталь"
+    d2 = await _make_assembly(db_session, project, warehouse, [(bc2, n2.id, 5)])
+    d2.wb_warehouse_name_manual = "Казань"
+    await db_session.commit()
+
+    counter = {"n": 0}
+    calls: list[dict] = []
+
+    async def fake_create(self, items, *, delivery=2, fbo=1, comment=None):
+        counter["n"] += 1
+        return {"status": "OK", "id": 515300 + counter["n"]}
+
+    async def fake_send(self, oid):
+        return {"status": "OK", "order_id": oid, "shipment_id": 900 + counter["n"]}
+
+    monkeypatch.setattr(WmsCelicomClient, "create_dispatch", fake_create)
+    monkeypatch.setattr(WmsCelicomClient, "send_dispatch", fake_send)
+
+    class _CollectingPortal(_FakePortal):
+        async def set_order_warehouse(self, order_id, wh_name):
+            calls.append({"order_id": order_id, "wh_name": wh_name})
+            return wh_name
+
+    portal = _CollectingPortal({})
+    monkeypatch.setattr(fulfillment_service, "_build_wms_portal", lambda key, pid: portal)
+
+    res = await fulfillment_service.bulk_create_ff_requests(
+        db_session,
+        project.id,
+        warehouse.id,
+        FfBulkCreateRequestPayload(assembly_request_ids=[d1.id, d2.id], collection_date=date(2026, 6, 28)),
+    )
+
+    assert res["created_count"] == 2
+    # один вызов кабинета на каждую заявку, с её именем склада
+    assert {c["wh_name"] for c in calls} == {"Электросталь", "Казань"}
+    assert len(calls) == 2
