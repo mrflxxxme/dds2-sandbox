@@ -51,7 +51,10 @@ jobs:
         # --ignore-vuln: starlette CVE-2026-48818/48817/54283/54282 — fix=1.1.0+/1.3.x, тот же блокер что PYSEC-2026-161
         #   (prometheus-fastapi-instrumentator не работает под starlette 1.x). Tracked для апгрейда когда экосистема
         #   поддержит starlette 1.x. (cryptography GHSA-537c-gmf6-5ccf — НЕ игнорим: бампнут до 48.0.1.)
-        run: pip-audit --strict -r requirements-backend.txt --ignore-vuln CVE-2026-30922 --ignore-vuln CVE-2025-71176 --ignore-vuln PYSEC-2026-161 --ignore-vuln CVE-2026-34993 --ignore-vuln CVE-2026-47265 --ignore-vuln CVE-2026-48818 --ignore-vuln CVE-2026-48817 --ignore-vuln CVE-2026-54283 --ignore-vuln CVE-2026-54282
+        # --ignore-vuln: ecdsa PYSEC-2026-1325 — timing side-channel (Minerva-класс), fix-версии НЕТ (мейнтейнеры
+        #   документируют как won't-fix). Транзитивная через python-jose (JWT). Убрать, если ecdsa выпустит фикс
+        #   или мигрируем jose на cryptography-бэкенд.
+        run: pip-audit --strict -r requirements-backend.txt --ignore-vuln CVE-2026-30922 --ignore-vuln CVE-2025-71176 --ignore-vuln PYSEC-2026-161 --ignore-vuln CVE-2026-34993 --ignore-vuln CVE-2026-47265 --ignore-vuln CVE-2026-48818 --ignore-vuln CVE-2026-48817 --ignore-vuln CVE-2026-54283 --ignore-vuln CVE-2026-54282 --ignore-vuln PYSEC-2026-1325
 
       - name: Audit worker/other dependencies (if exists)
         run: |
