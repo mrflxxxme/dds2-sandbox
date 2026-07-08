@@ -280,11 +280,20 @@ async def update_draft(
     project_id: int,
     draft_id: int,
     payload: AssemblyDraftUpdate,
+    changed_by: str | None = None,
 ) -> AssemblyDraft:
-    """Update mutable fields of a draft. Raises 404 if missing/deleted."""
+    """Update mutable fields of a draft. Raises 404 if missing/deleted.
+
+    Если `payload.event` задан (дозабор из предброни / запись из матрицы) — снапшотит
+    СТАРЫЙ distribution в историю (`AssemblyDraftEvent`) для отката. Обычный autosave
+    события не передаёт → не логируется."""
+    import copy
+
     draft = await get_draft(db, project_id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
+
+    before_distribution = copy.deepcopy(draft.distribution) if payload.event is not None else None
 
     if payload.name is not None:
         draft.name = payload.name
@@ -296,6 +305,25 @@ async def update_draft(
 
     await db.commit()
     await db.refresh(draft)
+
+    if payload.event is not None:
+        from backend.services.assembly.draft_history import log_draft_event
+
+        # Best-effort: черновик уже сохранён (commit выше) — сбой лога не валит PUT.
+        try:
+            await log_draft_event(
+                db,
+                project_id,
+                draft_id,
+                payload.event.event_type,
+                summary=payload.event.summary,
+                before_distribution=before_distribution,
+                draft_updated_at=draft.updated_at,
+                changed_by=changed_by,
+            )
+            await db.refresh(draft)
+        except Exception:
+            logger.warning("Failed to log draft event for draft_id=%s", draft_id, exc_info=True)
     return draft
 
 
@@ -694,6 +722,7 @@ async def commit_draft(
     pallet_counts: dict[str, int] | None = None,
     supplies: list[CommitSupply] | None = None,
     source_ff_id: int | None = None,
+    changed_by: str | None = None,
 ) -> AssemblyDraftCommitResponse:
     """
     Validate the distribution, then create one AssemblyRequest per
@@ -720,6 +749,8 @@ async def commit_draft(
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
 
+    # Снапшот вынесенных в заявки строк — для события истории COMMIT_REQUEST (откат).
+    committed_rows_snapshot: list[dict] = []
     try:
         distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
     except Exception as e:
@@ -1015,6 +1046,14 @@ async def commit_draft(
             await db.flush()
             created_ids.append(assembly_req.id)
 
+        # Снапшот того, что реально уехало в заявки = full − leftover (для отката коммита).
+        from backend.services.assembly.draft_history import build_committed_rows
+
+        committed_rows_snapshot = build_committed_rows(
+            [r.model_dump(mode="json") for r in distribution.rows],
+            [r.model_dump(mode="json") for r in leftover_rows],
+        )
+
         # 7. Если остались строки другого типа упаковки ИЛИ замороженные
         # (передан на ФФ) юниты ИЛИ предбронь (коробы, ждущие паллету) — оставляем
         # черновик; иначе soft-delete. Предбронь НЕ коммитится (только rows), но и не
@@ -1034,6 +1073,28 @@ async def commit_draft(
         raise HTTPException(status_code=400, detail=f"Failed to commit draft: {e}") from None
 
     await invalidate_cache("reports:assembly_flow")
+
+    # Событие истории «создание заявки» — для вкладки «🕘 История» и отката.
+    # Best-effort: заявки уже durable (коммит выше) — сбой лога НЕ должен валить ответ 500.
+    if created_ids:
+        from backend.models.assembly import DraftEventType
+        from backend.services.assembly.draft_history import log_draft_event
+
+        units = sum(int(q or 0) for r in committed_rows_snapshot for q in (r.get("tgt") or {}).values())
+        try:
+            await log_draft_event(
+                db,
+                project_id,
+                draft_id,
+                DraftEventType.COMMIT_REQUEST,
+                summary=f"Создано заявок: {len(created_ids)} ({units} шт)",
+                committed_rows=committed_rows_snapshot,
+                created_request_ids=created_ids,
+                draft_updated_at=draft.updated_at,
+                changed_by=changed_by,
+            )
+        except Exception:
+            logger.warning("Failed to log COMMIT_REQUEST draft event for draft_id=%s", draft_id, exc_info=True)
 
     return AssemblyDraftCommitResponse(
         created_request_ids=created_ids,

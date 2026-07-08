@@ -381,3 +381,58 @@ class AssemblyStockDistributionDaily(Base, TimestampMixin):
         ),
         Index("ix_asm_stock_dist_daily_project_date", "project_id", "snapshot_date"),
     )
+
+
+# ─── Assembly Draft change history (audit + rollback) ───────────────────────
+
+
+class DraftEventType(enum.StrEnum):
+    """Тип залогированного изменения черновика (для истории + отката)."""
+
+    PREBOOK_TOPUP = "PREBOOK_TOPUP"    # дозабор хвоста предброни до целой паллеты
+    MATRIX_WRITE = "MATRIX_WRITE"      # запись раскладки из «Ручной раскладки» (замена по SKU)
+    COMMIT_REQUEST = "COMMIT_REQUEST"  # создание заявки(ок) в ДДС из черновика
+
+
+class AssemblyDraftEvent(Base, TimestampMixin):
+    """История изменений черновика сборки с возможностью отката.
+
+    Одна строка = одно значимое изменение `distribution`:
+      • PREBOOK_TOPUP / MATRIX_WRITE — хранят before-снапшот `distribution`;
+        откат = вернуть снапшот, НО только если черновик не менялся после
+        (сверка `draft.updated_at == draft_updated_at_after`).
+      • COMMIT_REQUEST — хранит вынесенные строки (`committed_rows`) и id
+        созданных заявок; откат = удалить заявки (гвард: НЕ на ФФ и НЕ WB-поставка)
+        + вернуть строки в черновик. От версии черновика НЕ зависит.
+
+    Не soft-delete: откат помечается `reverted_at`/`reverted_by` (событие остаётся в истории).
+    """
+
+    __tablename__ = "assembly_draft_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    draft_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("assembly_drafts.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Снапшот distribution ДО изменения — для отката TOPUP/MATRIX_WRITE.
+    before_distribution: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # COMMIT: строки, вынесенные в заявки (для возврата в черновик при откате).
+    committed_rows: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    # COMMIT: id созданных AssemblyRequest (для отмены+удаления при откате).
+    created_request_ids: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True)
+    # Версия-токен: draft.updated_at сразу ПОСЛЕ события. Откат TOPUP/MATRIX разрешён,
+    # только если черновик с тех пор не менялся (updated_at совпадает).
+    draft_updated_at_after: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    reverted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reverted_by: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_assembly_draft_events_project_id", "project_id"),
+        Index("ix_assembly_draft_events_draft_id", "draft_id"),
+    )

@@ -646,6 +646,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                     source_warehouse_ids: [...srcIds],
                     target_warehouse_names: [...tgtNames],
                 },
+                event: { event_type: 'MATRIX_WRITE', summary: `Ручная раскладка: ${formatNumber(commit.totalShip, 0)} шт` },
             });
             showToast(`Записано в черновик: ${formatNumber(commit.totalShip, 0)} шт (замена по SKU)`, 'success');
             onWritten?.();

@@ -14,6 +14,8 @@ import type {
     AssemblyDraftCreate,
     AssemblyDraftUnitRef,
     AssemblyDraftUpdate,
+    DraftHistoryResponse,
+    DraftEventRevertResponse,
     AssemblyFlowAnalyticsResponse,
     LinkAnomaliesResponse,
     StockDistributionResponse,
@@ -626,6 +628,14 @@ export function addWarehouseMethods(api: ApiClient) {
         },
         deleteAssemblyDraft(id: number) {
             return api.request<void>('DELETE', `/api/v1/assembly/drafts/${id}`);
+        },
+        /** История изменений черновика (события дозабора/раскладки/создания заявок), новейшие первыми. */
+        getDraftHistory(draftId: number) {
+            return api.request<DraftHistoryResponse>('GET', `/api/v1/assembly/drafts/${draftId}/history`);
+        },
+        /** Откат одного события истории. 409 если откат недоступен (detail — причина). */
+        revertDraftEvent(draftId: number, eventId: number) {
+            return api.request<DraftEventRevertResponse>('POST', `/api/v1/assembly/drafts/${draftId}/history/${eventId}/revert`, {});
         },
         /** @param palletCounts map `"{ffId}::{wbName}::{pkg}" → паллет` — авто-проставляется
          *  в каждую создаваемую заявку (иначе бэкенд берёт плоский pallets_count черновика).
