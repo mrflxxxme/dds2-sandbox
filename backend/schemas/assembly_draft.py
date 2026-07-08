@@ -97,10 +97,24 @@ class AssemblyDraftCreate(BaseModel):
     comment: str | None = None
 
 
+class DraftEventLog(BaseModel):
+    """Маркер события истории для логирования при PUT черновика.
+
+    Клиент помечает «значимый» PUT (дозабор хвоста предброни / запись раскладки из
+    матрицы), сервер снапшотит СТАРЫЙ distribution в `AssemblyDraftEvent` для отката.
+    Обычный autosave событие НЕ передаёт → не логируется. COMMIT логируется отдельно
+    в `commit_draft` (не через этот путь)."""
+
+    event_type: Literal["PREBOOK_TOPUP", "MATRIX_WRITE"]
+    summary: str | None = None
+
+
 class AssemblyDraftUpdate(BaseModel):
     name: str | None = None
     distribution: AssemblyDraftDistribution | None = None
     comment: str | None = None
+    # Опц. маркер: если задан — этот PUT логируется в историю с before-снапшотом.
+    event: DraftEventLog | None = None
 
 
 class AssemblyDraftAddRows(BaseModel):
@@ -165,6 +179,43 @@ class AssemblyDraftCommitResponse(BaseModel):
 
     created_request_ids: list[int]
     draft_id: int
+
+
+class DraftEventRead(BaseModel):
+    """Одно событие истории черновика (вкладка «🕘 История»).
+
+    `can_revert` / `revert_blocked_reason` вычисляет сервис (гварды ФФ/WB/версия),
+    поэтому НЕ from_attributes — строится явно."""
+
+    id: int
+    event_type: str
+    summary: str | None = None
+    created_at: datetime
+    created_by: str | None = None
+    reverted_at: datetime | None = None
+    reverted_by: str | None = None
+    # Для COMMIT: сколько заявок создано (показ в UI).
+    created_request_ids: list[int] | None = None
+    # Можно ли откатить прямо сейчас + причина запрета (если нельзя).
+    can_revert: bool = False
+    revert_blocked_reason: str | None = None
+
+
+class DraftHistoryResponse(BaseModel):
+    """Ответ GET /assembly/drafts/{id}/history — события новейшие первыми."""
+
+    events: list[DraftEventRead] = Field(default_factory=list)
+
+
+class DraftEventRevertResponse(BaseModel):
+    """Ответ POST /assembly/drafts/{id}/history/{event_id}/revert."""
+
+    reverted_event_id: int
+    event_type: str
+    # Что произошло:
+    restored_draft: bool = False  # черновик был восстановлен/обновлён снапшотом
+    deleted_request_ids: list[int] = Field(default_factory=list)  # отменённые+удалённые заявки
+    draft: AssemblyDraftRead | None = None  # обновлённый черновик после отката
 
 
 class AssemblyDraftUnitRef(BaseModel):
