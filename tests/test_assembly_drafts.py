@@ -135,6 +135,55 @@ def _build_payload(
 # ─── Tests: CRUD ────────────────────────────────────────────────────────────
 
 
+def test_reconcile_handed_with_rows_drops_double_booked_draft_snapshots():
+    """rows-побеждает: ручной снимок (status='draft') того же потока ФФ→склад→баркод,
+    уже распределённого в rows, — устаревший дубль → вырезается; опустевший снимок
+    удаляется. Не дубль (тот же баркод, но другой ФФ) и реальный handed-снимок цел."""
+    dist = AssemblyDraftDistribution(
+        rows=[
+            AssemblyDraftRow(nm_id=1, barcode="BC-DUP", src={"5": 15}, tgt={"Воронеж": 15}),
+            AssemblyDraftRow(nm_id=2, barcode="BC-CAZ", src={"5": 30}, tgt={"Казань": 30}),
+            AssemblyDraftRow(nm_id=3, barcode="BC-HND", src={"5": 5}, tgt={"Пенза": 5}),
+            AssemblyDraftRow(nm_id=4, barcode="BC-OTHERFF", src={"2": 10}, tgt={"Сарапул": 10}),
+        ],
+        handed_units=[
+            # Дубль (5,Казань,BC-CAZ) есть в rows → снимок опустеет → удаляется.
+            HandedUnit(
+                source_ff_id=5, target_wb_name="Казань", package_type="BOX", status="draft",
+                items=[HandedUnitItem(nm_id=2, barcode="BC-CAZ", qty=30)],
+            ),
+            # (5,Воронеж,BC-DUP) дубль → режется; (5,Воронеж,BC-KEEP) уникален → остаётся.
+            HandedUnit(
+                source_ff_id=5, target_wb_name="Воронеж", package_type="BOX", status="draft",
+                items=[
+                    HandedUnitItem(nm_id=1, barcode="BC-DUP", qty=15),
+                    HandedUnitItem(nm_id=9, barcode="BC-KEEP", qty=12),
+                ],
+            ),
+            # BC-OTHERFF в rows идёт из ФФ 2, а снимок — ФФ 5 → НЕ дубль, снимок цел.
+            HandedUnit(
+                source_ff_id=5, target_wb_name="Сарапул", package_type="BOX", status="draft",
+                items=[HandedUnitItem(nm_id=4, barcode="BC-OTHERFF", qty=8)],
+            ),
+            # Реальная передача на ФФ (status='handed') — не трогаем даже при дубле (5,Пенза,BC-HND).
+            HandedUnit(
+                source_ff_id=5, target_wb_name="Пенза", package_type="BOX", status="handed",
+                items=[HandedUnitItem(nm_id=3, barcode="BC-HND", qty=5)],
+            ),
+        ],
+    )
+    changed = assembly_draft_service._reconcile_handed_with_rows(dist)
+    assert changed is True
+    by_wb = {u.target_wb_name: u for u in dist.handed_units}
+    assert "Казань" not in by_wb  # опустел → удалён
+    assert [it.barcode for it in by_wb["Воронеж"].items] == ["BC-KEEP"]
+    assert [it.barcode for it in by_wb["Сарапул"].items] == ["BC-OTHERFF"]  # другой ФФ — цел
+    assert by_wb["Пенза"].status == "handed"  # реальная передача не тронута
+    assert [it.barcode for it in by_wb["Пенза"].items] == ["BC-HND"]
+    # Идемпотентность: повторный прогон уже ничего не меняет.
+    assert assembly_draft_service._reconcile_handed_with_rows(dist) is False
+
+
 @pytest.mark.asyncio
 async def test_create_draft_happy_path(db_session):
     """POST /assembly/drafts equivalent — service creates a draft."""
