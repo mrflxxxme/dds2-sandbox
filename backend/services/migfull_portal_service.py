@@ -15,6 +15,7 @@ send_shipment — РЕАЛЬНОЕ создание заявки (шапка + �
 """
 
 import asyncio
+import re
 
 import httpx
 import structlog
@@ -23,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.integrations.migfull_client import MigfullApiError, MigfullClient
 from backend.integrations.migfull_portal_client import (
     BASE_URL,
     MigfullPortalClient,
@@ -58,7 +60,63 @@ logger = structlog.get_logger("dds.migfull_portal_service")
 
 MIGFULL_PORTAL_SERVICE = "migfull_portal"  # IntegrationKey портальных кредов
 MIGFULL_PROVIDER = "migfull"  # provider в FulfillmentRequest (общий с read-sync)
+MIGFULL_READ_SERVICE = "migfull"  # read-only API-ключ (для справочника складов назначения)
 _WB_MARKETPLACE_ID = "2"  # Wildberries в migfull (все заявки склада «Натали»)
+_WB_MARKETPLACE_ID_INT = 2
+
+# Кэш справочника складов назначения (read-API тяжёлый: /destinations + /shipments)
+_DEST_CACHE_TTL_SEC = 3600.0
+_dest_cache: dict[int, tuple[float, list[dict]]] = {}
+
+
+# ─── Резолв склада назначения (наш WB-склад сборки → migfull destination id) ──
+
+# Префикс маркетплейса в имени migfull («ВБ | Казань Зеленодольск», «Озон | …»)
+_DEST_PREFIX_RE = re.compile(r"^\s*[^|:]{1,12}[|:]\s*")
+# Служебные токены, не различающие склад
+_DEST_STOP = {"мо", "спб", "сц", "рфц", "склад", "тк", "фбо", "fbo", "вб", "wb"}
+
+
+def _dest_tokens(name: str | None) -> list[str]:
+    """Значимые токены имени склада (для матчинга наш↔migfull)."""
+    s = (name or "").lower().replace("ё", "е")
+    s = _DEST_PREFIX_RE.sub("", s)  # срезать «ВБ | »
+    s = re.sub(r"\([^)]*\)", " ", s)  # убрать «(Тихорецкая)»
+    s = re.sub(r"[^0-9a-zа-я]+", " ", s)
+    return [t for t in s.split() if len(t) >= 3 and t not in _DEST_STOP and not t.isdigit()]
+
+
+def _token_match(a: str, b: str) -> bool:
+    """Токен совпал точно или общим 5-символьным стемом (перспективн-ая/-ый)."""
+    return a == b or (len(a) >= 5 and len(b) >= 5 and a[:5] == b[:5])
+
+
+def resolve_destination(
+    our_name: str | None, delivery_type: str | None, destinations: list[dict]
+) -> dict | None:
+    """Наш WB-склад назначения → migfull `{id, name, ...}` или None.
+
+    Скоринг по числу совпавших значимых токенов; фильтр по `delivery_type` (если у
+    записи он задан). Требуется УНИКАЛЬНЫЙ top-score — при неоднозначности возвращаем
+    None (безопаснее оставить пусто, чем выставить чужой склад).
+    """
+    ours = _dest_tokens(our_name)
+    if not ours:
+        return None
+    scored: list[tuple[int, dict]] = []
+    for d in destinations:
+        dt = d.get("delivery_type")
+        if delivery_type and dt and dt != delivery_type:
+            continue
+        theirs = _dest_tokens(d.get("name"))
+        score = sum(1 for a in ours if any(_token_match(a, b) for b in theirs))
+        if score > 0:
+            scored.append((score, d))
+    if not scored:
+        return None
+    top = max(sc for sc, _ in scored)
+    top_matches = [d for sc, d in scored if sc == top]
+    return top_matches[0] if len(top_matches) == 1 else None
 
 
 class MigfullPortalServiceError(Exception):
@@ -104,6 +162,55 @@ def _client_from_key(key: IntegrationKey) -> MigfullPortalClient:
         project_id=key.project_id,
         host=cfg.get("host") or BASE_URL,
     )
+
+
+async def _read_destinations(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
+    """Справочник складов назначения из read-API migfull (кэш 1ч). Best-effort:
+    нет read-ключа / ошибка → []. Использует ОТДЕЛЬНЫЙ ключ `service="migfull"`
+    (Bearer read-API), не портальный."""
+    now = utcnow().timestamp()
+    cached = _dest_cache.get(project_id)
+    if cached and (now - cached[0]) < _DEST_CACHE_TTL_SEC:
+        return cached[1]
+    key = (
+        await db.execute(
+            select(IntegrationKey).where(
+                IntegrationKey.project_id == project_id,
+                IntegrationKey.service == MIGFULL_READ_SERVICE,
+                IntegrationKey.warehouse_id == warehouse_id,
+                IntegrationKey.is_active.is_(True),
+                IntegrationKey.is_deleted.is_(False),
+            )
+        )
+    ).scalar_one_or_none()
+    if key is None:
+        return cached[1] if cached else []
+    tenant_guid = str((key.config or {}).get("tenant_guid") or "")
+    if not tenant_guid:
+        return cached[1] if cached else []
+    try:
+        client = MigfullClient(tenant_guid, _decrypt(key.encrypted_key), project_id=project_id)
+        dests: list[dict] = await client.fetch_destination_index()
+    except (MigfullApiError, httpx.HTTPError, CircuitOpenError, ValueError) as e:
+        logger.warning("migfull_portal.destinations_fetch_failed", project_id=project_id, error=str(e)[:120])
+        return cached[1] if cached else []
+    _dest_cache[project_id] = (now, dests)
+    return dests
+
+
+async def _resolve_destination_id(
+    db: AsyncSession, project_id: int, warehouse_id: int, wb_name: str | None
+) -> dict | None:
+    """Наш WB-склад назначения сборки → migfull destination {id, name} (или None).
+
+    Резолвим ТОЛЬКО по имени (delivery_type=None): numeric id портала одинаков для
+    любого filter_delivery_type (getOptionsForJs отдаёт те же склады с теми же id), а
+    read-API индекс помечает ВСЕ склады как 'direct' (по историческим отгрузкам) — фильтр
+    по типу доставки заявки (у нас pickup) ложно отсёк бы все склады.
+    """
+    dests = await _read_destinations(db, project_id, warehouse_id)
+    wb_dests = [d for d in dests if d.get("marketplace_id") in (None, _WB_MARKETPLACE_ID_INT)]
+    return resolve_destination(wb_name, None, wb_dests or dests)
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -268,7 +375,8 @@ async def _already_sent(db: AsyncSession, project_id: int, assembly_id: int) -> 
 
 def _default_notes(ar: AssemblyRequest, supply: object | None) -> str:
     """Примечание заявки в портале Натали — оператор видит это поле и связывает
-    заявку с нашей сборкой DDS. Пишем наш № сборки (ASM) и, если есть, № поставки WB.
+    заявку с нашей сборкой DDS. Пишем наш № сборки (ASM) и № поставки WB.
+    Склад назначения теперь выставляется программно в поле формы (не через notes).
     Это дефолт-prefill; пользователь может изменить текст в модалке перед отправкой.
     """
     parts = [f"DDS · {ar.number}"] if ar.number else ["DDS"]
@@ -292,14 +400,23 @@ async def build_draft(db: AsyncSession, project_id: int, assembly_id: int) -> Mi
     already, guid, number = await _already_sent(db, project_id, assembly_id)
     supply = ar.wb_fbo_supply
 
+    wb_name = (supply.warehouse_name if supply else None) or ar.wb_warehouse_name_manual
+    dest = await _resolve_destination_id(db, project_id, ar.warehouse_id, wb_name)
     prefill = MigfullShipmentPrefill(
         number=(supply.wb_supply_id if supply else None),
         shipment_date=ar.delivery_date or ar.pickup_date,
-        filter_delivery_type="direct",
-        notes=_default_notes(ar, supply),  # № сборки (+поставка ВБ) — оператор Натали видит связь
-        wb_warehouse_name=(supply.warehouse_name if supply else None) or ar.wb_warehouse_name_manual,
+        filter_delivery_type="pickup",  # склад назначения персистит только при Самовывозе
+        notes=_default_notes(ar, supply),
+        wb_warehouse_name=wb_name,
+        destination_name=(dest.get("name") if dest else None),
+        destination_matched=dest is not None,
         assembly_number=ar.number,
     )
+    warnings = list(warnings)
+    if eligible and wb_name and dest is None:
+        warnings.append(
+            f"Склад назначения «{wb_name}» не распознан в ФФ — заполните вручную в кабинете после создания"
+        )
     return MigfullDraftResponse(
         eligible=eligible,
         already_sent=already,
@@ -433,7 +550,14 @@ async def send_shipment(
 
     supply = ar.wb_fbo_supply
     dest = (supply.warehouse_name if supply else None) or ar.wb_warehouse_name_manual
+    matched = await _resolve_destination_id(db, project_id, ar.warehouse_id, dest)
     shipment_date = req.shipment_date or ar.delivery_date or ar.pickup_date
+    # Склад назначения (destination_marketplace_id) = numeric id из резолвера (тот же id,
+    # что ждёт форма портала). ⚠️ Портал migfull ПЕРСИСТИТ склад ТОЛЬКО при
+    # filter_delivery_type="pickup" (Самовывоз) — при direct/transit значение молча роняется
+    # (реактивный хук гидрирует реляцию только для pickup; проверено живьём). client сетит
+    # filter ПЕРЕД destination_marketplace_id (см. create_shipment). filter не персистится
+    # (транзитный UI-фильтр), но обязателен в момент create.
     header: dict[str, object] = {
         "marketplace_id": _WB_MARKETPLACE_ID,
         "shipment_type": "fbo",
@@ -441,6 +565,8 @@ async def send_shipment(
         "shipment_date": shipment_date.isoformat() if shipment_date else None,
         "notes": req.notes or _default_notes(ar, supply),
         "filter_delivery_type": req.filter_delivery_type,
+        # str — форма портала ждёт строковый numeric id (живьём персистит именно строку).
+        "destination_marketplace_id": str(matched["id"]) if matched else None,
     }
     xlsx = build_opis_xlsx(
         lines,

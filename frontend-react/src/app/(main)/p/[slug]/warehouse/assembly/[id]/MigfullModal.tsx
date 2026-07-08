@@ -29,7 +29,7 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
     const [draftError, setDraftError] = useState('');
 
     // Поля шапки (инициализируются из prefill после загрузки draft).
-    const [deliveryType, setDeliveryType] = useState<DeliveryType>('direct');
+    const [deliveryType, setDeliveryType] = useState<DeliveryType>('pickup');
     const [number, setNumber] = useState('');
     const [shipmentDate, setShipmentDate] = useState('');
     const [notes, setNotes] = useState('');
@@ -217,10 +217,20 @@ export default function MigfullModal({ assemblyId, assemblyNumber, onClose, onSu
 
                             {/* Куда: WB-склад */}
                             {draft.prefill.wb_warehouse_name && (
-                                <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 16 }}>
+                                <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
                                     Куда: <strong style={{ color: 'var(--color-text)' }}>{draft.prefill.wb_warehouse_name}</strong>
                                 </div>
                             )}
+
+                            {/* Склад назначения в ФФ (выставится при создании; персистит только при Самовывозе) */}
+                            <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 16 }}>
+                                Склад назначения:{' '}
+                                {draft.prefill.destination_matched && draft.prefill.destination_name ? (
+                                    <strong style={{ color: 'var(--color-text)' }}>{draft.prefill.destination_name}</strong>
+                                ) : (
+                                    <span style={{ color: 'var(--color-warning)' }}>не распознан — заполнит оператор</span>
+                                )}
+                            </div>
 
                             {/* Шапка заявки */}
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
