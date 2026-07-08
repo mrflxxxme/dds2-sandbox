@@ -9,6 +9,7 @@ HTTP + валидация; вся логика — в services/. Все write-э
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import date
 from urllib.parse import quote
 
@@ -32,6 +33,7 @@ from backend.database import get_db
 from backend.integrations.faktura_api import FakturaApiError
 from backend.models import Project, ProjectMember, User
 from backend.models.payment_request import PaymentRequest
+from backend.models.refs import Account
 from backend.project_context import get_current_project
 from backend.rbac import require_role
 from backend.services.bank_directory import resolve_bank_db
@@ -638,13 +640,15 @@ async def create_payment_drafts_bulk(
 )
 async def parse_invoice_file(
     file: UploadFile = File(...),
-    _user: User = Depends(get_current_user),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
 ) -> InvoiceParseResult:
     """Распознать реквизиты получателя из файла счёта (PDF/Word/фото) — ПОДСКАЗКА для формы.
 
-    В БД ничего не пишется (без project-скоупа). Поля, не прошедшие проверку
-    (контроль-ключ р/с по БИК, БИК в справочнике), остаются None — вводятся вручную.
-    PDF/Word разбираются текстовым Claude+regex, фото (jpg/png/webp/heic) — vision-Claude.
+    В БД ничего не пишется. Поля, не прошедшие проверку (контроль-ключ р/с по БИК, БИК в
+    справочнике), остаются None — вводятся вручную. PDF/Word разбираются текстовым Claude+regex,
+    фото (jpg/png/webp/heic) — vision-Claude. Наши счета (проекта) передаём в распозналку, чтобы
+    отсечь блок ПЛАТЕЛЬЩИКА (наш счёт), ошибочно принятый за получателя.
     """
     # Счёт: PDF/Word/фото. Валидация как у upload_payment_request_document:
     # allowlist MIME ИЛИ расширение (браузер часто шлёт пустой content_type на HEIC)
@@ -677,7 +681,21 @@ async def parse_invoice_file(
     if len(data) > max_bytes:
         raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {max_mb} МБ")
 
-    return await invoice_parser.parse_invoice_async(data, file.filename or "invoice")
+    # Наши счета (для self-exclusion: распознанный счёт получателя = наш → это блок плательщика).
+    own_rows = (
+        await db.execute(
+            select(Account.account).where(
+                Account.project_id == project.id,
+                Account.is_our_account.is_(True),
+                Account.is_deleted.is_(False),
+            )
+        )
+    ).scalars().all()
+    own_accounts = frozenset(re.sub(r"\D", "", a) for a in own_rows if a)
+
+    return await invoice_parser.parse_invoice_async(
+        data, file.filename or "invoice", own_accounts
+    )
 
 
 # ─── Documents ────────────────────────────────────────────────────────────────

@@ -317,7 +317,9 @@ def _parse_purpose(text: str) -> str | None:
     return base[:300]
 
 
-def extract_requisites_from_text(text: str) -> InvoiceParseResult:
+def extract_requisites_from_text(
+    text: str, own_accounts: frozenset[str] = frozenset()
+) -> InvoiceParseResult:
     """Главная логика: вытащить реквизиты получателя из текста счёта (чистая функция).
 
     Всё опционально: отсутствующее поле → None. Доверие гейтится — р/с surface'ится
@@ -389,6 +391,7 @@ def extract_requisites_from_text(text: str) -> InvoiceParseResult:
         result.purpose = purpose
         found.append("purpose")
 
+    _apply_payee_sanity(result, found, warnings, own_accounts)
     result.fields_found = found
     result.warnings = warnings
     return result
@@ -417,6 +420,11 @@ _LLM_SYSTEM = (
     "либо «Без НДС», если счёт без НДС / УСН. Пример: «Оплата по счёту № 7690.1 от 25.06.2026 "
     "по договору № КВ/25-082 от 08.04.2025 за услуги по таможенному оформлению. "
     "В т.ч. НДС 20% — 3 850,00 руб.»\n"
+    "ВАЖНО: если в счёте есть банковский блок ПОКУПАТЕЛЯ / ПЛАТЕЛЬЩИКА (его р/с, к/с, БИК) — "
+    "это НЕ реквизиты получателя, игнорируй их полностью. Счёт получателя СОГЛАСОВАН с его ИНН: "
+    "у ИП (ИНН 12 цифр) р/с начинается с 40802, у физлица (ИНН 12 цифр) — с 40817, у юрлица "
+    "(ИНН 10 цифр) — с 40702. Если единственный найденный р/с не сходится с типом ИНН получателя — "
+    "верни payee_account = null, а не счёт другой стороны.\n"
     "Вызови инструмент extract_requisites ровно один раз."
 )
 
@@ -483,7 +491,57 @@ def _digits(v: object) -> str | None:
     return d or None
 
 
-def _finalize(payee: dict) -> InvoiceParseResult:
+# Префикс балансового счёта → тип владельца: 40802 = ИП, 40817/40820 = физлицо (ИНН 12 цифр);
+# 40702 = коммерческое юрлицо (ИНН 10 цифр). Рассинхрон счёт↔ИНН = перепутанные блоки счёта
+# (напр. в получателя попал счёт плательщика). Кейс ОПЛ-00058: ИНН ИП 12 цифр + счёт 40702 ВТБ.
+_IP_PHYS_ACC_PREFIXES = ("40802", "40817", "40820")
+_LEGAL_ACC_PREFIXES = ("40702",)
+
+
+def _account_inn_mismatch(account: str | None, inn: str | None) -> bool:
+    """True, если тип счёта получателя противоречит типу по длине ИНН: счёт юрлица (40702)
+    при 12-значном ИНН ИП/физлица, либо счёт ИП/физлица (40802/40817/40820) при 10-значном
+    ИНН юрлица. Сигнал перепутанных реквизитов (счёт одной стороны, ИНН другой)."""
+    if not (account and inn and len(account) >= 5 and inn.isdigit()):
+        return False
+    p = account[:5]
+    if len(inn) == 12 and p in _LEGAL_ACC_PREFIXES:
+        return True
+    if len(inn) == 10 and p in _IP_PHYS_ACC_PREFIXES:
+        return True
+    return False
+
+
+def _apply_payee_sanity(
+    r: InvoiceParseResult, found: list[str], warnings: list[str], own_accounts: frozenset[str]
+) -> None:
+    """Кросс-проверки поверх распознанных полей (общие для LLM- и regex-пути):
+    (1) у ИП/физлица (ИНН 12 цифр) нет КПП — ошибочно распознанный убираем;
+    (2) self-exclusion: если счёт получателя = НАШ счёт, распозналка взяла блок ПЛАТЕЛЬЩИКА —
+        чистим банковские реквизиты (имя/ИНН продавца из шапки могут быть верны — их не трогаем);
+    (3) предупреждение о рассинхроне тип-счёта ↔ тип-ИНН (перепутанные блоки)."""
+    if r.payee_inn and len(r.payee_inn) == 12 and r.payee_kpp:
+        r.payee_kpp = None
+        if "payee_kpp" in found:
+            found.remove("payee_kpp")
+    own = {re.sub(r"\D", "", a) for a in own_accounts if a}
+    if r.payee_account and r.payee_account in own:
+        for f in ("payee_account", "payee_bik", "payee_bank_name", "payee_corr_account", "payee_kpp"):
+            setattr(r, f, None)
+            if f in found:
+                found.remove(f)
+        warnings.append(
+            "Распознан счёт ПЛАТЕЛЬЩИКА (ваш собственный), а не получателя — "
+            "банковские реквизиты очищены, введите счёт получателя вручную"
+        )
+    if _account_inn_mismatch(r.payee_account, r.payee_inn):
+        warnings.append(
+            "Счёт получателя не соответствует его ИНН (счёт юрлица при ИНН ИП/физлица "
+            "или наоборот) — проверьте реквизиты"
+        )
+
+
+def _finalize(payee: dict, own_accounts: frozenset[str] = frozenset()) -> InvoiceParseResult:
     """Сырые поля (от LLM) → результат с гейтом доверия: р/с surface'ится только пройдя
     контроль-ключ по БИК; БИК добивает банк/к-с из справочника, если он там есть."""
     r = InvoiceParseResult()
@@ -544,12 +602,15 @@ def _finalize(payee: dict) -> InvoiceParseResult:
         r.purpose = purpose.strip()[:300]
         found.append("purpose")
 
+    _apply_payee_sanity(r, found, warnings, own_accounts)
     r.fields_found = found
     r.warnings = warnings
     return r
 
 
-async def extract_requisites_llm(text: str) -> InvoiceParseResult | None:
+async def extract_requisites_llm(
+    text: str, own_accounts: frozenset[str] = frozenset()
+) -> InvoiceParseResult | None:
     """Распознать реквизиты текстовым Claude (понимает «Продавец vs Покупатель»).
     None → ключ не настроен или модель не вернула tool_use (тогда сработает regex-fallback)."""
     key = settings.ANTHROPIC_API_KEY
@@ -570,10 +631,12 @@ async def extract_requisites_llm(text: str) -> InvoiceParseResult | None:
     data = getattr(block, "input", None)  # ToolUseBlock.input — getattr обходит union-тип content-блоков
     if not isinstance(data, dict):
         return None
-    return _finalize(data)
+    return _finalize(data, own_accounts)
 
 
-async def extract_requisites_vision(image_data: bytes, media_type: str) -> InvoiceParseResult | None:
+async def extract_requisites_vision(
+    image_data: bytes, media_type: str, own_accounts: frozenset[str] = frozenset()
+) -> InvoiceParseResult | None:
     """Распознать реквизиты с ФОТО счёта vision-Claude (тот же tool, что и текстовый путь).
     None → ключ не настроен (для фото regex-fallback невозможен — нет текста)."""
     key = settings.ANTHROPIC_API_KEY
@@ -603,7 +666,7 @@ async def extract_requisites_vision(image_data: bytes, media_type: str) -> Invoi
     data = getattr(block, "input", None)  # ToolUseBlock.input — getattr обходит union-тип content-блоков
     if not isinstance(data, dict):
         return None
-    return _finalize(data)
+    return _finalize(data, own_accounts)
 
 
 def _norm_doc_type(v: object) -> str:
@@ -612,7 +675,7 @@ def _norm_doc_type(v: object) -> str:
 
 
 async def extract_requisites_vision_pages(
-    images: list["Image.Image"],
+    images: list["Image.Image"], own_accounts: frozenset[str] = frozenset()
 ) -> tuple[InvoiceParseResult, list[str]] | None:
     """Скан-PDF (несколько страниц) → реквизиты счёта + тип каждой страницы (для авто-разнесения).
     None → ключ не настроен. Длину pages выравниваем под число страниц (модель могла сбиться)."""
@@ -642,7 +705,7 @@ async def extract_requisites_vision_pages(
     data = getattr(block, "input", None)  # ToolUseBlock.input — getattr обходит union-тип content-блоков
     if not isinstance(data, dict):
         return None
-    result = _finalize(data)
+    result = _finalize(data, own_accounts)
     raw_pages = data.get("pages")
     pages_list = raw_pages if isinstance(raw_pages, list) else []
     types = [_norm_doc_type(p.get("doc_type")) for p in pages_list if isinstance(p, dict)]
@@ -687,18 +750,22 @@ def _build_split_docs(
     return out
 
 
-async def _requisites_from_text(text: str) -> InvoiceParseResult:
+async def _requisites_from_text(
+    text: str, own_accounts: frozenset[str] = frozenset()
+) -> InvoiceParseResult:
     """Реквизиты из текста: текстовый Claude (понимает продавца/покупателя) с regex-fallback."""
     try:
-        llm = await extract_requisites_llm(text)
+        llm = await extract_requisites_llm(text, own_accounts)
         if llm is not None:
             return llm
     except Exception as e:  # API недоступен/refusal/таймаут — не роняем, идём в regex
         logger.warning("invoice LLM extract failed (%s) — fallback to regex", type(e).__name__)
-    return extract_requisites_from_text(text)
+    return extract_requisites_from_text(text, own_accounts)
 
 
-async def _parse_pdf_invoice(data: bytes, filename: str) -> InvoiceParseResult:
+async def _parse_pdf_invoice(
+    data: bytes, filename: str, own_accounts: frozenset[str] = frozenset()
+) -> InvoiceParseResult:
     """PDF-счёт: текстовый слой → текстовый Claude+regex; скан (без текста) → vision постранично.
     В обоих случаях, если файл = счёт+акт, разносим страницы по типам (`documents`)."""
     # pdfplumber/pypdfium2/Pillow — CPU-bound и синхронные; уводим с event-loop (иначе тяжёлый
@@ -712,7 +779,7 @@ async def _parse_pdf_invoice(data: bytes, filename: str) -> InvoiceParseResult:
     if any(p.strip() for p in pages_text):  # текстовый PDF
         types = [invoice_split.classify_page_text(t) for t in pages_text]
         invoice_text = "\n".join(t for t, ty in zip(pages_text, types) if ty != "ACT").strip()
-        result = await _requisites_from_text(invoice_text or "\n".join(pages_text))
+        result = await _requisites_from_text(invoice_text or "\n".join(pages_text), own_accounts)
         if _is_real_mix(types):
             result.documents = await asyncio.to_thread(_build_split_docs, data, types, filename, None)
         return result
@@ -726,7 +793,7 @@ async def _parse_pdf_invoice(data: bytes, filename: str) -> InvoiceParseResult:
     if not images:
         return InvoiceParseResult(warnings=["Не удалось прочитать PDF — введите реквизиты вручную"])
     try:
-        parsed = await extract_requisites_vision_pages(images)
+        parsed = await extract_requisites_vision_pages(images, own_accounts)
     except Exception as e:  # API недоступен/refusal/таймаут — не роняем
         logger.warning("invoice vision(pages) failed (%s)", type(e).__name__)
         return InvoiceParseResult(warnings=["Не удалось распознать PDF-скан — введите реквизиты вручную"])
@@ -738,7 +805,9 @@ async def _parse_pdf_invoice(data: bytes, filename: str) -> InvoiceParseResult:
     return result
 
 
-async def _parse_image_invoice(data: bytes, media_type: str) -> InvoiceParseResult:
+async def _parse_image_invoice(
+    data: bytes, media_type: str, own_accounts: frozenset[str] = frozenset()
+) -> InvoiceParseResult:
     """Фото счёта → реквизиты через vision. HEIC сперва конвертим в JPEG. Без ключа/ошибки —
     мягкое предупреждение (regex по картинке невозможен), 500 не роняем."""
     if media_type in ("image/heic", "image/heif"):
@@ -748,7 +817,7 @@ async def _parse_image_invoice(data: bytes, media_type: str) -> InvoiceParseResu
             logger.warning("invoice parse: не удалось конвертировать HEIC", exc_info=True)
             return InvoiceParseResult(warnings=["Не удалось обработать HEIC — приложите фото в JPEG/PNG или PDF"])
     try:
-        vision = await extract_requisites_vision(data, media_type)
+        vision = await extract_requisites_vision(data, media_type, own_accounts)
     except Exception as e:  # API недоступен/refusal/таймаут — не роняем
         logger.warning("invoice vision extract failed (%s)", type(e).__name__)
         return InvoiceParseResult(warnings=["Не удалось распознать фото — введите реквизиты вручную"])
@@ -757,17 +826,22 @@ async def _parse_image_invoice(data: bytes, media_type: str) -> InvoiceParseResu
     return vision
 
 
-async def parse_invoice_async(data: bytes, filename: str) -> InvoiceParseResult:
+async def parse_invoice_async(
+    data: bytes, filename: str, own_accounts: frozenset[str] = frozenset()
+) -> InvoiceParseResult:
     """Файл счёта → реквизиты (+ авто-разнесение счёт↔акт для многостраничного PDF).
 
     Фото (jpg/png/webp/heic) → vision-Claude; PDF → текстовый слой (Claude+regex) либо vision
-    по скану (без текста); Word → текстовый Claude+regex. Битый файл → не 500."""
+    по скану (без текста); Word → текстовый Claude+regex. Битый файл → не 500.
+
+    ``own_accounts`` — номера НАШИХ счетов (проекта): если распознанный счёт получателя
+    совпал с нашим, распозналка взяла блок плательщика → банковские реквизиты чистятся."""
     media_type = _image_media_type(data, filename)
     if media_type is not None:  # фото счёта — текста нет, идём vision-путём
-        return await _parse_image_invoice(data, media_type)
+        return await _parse_image_invoice(data, media_type, own_accounts)
 
     if (filename or "").lower().endswith(".pdf") or data[:4] == _PDF_MAGIC:
-        return await _parse_pdf_invoice(data, filename)
+        return await _parse_pdf_invoice(data, filename, own_accounts)
 
     # Word / прочее: текстовый разбор (постраничной резки нет — у .docx нет страниц как у PDF).
     try:
@@ -777,7 +851,7 @@ async def parse_invoice_async(data: bytes, filename: str) -> InvoiceParseResult:
         return InvoiceParseResult(warnings=["Не удалось прочитать файл — введите реквизиты вручную"])
     if not text or not text.strip():
         return InvoiceParseResult(warnings=["Файл пуст или текст не распознан — введите реквизиты вручную"])
-    return await _requisites_from_text(text)
+    return await _requisites_from_text(text, own_accounts)
 
 
 def parse_invoice(data: bytes, filename: str) -> InvoiceParseResult:
