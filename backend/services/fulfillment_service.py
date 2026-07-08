@@ -908,10 +908,13 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             except Exception as e:  # — best-effort, синк уже зафиксирован
                 logger.warning("FF auto-accept: приёмка %s пропущена (%s)", receipt_id, e)
 
-    # Авто-SHIP сборок: ФФ отгрузил груз (is_completed), а у нас уже назначена
-    # машина (VEHICLE_ASSIGNED) → переводим сборку в SHIPPED. ship_request
-    # списывает сток + создаёт OutboundShipment и коммитит сам — ПОСЛЕ commit
-    # синка, своей сессией; дефицит стока/прочая ошибка синк НЕ валит (best-effort).
+    # Авто-SHIP сборок: ФФ отгрузил груз (is_completed), а у нас назначена машина
+    # (VEHICLE_ASSIGNED) ЛИБО заявка ведётся Газелькой в READY → переводим сборку
+    # в SHIPPED. ship_request списывает сток + создаёт OutboundShipment и коммитит
+    # сам — ПОСЛЕ commit синка, своей сессией; дефицит стока/прочая ошибка синк НЕ
+    # валит (best-effort). allow_gazelka_ready: собранные READY-кандидаты — только
+    # Gazelka-связанные (см. _collect_assembly_ship_candidates); VEHICLE_ASSIGNED
+    # флаг игнорируют.
     assemblies_shipped = 0
     if assembly_ship_ids:
         from backend.database import AsyncSessionLocal
@@ -920,7 +923,7 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
         for asm_id in assembly_ship_ids:
             try:
                 async with AsyncSessionLocal() as ship_db:
-                    await ship_request(ship_db, project_id, asm_id)
+                    await ship_request(ship_db, project_id, asm_id, allow_gazelka_ready=True)
                 assemblies_shipped += 1
             except Exception as e:  # — best-effort, синк уже зафиксирован
                 logger.warning("FF auto-ship: сборка %s пропущена (%s)", asm_id, e)
@@ -2297,6 +2300,12 @@ async def _collect_assembly_ship_candidates(
     статусы ship_request отверг бы переходом. Вызывающий отфильтровал
     local_archived и провайдер+склад; завершённые-и-заархивированные заявки сюда
     доходят (та же выборка, что для авто-READY) — их отгружаем, отменённые отсеиваем.
+
+    Исключение — READY у Gazelka-связанных сборок: логистику ведёт агрегатор,
+    машину назначить нельзя (assign_vehicle блокирует) → заявка навсегда в READY.
+    Раз ФФ закрыл заявку — груз уехал (Газелька = «машина»), отгружаем прямо из
+    READY. Обычный READY (без Газельки) не трогаем — ждёт назначения машины.
+    Зеркалит WB-ACCEPTED авто-шип (fbo_supply.sync).
     """
     ff_by_assembly: dict[int, list[FulfillmentRequest]] = {}
     for req in ff_requests:
@@ -2314,14 +2323,24 @@ async def _collect_assembly_ship_candidates(
     if not shipped_ids:
         return []
     result = await db.execute(
-        select(AssemblyRequest.id).where(
+        select(AssemblyRequest.id, AssemblyRequest.status).where(
             AssemblyRequest.project_id == project_id,
             AssemblyRequest.id.in_(shipped_ids),
             AssemblyRequest.is_deleted == False,
-            AssemblyRequest.status == AssemblyStatus.VEHICLE_ASSIGNED.value,
+            AssemblyRequest.status.in_(
+                [AssemblyStatus.VEHICLE_ASSIGNED.value, AssemblyStatus.READY.value]
+            ),
         )
     )
-    return [row[0] for row in result.all()]
+    rows = result.all()
+    ship_ids = [rid for rid, status in rows if status == AssemblyStatus.VEHICLE_ASSIGNED.value]
+    ready_ids = [rid for rid, status in rows if status == AssemblyStatus.READY.value]
+    if ready_ids:
+        from backend.services.assembly.status import _gazelka_linked_ids
+
+        gazelka_ready = await _gazelka_linked_ids(db, project_id, ready_ids)
+        ship_ids.extend(rid for rid in ready_ids if rid in gazelka_ready)
+    return ship_ids
 
 
 def _parse_date(value: object) -> date | None:

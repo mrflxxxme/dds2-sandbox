@@ -33,6 +33,7 @@ from backend.models import (
     WarehouseStock,
 )
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus, AssemblyStatusHistory
+from backend.models.gazelka import GazelkaOrder, GazelkaOrderStatus
 from backend.services import fulfillment_service
 from backend.utils.time import utcnow
 
@@ -2890,6 +2891,81 @@ async def test_sync_no_ship_when_not_vehicle_assigned(db_session, project, wareh
     assert result["assemblies_shipped"] == 0
     await db_session.refresh(doc)
     assert doc.status == AssemblyStatus.READY.value
+
+
+async def _make_gazelka_ready_doc(db_session, project, warehouse, nom, bc, qty=5, stock_qty=20):
+    """Сборка READY, ведётся Газелькой (активная связь MATCHED) + позиция + сток."""
+    doc = AssemblyRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        number=f"A-{_uid()[:6]}",
+        status=AssemblyStatus.READY.value,
+        pallets_count=1,
+        pallet_weight_kg=Decimal("10.00"),
+    )
+    db_session.add(doc)
+    await db_session.flush()
+    db_session.add(
+        AssemblyRequestItem(
+            project_id=project.id, assembly_request_id=doc.id,
+            nomenclature_id=nom.id, barcode=bc, quantity=qty,
+        )
+    )
+    db_session.add(
+        WarehouseStock(
+            project_id=project.id, warehouse_id=warehouse.id,
+            nomenclature_id=nom.id, barcode=bc, quantity=stock_qty,
+        )
+    )
+    db_session.add(
+        GazelkaOrder(
+            project_id=project.id, assembly_request_id=doc.id,
+            status=GazelkaOrderStatus.MATCHED, gazelka_ref="G-1",
+        )
+    )
+    await db_session.commit()
+    await db_session.refresh(doc)
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_sync_ships_gazelka_ready_on_ff_completed(db_session, project, warehouse, connected_key, monkeypatch):
+    """ФФ закрыл заявку (is_completed) + Gazelka-связанная сборка в READY (машину назначить
+    нельзя — агрегатор) → авто-SHIP из READY + сток списан. Зеркало WB-ACCEPTED авто-шипа."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {851: [_req(9911, stage_title="Погрузка")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    doc = await _make_gazelka_ready_doc(db_session, project, warehouse, nom, bc, qty=5, stock_qty=20)
+    mirror = await _mirror_row(db_session, project.id, "9911")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, assembly_request_id=doc.id)
+
+    # ФФ ещё не закрыл — сборка остаётся READY
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_shipped"] == 0
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.READY.value
+
+    # ФФ закрыл заявку (is_completed) → Gazelka-READY отгружается
+    _mock_requests(monkeypatch, {851: [_req(9911, status="done", completed=1, stage_title="Выполнена")]})
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["assemblies_shipped"] == 1
+    await db_session.refresh(doc)
+    assert doc.status == AssemblyStatus.SHIPPED.value
+    assert doc.outbound_shipment_id is not None
+
+    stock = (
+        await db_session.execute(
+            select(WarehouseStock).where(
+                WarehouseStock.project_id == project.id,
+                WarehouseStock.warehouse_id == warehouse.id,
+                WarehouseStock.barcode == bc,
+            )
+        )
+    ).scalar_one()
+    assert stock.quantity == 15  # 20 − 5
 
 
 @pytest.mark.asyncio
