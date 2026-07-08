@@ -10,6 +10,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytz
 from sqlalchemy import func, select
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbAdCampaign, WbAdCampaignEvent, WbFunnelDaily
 from backend.models.integrations import WbAdCampaignDaily
+from backend.services.funnel.bdr_rates import BdrRatesLookup
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.funnel")
@@ -38,7 +40,7 @@ async def list_ad_campaigns(
     db: AsyncSession,
     project_id: int,
     tax_info: dict | None = None,
-    bdr_rates_map=None,
+    bdr_rates_map: BdrRatesLookup | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> list[dict]:
@@ -106,7 +108,7 @@ async def list_ad_campaigns(
         )
         sku_map = {r["nm_id"]: r for r in sku_rows}
 
-    result = []
+    result: list[dict[str, Any]] = []
     for c in campaigns:
         s = spend_map.get(c.campaign_id)
         nm_ids = c.nm_ids or []
