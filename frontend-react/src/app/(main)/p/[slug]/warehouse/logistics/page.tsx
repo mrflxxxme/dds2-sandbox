@@ -277,9 +277,13 @@ export default function LogisticsPage() {
     /** Показывать кнопку «Отправить в Газельку» только если:
      *  - Газелька настроена
      *  - склад заявки совпадает со складом Газельки
-     *  - статус READY или VEHICLE_ASSIGNED */
+     *  - статус READY или VEHICLE_ASSIGNED
+     *  - заявка ещё НЕ отправлена (via_gazelka=false): активная связь SENT/MATCHED →
+     *    повторная отправка плодит дубль в Газельке. Провалившаяся отправка (FAILED)
+     *    даёт via_gazelka=false → кнопка остаётся для легитимного ре-сенда. */
     const isGazelkaEligible = (item: AssemblyRequest): boolean => {
         if (!gazelkaConfig?.configured) return false;
+        if (item.via_gazelka) return false;
         if (item.warehouse_name !== gazelkaConfig.warehouse_name) return false;
         return item.status === 'READY' || item.status === 'VEHICLE_ASSIGNED';
     };
