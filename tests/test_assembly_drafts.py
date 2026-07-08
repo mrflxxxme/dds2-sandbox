@@ -28,10 +28,12 @@ from backend.schemas.assembly_draft import (
     AssemblyDraftMergeRequest,
     AssemblyDraftRow,
     AssemblyDraftUpdate,
+    DraftEventLog,
     HandedUnit,
     HandedUnitItem,
 )
 from backend.services import assembly_draft_service, assembly_service
+from backend.services.assembly import draft_history
 
 # PROJECT_ID / OTHER_PROJECT_ID are assigned per-test by the `setup_test_data`
 # fixture from conftest's sequence-allocated `project` / `other_project`. Never
@@ -2687,3 +2689,124 @@ async def test_merge_assembly_requests_missing_id_rejected(db_session):
     a = await _commit_one(db_session, wh_a, "Тула", {TEST_BARCODE_1: 6})
     with pytest.raises(ValueError, match="не найдены"):
         await assembly_service.merge_assembly_requests(db_session, PROJECT_ID, [a, 999_999_999])
+
+
+# ─── Tests: история черновика + откат (draft_history) ───────────────────────
+
+
+async def _make_draft(db_session, wh: int, wb: str, items: dict[str, int]):
+    """Создать черновик (без коммита) с одним ФФ→WB. Возвращает объект AssemblyDraft."""
+    nm_by_bc = {TEST_BARCODE_1: 111, TEST_BARCODE_2: 222}
+    rows = [
+        AssemblyDraftRow(nm_id=nm_by_bc[bc], barcode=bc, vendor_code=f"v-{bc}", src={str(wh): q}, tgt={wb: q})
+        for bc, q in items.items()
+    ]
+    return await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh], [wb], rows)
+    )
+
+
+@pytest.mark.asyncio
+async def test_commit_logs_event_and_revert_restores(db_session):
+    """Коммит логирует COMMIT_REQUEST; откат удаляет заявку и возвращает строки в черновик."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    draft = await _make_draft(db_session, wh_a, "Электросталь", {TEST_BARCODE_1: 10})
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert len(resp.created_request_ids) == 1
+
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    assert len(hist.events) == 1
+    ev = hist.events[0]
+    assert ev.event_type == "COMMIT_REQUEST"
+    assert ev.can_revert is True
+    assert ev.created_request_ids == resp.created_request_ids
+
+    rev = await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, ev.id)
+    assert rev.deleted_request_ids == resp.created_request_ids
+
+    req = (
+        await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == resp.created_request_ids[0]))
+    ).scalar_one()
+    assert req.is_deleted is True
+
+    # Черновик был soft-delete'нут после полного коммита → откат его восстановил + вернул строку.
+    draft2 = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    assert draft2 is not None
+    dist = AssemblyDraftDistribution.model_validate(draft2.distribution)
+    assert any(r.barcode == TEST_BARCODE_1 and sum(r.tgt.values()) == 10 for r in dist.rows)
+
+    hist2 = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    assert hist2.events[0].reverted_at is not None
+    assert hist2.events[0].can_revert is False
+
+
+@pytest.mark.asyncio
+async def test_commit_revert_blocked_when_shipped(db_session):
+    """Откат создания заявки заблокирован, если заявка уже WB-поставка (SHIPPED)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    draft = await _make_draft(db_session, wh_a, "Тула", {TEST_BARCODE_1: 6})
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    rid = resp.created_request_ids[0]
+
+    req = (await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == rid))).scalar_one()
+    req.status = "SHIPPED"
+    await db_session.commit()
+
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    ev = hist.events[0]
+    assert ev.can_revert is False
+    assert ev.revert_blocked_reason and "WB" in ev.revert_blocked_reason
+
+    with pytest.raises(HTTPException) as exc:
+        await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, ev.id)
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_topup_event_revert_and_version_guard(db_session):
+    """PUT с event логирует PREBOOK_TOPUP; откат возвращает снапшот; изменение черновика блокирует откат."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    draft = await _make_draft(db_session, wh_a, "Электросталь", {TEST_BARCODE_1: 10})
+
+    # «Дозабор»: PUT нового distribution (20 шт) с маркером события.
+    bumped = AssemblyDraftDistribution(
+        source_warehouse_ids=[wh_a],
+        target_warehouse_names=["Электросталь"],
+        rows=[AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, vendor_code="v", src={str(wh_a): 20}, tgt={"Электросталь": 20})],
+        pallets_count=1,
+        pallet_weight_kg=100.0,
+    )
+    await assembly_draft_service.update_draft(
+        db_session, PROJECT_ID, draft.id,
+        AssemblyDraftUpdate(distribution=bumped, event=DraftEventLog(event_type="PREBOOK_TOPUP", summary="дозабор")),
+        changed_by="user",
+    )
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    ev = hist.events[0]
+    assert ev.event_type == "PREBOOK_TOPUP"
+    assert ev.can_revert is True
+
+    # Откат возвращает 10 шт (снапшот before).
+    await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, ev.id)
+    d = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    dist = AssemblyDraftDistribution.model_validate(d.distribution)
+    assert sum(dist.rows[0].tgt.values()) == 10
+
+    # Новый top-up, затем ПОСТОРОННЕЕ изменение черновика → его откат становится недоступен.
+    await assembly_draft_service.update_draft(
+        db_session, PROJECT_ID, draft.id,
+        AssemblyDraftUpdate(distribution=bumped, event=DraftEventLog(event_type="PREBOOK_TOPUP", summary="дозабор 2")),
+        changed_by="user",
+    )
+    hist2 = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    topup2 = hist2.events[0]
+    assert topup2.can_revert is True
+
+    # autosave без event — меняет updated_at.
+    await assembly_draft_service.update_draft(
+        db_session, PROJECT_ID, draft.id, AssemblyDraftUpdate(comment="touched"), changed_by="user",
+    )
+    hist3 = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    topup2b = next(e for e in hist3.events if e.id == topup2.id)
+    assert topup2b.can_revert is False
+    assert topup2b.revert_blocked_reason and "изменил" in topup2b.revert_blocked_reason
