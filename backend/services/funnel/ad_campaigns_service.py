@@ -122,6 +122,7 @@ async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
                 "campaign_id": cid,
                 "name": str(c.get("name") or cid),
                 "campaign_type": c.get("type"),
+                "bid_mode": c.get("bid_mode"),  # unified/manual из WB bid_type (_parse_advert_item)
                 "status": c.get("status") or 9,
                 "budget": campaign_budget or Decimal("0"),
                 "nm_ids": c.get("nm_ids") or [],
@@ -181,6 +182,7 @@ async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
             set_={
                 "name": stmt.excluded.name,
                 "campaign_type": stmt.excluded.campaign_type,
+                "bid_mode": stmt.excluded.bid_mode,
                 "status": stmt.excluded.status,
                 "budget": stmt.excluded.budget,
                 "nm_ids": stmt.excluded.nm_ids,

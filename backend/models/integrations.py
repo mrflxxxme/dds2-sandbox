@@ -117,7 +117,8 @@ class WbAdCampaign(Base):
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     campaign_id: Mapped[int] = mapped_column(Integer, nullable=False)  # WB advertId
     name: Mapped[str | None] = mapped_column(String(500))
-    campaign_type: Mapped[str | None] = mapped_column(String(20))  # cpm, cpc, unified
+    campaign_type: Mapped[str | None] = mapped_column(String(20))  # cpm, cpc (модель оплаты WB)
+    bid_mode: Mapped[str | None] = mapped_column(String(20))  # режим ставки: unified (единая) / manual (ручная)
     status: Mapped[int] = mapped_column(Integer, default=9)  # 7=completed, 9=active, 11=paused
     budget: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # remaining budget (rubles)
     nm_ids: Mapped[list | None] = mapped_column(JSONB, default=list)  # linked product IDs

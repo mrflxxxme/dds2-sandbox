@@ -24,6 +24,7 @@ from backend.routers import (
     ai_chat,
     assembly,
     assembly_drafts,
+    assembly_wb,
     auth,
     cost,
     counterparty,
@@ -570,6 +571,12 @@ app.include_router(
     assembly_drafts.router,
     prefix="/api/v1",
     tags=["Assembly Drafts"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    assembly_wb.router,
+    prefix="/api/v1",
+    tags=["Assembly WB"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

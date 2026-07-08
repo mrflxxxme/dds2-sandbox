@@ -724,6 +724,82 @@ async def get_ad_tab(
     return await get_ad_tab_data(db, project.id, date_from, date_to, brand, subject)
 
 
+@router.get("/campaigns")
+async def get_ad_campaigns_list(
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Все рекламные кампании: бюджеты, расход/клики/CTR, ДРР и маржа за период (деф. 7 дней)."""
+    from backend.services.funnel.ads_manager import list_ad_campaigns
+
+    tax_info = await _load_tax_info(db, project)
+    bdr_rates_map = await _load_bdr_rates(db, project.id)
+    return await list_ad_campaigns(
+        db, project.id, tax_info=tax_info, bdr_rates_map=bdr_rates_map, date_from=date_from, date_to=date_to,
+    )
+
+
+class AutopaySettingRequest(BaseModel):
+    campaign_id: int
+    enabled: bool = False
+    amount: float = 0
+    hour: int = 9  # час пополнения, МСК
+    threshold_pct: int = 50  # пополнять, только если открут за сутки ≥ порога
+
+
+@router.get("/campaigns/autopay")
+async def get_campaigns_autopay(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Настройки автопополнения по кампаниям (пока только настройки — исполнение в DRY_RUN этапом 2)."""
+    from backend.services.funnel.ads_manager import get_autopay_settings
+
+    return await get_autopay_settings(db, project.id)
+
+
+@router.post("/campaigns/autopay", dependencies=[Depends(rate_limit_write)])
+async def set_campaigns_autopay(
+    body: AutopaySettingRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сохранить настройку автопополнения одной кампании."""
+    from backend.services.funnel.ads_manager import set_autopay_setting
+
+    return await set_autopay_setting(
+        db, project.id, body.campaign_id,
+        {"enabled": body.enabled, "amount": body.amount, "hour": body.hour, "threshold_pct": body.threshold_pct},
+    )
+
+
+@router.get("/campaigns/{campaign_id}/history")
+async def get_campaign_history_endpoint(
+    campaign_id: int,
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """История кампании за выбранный период для графика: расход кампании + метрики товаров."""
+    from backend.services.funnel.ads_manager import get_campaign_history
+
+    return await get_campaign_history(db, project.id, campaign_id, date_from=date_from, date_to=date_to)
+
+
+@router.get("/campaigns/budget_gaps")
+async def get_campaigns_budget_gaps(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Кампании, у которых сегодня кончился бюджет: час остановки + доливка до 00:00."""
+    from backend.services.funnel.ads_manager import get_budget_gaps
+
+    return await get_budget_gaps(db, project.id)
+
+
 @router.post("/sync_campaigns", dependencies=[Depends(rate_limit_write)])
 async def sync_campaigns(
     project: Project = Depends(get_current_project),

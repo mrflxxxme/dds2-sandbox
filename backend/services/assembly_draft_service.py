@@ -192,6 +192,9 @@ async def to_read_model(
     """Преобразовать ORM-модель в схему ответа с обогащённым newcomer_nm_ids."""
     newcomer = await fetch_newcomer_nm_ids(db, project_id, _draft_nm_ids(draft))
     read = AssemblyDraftRead.model_validate(draft)
+    # Self-heal display: убрать устаревшие ручные снимки, задваивающие ФФ-сток с rows
+    # (rows — источник истины). Не персистится — чинится при следующей записи.
+    _reconcile_handed_with_rows(read.distribution)
     read.newcomer_nm_ids = sorted(newcomer)
     return read
 
@@ -299,6 +302,7 @@ async def update_draft(
         draft.name = payload.name
     if payload.distribution is not None:
         payload.distribution.rows = _dedupe_rows(payload.distribution.rows)
+        _reconcile_handed_with_rows(payload.distribution)
         draft.distribution = payload.distribution.model_dump()
     if payload.comment is not None:
         draft.comment = payload.comment
@@ -558,6 +562,8 @@ async def add_rows_to_draft(
     existing = [r.model_dump() for r in distribution.rows]
     merged_rows = _merge_rows(existing, incoming)
     distribution.rows = [AssemblyDraftRow.model_validate(r) for r in merged_rows]
+    # Дозабор мог заново заложить ФФ-сток, зарезервированный ручным снимком → сверить.
+    _reconcile_handed_with_rows(distribution)
 
     # Union source_warehouse_ids (из ключей src входящих строк, как int).
     src_ids: list[int] = list(distribution.source_warehouse_ids)
@@ -1121,6 +1127,62 @@ def _find_handed_index(units: list[HandedUnit], ff: int, wb: str, pkg: str) -> i
         if u.source_ff_id == ff and u.target_wb_name == wb and (u.package_type or "BOX") == pkg:
             return i
     return None
+
+
+def _reconcile_handed_with_rows(distribution: AssemblyDraftDistribution) -> bool:
+    """Убрать двойной заклад ФФ-стока: если поток ФФ→склад→баркод уже распределён
+    в `rows`, ручной снимок (`handed_units` со `status="draft"`) того же
+    (ФФ, склад, баркод) — устаревший дубль. `rows` — источник истины: такая
+    позиция вырезается из снимка, опустевший снимок удаляется целиком.
+
+    Зачем: `set_unit_items` (ручная раскладка) вырезает поток ФФ→склад из `rows`
+    в замороженный снимок; но последующее наполнение `rows` (дозабор
+    `add_rows_to_draft` / автосейв `update_draft` / пере-распределение) не сверяется
+    со снимками и может заново заложить ТОТ ЖЕ поток ФФ→склад. Тогда `rows` и снимок
+    описывают ОДИН товар → страница склада (rows + handed) показывает фантомный
+    перезаклад (товара физически меньше, чем сумма). Гвард держит два хранилища
+    непересекающимися по (ФФ, склад, баркод), rows побеждает.
+
+    Грань — именно (ФФ, склад, баркод), а не (ФФ, баркод): `_carve_unit_from_rows`
+    уменьшает `src[ФФ]` на вырезанное, но баркод ЗАКОННО остаётся в rows, если тот
+    же ФФ шлёт его на ДРУГИЕ склады — это не дубль. Дубль — только повторный тот же
+    ФФ→склад→баркод.
+
+    Реальные передачи на ФФ (`status="handed"`) НЕ трогаем — это физический факт
+    выдачи оператору, а не устаревший авто-снимок. Мутирует distribution;
+    возвращает True, если что-то изменилось."""
+    rows_ff_wb_bc: set[tuple[int, str, str]] = set()
+    for row in distribution.rows:
+        bc = row.barcode
+        if not bc:
+            continue
+        for (ff, wb), qty in _allocate_pairs(row.src, row.tgt).items():
+            if qty > 0:
+                rows_ff_wb_bc.add((ff, wb, bc))
+    if not rows_ff_wb_bc:
+        return False
+
+    changed = False
+    kept_units: list[HandedUnit] = []
+    for unit in distribution.handed_units:
+        if (unit.status or "handed") != "draft":
+            kept_units.append(unit)
+            continue
+        kept_items = [
+            it for it in unit.items
+            if (unit.source_ff_id, unit.target_wb_name, it.barcode) not in rows_ff_wb_bc
+        ]
+        if len(kept_items) == len(unit.items):
+            kept_units.append(unit)
+            continue
+        changed = True
+        if kept_items:
+            unit.items = kept_items
+            kept_units.append(unit)
+        # опустевший снимок целиком — не сохраняем (весь товар ушёл в rows)
+    if changed:
+        distribution.handed_units = kept_units
+    return changed
 
 
 def _normalize_handed_units(units: list[HandedUnit]) -> list[HandedUnit]:

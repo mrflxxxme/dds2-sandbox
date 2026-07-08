@@ -6,6 +6,7 @@ Extracted from routers/integrations.py to keep router as thin HTTP layer.
 import logging
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models import IntegrationKey, Nomenclature, SyncLog, WbPayout
 from backend.utils.crypto import decrypt as _decrypt, encrypt as _encrypt
 from backend.utils.time import utcnow
+
+if TYPE_CHECKING:
+    from backend.integrations.wb_portal_client import WbPortalClient
 
 logger = logging.getLogger("dds.integrations")
 
@@ -30,6 +34,12 @@ async def list_keys(db: AsyncSession, project_id: int) -> list[dict]:
     keys = result.scalars().all()
     output = []
     for k in keys:
+        # Один нерасшифровываемый ключ (напр. замаскированная заглушка после sync-prod)
+        # не должен ронять весь список — показываем плейсхолдер вместо 500.
+        try:
+            preview = "***" + _decrypt(k.encrypted_key)[-4:]
+        except Exception:
+            preview = "•••• (не расшифровать)"
         output.append(
             {
                 "id": k.id,
@@ -38,7 +48,7 @@ async def list_keys(db: AsyncSession, project_id: int) -> list[dict]:
                 "is_active": k.is_active,
                 "created_at": k.created_at,
                 "last_sync_at": k.last_sync_at,
-                "key_preview": "***" + _decrypt(k.encrypted_key)[-4:],
+                "key_preview": preview,
             }
         )
     return output
@@ -147,6 +157,111 @@ async def _get_wb_key(db: AsyncSession, project_id: int) -> tuple:
     if not key:
         raise ValueError("WB API ключ не найден. Добавьте ключ через /integrations/keys")
     return key, _decrypt(key.encrypted_key)
+
+
+# ─── WB Portal Session (реплей кабинета для FBW-поставок) ─────────────────────
+
+WB_PORTAL_SERVICE = "wb_portal_session"
+WB_PORTAL_LABEL = "WB Portal Session"
+
+
+async def set_wb_portal_session(db: AsyncSession, project_id: int, authorizev3: str) -> dict:
+    """
+    Завести/обновить session-токен кабинета WB (authorizev3) для реплея портала.
+    Валидирует токен обновлением wb-seller-lk перед сохранением.
+    Upsert по (project_id, service, label) с восстановлением soft-deleted строки.
+    """
+    from backend.integrations.wb_portal_client import WbPortalClient, WbPortalError
+
+    authorizev3 = authorizev3.strip()
+    if not authorizev3:
+        raise ValueError("Пустой токен")
+
+    client = WbPortalClient(authorizev3)
+    try:
+        await client.check_session()
+    except WbPortalError as e:
+        # WbSessionExpired (протух токен) И сетевые ошибки WB → 400 с понятным текстом.
+        raise ValueError(f"Токен недействителен или WB недоступен: {e}") from e
+
+    # Ищем ВКЛЮЧАЯ soft-deleted (unique-слот занят даже у удалённой строки).
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_PORTAL_SERVICE,
+            IntegrationKey.label == WB_PORTAL_LABEL,
+        )
+    )
+    key = result.scalar_one_or_none()
+    encrypted = _encrypt(authorizev3)
+    if key:
+        key.restore() if key.is_deleted else None
+        key.encrypted_key = encrypted
+        key.is_active = True
+        key.config = {"status": "ACTIVE", "updated_at": utcnow().isoformat()}
+    else:
+        key = IntegrationKey(
+            project_id=project_id,
+            service=WB_PORTAL_SERVICE,
+            label=WB_PORTAL_LABEL,
+            encrypted_key=encrypted,
+            is_active=True,
+            config={"status": "ACTIVE", "updated_at": utcnow().isoformat()},
+        )
+        db.add(key)
+    await db.commit()
+    await db.refresh(key)
+    return {"status": "ACTIVE", "updated_at": (key.config or {}).get("updated_at")}
+
+
+async def get_wb_portal_client(db: AsyncSession, project_id: int) -> "WbPortalClient":
+    """Собрать WbPortalClient из активной сессии. Raises ValueError если нет."""
+    from backend.integrations.wb_portal_client import WbPortalClient
+
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_PORTAL_SERVICE,
+            IntegrationKey.is_active.is_(True),
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    key = result.scalar_one_or_none()
+    if not key:
+        raise ValueError("Сессия WB-кабинета не задана. Обновите доступ WB в настройках.")
+    return WbPortalClient(_decrypt(key.encrypted_key))
+
+
+async def mark_wb_portal_expired(db: AsyncSession, project_id: int) -> None:
+    """Пометить сессию EXPIRED (после 401) — UI попросит вставить свежий токен."""
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_PORTAL_SERVICE,
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    key = result.scalar_one_or_none()
+    if key:
+        key.is_active = False
+        key.config = {**(key.config or {}), "status": "EXPIRED", "expired_at": utcnow().isoformat()}
+        await db.commit()
+
+
+async def get_wb_portal_status(db: AsyncSession, project_id: int) -> dict:
+    """Статус сессии кабинета для UI: ACTIVE / EXPIRED / NONE."""
+    result = await db.execute(
+        select(IntegrationKey).where(
+            IntegrationKey.project_id == project_id,
+            IntegrationKey.service == WB_PORTAL_SERVICE,
+            IntegrationKey.is_deleted.is_(False),
+        )
+    )
+    key = result.scalar_one_or_none()
+    if not key:
+        return {"status": "NONE"}
+    status = (key.config or {}).get("status", "ACTIVE" if key.is_active else "EXPIRED")
+    return {"status": status, "updated_at": (key.config or {}).get("updated_at")}
 
 
 async def sync_wb_sales(

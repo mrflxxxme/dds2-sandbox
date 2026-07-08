@@ -9,6 +9,7 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchBlock } from '@/components/FfMismatchModal';
 import MigfullModal from './MigfullModal';
 import PalletLayoutTab from './PalletLayoutTab';
+import WbSupplyPanel from './WbSupplyPanel';
 import type { Column } from '@/components/DataTable';
 import type { AssemblyAttempt, AssemblyHistoryEntry, AssemblyRequest, AssemblyStatus, BoxMultiplicityRow, FfCreateFormResponse, FfPushAssemblyResult, FulfillmentStatus, MigfullPortalConfig, RefreshFromFboResponse, Warehouse, WbFboSupply } from '@/types/api';
 
@@ -1527,6 +1528,9 @@ export default function AssemblyDetailPage() {
                     </div>
                 </div>
             )}
+
+            {/* Поставка WB — занос заявки в кабинет через реплей портала */}
+            {assembly && <WbSupplyPanel assemblyId={assembly.id} items={assembly.items ?? []} />}
 
             {/* Migfull-портал («Натали») — заявка на отгрузку из сборки */}
             {showMigfullModal && assembly && (

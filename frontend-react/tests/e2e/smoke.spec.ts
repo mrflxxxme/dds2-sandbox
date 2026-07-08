@@ -28,6 +28,7 @@ const pages = [
   { path: '/supply-chain', name: 'Supply Chain' },
   { path: '/container-loader', name: 'Container Loader' },
   { path: '/funnel', name: 'Funnel' },
+  { path: '/ads-manager', name: 'Ads Manager' },
   { path: '/trends', name: 'Trends' },
   { path: '/order-geography', name: 'Order Geography' },
   { path: '/opiu', name: 'OPIU' },

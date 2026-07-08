@@ -213,6 +213,47 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
     return result
 
 
+def _parse_advert_item(c: dict) -> dict | None:
+    """Элемент ответа WB /api/advert/v2/adverts → нормализованный dict кампании.
+
+    settings.payment_type ('cpm'/'cpc') → campaign_type;
+    bid_type ('unified'=единая / 'manual'=ручная) → bid_mode (для CPM; у CPC тоже приходит).
+    """
+    if not isinstance(c, dict):
+        return None
+    nm_ids: list[int] = []
+    # New API: nm_settings[].nm_id
+    for ns in c.get("nm_settings") or []:
+        if isinstance(ns, dict) and ns.get("nm_id"):
+            nm_ids.append(ns["nm_id"])
+    # Fallback: params[].nms[]
+    if not nm_ids:
+        for param in c.get("params") or []:
+            if isinstance(param, dict):
+                nm_ids.extend(param.get("nms") or [])
+    # Name and payment_type from settings
+    name = None
+    payment_type = None
+    settings = c.get("settings")
+    if isinstance(settings, dict):
+        name = settings.get("name")
+        payment_type = settings.get("payment_type")
+    if not name:
+        name = c.get("name")
+    # ID: "id" or "advertId"
+    advert_id = c.get("id") or c.get("advertId")
+    return {
+        "advertId": advert_id,
+        "name": name or str(advert_id or ""),
+        # campaign_type: payment_type ('cpm'/'cpc'); фолбэк на bid_type только если payment_type пуст
+        "type": payment_type or c.get("bid_type"),
+        # bid_mode: режим ставки WB — 'unified'/'manual' как есть (совпадает с контрактом фронта)
+        "bid_mode": c.get("bid_type"),
+        "status": c.get("status"),
+        "nm_ids": nm_ids,
+    }
+
+
 async def fetch_ad_campaigns_detailed(
     api_key: str,
     include_completed: bool = False,
@@ -264,40 +305,9 @@ async def fetch_ad_campaigns_detailed(
                     continue
 
                 for c in items:
-                    if not isinstance(c, dict):
-                        continue
-                    nm_ids: list[int] = []
-                    # New API: nm_settings[].nm_id
-                    for ns in c.get("nm_settings") or []:
-                        if isinstance(ns, dict) and ns.get("nm_id"):
-                            nm_ids.append(ns["nm_id"])
-                    # Fallback: params[].nms[]
-                    if not nm_ids:
-                        for param in c.get("params") or []:
-                            if isinstance(param, dict):
-                                nm_ids.extend(param.get("nms") or [])
-                    # Name and payment_type from settings
-                    name = None
-                    payment_type = None
-                    settings = c.get("settings")
-                    if isinstance(settings, dict):
-                        name = settings.get("name")
-                        payment_type = settings.get("payment_type")
-                    if not name:
-                        name = c.get("name")
-                    # ID: "id" or "advertId"
-                    advert_id = c.get("id") or c.get("advertId")
-                    # campaign_type: use payment_type string
-                    ctype = payment_type or c.get("bid_type")
-                    campaigns.append(
-                        {
-                            "advertId": advert_id,
-                            "name": name or str(advert_id or ""),
-                            "type": ctype,
-                            "status": c.get("status"),
-                            "nm_ids": nm_ids,
-                        }
-                    )
+                    parsed = _parse_advert_item(c)
+                    if parsed is not None:
+                        campaigns.append(parsed)
             except Exception as e:
                 logger.warning(f"WB adv details chunk {idx + 1} failed: {e}")
 
