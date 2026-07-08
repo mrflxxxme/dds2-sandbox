@@ -39,6 +39,7 @@ const SECTION_PAGES: Record<string, { key: string; label: string }[]> = {
     ],
     'Продажи': [
         { key: 'funnel', label: 'Воронка/Реклама' },
+        { key: 'ads-manager', label: 'Управление рекламой' },
         { key: 'trends', label: 'Тренды' },
         { key: 'opiu', label: 'ОПИУ' },
         { key: 'plan-fact', label: 'План-Факт' },

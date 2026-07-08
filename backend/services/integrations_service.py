@@ -34,6 +34,12 @@ async def list_keys(db: AsyncSession, project_id: int) -> list[dict]:
     keys = result.scalars().all()
     output = []
     for k in keys:
+        # Один нерасшифровываемый ключ (напр. замаскированная заглушка после sync-prod)
+        # не должен ронять весь список — показываем плейсхолдер вместо 500.
+        try:
+            preview = "***" + _decrypt(k.encrypted_key)[-4:]
+        except Exception:
+            preview = "•••• (не расшифровать)"
         output.append(
             {
                 "id": k.id,
@@ -42,7 +48,7 @@ async def list_keys(db: AsyncSession, project_id: int) -> list[dict]:
                 "is_active": k.is_active,
                 "created_at": k.created_at,
                 "last_sync_at": k.last_sync_at,
-                "key_preview": "***" + _decrypt(k.encrypted_key)[-4:],
+                "key_preview": preview,
             }
         )
     return output

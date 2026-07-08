@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, UnifiedSyncProgress, FirstSyncProgress } from '@/types/api';
+import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -112,6 +112,27 @@ export function addFunnelMethods(api: ApiClient) {
             if (params.subject) q.set('subject', params.subject);
             if (params.group_by) q.set('group_by', params.group_by);
             return api.request<AdTabProduct[]>('GET', `/api/v1/funnel/ad_tab?${q.toString()}`);
+        },
+        getAdCampaignsList(dateFrom?: string, dateTo?: string) {
+            const q = new URLSearchParams();
+            if (dateFrom) q.set('date_from', dateFrom);
+            if (dateTo) q.set('date_to', dateTo);
+            return api.request<AdsManagerCampaign[]>('GET', `/api/v1/funnel/campaigns?${q.toString()}`);
+        },
+        getAdsBudgetGaps() {
+            return api.request<AdsBudgetGap[]>('GET', '/api/v1/funnel/campaigns/budget_gaps');
+        },
+        getCampaignHistory(campaignId: number, dateFrom?: string, dateTo?: string) {
+            const q = new URLSearchParams();
+            if (dateFrom) q.set('date_from', dateFrom);
+            if (dateTo) q.set('date_to', dateTo);
+            return api.request<AdsHistoryPoint[]>('GET', `/api/v1/funnel/campaigns/${campaignId}/history?${q.toString()}`);
+        },
+        getCampaignsAutopay() {
+            return api.request<Record<string, AdsAutopaySetting>>('GET', '/api/v1/funnel/campaigns/autopay');
+        },
+        setCampaignAutopay(campaignId: number, setting: AdsAutopaySetting) {
+            return api.request<Record<string, AdsAutopaySetting>>('POST', '/api/v1/funnel/campaigns/autopay', { campaign_id: campaignId, ...setting });
         },
         syncAdCampaigns() {
             return api.request<{ status: string }>('POST', '/api/v1/funnel/sync_campaigns');

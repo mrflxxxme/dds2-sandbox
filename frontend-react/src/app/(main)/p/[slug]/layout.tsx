@@ -65,6 +65,7 @@ const navGroups = [
         section: 'sales',
         items: [
             { href: '/funnel', label: 'Воронка продаж', icon: '📊', pageKey: 'funnel' },
+            { href: '/ads-manager', label: 'Управление рекламой', icon: '📢', pageKey: 'ads-manager' },
             { href: '/pricing', label: 'Ценообразование', icon: '💲', pageKey: 'funnel' },
             { href: '/trends', label: 'Метрики и тренды', icon: '📈', pageKey: 'trends' },
             { href: '/order-geography', label: 'Куда заказывают', icon: '🗺️', pageKey: 'geography' },

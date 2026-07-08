@@ -3196,6 +3196,66 @@ export interface AdCampaignEvent {
   created_at: string;
 }
 
+// ─── Управление рекламой ─────────────────────────────────────────────────────
+
+export interface AdsManagerCampaign {
+  campaign_id: number;
+  name: string | null;
+  campaign_type: string | null;
+  status: number;
+  status_label: string;
+  budget: number;
+  nm_ids: number[];
+  nm_count: number;
+  brands: string[];
+  subjects: string[];
+  spend_today: number;
+  spend_period: number;
+  views_period: number;
+  clicks_period: number;
+  ctr: number;
+  cpc: number;
+  drr: number;
+  margin: number;
+  ad_click_share: number;  // доля рекл. кликов от всех переходов товаров кампании
+  cr_cart: number;  // конверсия переход→корзина
+  cr_order: number;  // конверсия корзина→заказ
+  bid_mode?: string | null;  // для CPM: 'unified' (единая) / 'manual' (ручная); пока не синкается
+  updated_at: string | null;
+}
+
+export interface AdsAutopaySetting {
+  enabled: boolean;
+  amount: number;
+  hour: number;  // час пополнения, МСК
+  threshold_pct: number;  // пополнять, только если открут за сутки ≥ порога
+}
+
+export interface AdsHistoryPoint {
+  date: string;
+  price_spp: number;
+  open_card: number;
+  adv_sum: number;
+  drr: number;
+  orders_sum_rub: number;
+}
+
+export interface AdsBudgetGap {
+  campaign_id: number;
+  name: string | null;
+  campaign_type: string | null;
+  nm_ids: number[];
+  nm_count: number;
+  spend_today: number;
+  ran_out_at: string | null;  // null = кончился до первого синка (час неизвестен)
+  burn_rate: number;
+  needed_till_midnight: number;  // с учётом минимума пополнения WB (1000 ₽)
+  raw_needed: number;  // расчётная нужда без учёта минимума
+  min_topup: number;
+  hours_active: number;
+  remaining_hours: number;
+}
+
 export interface AdCampaign {
   campaign_id: number;
   name: string | null;
