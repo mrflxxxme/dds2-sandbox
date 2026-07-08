@@ -2810,3 +2810,42 @@ async def test_topup_event_revert_and_version_guard(db_session):
     topup2b = next(e for e in hist3.events if e.id == topup2.id)
     assert topup2b.can_revert is False
     assert topup2b.revert_blocked_reason and "изменил" in topup2b.revert_blocked_reason
+
+
+@pytest.mark.asyncio
+async def test_commit_revert_lifo_guard(db_session):
+    """Стек частичных коммитов: откат НЕ новейшего события заблокирован (LIFO) —
+    иначе restore/merge портит количества (потеря+задвоение)."""
+    wh_a, wh_b = await _get_warehouse_ids(db_session)
+    # Черновик с одним nm, источник размазан по двум ФФ (src wh_a=5, wh_b=5).
+    rows = [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, vendor_code="v", src={str(wh_a): 5, str(wh_b): 5}, tgt={"Электросталь": 10})]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh_a, wh_b], ["Электросталь"], rows)
+    )
+    # Частичный коммит по ФФ wh_a (порция wh_b карвится в leftover, черновик выживает).
+    r1 = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id, source_ff_id=wh_a)
+    assert len(r1.created_request_ids) == 1
+    # Второй коммит по wh_b (черновик пустеет → soft-delete).
+    r2 = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id, source_ff_id=wh_b)
+    assert len(r2.created_request_ids) == 1
+
+    hist = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    assert len(hist.events) == 2
+    newest, older = hist.events[0], hist.events[1]  # desc по id
+    assert older.created_request_ids == r1.created_request_ids
+    assert newest.created_request_ids == r2.created_request_ids
+    # LIFO: старое событие откатить нельзя, новое — можно.
+    assert older.can_revert is False
+    assert older.revert_blocked_reason and "более новое" in older.revert_blocked_reason
+    assert newest.can_revert is True
+
+    # Прямой откат старого события → 409.
+    with pytest.raises(HTTPException) as exc:
+        await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, older.id)
+    assert exc.value.status_code == 409
+
+    # Откат новейшего проходит; после него старое становится откатываемым.
+    await draft_history.revert_draft_event(db_session, PROJECT_ID, draft.id, newest.id)
+    hist2 = await draft_history.get_draft_history(db_session, PROJECT_ID, draft.id)
+    older2 = next(e for e in hist2.events if e.id == older.id)
+    assert older2.can_revert is True

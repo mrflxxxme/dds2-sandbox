@@ -309,17 +309,21 @@ async def update_draft(
     if payload.event is not None:
         from backend.services.assembly.draft_history import log_draft_event
 
-        await log_draft_event(
-            db,
-            project_id,
-            draft_id,
-            payload.event.event_type,
-            summary=payload.event.summary,
-            before_distribution=before_distribution,
-            draft_updated_at=draft.updated_at,
-            changed_by=changed_by,
-        )
-        await db.refresh(draft)
+        # Best-effort: черновик уже сохранён (commit выше) — сбой лога не валит PUT.
+        try:
+            await log_draft_event(
+                db,
+                project_id,
+                draft_id,
+                payload.event.event_type,
+                summary=payload.event.summary,
+                before_distribution=before_distribution,
+                draft_updated_at=draft.updated_at,
+                changed_by=changed_by,
+            )
+            await db.refresh(draft)
+        except Exception:
+            logger.warning("Failed to log draft event for draft_id=%s", draft_id, exc_info=True)
     return draft
 
 
@@ -1071,22 +1075,26 @@ async def commit_draft(
     await invalidate_cache("reports:assembly_flow")
 
     # Событие истории «создание заявки» — для вкладки «🕘 История» и отката.
+    # Best-effort: заявки уже durable (коммит выше) — сбой лога НЕ должен валить ответ 500.
     if created_ids:
         from backend.models.assembly import DraftEventType
         from backend.services.assembly.draft_history import log_draft_event
 
         units = sum(int(q or 0) for r in committed_rows_snapshot for q in (r.get("tgt") or {}).values())
-        await log_draft_event(
-            db,
-            project_id,
-            draft_id,
-            DraftEventType.COMMIT_REQUEST,
-            summary=f"Создано заявок: {len(created_ids)} ({units} шт)",
-            committed_rows=committed_rows_snapshot,
-            created_request_ids=created_ids,
-            draft_updated_at=draft.updated_at,
-            changed_by=changed_by,
-        )
+        try:
+            await log_draft_event(
+                db,
+                project_id,
+                draft_id,
+                DraftEventType.COMMIT_REQUEST,
+                summary=f"Создано заявок: {len(created_ids)} ({units} шт)",
+                committed_rows=committed_rows_snapshot,
+                created_request_ids=created_ids,
+                draft_updated_at=draft.updated_at,
+                changed_by=changed_by,
+            )
+        except Exception:
+            logger.warning("Failed to log COMMIT_REQUEST draft event for draft_id=%s", draft_id, exc_info=True)
 
     return AssemblyDraftCommitResponse(
         created_request_ids=created_ids,

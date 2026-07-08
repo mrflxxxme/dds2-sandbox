@@ -15,7 +15,7 @@ import logging
 from datetime import datetime
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.assembly import (
@@ -26,12 +26,11 @@ from backend.models.assembly import (
     DraftEventType,
 )
 from backend.schemas.assembly_draft import (
-    AssemblyDraftRead,
     DraftEventRead,
     DraftEventRevertResponse,
     DraftHistoryResponse,
 )
-from backend.services.assembly_draft_service import _merge_rows
+from backend.services.assembly_draft_service import _merge_rows, to_read_model
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -129,11 +128,24 @@ async def _load_draft_any(db: AsyncSession, project_id: int, draft_id: int) -> A
 
 
 async def _revert_guard(
-    db: AsyncSession, project_id: int, ev: AssemblyDraftEvent, draft: AssemblyDraft | None
+    db: AsyncSession,
+    project_id: int,
+    ev: AssemblyDraftEvent,
+    draft: AssemblyDraft | None,
+    newest_open_id: int | None,
 ) -> tuple[bool, str | None]:
-    """Можно ли откатить событие сейчас + причина запрета (None если можно)."""
+    """Можно ли откатить событие сейчас + причина запрета (None если можно).
+
+    `newest_open_id` — id самого нового НЕ откаченного события черновика."""
     if ev.reverted_at is not None:
         return False, "уже откачено"
+
+    # LIFO: откатывать можно только САМОЕ НОВОЕ незавершённое событие. Откат «через
+    # голову» более позднего (частичного) коммита рушит целостность количеств —
+    # `draft.is_deleted` перестаёт однозначно указывать, ЧЕЙ коммит закрыл черновик,
+    # и restore/merge даёт потерю+задвоение. Сначала откатывается новейшее.
+    if newest_open_id is not None and ev.id < newest_open_id:
+        return False, "сначала откатите более новое действие в истории"
 
     if ev.event_type in _SNAPSHOT_EVENTS:
         if draft is None or draft.is_deleted:
@@ -148,11 +160,13 @@ async def _revert_guard(
             return False, "нет связанных заявок"
         reqs = (
             await db.execute(
-                select(AssemblyRequest).where(
+                select(AssemblyRequest)
+                .where(
                     AssemblyRequest.id.in_(ids),
                     AssemblyRequest.project_id == project_id,
                     AssemblyRequest.is_deleted == False,  # noqa: E712
                 )
+                .limit(len(ids))
             )
         ).scalars().all()
         if not reqs:
@@ -186,9 +200,11 @@ async def get_draft_history(db: AsyncSession, project_id: int, draft_id: int) ->
             .limit(_HISTORY_LIMIT)
         )
     ).scalars().all()
+    # Самое новое НЕ откаченное событие — только его можно откатить (LIFO).
+    newest_open_id = max((e.id for e in events if e.reverted_at is None), default=None)
     out: list[DraftEventRead] = []
     for ev in events:
-        can, reason = await _revert_guard(db, project_id, ev, draft)
+        can, reason = await _revert_guard(db, project_id, ev, draft, newest_open_id)
         out.append(
             DraftEventRead(
                 id=ev.id,
@@ -230,7 +246,17 @@ async def revert_draft_event(
     if draft is None:
         raise HTTPException(status_code=404, detail="Черновик не найден")
 
-    can, reason = await _revert_guard(db, project_id, ev, draft)
+    newest_open_id = (
+        await db.execute(
+            select(func.max(AssemblyDraftEvent.id)).where(
+                AssemblyDraftEvent.project_id == project_id,
+                AssemblyDraftEvent.draft_id == draft_id,
+                AssemblyDraftEvent.reverted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+
+    can, reason = await _revert_guard(db, project_id, ev, draft, newest_open_id)
     if not can:
         raise HTTPException(status_code=409, detail=f"Откат недоступен: {reason}")
 
@@ -278,7 +304,8 @@ async def revert_draft_event(
     await db.commit()
     await db.refresh(draft)
 
-    draft_read = AssemblyDraftRead.model_validate(draft) if not draft.is_deleted else None
+    # to_read_model (не model_validate) — чтобы вернулись newcomer_nm_ids (бейдж 🆕).
+    draft_read = await to_read_model(db, project_id, draft) if not draft.is_deleted else None
     return DraftEventRevertResponse(
         reverted_event_id=ev.id,
         event_type=ev.event_type,
