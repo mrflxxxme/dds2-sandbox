@@ -224,3 +224,34 @@ class MigfullClient:
         return await self._fetch_paginated(
             f"submissions/{_validate_guid(guid, 'GUID приёмки')}/lines/{_validate_line_type(line_type)}"
         )
+
+    @retry_with_backoff(max_retries=3)
+    async def fetch_destination_index(self) -> list[dict]:
+        """Склады назначения с numeric id — для создания заявки через портал.
+
+        У `/destinations` numeric id НЕТ (только guid); численный
+        `destination_marketplace_id` (значение, которое ждёт форма портала) берём из
+        отгрузок (id↔guid), а имя/тип доставки/маркетплейс — из `/destinations`.
+        Возвращает `[{id, name, delivery_type, marketplace_id}]` — только склады, куда
+        уже были отгрузки (иные не имеют numeric id и через портал не выставляются).
+        """
+        dests = await self._fetch_paginated("destinations")
+        by_guid = {d.get("guid"): d for d in dests if d.get("guid")}
+        shipments = await self._fetch_paginated("shipments")
+        out: dict[int, dict] = {}
+        for s in shipments:
+            did = s.get("destination_marketplace_id")
+            if not isinstance(did, int) or did in out:
+                continue
+            meta = by_guid.get(s.get("destination_marketplace_guid")) or {}
+            dm = s.get("destination_marketplace") if isinstance(s.get("destination_marketplace"), dict) else {}
+            name = meta.get("name") or dm.get("name")
+            if not name:
+                continue
+            out[did] = {
+                "id": did,
+                "name": name,
+                "delivery_type": meta.get("delivery_type") or s.get("delivery_type"),
+                "marketplace_id": meta.get("marketplace_id") or s.get("marketplace_id"),
+            }
+        return list(out.values())

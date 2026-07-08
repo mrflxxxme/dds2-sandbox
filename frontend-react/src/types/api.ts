@@ -2277,6 +2277,8 @@ export interface MigfullShipmentPrefill {
   filter_delivery_type: 'direct' | 'transit' | 'pickup';
   notes: string | null;
   wb_warehouse_name: string | null;            // инфо: куда отгрузка (WB-склад)
+  destination_name: string | null;            // распознанный склад в ФФ (выставим при создании)
+  destination_matched: boolean;               // удалось ли сматчить склад назначения
   assembly_number: string | null;
 }
 

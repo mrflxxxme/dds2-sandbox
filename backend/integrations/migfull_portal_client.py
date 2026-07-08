@@ -258,9 +258,10 @@ class MigfullPortalClient:
     async def create_shipment(self, header: dict[str, object]) -> MigfullCreateResult:
         """Создать шапку заявки (Livewire `create`). БЕЗ retry — создание необратимо.
 
-        ``header`` — пары data-полей (marketplace_id, shipment_type, number,
-        shipment_date, notes, filter_delivery_type). .live-поля сетятся последовательно,
-        filter_delivery_type — последним (иначе reactive-перерисовка затрёт его).
+        ``header`` — пары data-полей (marketplace_id, shipment_type, number, shipment_date,
+        notes, filter_delivery_type, destination_marketplace_id). .live-поля сетятся
+        последовательно: filter_delivery_type (фильтрует склады) → destination_marketplace_id
+        последним (иначе reactive-перерисовка их затрёт).
         """
         async with self._circuit:
             page = await self._get("/app/shipments/create")
@@ -271,8 +272,11 @@ class MigfullPortalClient:
             if not snap:
                 raise MigfullPortalError("migfull-портал: форма создания не распознана", status_code=502)
 
-            # Последовательная установка полей; filter_delivery_type — строго последним.
-            ordered = sorted(header.items(), key=lambda kv: kv[0] == "filter_delivery_type")
+            # Последовательная установка полей (.live-поля затирают друг друга при bulk):
+            # filter_delivery_type фильтрует список складов → идёт перед destination_marketplace_id,
+            # который выставляется СТРОГО последним.
+            order = {"filter_delivery_type": 1, "destination_marketplace_id": 2}
+            ordered = sorted(header.items(), key=lambda kv: order.get(kv[0], 0))
             for field, value in ordered:
                 if value is None:
                     continue

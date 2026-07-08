@@ -31,9 +31,12 @@ from backend.utils.time import utcnow
 
 logger = structlog.get_logger("dds.wb_supply")
 
-# Тип упаковки WB по умолчанию (короб). Реальный boxTypeID берём из ответа
-# валидации (availableBoxTypes), это — фолбэк.
-DEFAULT_BOX_TYPE_ID = 2
+# Тип упаковки заявки (PackageType) → WB boxTypeID. Подтверждено вживую:
+# 2=Короб, 5=Монопаллета; 6=Суперсейф — стандарт WB. Ответ валидации
+# (availableBoxTypes) страхует от неверного id: если WB не принимает запрошенный
+# тип для этих товаров/склада — понятная ошибка со списком доступных.
+PACKAGE_TYPE_TO_BOX_TYPE_ID = {"BOX": 2, "MONOPALLET": 5, "SUPERSAFE": 6}
+BOX_TYPE_ID_LABEL = {2: "Короб", 5: "Монопаллета", 6: "Суперсейф"}
 
 
 class WbSupplyError(Exception):
@@ -195,8 +198,17 @@ async def save_pass(
     return link
 
 
-async def create_preorder(db: AsyncSession, project_id: int, assembly_id: int) -> AssemblyWbSupply:
-    """Шаги 1-4: черновик → наполнение → валидация → преордер."""
+async def create_preorder(
+    db: AsyncSession, project_id: int, assembly_id: int, package_type: str | None = None
+) -> AssemblyWbSupply:
+    """
+    Шаги 1-4: черновик → наполнение → валидация → преордер.
+
+    Тип упаковки: явный `package_type` (BOX/MONOPALLET/SUPERSAFE — выбор в панели)
+    ИЛИ тип заявки (`assembly.package_type`, проставлен на «Распределить»). WB
+    должен разрешать его для этих товаров/склада — иначе понятная ошибка со
+    списком доступных типов (пользователь меняет тип в панели и повторяет).
+    """
     assembly = await _load_assembly(db, project_id, assembly_id)
     goods = _build_goods(assembly)
     if not goods:
@@ -204,6 +216,11 @@ async def create_preorder(db: AsyncSession, project_id: int, assembly_id: int) -
     name = _direction_name(assembly)
     if not name:
         raise WbSupplyError("У заявки не задан WB-склад направления")
+
+    pkg = (package_type or assembly.package_type or "BOX").upper()
+    desired_box_type = PACKAGE_TYPE_TO_BOX_TYPE_ID.get(pkg)
+    if desired_box_type is None:
+        raise WbSupplyError(f"Неизвестный тип упаковки: {pkg}")
 
     link = await _get_or_create_link(db, project_id, assembly_id)
     client = await _client(db, project_id)
@@ -219,8 +236,7 @@ async def create_preorder(db: AsyncSession, project_id: int, assembly_id: int) -
         await db.commit()
         await client.draft_update_goods(draft_id, goods)
         validation = await client.validate_warehouse_goods(draft_id, warehouse_id)
-        box_types = _extract_box_types(validation)
-        box_type_id = box_types[0] if box_types else DEFAULT_BOX_TYPE_ID
+        box_type_id = _choose_box_type(desired_box_type, _extract_box_types(validation), pkg, name)
         preorder_id = await client.supply_create(draft_id, warehouse_id, box_type_id)
 
         link.warehouse_id_wb = warehouse_id
@@ -228,6 +244,42 @@ async def create_preorder(db: AsyncSession, project_id: int, assembly_id: int) -
         link.draft_id = draft_id
         link.preorder_id = preorder_id
         link.sync_status = WbSupplySyncStatus.PREORDER.value
+        link.last_error = None
+        link.last_synced_at = utcnow()
+        await db.commit()
+        return link
+
+    return await _run(db, project_id, link, _flow())
+
+
+async def update_preorder_goods(
+    db: AsyncSession, project_id: int, assembly_id: int
+) -> AssemblyWbSupply:
+    """Дослать текущее наполнение заявки в готовый преордер WB (upsert).
+
+    Шлём ВСЕ товары заявки; WB валидирует поштучно. Если хоть один товар
+    отклонён (`hasError`) — операция считается неуспешной, тексты ошибок WB
+    поднимаются наверх через WbSupplyError.
+    """
+    assembly = await _load_assembly(db, project_id, assembly_id)
+    goods = _build_goods(assembly)
+    if not goods:
+        raise WbSupplyError("В заявке нет товаров для поставки")
+
+    link = await _get_or_create_link(db, project_id, assembly_id)
+    if not link.preorder_id:
+        raise WbSupplyError("Преордер ещё не создан")
+    preorder_id = link.preorder_id
+    client = await _client(db, project_id)
+
+    async def _flow() -> AssemblyWbSupply:
+        res = await client.edit_preorder_goods(preorder_id, goods)
+        bad = [r for r in res if r.get("hasError")]
+        if bad:
+            msgs = "; ".join(
+                e.get("error", "") for r in bad for e in (r.get("errors") or [])
+            )
+            raise WbSupplyError(f"WB отклонил часть товаров: {msgs}")
         link.last_error = None
         link.last_synced_at = utcnow()
         await db.commit()
@@ -363,6 +415,22 @@ def _extract_box_types(validation: dict) -> list[int]:
         if types:
             return [int(t) for t in types]
     return []
+
+
+def _choose_box_type(desired: int, available: list[int], pkg: str, warehouse: str) -> int:
+    """
+    boxTypeID для supply/create: запрошенный тип, если WB его разрешает; иначе
+    понятная ошибка со списком доступных (WB не принимает эту упаковку для товаров/склада).
+    Пустой available (WB не вернул список) — доверяем запросу.
+    """
+    if not available or desired in available:
+        return desired
+    allowed = ", ".join(BOX_TYPE_ID_LABEL.get(b, str(b)) for b in available)
+    want = BOX_TYPE_ID_LABEL.get(desired, pkg)
+    raise WbSupplyError(
+        f"WB не принимает упаковку «{want}» для этих товаров на складе «{warehouse}». "
+        f"Доступно: {allowed}. Выберите доступный тип упаковки и повторите."
+    )
 
 
 def _extract_barcode_id(details: dict) -> int | None:

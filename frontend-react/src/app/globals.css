@@ -237,6 +237,15 @@ input[type="number"] {
     color: var(--color-text-dim);
 }
 
+.section-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 12px;
+}
+
 /* ─── Table ─────────────────────────────────────────────────────────────────── */
 
 .data-table {

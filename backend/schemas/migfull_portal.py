@@ -64,9 +64,13 @@ class MigfullShipmentPrefill(BaseModel):
 
     number: str | None = None  # № поставки WB (= wb_fbo_supply.wb_supply_id)
     shipment_date: date | None = None
-    filter_delivery_type: DeliveryType = "direct"
+    # Самовывоз — портал migfull персистит склад назначения ТОЛЬКО при pickup
+    # (при direct/transit значение молча роняется); реальные заявки Натали — самовывоз.
+    filter_delivery_type: DeliveryType = "pickup"
     notes: str | None = None
-    wb_warehouse_name: str | None = None  # инфо: куда отгрузка (WB-склад назначения)
+    wb_warehouse_name: str | None = None  # инфо: куда отгрузка (WB-склад назначения, наше имя)
+    destination_name: str | None = None  # распознанный склад назначения в ФФ (показ в модалке)
+    destination_matched: bool = False  # удалось ли сматчить склад → выставим при создании
     assembly_number: str | None = None
 
 
@@ -88,7 +92,7 @@ class MigfullDraftResponse(BaseModel):
 class MigfullSendRequest(BaseModel):
     """Поля заявки, подтверждённые пользователем в модалке."""
 
-    filter_delivery_type: DeliveryType = "direct"
+    filter_delivery_type: DeliveryType = "pickup"
     number: str | None = Field(default=None, max_length=100)
     shipment_date: date | None = None
     notes: str | None = Field(default=None, max_length=1000)

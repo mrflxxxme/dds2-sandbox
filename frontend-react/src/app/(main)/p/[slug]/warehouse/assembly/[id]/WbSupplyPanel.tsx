@@ -2,8 +2,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
+import { downloadBoxStickers } from '@/lib/wbBoxStickers';
 import type {
     AssemblyRequestItem,
+    PackageType,
     WbBox,
     WbDriver,
     WbPortalStatus,
@@ -23,12 +25,26 @@ const STATUS_LABEL: Record<WbSupplySyncStatus, { label: string; className: strin
 
 type Tab = 'goods' | 'boxes' | 'pass';
 
+// WB boxTypeID → человекочитаемый тип (для показа созданного преордера).
+// Прямая ссылка на карточку поставки в кабинете WB (номер преордера/поставки).
+const wbSupplyUrl = (preorderId: number, supplyId?: number | null) => {
+    const p = new URLSearchParams({ preorderId: String(preorderId), supplyId: supplyId ? String(supplyId) : '' });
+    return `https://seller.wildberries.ru/supplies-management/all-supplies/supply-detail?${p.toString()}`;
+};
+
+const PKG_OPTIONS: [PackageType, string][] = [
+    ['BOX', 'Короб'],
+    ['MONOPALLET', 'Монопаллета'],
+    ['SUPERSAFE', 'Суперсейф'],
+];
+
 interface Props {
     assemblyId: number;
     items: AssemblyRequestItem[];
+    defaultPackageType?: PackageType;
 }
 
-export default function WbSupplyPanel({ assemblyId, items }: Props) {
+export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }: Props) {
     const [state, setState] = useState<WbSupplyState | null>(null);
     const [session, setSession] = useState<WbPortalStatus | null>(null);
     const [loading, setLoading] = useState(true);
@@ -38,6 +54,9 @@ export default function WbSupplyPanel({ assemblyId, items }: Props) {
 
     // Session token input
     const [tokenInput, setTokenInput] = useState('');
+
+    // Тип упаковки для преордера — по умолчанию тип заявки (с экрана «Распределить»).
+    const [pkg, setPkg] = useState<PackageType>(defaultPackageType ?? 'BOX');
 
     // Pass form
     const [driverFirst, setDriverFirst] = useState('');
@@ -124,6 +143,23 @@ export default function WbSupplyPanel({ assemblyId, items }: Props) {
         setBoxes(items.map((it) => ({ boxcode: null, items: [{ barcode: it.barcode, quantity: it.quantity }] })));
     }, [items]);
 
+    // Скачать PDF со стикерами коробов (QR + Code128) — целиком на клиенте.
+    const downloadStickers = useCallback(async () => {
+        const codes = (state?.boxes ?? [])
+            .map((b) => b.boxcode)
+            .filter((c): c is string => !!c);
+        if (codes.length === 0) return;
+        setBusy('stickers');
+        setError('');
+        try {
+            await downloadBoxStickers(codes, `ШК_короба_${assemblyId}.pdf`);
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Не удалось сгенерировать ШК коробов');
+        } finally {
+            setBusy('');
+        }
+    }, [state, assemblyId]);
+
     if (loading) return <div className="glass-card">Загрузка поставки WB…</div>;
 
     const st = state;
@@ -150,7 +186,7 @@ export default function WbSupplyPanel({ assemblyId, items }: Props) {
                         : 'Доступ к кабинету WB не задан. Вставьте authorizev3 (из DevTools кабинета).'}
                     <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                         <input
-                            className="input"
+                            className="form-input"
                             style={{ flex: 1 }}
                             placeholder="authorizev3 …"
                             value={tokenInput}
@@ -183,35 +219,60 @@ export default function WbSupplyPanel({ assemblyId, items }: Props) {
 
             {/* ── Наполнение ── */}
             {tab === 'goods' && (
-                <div>
-                    {items.length === 0 ? (
-                        <div className="text-muted">В заявке нет товаров</div>
-                    ) : (
-                        <table style={{ width: '100%', marginBottom: 12 }}>
-                            <thead>
-                                <tr>
-                                    <th style={{ textAlign: 'left' }}>Баркод</th>
-                                    <th style={{ textAlign: 'right' }}>Кол-во</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {items.map((it) => (
-                                    <tr key={it.id}>
-                                        <td>{it.barcode}</td>
-                                        <td style={{ textAlign: 'right' }}>{formatNumber(it.quantity, 0)}</td>
+                <div style={{ display: 'grid', gap: 16 }}>
+                    <section>
+                        <div className="section-title">Состав заявки</div>
+                        {items.length === 0 ? (
+                            <div className="text-muted">В заявке нет товаров</div>
+                        ) : (
+                            <table className="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Баркод</th>
+                                        <th style={{ textAlign: 'right' }}>Кол-во</th>
                                     </tr>
+                                </thead>
+                                <tbody>
+                                    {items.map((it) => (
+                                        <tr key={it.id}>
+                                            <td>{it.barcode}</td>
+                                            <td style={{ textAlign: 'right' }}>{formatNumber(it.quantity, 0)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
+                    </section>
+                    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                        <div className="form-group" style={{ minWidth: 200 }}>
+                            <label className="form-label">Тип упаковки</label>
+                            <select
+                                className="form-input"
+                                value={pkg}
+                                disabled={busy === 'preorder' || !!st?.preorder_id}
+                                onChange={(e) => setPkg(e.target.value as PackageType)}
+                            >
+                                {PKG_OPTIONS.map(([value, label]) => (
+                                    <option key={value} value={value}>{label}</option>
                                 ))}
-                            </tbody>
-                        </table>
-                    )}
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            </select>
+                        </div>
                         <button
                             className="btn btn-primary btn-sm"
-                            disabled={!sessionActive || busy === 'preorder' || items.length === 0}
-                            onClick={() => run('preorder', () => api.wbSupplyCreatePreorder(assemblyId))}
+                            disabled={!sessionActive || busy === 'preorder' || items.length === 0 || !!st?.preorder_id}
+                            onClick={() => run('preorder', () => api.wbSupplyCreatePreorder(assemblyId, pkg))}
                         >
                             {busy === 'preorder' ? 'Создаю…' : 'Создать преордер в WB'}
                         </button>
+                        {st?.preorder_id && (
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                disabled={!sessionActive || busy === 'pushgoods'}
+                                onClick={() => run('pushgoods', () => api.wbSupplyPushGoods(assemblyId))}
+                            >
+                                {busy === 'pushgoods' ? 'Обновляю…' : 'Обновить наполнение в WB'}
+                            </button>
+                        )}
                         {st?.preorder_id && (
                             <button
                                 className="btn btn-secondary btn-sm"
@@ -224,8 +285,15 @@ export default function WbSupplyPanel({ assemblyId, items }: Props) {
                     </div>
                     {st?.preorder_id && !st.supply_id && (
                         <div className="text-muted" style={{ marginTop: 8, fontSize: 13 }}>
-                            Преордер {formatNumber(st.preorder_id, 0)} создан. Подтвердите дату в кабинете WB, затем
-                            нажмите «Синхронизировать бронь».
+                            <a
+                                href={wbSupplyUrl(st.preorder_id, st.supply_id)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{ color: 'var(--color-accent)' }}
+                            >
+                                Преордер {st.preorder_id}
+                            </a>{' '}
+                            создан. Подтвердите дату в кабинете WB, затем нажмите «Синхронизировать бронь».
                         </div>
                     )}
                 </div>
@@ -233,8 +301,8 @@ export default function WbSupplyPanel({ assemblyId, items }: Props) {
 
             {/* ── Упаковка ── */}
             {tab === 'boxes' && (
-                <div>
-                    <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                <div style={{ display: 'grid', gap: 16 }}>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         <button className="btn btn-secondary btn-sm" onClick={autoLayout}>
                             Авто-раскладка (баркод = короб)
                         </button>
@@ -245,84 +313,102 @@ export default function WbSupplyPanel({ assemblyId, items }: Props) {
                         >
                             {busy === 'saveboxes' ? '…' : 'Сохранить раскладку'}
                         </button>
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            disabled={busy === 'stickers' || !(st?.boxes ?? []).some((b) => b.boxcode)}
+                            title={
+                                (st?.boxes ?? []).some((b) => b.boxcode)
+                                    ? 'Скачать PDF со стикерами коробов (QR + ШК)'
+                                    : 'Сначала занесите короба в WB'
+                            }
+                            onClick={downloadStickers}
+                        >
+                            {busy === 'stickers' ? 'Готовлю…' : '📄 Скачать ШК коробов'}
+                        </button>
                     </div>
-                    {boxes.length === 0 ? (
-                        <div className="text-muted">Раскладка коробов не задана — нажмите «Авто-раскладка»</div>
-                    ) : (
-                        <table style={{ width: '100%', marginBottom: 12 }}>
-                            <thead>
-                                <tr>
-                                    <th style={{ textAlign: 'left' }}>Короб</th>
-                                    <th style={{ textAlign: 'left' }}>Содержимое</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {boxes.map((b, i) => (
-                                    <tr key={b.boxcode ?? i}>
-                                        <td>{b.boxcode ?? `№${i + 1} (новый)`}</td>
-                                        <td>
-                                            {b.items
-                                                .map((it) => `${it.barcode} × ${formatNumber(it.quantity, 0)}`)
-                                                .join(', ')}
-                                        </td>
+                    <section>
+                        <div className="section-title">Раскладка коробов</div>
+                        {boxes.length === 0 ? (
+                            <div className="text-muted">Раскладка коробов не задана — нажмите «Авто-раскладка»</div>
+                        ) : (
+                            <table className="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Короб</th>
+                                        <th>Содержимое</th>
                                     </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    )}
-                    <button
-                        className="btn btn-primary btn-sm"
-                        disabled={!sessionActive || busy === 'pushboxes' || !st?.supply_id || boxes.length === 0}
-                        onClick={() => run('pushboxes', () => api.wbSupplyPushBoxes(assemblyId))}
-                    >
-                        {busy === 'pushboxes' ? 'Заношу…' : 'Занести короба в WB'}
-                    </button>
-                    {!st?.supply_id && (
-                        <div className="text-muted" style={{ marginTop: 8, fontSize: 13 }}>
-                            Сначала забронируйте дату в кабинете WB и нажмите «Синхронизировать бронь».
-                        </div>
-                    )}
+                                </thead>
+                                <tbody>
+                                    {boxes.map((b, i) => (
+                                        <tr key={b.boxcode ?? i}>
+                                            <td>{b.boxcode ?? `№${i + 1} (новый)`}</td>
+                                            <td>
+                                                {b.items
+                                                    .map((it) => `${it.barcode} × ${formatNumber(it.quantity, 0)}`)
+                                                    .join(', ')}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
+                    </section>
+                    <div>
+                        <button
+                            className="btn btn-primary btn-sm"
+                            disabled={!sessionActive || busy === 'pushboxes' || !st?.supply_id || boxes.length === 0}
+                            onClick={() => run('pushboxes', () => api.wbSupplyPushBoxes(assemblyId))}
+                        >
+                            {busy === 'pushboxes' ? 'Заношу…' : 'Занести короба в WB'}
+                        </button>
+                        {!st?.supply_id && (
+                            <div className="text-muted" style={{ marginTop: 8, fontSize: 13 }}>
+                                Сначала забронируйте дату в кабинете WB и нажмите «Синхронизировать бронь».
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
 
             {/* ── Пропуск ── */}
             {tab === 'pass' && (
-                <div style={{ display: 'grid', gap: 12, maxWidth: 520 }}>
+                <div style={{ display: 'grid', gap: 16, maxWidth: 560 }}>
+                    <div className="section-title">Данные водителя и машины</div>
                     <datalist id="wb-drivers">
                         {drivers.map((d, i) => (
                             <option key={i} value={`${d.firstName} ${d.lastName}`} />
                         ))}
                     </datalist>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                        <label>
-                            Имя
-                            <input className="input" list="wb-drivers" value={driverFirst} onChange={(e) => setDriverFirst(e.target.value)} />
-                        </label>
-                        <label>
-                            Фамилия
-                            <input className="input" value={driverLast} onChange={(e) => setDriverLast(e.target.value)} />
-                        </label>
-                        <label>
-                            Телефон
-                            <input className="input" value={driverPhone} onChange={(e) => setDriverPhone(e.target.value)} />
-                        </label>
-                        <label>
-                            Кол-во паллет
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                        <div className="form-group">
+                            <label className="form-label">Имя</label>
+                            <input className="form-input" list="wb-drivers" value={driverFirst} onChange={(e) => setDriverFirst(e.target.value)} />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Фамилия</label>
+                            <input className="form-input" value={driverLast} onChange={(e) => setDriverLast(e.target.value)} />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Телефон</label>
+                            <input className="form-input" value={driverPhone} onChange={(e) => setDriverPhone(e.target.value)} />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Кол-во паллет</label>
                             <input
-                                className="input"
+                                className="form-input"
                                 type="number"
                                 value={pallets}
                                 onChange={(e) => setPallets(e.target.value === '' ? '' : Number(e.target.value))}
                             />
-                        </label>
-                        <label>
-                            Марка авто
-                            <input className="input" value={carModel} onChange={(e) => setCarModel(e.target.value)} />
-                        </label>
-                        <label>
-                            Госномер
-                            <input className="input" value={carNumber} onChange={(e) => setCarNumber(e.target.value)} />
-                        </label>
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Марка авто</label>
+                            <input className="form-input" value={carModel} onChange={(e) => setCarModel(e.target.value)} />
+                        </div>
+                        <div className="form-group">
+                            <label className="form-label">Госномер</label>
+                            <input className="form-input" value={carNumber} onChange={(e) => setCarNumber(e.target.value)} />
+                        </div>
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>
                         <button

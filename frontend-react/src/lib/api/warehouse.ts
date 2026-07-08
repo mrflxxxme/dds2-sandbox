@@ -894,8 +894,11 @@ export function addWarehouseMethods(api: ApiClient) {
         wbSupplyGetState(assemblyId: number) {
             return api.request<import('@/types/api').WbSupplyState>('GET', `/api/v1/warehouse/assembly/${assemblyId}/wb`);
         },
-        wbSupplyCreatePreorder(assemblyId: number) {
-            return api.request<import('@/types/api').WbSupplyState>('POST', `/api/v1/warehouse/assembly/${assemblyId}/wb/preorder`);
+        wbSupplyCreatePreorder(assemblyId: number, packageType?: import('@/types/api').PackageType) {
+            return api.request<import('@/types/api').WbSupplyState>('POST', `/api/v1/warehouse/assembly/${assemblyId}/wb/preorder`, { package_type: packageType ?? null });
+        },
+        wbSupplyPushGoods(assemblyId: number) {
+            return api.request<import('@/types/api').WbSupplyState>('POST', `/api/v1/warehouse/assembly/${assemblyId}/wb/goods/push`);
         },
         wbSupplySyncSupply(assemblyId: number) {
             return api.request<import('@/types/api').WbSupplyState>('POST', `/api/v1/warehouse/assembly/${assemblyId}/wb/sync-supply`);

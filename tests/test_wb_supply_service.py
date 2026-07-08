@@ -26,10 +26,14 @@ WH_NAME = "Волгоград"
 class FakeClient:
     """Мок реплея портала. По флагам поднимает ошибки сессии/портала."""
 
-    def __init__(self, *, expire=False, portal_error=False, supplies=None):
+    def __init__(
+        self, *, expire=False, portal_error=False, supplies=None, box_types=None, goods_error=False
+    ):
         self.expire = expire
         self.portal_error = portal_error
         self.supplies = supplies if supplies is not None else []
+        self.box_types = box_types if box_types is not None else [2]
+        self.goods_error = goods_error
         self.goods_sent = None
         self.bind_sent = None
         self.trn_saved = None
@@ -48,10 +52,25 @@ class FakeClient:
         self.goods_sent = barcodes
 
     async def validate_warehouse_goods(self, draft_id, warehouse_id):
-        return {"items": [{"availableBoxTypes": [2]}]}
+        return {"items": [{"availableBoxTypes": self.box_types}]}
 
     async def supply_create(self, draft_id, warehouse_id, box_type_id, **kw):
         return 52670743
+
+    async def edit_preorder_goods(self, preorder_id, barcodes):
+        if self.goods_error:
+            return [
+                {
+                    "barcode": barcodes[0]["barcode"],
+                    "quantity": barcodes[0]["quantity"],
+                    "errors": [{"field": "monopallet", "error": "мелкий товар"}],
+                    "hasError": True,
+                }
+            ]
+        return [
+            {"barcode": b["barcode"], "quantity": b["quantity"], "errors": [], "hasError": False}
+            for b in barcodes
+        ]
 
     async def list_supplies(self, status_ids=None):
         return self.supplies
@@ -153,6 +172,38 @@ async def test_create_preorder_happy(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_preorder_uses_assembly_package_type(db_session, monkeypatch):
+    # заявка помечена MONOPALLET, WB предлагает тип 5 → boxType 5
+    await db_session.execute(
+        text("UPDATE assembly_requests SET package_type = 'MONOPALLET' WHERE id = :id"),
+        {"id": ASSEMBLY_ID},
+    )
+    await db_session.commit()
+    db_session.expire_all()  # сбросить кэш ORM, чтобы сервис прочитал свежий package_type
+    await _patch_client(monkeypatch, FakeClient(box_types=[5]))
+    link = await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.box_type_id == 5
+
+
+@pytest.mark.asyncio
+async def test_create_preorder_explicit_package_override(db_session, monkeypatch):
+    # явный выбор SUPERSAFE в панели перекрывает тип заявки; WB предлагает 6 → boxType 6
+    await _patch_client(monkeypatch, FakeClient(box_types=[6]))
+    link = await wb_supply_service.create_preorder(
+        db_session, PROJECT_ID, ASSEMBLY_ID, package_type="SUPERSAFE"
+    )
+    assert link.box_type_id == 6
+
+
+@pytest.mark.asyncio
+async def test_create_preorder_rejects_unavailable_package(db_session, monkeypatch):
+    # заявка BOX (тип 2), а WB для этих товаров/склада предлагает только 5 → понятная ошибка
+    await _patch_client(monkeypatch, FakeClient(box_types=[5]))
+    with pytest.raises(WbSupplyError, match="не принимает упаковку"):
+        await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+
+@pytest.mark.asyncio
 async def test_create_preorder_no_goods(db_session, monkeypatch):
     # Убрать позиции → ошибка «нет товаров»
     await db_session.execute(
@@ -163,6 +214,30 @@ async def test_create_preorder_no_goods(db_session, monkeypatch):
     await _patch_client(monkeypatch, FakeClient())
     with pytest.raises(WbSupplyError, match="нет товаров"):
         await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+
+@pytest.mark.asyncio
+async def test_update_preorder_goods_happy(db_session, monkeypatch):
+    # Сначала создать преордер, затем дослать наполнение — без ошибок WB.
+    client = FakeClient()
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    link = await wb_supply_service.update_preorder_goods(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    assert link.sync_status != WbSupplySyncStatus.ERROR.value
+    assert link.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_update_preorder_goods_wb_rejects(db_session, monkeypatch):
+    # WB отклоняет товар (мелкий в монопаллету) → WbSupplyError с текстом «отклонил».
+    await _patch_client(monkeypatch, FakeClient())
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    await _patch_client(monkeypatch, FakeClient(goods_error=True))
+    with pytest.raises(WbSupplyError, match="отклонил"):
+        await wb_supply_service.update_preorder_goods(db_session, PROJECT_ID, ASSEMBLY_ID)
 
 
 @pytest.mark.asyncio
