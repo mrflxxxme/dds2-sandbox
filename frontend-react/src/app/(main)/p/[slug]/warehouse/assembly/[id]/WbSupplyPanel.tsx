@@ -38,6 +38,20 @@ const PKG_OPTIONS: [PackageType, string][] = [
     ['SUPERSAFE', 'Суперсейф'],
 ];
 
+// Русские госномера: кабинет WB хранит латиницей (B331YT69), логист вводит
+// кириллицей (В331УТ69) — это ОДИН номер. Плюс `vehicle_info` заявки часто несёт
+// ещё и ФИО водителя. Поэтому сравниваем нормализованные номера (гомоглифы
+// кириллица→латиница, только буквы/цифры), а сам номер вынимаем из строки заявки.
+const PLATE_HOMOGLYPH: Record<string, string> = {
+    А: 'A', В: 'B', Е: 'E', К: 'K', М: 'M', Н: 'H',
+    О: 'O', Р: 'P', С: 'C', Т: 'T', У: 'Y', Х: 'X',
+};
+const PLATE_RE = /[АВЕКМНОРСТУХABEKMHOPCTYX]\d{3}[АВЕКМНОРСТУХABEKMHOPCTYX]{2}\d{2,3}/i;
+const normalizePlate = (s: string): string =>
+    s.toUpperCase().split('').map((c) => PLATE_HOMOGLYPH[c] ?? c).join('').replace(/[^A-Z0-9]/g, '');
+const extractPlate = (s: string): string => s.match(PLATE_RE)?.[0] ?? s.trim();
+const onlyDigits = (s: string): string => s.replace(/\D/g, '');
+
 interface Props {
     assemblyId: number;
     items: AssemblyRequestItem[];
@@ -182,7 +196,8 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
 
     // Префилл полей пропуска из назначенной машины заявки (только непустые значения).
     const fillFromVehicle = useCallback(() => {
-        if (state?.assembly_vehicle_info) setCarNumber(state.assembly_vehicle_info);
+        // Из строки машины заявки вынимаем сам госномер (в ней часто ещё ФИО).
+        if (state?.assembly_vehicle_info) setCarNumber(extractPlate(state.assembly_vehicle_info));
         if (state?.assembly_vehicle_brand) setCarModel(state.assembly_vehicle_brand);
         if (state?.assembly_driver_phone) setDriverPhone(state.assembly_driver_phone);
     }, [state]);
@@ -196,10 +211,17 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
     const vehPhone = st?.assembly_driver_phone ?? '';
     const hasVehicleData = !!(vehInfo || vehBrand || vehPhone);
     // Расхождение поля пропуска с машиной заявки: оба непустые и различаются.
-    const mismatch = (field: string, veh: string) => !!field.trim() && !!veh.trim() && field.trim() !== veh.trim();
-    const carNumberMismatch = mismatch(carNumber, vehInfo);
+    const mismatch = (field: string, veh: string) =>
+        !!field.trim() && !!veh.trim() && field.trim().toLowerCase() !== veh.trim().toLowerCase();
+    // Госномер: сравниваем нормализованные (кириллица→латиница), номер вынимаем из
+    // строки заявки — иначе «B331YT69» ≠ «В331УТ69 Иванов» давало ложное расхождение.
+    const carNumberMismatch =
+        !!carNumber.trim() && !!vehInfo.trim()
+        && normalizePlate(carNumber) !== normalizePlate(extractPlate(vehInfo));
     const carModelMismatch = mismatch(carModel, vehBrand);
-    const driverPhoneMismatch = mismatch(driverPhone, vehPhone);
+    // Телефон — по цифрам (игнорируем +/пробелы/скобки).
+    const driverPhoneMismatch =
+        !!driverPhone.trim() && !!vehPhone.trim() && onlyDigits(driverPhone) !== onlyDigits(vehPhone);
     const sessionActive = session?.status === 'ACTIVE';
     const statusCfg = st ? STATUS_LABEL[st.sync_status] : STATUS_LABEL.NONE;
 
