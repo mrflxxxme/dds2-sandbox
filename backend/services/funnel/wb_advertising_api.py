@@ -487,3 +487,44 @@ async def deposit_campaign_budget(api_key: str, campaign_id: int, sum_rub: int, 
     except Exception as e:
         logger.error(f"WB adv deposit failed for {campaign_id}: {e}")
         return {"ok": False, "status": "error", "total": None, "error": str(e)[:300]}
+
+
+# ─── Управление состоянием кампании (пауза / запуск) ─────────────────────────
+
+# action → путь WB. start: запускает кампанию в статусе 4 (готова) или 11 (пауза)
+# → 9 (активна); pause: 9 → 11. Требует WRITE-доступа скоупа «Продвижение».
+_CAMPAIGN_STATE_PATHS = {"start": "start", "pause": "pause"}
+
+
+async def set_campaign_state(api_key: str, campaign_id: int, action: str) -> dict:
+    """GET /adv/v1/{start|pause}?id={campaign_id} — запуск или пауза кампании.
+
+    action="start" — запуск/возобновление (статус 4/11 → 9);
+    action="pause" — пауза (9 → 11).
+    Возвращает {"ok": bool, "error": str | None}. 401/403 — обычно read-only
+    токен (нужен write-доступ «Продвижение»); 429 — один повтор.
+    """
+    if action not in _CAMPAIGN_STATE_PATHS:
+        return {"ok": False, "error": f"unknown action: {action}"}
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = f"https://advert-api.wildberries.ru/adv/v1/{_CAMPAIGN_STATE_PATHS[action]}?id={campaign_id}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 429:
+                ra = resp.headers.get("Retry-After", "5")
+                await asyncio.sleep(int(ra) if ra.isdigit() else 5)  # WB иногда шлёт HTTP-date
+                resp = await client.get(url, headers=headers)
+    except httpx.HTTPError as e:
+        logger.warning(f"WB adv {action} failed for {campaign_id}: {e}")
+        return {"ok": False, "error": str(e)[:300]}
+
+    if resp.status_code == 200:
+        logger.info(f"WB adv {action} ok: campaign {campaign_id}")
+        return {"ok": True, "error": None}
+    if resp.status_code in (401, 403):
+        logger.warning(f"WB adv {action} forbidden {resp.status_code} for {campaign_id} — read-only токен?")
+        return {"ok": False, "error": "Нет доступа: токен «Продвижение» должен быть с правом записи (не read-only)."}
+    err = resp.text[:300]
+    logger.warning(f"WB adv {action} rejected {resp.status_code} for {campaign_id}: {err}")
+    return {"ok": False, "error": f"HTTP {resp.status_code}: {err}"}

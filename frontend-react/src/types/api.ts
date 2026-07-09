@@ -3301,6 +3301,19 @@ export interface AdsAutopayLogEntry {
   reason: string | null;  // текст ошибки WB, если была
 }
 
+/** Результат смены статуса кампании (запуск/пауза) в WB. */
+export interface AdsCampaignStateResult {
+  ok: boolean;
+  status: number | null;  // новый статус (9 активна / 11 пауза), null при ошибке
+  error: string | null;
+}
+
+/** Ответ сохранения автопополнения: настройки + результат авто-активации (если включили). */
+export interface AdsAutopaySaveResult {
+  settings: Record<string, AdsAutopaySetting>;
+  activation: AdsCampaignStateResult | null;
+}
+
 export interface AdsHistoryPoint {
   date: string;
   price_spp: number;
