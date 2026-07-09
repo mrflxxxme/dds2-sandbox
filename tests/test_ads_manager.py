@@ -114,7 +114,8 @@ async def test_budget_gaps_uses_last_zero_event():
     spend_row = MagicMock(campaign_id=101, spend=Decimal("800"))
     # событие в 09:00 UTC = 12:00 МСК
     ev = _event(101, "0", datetime(2026, 7, 3, 9, 0, 0))
-    db = _db_seq(_scalars_result([camp]), _rows_result([spend_row]), _scalars_result([ev]))
+    nm_meta = MagicMock(nm_id=111, brand="НУ-НУ", subject="Ковры")
+    db = _db_seq(_scalars_result([camp]), _rows_result([spend_row]), _scalars_result([ev]), _rows_result([nm_meta]))
 
     rows = await get_budget_gaps(db, PROJECT_ID)
 
@@ -123,6 +124,8 @@ async def test_budget_gaps_uses_last_zero_event():
     assert rows[0]["spend_today"] == 800.0
     assert rows[0]["ran_out_at"] is not None
     assert "needed_till_midnight" in rows[0]
+    assert rows[0]["brands"] == ["НУ-НУ"]
+    assert rows[0]["subjects"] == ["Ковры"]
 
 
 @pytest.mark.asyncio
@@ -136,7 +139,8 @@ async def test_budget_gaps_topup_after_zero_excludes():
         _event(102, "0", datetime(2026, 7, 3, 6, 0, 0)),
         _event(102, "1000", datetime(2026, 7, 3, 7, 0, 0)),
     ]
-    db = _db_seq(_scalars_result([camp]), _rows_result([spend_row]), _scalars_result(events))
+    nm_meta = MagicMock(nm_id=111, brand="НУ-НУ", subject="Ковры")
+    db = _db_seq(_scalars_result([camp]), _rows_result([spend_row]), _scalars_result(events), _rows_result([nm_meta]))
 
     rows = await get_budget_gaps(db, PROJECT_ID)
 
@@ -151,7 +155,8 @@ async def test_budget_gaps_no_spend_today_excluded():
     from backend.services.funnel.ads_manager import get_budget_gaps
 
     camp = _campaign(103)
-    db = _db_seq(_scalars_result([camp]), _rows_result([]), _scalars_result([]))
+    nm_meta = MagicMock(nm_id=111, brand="НУ-НУ", subject="Ковры")
+    db = _db_seq(_scalars_result([camp]), _rows_result([]), _scalars_result([]), _rows_result([nm_meta]))
 
     rows = await get_budget_gaps(db, PROJECT_ID)
     assert rows == []

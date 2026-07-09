@@ -472,7 +472,8 @@ export interface FunnelSkuRow {
   wb_stock_cost?: number;
   own_stock_qty?: number;
   own_stock_cost?: number;
-  stock_days_left?: number;
+  stock_days_left?: number;  // запас по общему остатку (WB + наши склады)
+  wb_stock_days_left?: number;  // запас ТОЛЬКО по остатку на WB
   stock_out_date?: string | null;
   stock_trend_pct?: number;
 }
@@ -3277,6 +3278,8 @@ export interface AdsBudgetGap {
   campaign_type: string | null;
   nm_ids: number[];
   nm_count: number;
+  brands: string[];
+  subjects: string[];
   spend_today: number;
   ran_out_at: string | null;  // null = кончился до первого синка (час неизвестен)
   burn_rate: number;

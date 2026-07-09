@@ -277,7 +277,10 @@ export default function AdsManagerPage() {
     const campArrow = (field: keyof AdsManagerCampaign) => campSort?.field === field ? (campSort.dir === 'desc' ? ' ↓' : ' ↑') : '';
     // bid_mode начнёт приходить после доработки синка — до этого фильтр ставки задизейблен
     const bidModeAvailable = campaigns.some(c => !!c.bid_mode);
-    const visibleGaps = gaps.filter(g => matchCampaign(g.name, g.campaign_id, g.nm_ids));
+    const visibleGaps = gaps
+        .filter(g => matchCampaign(g.name, g.campaign_id, g.nm_ids))
+        .filter(g => !brand || g.brands.includes(brand))
+        .filter(g => !subject || g.subjects.includes(subject));
 
     // Высокий ДРР: фильтр + сортировка
     const highDrr = drrRows
@@ -292,12 +295,13 @@ export default function AdsManagerPage() {
         setDrrSort(prev => ({ field, dir: prev.field === field && prev.dir === 'desc' ? 'asc' : 'desc' }));
     const sortArrow = (field: keyof AdTabProduct) => drrSort.field === field ? (drrSort.dir === 'desc' ? ' ↓' : ' ↑') : '';
 
-    // Не работает реклама: сток > N дней (включая «нет продаж» = 999+), реклама за период = 0
+    // Не работает реклама: запас ПО WB-остатку > N дней (нет продаж = 999+), реклама за период = 0.
+    // Считаем по остатку на WB (то, что реально лежит на площадке), а не по общему.
     const noAds = noAdsRows.filter(r =>
-        (Number(r.adv_sum) || 0) === 0 && r.stock_days_left != null && Number(r.stock_days_left) > turnoverDays
-        && ((Number(r.wb_stock_qty) || 0) + (Number(r.own_stock_qty) || 0)) > 0
+        (Number(r.adv_sum) || 0) === 0 && r.wb_stock_days_left != null && Number(r.wb_stock_days_left) > turnoverDays
+        && (Number(r.wb_stock_qty) || 0) > 0
         && matchProduct(r.vendor_code, r.nm_id),
-    ).sort((a, b) => ((Number(b.wb_stock_cost) || 0) + (Number(b.own_stock_cost) || 0)) - ((Number(a.wb_stock_cost) || 0) + (Number(a.own_stock_cost) || 0)));
+    ).sort((a, b) => (Number(b.wb_stock_cost) || 0) - (Number(a.wb_stock_cost) || 0));
 
     // Нет органики: доля рекл. кликов (adv_clicks / переходы) ≥ порога, с ощутимым трафиком
     const adShare = (r: FunnelSkuRow) => {
@@ -327,7 +331,8 @@ export default function AdsManagerPage() {
         'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Бренд': r.brand || '', 'Категория': r.subject || '',
         'Остаток WB, шт': num(r.wb_stock_qty), 'Наши склады, шт': num(r.own_stock_qty),
         'Себест. остатков ₽': num(r.wb_stock_cost) + num(r.own_stock_cost),
-        'Хватит, дн': num(r.stock_days_left), 'Заказы за период ₽': num(r.orders_sum_rub),
+        'Хватит на WB, дн': num(r.wb_stock_days_left), 'Хватит общий, дн': num(r.stock_days_left),
+        'Заказы за период ₽': num(r.orders_sum_rub),
     })), `ads-no-ads_${dateFrom}_${dateTo}`);
     const exportNoOrganic = () => exportToExcel(noOrganic.map(r => ({
         'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Бренд': r.brand || '', 'Категория': r.subject || '',
@@ -401,7 +406,7 @@ export default function AdsManagerPage() {
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
                     <input placeholder="🔍 Артикул..." value={search} onChange={e => setSearch(e.target.value)}
                         style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', color: 'var(--color-text)', fontSize: 13, width: 170 }} />
-                    {(tab === 'campaigns' || tab === 'high-drr' || tab === 'no-ads' || tab === 'no-organic') && (
+                    {(tab === 'campaigns' || tab === 'high-drr' || tab === 'no-ads' || tab === 'no-organic' || tab === 'budget-gap') && (
                         <>
                             <select value={brand} onChange={e => setBrand(e.target.value)}
                                 style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)' }}>
@@ -636,7 +641,7 @@ export default function AdsManagerPage() {
                                             <th style={thStyle}>Остаток WB, шт</th>
                                             <th style={thStyle}>Наши склады, шт</th>
                                             <th style={thStyle}>Себест. остатков ₽</th>
-                                            <th style={thStyle}>Хватит, дн</th>
+                                            <th style={thStyle} title="Запас в днях по остатку на WB (без наших складов). Внизу — общий, с учётом наших складов.">Хватит на WB, дн</th>
                                             <th style={thStyle}>Заказы за период ₽</th>
                                             <th style={thStyle}>Расход рекл. ₽</th>
                                         </tr></thead>
@@ -653,7 +658,12 @@ export default function AdsManagerPage() {
                                                     <td style={tdStyle}>{fmt(r.wb_stock_qty)}</td>
                                                     <td style={tdStyle}>{fmt(r.own_stock_qty)}</td>
                                                     <td style={{ ...tdStyle, fontWeight: 600 }}>{fmt((Number(r.wb_stock_cost) || 0) + (Number(r.own_stock_cost) || 0))}</td>
-                                                    <td style={{ ...tdStyle, fontWeight: 600, color: '#ef4444' }}>{r.stock_days_left != null && Number(r.stock_days_left) >= 999 ? '∞' : fmt(r.stock_days_left)}</td>
+                                                    <td style={{ ...tdStyle, fontWeight: 600, color: '#ef4444' }}>
+                                                        {r.wb_stock_days_left != null && Number(r.wb_stock_days_left) >= 999 ? '∞' : fmt(r.wb_stock_days_left)}
+                                                        <div style={{ fontSize: 10, fontWeight: 400, color: '#9ca3af' }} title="Запас с учётом наших складов">
+                                                            общий: {r.stock_days_left != null && Number(r.stock_days_left) >= 999 ? '∞' : fmt(r.stock_days_left)}
+                                                        </div>
+                                                    </td>
                                                     <td style={tdStyle}>{fmt(r.orders_sum_rub)}</td>
                                                     <td style={{ ...tdStyle, color: '#9ca3af' }}>0</td>
                                                 </tr>

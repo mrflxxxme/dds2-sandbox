@@ -392,6 +392,23 @@ async def get_budget_gaps(db: AsyncSession, project_id: int) -> list[dict]:
         elif new_v is not None and new_v > 0:
             ran_out_at.pop(ev.campaign_id, None)  # после пополнения не считается остановленной
 
+    # Карта nm_id → бренд/категория (для фильтров бренд/категория на фронте)
+    all_nm_ids = {nm for c in campaigns for nm in (c.nm_ids or [])}
+    nm_meta: dict[int, tuple] = {}
+    if all_nm_ids:
+        meta_rows = (
+            await db.execute(
+                select(
+                    WbFunnelDaily.nm_id,
+                    func.max(WbFunnelDaily.brand).label("brand"),
+                    func.max(WbFunnelDaily.subject).label("subject"),
+                )
+                .where(WbFunnelDaily.project_id == project_id, WbFunnelDaily.nm_id.in_(all_nm_ids))
+                .group_by(WbFunnelDaily.nm_id)
+            )
+        ).all()
+        nm_meta = {r.nm_id: (r.brand, r.subject) for r in meta_rows}
+
     now_hour = now_msk.hour + now_msk.minute / 60
     result = []
     for c in campaigns:
@@ -414,6 +431,8 @@ async def get_budget_gaps(db: AsyncSession, project_id: int) -> list[dict]:
                 "campaign_type": c.campaign_type,
                 "nm_ids": c.nm_ids or [],
                 "nm_count": len(c.nm_ids or []),
+                "brands": sorted({nm_meta[nm][0] for nm in (c.nm_ids or []) if nm in nm_meta and nm_meta[nm][0]}),
+                "subjects": sorted({nm_meta[nm][1] for nm in (c.nm_ids or []) if nm in nm_meta and nm_meta[nm][1]}),
                 "spend_today": round(spend_today, 2),
                 "ran_out_at": ran_out_iso,  # None = кончился до первого синка (час неизвестен)
                 **gap,
