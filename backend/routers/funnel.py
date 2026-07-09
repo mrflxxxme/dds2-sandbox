@@ -754,10 +754,25 @@ async def get_campaigns_autopay(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Настройки автопополнения по кампаниям (пока только настройки — исполнение в DRY_RUN этапом 2)."""
+    """Настройки автопополнения по кампаниям (исполняет scheduler-джоба ads_autopay)."""
     from backend.services.funnel.ads_manager import get_autopay_settings
 
     return await get_autopay_settings(db, project.id)
+
+
+@router.get("/campaigns/autopay/log")
+async def get_campaigns_autopay_log(
+    campaign_id: int | None = None,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Журнал автопополнений (новые первыми); campaign_id — фильтр по кампании."""
+    from backend.services.funnel.ads_manager import get_autopay_log
+
+    log = await get_autopay_log(db, project.id)
+    if campaign_id is not None:
+        log = [e for e in log if int(e.get("campaign_id") or 0) == campaign_id]
+    return log
 
 
 @router.post("/campaigns/autopay", dependencies=[Depends(rate_limit_write)])

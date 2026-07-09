@@ -114,7 +114,8 @@ async def test_budget_gaps_uses_last_zero_event():
     spend_row = MagicMock(campaign_id=101, spend=Decimal("800"))
     # событие в 09:00 UTC = 12:00 МСК
     ev = _event(101, "0", datetime(2026, 7, 3, 9, 0, 0))
-    db = _db_seq(_scalars_result([camp]), _rows_result([spend_row]), _scalars_result([ev]))
+    nm_meta = MagicMock(nm_id=111, brand="НУ-НУ", subject="Ковры")
+    db = _db_seq(_scalars_result([camp]), _rows_result([spend_row]), _scalars_result([ev]), _rows_result([nm_meta]))
 
     rows = await get_budget_gaps(db, PROJECT_ID)
 
@@ -123,6 +124,8 @@ async def test_budget_gaps_uses_last_zero_event():
     assert rows[0]["spend_today"] == 800.0
     assert rows[0]["ran_out_at"] is not None
     assert "needed_till_midnight" in rows[0]
+    assert rows[0]["brands"] == ["НУ-НУ"]
+    assert rows[0]["subjects"] == ["Ковры"]
 
 
 @pytest.mark.asyncio
@@ -136,7 +139,8 @@ async def test_budget_gaps_topup_after_zero_excludes():
         _event(102, "0", datetime(2026, 7, 3, 6, 0, 0)),
         _event(102, "1000", datetime(2026, 7, 3, 7, 0, 0)),
     ]
-    db = _db_seq(_scalars_result([camp]), _rows_result([spend_row]), _scalars_result(events))
+    nm_meta = MagicMock(nm_id=111, brand="НУ-НУ", subject="Ковры")
+    db = _db_seq(_scalars_result([camp]), _rows_result([spend_row]), _scalars_result(events), _rows_result([nm_meta]))
 
     rows = await get_budget_gaps(db, PROJECT_ID)
 
@@ -151,7 +155,8 @@ async def test_budget_gaps_no_spend_today_excluded():
     from backend.services.funnel.ads_manager import get_budget_gaps
 
     camp = _campaign(103)
-    db = _db_seq(_scalars_result([camp]), _rows_result([]), _scalars_result([]))
+    nm_meta = MagicMock(nm_id=111, brand="НУ-НУ", subject="Ковры")
+    db = _db_seq(_scalars_result([camp]), _rows_result([]), _scalars_result([]), _rows_result([nm_meta]))
 
     rows = await get_budget_gaps(db, PROJECT_ID)
     assert rows == []
@@ -197,3 +202,99 @@ def test_sanitize_autopay_clamps():
     assert s == {"enabled": True, "amount": 0.0, "hour": 23, "threshold_pct": 100}
     d = _sanitize_autopay({})
     assert d == {"enabled": False, "amount": 0.0, "hour": 9, "threshold_pct": 50}
+
+
+# ─── compute_autopay_decision ────────────────────────────────────────────────
+
+
+def _decision(**overrides):
+    from backend.services.funnel.ads_manager import compute_autopay_decision
+
+    kwargs = {
+        "setting": {"enabled": True, "amount": 3000.0, "hour": 9, "threshold_pct": 50},
+        "budget": 500.0,
+        "spend_day": 2000.0,
+        "now_hour_msk": 9,
+        "already_topped_today": False,
+        "pending_unknown": False,
+    }
+    kwargs.update(overrides)
+    return compute_autopay_decision(**kwargs)
+
+
+def test_autopay_deposit_tops_up_to_x():
+    """Бюджет 500, X=3000 → пополнить 2500 (кратно 50)."""
+    d = _decision()
+    assert d == {"action": "deposit", "sum": 2500, "reason": "ok"}
+
+
+def test_autopay_min_1000_and_round50():
+    """Недобор 300 → минимум 1000; недобор 1230 → округление вверх до 1250."""
+    d = _decision(budget=2700.0)
+    assert d["action"] == "deposit" and d["sum"] == 1000
+    d = _decision(budget=1770.0)
+    assert d["action"] == "deposit" and d["sum"] == 1250
+
+
+def test_autopay_skips():
+    """Скипы: выключено, не тот час, уже пополняли, неизвестный исход, бюджет полон."""
+    assert _decision(setting={"enabled": False, "amount": 3000, "hour": 9, "threshold_pct": 0})["reason"] == "disabled"
+    assert _decision(now_hour_msk=10)["reason"] == "not_time"
+    assert _decision(already_topped_today=True)["reason"] == "already_today"
+    assert _decision(pending_unknown=True)["reason"] == "pending_unknown"
+    assert _decision(budget=3000.0)["reason"] == "budget_full"
+    assert _decision(budget=5000.0)["reason"] == "budget_full"
+
+
+def test_autopay_threshold():
+    """Порог 50% от X=3000 → 1500: открут 1499 — скип, 1500 — пополняем. Порог 0 — всегда."""
+    assert _decision(spend_day=1499.0)["reason"] == "below_threshold"
+    assert _decision(spend_day=1500.0)["action"] == "deposit"
+    d = _decision(spend_day=0.0, setting={"enabled": True, "amount": 3000, "hour": 9, "threshold_pct": 0})
+    assert d["action"] == "deposit"
+
+
+def test_autopay_zero_amount_disabled():
+    d = _decision(setting={"enabled": True, "amount": 0, "hour": 9, "threshold_pct": 0})
+    assert d["reason"] == "disabled"
+
+
+# ─── Журнал автопополнений ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_autopay_log_append_and_cap(monkeypatch):
+    """append кладёт запись в начало и режет журнал до AUTOPAY_LOG_CAP."""
+    import json as _json
+
+    from backend.services.funnel import ads_manager as am
+
+    store: dict[str, str] = {}
+
+    async def fake_get(db, project_id, key):
+        return store.get(key)
+
+    async def fake_set(db, project_id, key, value):
+        store[key] = value
+
+    monkeypatch.setattr("backend.services.settings_service.get_setting", fake_get)
+    monkeypatch.setattr("backend.services.settings_service.set_setting", fake_set)
+
+    db = AsyncMock()
+    for i in range(am.AUTOPAY_LOG_CAP + 5):
+        await am.append_autopay_log(db, PROJECT_ID, {"campaign_id": i, "ts": f"2026-07-08T0{i % 10}:00:00+00:00", "status": "ok"})
+
+    log = _json.loads(store[am.AUTOPAY_LOG_KEY])
+    assert len(log) == am.AUTOPAY_LOG_CAP
+    assert log[0]["campaign_id"] == am.AUTOPAY_LOG_CAP + 4  # новые — первыми
+
+
+@pytest.mark.asyncio
+async def test_autopay_log_bad_json_returns_empty(monkeypatch):
+    from backend.services.funnel import ads_manager as am
+
+    async def fake_get(db, project_id, key):
+        return "{broken json"
+
+    monkeypatch.setattr("backend.services.settings_service.get_setting", fake_get)
+    assert await am.get_autopay_log(AsyncMock(), PROJECT_ID) == []

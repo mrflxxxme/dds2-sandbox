@@ -33,6 +33,7 @@ _ROW_FIELDS = (
     "own_stock_qty",
     "own_stock_cost",
     "stock_days_left",
+    "wb_stock_days_left",  # хватит дней ТОЛЬКО по остатку на WB (для «Не работает реклама»)
     "stock_out_date",
     "stock_trend_pct",
 )
@@ -221,6 +222,9 @@ def _apply_totals(
     row["own_stock_cost"] = round(own_cost, 2)
     days_left = compute_days_left(wb_qty + own_qty, avg_daily)
     row["stock_days_left"] = days_left
+    # Отдельно — запас только по WB-остатку (без наших складов): «Не работает реклама»
+    # определяет залежавшийся товар по тому, что реально лежит на WB.
+    row["wb_stock_days_left"] = compute_days_left(wb_qty, avg_daily)
     row["stock_out_date"] = (today + timedelta(days=days_left)).isoformat() if 0 < days_left < 999 else None
     row["stock_trend_pct"] = compute_trend_pct(avg_daily, avg_prev)
 

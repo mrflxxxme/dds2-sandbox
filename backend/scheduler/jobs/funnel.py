@@ -468,3 +468,43 @@ async def sync_funnel_hourly():
             raise
         except Exception as e:
             logger.error(f"Hourly funnel sync failed for project {pid}: {e}")
+
+
+# ─── Ads autopay (реальные деньги) ───────────────────────────────────────────
+
+_autopay_lock = asyncio.Lock()
+
+
+async def ads_autopay_tick():
+    """Автопополнение бюджетов кампаний по настройкам ads_autopay.
+
+    Каждые 15 мин; реально пополняет только кампании, у которых текущий час МСК
+    совпал с настроенным и сегодня ещё не пополняли (идемпотентность — по
+    журналу ads_autopay_log). РЕАЛЬНОЕ СПИСАНИЕ ДЕНЕГ через WB API.
+    """
+    if _autopay_lock.locked():
+        return
+    async with _autopay_lock:
+        from backend.services.funnel.ads_manager import run_autopay_tick
+        from backend.services.funnel.wb_api_client import get_wb_key
+
+        try:
+            project_ids = await get_sync_project_ids()
+            for pid in project_ids:
+                async with AsyncSessionLocal() as db:
+                    api_key = (
+                        await get_wb_key(db, pid, "wb_advert")
+                        or await get_wb_key(db, pid, "wb_analytics")
+                        or await get_wb_key(db, pid, "wb")
+                    )
+                    if not api_key:
+                        continue
+                    res = await run_autopay_tick(db, pid, api_key)
+                    if res.get("checked"):
+                        logger.info(
+                            f"💰 Ads autopay: project {pid} — checked {res['checked']}, deposits {res['deposits']}"
+                        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Ads autopay error: {e}\n{traceback.format_exc()}")

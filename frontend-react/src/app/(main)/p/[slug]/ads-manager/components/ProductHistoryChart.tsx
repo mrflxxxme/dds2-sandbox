@@ -4,18 +4,18 @@ import { api } from '@/lib/api';
 import type { FunnelDayRow } from '@/types/api';
 
 /**
- * История артикула/кампании за период: 5 линий (цена с СПП, переходы, бюджет
- * рекламы, ДРР, продажи) плавными кривыми с заливкой и наведением — вертикальный
- * курсор и тултип со значениями дня. Каждая линия нормируется в свой диапазон.
- * Единый график: рендерится ОДИН сверху, по клику на строку меняется nm/кампания.
+ * История артикула/кампании за период — ОДИН график, 5 линий (цена с СПП,
+ * переходы, бюджет, ДРР, продажи). Каждая линия нормируется в свой [min…max]
+ * (растянута на всю высоту — не липнет к верху), ломаные линии + точки, без
+ * заливок (чтобы не мутить). Цена с СПП — тусклая (почти не меняется).
  */
 
 export const HISTORY_LINES = [
-    { key: 'price_spp', label: 'Цена с СПП ₽', color: '#8b5cf6' },
-    { key: 'open_card', label: 'Переходы', color: '#f59e0b' },
-    { key: 'adv_sum', label: 'Бюджет ₽', color: '#ef4444' },
-    { key: 'drr', label: 'ДРР %', color: '#10b981' },
-    { key: 'orders_sum_rub', label: 'Продажи ₽', color: '#3b82f6' },
+    { key: 'price_spp', label: 'Цена с СПП ₽', color: '#8b5cf6', dim: true },
+    { key: 'open_card', label: 'Переходы', color: '#f59e0b', dim: false },
+    { key: 'adv_sum', label: 'Бюджет ₽', color: '#ef4444', dim: false },
+    { key: 'drr', label: 'ДРР %', color: '#10b981', dim: false },
+    { key: 'orders_sum_rub', label: 'Продажи ₽', color: '#3b82f6', dim: false },
 ] as const;
 
 type LineKey = typeof HISTORY_LINES[number]['key'];
@@ -41,26 +41,13 @@ export function toHistoryPoints(rows: FunnelDayRow[]): HistoryPoint[] {
 
 const fmtVal = (n: number) => n.toLocaleString('ru-RU', { maximumFractionDigits: 2 });
 
-// Широкий viewBox → при width:100% график остаётся невысоким (не «огромным»).
-const W = 1200, H = 260, PAD_L = 12, PAD_R = 12, PAD_T = 14, PAD_B = 48;
+// Один компактный график. Широкий viewBox → при width:100% высота небольшая.
+const W = 1000, H = 250, PAD_L = 14, PAD_R = 14, PAD_T = 14, PAD_B = 40;
 
-/** Плавная кривая (Catmull-Rom → кубические Безье) по массиву точек. */
-function smoothPath(pts: { x: number; y: number }[], tension = 0.16): string {
+/** Ломаная линия (прямые сегменты) по массиву точек. */
+function linePath(pts: { x: number; y: number }[]): string {
     if (pts.length === 0) return '';
-    if (pts.length === 1) return `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
-    let d = `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
-    for (let i = 0; i < pts.length - 1; i++) {
-        const p0 = pts[i - 1] || pts[i];
-        const p1 = pts[i];
-        const p2 = pts[i + 1];
-        const p3 = pts[i + 2] || p2;
-        const c1x = p1.x + (p2.x - p0.x) * tension;
-        const c1y = p1.y + (p2.y - p0.y) * tension;
-        const c2x = p2.x - (p3.x - p1.x) * tension;
-        const c2y = p2.y - (p3.y - p1.y) * tension;
-        d += ` C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`;
-    }
-    return d;
+    return pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
 }
 
 /** График артикула: детализация воронки по nm_id за выбранный период. */
@@ -72,7 +59,6 @@ export default function ProductHistoryChart({ nmId, dateFrom, dateTo, title }: {
         let cancelled = false;
         setPoints(null); setError('');
         const to = dateTo || new Date().toISOString().slice(0, 10);
-        // По умолчанию — 30 дней назад, если период не задан
         const from = dateFrom || new Date(new Date(to + 'T00:00:00').getTime() - 29 * 86400_000).toISOString().slice(0, 10);
         api.getFunnelData({ date_from: from, date_to: to, vendor_code: String(nmId) })
             .then(res => { if (!cancelled) setPoints(toHistoryPoints((res.data || []) as FunnelDayRow[])); })
@@ -97,7 +83,7 @@ export function CampaignHistoryChart({ campaignId, dateFrom, dateTo, title }: { 
         return () => { cancelled = true; };
     }, [campaignId, dateFrom, dateTo]);
 
-    return <HistoryChartBody points={points} error={error} title={title} note="Бюджет — расход именно этой кампании; переходы/продажи/цена — по её товарам (все источники трафика)." />;
+    return <HistoryChartBody points={points} error={error} title={title} note="Бюджет — расход этой кампании; переходы/продажи/цена — по её товарам." />;
 }
 
 function HistoryChartBody({ points, error, note, title }: { points: HistoryPoint[] | null; error: string; note?: string; title?: string }) {
@@ -113,23 +99,24 @@ function HistoryChartBody({ points, error, note, title }: { points: HistoryPoint
         const xStep = points.length > 1 ? innerW / (points.length - 1) : innerW;
         const xs = points.map((_, i) => PAD_L + i * xStep);
         const coords: Record<string, { x: number; y: number }[]> = {};
-        const line: Record<string, string> = {};
-        const area: Record<string, string> = {};
+        const path: Record<string, string> = {};
         const ranges: Record<string, { min: number; max: number }> = {};
         for (const l of HISTORY_LINES) {
             const vals = points.map(p => p[l.key]);
             const dataMax = Math.max(...vals);
             const dataMin = Math.min(...vals);
-            const max = Math.max(dataMax, 1e-9);
-            const min = Math.min(dataMin, 0);
-            const range = max - min || 1;
             ranges[l.key] = { min: dataMin, max: dataMax };
-            const cs = points.map((p, i) => ({ x: xs[i], y: PAD_T + innerH - ((p[l.key] - min) / range) * innerH }));
+            const flat = dataMax === dataMin;
+            const range = flat ? 1 : dataMax - dataMin;
+            // Автомасштаб в свой [min…max] → линия использует всю высоту (нет пустоты снизу)
+            const cs = points.map((p, i) => ({
+                x: xs[i],
+                y: flat ? PAD_T + innerH / 2 : baseY - ((p[l.key] - dataMin) / range) * innerH,
+            }));
             coords[l.key] = cs;
-            line[l.key] = smoothPath(cs);
-            area[l.key] = `${smoothPath(cs)} L${cs[cs.length - 1].x.toFixed(1)},${baseY.toFixed(1)} L${cs[0].x.toFixed(1)},${baseY.toFixed(1)} Z`;
+            path[l.key] = linePath(cs);
         }
-        return { xs, xStep, coords, line, area, ranges };
+        return { xs, xStep, coords, path, ranges };
     }, [points]);
 
     if (error) return <div style={{ padding: 16, fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {error}</div>;
@@ -151,65 +138,72 @@ function HistoryChartBody({ points, error, note, title }: { points: HistoryPoint
 
     const hp = hover != null ? points[hover] : null;
     const tooltipLeftPct = hover != null ? (chart.xs[hover] / W) * 100 : 0;
-    // Каждый n-й день подписываем, чтобы подписи не сливались на длинном периоде
-    const labelEvery = Math.ceil(points.length / 16);
+    const labelEvery = Math.ceil(points.length / 14);
+    const showDots = points.length <= 45;  // на очень длинном периоде точки на каждом дне — каша
+    const innerH = H - PAD_T - PAD_B;
 
     return (
         <div style={{ padding: '10px 14px 12px' }}>
-            {title && <div style={{ fontSize: 14, fontWeight: 600, color: '#111827', marginBottom: 6 }}>{title}</div>}
-            {/* Легенда: у каждой линии своя шкала → показываем её диапазон [мин…макс] */}
-            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 4, alignItems: 'baseline' }}>
+            {title && <div style={{ fontSize: 14, fontWeight: 600, color: '#111827', marginBottom: 4 }}>{title}</div>}
+            {/* Легенда: цвет + название + диапазон [мин…макс], клик — скрыть линию */}
+            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 6, alignItems: 'baseline' }}>
                 {HISTORY_LINES.map(l => {
                     const r = chart.ranges[l.key];
+                    const off = hidden.has(l.key);
                     return (
                         <button key={l.key} onClick={() => toggleLine(l.key)}
-                            style={{ display: 'flex', alignItems: 'baseline', gap: 5, border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, color: hidden.has(l.key) ? '#9ca3af' : '#374151', opacity: hidden.has(l.key) ? 0.5 : 1, padding: 0 }}>
-                            <span style={{ width: 14, height: 3, background: l.color, borderRadius: 2, display: 'inline-block', transform: 'translateY(-2px)' }} />
+                            style={{ display: 'flex', alignItems: 'baseline', gap: 5, border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, color: off ? '#c4c4c4' : (l.dim ? '#9ca3af' : '#374151'), opacity: off ? 0.5 : 1, padding: 0 }}>
+                            <span style={{ width: 12, height: 3, background: l.color, borderRadius: 2, display: 'inline-block', transform: 'translateY(-2px)', opacity: l.dim ? 0.5 : 1 }} />
                             {l.label}
-                            <span style={{ fontSize: 11, color: '#9ca3af' }}>{fmtVal(r.min)}…{fmtVal(r.max)}</span>
+                            <span style={{ fontSize: 11, color: '#b0b0b0' }}>{fmtVal(r.min)}…{fmtVal(r.max)}</span>
                         </button>
                     );
                 })}
-                {note && <span style={{ fontSize: 11, color: '#9ca3af', marginLeft: 'auto' }}>{note}</span>}
-            </div>
-            <div style={{ fontSize: 10, color: '#b0b0b0', marginBottom: 4 }}>
-                У каждой линии свой масштаб (диапазон рядом с названием) — сравнивайте форму и совпадение пиков, точные значения дня — при наведении.
+                {note && <span style={{ fontSize: 11, color: '#b0b0b0', marginLeft: 'auto' }}>{note}</span>}
             </div>
 
             <div style={{ position: 'relative' }}>
                 <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet"
-                    style={{ width: '100%', maxHeight: 320, height: 'auto', display: 'block', background: '#fafafa', borderRadius: 8 }}
+                    style={{ width: '100%', maxHeight: 300, height: 'auto', display: 'block' }}
                     onMouseMove={handleMove} onMouseLeave={() => setHover(null)}>
-                    <defs>
-                        {HISTORY_LINES.map(l => (
-                            <linearGradient key={l.key} id={`ads-grad-${l.key}`} x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="0%" stopColor={l.color} stopOpacity={0.16} />
-                                <stop offset="100%" stopColor={l.color} stopOpacity={0} />
-                            </linearGradient>
-                        ))}
-                    </defs>
-                    {/* Сетка */}
+                    {/* Лёгкая сетка (визуальный ориентир, без чисел — шкалы разные) */}
                     {[0, 1, 2, 3, 4].map(i => (
-                        <line key={i} x1={PAD_L} x2={W - PAD_R} y1={PAD_T + ((H - PAD_T - PAD_B) * i) / 4} y2={PAD_T + ((H - PAD_T - PAD_B) * i) / 4} stroke="#e5e7eb" strokeWidth={1} />
+                        <line key={i} x1={PAD_L} x2={W - PAD_R} y1={PAD_T + (innerH * i) / 4} y2={PAD_T + (innerH * i) / 4} stroke="#eef0f2" strokeWidth={1} />
                     ))}
-                    {/* Заливка под кривыми */}
-                    {HISTORY_LINES.filter(l => !hidden.has(l.key)).map(l => (
-                        <path key={l.key} d={chart.area[l.key]} fill={`url(#ads-grad-${l.key})`} stroke="none" />
+                    {/* Вертикальные направляющие по подписанным датам */}
+                    {points.map((p, i) => (
+                        (i % labelEvery === 0 || i === points.length - 1) && (
+                            <line key={`v${i}`} x1={chart.xs[i]} x2={chart.xs[i]} y1={PAD_T} y2={PAD_T + innerH} stroke="#f4f5f7" strokeWidth={1} />
+                        )
                     ))}
-                    {/* Плавные линии */}
-                    {HISTORY_LINES.filter(l => !hidden.has(l.key)).map(l => (
-                        <path key={l.key} d={chart.line[l.key]} fill="none" stroke={l.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+                    {/* Нижняя ось */}
+                    <line x1={PAD_L} x2={W - PAD_R} y1={PAD_T + innerH} y2={PAD_T + innerH} stroke="#dde1e6" strokeWidth={1} />
+
+                    {/* Линии (тусклые — тоньше и полупрозрачные, поверх — яркие) */}
+                    {HISTORY_LINES.filter(l => !hidden.has(l.key)).sort((a, b) => Number(b.dim) - Number(a.dim)).map(l => (
+                        <path key={l.key} d={chart.path[l.key]} fill="none" stroke={l.color}
+                            strokeWidth={l.dim ? 1.3 : 2} strokeOpacity={l.dim ? 0.4 : 1}
+                            strokeDasharray={l.dim ? '4 3' : undefined} strokeLinejoin="round" strokeLinecap="round" />
                     ))}
-                    {/* Курсор + точки на линиях */}
+
+                    {/* Точки на значениях (кроме тусклой; на длинном периоде — только при наведении) */}
+                    {showDots && HISTORY_LINES.filter(l => !hidden.has(l.key) && !l.dim).map(l => (
+                        chart.coords[l.key].map((c, i) => (
+                            <circle key={`${l.key}-${i}`} cx={c.x} cy={c.y} r={2.2} fill={l.color} />
+                        ))
+                    ))}
+
+                    {/* Курсор + точки дня */}
                     {hover != null && (
                         <g>
-                            <line x1={chart.xs[hover]} x2={chart.xs[hover]} y1={PAD_T} y2={H - PAD_B} stroke="#9ca3af" strokeWidth={1} strokeDasharray="4 3" />
+                            <line x1={chart.xs[hover]} x2={chart.xs[hover]} y1={PAD_T} y2={PAD_T + innerH} stroke="#9ca3af" strokeWidth={1} strokeDasharray="4 3" />
                             {HISTORY_LINES.filter(l => !hidden.has(l.key)).map(l => (
-                                <circle key={l.key} cx={chart.coords[l.key][hover].x} cy={chart.coords[l.key][hover].y} r={3.5} fill="#fff" stroke={l.color} strokeWidth={2} />
+                                <circle key={l.key} cx={chart.coords[l.key][hover].x} cy={chart.coords[l.key][hover].y} r={3.2} fill="#fff" stroke={l.color} strokeWidth={2} opacity={l.dim ? 0.6 : 1} />
                             ))}
                         </g>
                     )}
-                    {/* Подпись даты (DD.MM, повёрнуто чтобы влезло) */}
+
+                    {/* Ось дат внизу (DD.MM, повёрнуто) */}
                     {points.map((p, i) => (
                         (i % labelEvery === 0 || i === points.length - 1 || hover === i) && (
                             <text key={p.date} x={chart.xs[i]} y={H - PAD_B + 14}
@@ -221,11 +215,11 @@ function HistoryChartBody({ points, error, note, title }: { points: HistoryPoint
                     ))}
                 </svg>
 
-                {/* Тултип */}
+                {/* Тултип — значения дня по всем метрикам */}
                 {hp && (
                     <div style={{
-                        position: 'absolute', top: 8,
-                        left: `min(max(${tooltipLeftPct}%, 90px), calc(100% - 110px))`,
+                        position: 'absolute', top: 4,
+                        left: `min(max(${tooltipLeftPct}%, 90px), calc(100% - 120px))`,
                         transform: 'translateX(-50%)',
                         background: 'rgba(17,24,39,0.92)', color: '#fff', borderRadius: 8,
                         padding: '8px 10px', fontSize: 12, pointerEvents: 'none', whiteSpace: 'nowrap', zIndex: 5,

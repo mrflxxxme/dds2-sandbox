@@ -29,6 +29,7 @@ from backend.scheduler.jobs.fbo_supplies import (
 from backend.scheduler.jobs.fulfillment_sync import sync_all_fulfillment_warehouses
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
+    ads_autopay_tick,
     fast_backfill_tick,
     sync_ad_campaigns_all_projects,
     sync_all_projects_funnel,
@@ -135,6 +136,17 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=120,
+    )
+
+    # Ads autopay: every 15 min — реальное пополнение бюджетов по настройкам
+    _scheduler.add_job(
+        ads_autopay_tick,
+        trigger=CronTrigger(minute="1,16,31,46", timezone=MSK),
+        id="ads_autopay",
+        name="WB Ads Autopay (every 15min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=300,
     )
 
     # Funnel hourly sync: every hour at :45 — last 2 days

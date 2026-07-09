@@ -375,3 +375,81 @@ async def fetch_campaign_budgets_batch(
 
     logger.info(f"WB ad budgets: {len(result)}/{len(campaign_ids)} fetched")
     return result
+
+
+# ─── Финансы: баланс и пополнение бюджета (реальные деньги!) ─────────────────
+
+# Источники пополнения WB (параметр type в /adv/v1/budget/deposit)
+DEPOSIT_SOURCE_ACCOUNT = 0  # счёт кабинета Продвижения (пополняет продавец)
+DEPOSIT_SOURCE_BALANCE = 1  # баланс взаиморасчёта (удержание из будущих продаж)
+
+DEPOSIT_SOURCE_LABELS = {DEPOSIT_SOURCE_ACCOUNT: "счёт", DEPOSIT_SOURCE_BALANCE: "баланс"}
+
+
+async def fetch_adv_balance(api_key: str) -> dict | None:
+    """GET /adv/v1/balance — счёт/баланс/бонусы кабинета Продвижения.
+
+    Ответ WB: {"balance": ..., "net": ..., "bonus": ..., "currency": "RUB"}.
+    None — если запрос не удался (не роняем вызывающего).
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://advert-api.wildberries.ru/adv/v1/balance", headers=headers)
+            if resp.status_code == 429:
+                await asyncio.sleep(int(resp.headers.get("Retry-After", "5")))
+                resp = await client.get("https://advert-api.wildberries.ru/adv/v1/balance", headers=headers)
+            if resp.status_code != 200:
+                logger.warning(f"WB adv balance error {resp.status_code}: {resp.text[:200]}")
+                return None
+            data = resp.json()
+            return data if isinstance(data, dict) else None
+    except Exception as e:
+        logger.warning(f"WB adv balance failed: {e}")
+        return None
+
+
+async def deposit_campaign_budget(api_key: str, campaign_id: int, sum_rub: int, source_type: int) -> dict:
+    """POST /adv/v1/budget/deposit?id={campaign_id} — пополнение бюджета кампании.
+
+    РЕАЛЬНОЕ СПИСАНИЕ ДЕНЕГ. Политика ретраев консервативная:
+    - 429 — один повтор (списания не было);
+    - 4xx — не ретраим, возвращаем ошибку (списания не было);
+    - timeout/5xx — НЕ ретраим (неизвестно, прошло ли списание) → status "unknown",
+      вызывающий обязан сверить бюджет перед новой попыткой.
+
+    Возвращает {"ok": bool, "status": "ok"|"error"|"unknown",
+                "total": новый бюджет | None, "error": текст | None}.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = f"https://advert-api.wildberries.ru/adv/v1/budget/deposit?id={campaign_id}"
+    payload = {"sum": int(sum_rub), "type": int(source_type), "return": True}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code == 429:
+                await asyncio.sleep(int(resp.headers.get("Retry-After", "5")))
+                resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code == 200:
+                total = None
+                try:
+                    body = resp.json()
+                    raw_total = body.get("total") if isinstance(body, dict) else None
+                    total = float(raw_total) if raw_total is not None else None
+                except ValueError:
+                    pass
+                logger.info(f"WB adv deposit ok: campaign {campaign_id} +{sum_rub}₽ (type={source_type}), total={total}")
+                return {"ok": True, "status": "ok", "total": total, "error": None}
+            if 400 <= resp.status_code < 500:
+                err = resp.text[:300]
+                logger.warning(f"WB adv deposit rejected {resp.status_code} for {campaign_id}: {err}")
+                return {"ok": False, "status": "error", "total": None, "error": f"HTTP {resp.status_code}: {err}"}
+            # 5xx — исход неизвестен
+            logger.error(f"WB adv deposit UNKNOWN outcome {resp.status_code} for {campaign_id}: {resp.text[:200]}")
+            return {"ok": False, "status": "unknown", "total": None, "error": f"HTTP {resp.status_code}"}
+    except httpx.TimeoutException:
+        logger.error(f"WB adv deposit TIMEOUT for {campaign_id} — исход неизвестен, не ретраим")
+        return {"ok": False, "status": "unknown", "total": None, "error": "timeout"}
+    except Exception as e:
+        logger.error(f"WB adv deposit failed for {campaign_id}: {e}")
+        return {"ok": False, "status": "error", "total": None, "error": str(e)[:300]}
