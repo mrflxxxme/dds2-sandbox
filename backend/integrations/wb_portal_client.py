@@ -371,18 +371,39 @@ class WbPortalClient:
             raise WbPortalError(f"supply/create не вернул ids: {res}")
         return int(ids[0]["Id"])
 
-    async def list_supplies(self, status_ids: list[int] | None = None) -> list[dict]:
+    async def list_supplies(
+        self, status_ids: list[int] | None = None, limit: int = 50, offset: int = 0
+    ) -> list[dict]:
         """
         Список поставок кабинета — для поиска supply_id после ручной брони даты
-        (матч по преордеру).
+        (матч по преордеру) и bulk-синка статусов (F1). limit/offset — пагинация
+        (bulk-синк тянет страницами до исчерпания).
         """
         res = await self._call(
-            {"statusIDs": status_ids or [], "limit": 50, "offset": 0},
+            {"statusIDs": status_ids or [], "limit": limit, "offset": offset},
             SUPPLY_BASE,
             "/ns/sm-supply/supply-manager/api/v1/supply/listSupplies",
         )
         supplies = res.get("supplies", [])
         return supplies if isinstance(supplies, list) else []
+
+    async def list_statuses(self) -> list[dict]:
+        """
+        Справочник статусов поставок кабинета: [{"id"/"statusID": int,
+        "name"/"statusName": str}]. Нужен для резолва числового statusID из
+        listSupplies в человекочитаемое имя («В сборке» / «В пути» …).
+        """
+        res = await self._call(
+            {},
+            SUPPLY_BASE,
+            "/ns/sm-supply/supply-manager/api/v1/supply/listStatuses",
+        )
+        # WB отдаёт список под разными ключами в зависимости от версии портала.
+        for key in ("statuses", "items", "data"):
+            val = res.get(key)
+            if isinstance(val, list):
+                return val
+        return []
 
     # ─── шаг 6: короба ────────────────────────────────────────────────────
 

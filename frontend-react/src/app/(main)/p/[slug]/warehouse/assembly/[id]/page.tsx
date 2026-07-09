@@ -764,6 +764,25 @@ export default function AssemblyDetailPage() {
                 </button>
             </div>
 
+            {/* Расхождение: локальное число паллет ≠ паллеты в WB-пропуске (только в «Готово»). */}
+            {assembly.status === 'READY'
+                && wbState?.pass_pallets != null
+                && wbState.pass_pallets !== assembly.pallets_count && (
+                <div
+                    className="glass-card"
+                    style={{
+                        padding: '12px 16px', marginBottom: 16,
+                        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                        borderLeft: '3px solid var(--color-warning)',
+                    }}
+                >
+                    <span style={{ fontSize: 18 }}>⚠️</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)' }}>
+                        Паллеты не совпадают с WB: локально {formatNumber(assembly.pallets_count, 0)}, в WB-пропуске {formatNumber(wbState.pass_pallets, 0)}
+                    </span>
+                </div>
+            )}
+
             {tab === 'pallets' && (
                 <PalletLayoutTab assembly={assembly} ppbByBarcode={ppbByBarcode} slug={slug} onSaved={load} />
             )}

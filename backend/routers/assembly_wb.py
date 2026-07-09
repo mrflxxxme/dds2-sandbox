@@ -15,6 +15,7 @@ from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.assembly_wb import (
     WbBoxesUpdate,
+    WbBulkSyncResult,
     WbDriver,
     WbPassUpdate,
     WbPortalSessionSet,
@@ -64,6 +65,21 @@ async def _call(coro) -> WbSupplyState:
     except WbSupplyError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return WbSupplyState.model_validate(link)
+
+
+@router.post("/wb/sync-states", response_model=WbBulkSyncResult)
+async def sync_wb_states(
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+    _: None = Depends(rate_limit_write),
+) -> WbBulkSyncResult:
+    """Bulk-синк живого WB-состояния всех поставок проекта (кнопка «Обновить» +
+    фоновая джоба). Объявлен ДО `/{assembly_id}/wb/...` ради ясности маршрутизации."""
+    try:
+        res = await wb_supply_service.sync_all_states(db, project.id)
+    except WbSupplyError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return WbBulkSyncResult(**res)
 
 
 @router.get("/{assembly_id}/wb", response_model=WbSupplyState)

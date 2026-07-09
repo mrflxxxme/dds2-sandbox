@@ -27,13 +27,23 @@ class FakeClient:
     """Мок реплея портала. По флагам поднимает ошибки сессии/портала."""
 
     def __init__(
-        self, *, expire=False, portal_error=False, supplies=None, box_types=None, goods_error=False
+        self,
+        *,
+        expire=False,
+        portal_error=False,
+        supplies=None,
+        box_types=None,
+        goods_error=False,
+        statuses=None,
+        list_expire=False,
     ):
         self.expire = expire
         self.portal_error = portal_error
         self.supplies = supplies if supplies is not None else []
         self.box_types = box_types if box_types is not None else [2]
         self.goods_error = goods_error
+        self.statuses = statuses if statuses is not None else []
+        self.list_expire = list_expire  # WbSessionExpired на list_statuses (bulk-синк)
         self.goods_sent = None
         self.bind_sent = None
         self.trn_saved = None
@@ -72,8 +82,14 @@ class FakeClient:
             for b in barcodes
         ]
 
-    async def list_supplies(self, status_ids=None):
-        return self.supplies
+    async def list_supplies(self, status_ids=None, limit=50, offset=0):
+        # Одна страница: всё на offset 0, дальше пусто (терминатор пагинации).
+        return self.supplies if offset == 0 else []
+
+    async def list_statuses(self):
+        if self.list_expire:
+            raise WbSessionExpired("expired")
+        return self.statuses
 
     async def create_box_barcodes(self, supply_id, count):
         return [f"WB_{i}" for i in range(count)]
@@ -320,3 +336,122 @@ async def test_push_boxes_requires_supply(db_session, monkeypatch):
     )
     with pytest.raises(WbSupplyError, match="забронируйте"):
         await wb_supply_service.push_boxes(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+
+# ─── bulk-синк WB-состояний (sync_all_states) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sync_all_states_empty_no_wb_call(db_session, monkeypatch):
+    # Нет заявок с preorder/supply → в кабинет не ходим, {0,0,0}.
+    called = {"list": False}
+
+    class Guard(FakeClient):
+        async def list_supplies(self, status_ids=None, limit=50, offset=0):
+            called["list"] = True
+            return []
+
+    await _patch_client(monkeypatch, Guard())
+    res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
+    assert res == {"checked": 0, "updated": 0, "supplies_seen": 0}
+    assert called["list"] is False
+
+
+@pytest.mark.asyncio
+async def test_sync_all_states_match_by_supply_id(db_session, monkeypatch):
+    # Связь с supply_id матчится по supplyId, статус резолвится по справочнику.
+    client = FakeClient(
+        supplies=[{"supplyId": 40699158, "preorders": [52670743], "statusID": 3}],
+        statuses=[{"id": 3, "name": "В сборке"}],
+    )
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
+    assert res["checked"] == 1
+    assert res["updated"] == 1
+    assert res["supplies_seen"] == 1
+
+    link = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.wb_supply_state == "В сборке"
+    assert link.wb_supply_state_id == 3
+    assert link.wb_state_synced_at is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_all_states_match_by_preorder_id(db_session, monkeypatch):
+    # Только преордер (дата ещё не забронирована) → матч по preorder_id.
+    client = FakeClient(
+        supplies=[{"supplyId": 40699158, "preorders": [52670743], "statusName": "Черновик"}],
+    )
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
+    assert res["checked"] == 1
+    assert res["updated"] == 1
+
+    link = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.wb_supply_state == "Черновик"
+
+
+@pytest.mark.asyncio
+async def test_sync_all_states_no_change_updates_synced_at(db_session, monkeypatch):
+    # Второй прогон с тем же статусом → updated=0, но synced_at обновлён.
+    client = FakeClient(
+        supplies=[{"supplyId": 40699158, "preorders": [52670743], "statusID": 3}],
+        statuses=[{"id": 3, "name": "В сборке"}],
+    )
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
+    await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
+
+    first = (await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)).wb_state_synced_at
+
+    res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
+    assert res["updated"] == 0
+    assert res["checked"] == 1
+
+    second = (await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)).wb_state_synced_at
+    assert second is not None and second >= first
+
+
+@pytest.mark.asyncio
+async def test_sync_all_states_session_expired(db_session, monkeypatch):
+    # WbSessionExpired на bulk-синке → WbSupplyError + пометка сессии EXPIRED.
+    client = FakeClient(list_expire=True)
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    called = {}
+
+    async def fake_mark(db, project_id):
+        called["marked"] = project_id
+
+    monkeypatch.setattr(integrations_service, "mark_wb_portal_expired", fake_mark)
+
+    with pytest.raises(WbSupplyError, match="истекла"):
+        await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
+    assert called.get("marked") == PROJECT_ID
+
+
+@pytest.mark.asyncio
+async def test_get_state_mirrors_assembly_vehicle(db_session, monkeypatch):
+    # get_state прокидывает зеркало машины/паллет заявки транзиентными атрибутами.
+    await db_session.execute(
+        text(
+            "UPDATE assembly_requests SET vehicle_info = :vi, vehicle_brand = :vb, "
+            "driver_phone = :dp WHERE id = :id"
+        ),
+        {"vi": "В815УН37", "vb": "Газель", "dp": "79001112233", "id": ASSEMBLY_ID},
+    )
+    await db_session.commit()
+    db_session.expire_all()
+
+    link = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.assembly_vehicle_info == "В815УН37"
+    assert link.assembly_vehicle_brand == "Газель"
+    assert link.assembly_driver_phone == "79001112233"
+    assert link.assembly_pallets_count == 2

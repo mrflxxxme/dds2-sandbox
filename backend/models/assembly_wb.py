@@ -86,6 +86,14 @@ class AssemblyWbSupply(Base, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Живое состояние поставки в кабинете WB (bulk-синк через supply/listSupplies):
+    # человекочитаемое имя статуса («В сборке» / «Готово к отгрузке» / «В пути» …)
+    # + числовой statusID портала. Отдельная метка времени, чтобы не путать с
+    # операционным last_synced_at (тот двигают ручные шаги реплея).
+    wb_supply_state: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    wb_supply_state_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    wb_state_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Раскладка коробов: [{"boxcode": str|null, "items": [{"barcode": str, "quantity": int}]}]
     # boxcode = null, пока короб не создан в WB (createBoxBarcodes), затем заполняется.
     boxes: Mapped[list[dict[str, Any]]] = mapped_column(

@@ -1820,6 +1820,9 @@ export interface WbSupplyState {
   barcode_id: number | null;
   last_error: string | null;
   last_synced_at: string | null;
+  wb_supply_state: string | null;
+  wb_supply_state_id: number | null;
+  wb_state_synced_at: string | null;
   boxes: WbBox[];
   pass_driver_first: string | null;
   pass_driver_last: string | null;
@@ -1827,6 +1830,30 @@ export interface WbSupplyState {
   pass_car_model: string | null;
   pass_car_number: string | null;
   pass_pallets: number | null;
+  // Зеркало назначенной машины заявки (read-only) — для префилла пропуска и
+  // подсветки расхождений «машина заявки ↔ WB-пропуск» (F3).
+  assembly_vehicle_info: string | null;
+  assembly_vehicle_brand: string | null;
+  assembly_driver_phone: string | null;
+  // Локальное число паллет заявки — для баннера «паллеты ≠ WB» (F2).
+  assembly_pallets_count: number | null;
+}
+
+// Компактная WB-сводка в строке списка заявок (F1/F2).
+export interface WbSupplyStateBrief {
+  sync_status: WbSupplySyncStatus;
+  wb_supply_state: string | null;
+  supply_id: number | null;
+  preorder_id: number | null;
+  pass_pallets: number | null;
+  wb_state_synced_at: string | null;
+}
+
+// Итог bulk-синка WB-состояний заявок проекта (F1).
+export interface WbBulkSyncResult {
+  checked: number;
+  updated: number;
+  supplies_seen: number;
 }
 
 export interface WbBoxesUpdate {
@@ -1904,6 +1931,8 @@ export interface AssemblyRequest {
   carrier_inn?: string | null;
   carrier_name?: string | null;
   package_type?: PackageType;
+  /** WB-сводка поставки (F1/F2): статус в кабинете + паллеты пропуска. null — не заведена */
+  wb_supply?: WbSupplyStateBrief | null;
   items: AssemblyRequestItem[];
   created_at: string;
   updated_at: string;

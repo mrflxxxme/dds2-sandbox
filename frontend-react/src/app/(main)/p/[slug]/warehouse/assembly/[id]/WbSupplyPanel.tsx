@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import { downloadBoxStickers } from '@/lib/wbBoxStickers';
+import { downloadBoxStickers, downloadSupplyStickers } from '@/lib/wbBoxStickers';
 import type {
     AssemblyRequestItem,
     PackageType,
@@ -160,9 +160,46 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
         }
     }, [state, assemblyId]);
 
+    // Скачать PDF со ШК поставки и пропуска (QR + Code128) — целиком на клиенте.
+    // Штрихкод пропуска WB имеет префикс WB-GI- перед его id (barcode_id).
+    const downloadSupply = useCallback(async () => {
+        const passBarcode = state?.barcode_id != null ? `WB-GI-${state.barcode_id}` : null;
+        if (state?.supply_id == null && !passBarcode) return;
+        setBusy('supply-stickers');
+        setError('');
+        try {
+            await downloadSupplyStickers({
+                supplyId: state?.supply_id ?? null,
+                passBarcode,
+                fileName: `wb-supply-${assemblyId}.pdf`,
+            });
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Не удалось сгенерировать ШК поставки');
+        } finally {
+            setBusy('');
+        }
+    }, [state, assemblyId]);
+
+    // Префилл полей пропуска из назначенной машины заявки (только непустые значения).
+    const fillFromVehicle = useCallback(() => {
+        if (state?.assembly_vehicle_info) setCarNumber(state.assembly_vehicle_info);
+        if (state?.assembly_vehicle_brand) setCarModel(state.assembly_vehicle_brand);
+        if (state?.assembly_driver_phone) setDriverPhone(state.assembly_driver_phone);
+    }, [state]);
+
     if (loading) return <div className="glass-card">Загрузка поставки WB…</div>;
 
     const st = state;
+    // Значения назначенной машины заявки — для префилла и подсветки расхождений пропуска.
+    const vehInfo = st?.assembly_vehicle_info ?? '';
+    const vehBrand = st?.assembly_vehicle_brand ?? '';
+    const vehPhone = st?.assembly_driver_phone ?? '';
+    const hasVehicleData = !!(vehInfo || vehBrand || vehPhone);
+    // Расхождение поля пропуска с машиной заявки: оба непустые и различаются.
+    const mismatch = (field: string, veh: string) => !!field.trim() && !!veh.trim() && field.trim() !== veh.trim();
+    const carNumberMismatch = mismatch(carNumber, vehInfo);
+    const carModelMismatch = mismatch(carModel, vehBrand);
+    const driverPhoneMismatch = mismatch(driverPhone, vehPhone);
     const sessionActive = session?.status === 'ACTIVE';
     const statusCfg = st ? STATUS_LABEL[st.sync_status] : STATUS_LABEL.NONE;
 
@@ -325,6 +362,18 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                         >
                             {busy === 'stickers' ? 'Готовлю…' : '📄 Скачать ШК коробов'}
                         </button>
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            disabled={busy === 'supply-stickers' || (st?.supply_id == null && st?.barcode_id == null)}
+                            title={
+                                st?.supply_id != null || st?.barcode_id != null
+                                    ? 'Скачать PDF со ШК поставки и пропуска (QR + Code128)'
+                                    : 'Сначала забронируйте дату / занесите пропуск в WB'
+                            }
+                            onClick={downloadSupply}
+                        >
+                            {busy === 'supply-stickers' ? 'Готовлю…' : '📄 Скачать ШК поставки'}
+                        </button>
                     </div>
                     <section>
                         <div className="section-title">Раскладка коробов</div>
@@ -373,7 +422,19 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
             {/* ── Пропуск ── */}
             {tab === 'pass' && (
                 <div style={{ display: 'grid', gap: 16, maxWidth: 560 }}>
-                    <div className="section-title">Данные водителя и машины</div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                        <div className="section-title" style={{ margin: 0 }}>Данные водителя и машины</div>
+                        {hasVehicleData && (
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                type="button"
+                                title="Заполнить госномер, марку и телефон из назначенной машины заявки"
+                                onClick={fillFromVehicle}
+                            >
+                                Подставить из машины заявки
+                            </button>
+                        )}
+                    </div>
                     <datalist id="wb-drivers">
                         {drivers.map((d, i) => (
                             <option key={i} value={`${d.firstName} ${d.lastName}`} />
@@ -389,8 +450,18 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                             <input className="form-input" value={driverLast} onChange={(e) => setDriverLast(e.target.value)} />
                         </div>
                         <div className="form-group">
-                            <label className="form-label">Телефон</label>
-                            <input className="form-input" value={driverPhone} onChange={(e) => setDriverPhone(e.target.value)} />
+                            <label className="form-label">
+                                Телефон
+                                {driverPhoneMismatch && (
+                                    <span title={`В машине заявки: ${vehPhone}`} style={{ marginLeft: 6, color: 'var(--color-warning)', cursor: 'help' }}>⚠</span>
+                                )}
+                            </label>
+                            <input
+                                className="form-input"
+                                value={driverPhone}
+                                onChange={(e) => setDriverPhone(e.target.value)}
+                                style={driverPhoneMismatch ? { borderColor: 'var(--color-warning)' } : undefined}
+                            />
                         </div>
                         <div className="form-group">
                             <label className="form-label">Кол-во паллет</label>
@@ -402,12 +473,32 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                             />
                         </div>
                         <div className="form-group">
-                            <label className="form-label">Марка авто</label>
-                            <input className="form-input" value={carModel} onChange={(e) => setCarModel(e.target.value)} />
+                            <label className="form-label">
+                                Марка авто
+                                {carModelMismatch && (
+                                    <span title={`В машине заявки: ${vehBrand}`} style={{ marginLeft: 6, color: 'var(--color-warning)', cursor: 'help' }}>⚠</span>
+                                )}
+                            </label>
+                            <input
+                                className="form-input"
+                                value={carModel}
+                                onChange={(e) => setCarModel(e.target.value)}
+                                style={carModelMismatch ? { borderColor: 'var(--color-warning)' } : undefined}
+                            />
                         </div>
                         <div className="form-group">
-                            <label className="form-label">Госномер</label>
-                            <input className="form-input" value={carNumber} onChange={(e) => setCarNumber(e.target.value)} />
+                            <label className="form-label">
+                                Госномер
+                                {carNumberMismatch && (
+                                    <span title={`В машине заявки: ${vehInfo}`} style={{ marginLeft: 6, color: 'var(--color-warning)', cursor: 'help' }}>⚠</span>
+                                )}
+                            </label>
+                            <input
+                                className="form-input"
+                                value={carNumber}
+                                onChange={(e) => setCarNumber(e.target.value)}
+                                style={carNumberMismatch ? { borderColor: 'var(--color-warning)' } : undefined}
+                            />
                         </div>
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>

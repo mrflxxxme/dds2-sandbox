@@ -87,3 +87,53 @@ export async function downloadBoxStickers(codes: string[], fileName: string): Pr
 
     doc.save(fileName);
 }
+
+/**
+ * Собирает PDF (A4, портрет) с ШК всей поставки: штрихкод/QR поставки (WB-{supplyId})
+ * и штрихкод/QR пропуска (passBarcode). Одна страница, до двух блоков.
+ * Если обе части пусты — ничего не делает (мягко).
+ */
+export async function downloadSupplyStickers(opts: {
+    supplyId: number | null;
+    passBarcode: string | null;
+    fileName: string;
+}): Promise<void> {
+    const { supplyId, passBarcode, fileName } = opts;
+    const blocks: { code: string; caption: string }[] = [];
+    if (supplyId != null) blocks.push({ code: `WB-${supplyId}`, caption: `Поставка WB-${supplyId}` });
+    if (passBarcode) blocks.push({ code: passBarcode, caption: `Пропуск ${passBarcode}` });
+    if (blocks.length === 0) return;
+
+    const { jsPDF } = await import('jspdf');
+    const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+
+    const PAGE_W = 210;
+    const MARGIN = 15;
+    const CONTENT_W = PAGE_W - 2 * MARGIN;
+    // Каждый блок: заголовок + QR + Code128.
+    const BLOCK_H = 90;
+
+    for (let i = 0; i < blocks.length; i++) {
+        const { code, caption } = blocks[i];
+        const top = MARGIN + i * (BLOCK_H + 10);
+
+        // Заголовок блока.
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(14);
+        doc.setTextColor(20);
+        doc.text(caption, PAGE_W / 2, top + 6, { align: 'center' });
+
+        // QR-код (квадрат), по центру.
+        const qr = await renderBarcode('qrcode', code, { scale: 5 });
+        const QR = 45;
+        doc.addImage(qr.dataUrl, 'PNG', (PAGE_W - QR) / 2, top + 12, QR, QR, undefined, 'FAST');
+
+        // Штрихкод Code128 с человекочитаемым текстом.
+        const bc = await renderBarcode('code128', code, { scale: 4, height: 16, includetext: true });
+        const bcW = CONTENT_W;
+        const bcH = Math.min(bcW * bc.ratio, 28);
+        doc.addImage(bc.dataUrl, 'PNG', MARGIN, top + 12 + QR + 4, bcW, bcH, undefined, 'FAST');
+    }
+
+    doc.save(fileName);
+}
