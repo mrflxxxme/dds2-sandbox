@@ -14,7 +14,8 @@
  *
  * Проверку лимитов приёмки WB (правило 3) делает CALL-SITE ДО нормализатора (сетевой
  * вызов, инкрементально по изменённым артикулам) — здесь только локальная геометрия.
- * Новинки cold-start без кратности (`isNewcomer`) — россыпь, не палетизируем.
+ * РОССЫПЬ ЗАПРЕЩЕНА ВСЕМ (канон 2026-07-08), исключения для новинок НЕТ: строка без
+ * кратности (ни global, ни per-ФФ) в черновик не едет — уходит в dropped/предбронь.
  *
  * Баланс Σsrc==Σtgt держится by construction (строки пересобираются из сбалансированных
  * линий ФФ→WB). Идемпотентна: повторный прогон стабилен (важно — гоняется часто).
@@ -35,8 +36,6 @@ export interface NormalizeDraftCtx {
     boxSizeOf: (nm: number) => string | null | undefined;
     /** Ручной «коробов на паллету» по канон-размеру. */
     overrides?: Record<string, number>;
-    /** nm новинки cold-start — россыпь, не палетизируем (исключение из инварианта). */
-    isNewcomer: (nm: number) => boolean;
     /** Свободный ФФ per nm per ff для добивки неполного короба вверх (опц.). */
     freeByNm?: Record<number, Record<number, number>>;
 }
@@ -106,43 +105,39 @@ export function normalizeDraft(
     // так»). `as_is` освобождает лишь от ПАЛЛЕТ-среза (юзер осознанно везёт неполную
     // паллету), но НЕ от короб-инварианта: НЕПОЛНЫЙ КОРОБ РОССЫПЬЮ НЕДОПУСТИМ — добираем
     // до целого короба из свободного ФФ, некратный остаток < короба уходит на ФФ (строго).
-    // Россыпь-исключение = новинка cold-start БЕЗ заданной кратности короба (`ppb`).
-    // Новинка С `ppb` едет ЦЕЛЫМИ коробами и МИКСуется в смешанные/моно-паллеты как
-    // обычный box-SKU (по требованию пользователя): её НЕ исключаем из box+pallet шагов.
-    // Новинка БЕЗ `ppb` физически нельзя округлить → остаётся россыпью (как раньше).
-    const isLoose = (nm: number): boolean => {
-        if (!ctx.isNewcomer(nm)) return false;
-        const ppb = ctx.ppbOf(nm);
-        return !(ppb && ppb > 0);
-    };
-    const boxed = roundDraftRowsToWholeBoxes(rows, ctx.ppbOf, freeByNm, isLoose, ctx.ppbAt);
-    const monoRows = roundMonoToWholeBoxes(boxed.rows, ctx.ppbOf, freeByNm, isLoose, ctx.ppbAt);
+    // РОССЫПЬ ЗАПРЕЩЕНА ВСЕМ (канон 2026-07-08) — исключения для новинок больше нет.
+    // Новинка С `ppb` и раньше ехала целыми коробами как обычный box-SKU; новинка БЕЗ
+    // `ppb` теперь не едет: округлять нечем → паллет-срез снимет её в dropped/предбронь.
+    const boxed = roundDraftRowsToWholeBoxes(rows, ctx.ppbOf, freeByNm, undefined, ctx.ppbAt);
+    const monoRows = roundMonoToWholeBoxes(boxed.rows, ctx.ppbOf, freeByNm, undefined, ctx.ppbAt);
     // `as_is` (уже приведённые к ЦЕЛЫМ коробам выше) минуют ПАЛЛЕТ-срез ниже — юзер
-    // осознанно везёт неполную паллету из целых коробов. Остальное режется до целых паллет.
-    const asIsRows = monoRows.filter((r) => r.as_is === true);
-    const workRows = asIsRows.length ? monoRows.filter((r) => r.as_is !== true) : monoRows;
+    // осознанно везёт неполную паллету из ЦЕЛЫХ КОРОБОВ. Строка без известной кратности
+    // (ни global, ни per-ФФ её источников) целых коробов не имеет → НЕ освобождается:
+    // идёт в общий срез, где upp=null снимет её (россыпь не едет и через «Оставить так»).
+    const hasAnyPpb = (r: AssemblyDraftRow): boolean => {
+        if ((ctx.ppbOf(r.nm_id) ?? 0) > 0) return true;
+        return Object.keys(r.src).some((ff) => (ctx.ppbAt?.(r.nm_id, Number(ff)) ?? 0) > 0);
+    };
+    const asIsSet = new Set(monoRows.filter((r) => r.as_is === true && hasAnyPpb(r)));
+    const asIsRows = [...asIsSet];
+    const workRows = asIsSet.size ? monoRows.filter((r) => !asIsSet.has(r)) : monoRows;
 
     // 2. Целые паллеты на каждую отгрузку ФФ→WB (короб смешанные, моно ≤3 АРТИКУЛА,
     //    добор ЦЕЛЫМИ коробами). Разворачиваем в линии, режем, сворачиваем обратно.
-    // `isNew` для линии = только россыпь-новинка (б/ppb): она остаётся россыпью в trim.
-    // Новинка С ppb имеет upp != null → режется до целых паллет/входит в микс как обычная.
-    const newcomerSet = new Set(workRows.map((r) => r.nm_id).filter((nm) => isLoose(nm)));
     // upp per-ФФ: вместимость паллеты = bpp × короб ЭТОГО ФФ. Глобальный min резал
     // физически целые паллеты мульти-кратных SKU и давал моно-паллеты, некратные
     // коробу ФФ (PUT-шторм, адверсарное ревью).
     const uppOf = (nm: number, wb: string, ffId?: number): number | null => {
-        if (isLoose(nm)) return null;
         const pw = ffId != null ? ctx.ppbAt?.(nm, ffId) : null;
         const ppb = pw && pw > 0 ? pw : ctx.ppbOf(nm);
         const bpp = effectiveBoxesPerPallet(ctx.boxSizeOf(nm), maxPalletHeightCm(wb), ctx.overrides);
         return bpp != null && ppb && ppb > 0 ? bpp * ppb : null;
     };
     const boxOf = (nm: number, ffId?: number): number | null => {
-        if (isLoose(nm)) return null;
         const pw = ffId != null ? ctx.ppbAt?.(nm, ffId) : null;
         return pw && pw > 0 ? pw : (ctx.ppbOf(nm) ?? null);
     };
-    const lines = buildPreviewLines(workRows, newcomerSet);
+    const lines = buildPreviewLines(workRows, new Set());
     const trim = trimLinesToWholePallets(lines, uppOf, boxOf);
     const outRows = linesToRows(trim.kept);
     const dropped = linesToRows(trim.droppedLines);

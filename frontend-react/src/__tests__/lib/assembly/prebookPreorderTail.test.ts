@@ -19,7 +19,6 @@ const ctx: NormalizeDraftCtx = {
     ppbOf: () => PPB,
     boxSizeOf: () => '40x40x40',
     overrides: { '40x40x40': 10 },
-    isNewcomer: () => false,
     freeByNm: {},
 };
 const FF = '5';

@@ -1401,7 +1401,6 @@ export function WarehouseNeedView({
             ppbOf: (nm) => { const { ppb, use } = resolveSkuLevelPpb(nm); return use && ppb && ppb > 0 ? ppb : null; },
             boxSizeOf: (nm) => resolveSkuBoxSize(nm),
             overrides: palletOverrides,
-            isNewcomer: () => false, // новинок тут нет (свой newcomerBoxedAlloc)
             freeByNm,
         });
         const m2 = new Map<number, { rows: { package_type: PackageType; tgt: Record<string, number>; src: Record<string, number> }[]; byWh: Record<string, number>; total: number }>();

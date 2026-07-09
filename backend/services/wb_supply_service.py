@@ -26,6 +26,7 @@ from backend.schemas.assembly_wb import (
     WbCabinetBox,
     WbCabinetBoxes,
     WbCabinetBoxItem,
+    WbCabinetPass,
     WbSupplyState,
 )
 from backend.services import integrations_service
@@ -706,6 +707,58 @@ async def get_cabinet_boxes(
         total_boxes=len(boxes),
         total_barcodes=len(seen_barcodes),
         total_units=total_units,
+    )
+
+
+async def get_cabinet_pass(
+    db: AsyncSession, project_id: int, assembly_id: int
+) -> WbCabinetPass:
+    """
+    Существующий пропуск поставки из кабинета WB (trn_details) — водитель/авто/
+    паллеты/ШК пропуска. Нужен, когда пропуск завели прямо в кабинете (наш авто-
+    синк тянет только статус, не пропуск) — панель показывает то, что уже в WB.
+
+    supply_id — из реплей-связи ИЛИ адопции из FBO.
+    """
+    assembly = await _load_assembly(db, project_id, assembly_id)
+    result = await db.execute(
+        select(AssemblyWbSupply).where(
+            AssemblyWbSupply.assembly_request_id == assembly_id,
+            AssemblyWbSupply.project_id == project_id,
+        )
+    )
+    link = result.scalar_one_or_none()
+    supply_id = (link.supply_id if link else None) or _adopted_supply_id(assembly)
+    if not supply_id:
+        return WbCabinetPass()
+
+    client = await _client(db, project_id)
+    try:
+        details = await client.trn_details(supply_id)
+    except WbSessionExpired as e:
+        await integrations_service.mark_wb_portal_expired(db, project_id)
+        raise WbSupplyError("Сессия WB-кабинета истекла. Обновите доступ WB.") from e
+    except WbPortalError as e:
+        raise WbSupplyError(f"WB отклонил операцию: {e}") from e
+
+    trns = ((details.get("details") or {}).get("trns")) or []
+    if not trns:
+        return WbCabinetPass(has_pass=False)
+    t = trns[0]
+    bc = t.get("barcode") or {}
+    pallets = t.get("quantity")
+    return WbCabinetPass(
+        has_pass=bool(t.get("firstName") or t.get("lastName") or t.get("carNumber")),
+        driver_first=t.get("firstName") or None,
+        driver_last=t.get("lastName") or None,
+        driver_phone=t.get("phone") or None,
+        car_model=t.get("carModel") or None,
+        car_number=t.get("carNumber") or None,
+        pallets=int(pallets) if isinstance(pallets, int) else None,
+        barcode_id=bc.get("barcodeId"),
+        barcode_prefix=bc.get("barcodePrefix"),
+        date_from=t.get("dateFrom"),
+        date_to=t.get("dateTo"),
     )
 
 

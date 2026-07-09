@@ -8,6 +8,7 @@ Handles:
 import asyncio
 import logging
 import time
+from typing import Any
 
 import httpx
 
@@ -528,3 +529,258 @@ async def set_campaign_state(api_key: str, campaign_id: int, action: str) -> dic
     err = resp.text[:300]
     logger.warning(f"WB adv {action} rejected {resp.status_code} for {campaign_id}: {err}")
     return {"ok": False, "error": f"HTTP {resp.status_code}: {err}"}
+
+
+# ── Search-cluster (normquery) stats & minus-phrases ──────────────────────────
+# WB нормализует пользовательские запросы в «кластеры» (norm_query) и копит по ним
+# статистику. Доступно только для CPM-кампаний. Эндпоинты:
+#   POST /adv/v0/normquery/stats      — статистика по кластерам за период (≤30 дней)
+#   POST /adv/v0/normquery/get-minus  — текущие минус-фразы кампаний
+#   POST /adv/v0/normquery/set-minus  — установка/удаление минус-фраз (полный список)
+_NQ_BASE = "https://advert-api.wildberries.ru/adv/v0/normquery"
+
+
+def _split_windows(date_from: str, date_to: str, max_days: int = 30) -> list[tuple[str, str]]:
+    from datetime import datetime, timedelta
+
+    d0 = datetime.strptime(date_from, "%Y-%m-%d").date()
+    d1 = datetime.strptime(date_to, "%Y-%m-%d").date()
+    out: list[tuple[str, str]] = []
+    ws = d0
+    while ws <= d1:
+        we = min(ws + timedelta(days=max_days - 1), d1)
+        out.append((ws.isoformat(), we.isoformat()))
+        ws = we + timedelta(days=1)
+    return out
+
+
+def _merge_clusters(acc: dict[str, dict[str, Any]], clusters: list[dict[str, Any]]) -> None:
+    """Суммирует кластеры по norm_query через несколько окон.
+    Счётчики складываются, производные (ctr/cpc/cpm/avg_pos) пересчитываются из сумм."""
+    for c in clusters or []:
+        q = c.get("norm_query")
+        if not q:
+            continue
+        a = acc.get(q)
+        if a is None:
+            a = acc[q] = {
+                "norm_query": q, "views": 0, "clicks": 0, "spend": 0.0,
+                "orders": 0, "atbs": 0, "shks": 0, "_pos_w": 0.0,
+            }
+        a["views"] += c.get("views", 0) or 0
+        a["clicks"] += c.get("clicks", 0) or 0
+        a["spend"] += c.get("spend", 0.0) or 0.0
+        a["orders"] += c.get("orders", 0) or 0
+        a["atbs"] += c.get("atbs", 0) or 0
+        a["shks"] += c.get("shks", 0) or 0
+        a["_pos_w"] += (c.get("avg_pos", 0.0) or 0.0) * (c.get("views", 0) or 0)
+
+
+def _finalize_clusters(acc: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for a in acc.values():
+        v, cl, sp = a["views"], a["clicks"], a["spend"]
+        a["ctr"] = round(cl / v * 100, 2) if v else 0.0
+        a["cpc"] = round(sp / cl, 2) if cl else 0.0
+        a["cpm"] = round(sp / v * 1000, 2) if v else 0.0
+        a["avg_pos"] = round(a.pop("_pos_w") / v, 2) if v else 0.0
+        a["spend"] = round(sp, 2)
+        out.append(a)
+    out.sort(key=lambda x: -x["spend"])
+    return out
+
+
+async def fetch_normquery_stats(
+    api_key: str,
+    pairs: list[tuple[int, int]],
+    date_from: str,
+    date_to: str,
+) -> dict[tuple[int, int], list[dict[str, Any]]]:
+    """Статистика по поисковым кластерам для пар (advert_id, nm_id).
+
+    Разбивает период на окна ≤30 дней и чанкует пары по 50 в запрос.
+    Возвращает {(advert_id, nm_id): [cluster, ...]} с полями
+    norm_query/views/clicks/ctr/cpc/cpm/spend/orders/atbs/shks/avg_pos.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    windows = _split_windows(date_from, date_to)
+    chunks = [pairs[i : i + 50] for i in range(0, len(pairs), 50)]
+    # acc[(advert_id, nm_id)][norm_query] -> merged dict
+    acc: dict[tuple[int, int], dict[str, dict[str, Any]]] = {p: {} for p in pairs}
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        first = True
+        for win_from, win_to in windows:
+            for chunk in chunks:
+                if not first:
+                    await asyncio.sleep(0.4)
+                first = False
+                body = {
+                    "from": win_from,
+                    "to": win_to,
+                    "items": [{"advert_id": a, "nm_id": n} for a, n in chunk],
+                }
+                try:
+                    resp = await client.post(f"{_NQ_BASE}/stats", json=body, headers=headers)
+                except Exception as e:
+                    logger.warning(f"WB normquery/stats request failed: {e}")
+                    continue
+                if resp.status_code == 429:
+                    await asyncio.sleep(15)
+                    resp = await client.post(f"{_NQ_BASE}/stats", json=body, headers=headers)
+                if resp.status_code != 200:
+                    logger.warning(f"WB normquery/stats {resp.status_code}: {resp.text[:200]}")
+                    continue
+                data = resp.json() or {}
+                for item in data.get("stats") or []:
+                    key = (item.get("advert_id"), item.get("nm_id"))
+                    if key in acc:
+                        _merge_clusters(acc[key], item.get("stats") or [])
+
+    return {p: _finalize_clusters(acc[p]) for p in pairs}
+
+
+async def get_normquery_minus(
+    api_key: str,
+    pairs: list[tuple[int, int]],
+) -> dict[tuple[int, int], list[str]]:
+    """Текущие минус-фразы для пар (advert_id, nm_id).
+
+    ВАЖНО: пара присутствует в результате ТОЛЬКО если её чанк реально прочитан (HTTP 200).
+    При сетевом сбое/не-200 пары чанка ОТСУТСТВУЮТ в ответе — вызывающий обязан отличать
+    «нет минус-фраз» (ключ есть, список пуст) от «не прочитано» (ключа нет). Без этого
+    replace-семантика set-minus затёрла бы живой список при транзиентном сбое чтения.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    result: dict[tuple[int, int], list[str]] = {}
+    chunks = [pairs[i : i + 50] for i in range(0, len(pairs), 50)]
+    async with httpx.AsyncClient(timeout=30) as client:
+        for idx, chunk in enumerate(chunks):
+            if idx > 0:
+                await asyncio.sleep(0.4)
+            body = {"items": [{"advert_id": a, "nm_id": n} for a, n in chunk]}
+            try:
+                resp = await client.post(f"{_NQ_BASE}/get-minus", json=body, headers=headers)
+            except Exception as e:
+                logger.warning(f"WB normquery/get-minus failed: {e}")
+                continue  # чанк не прочитан → его пары отсутствуют в result
+            if resp.status_code != 200:
+                logger.warning(f"WB normquery/get-minus {resp.status_code}: {resp.text[:200]}")
+                continue
+            # чанк прочитан успешно: сеем пустой список для всех его пар, затем заполняем
+            for p in chunk:
+                result[p] = []
+            for item in (resp.json() or {}).get("items") or []:
+                key = (item.get("advert_id"), item.get("nm_id"))
+                if key in result:
+                    result[key] = list(item.get("norm_queries") or [])
+    return result
+
+
+async def set_normquery_minus(
+    api_key: str,
+    advert_id: int,
+    nm_id: int,
+    norm_queries: list[str],
+) -> tuple[bool, str | None]:
+    """Устанавливает ПОЛНЫЙ список минус-фраз для (advert_id, nm_id) — replace-семантика.
+
+    Всегда вызывать после get_normquery_minus + слияния: WB заменяет весь список,
+    отсутствующие фразы удаляются. Возвращает (ok, error) — error читаемый для UI.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    body = {"items": [{"advert_id": advert_id, "nm_id": nm_id, "norm_queries": norm_queries}]}
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.post(f"{_NQ_BASE}/set-minus", json=body, headers=headers)
+        except Exception as e:
+            logger.error(f"WB normquery/set-minus failed for {advert_id}/{nm_id}: {e}")
+            return False, "Сеть недоступна, повторите позже"
+        if resp.status_code in (200, 204):
+            logger.info(f"WB normquery/set-minus ok: advert={advert_id} nm={nm_id} n={len(norm_queries)}")
+            return True, None
+        text = resp.text[:200]
+        logger.error(f"WB normquery/set-minus {resp.status_code}: {text}")
+        if resp.status_code in (401, 403) and "read-only" in text:
+            return False, (
+                "WB-токен только для чтения. Заведите в кабинете WB токен с категорией "
+                "«Продвижение» и правом записи (без «Только на чтение») — тогда минус-фразы "
+                "будут применяться в кабинете."
+            )
+        return False, f"WB вернул {resp.status_code}"
+
+
+async def get_normquery_bids(
+    api_key: str,
+    pairs: list[tuple[int, int]],
+) -> dict[tuple[int, int], dict[str, float]]:
+    """Текущие ставки по кластерам: {(advert_id, nm_id): {norm_query: bid_rub}}.
+
+    Ставки задаются индивидуально по кластеру; заданы не у всех (у остальных — дефолт кампании).
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    result: dict[tuple[int, int], dict[str, float]] = {}
+    chunks = [pairs[i : i + 50] for i in range(0, len(pairs), 50)]
+    async with httpx.AsyncClient(timeout=30) as client:
+        for idx, chunk in enumerate(chunks):
+            if idx > 0:
+                await asyncio.sleep(0.4)
+            body = {"items": [{"advert_id": a, "nm_id": n} for a, n in chunk]}
+            try:
+                resp = await client.post(f"{_NQ_BASE}/get-bids", json=body, headers=headers)
+            except Exception as e:
+                logger.warning(f"WB normquery/get-bids failed: {e}")
+                continue
+            if resp.status_code != 200:
+                logger.warning(f"WB normquery/get-bids {resp.status_code}: {resp.text[:200]}")
+                continue
+            for b in (resp.json() or {}).get("bids") or []:
+                key = (b.get("advert_id"), b.get("nm_id"))
+                q = b.get("norm_query")
+                if key[0] is None or not q:
+                    continue
+                result.setdefault(key, {})[q] = float(b.get("bid", 0) or 0)
+    return result
+
+
+async def set_normquery_bid(
+    api_key: str,
+    advert_id: int,
+    nm_id: int,
+    norm_query: str,
+    bid_rub: float,
+) -> tuple[bool, str | None]:
+    """Ставит ставку одному кластеру (₽ → копейки). WB не даёт ставку кластерам <100 показов.
+
+    Схема set-bids подтверждается вживую при write-scoped токене (сейчас токен read-only → 401).
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    body = {
+        "bids": [
+            {
+                "advert_id": advert_id,
+                "nm_id": nm_id,
+                "norm_query": norm_query,
+                "bid_kopecks": int(round(bid_rub * 100)),
+            }
+        ]
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.post(f"{_NQ_BASE}/bids", json=body, headers=headers)
+        except Exception as e:
+            logger.error(f"WB normquery/bids failed for {advert_id}/{nm_id}: {e}")
+            return False, "Сеть недоступна, повторите позже"
+        if resp.status_code in (200, 204):
+            logger.info(f"WB normquery/bids ok: advert={advert_id} nm={nm_id} q={norm_query!r} bid={bid_rub}")
+            return True, None
+        text = resp.text[:200]
+        logger.error(f"WB normquery/bids {resp.status_code}: {text}")
+        if resp.status_code in (401, 403) and "read-only" in text:
+            return False, (
+                "WB-токен только для чтения. Нужен токен «Продвижение» с правом записи, "
+                "чтобы менять ставки по кластерам."
+            )
+        if resp.status_code == 400 and ("100" in text or "views" in text.lower()):
+            return False, "Кластер в стадии сбора данных (<100 показов) — WB не принимает ставку."
+        return False, f"WB вернул {resp.status_code}"

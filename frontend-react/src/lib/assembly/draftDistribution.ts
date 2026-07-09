@@ -41,6 +41,7 @@ import {
     type EnrichedSku,
     type PinnedPkgOf,
 } from '@/lib/assembly/preDistribution';
+import { allocatePairs } from '@/lib/utils/assemblyPreview';
 
 // Приёмка/сплиты и generic-хелперы — реэкспорт для call-site черновика.
 export { applyAcceptanceSplits, applyCellBoxDelta, rowsToPreDistRows, splitByKratnost };
@@ -286,6 +287,34 @@ export function buildTopUpRowsFf(
         rows.push({ nm_id: a.nm_id, barcode: bc, vendor_code: a.vendor_code || bc, src, tgt, package_type: 'BOX' });
     }
     return rows;
+}
+
+/**
+ * Срез строк раскладки по ОДНОМУ ФФ-источнику: из каждой строки берётся только
+ * доля, физически забираемая с `ffId`. Пары ФФ→WB — тот же `allocatePairs`, что
+ * карточки черновика, экспорт и создание заявок → числа сходятся между экранами.
+ * Для лупы «Склад забора» в матрице — это ОТОБРАЖЕНИЕ, раскладку не мутирует.
+ * Чистая.
+ */
+export function sliceRowsByFf(rows: AssemblyDraftRow[], ffId: number): AssemblyDraftRow[] {
+    const key = String(ffId);
+    const out: AssemblyDraftRow[] = [];
+    for (const r of rows) {
+        if ((r.src?.[key] || 0) <= 0) continue;
+        const tgt: Record<string, number> = {};
+        let total = 0;
+        for (const [pair, q] of allocatePairs(r.src, r.tgt)) {
+            if ((q || 0) <= 0) continue;
+            const sep = pair.indexOf('::');
+            if (pair.slice(0, sep) !== key) continue;
+            const wb = pair.slice(sep + 2);
+            tgt[wb] = (tgt[wb] || 0) + q;
+            total += q;
+        }
+        if (total <= 0) continue;
+        out.push({ ...r, src: { [key]: total }, tgt });
+    }
+    return out;
 }
 
 /** Обогащение артикула данными «Потребности по складам» (для матрицы черновика):

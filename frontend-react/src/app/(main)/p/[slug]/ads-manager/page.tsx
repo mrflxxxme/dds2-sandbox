@@ -1,12 +1,16 @@
 'use client';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
-import { exportToExcel } from '@/lib/utils';
+import { exportToExcel, formatNumber } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
+import Link from 'next/link';
+import { useParams } from 'next/navigation';
 import ProductHistoryChart, { CampaignHistoryChart } from './components/ProductHistoryChart';
-import type { AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsBudgetGap, AdTabProduct, FunnelFilters, FunnelSkuRow } from '@/types/api';
+import ClusterTable, { DailyBudgetBar, drrColor, clNum, clMoney, clMoneyN } from './components/ClusterTable';
+import type { AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsBudgetGap, AdTabProduct, FunnelFilters, FunnelSkuRow, CampaignClustersResponse, SearchCluster } from '@/types/api';
 
 const fmt = (n: number | undefined) => (Number(n) || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+const num = (v: unknown) => Number(v) || 0;
 const fmtPct = (n: number | undefined) => (Number(n) || 0).toFixed(2) + '%';
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 
@@ -202,7 +206,171 @@ function AutopayLogModal({ campaign, onClose }: {
     );
 }
 
+/** ДРР-цвет кампании: ≤8% зелёный, ≤12% янтарь, иначе красный. */
+/** Модалка «Кластеры» одной CPM-кампании (Features 1 & 2). */
+function ClustersModal({ campaign, onClose }: { campaign: AdsManagerCampaign; onClose: () => void }) {
+    const [dateFrom, setDateFrom] = useState(iso(new Date(Date.now() - 29 * 86400_000)));
+    const [dateTo, setDateTo] = useState(iso(new Date()));
+    const [data, setData] = useState<CampaignClustersResponse | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [reloadKey, setReloadKey] = useState(0);
+    // Минус-фразы: набор norm_query, по которым идёт запрос, и текст последней ошибки
+    const [pending, setPending] = useState<Set<string>>(new Set());
+    const [minusError, setMinusError] = useState<string | null>(null);
+    // Ставки: набор norm_query, по которым идёт запись, и текст последней ошибки
+    const [bidPending, setBidPending] = useState<Set<string>>(new Set());
+    const [bidError, setBidError] = useState<string | null>(null);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setLoading(true); setError(''); setData(null);
+        api.getCampaignClusters(campaign.campaign_id, dateFrom, dateTo)
+            .then(res => {
+                if (controller.signal.aborted) return;
+                if (res.error) {
+                    setError(res.error === 'no_api_key' ? 'Не задан API-ключ WB — подключите ключ в настройках проекта, чтобы анализировать кластеры.'
+                        : res.error === 'campaign_not_found' ? 'Кампания не найдена в кабинете WB.'
+                        : res.error);
+                } else {
+                    setData(res);
+                }
+            })
+            .catch(e => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка загрузки кластеров'); })
+            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+        return () => controller.abort();
+    }, [campaign.campaign_id, dateFrom, dateTo, reloadKey]);
+
+    const handleToggleMinus = async (c: SearchCluster) => {
+        const action: 'add' | 'remove' = c.is_minused ? 'remove' : 'add';
+        const nmId = data?.nm_ids?.[0] ?? campaign.nm_ids?.[0];
+        if (nmId == null) { setMinusError('Не удалось определить товар (nm_id) кампании'); return; }
+        const confirmText = action === 'add'
+            ? `Добавить «${c.norm_query}» в минус-фразы кампании в кабинете WB?`
+            : `Вернуть «${c.norm_query}» — убрать из минус-фраз кампании в кабинете WB?`;
+        if (!window.confirm(confirmText)) return;
+        setMinusError(null);
+        setPending(prev => new Set(prev).add(c.norm_query));
+        try {
+            const res = await api.toggleClusterMinus(campaign.campaign_id, { nm_id: nmId, norm_query: c.norm_query, action });
+            if (!res.ok) { setMinusError(res.error || 'WB отклонил операцию'); return; }
+            setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => x.norm_query === c.norm_query ? { ...x, is_minused: action === 'add' } : x) } : prev);
+        } catch (e) {
+            setMinusError(e instanceof Error ? e.message : 'Ошибка обращения к WB');
+        } finally {
+            setPending(prev => { const nx = new Set(prev); nx.delete(c.norm_query); return nx; });
+        }
+    };
+
+    const handleSetBid = async (c: SearchCluster, bid: number) => {
+        const nmId = data?.nm_ids?.[0] ?? campaign.nm_ids?.[0];
+        if (nmId == null) { setBidError('Не удалось определить товар (nm_id) кампании'); return; }
+        if (!window.confirm(`Поставить ставку ${formatNumber(bid, 0)} ₽ на кластер «${c.norm_query}» в кабинете WB?`)) return;
+        setBidError(null);
+        setBidPending(prev => new Set(prev).add(c.norm_query));
+        try {
+            const res = await api.setCampaignClusterBid(campaign.campaign_id, { nm_id: nmId, norm_query: c.norm_query, bid });
+            if (!res.ok) { setBidError(res.error || 'WB отклонил ставку'); return; }
+            setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => x.norm_query === c.norm_query ? { ...x, bid: res.bid ?? bid } : x) } : prev);
+        } catch (e) {
+            setBidError(e instanceof Error ? e.message : 'Ошибка обращения к WB');
+        } finally {
+            setBidPending(prev => { const nx = new Set(prev); nx.delete(c.norm_query); return nx; });
+        }
+    };
+
+    const totals = data?.totals;
+    const campDrr = data && num(data.aov) > 0 && num(totals?.orders) > 0 ? num(totals?.spend) / (num(totals?.orders) * num(data.aov)) * 100 : null;
+
+    return (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '32px 16px', overflow: 'auto' }} onClick={onClose}>
+            <div className="glass-card" style={{ width: 'min(1080px, 96vw)', padding: 24, background: '#fff' }} onClick={e => e.stopPropagation()}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 4 }}>
+                    <div style={{ flex: 1 }}>
+                        <h3 style={{ fontSize: 17, fontWeight: 700, margin: '0 0 4px' }}>🧩 Кластеры запросов — {campaign.name || `#${campaign.campaign_id}`}</h3>
+                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>#{campaign.campaign_id}{data?.subject ? ` · ${data.subject}` : ''}</div>
+                    </div>
+                    <button className="btn btn-secondary btn-sm" onClick={onClose} style={{ fontSize: 13 }}>Закрыть</button>
+                </div>
+
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '12px 0' }}>
+                    <input type="date" value={dateFrom} max={dateTo} onChange={e => setDateFrom(e.target.value)}
+                        style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)' }} />
+                    <span style={{ color: 'var(--color-text-dim)' }}>—</span>
+                    <input type="date" value={dateTo} min={dateFrom} onChange={e => setDateTo(e.target.value)}
+                        style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)' }} />
+                    <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={() => { setDateFrom(iso(new Date(Date.now() - 29 * 86400_000))); setDateTo(iso(new Date())); }}>30 дней</button>
+                    <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={() => setReloadKey(k => k + 1)} disabled={loading}>🔄 Обновить</button>
+                </div>
+
+                {loading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка кластеров…</div>}
+                {!loading && error && (
+                    <div className="glass-card" style={{ padding: '16px 20px', border: '1px solid var(--color-danger)', background: '#fef2f2' }}>
+                        <span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {error}</span>
+                    </div>
+                )}
+                {!loading && !error && data && (
+                    <>
+                        {/* Тоталы + ДРР кампании */}
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+                            {[
+                                { label: 'Кластеров', value: clNum(totals?.clusters) },
+                                { label: 'Показы', value: clNum(totals?.views) },
+                                { label: 'Клики', value: clNum(totals?.clicks) },
+                                { label: 'Заказы', value: clNum(totals?.orders) },
+                                { label: 'Расход', value: clMoney(totals?.spend) },
+                                { label: 'CPO', value: clMoneyN(totals?.cpo ?? null) },
+                            ].map(m => (
+                                <div key={m.label} style={{ minWidth: 92, padding: '8px 12px', border: '1px solid #e5e7eb', borderRadius: 12, background: '#f9fafb' }}>
+                                    <div style={{ fontSize: 11, color: '#6b7280' }}>{m.label}</div>
+                                    <div style={{ fontSize: 17, fontWeight: 700, color: '#111827' }}>{m.value}</div>
+                                </div>
+                            ))}
+                            <div style={{ minWidth: 92, padding: '8px 12px', border: '1px solid #e5e7eb', borderRadius: 12, background: '#f9fafb' }}>
+                                <div style={{ fontSize: 11, color: '#6b7280' }}>ДРР кампании</div>
+                                <div style={{ fontSize: 17, fontWeight: 700, color: drrColor(campDrr, data.target_drr) }}>
+                                    {campDrr == null ? '—' : `${formatNumber(campDrr, 1)}%`}
+                                </div>
+                            </div>
+                            {data.aov > 0 && (
+                                <div style={{ minWidth: 92, padding: '8px 12px', border: '1px solid #e5e7eb', borderRadius: 12, background: '#f9fafb' }}>
+                                    <div style={{ fontSize: 11, color: '#6b7280' }}>AOV</div>
+                                    <div style={{ fontSize: 17, fontWeight: 700, color: '#111827' }}>{clMoney(data.aov)}</div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Feature 1 — распределение бюджета по дням */}
+                        {data.daily && data.daily.length > 0 && (
+                            <div style={{ marginBottom: 20 }}>
+                                <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 6 }}>📊 Распределение расхода по дням</div>
+                                <DailyBudgetBar daily={data.daily} />
+                            </div>
+                        )}
+
+                        {/* Cluster table + Feature 2 (минус-фразы) */}
+                        {data.clusters.length === 0 ? (
+                            <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период у кампании нет данных по кластерам</div>
+                        ) : (
+                            <ClusterTable
+                                clusters={data.clusters}
+                                targetDrr={data.target_drr}
+                                exportName={`clusters_${campaign.campaign_id}_${dateFrom}_${dateTo}`}
+                                minus={{ pending, onToggle: handleToggleMinus, error: minusError }}
+                                bids={{ pending: bidPending, onSetBid: handleSetBid, error: bidError }}
+                            />
+                        )}
+                    </>
+                )}
+            </div>
+        </div>
+    );
+}
+
 export default function AdsManagerPage() {
+    const routeParams = useParams();
+    const slug = typeof routeParams?.slug === 'string' ? routeParams.slug : Array.isArray(routeParams?.slug) ? routeParams.slug[0] : '';
+    const [clustersModal, setClustersModal] = useState<AdsManagerCampaign | null>(null);
     const [tab, setTab] = useState<Tab>('campaigns');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
@@ -418,7 +586,6 @@ export default function AdsManagerPage() {
         .sort((a, b) => adShare(b) - adShare(a));
 
     // Excel-экспорт: выгружаем то, что видно (с учётом фильтров и сортировки)
-    const num = (v: unknown) => Number(v) || 0;
     const exportCampaigns = () => exportToExcel(visibleCampaigns.map(c => ({
         'Кампания': c.name || `#${c.campaign_id}`, 'ID': c.campaign_id,
         'Тип': (c.campaign_type || '').toUpperCase() + (c.bid_mode === 'unified' ? ' · единая' : c.bid_mode === 'manual' ? ' · ручная' : ''),
@@ -490,10 +657,17 @@ export default function AdsManagerPage() {
     return (
         <PageGuard page="ads-manager">
             <div className="animate-in">
-                <h1 style={{ fontSize: 28, fontWeight: 700, margin: '0 0 4px' }}>📢 Управление рекламой</h1>
-                <p style={{ fontSize: 13, color: 'var(--color-text-dim)', margin: '0 0 16px' }}>
-                    Кампании WB: бюджеты, проблемный ДРР, товары без рекламы, нехватка дневного бюджета.
-                </p>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                    <div>
+                        <h1 style={{ fontSize: 28, fontWeight: 700, margin: '0 0 4px' }}>📢 Управление рекламой</h1>
+                        <p style={{ fontSize: 13, color: 'var(--color-text-dim)', margin: '0 0 16px' }}>
+                            Кампании WB: бюджеты, проблемный ДРР, товары без рекламы, нехватка дневного бюджета.
+                        </p>
+                    </div>
+                    <Link href={`/p/${slug}/ads-manager/categories`} className="btn btn-secondary btn-sm" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
+                        🧩 Кластеры по категории →
+                    </Link>
+                </div>
 
                 {/* Вкладки */}
                 <div style={{ display: 'flex', gap: 0, border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', width: 'fit-content', marginBottom: 12 }}>
@@ -656,7 +830,11 @@ export default function AdsManagerPage() {
                                                             📜
                                                         </button>
                                                     </td>
-                                                    <td style={{ ...tdStyle, textAlign: 'center' }}>
+                                                    <td style={{ ...tdStyle, textAlign: 'center', whiteSpace: 'nowrap' }}>
+                                                        {(c.campaign_type || '').toLowerCase() === 'cpm' && (
+                                                            <button onClick={e => { e.stopPropagation(); setClustersModal(c); }} title="Кластеризатор поисковых запросов кампании"
+                                                                className="btn btn-secondary btn-sm" style={{ fontSize: 12, marginRight: 6 }}>🧩 Кластеры</button>
+                                                        )}
                                                         <a href={wbCampaignUrl(c)} target="_blank" rel="noreferrer" title="Открыть кампанию в кабинете WB" onClick={e => e.stopPropagation()}
                                                             style={{ color: 'var(--color-accent)', textDecoration: 'none', fontSize: 15 }}>↗</a>
                                                     </td>
@@ -926,6 +1104,9 @@ export default function AdsManagerPage() {
                         campaign={autopayLogModal}
                         onClose={() => setAutopayLogModal(null)}
                     />
+                )}
+                {clustersModal && (
+                    <ClustersModal campaign={clustersModal} onClose={() => setClustersModal(null)} />
                 )}
             </div>
         </PageGuard>

@@ -8,6 +8,7 @@ import type {
     PackageType,
     WbBox,
     WbCabinetBoxes,
+    WbCabinetPass,
     WbDriver,
     WbPortalStatus,
     WbSupplyState,
@@ -88,6 +89,8 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
     const [cabinetBoxes, setCabinetBoxes] = useState<WbCabinetBoxes | null>(null);
     const [cabinetLoading, setCabinetLoading] = useState(false);
     const [expandedBox, setExpandedBox] = useState<string | null>(null);
+    // Существующий пропуск из кабинета WB (когда завели прямо там).
+    const [cabinetPass, setCabinetPass] = useState<WbCabinetPass | null>(null);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -170,6 +173,29 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
             setCabinetBoxes(null);
         } finally {
             setCabinetLoading(false);
+        }
+    }, [assemblyId, state?.supply_id]);
+
+    // Существующий пропуск из кабинета WB — для вкладки «Пропуск». Если поля
+    // локально пусты, а в кабинете пропуск уже заведён — подставляем его.
+    const loadCabinetPass = useCallback(async () => {
+        if (!state?.supply_id) {
+            setCabinetPass(null);
+            return;
+        }
+        try {
+            const p = await api.wbSupplyCabinetPass(assemblyId);
+            setCabinetPass(p);
+            if (p.has_pass) {
+                setDriverFirst((v) => v || p.driver_first || '');
+                setDriverLast((v) => v || p.driver_last || '');
+                setDriverPhone((v) => v || p.driver_phone || '');
+                setCarModel((v) => v || p.car_model || '');
+                setCarNumber((v) => v || p.car_number || '');
+                setPallets((v) => (v === '' && p.pallets != null ? p.pallets : v));
+            }
+        } catch {
+            setCabinetPass(null);
         }
     }, [assemblyId, state?.supply_id]);
 
@@ -288,7 +314,7 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                             className={tab === key ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
                             onClick={() => {
                                 setTab(key);
-                                if (key === 'pass') loadDrivers();
+                                if (key === 'pass') { loadDrivers(); loadCabinetPass(); }
                                 if (key === 'boxes') loadCabinetBoxes();
                             }}
                         >
@@ -554,6 +580,26 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
             {/* ── Пропуск ── */}
             {tab === 'pass' && (
                 <div style={{ display: 'grid', gap: 16, maxWidth: 560 }}>
+                    {cabinetPass?.has_pass && (
+                        <div
+                            className="glass-card"
+                            style={{ padding: '10px 14px', borderLeft: '3px solid var(--color-info)', fontSize: 13 }}
+                        >
+                            <div style={{ fontWeight: 600, marginBottom: 4 }}>Пропуск уже заведён в кабинете WB</div>
+                            <div className="text-muted">
+                                {[cabinetPass.driver_first, cabinetPass.driver_last].filter(Boolean).join(' ')}
+                                {cabinetPass.car_number ? ` · ${cabinetPass.car_number}` : ''}
+                                {cabinetPass.pallets != null ? ` · ${formatNumber(cabinetPass.pallets, 0)} паллет` : ''}
+                            </div>
+                            {(cabinetPass.barcode_id || cabinetPass.date_from) && (
+                                <div className="text-muted" style={{ marginTop: 2 }}>
+                                    {cabinetPass.barcode_id ? `ШК: ${cabinetPass.barcode_prefix ?? 'WB-GI-'}${cabinetPass.barcode_id}` : ''}
+                                    {cabinetPass.date_from ? ` · действует ${cabinetPass.date_from.slice(0, 10)}—${(cabinetPass.date_to ?? '').slice(0, 10)}` : ''}
+                                </div>
+                            )}
+                            <div className="text-muted" style={{ marginTop: 4 }}>Поля ниже подставлены из кабинета — правьте и «Занести пропуск в WB» при необходимости.</div>
+                        </div>
+                    )}
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                         <div className="section-title" style={{ margin: 0 }}>Данные водителя и машины</div>
                         {hasVehicleData && (

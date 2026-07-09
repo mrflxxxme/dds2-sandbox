@@ -132,7 +132,6 @@ describe('регрессия PUT-шторма (адверсарное ревью
             ppbOf: () => 5,
             boxSizeOf: () => '40x40x40',
             overrides: { '40x40x40': 4 },   // bpp 4 → upp 20
-            isNewcomer: () => false,
             freeByNm: { 1: pool },
         };
     };
@@ -163,7 +162,6 @@ describe('инцидент-композиция: конс-упаковка во�
         ppbOf: () => 22,
         boxSizeOf: () => '60x40x40',
         overrides: { '60x40x40': 16 },
-        isNewcomer: () => false,
     };
     const row = (qty: number): AssemblyDraftRow => ({
         nm_id: 599228796, barcode: 'bc', vendor_code: '80х160_синий',

@@ -20,7 +20,6 @@ const ctx: NormalizeDraftCtx = {
     ppbOf: () => PPB,
     boxSizeOf: () => '40x40x40',
     overrides: OVERRIDES,
-    isNewcomer: () => false,
     freeByNm: {},
 };
 const uppAt = (): number => 100; // bpp(override 10) × ppb(10)

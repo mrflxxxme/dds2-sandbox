@@ -17,7 +17,6 @@ const mkCtx = (free: Record<number, Record<number, number>> = {}): NormalizeDraf
     ppbOf: () => PPB,
     boxSizeOf: () => '40x40x40',
     overrides: { '40x40x40': 10 },
-    isNewcomer: () => false,
     freeByNm: free,
 });
 

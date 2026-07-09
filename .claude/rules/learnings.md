@@ -43,6 +43,7 @@ paths:
 - Cumulative consumption: `consumed: dict[id, qty]` как mutable state при sequential distribute
 - Composite priority chain: per-scope → SKU-level → derived-from-fact → derived-from-plan
 - Box-multiple распределение: кратность задаёт ФОРМУ (целые короба по потребности). Обычные SKU дослают хвост < короба россыпью (`distributeByBoxMultiple(..., looseTail=true)` + источник boxMode Pass 2) — иначе фрагментированный SKU молча выпадает. Новинки cold-start — СТРОГО (`looseTail=false`): хвост остаётся на ФФ (по требованию пользователя)
+- ОТГРУЗКА (черновик→заявка): россыпь запрещена ВСЕМ, включая новинки (канон юзера 2026-07-08). `normalizeDraft` без исключений: SKU без кратности (ни global, ни per-ФФ) не едет — паллет-срез снимает в dropped/предбронь; SKU без габаритов (вкл. новинку с кратностью) тоже уходит в предбронь, наружу — «Оставить так» ЦЕЛЫМИ коробами (`as_is` освобождает только от паллет-среза и только строки с известной кратностью); isNew-ветка `trimLinesToWholePallets` держит короб-инвариант для вызовов, передающих newcomerSet (предпросмотр)
 - Carve потока из сбалансированной матрицы: вычитать qty из `src` И `tgt` поровну → строка остаётся `Σsrc==Σtgt`
 - Force-pull mutable external fields: `_try_force_enrich_*` с try/except, не кэшировать
 - Idempotent seed: `SELECT ... GROUP BY project_id` → INSERT только для новых

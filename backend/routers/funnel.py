@@ -1004,3 +1004,150 @@ async def get_funnel_products(
             }
         )
     return {"products": products}
+
+
+# ── Кластеризатор поисковых кампаний ──────────────────────────────────────────
+class ClusterMinusRequest(BaseModel):
+    nm_id: int
+    norm_query: str
+    action: str = "add"  # add | remove
+
+
+@router.get("/campaigns/{campaign_id}/clusters")
+async def get_campaign_clusters_ep(
+    campaign_id: int,
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Поисковые кластеры кампании: статистика WB + классификация (голова/хвост/мусор),
+    дневное распределение бюджета (%) и флаги минус-фраз."""
+    from backend.services.funnel.cluster_analysis_service import get_campaign_clusters
+
+    return await get_campaign_clusters(db, project.id, campaign_id, date_from, date_to)
+
+
+@router.post("/campaigns/{campaign_id}/clusters/minus", dependencies=[Depends(rate_limit_write)])
+async def toggle_campaign_cluster_minus_ep(
+    campaign_id: int,
+    body: ClusterMinusRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Добавить/убрать кластер из минус-фраз кампании в кабинете WB (живое действие)."""
+    from backend.services.funnel.cluster_analysis_service import toggle_cluster_minus
+
+    return await toggle_cluster_minus(
+        db, project.id, campaign_id, body.nm_id, body.norm_query, body.action
+    )
+
+
+@router.get("/categories")
+async def list_ad_categories_ep(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Категории (subject) с рекламируемыми товарами — для селектора агрегации."""
+    from backend.services.funnel.cluster_analysis_service import list_categories
+
+    return await list_categories(db, project.id)
+
+
+@router.get("/categories/clusters")
+async def get_category_clusters_ep(
+    subject: str = Query(...),
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """On-demand агрегация кластеров по всем CPM-поиск-кампаниям категории:
+    средние/топ-запросы и разбивка по товарам (какие конвертят, какие нет)."""
+    from backend.services.funnel.cluster_analysis_service import get_category_clusters
+
+    return await get_category_clusters(db, project.id, subject, date_from, date_to)
+
+
+class ProductMinusRequest(BaseModel):
+    norm_query: str
+    action: str = "add"  # add | remove
+
+
+@router.get("/products/{nm_id}/clusters")
+async def get_product_clusters_ep(
+    nm_id: int,
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Поисковые кластеры одного артикула (nm_id) по всем его CPM-кампаниям —
+    для drill-down страницы из категорийной аналитики."""
+    from backend.services.funnel.cluster_analysis_service import get_product_clusters
+
+    return await get_product_clusters(db, project.id, nm_id, date_from, date_to)
+
+
+@router.post("/products/{nm_id}/clusters/minus", dependencies=[Depends(rate_limit_write)])
+async def toggle_product_cluster_minus_ep(
+    nm_id: int,
+    body: ProductMinusRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Добавить/убрать кластер из минус-фраз по всем CPM-кампаниям артикула (живое действие WB)."""
+    from backend.services.funnel.cluster_analysis_service import toggle_product_cluster_minus
+
+    return await toggle_product_cluster_minus(db, project.id, nm_id, body.norm_query, body.action)
+
+
+class ClusterBidRequest(BaseModel):
+    nm_id: int
+    norm_query: str
+    bid: float
+
+
+class ProductBidRequest(BaseModel):
+    norm_query: str
+    bid: float
+
+
+@router.post("/campaigns/{campaign_id}/clusters/bid", dependencies=[Depends(rate_limit_write)])
+async def set_campaign_cluster_bid_ep(
+    campaign_id: int,
+    body: ClusterBidRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ставка по кластеру кампании (живое действие WB; <100 показов WB не примет)."""
+    from backend.services.funnel.cluster_analysis_service import set_cluster_bid
+
+    return await set_cluster_bid(db, project.id, campaign_id, body.nm_id, body.norm_query, body.bid)
+
+
+@router.post("/products/{nm_id}/clusters/bid", dependencies=[Depends(rate_limit_write)])
+async def set_product_cluster_bid_ep(
+    nm_id: int,
+    body: ProductBidRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ставка по кластеру артикула — по всем его CPM-кампаниям (живое действие WB)."""
+    from backend.services.funnel.cluster_analysis_service import set_product_cluster_bid
+
+    return await set_product_cluster_bid(db, project.id, nm_id, body.norm_query, body.bid)
+
+
+@router.get("/products/{nm_id}/daily")
+async def get_product_daily_ep(
+    nm_id: int,
+    date_from: str = Query(...),
+    date_to: str = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Дневная статистика артикула (реклама + воронка продаж) — вкладка «По дням» карточки."""
+    from backend.services.funnel.cluster_analysis_service import get_product_daily
+
+    return await get_product_daily(db, project.id, nm_id, date_from, date_to)

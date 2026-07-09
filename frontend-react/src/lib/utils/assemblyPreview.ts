@@ -99,9 +99,12 @@ export interface TrimWholeResult {
  * отгрузка, не набравшая целой паллеты, убирается полностью.
  *
  * `uppOf(nmId, wbName)` — штук в полной паллете SKU на складе-цели (или null — без
- * габаритов/кратности). SKU без габаритов: ОБЫЧНЫЕ снимаются (в паллету не положить),
- * НОВИНКИ остаются РОССЫПЬЮ (cold-start засев — новинку надо отгрузить даже без
- * геометрии; видна в предпросмотре). Чистая функция.
+ * габаритов/кратности). SKU без габаритов снимаются (в паллету не положить); линии,
+ * помеченные `isNew` (вызовы с newcomerSet, напр. предпросмотр), — режутся до ЦЕЛЫХ
+ * коробов по `boxOf` вне паллетного счёта: россыпь запрещена ВСЕМ (канон 2026-07-08),
+ * некратный хвост / без кратности — на ФФ. Конвейер черновика (`normalizeDraft`)
+ * новинок НЕ помечает — там SKU без габаритов уходит в dropped/предбронь, наружу —
+ * через «Оставить так» (целые короба, as_is). Чистая функция.
  */
 export function trimLinesToWholePallets(
     lines: PreviewLine[],
@@ -136,16 +139,21 @@ export function trimLinesToWholePallets(
     let droppedUnits = 0;
     for (const g of groups.values()) {
         // Палетизируемые (upp!=null) режем до целых паллет. Без габаритов:
-        //  • НОВИНКА — НЕ срезаем, едет РОССЫПЬЮ (cold-start засев: новинку часто
-        //    нельзя посчитать в паллеты, но отгрузить её надо — видна в предпросмотре);
+        //  • isNew-линия (caller передал newcomerSet) — ЦЕЛЫЕ короба по boxOf вне
+        //    паллетного счёта; россыпь запрещена и ей (канон 2026-07-08): некратный
+        //    хвост / без кратности — снимается;
         //  • обычный SKU — снимаем целиком (в паллету не положить).
         const geomKm: Record<string, number> = {};
         for (const [nmStr, u] of Object.entries(g.km)) {
             const upp = uppOf(Number(nmStr), g.wb, g.ffId);
             if (upp != null && upp > 0) { geomKm[nmStr] = u; continue; }
             const line = g.meta.get(Number(nmStr));
-            if (line?.isNew) kept.push({ ...line, qty: u });
-            else { droppedUnits += u; if (line) droppedLines.push({ ...line, qty: u }); }
+            if (!line) { droppedUnits += u; continue; }
+            const bx = line.isNew ? (boxOf?.(Number(nmStr), g.ffId) ?? 0) : 0;
+            const wholeBoxUnits = bx > 0 ? Math.floor(u / bx) * bx : 0;
+            if (wholeBoxUnits > 0) kept.push({ ...line, qty: wholeBoxUnits });
+            const rest = u - wholeBoxUnits;
+            if (rest > 0) { droppedUnits += rest; droppedLines.push({ ...line, qty: rest }); }
         }
         // МОНО — упаковка ≤3 артикула на паллету (правило WB); КОРОБ/СЕЙФ — смешанный /
         // одиночный snap по суммарному footprint'у. Сигнатуры идентичны. boxOf в ОБЕ

@@ -341,10 +341,9 @@ export default function AssemblyDraftPage() {
             ppbAt: (nm, ffId) => nmPpbByWh.get(nm)?.[ffId] ?? null,
             boxSizeOf: (nm) => nmBoxSize.get(nm) ?? null,
             overrides: palletOverrides,
-            isNewcomer: (nm) => newcomerNmIds.has(nm),
             freeByNm,
         };
-    }, [stockNeed, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, newcomerNmIds]);
+    }, [stockNeed, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides]);
 
     // ЛОКАЛЬНАЯ нормализация (rows+prebook) без I/O — единый конвейер для self-heal
     // (normalizeAndSave) и ЛЮБОГО сохранения (saveDraft/autosave). Инвариант «целые
@@ -1164,13 +1163,10 @@ export default function AssemblyDraftPage() {
                 .filter(r => (r.tgt[wb] || 0) > 0);
             const combined = [...pbPortions, ...candidates];
             const norm = normalizeDraft(combined, buildNormalizeCtx([...rows, ...combined]));
-            // Новинки без кратности normalizeDraft оставляет «россыпью» (исключение из
-            // инварианта) — это НЕ собранная паллета. Успех дозабора считаем ТОЛЬКО по
-            // палетизированным строкам; россыпь-новинки возвращаем в предбронь. Иначе
-            // направление уезжало в черновик с ложным тостом «целыми паллетами».
-            const isLooseNewcomer = (nm: number) => newcomerNmIds.has(nm) && !((nmPpb.get(nm) || 0) > 0);
-            const palletizedRows = norm.rows.filter(r => !isLooseNewcomer(r.nm_id));
-            const looseKept = norm.rows.filter(r => isLooseNewcomer(r.nm_id));
+            // Россыпь запрещена всем (канон 2026-07-08): normalizeDraft исключений не
+            // имеет — SKU без кратности (вкл. новинки) уходит в norm.dropped и ниже
+            // возвращается в предбронь. norm.rows = только палетизированные строки.
+            const palletizedRows = norm.rows;
             const keptUnits = palletizedRows.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
             if (keptUnits <= 0) { showToast('Не удалось дособрать целую паллету — не хватает свободного ФФ', 'error'); return; }
             // Провенанс: дозабранные паллеты собраны с участием предброни направления.
@@ -1188,7 +1184,7 @@ export default function AssemblyDraftPage() {
                     return { ...r, tgt, src };
                 })
                 .filter(r => Object.keys(r.tgt).length > 0);
-            nextPrebook.push(...norm.dropped.filter(r => pbNm.has(r.nm_id)), ...looseKept.filter(r => pbNm.has(r.nm_id)));
+            nextPrebook.push(...norm.dropped.filter(r => pbNm.has(r.nm_id)));
             const targetNames = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.tgt))));
             const sourceIds = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
             const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: mergedRows, prebook: nextPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames }, event: { event_type: 'PREBOOK_TOPUP', summary: 'Дозабор из предброни' } });
@@ -1197,7 +1193,7 @@ export default function AssemblyDraftPage() {
             showToast(`Дособрано на «${wb}»: +${formatNumber(keptUnits, 0)} шт целыми паллетами`, 'success');
         } catch (e) { showToast(e instanceof Error ? e.message : 'Ошибка дозабивки', 'error'); }
         finally { setToppingUp(null); }
-    }, [draftId, geomState, prebook, rows, stockNeed, nmPpb, nmBoxSize, palletOverrides, newcomerNmIds, prebookAcceptance, buildNormalizeCtx, buildDistribution, applyDraft, showToast]);
+    }, [draftId, geomState, prebook, rows, stockNeed, nmPpb, nmBoxSize, palletOverrides, prebookAcceptance, buildNormalizeCtx, buildDistribution, applyDraft, showToast]);
 
     // Отгрузить неполную паллету направления КАК ЕСТЬ: переносим предбронь этой отгрузки
     // (упаковка × склад × ФФ) в черновик частичной паллетой (без дозабора до целой) и
@@ -1261,7 +1257,6 @@ export default function AssemblyDraftPage() {
             const shipRows: AssemblyDraftRow[] = [];
             let skipped = 0;
             let looseLeft = 0;   // остаток россыпью, оставшийся в предброни (не кратен коробу)
-            let looseShipped = 0; // уехало россыпью (SKU без кратности — резать не на что)
             const nextPrebook = prebook
                 .map(r => {
                     if ((r.package_type || 'BOX') !== pkg || !(r.tgt[wb] > 0) || !(r.src[chosenKey] > 0)) return r;
@@ -1271,14 +1266,12 @@ export default function AssemblyDraftPage() {
                     // перелили бы с одного ФФ и выкинули порцию другого.
                     const portion = allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0;
                     if (portion <= 0) return r;
-                    // «Кратность только коробки»: отгружаем ЦЕЛЫЕ коробы, остаток россыпью
-                    // (portion % ppb) оставляем в предброни (не везём неполный короб).
-                    // SKU без кратности (ppb неизвестен — товар лежит россыпью) везём порцию
-                    // целиком, но считаем отдельно — тост не рапортует её «целыми коробами».
-                    const ppb = nmPpb.get(r.nm_id) || 0;
-                    const moved = ppb > 0 ? Math.floor(portion / ppb) * ppb : portion;
+                    // Отгружаем только ЦЕЛЫЕ коробы (кратность этого ФФ, фолбэк — глобальная);
+                    // остаток < короба остаётся в предброни. РОССЫПЬ ЗАПРЕЩЕНА ВСЕМ (канон
+                    // 2026-07-08): SKU без кратности не отгружается и через «Оставить так».
+                    const ppb = nmPpbByWh.get(r.nm_id)?.[ffId] ?? (nmPpb.get(r.nm_id) || 0);
+                    const moved = ppb > 0 ? Math.floor(portion / ppb) * ppb : 0;
                     if (moved <= 0) { looseLeft += portion; return r; }  // целого короба нет — остаётся остатком
-                    if (ppb <= 0) looseShipped += moved;
                     looseLeft += portion - moved;
                     // as_is: сознательно отгруженная частичная — self-heal её не откатывает.
                     shipRows.push({ nm_id: r.nm_id, barcode: r.barcode, vendor_code: r.vendor_code, src: { [chosenKey]: moved }, tgt: { [wb]: moved }, package_type: pkg, as_is: true });
@@ -1288,9 +1281,13 @@ export default function AssemblyDraftPage() {
                 })
                 .filter(r => Object.keys(r.tgt).length > 0);
             if (shipRows.length === 0) {
-                showToast(skipped
-                    ? 'Все SKU направления закрыты WB — отгружать нечего'
-                    : 'Нет целых коробов — в направлении только остатки россыпью (неполные коробы)', 'error');
+                // Смешанный случай честно перечисляет обе причины (часть SKU закрыта WB,
+                // у остальных нет целого короба) — направление целиком остаётся в предброни.
+                const reasons = [
+                    skipped ? `⛔ ${formatNumber(skipped, 0)} SKU закрыты WB` : '',
+                    looseLeft ? 'нет целых коробов (россыпь запрещена — задайте кратность)' : '',
+                ].filter(Boolean).join(' · ');
+                showToast(`Отгружать нечего: ${reasons || 'нет порций этого ФФ'} — направление остаётся в предброни`, 'error');
                 return;
             }
             const movedUnits = shipRows.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
@@ -1302,20 +1299,15 @@ export default function AssemblyDraftPage() {
             const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: mergedRows, prebook: nextPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames } });
             healScopeRef.current = { ts: updated.updated_at, only: new Set([directionKey(pkg, wb)]) };
             applyDraft(updated);
-            const boxUnits = movedUnits - looseShipped;
             showToast(
-                `Отгружено как есть на «${wb}» (неполная паллета): `
-                + [
-                    boxUnits > 0 ? `+${formatNumber(boxUnits, 0)} шт целыми коробами` : '',
-                    looseShipped > 0 ? `+${formatNumber(looseShipped, 0)} шт россыпью (нет кратности короба)` : '',
-                ].filter(Boolean).join(' · ')
-                + (looseLeft ? ` · остаток ${formatNumber(looseLeft, 0)} шт остался в предброни (неполный короб)` : '')
+                `Отгружено как есть на «${wb}» (неполная паллета): +${formatNumber(movedUnits, 0)} шт целыми коробами`
+                + (looseLeft ? ` · остаток ${formatNumber(looseLeft, 0)} шт остался в предброни (неполный короб / без кратности)` : '')
                 + (skipped ? ` · ⛔ ${formatNumber(skipped, 0)} SKU закрыты WB — оставлены в предброни` : ''),
                 'success',
             );
         } catch (e) { showToast(e instanceof Error ? e.message : 'Ошибка отгрузки', 'error'); }
         finally { setShippingAsIs(null); }
-    }, [draftId, shippingAsIs, prebook, rows, nmPpb, prebookAcceptance, buildDistribution, applyDraft, showToast]);
+    }, [draftId, shippingAsIs, prebook, rows, nmPpb, nmPpbByWh, prebookAcceptance, buildDistribution, applyDraft, showToast]);
 
     // Удалить ВСЁ направление (упаковка × склад × ФФ) из предброни одним действием.
     // Снимаем порцию (ffId→wb) со ВСЕХ строк направления (скоуп по ffId через allocatePairs,
