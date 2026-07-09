@@ -16,6 +16,7 @@ import {
     finalizeDraftDistribution,
     planBoxTopUpFf,
     rowsToPreDistRows,
+    sliceRowsByFf,
     splitByKratnost,
     type AcceptanceSplitMap,
     type CellEdits,
@@ -31,6 +32,7 @@ import type {
     AcceptanceCheckPerItem,
     AcceptanceFlags,
     AssemblyDraftRow,
+    LocalizationSkuRow,
     PackageType,
     StockNeedArticle,
     StockNeedResponse,
@@ -49,7 +51,15 @@ const districtTint = (d: string): string | undefined => {
     return c ? `color-mix(in srgb, ${c} 6%, transparent)` : undefined;
 };
 
-type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
+type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'need' | 'revenue' | 'loc' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
+
+// Цвет «Лок %» по статусу КТР (excellent/neutral/weak/critical) — как на странице «Локализация».
+const LOC_STATUS_COLOR: Record<string, string> = {
+    excellent: 'var(--color-success)',
+    neutral: 'var(--color-text)',
+    weak: 'var(--color-warning)',
+    critical: 'var(--color-danger)',
+};
 
 /** Ключ строки распределения для замены по SKU (nm × баркод × упаковка × as_is) —
  *  зеркало бэкенд-ключа `_merge_rows`/`_dedupe_rows`. */
@@ -125,6 +135,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
     const [stockNeed, setStockNeed] = useState<StockNeedResponse | null>(null);
+    const [locByNm, setLocByNm] = useState<Map<number, LocalizationSkuRow>>(new Map());
     const [newcomerSet, setNewcomerSet] = useState<Set<number>>(new Set());
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
     const [nmBoxSize, setNmBoxSize] = useState<Map<number, string | null>>(new Map());
@@ -174,7 +185,11 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             setLoading(true);
             setError(null);
             try {
-                const [need, cold, boxMult, palletOv, preorder] = await Promise.all([
+                // Индекс локализации — то же 14-дневное окно, что analysis_days потребности.
+                const locTo = new Date();
+                const locFrom = new Date(locTo.getTime() - 13 * 86_400_000);
+                const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+                const [need, cold, boxMult, palletOv, preorder, locSkus] = await Promise.all([
                     // Первичный источник экрана — НЕ глушим (иначе 500 покажет пустое «нечего
                     // отгружать» вместо ошибки). Отказ → reject Promise.all → error-стейт.
                     api.getStockNeed(14, 14, 'actual', true, true, 0) as Promise<StockNeedResponse>,
@@ -182,9 +197,11 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                     api.getBoxMultiplicity().catch(() => null),
                     api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
                     api.getPreorderAllowedWarehouses().catch(() => [] as string[]),
+                    api.getLocalizationSkus(isoDay(locFrom), isoDay(locTo)).catch(() => [] as LocalizationSkuRow[]),
                 ]);
                 if (controller.signal.aborted) return;
                 setStockNeed(need);
+                setLocByNm(new Map(locSkus.map((r) => [r.nm_id, r])));
                 setPreorderWbs(new Set(preorder));
                 setPromotedDirs(new Set());
                 setHiddenDirs(new Set());
@@ -388,6 +405,30 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const matrix = useMemo(() => buildDistAgg(distRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides), [distRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
     const submitRows = commit.submitRows;
 
+    // ─── ФФ-срез (лупа «Склад забора»): показываем ДОЛЮ выбранного ФФ ────────
+    // Чистое отображение, раскладку/запись не трогает. Пары ФФ→WB — тот же
+    // `allocatePairs`, что карточки черновика → числа сходятся с карточкой ФФ.
+    // В ручном режиме срез ПРИОСТАНОВЛЕН (степперы правят ПОЛНУЮ раскладку),
+    // но видимость строк держится по срезу — набор строк не прыгает.
+    const ffFilterId = filterFf ? Number(filterFf) : null;
+    const ffSliceActive = ffFilterId != null && !editMode;
+    const slicedRowsBox = useMemo(
+        () => (ffFilterId != null ? sliceRowsByFf(distRowsBox, ffFilterId) : distRowsBox),
+        [ffFilterId, distRowsBox],
+    );
+    const sliceAgg = useMemo(
+        () => (ffFilterId != null ? buildDistAgg(slicedRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides) : matrix),
+        [ffFilterId, slicedRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides, matrix],
+    );
+    /** Агрегат ЗНАЧЕНИЙ таблицы: доля ФФ при активном срезе, иначе полная матрица. */
+    const viewAgg = ffSliceActive ? sliceAgg : matrix;
+    /** Наличие строки: остаток ИМЕННО выбранного ФФ при срезе, иначе Σ всех ФФ. */
+    const availOf = useCallback((a: StockNeedArticle): number => (
+        ffSliceActive
+            ? Math.max(0, Math.floor(Number(a.rf_stocks?.[ffFilterId!]?.available) || 0))
+            : (availByBc.get(a.barcode) ?? 0)
+    ), [ffSliceActive, ffFilterId, availByBc]);
+
     const enrichMap = useMemo(() => enrichArticles(articles, stockNeed, newcomerSet), [articles, stockNeed, newcomerSet]);
 
     const wbCols = useMemo(() => {
@@ -543,19 +584,22 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const sortValue = useCallback((a: StockNeedArticle, key: SortKey): number | string => {
         const nm = a.nm_id;
         const e = enrichMap.get(nm);
-        const ship = matrix.allocByBc.get(a.barcode) ?? 0;
-        const avail = availByBc.get(a.barcode) ?? 0;
+        const ship = viewAgg.allocByBc.get(a.barcode) ?? 0;
+        const avail = availOf(a);
         switch (key) {
             case 'label': return (a.vendor_code || a.barcode).toLowerCase();
             case 'avail': return avail;
             case 'inAssembly': return e?.inAssembly ?? 0;
             case 'stocksWb': return e?.stocksWb ?? 0;
+            case 'need': return Number(a.total_need) || 0;
+            case 'revenue': return Number(a.revenue_30d) || 0;
+            case 'loc': return locByNm.has(nm) ? Number(locByNm.get(nm)!.loc_pct) || 0 : -1;
             case 'ship': return ship;
             case 'boxes': return boxesOf(ship, nmPpb.get(nm));
             case 'stays': return Math.max(0, avail - ship);
-            default: return matrix.cellByBc.get(a.barcode)?.get(key.slice(3))?.qty ?? 0;
+            default: return viewAgg.cellByBc.get(a.barcode)?.get(key.slice(3))?.qty ?? 0;
         }
-    }, [enrichMap, matrix, availByBc, nmPpb]);
+    }, [enrichMap, viewAgg, availOf, nmPpb, locByNm]);
 
     const sortedRows = useMemo(() => {
         const rows = [...articles];
@@ -572,6 +616,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     // ─── Фильтр таблицы: предмет / бренд / скрыть нераспределённые ───────────
     // Лупа по ОТОБРАЖЕНИЮ (не по расчёту) — раскладка/паллеты/KPI считаются по всему
     // ФФ-стоку, фильтр лишь сужает видимые строки (черновик масштаба = сотни артикулов).
+    // ФФ-фильтр вдобавок СРЕЗАЕТ значения до доли этого склада (viewAgg/availOf выше).
     const subjectOptions = useMemo(
         () => [...new Set(articles.map((a) => a.subject).filter(Boolean))].sort((x, y) => x.localeCompare(y, 'ru')),
         [articles],
@@ -592,26 +637,32 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         () => sortedRows.filter((a) => {
             if (filterSubject && a.subject !== filterSubject) return false;
             if (filterBrand && a.brand !== filterBrand) return false;
-            if (filterFf && (Number(a.rf_stocks?.[Number(filterFf)]?.available) || 0) <= 0) return false;
-            if (hideEmpty && (matrix.allocByBc.get(a.barcode) ?? 0) <= 0) return false;
+            if (ffFilterId != null) {
+                // Виден, если на этом ФФ есть остаток ИЛИ раскладка что-то с него забирает
+                // (sliceAgg, не viewAgg — набор строк стабилен при входе в ручной режим).
+                const availFf = Number(a.rf_stocks?.[ffFilterId]?.available) || 0;
+                const shipFf = sliceAgg.allocByBc.get(a.barcode) ?? 0;
+                if (availFf <= 0 && shipFf <= 0) return false;
+            }
+            if (hideEmpty && (viewAgg.allocByBc.get(a.barcode) ?? 0) <= 0) return false;
             return true;
         }),
-        [sortedRows, filterSubject, filterBrand, filterFf, hideEmpty, matrix],
+        [sortedRows, filterSubject, filterBrand, ffFilterId, hideEmpty, sliceAgg, viewAgg],
     );
 
     // Итоги колонок («Сдаём» / футер) — по ВИДИМЫМ строкам, чтобы суммы под складами
-    // соответствовали фильтру. Без фильтра === полная матрица (переиспользуем `matrix`).
+    // соответствовали фильтру; при активном ФФ-срезе — по срезанным строкам (доля ФФ).
+    // Без фильтра === полная матрица (переиспользуем `viewAgg`).
     const isFiltered = !!(filterSubject || filterBrand || filterFf || hideEmpty);
     const visibleBarcodes = useMemo(() => new Set(visibleRows.map((a) => a.barcode)), [visibleRows]);
-    const matrixView = useMemo(
-        () => (isFiltered
-            ? buildDistAgg(distRowsBox.filter((r) => visibleBarcodes.has(r.barcode)), nmByBc, nmPpb, nmBoxSize, palletOverrides)
-            : matrix),
-        [isFiltered, distRowsBox, visibleBarcodes, nmByBc, nmPpb, nmBoxSize, palletOverrides, matrix],
-    );
+    const matrixView = useMemo(() => {
+        if (!isFiltered) return viewAgg;
+        const base = ffSliceActive ? slicedRowsBox : distRowsBox;
+        return buildDistAgg(base.filter((r) => visibleBarcodes.has(r.barcode)), nmByBc, nmPpb, nmBoxSize, palletOverrides);
+    }, [isFiltered, viewAgg, ffSliceActive, slicedRowsBox, distRowsBox, visibleBarcodes, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
     const matrixViewOnHold = useMemo(
-        () => visibleRows.reduce((s, a) => s + Math.max(0, (availByBc.get(a.barcode) ?? 0) - (matrixView.allocByBc.get(a.barcode) ?? 0)), 0),
-        [visibleRows, availByBc, matrixView],
+        () => visibleRows.reduce((s, a) => s + Math.max(0, availOf(a) - (matrixView.allocByBc.get(a.barcode) ?? 0)), 0),
+        [visibleRows, availOf, matrixView],
     );
 
     // «Записать в черновик» — ЗАМЕНА по SKU (не сложение): строки черновика по SKU, которые
@@ -780,6 +831,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                     <div style={{ color: 'var(--color-muted)', fontSize: 13 }}>
                         Матрица показывает <b style={{ color: 'var(--color-text)' }}>коробное покрытие</b> потребности (целые коробы под потребность каждого WB-склада), источник — весь свободный остаток ФФ.
                         Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · что сдаём коробом.
+                        Метрики SKU за окно 14 дней: <b style={{ color: 'var(--color-text)' }}>Потр. 14д</b> (потребность движка) · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> (выручка) · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (индекс локализации, цвет — статус КТР).
                         В <b style={{ color: 'var(--color-text)' }}>черновик</b> пишутся только целые паллеты; неполные — в 🅿️ Предбронь. Поэтому числа матрицы и черновика могут расходиться.
                     </div>
                     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
@@ -806,6 +858,16 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                 <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>показано {formatNumber(visibleRows.length, 0)} из {formatNumber(sortedRows.length, 0)}</span>
                             </>
                         )}
+                        {ffSliceActive && ffFilterId != null && (
+                            <span style={{ fontSize: 12, color: 'var(--color-accent)' }} title="Ячейки, «Σ отпр.», «На ФФ», «Остаётся ФФ» и итоги показывают только то, что забираем с этого склада (как в карточке черновика). Шапка «К отправке» и «Записать в черновик» — вся матрица.">
+                                📍 срез: доля забора с «{ffNameById.get(ffFilterId) || `ФФ ${ffFilterId}`}» · шапка и запись — вся матрица
+                            </span>
+                        )}
+                        {editMode && filterFf && (
+                            <span style={{ fontSize: 12, color: 'var(--color-warning)' }}>
+                                ФФ-срез приостановлен на время ручной правки — показана полная раскладка
+                            </span>
+                        )}
                     </div>
                 </div>
 
@@ -820,7 +882,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                             <thead>
                                 <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                    <th colSpan={4} style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }} />
+                                    <th colSpan={7} style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }} />
                                     {districtGroups.map((g, i) => (
                                         <th key={i} colSpan={g.count} style={{ padding: '6px 8px', textAlign: 'center', color: '#fff', background: g.color, fontSize: 11, letterSpacing: 0.4, textTransform: 'uppercase' }}>
                                             {g.label}
@@ -833,6 +895,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('avail')} title="Сортировать по остатку на ФФ">На ФФ{sortArrow('avail')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('inAssembly')} title="Уже в сборке на WB">В сборке{sortArrow('inAssembly')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('stocksWb')} title="Остаток на Wildberries">На WB{sortArrow('stocksWb')}</th>
+                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('need')} title="Потребность на горизонт 14 дней (движок раскладки: скорость заказов за 14 дней; глобальная метрика SKU — ФФ-фильтр не влияет)">Потр. 14д{sortArrow('need')}</th>
+                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('revenue')} title="Выручка за 14 дней (продажи − возвраты, окно тренда движка потребности)">₽ 14д{sortArrow('revenue')}</th>
+                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('loc')} title="Индекс локализации артикула за 14 дней (доля локальных заказов; цвет — статус КТР)">Лок %{sortArrow('loc')}</th>
                                     {wbCols.map((c) => (
                                         <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap', background: districtTint(c.district), ...sortableTh }} onClick={() => toggleSort(`wb:${c.name}`)} title={`Сортировать по отправке в «${c.name}»`}>{c.name}{sortArrow(`wb:${c.name}`)}</th>
                                     ))}
@@ -844,7 +909,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                     <td style={{ padding: '6px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }}>
                                         Сдаём <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--color-muted)' }}>шт · кор</span>
                                     </td>
-                                    <td colSpan={3} />
+                                    <td colSpan={6} />
                                     {wbCols.map((c) => {
                                         const u = matrixView.shipByWh.get(c.name) ?? 0;
                                         const bx = matrixView.boxesByWh.get(c.name) ?? 0;
@@ -864,10 +929,10 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                 {visibleRows.map((a) => {
                                     const nm = a.nm_id;
                                     const e: EnrichedSku | undefined = enrichMap.get(nm);
-                                    const avail = availByBc.get(a.barcode) ?? 0;
-                                    const ship = matrix.allocByBc.get(a.barcode) ?? 0;
+                                    const avail = availOf(a);
+                                    const ship = viewAgg.allocByBc.get(a.barcode) ?? 0;
                                     const stays = Math.max(0, avail - ship);
-                                    const cells = matrix.cellByBc.get(a.barcode);
+                                    const cells = viewAgg.cellByBc.get(a.barcode);
                                     const ppb = nmPpb.get(nm);
                                     const label = a.vendor_code || String(nm) || a.barcode;
                                     const rowBoxes = boxesOf(ship, ppb);
@@ -892,6 +957,22 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                             <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(avail, 0)}</td>
                                             <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.inAssembly > 0 ? formatNumber(e.inAssembly, 0) : '·'}</td>
                                             <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.stocksWb > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.stocksWb > 0 ? formatNumber(e.stocksWb, 0) : '·'}</td>
+                                            {(() => {
+                                                const needQty = Number(a.total_need) || 0;
+                                                const rev = Number(a.revenue_30d) || 0;
+                                                const loc = locByNm.get(nm);
+                                                const locPct = loc ? Number(loc.loc_pct) || 0 : null;
+                                                return (
+                                                    <>
+                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: needQty > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{needQty > 0 ? formatNumber(needQty, 0) : '·'}</td>
+                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: rev > 0 ? 'var(--color-muted)' : 'var(--color-dim)' }}>{rev > 0 ? formatNumber(rev, 0) : '·'}</td>
+                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: locPct != null ? (LOC_STATUS_COLOR[loc!.status] || 'var(--color-text)') : 'var(--color-dim)' }}
+                                                            title={loc ? `Заказов 14д: ${formatNumber(loc.total, 0)} · локальных: ${formatNumber(loc.local, 0)} · КТР ${formatNumber(Number(loc.ktr), 2)}` : 'Нет данных локализации за окно 14 дней'}>
+                                                            {locPct != null ? `${formatNumber(locPct, 0)}%` : '·'}
+                                                        </td>
+                                                    </>
+                                                );
+                                            })()}
                                             {wbCols.map((c) => {
                                                 const cell = cells?.get(c.name);
                                                 const ctx = e?.byWh[c.name];
@@ -921,7 +1002,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                 })}
                                 {visibleRows.length === 0 && (
                                     <tr>
-                                        <td colSpan={wbCols.length + 7} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
+                                        <td colSpan={wbCols.length + 10} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
                                             Ничего не найдено по выбранному фильтру
                                         </td>
                                     </tr>
@@ -930,7 +1011,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                             <tfoot>
                                 <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600 }}>
                                     <td style={{ padding: '8px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>Отправить, шт</td>
-                                    <td colSpan={3} />
+                                    <td colSpan={6} />
                                     {wbCols.map((c) => (
                                         <td key={c.name} style={{ padding: '8px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{formatNumber(matrixView.shipByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
@@ -939,7 +1020,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                 </tr>
                                 <tr style={{ color: 'var(--color-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>📦 Коробов</td>
-                                    <td colSpan={3} />
+                                    <td colSpan={6} />
                                     {wbCols.map((c) => (
                                         <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.boxesByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
@@ -948,7 +1029,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                 </tr>
                                 <tr style={{ color: 'var(--color-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>🚚 Паллет</td>
-                                    <td colSpan={3} />
+                                    <td colSpan={6} />
                                     {wbCols.map((c) => (
                                         <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.palletsByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}

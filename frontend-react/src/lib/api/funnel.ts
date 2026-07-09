@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress } from '@/types/api';
+import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsCampaignStateResult, AdsAutopaySaveResult, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, ClusterMinusResult, ClusterBidResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -132,7 +132,11 @@ export function addFunnelMethods(api: ApiClient) {
             return api.request<Record<string, AdsAutopaySetting>>('GET', '/api/v1/funnel/campaigns/autopay');
         },
         setCampaignAutopay(campaignId: number, setting: AdsAutopaySetting) {
-            return api.request<Record<string, AdsAutopaySetting>>('POST', '/api/v1/funnel/campaigns/autopay', { campaign_id: campaignId, ...setting });
+            return api.request<AdsAutopaySaveResult>('POST', '/api/v1/funnel/campaigns/autopay', { campaign_id: campaignId, ...setting });
+        },
+        /** Запустить (active=true) или поставить кампанию на паузу (false) в WB. */
+        setCampaignState(campaignId: number, active: boolean) {
+            return api.request<AdsCampaignStateResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/state`, { active });
         },
         getAutopayLog(campaignId?: number) {
             const q = new URLSearchParams();
@@ -160,6 +164,38 @@ export function addFunnelMethods(api: ApiClient) {
         },
         firstSync() {
             return api.request<{ status: string }>('POST', '/api/v1/funnel/first_sync');
+        },
+        // ─── Кластеризатор рекламных запросов ───
+        getCampaignClusters(campaignId: number, dateFrom: string, dateTo: string) {
+            const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
+            return api.request<CampaignClustersResponse>('GET', `/api/v1/funnel/campaigns/${campaignId}/clusters?${q.toString()}`);
+        },
+        toggleClusterMinus(campaignId: number, body: { nm_id: number; norm_query: string; action: 'add' | 'remove' }) {
+            return api.request<ClusterMinusResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/clusters/minus`, body);
+        },
+        setCampaignClusterBid(campaignId: number, body: { nm_id: number; norm_query: string; bid: number }) {
+            return api.request<ClusterBidResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/clusters/bid`, body);
+        },
+        getAdCategories() {
+            return api.request<AdCategory[]>('GET', '/api/v1/funnel/categories');
+        },
+        getCategoryClusters(subject: string, dateFrom: string, dateTo: string) {
+            const q = new URLSearchParams({ subject, date_from: dateFrom, date_to: dateTo });
+            return api.request<CategoryClustersResponse>('GET', `/api/v1/funnel/categories/clusters?${q.toString()}`);
+        },
+        getProductClusters(nmId: number, dateFrom: string, dateTo: string) {
+            const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
+            return api.request<ProductClustersResponse>('GET', `/api/v1/funnel/products/${nmId}/clusters?${q.toString()}`);
+        },
+        getProductDaily(nmId: number, dateFrom: string, dateTo: string): Promise<ProductDailyResponse> {
+            const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
+            return api.request<ProductDailyResponse>('GET', `/api/v1/funnel/products/${nmId}/daily?${q.toString()}`);
+        },
+        toggleProductClusterMinus(nmId: number, body: { norm_query: string; action: 'add' | 'remove' }) {
+            return api.request<ProductMinusResult>('POST', `/api/v1/funnel/products/${nmId}/clusters/minus`, body);
+        },
+        setProductClusterBid(nmId: number, body: { norm_query: string; bid: number }) {
+            return api.request<ClusterBidResult>('POST', `/api/v1/funnel/products/${nmId}/clusters/bid`, body);
         },
         getFirstSyncProgress() {
             return api.request<FirstSyncProgress>('GET', '/api/v1/funnel/first_sync_progress');

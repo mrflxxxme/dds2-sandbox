@@ -112,7 +112,23 @@ class FakeClient:
         self.bind_sent = bind
 
     async def trn_details(self, supply_id):
-        return {"details": {"trns": [{"barcode": {"barcodeId": 999}}]}}
+        return {
+            "details": {
+                "trns": [
+                    {
+                        "barcode": {"barcodeId": 999, "barcodePrefix": "WB-GI-"},
+                        "firstName": "Александр",
+                        "lastName": "Рыболов",
+                        "carModel": "газ",
+                        "carNumber": "O253PY790",
+                        "quantity": 7,
+                        "phone": "",
+                        "dateFrom": "2026-07-10T00:00:00+03:00",
+                        "dateTo": "2026-07-12T00:00:00+03:00",
+                    }
+                ]
+            }
+        }
 
     async def set_trn(self, **kw):
         self.trn_saved = kw
@@ -592,3 +608,26 @@ async def test_get_cabinet_boxes_empty_without_supply(db_session, monkeypatch):
     res = await wb_supply_service.get_cabinet_boxes(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert res.total_boxes == 0
     assert res.boxes == []
+
+
+@pytest.mark.asyncio
+async def test_get_cabinet_pass_from_adopted_supply(db_session, monkeypatch):
+    # Пропуск заведён в кабинете → тянем его из trn_details по supply_id из FBO.
+    await _attach_fbo(db_session, "40566125", "IN_PROGRESS")
+    await _patch_client(monkeypatch, FakeClient())
+    p = await wb_supply_service.get_cabinet_pass(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert p.has_pass is True
+    assert p.driver_first == "Александр"
+    assert p.driver_last == "Рыболов"
+    assert p.car_number == "O253PY790"
+    assert p.pallets == 7
+    assert p.barcode_id == 999
+    assert p.barcode_prefix == "WB-GI-"
+
+
+@pytest.mark.asyncio
+async def test_get_cabinet_pass_empty_without_supply(db_session, monkeypatch):
+    # Без supply — пустой пропуск, в WB не ходим.
+    await _patch_client(monkeypatch, FakeClient())
+    p = await wb_supply_service.get_cabinet_pass(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert p.has_pass is False

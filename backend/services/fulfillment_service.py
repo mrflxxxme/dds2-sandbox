@@ -819,8 +819,13 @@ async def sync_warehouse(db: AsyncSession, project_id: int, warehouse_id: int) -
             FulfillmentRequest.provider == provider,
             FulfillmentRequest.kind == FfRequestKind.INBOUND.value,
             FulfillmentRequest.inbound_receipt_id.is_not(None),
+            # is_completed — строгий сигнал приёма (см. _inbound_accept_signal).
+            # archived НЕ фильтруем: skladbot при завершении приёмки ставит
+            # is_completed И archived=True одновременно → фильтр archived==False
+            # навсегда оставлял бы такую приёмку EXPECTED (прод-баг WH-R-204611
+            # → receipt 201). Отменённые приходят archived БЕЗ is_completed и
+            # отсекаются этим же is_completed==True. Симметрично авто-SHIP сборок.
             FulfillmentRequest.is_completed == True,
-            FulfillmentRequest.archived == False,
             FulfillmentRequest.local_archived == False,
         )
         .limit(_MIRROR_SELECT_LIMIT)
@@ -4788,7 +4793,9 @@ async def link_request(
         # DRAFT → принимаем сразу, не дожидаясь синка. Сам accept_receipt — ПОСЛЕ
         # commit, своей сессией (постит сток и коммитит сам), как в sync_warehouse.
         accept_inbound = (
-            not req.archived
+            # archived НЕ блокирует, если заявка завершена (is_completed): ФФ
+            # принял приёмку и сдал заявку в архив — принять надо (как в синке).
+            (not req.archived or req.is_completed)
             and not req.local_archived
             and _inbound_accept_signal(req.provider, req.stage_code, req.stage_title, req.is_completed)
             and inb_doc.status in (InboundStatus.DRAFT.value, InboundStatus.EXPECTED.value)

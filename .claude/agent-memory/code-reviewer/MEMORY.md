@@ -1,1 +1,2 @@
 - [Pre-dist over-commit invariant](pre-dist-overcommit-invariant.md) — pre-distribution guard is vehicle-pool-based (gross−reserved), not WarehouseStock; why IN_PROGRESS-fold is safe
+- [Assembly-draft loose-ban canon](assembly-draft-loose-ban-canon.md) — россыпь запрещена всем (2026-07-08); trim's newcomer-whole-box branch is unwired end-to-end (only tests pass boxOf+newcomers)

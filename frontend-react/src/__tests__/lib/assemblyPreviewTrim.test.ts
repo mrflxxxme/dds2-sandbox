@@ -101,23 +101,32 @@ describe('trimLinesToWholePallets', () => {
         expect(r.droppedUnits).toBe(80);
     });
 
-    it('новинка без габаритов — едет РОССЫПЬЮ (гибрид: не снимается)', () => {
+    it('новинка без кратности — СНИМАЕТСЯ (россыпь запрещена всем, канон 2026-07-08)', () => {
         const r = trimLinesToWholePallets([newLine(1, 'Казань', 999, 50)], uppOf);
-        expect(r.kept).toHaveLength(1);
-        expect(r.kept[0].nmId).toBe(999);
-        expect(r.kept[0].qty).toBe(50);
-        expect(r.droppedUnits).toBe(0);
-        expect(r.removedSupplies).toBe(0);
+        expect(r.kept).toHaveLength(0);
+        expect(r.droppedUnits).toBe(50);
+        expect(r.droppedLines).toHaveLength(1);
+        expect(r.droppedLines[0].nmId).toBe(999);
     });
 
-    it('гибрид: новинка б/габ остаётся, ОБЫЧНЫЙ б/габ снимается', () => {
-        const r = trimLinesToWholePallets([
-            newLine(1, 'Казань', 999, 50),  // новинка б/габ → россыпью
-            line(1, 'Казань', 998, 40),     // обычный б/габ (998∉UPP→null) → снять
-        ], uppOf);
+    it('новинка с кратностью, но без габаритов — едет ЦЕЛЫМИ коробами, хвост снят', () => {
+        // ppb=24, габаритов нет (upp=null): 50 → 48 (2 короба) едут, 2 шт на ФФ.
+        const r = trimLinesToWholePallets([newLine(1, 'Казань', 999, 50)], uppOf, (nm) => (nm === 999 ? 24 : null));
         expect(r.kept).toHaveLength(1);
         expect(r.kept[0].nmId).toBe(999);
-        expect(r.droppedUnits).toBe(40);
+        expect(r.kept[0].qty).toBe(48);
+        expect(r.droppedUnits).toBe(2);
+    });
+
+    it('гибрид: новинка б/габ с кратностью едет коробами, ОБЫЧНЫЙ б/габ снимается', () => {
+        const r = trimLinesToWholePallets([
+            newLine(1, 'Казань', 999, 50),  // новинка б/габ, ppb=24 → 48 целыми коробами
+            line(1, 'Казань', 998, 40),     // обычный б/габ (998∉UPP→null) → снять
+        ], uppOf, (nm) => (nm === 999 ? 24 : null));
+        expect(r.kept).toHaveLength(1);
+        expect(r.kept[0].nmId).toBe(999);
+        expect(r.kept[0].qty).toBe(48);
+        expect(r.droppedUnits).toBe(42);
     });
 
     it('новинка С геометрией режется до целых паллет как обычная (sub-pallet снят)', () => {

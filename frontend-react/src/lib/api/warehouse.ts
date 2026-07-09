@@ -926,5 +926,9 @@ export function addWarehouseMethods(api: ApiClient) {
         wbSupplyCabinetBoxes(assemblyId: number) {
             return api.request<import('@/types/api').WbCabinetBoxes>('GET', `/api/v1/warehouse/assembly/${assemblyId}/wb/cabinet-boxes`);
         },
+        // Существующий пропуск поставки из кабинета WB — вкладка «Пропуск».
+        wbSupplyCabinetPass(assemblyId: number) {
+            return api.request<import('@/types/api').WbCabinetPass>('GET', `/api/v1/warehouse/assembly/${assemblyId}/wb/cabinet-pass`);
+        },
     };
 }

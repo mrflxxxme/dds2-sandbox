@@ -287,6 +287,83 @@ async def set_autopay_setting(db: AsyncSession, project_id: int, campaign_id: in
     return settings
 
 
+async def save_autopay_and_maybe_activate(
+    db: AsyncSession, project_id: int, campaign_id: int, entry: dict
+) -> dict:
+    """Сохранить настройку автопополнения; если включили — активировать кампанию.
+
+    На паузе WB кампанию не откручивает → автопополнение для неё бессмысленно,
+    поэтому включение автопополнения запускает кампанию (best-effort: ошибка WB
+    не мешает сохранению настройки, а возвращается вызывающему для показа).
+
+    Возвращает {"settings": {...}, "activation": {ok,status,error} | None}.
+    """
+    settings = await set_autopay_setting(db, project_id, campaign_id, entry)
+    activation = None
+    if bool(entry.get("enabled")) and float(entry.get("amount") or 0) > 0:
+        # Активируем ТОЛЬКО кампанию на паузе. На уже активной (9) WB start
+        # отбился бы ошибкой → ложный баннер + лишний write при правке суммы.
+        status = (
+            await db.execute(
+                select(WbAdCampaign.status).where(
+                    WbAdCampaign.project_id == project_id,
+                    WbAdCampaign.campaign_id == campaign_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if status == CAMPAIGN_STATUS_PAUSED:
+            activation = await set_campaign_active(db, project_id, campaign_id, True)
+    return {"settings": settings, "activation": activation}
+
+
+# ─── Пауза / запуск кампании (реальный вызов WB) ─────────────────────────────
+
+CAMPAIGN_STATUS_ACTIVE = 9
+CAMPAIGN_STATUS_PAUSED = 11
+
+
+async def _get_advert_api_key(db: AsyncSession, project_id: int) -> str | None:
+    """Ключ для рекламных вызовов — каскад wb_advert → wb_analytics → wb."""
+    from backend.services.funnel.wb_api_client import get_wb_key
+
+    return (
+        await get_wb_key(db, project_id, "wb_advert")
+        or await get_wb_key(db, project_id, "wb_analytics")
+        or await get_wb_key(db, project_id, "wb")
+    )
+
+
+async def set_campaign_active(db: AsyncSession, project_id: int, campaign_id: int, active: bool) -> dict:
+    """Запустить (active=True) или поставить на паузу (False) кампанию в WB.
+
+    Дёргает WB start/pause; при успехе синхронно обновляет наш WbAdCampaign.status
+    (чтобы UI не ждал часового синка). Возвращает {"ok", "status", "error"}.
+    """
+    from backend.services.funnel.wb_advertising_api import set_campaign_state
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, "status": None, "error": "Нет WB-ключа с доступом к рекламе."}
+
+    result = await set_campaign_state(api_key, campaign_id, "start" if active else "pause")
+    if not result["ok"]:
+        return {"ok": False, "status": None, "error": result.get("error")}
+
+    new_status = CAMPAIGN_STATUS_ACTIVE if active else CAMPAIGN_STATUS_PAUSED
+    row = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id,
+                WbAdCampaign.campaign_id == campaign_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is not None:
+        row.status = new_status
+        await db.commit()
+    return {"ok": True, "status": new_status, "error": None}
+
+
 # ─── Автопополнение: журнал и исполнение (реальные деньги) ───────────────────
 
 AUTOPAY_LOG_KEY = "ads_autopay_log"

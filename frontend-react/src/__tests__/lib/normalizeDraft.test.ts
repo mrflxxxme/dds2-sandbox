@@ -8,7 +8,6 @@ const PPB = 10;
 const ctx: NormalizeDraftCtx = {
     ppbOf: () => PPB,
     boxSizeOf: () => SIZE,
-    isNewcomer: () => false,
 };
 
 const row = (
@@ -133,7 +132,6 @@ describe('normalizeDraft — инвариант «целые коробы + це
         const fctx: NormalizeDraftCtx = {
             ppbOf: (nm) => PPB[nm] ?? 1,
             boxSizeOf: () => SIZE,
-            isNewcomer: () => false,
         };
         for (let t = 0; t < 3000; t++) {
             const rows: AssemblyDraftRow[] = [];
@@ -166,16 +164,27 @@ describe('normalizeDraft — инвариант «целые коробы + це
         }
     });
 
-    it('новинка cold-start (ppb=null) едет россыпью, не палетизируется и не дропается', () => {
+    it('новинка cold-start (ppb=null) НЕ едет — россыпь запрещена всем (канон 2026-07-08)', () => {
         const nctx: NormalizeDraftCtx = {
             ppbOf: (nm) => (nm === 999 ? null : PPB),
             boxSizeOf: () => SIZE,
-            isNewcomer: (nm) => nm === 999,
         };
         const res = normalizeDraft([row(999, { '1': 37 }, { 'Казань': 37 }, 'BOX')], nctx);
-        expect(res.rows).toHaveLength(1);
-        expect(tTgt(res.rows[0])).toBe(37);
-        expect(res.droppedUnits).toBe(0);
+        expect(res.rows).toHaveLength(0);                  // в черновик не едет
+        expect(res.droppedUnits).toBe(37);
+        const d = res.dropped.find((r) => r.nm_id === 999); // ушла в предбронь, не потерялась
+        expect(d).toBeDefined();
+        expect(tTgt(d!)).toBe(37);
+    });
+
+    it('as_is БЕЗ кратности не минует срез — россыпь запрещена и для «Оставить так»', () => {
+        const nctx: NormalizeDraftCtx = {
+            ppbOf: () => null,
+            boxSizeOf: () => SIZE,
+        };
+        const res = normalizeDraft([{ ...row(999, { '1': 37 }, { 'Казань': 37 }, 'BOX'), as_is: true }], nctx);
+        expect(res.rows).toHaveLength(0);
+        expect(res.droppedUnits).toBe(37);
     });
 
     // ─── Новинка С кратностью короба (ppb есть) → ведёт себя как обычный box-SKU ───
@@ -184,7 +193,6 @@ describe('normalizeDraft — инвариант «целые коробы + це
         const nctx: NormalizeDraftCtx = {
             ppbOf: () => PPB,            // новинка имеет кратность
             boxSizeOf: () => SIZE,
-            isNewcomer: () => true,      // и при этом новинка
             freeByNm: { 200: { 1: 50 } },
         };
         const res = normalizeDraft([row(200, { '1': 316 }, { 'Казань': 316 }, 'BOX')], nctx);
@@ -204,7 +212,6 @@ describe('normalizeDraft — инвариант «целые коробы + це
         const nctx: NormalizeDraftCtx = {
             ppbOf: () => PPB,
             boxSizeOf: () => SIZE,
-            isNewcomer: (nm) => nm === 200, // 200 — новинка, 201 — обычный
         };
         const res = normalizeDraft([
             row(200, { '1': 80 }, { 'Казань': 80 }, 'BOX'),
@@ -223,7 +230,6 @@ describe('normalizeDraft — инвариант «целые коробы + це
         const nctx: NormalizeDraftCtx = {
             ppbOf: () => PPB,
             boxSizeOf: () => SIZE,
-            isNewcomer: () => true,
         };
         const res = normalizeDraft([
             row(100, { '1': 64 }, { 'Казань': 64 }, 'MONOPALLET'),
@@ -238,20 +244,18 @@ describe('normalizeDraft — инвариант «целые коробы + це
         }
     });
 
-    it('новинка БЕЗ ppb остаётся россыпью, даже если соседняя новинка С ppb палетизируется', () => {
+    it('новинка БЕЗ ppb снимается, соседняя новинка С ppb палетизируется как обычная', () => {
         const nctx: NormalizeDraftCtx = {
             ppbOf: (nm) => (nm === 999 ? null : PPB), // 999 без кратности, 200 — с кратностью
             boxSizeOf: () => SIZE,
-            isNewcomer: () => true,                   // обе новинки
             freeByNm: { 200: { 1: 50 } },
         };
         const res = normalizeDraft([
-            row(999, { '2': 37 }, { 'Тула': 37 }, 'BOX'),    // новинка б/ppb → россыпь
+            row(999, { '2': 37 }, { 'Тула': 37 }, 'BOX'),    // новинка б/ppb → НЕ едет (канон)
             row(200, { '1': 316 }, { 'Казань': 316 }, 'BOX'), // новинка с ppb → паллеты
         ], nctx);
-        const loose = res.rows.find(r => r.nm_id === 999);
-        expect(loose).toBeDefined();
-        expect(tTgt(loose!)).toBe(37);                 // россыпь не тронута
+        expect(res.rows.find(r => r.nm_id === 999)).toBeUndefined(); // россыпь не едет
+        expect(res.dropped.find(r => r.nm_id === 999)).toBeDefined(); // ушла в предбронь
         const boxed = res.rows.filter(r => r.nm_id === 200);
         expect(boxed.length).toBeGreaterThan(0);
         for (const r of boxed) for (const q of Object.values(r.tgt)) expect(q % PPB).toBe(0);
@@ -262,7 +266,6 @@ describe('normalizeDraft — инвариант «целые коробы + це
         const nctx: NormalizeDraftCtx = {
             ppbOf: () => PPB,
             boxSizeOf: () => SIZE,
-            isNewcomer: () => true,
             freeByNm: { 200: { 1: 100 } },
         };
         const inUnits = 450;
