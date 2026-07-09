@@ -210,7 +210,6 @@ export function finalizeDistribution(
         ppbOf: (nm) => ppbOf(nm),
         boxSizeOf: (nm) => boxSizeOf(nm) ?? null,
         overrides: palletOverrides,
-        isNewcomer: () => false,
         freeByNm: freeAfter(merged),
     };
     const norm = normalizeDraft(merged, ctx);
