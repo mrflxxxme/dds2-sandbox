@@ -480,3 +480,36 @@ async def test_set_campaign_state_unknown_action():
 
     res = await set_campaign_state("tok", 1, "delete")
     assert res["ok"] is False and "unknown action" in res["error"]
+
+
+@pytest.mark.asyncio
+async def test_set_campaign_state_uses_adv_v0(monkeypatch):
+    """Статус кампании управляется через adv/v0 (v1 отдаёт 404 — прод 2026-07-09)."""
+    from backend.services.funnel import wb_advertising_api as wa
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+        text = ""
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None):
+            captured["url"] = url
+            return _Resp()
+
+    monkeypatch.setattr(wa.httpx, "AsyncClient", _Client)
+
+    res = await wa.set_campaign_state("tok", 555, "start")
+    assert res["ok"] is True
+    assert "/adv/v0/start?id=555" in captured["url"]
+    assert "/adv/v1/" not in captured["url"]
