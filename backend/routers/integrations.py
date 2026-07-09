@@ -4,6 +4,7 @@ Thin HTTP layer — all business logic is in services/integrations_service.py.
 """
 
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -27,7 +28,7 @@ router = APIRouter(prefix="/integrations")
 
 
 class AddKeyRequest(BaseModel):
-    service: str
+    service: Literal["wb", "wb_advert", "ozon"]
     api_key: str
     label: str | None = None
 

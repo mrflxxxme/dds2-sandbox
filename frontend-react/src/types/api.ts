@@ -361,7 +361,7 @@ export interface CostOrderItem {
 export interface IntegrationKey {
   id: number;
   project_id?: number;
-  service: string;
+  service: 'wb' | 'wb_advert' | 'wb_analytics' | 'ozon' | (string & {});
   label?: string;
   is_active: boolean;
   created_at: string;
