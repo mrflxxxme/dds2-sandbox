@@ -781,13 +781,36 @@ async def set_campaigns_autopay(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Сохранить настройку автопополнения одной кампании."""
-    from backend.services.funnel.ads_manager import set_autopay_setting
+    """Сохранить настройку автопополнения; при включении — активировать кампанию.
 
-    return await set_autopay_setting(
+    Возвращает {"settings": {...}, "activation": {ok,status,error} | None}.
+    """
+    from backend.services.funnel.ads_manager import save_autopay_and_maybe_activate
+
+    return await save_autopay_and_maybe_activate(
         db, project.id, body.campaign_id,
         {"enabled": body.enabled, "amount": body.amount, "hour": body.hour, "threshold_pct": body.threshold_pct},
     )
+
+
+class CampaignStateRequest(BaseModel):
+    active: bool  # True — запустить/возобновить, False — поставить на паузу
+
+
+@router.post("/campaigns/{campaign_id}/state", dependencies=[Depends(rate_limit_write)])
+async def set_campaign_state_endpoint(
+    campaign_id: int,
+    body: CampaignStateRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Запустить или поставить кампанию на паузу в WB (реальное изменение статуса)."""
+    from backend.services.funnel.ads_manager import set_campaign_active
+
+    result = await set_campaign_active(db, project.id, campaign_id, body.active)
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось изменить статус кампании")
+    return result
 
 
 @router.get("/campaigns/{campaign_id}/history")

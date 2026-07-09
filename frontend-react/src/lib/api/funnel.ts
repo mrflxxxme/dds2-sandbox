@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, ClusterMinusResult, ClusterBidResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
+import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsCampaignStateResult, AdsAutopaySaveResult, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, ClusterMinusResult, ClusterBidResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -132,7 +132,11 @@ export function addFunnelMethods(api: ApiClient) {
             return api.request<Record<string, AdsAutopaySetting>>('GET', '/api/v1/funnel/campaigns/autopay');
         },
         setCampaignAutopay(campaignId: number, setting: AdsAutopaySetting) {
-            return api.request<Record<string, AdsAutopaySetting>>('POST', '/api/v1/funnel/campaigns/autopay', { campaign_id: campaignId, ...setting });
+            return api.request<AdsAutopaySaveResult>('POST', '/api/v1/funnel/campaigns/autopay', { campaign_id: campaignId, ...setting });
+        },
+        /** Запустить (active=true) или поставить кампанию на паузу (false) в WB. */
+        setCampaignState(campaignId: number, active: boolean) {
+            return api.request<AdsCampaignStateResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/state`, { active });
         },
         getAutopayLog(campaignId?: number) {
             const q = new URLSearchParams();

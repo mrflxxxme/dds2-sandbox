@@ -391,6 +391,7 @@ export default function AdsManagerPage() {
     const [autopay, setAutopay] = useState<Record<string, AdsAutopaySetting>>({});
     const [autopayModal, setAutopayModal] = useState<AdsManagerCampaign | null>(null);
     const [autopayLogModal, setAutopayLogModal] = useState<AdsManagerCampaign | null>(null);
+    const [stateBusy, setStateBusy] = useState<number | null>(null);  // кампания в процессе смены статуса
 
     // Высокий ДРР / Не работает реклама — общий период
     const today = new Date();
@@ -431,9 +432,25 @@ export default function AdsManagerPage() {
     }, []);
 
     const saveAutopay = useCallback(async (campaignId: number, s: AdsAutopaySetting) => {
-        const updated = await api.setCampaignAutopay(campaignId, s);
-        setAutopay(updated);
-    }, []);
+        const res = await api.setCampaignAutopay(campaignId, s);
+        setAutopay(res.settings);
+        if (res.activation && !res.activation.ok) {
+            setError(`Автопополнение сохранено, но кампанию не удалось активировать: ${res.activation.error || 'ошибка WB'}`);
+        }
+        // Включение автопополнения активирует кампанию — подтянем свежий статус в таблицу
+        if (s.enabled) loadCampaigns(dateFrom, dateTo);
+    }, [loadCampaigns, dateFrom, dateTo]);
+
+    const toggleCampaignState = useCallback(async (c: AdsManagerCampaign) => {
+        const active = c.status !== 9;  // не активна → запускаем, активна → пауза
+        setStateBusy(c.campaign_id); setError('');
+        try {
+            await api.setCampaignState(c.campaign_id, active);
+            await loadCampaigns(dateFrom, dateTo);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : 'Не удалось изменить статус кампании');
+        } finally { setStateBusy(null); }
+    }, [loadCampaigns, dateFrom, dateTo]);
 
     const loadDrr = useCallback(async (df: string, dt: string, b = brand, s = subject) => {
         setLoading(true); setError('');
@@ -781,7 +798,16 @@ export default function AdsManagerPage() {
                                                             {c.brands.length > 0 && <span>· {c.brands.join(', ')}</span>}
                                                         </div>
                                                     </td>
-                                                    <td style={tdLeft}><span className={`badge ${STATUS_BADGE[c.status] || 'badge-secondary'}`}>{c.status_label}</span></td>
+                                                    <td style={tdLeft}>
+                                                        <span className={`badge ${STATUS_BADGE[c.status] || 'badge-secondary'}`}>{c.status_label}</span>
+                                                        {(c.status === 9 || c.status === 11) && (
+                                                            <button onClick={e => { e.stopPropagation(); toggleCampaignState(c); }} disabled={stateBusy === c.campaign_id}
+                                                                title={c.status === 9 ? 'Поставить на паузу' : 'Запустить кампанию'}
+                                                                style={{ marginLeft: 8, border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: c.status === 9 ? '#f59e0b' : '#10b981' }}>
+                                                                {stateBusy === c.campaign_id ? '…' : c.status === 9 ? '⏸' : '▶'}
+                                                            </button>
+                                                        )}
+                                                    </td>
                                                     <td style={{ ...tdStyle, fontWeight: 600, color: c.budget <= 0 && c.status === 9 ? '#ef4444' : '#111827' }}>{fmt(c.budget)}</td>
                                                     <td style={tdStyle}>{fmt(c.spend_today)}</td>
                                                     <td style={tdStyle}>{fmt(c.spend_period)}</td>

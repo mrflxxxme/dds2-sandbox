@@ -298,3 +298,185 @@ async def test_autopay_log_bad_json_returns_empty(monkeypatch):
 
     monkeypatch.setattr("backend.services.settings_service.get_setting", fake_get)
     assert await am.get_autopay_log(AsyncMock(), PROJECT_ID) == []
+
+
+# ─── Пауза / запуск кампании ─────────────────────────────────────────────────
+
+
+def _scalar_one_result(obj) -> MagicMock:
+    m = MagicMock()
+    m.scalar_one_or_none.return_value = obj
+    return m
+
+
+@pytest.mark.asyncio
+async def test_set_campaign_active_starts_and_updates_status(monkeypatch):
+    """active=True → WB start; при успехе локальный статус кампании → 9."""
+    from backend.services.funnel import ads_manager as am
+
+    calls: dict = {}
+
+    async def fake_key(db, pid):
+        return "tok"
+
+    async def fake_state(api_key, cid, action):
+        calls["action"] = action
+        return {"ok": True, "error": None}
+
+    monkeypatch.setattr(am, "_get_advert_api_key", fake_key)
+    monkeypatch.setattr("backend.services.funnel.wb_advertising_api.set_campaign_state", fake_state)
+
+    camp = MagicMock()
+    camp.status = 11
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_scalar_one_result(camp))
+
+    res = await am.set_campaign_active(db, PROJECT_ID, 555, True)
+
+    assert calls["action"] == "start"
+    assert res == {"ok": True, "status": 9, "error": None}
+    assert camp.status == 9
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_campaign_active_pause(monkeypatch):
+    """active=False → WB pause; локальный статус → 11."""
+    from backend.services.funnel import ads_manager as am
+
+    calls: dict = {}
+
+    async def fake_key(db, pid):
+        return "tok"
+
+    async def fake_state(api_key, cid, action):
+        calls["action"] = action
+        return {"ok": True, "error": None}
+
+    monkeypatch.setattr(am, "_get_advert_api_key", fake_key)
+    monkeypatch.setattr("backend.services.funnel.wb_advertising_api.set_campaign_state", fake_state)
+
+    camp = MagicMock()
+    camp.status = 9
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_scalar_one_result(camp))
+
+    res = await am.set_campaign_active(db, PROJECT_ID, 555, False)
+    assert calls["action"] == "pause"
+    assert res["status"] == 11
+    assert camp.status == 11
+
+
+@pytest.mark.asyncio
+async def test_set_campaign_active_no_key(monkeypatch):
+    """Нет рекламного ключа → ошибка, без вызова WB и без коммита."""
+    from backend.services.funnel import ads_manager as am
+
+    async def fake_key(db, pid):
+        return None
+
+    monkeypatch.setattr(am, "_get_advert_api_key", fake_key)
+    db = AsyncMock()
+    res = await am.set_campaign_active(db, PROJECT_ID, 1, True)
+    assert res["ok"] is False and res["status"] is None
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_campaign_active_wb_error_keeps_status(monkeypatch):
+    """Отказ WB → ошибка пробрасывается, локальный статус НЕ трогаем."""
+    from backend.services.funnel import ads_manager as am
+
+    async def fake_key(db, pid):
+        return "tok"
+
+    async def fake_state(api_key, cid, action):
+        return {"ok": False, "error": "read-only токен"}
+
+    monkeypatch.setattr(am, "_get_advert_api_key", fake_key)
+    monkeypatch.setattr("backend.services.funnel.wb_advertising_api.set_campaign_state", fake_state)
+
+    db = AsyncMock()
+    res = await am.set_campaign_active(db, PROJECT_ID, 1, True)
+    assert res == {"ok": False, "status": None, "error": "read-only токен"}
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_save_autopay_activates_paused_campaign(monkeypatch):
+    """Включили автопополнение на кампании НА ПАУЗЕ (11) → активируется."""
+    from backend.services.funnel import ads_manager as am
+
+    activated: dict = {}
+
+    async def fake_save(db, pid, cid, entry):
+        return {str(cid): entry}
+
+    async def fake_active(db, pid, cid, active):
+        activated["cid"] = cid
+        activated["active"] = active
+        return {"ok": True, "status": 9, "error": None}
+
+    monkeypatch.setattr(am, "set_autopay_setting", fake_save)
+    monkeypatch.setattr(am, "set_campaign_active", fake_active)
+
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_scalar_one_result(11))  # текущий статус — пауза
+    res = await am.save_autopay_and_maybe_activate(db, PROJECT_ID, 42, {"enabled": True, "amount": 1000})
+    assert activated == {"cid": 42, "active": True}
+    assert res["activation"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_save_autopay_skips_activate_when_already_active(monkeypatch):
+    """Кампания уже активна (9) → повторный start НЕ дёргаем (нет ложного баннера)."""
+    from backend.services.funnel import ads_manager as am
+
+    called = {"n": 0}
+
+    async def fake_save(db, pid, cid, entry):
+        return {str(cid): entry}
+
+    async def fake_active(db, pid, cid, active):
+        called["n"] += 1
+        return {"ok": True, "status": 9, "error": None}
+
+    monkeypatch.setattr(am, "set_autopay_setting", fake_save)
+    monkeypatch.setattr(am, "set_campaign_active", fake_active)
+
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_scalar_one_result(9))  # уже активна
+    res = await am.save_autopay_and_maybe_activate(db, PROJECT_ID, 42, {"enabled": True, "amount": 1000})
+    assert called["n"] == 0
+    assert res["activation"] is None
+
+
+@pytest.mark.asyncio
+async def test_save_autopay_no_activate_when_disabled(monkeypatch):
+    """Выключенное автопополнение НЕ трогает статус кампании."""
+    from backend.services.funnel import ads_manager as am
+
+    called = {"n": 0}
+
+    async def fake_save(db, pid, cid, entry):
+        return {}
+
+    async def fake_active(db, pid, cid, active):
+        called["n"] += 1
+        return {}
+
+    monkeypatch.setattr(am, "set_autopay_setting", fake_save)
+    monkeypatch.setattr(am, "set_campaign_active", fake_active)
+
+    res = await am.save_autopay_and_maybe_activate(AsyncMock(), PROJECT_ID, 42, {"enabled": False, "amount": 0})
+    assert called["n"] == 0
+    assert res["activation"] is None
+
+
+@pytest.mark.asyncio
+async def test_set_campaign_state_unknown_action():
+    """Неизвестное действие отбивается без сетевого вызова."""
+    from backend.services.funnel.wb_advertising_api import set_campaign_state
+
+    res = await set_campaign_state("tok", 1, "delete")
+    assert res["ok"] is False and "unknown action" in res["error"]
