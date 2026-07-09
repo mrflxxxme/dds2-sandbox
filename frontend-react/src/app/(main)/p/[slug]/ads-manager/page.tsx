@@ -4,7 +4,7 @@ import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import ProductHistoryChart, { CampaignHistoryChart } from './components/ProductHistoryChart';
-import type { AdsManagerCampaign, AdsAutopaySetting, AdsBudgetGap, AdTabProduct, FunnelFilters, FunnelSkuRow } from '@/types/api';
+import type { AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsBudgetGap, AdTabProduct, FunnelFilters, FunnelSkuRow } from '@/types/api';
 
 const fmt = (n: number | undefined) => (Number(n) || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
 const fmtPct = (n: number | undefined) => (Number(n) || 0).toFixed(2) + '%';
@@ -103,12 +103,99 @@ function AutopayModal({ campaign, initial, onClose, onSave }: {
                 </label>
 
                 <div style={{ fontSize: 11, color: 'var(--color-warning, #f59e0b)', marginBottom: 16 }}>
-                    ⚠️ Пока сохраняются только настройки: автосписание включим после периода наблюдения (DRY-RUN журнал решений).
+                    ⚠️ Автопополнение активно: в заданный час бюджет доливается до X реальными деньгами
+                    (минимум 1000₽ за пополнение — ограничение WB). Все операции — в журнале (📜 в таблице).
                 </div>
 
                 <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                     <button className="btn btn-secondary" onClick={onClose} disabled={saving}>Отмена</button>
                     <button className="btn btn-primary" onClick={handleSave} disabled={saving}>{saving ? 'Сохранение…' : 'Сохранить'}</button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+const AUTOPAY_STATUS_BADGE: Record<AdsAutopayLogEntry['status'], { label: string; cls: string }> = {
+    ok: { label: 'Успешно', cls: 'badge-success' },
+    error: { label: 'Ошибка', cls: 'badge-danger' },
+    unknown: { label: 'Неизвестно', cls: 'badge-warning' },
+};
+
+/** Модалка истории автопополнений: по кампании или по всем сразу. */
+function AutopayLogModal({ campaign, onClose }: {
+    campaign: AdsManagerCampaign;
+    onClose: () => void;
+}) {
+    const [entries, setEntries] = useState<AdsAutopayLogEntry[] | null>(null);
+    const [error, setError] = useState('');
+    const [allCampaigns, setAllCampaigns] = useState(false);
+
+    useEffect(() => {
+        const controller = new AbortController();
+        setEntries(null);
+        setError('');
+        api.getAutopayLog(allCampaigns ? undefined : campaign.campaign_id)
+            .then(data => { if (!controller.signal.aborted) setEntries(data); })
+            .catch(() => { if (!controller.signal.aborted) setError('Не удалось загрузить журнал'); });
+        return () => controller.abort();
+    }, [campaign.campaign_id, allCampaigns]);
+
+    const fmtTs = (ts: string) => {
+        try {
+            return new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
+        } catch { return ts; }
+    };
+
+    return (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+            <div className="glass-card" style={{ width: 640, maxHeight: '80vh', overflow: 'auto', padding: 24, background: '#fff' }} onClick={e => e.stopPropagation()}>
+                <h3 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>📜 История пополнений</h3>
+                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
+                    {allCampaigns ? 'Все кампании' : <>{campaign.name || `#${campaign.campaign_id}`} · #{campaign.campaign_id}</>}
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, marginBottom: 12, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={allCampaigns} onChange={e => setAllCampaigns(e.target.checked)} />
+                    Показать все кампании
+                </label>
+
+                {error && <div style={{ color: '#ef4444', fontSize: 13, padding: '12px 0' }}>{error}</div>}
+                {!error && entries === null && <div style={{ color: '#9ca3af', fontSize: 13, padding: '12px 0' }}>Загрузка…</div>}
+                {!error && entries !== null && entries.length === 0 && (
+                    <div style={{ color: '#9ca3af', fontSize: 13, padding: '12px 0' }}>Пополнений ещё не было.</div>
+                )}
+                {!error && entries !== null && entries.length > 0 && (
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <thead><tr>
+                            <th style={thLeft}>Кампания</th>
+                            <th style={thLeft}>Дата (МСК)</th>
+                            <th style={thStyle}>Сумма, ₽</th>
+                            <th style={thLeft}>Источник</th>
+                            <th style={thLeft}>Статус</th>
+                            <th style={thStyle} title="Бюджет кампании после пополнения">Бюджет после</th>
+                        </tr></thead>
+                        <tbody>
+                            {entries.map((e, i) => {
+                                const badge = AUTOPAY_STATUS_BADGE[e.status] ?? AUTOPAY_STATUS_BADGE.unknown;
+                                return (
+                                    <tr key={`${e.campaign_id}-${e.ts}-${i}`} style={{ color: '#111827' }}>
+                                        <td style={tdLeft}>#{e.campaign_id}</td>
+                                        <td style={tdLeft}>{fmtTs(e.ts)}</td>
+                                        <td style={{ ...tdStyle, fontWeight: 600 }}>{e.status === 'ok' ? fmt(e.amount) : fmt(e.requested)}</td>
+                                        <td style={tdLeft}>{e.source || '—'}</td>
+                                        <td style={tdLeft}>
+                                            <span className={`badge ${badge.cls}`} title={e.reason || undefined}>{badge.label}</span>
+                                        </td>
+                                        <td style={tdStyle}>{e.budget_after != null ? fmt(e.budget_after) : '—'}</td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+                    <button className="btn btn-secondary" onClick={onClose}>Закрыть</button>
                 </div>
             </div>
         </div>
@@ -135,6 +222,7 @@ export default function AdsManagerPage() {
     const [syncing, setSyncing] = useState(false);
     const [autopay, setAutopay] = useState<Record<string, AdsAutopaySetting>>({});
     const [autopayModal, setAutopayModal] = useState<AdsManagerCampaign | null>(null);
+    const [autopayLogModal, setAutopayLogModal] = useState<AdsManagerCampaign | null>(null);
 
     // Высокий ДРР / Не работает реклама — общий период
     const today = new Date();
@@ -532,10 +620,14 @@ export default function AdsManagerPage() {
                                                     <td style={tdStyle}>{c.cr_cart > 0 ? fmtPct(c.cr_cart) : '—'}</td>
                                                     <td style={tdStyle}>{c.cr_order > 0 ? fmtPct(c.cr_order) : '—'}</td>
                                                     <td style={tdStyle}>{c.nm_count}</td>
-                                                    <td style={{ ...tdStyle, textAlign: 'center' }}>
+                                                    <td style={{ ...tdStyle, textAlign: 'center', whiteSpace: 'nowrap' }}>
                                                         <button onClick={e => { e.stopPropagation(); setAutopayModal(c); }} title="Настроить автопополнение"
                                                             style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, color: ap?.enabled ? '#10b981' : '#9ca3af', fontWeight: ap?.enabled ? 600 : 400, whiteSpace: 'nowrap' }}>
                                                             {ap?.enabled ? `⏰ ${String(ap.hour).padStart(2, '0')}:00 · ${fmt(ap.amount)}₽` : '⚙ настроить'}
+                                                        </button>
+                                                        <button onClick={e => { e.stopPropagation(); setAutopayLogModal(c); }} title="История пополнений"
+                                                            style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#6b7280', padding: '0 2px' }}>
+                                                            📜
                                                         </button>
                                                     </td>
                                                     <td style={{ ...tdStyle, textAlign: 'center' }}>
@@ -801,6 +893,12 @@ export default function AdsManagerPage() {
                         initial={autopay[String(autopayModal.campaign_id)]}
                         onClose={() => setAutopayModal(null)}
                         onSave={s => saveAutopay(autopayModal.campaign_id, s)}
+                    />
+                )}
+                {autopayLogModal && (
+                    <AutopayLogModal
+                        campaign={autopayLogModal}
+                        onClose={() => setAutopayLogModal(null)}
                     />
                 )}
             </div>

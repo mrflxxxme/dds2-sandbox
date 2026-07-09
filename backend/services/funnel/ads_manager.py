@@ -287,6 +287,178 @@ async def set_autopay_setting(db: AsyncSession, project_id: int, campaign_id: in
     return settings
 
 
+# ─── Автопополнение: журнал и исполнение (реальные деньги) ───────────────────
+
+AUTOPAY_LOG_KEY = "ads_autopay_log"
+AUTOPAY_LOG_CAP = 500  # храним последние N записей, чтобы не раздувать JSON
+
+
+async def get_autopay_log(db: AsyncSession, project_id: int) -> list[dict]:
+    """Журнал пополнений проекта (новые записи первыми)."""
+    from backend.services.settings_service import get_setting
+
+    raw = await get_setting(db, project_id, AUTOPAY_LOG_KEY)
+    try:
+        data = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        data = []
+    return [e for e in data if isinstance(e, dict)]
+
+
+async def append_autopay_log(db: AsyncSession, project_id: int, entry: dict) -> None:
+    """Дописать запись в журнал (в начало) с обрезкой до AUTOPAY_LOG_CAP."""
+    from backend.services.settings_service import set_setting
+
+    log = await get_autopay_log(db, project_id)
+    log.insert(0, entry)
+    await set_setting(db, project_id, AUTOPAY_LOG_KEY, json.dumps(log[:AUTOPAY_LOG_CAP], ensure_ascii=False))
+
+
+def _round_up_50(value: float) -> int:
+    """Округление суммы пополнения вверх до шага 50₽ (шаг кабинета WB)."""
+    import math
+
+    return int(math.ceil(value / 50.0) * 50)
+
+
+def compute_autopay_decision(
+    setting: dict,
+    budget: float,
+    spend_day: float,
+    now_hour_msk: int,
+    already_topped_today: bool,
+    pending_unknown: bool,
+) -> dict:
+    """Чистое решение «пополнять ли кампанию сейчас и на сколько».
+
+    setting — {enabled, amount(X, дневной бюджет), hour, threshold_pct};
+    budget — текущий бюджет кампании ₽; spend_day — открут за последние сутки ₽;
+    already_topped_today — в журнале уже есть успешное пополнение за сегодня (МСК);
+    pending_unknown — последняя попытка сегодня закончилась timeout/5xx (исход
+    неизвестен) → не пополняем, пока бюджет не пересинкается.
+
+    Возвращает {"action": "deposit"|"skip", "sum": int, "reason": str}.
+    """
+    x = float(setting.get("amount") or 0)
+    if not setting.get("enabled") or x <= 0:
+        return {"action": "skip", "sum": 0, "reason": "disabled"}
+    if now_hour_msk != int(setting.get("hour", 9)):
+        return {"action": "skip", "sum": 0, "reason": "not_time"}
+    if already_topped_today:
+        return {"action": "skip", "sum": 0, "reason": "already_today"}
+    if pending_unknown:
+        return {"action": "skip", "sum": 0, "reason": "pending_unknown"}
+    threshold_pct = int(setting.get("threshold_pct", 50) or 0)
+    if threshold_pct > 0 and spend_day < x * threshold_pct / 100.0:
+        return {"action": "skip", "sum": 0, "reason": "below_threshold"}
+    gap = x - float(budget or 0)
+    if gap <= 0:
+        return {"action": "skip", "sum": 0, "reason": "budget_full"}
+    return {"action": "deposit", "sum": _round_up_50(max(MIN_TOPUP_RUB, gap)), "reason": "ok"}
+
+
+async def run_autopay_tick(db: AsyncSession, project_id: int, api_key: str) -> dict:
+    """Один проход автопополнения проекта: решения + реальные списания + журнал.
+
+    Вызывается scheduler'ом каждые ~15 минут. Срабатывает только для кампаний,
+    у которых enabled и текущий час МСК == настроенному. Идемпотентность —
+    по журналу (одно успешное пополнение в день на кампанию).
+    """
+    from backend.services.funnel.wb_advertising_api import (
+        DEPOSIT_SOURCE_ACCOUNT,
+        DEPOSIT_SOURCE_BALANCE,
+        DEPOSIT_SOURCE_LABELS,
+        deposit_campaign_budget,
+        fetch_adv_balance,
+        fetch_campaign_budgets_batch,
+    )
+
+    settings = await get_autopay_settings(db, project_id)
+    enabled = {int(cid): s for cid, s in settings.items() if s.get("enabled") and (s.get("amount") or 0) > 0}
+    if not enabled:
+        return {"deposits": 0, "checked": 0}
+
+    now_msk = utcnow().astimezone(MSK)
+    today_msk = now_msk.date()
+    due_ids = [cid for cid, s in enabled.items() if now_msk.hour == int(s.get("hour", 9))]
+    if not due_ids:
+        return {"deposits": 0, "checked": 0}
+
+    log = await get_autopay_log(db, project_id)
+    topped_today: set[int] = set()
+    unknown_today: set[int] = set()
+    for e in log:
+        try:
+            ts = datetime.fromisoformat(e.get("ts", ""))
+            e_date = ts.astimezone(MSK).date() if ts.tzinfo else ts.date()
+        except (TypeError, ValueError):
+            continue
+        if e_date != today_msk:
+            continue
+        cid = int(e.get("campaign_id") or 0)
+        if e.get("status") == "ok":
+            topped_today.add(cid)
+        elif e.get("status") == "unknown":
+            unknown_today.add(cid)
+
+    # Открут за последние сутки (вчера МСК — полные сутки)
+    CD = WbAdCampaignDaily
+    yesterday = today_msk - timedelta(days=1)
+    spend_rows = (
+        await db.execute(
+            select(CD.campaign_id, func.coalesce(func.sum(CD.spend), Decimal("0")).label("spend"))
+            .where(CD.project_id == project_id, CD.date == yesterday, CD.campaign_id.in_(due_ids))
+            .group_by(CD.campaign_id)
+        )
+    ).all()
+    spend_day_map = {r.campaign_id: float(r.spend) for r in spend_rows}
+
+    # Свежие бюджеты — прямо из WB (не из нашей таблицы: синк мог отстать на час)
+    budgets = await fetch_campaign_budgets_batch(api_key, due_ids)
+
+    deposits = 0
+    for cid in due_ids:
+        setting = enabled[cid]
+        budget = float(budgets.get(cid, -1))
+        if budget < 0:
+            logger.warning(f"Autopay: project {project_id} campaign {cid} — бюджет из WB не получен, скип")
+            continue
+        decision = compute_autopay_decision(
+            setting, budget, spend_day_map.get(cid, 0.0), now_msk.hour, cid in topped_today, cid in unknown_today
+        )
+        if decision["action"] != "deposit":
+            continue
+
+        # Источник: как в кабинете — сначала счёт, при отказе баланс. Бонусы не трогаем.
+        balance_info = await fetch_adv_balance(api_key) or {}
+        result = await deposit_campaign_budget(api_key, cid, decision["sum"], DEPOSIT_SOURCE_ACCOUNT)
+        source = DEPOSIT_SOURCE_ACCOUNT
+        if result["status"] == "error":
+            result = await deposit_campaign_budget(api_key, cid, decision["sum"], DEPOSIT_SOURCE_BALANCE)
+            source = DEPOSIT_SOURCE_BALANCE
+
+        await append_autopay_log(
+            db,
+            project_id,
+            {
+                "campaign_id": cid,
+                "ts": utcnow().isoformat(),
+                "amount": decision["sum"] if result["ok"] else 0,
+                "requested": decision["sum"],
+                "source": DEPOSIT_SOURCE_LABELS.get(source, str(source)),
+                "status": result["status"],
+                "budget_before": budget,
+                "budget_after": result.get("total"),
+                "reason": result.get("error"),
+                "balance_snapshot": {k: balance_info.get(k) for k in ("balance", "net", "bonus")},
+            },
+        )
+        if result["ok"]:
+            deposits += 1
+
+    return {"deposits": deposits, "checked": len(due_ids)}
+
+
 # ─── Нехватка бюджета ────────────────────────────────────────────────────────
 
 

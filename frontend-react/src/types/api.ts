@@ -3263,6 +3263,18 @@ export interface AdsAutopaySetting {
   threshold_pct: number;  // пополнять, только если открут за сутки ≥ порога
 }
 
+export interface AdsAutopayLogEntry {
+  campaign_id: number;
+  ts: string;  // ISO UTC
+  amount: number;  // фактически пополнено ₽ (0, если не удалось)
+  requested: number;  // запрошенная сумма ₽
+  source: string;  // счёт | баланс
+  status: 'ok' | 'error' | 'unknown';
+  budget_before: number | null;
+  budget_after: number | null;
+  reason: string | null;  // текст ошибки WB, если была
+}
+
 export interface AdsHistoryPoint {
   date: string;
   price_spp: number;

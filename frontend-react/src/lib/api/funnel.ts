@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress } from '@/types/api';
+import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -133,6 +133,12 @@ export function addFunnelMethods(api: ApiClient) {
         },
         setCampaignAutopay(campaignId: number, setting: AdsAutopaySetting) {
             return api.request<Record<string, AdsAutopaySetting>>('POST', '/api/v1/funnel/campaigns/autopay', { campaign_id: campaignId, ...setting });
+        },
+        getAutopayLog(campaignId?: number) {
+            const q = new URLSearchParams();
+            if (campaignId != null) q.set('campaign_id', String(campaignId));
+            const qs = q.toString();
+            return api.request<AdsAutopayLogEntry[]>('GET', `/api/v1/funnel/campaigns/autopay/log${qs ? `?${qs}` : ''}`);
         },
         syncAdCampaigns() {
             return api.request<{ status: string }>('POST', '/api/v1/funnel/sync_campaigns');
