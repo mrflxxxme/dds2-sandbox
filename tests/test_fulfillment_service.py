@@ -2647,6 +2647,71 @@ async def test_sync_inbound_no_accept_without_link(db_session, project, warehous
     assert result["inbound_receipts_accepted"] == 0
 
 
+@pytest.mark.asyncio
+async def test_sync_accepts_inbound_completed_and_archived(
+    db_session, project, warehouse, connected_key, monkeypatch
+):
+    """ФФ принял приёмку и СРАЗУ сдал заявку в архив (is_completed + archived).
+
+    Прод-баг (WH-R-204611 → receipt 201, склад 5): skladbot при завершении
+    приёмки ставит is_completed И archived=True одновременно. Фильтр
+    archived==False в авто-приёме отсекал такую заявку → приёмка навсегда
+    висела EXPECTED. Теперь archived НЕ блокирует, если заявка завершена
+    (симметрично авто-SHIP сборок). Отменённая (archived без is_completed)
+    по-прежнему НЕ принимается — проверяется отдельно ниже.
+    """
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {852: [_req(8830, stage_title="Приемка", stage_code="acceptance")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    receipt = await _make_receipt_with_item(db_session, project, warehouse, nom, bc, expected_qty=10)
+    mirror = await _mirror_row(db_session, project.id, "8830")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, inbound_receipt_id=receipt.id)
+
+    # ФФ завершил приёмку и в ТОТ ЖЕ синк сдал заявку в архив
+    _mock_requests(
+        monkeypatch,
+        {852: [_req(8830, status="new", completed=1, archived=1, stage_title=None, stage_code=None)]},
+    )
+    _mock_request_detail(monkeypatch, [{"barcode": bc, "amount": 10, "acceptedAmount": 10}])
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["inbound_receipts_accepted"] == 1
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.ACCEPTED
+
+
+@pytest.mark.asyncio
+async def test_sync_inbound_no_accept_when_archived_without_completed(
+    db_session, project, warehouse, connected_key, monkeypatch
+):
+    """Отменённая приёмка (archived=True БЕЗ is_completed) НЕ принимается.
+
+    Гард: смягчая archived-фильтр (см. test выше), не должны начать принимать
+    отменённые заявки. is_completed=False → _inbound_accept_signal ложно.
+    """
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc)
+    _mock_products(monkeypatch, [])
+    _mock_requests(monkeypatch, {852: [_req(8831, stage_title="Приемка", stage_code="acceptance")]})
+    await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+
+    receipt = await _make_receipt_with_item(db_session, project, warehouse, nom, bc, expected_qty=10)
+    mirror = await _mirror_row(db_session, project.id, "8831")
+    await fulfillment_service.link_request(db_session, project.id, mirror.id, inbound_receipt_id=receipt.id)
+
+    # Заявку отменили: archived=True, но приёмка НЕ завершена (completed=0)
+    _mock_requests(
+        monkeypatch,
+        {852: [_req(8831, status="new", completed=0, archived=1, stage_title=None, stage_code=None)]},
+    )
+    result = await fulfillment_service.sync_warehouse(db_session, project.id, warehouse.id)
+    assert result["inbound_receipts_accepted"] == 0
+    await db_session.refresh(receipt)
+    assert receipt.status == InboundStatus.EXPECTED
+
+
 # ─── Авто-ACCEPT приёмки ПРЯМО ПРИ ПРИВЯЗКЕ (симметрия с авто-READY сборки) ───
 
 
