@@ -9,7 +9,7 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchModal } from '@/components/FfMismatchModal';
 import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { AssemblyBulkStatus, AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, Warehouse } from '@/types/api';
+import type { AssemblyBulkStatus, AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, Warehouse, WbSupplySyncStatus } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -53,6 +53,24 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
     CLOSED:           { label: 'Закрыт',             className: 'badge-warning' },
     CANCELLED:        { label: 'Отменена',           className: 'badge-secondary' },
 };
+
+// Занос заявки в кабинет WB (колонка «WB»): фолбэк-подпись, когда живой статус
+// кабинета (wb_supply_state) ещё не подтянут.
+const WB_SYNC_BRIEF: Record<WbSupplySyncStatus, { label: string; className: string }> = {
+    NONE:     { label: 'Не заведена',      className: 'badge-secondary' },
+    DRAFT:    { label: 'Черновик',          className: 'badge-info' },
+    PREORDER: { label: 'Преордер',          className: 'badge-warning' },
+    BOOKED:   { label: 'Дата забронирована', className: 'badge-info' },
+    BOXED:    { label: 'Короба занесены',   className: 'badge-info' },
+    PASSED:   { label: 'Пропуск занесён',   className: 'badge-success' },
+    ERROR:    { label: 'Ошибка',            className: 'badge-danger' },
+};
+
+// Расхождение локального числа паллет с паллетами WB-пропуска (только «Готово»).
+function palletsMismatch(row: AssemblyRequest): boolean {
+    const wb = row.wb_supply;
+    return row.status === 'READY' && !!wb && wb.pass_pallets != null && wb.pass_pallets !== row.pallets_count;
+}
 
 const EDITABLE_STATUSES: AssemblyStatus[] = ['IN_PROGRESS', 'READY'];
 
@@ -649,6 +667,25 @@ export default function AssemblyListPage() {
         }
     };
 
+    // ─── Bulk-синк WB-состояний (F1): опрашивает кабинет по всем заявкам проекта ──
+    const [wbSyncing, setWbSyncing] = useState(false);
+    const handleWbSyncAll = useCallback(async () => {
+        if (wbSyncing) return;
+        setWbSyncing(true);
+        try {
+            const res = await api.wbSupplySyncAllStates();
+            setToast({
+                message: `Проверено ${formatNumber(res.checked, 0)}, обновлено ${formatNumber(res.updated, 0)}`,
+                type: 'success',
+            });
+            await load();
+        } catch (e: unknown) {
+            setToast({ message: e instanceof Error ? e.message : 'Ошибка синхронизации WB', type: 'error' });
+        } finally {
+            setWbSyncing(false);
+        }
+    }, [wbSyncing, load]);
+
     // ─── Массовое удаление (заявки из черновика, ещё не на WB) ───────────────
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
     const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -943,6 +980,27 @@ export default function AssemblyListPage() {
             exportValue: (row: AssemblyRequest) => PKG_TYPE_LABEL[row.package_type || 'BOX'],
         },
         {
+            key: 'wb_supply', label: 'WB',
+            getValue: (row: AssemblyRequest) => {
+                const wb = row.wb_supply;
+                if (!wb) return '';
+                return wb.wb_supply_state || WB_SYNC_BRIEF[wb.sync_status]?.label || wb.sync_status;
+            },
+            render: (_v, row: AssemblyRequest) => {
+                const wb = row.wb_supply;
+                if (!wb) return <span style={{ color: 'var(--color-text-muted)' }}>—</span>;
+                // Живой статус кабинета (В сборке / В пути…) в приоритете; иначе — стадия заноса.
+                const cfg = WB_SYNC_BRIEF[wb.sync_status] || { label: wb.sync_status, className: 'badge-secondary' };
+                const label = wb.wb_supply_state || cfg.label;
+                return <span className={`badge ${cfg.className}`} style={{ fontSize: 11 }}>{label}</span>;
+            },
+            exportValue: (row: AssemblyRequest) => {
+                const wb = row.wb_supply;
+                if (!wb) return '';
+                return wb.wb_supply_state || WB_SYNC_BRIEF[wb.sync_status]?.label || wb.sync_status;
+            },
+        },
+        {
             key: 'items_qty', label: 'Товары', align: 'right',
             getValue: itemsQty,
             render: (_v, row: AssemblyRequest) => row.items ? formatNumber(itemsQty(row), 0) : '—',
@@ -951,12 +1009,23 @@ export default function AssemblyListPage() {
         {
             key: 'pallets_count', label: 'Палеты', align: 'right',
             render: (_v, row: AssemblyRequest) => (
-                <EditableCell
-                    value={row.pallets_count}
-                    editable={EDITABLE_STATUSES.includes(row.status)}
-                    highlight={row.status === 'IN_PROGRESS' && (!row.pallets_count || row.pallets_count <= 0)}
-                    onSave={(val) => handlePalletsChange(row, val)}
-                />
+                <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6, whiteSpace: 'nowrap' }}>
+                    <EditableCell
+                        value={row.pallets_count}
+                        editable={EDITABLE_STATUSES.includes(row.status)}
+                        highlight={row.status === 'IN_PROGRESS' && (!row.pallets_count || row.pallets_count <= 0)}
+                        onSave={(val) => handlePalletsChange(row, val)}
+                    />
+                    {palletsMismatch(row) && (
+                        <span
+                            className="badge badge-warning"
+                            style={{ fontSize: 11, padding: '2px 6px' }}
+                            title={`Локально ${formatNumber(row.pallets_count, 0)} паллет, в WB-пропуске ${formatNumber(row.wb_supply?.pass_pallets ?? 0, 0)}`}
+                        >
+                            ≠ WB
+                        </span>
+                    )}
+                </span>
             ),
             exportValue: (row: AssemblyRequest) => row.pallets_count,
         },
@@ -1013,11 +1082,21 @@ export default function AssemblyListPage() {
                         {items.length < total && ` · показаны первые ${formatNumber(items.length, 0)} — уточните фильтры`}
                     </p>
                 </div>
-                {canEdit() && (
-                    <Link href={`/p/${slug}/warehouse/assembly/new`}>
-                        <button className="btn btn-primary">Создать заявку</button>
-                    </Link>
-                )}
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button
+                        className="btn btn-secondary"
+                        onClick={handleWbSyncAll}
+                        disabled={wbSyncing}
+                        title="Опросить кабинет WB и обновить статусы поставок по всем заявкам"
+                    >
+                        {wbSyncing ? 'Синхронизация…' : '🔄 Синхронизировать WB'}
+                    </button>
+                    {canEdit() && (
+                        <Link href={`/p/${slug}/warehouse/assembly/new`}>
+                            <button className="btn btn-primary">Создать заявку</button>
+                        </Link>
+                    )}
+                </div>
             </div>
 
             {/* Баннер: товары без веса, участвующие в сборках → расчёт веса неполный. */}

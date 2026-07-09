@@ -33,6 +33,10 @@ class WbSupplyState(BaseModel):
     barcode_id: int | None = None
     last_error: str | None = None
     last_synced_at: datetime | None = None
+    # Живое состояние поставки в кабинете (bulk-синк listSupplies).
+    wb_supply_state: str | None = None
+    wb_supply_state_id: int | None = None
+    wb_state_synced_at: datetime | None = None
     boxes: list[WbBox] = []
     pass_driver_first: str | None = None
     pass_driver_last: str | None = None
@@ -40,6 +44,14 @@ class WbSupplyState(BaseModel):
     pass_car_model: str | None = None
     pass_car_number: str | None = None
     pass_pallets: int | None = None
+    # Зеркало назначенной машины заявки (read-only) — для префилла пропуска и
+    # подсветки расхождений «машина заявки ↔ WB-пропуск» (F3). Заполняется
+    # сервисом из AssemblyRequest, в самой таблице wb-поставки не хранится.
+    assembly_vehicle_info: str | None = None
+    assembly_vehicle_brand: str | None = None
+    assembly_driver_phone: str | None = None
+    # Локальное число паллет заявки — для баннера «паллеты ≠ WB» (F2).
+    assembly_pallets_count: int | None = None
 
 
 class WbPreorderCreate(BaseModel):
@@ -64,6 +76,30 @@ class WbPassUpdate(BaseModel):
     car_model: str | None = None
     car_number: str | None = None
     pallets: int | None = None
+
+
+class WbSupplyStateBrief(BaseModel):
+    """Компактная WB-сводка для строки списка заявок (F1/F2).
+
+    Отдаётся вместе с заявкой в списке, чтобы не дёргать get_state построчно.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    sync_status: str
+    wb_supply_state: str | None = None
+    supply_id: int | None = None
+    preorder_id: int | None = None
+    pass_pallets: int | None = None
+    wb_state_synced_at: datetime | None = None
+
+
+class WbBulkSyncResult(BaseModel):
+    """Итог bulk-синка WB-состояний заявок проекта (F1)."""
+
+    checked: int  # сколько заявок имели preorder/supply и проверялись
+    updated: int  # у скольких статус WB изменился
+    supplies_seen: int  # сколько поставок вернул кабинет
 
 
 class WbDriver(BaseModel):

@@ -16,11 +16,12 @@ from collections.abc import Awaitable
 from typing import TypeVar
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models import AssemblyRequest, AssemblyWbSupply, WbSupplySyncStatus
+from backend.schemas.assembly_wb import WbSupplyState
 from backend.services import integrations_service
 from backend.integrations.wb_portal_client import (
     WbPortalClient,
@@ -147,13 +148,17 @@ async def _run(
 # ─── публичные операции ──────────────────────────────────────────────────────
 
 
-async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> AssemblyWbSupply:
+async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> WbSupplyState:
     """
     Текущее состояние связи. НЕ создаёт строку (панель грузится на каждой
     детали сборки — иначе плодили бы пустые записи и ловили гонку INSERT).
     Пока заявку в WB не заводили — отдаём транзиентное состояние NONE.
+
+    Возвращает готовую схему: к полям связи домешивается read-only зеркало
+    назначенной машины и числа паллет заявки (не колонки таблицы wb-поставки) —
+    для префилла пропуска (F3) и баннера «паллеты ≠ WB» (F2).
     """
-    await _load_assembly(db, project_id, assembly_id)  # проверка доступа/существования
+    assembly = await _load_assembly(db, project_id, assembly_id)  # проверка доступа/существования
     result = await db.execute(
         select(AssemblyWbSupply).where(
             AssemblyWbSupply.assembly_request_id == assembly_id,
@@ -168,7 +173,82 @@ async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> Asse
             sync_status=WbSupplySyncStatus.NONE.value,
             boxes=[],
         )
-    return link
+    state = WbSupplyState.model_validate(link)
+    return state.model_copy(
+        update={
+            "assembly_vehicle_info": assembly.vehicle_info,
+            "assembly_vehicle_brand": assembly.vehicle_brand,
+            "assembly_driver_phone": assembly.driver_phone,
+            "assembly_pallets_count": assembly.pallets_count,
+        }
+    )
+
+
+async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
+    """
+    Bulk-синк живого состояния WB-поставок проекта через кабинет (listSupplies).
+
+    Забирает справочник статусов + все поставки кабинета постранично и для каждой
+    локальной связи (preorder_id/supply_id) обновляет `wb_supply_state`/
+    `wb_supply_state_id`/`wb_state_synced_at`. Проекты без заведённых поставок в
+    WB не ходят в кабинет вообще. Возврат: {checked, updated, supplies_seen}.
+    """
+    result = await db.execute(
+        select(AssemblyWbSupply).where(
+            AssemblyWbSupply.project_id == project_id,
+            or_(
+                AssemblyWbSupply.preorder_id.isnot(None),
+                AssemblyWbSupply.supply_id.isnot(None),
+            ),
+        )
+    )
+    links = list(result.scalars().all())
+    if not links:
+        return {"checked": 0, "updated": 0, "supplies_seen": 0}
+
+    try:
+        client = await _client(db, project_id)
+    except ValueError as e:
+        # Сессия кабинета не задана — не поднимаем 500, тихо сигналим наверх.
+        raise WbSupplyError(str(e)) from e
+
+    try:
+        statuses = await client.list_statuses()
+        supplies: list[dict] = []
+        page_size = 100
+        offset = 0
+        while True:
+            page = await client.list_supplies(limit=page_size, offset=offset)
+            supplies.extend(page)
+            if len(page) < page_size or offset > 2000:
+                break
+            offset += page_size
+    except WbSessionExpired as e:
+        await integrations_service.mark_wb_portal_expired(db, project_id)
+        raise WbSupplyError(
+            "Сессия WB-кабинета истекла. Обновите доступ WB в настройках."
+        ) from e
+    except WbPortalError as e:
+        raise WbSupplyError(f"WB отклонил операцию: {e}") from e
+
+    name_by_id = _build_status_name_map(statuses)
+
+    updated = 0
+    for link in links:
+        supply = _find_supply_for_link(supplies, link)
+        if supply is None:
+            continue
+        state_id, state_name = _extract_supply_state(supply, name_by_id)
+        if state_id is None and state_name is None:
+            continue
+        if link.wb_supply_state != state_name or link.wb_supply_state_id != state_id:
+            link.wb_supply_state = state_name
+            link.wb_supply_state_id = state_id
+            updated += 1
+        link.wb_state_synced_at = utcnow()
+
+    await db.commit()
+    return {"checked": len(links), "updated": updated, "supplies_seen": len(supplies)}
 
 
 async def save_boxes(
@@ -455,3 +535,67 @@ def _match_supply(supplies: list, preorder_id: int) -> int | None:
             val = s.get("supplyId") or s.get("id")
             return int(val) if val else None
     return None
+
+
+def _build_status_name_map(statuses: list[dict]) -> dict[int, str]:
+    """Справочник статусов → {statusID: name}. Ключи id/statusID и name/statusName варьируются."""
+    result: dict[int, str] = {}
+    for s in statuses or []:
+        sid = s.get("id") or s.get("statusID") or s.get("statusId")
+        name = s.get("name") or s.get("statusName")
+        if sid is not None and name:
+            try:
+                result[int(sid)] = str(name)
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
+def _find_supply_for_link(supplies: list[dict], link: "AssemblyWbSupply") -> dict | None:
+    """Найти поставку кабинета для связи: по supply_id, иначе по preorder_id."""
+    for s in supplies or []:
+        raw_sid = s.get("supplyId") or s.get("id")
+        if link.supply_id and raw_sid:
+            try:
+                if int(raw_sid) == link.supply_id:
+                    return s
+            except (TypeError, ValueError):
+                pass
+        if link.preorder_id:
+            pres = s.get("preorders") or s.get("preorderIds") or []
+            if (
+                link.preorder_id in pres
+                or s.get("preorderId") == link.preorder_id
+                or s.get("preOrderId") == link.preorder_id
+            ):
+                return s
+    return None
+
+
+def _extract_supply_state(
+    supply: dict, name_by_id: dict[int, str]
+) -> tuple[int | None, str | None]:
+    """Достать (statusID, statusName) из поставки. Ключи варьируются: statusID/
+    statusId/status (число) + statusName/status (строка); имя резолвим по справочнику."""
+    state_id: int | None = None
+    for key in ("statusID", "statusId"):
+        v = supply.get(key)
+        if isinstance(v, int):
+            state_id = v
+            break
+        if isinstance(v, str) and v.isdigit():
+            state_id = int(v)
+            break
+    status_val = supply.get("status")
+    if state_id is None:
+        if isinstance(status_val, int):
+            state_id = status_val
+        elif isinstance(status_val, str) and status_val.isdigit():
+            state_id = int(status_val)
+
+    state_name = supply.get("statusName")
+    if not state_name and isinstance(status_val, str) and not status_val.isdigit():
+        state_name = status_val
+    if not state_name and state_id is not None:
+        state_name = name_by_id.get(state_id) or str(state_id)
+    return state_id, state_name

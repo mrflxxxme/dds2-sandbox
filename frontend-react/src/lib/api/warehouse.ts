@@ -918,5 +918,9 @@ export function addWarehouseMethods(api: ApiClient) {
         wbSupplyDrivers(assemblyId: number) {
             return api.request<import('@/types/api').WbDriver[]>('GET', `/api/v1/warehouse/assembly/${assemblyId}/wb/drivers`);
         },
+        // F1: bulk-синк живого WB-состояния всех заявок проекта (одним заходом в кабинет).
+        wbSupplySyncAllStates() {
+            return api.request<import('@/types/api').WbBulkSyncResult>('POST', '/api/v1/warehouse/assembly/wb/sync-states');
+        },
     };
 }

@@ -14,6 +14,7 @@ from starlette.responses import Response
 from backend.database import get_db
 from backend.models import Project
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
+from backend.models.assembly_wb import AssemblyWbSupply, WbSupplySyncStatus
 from backend.models.fulfillment import FulfillmentRequest
 from backend.models.warehouse import Warehouse
 from backend.project_context import get_current_project
@@ -48,6 +49,7 @@ from backend.schemas.assembly import (
     PalletManifest,
     PalletManifestUpdate,
     PreDistVehicle,
+    WbSupplyStateBrief,
     PreDistVehiclePool,
     PrebookingCreate,
     PrebookingCreateResult,
@@ -137,7 +139,44 @@ async def list_assembly_requests(
     await _enrich_ff_links(db, project.id, items, response_items)
     await _enrich_source_vehicle_order_no(db, project.id, items, response_items)
     await _enrich_joint(db, project.id, items, response_items)
+    await _enrich_wb_supply(db, project.id, items, response_items)
     return AssemblyListResponse(items=response_items, total=total)
+
+
+async def _enrich_wb_supply(
+    db: AsyncSession,
+    project_id: int,
+    items: list,
+    response_items: list[AssemblyRequestResponse],
+) -> None:
+    """BATCH-обогащение WB-сводкой поставки (реплей кабинета).
+
+    Один индексированный запрос по ix_assembly_wb_supply_assembly_request_id —
+    без per-row get_state. Сводка заполняется только если заявку реально заводили
+    в WB (есть preorder/supply/статус ≠ NONE), иначе wb_supply остаётся None.
+    """
+    if not items:
+        return
+    assembly_ids = [req.id for req in items]
+    rows = await db.execute(
+        select(AssemblyWbSupply).where(
+            AssemblyWbSupply.assembly_request_id.in_(assembly_ids),
+            AssemblyWbSupply.project_id == project_id,
+        )
+    )
+    by_assembly = {link.assembly_request_id: link for link in rows.scalars().all()}
+    if not by_assembly:
+        return
+    for resp in response_items:
+        link = by_assembly.get(resp.id)
+        if link is None:
+            continue
+        if (
+            link.preorder_id
+            or link.supply_id
+            or (link.sync_status and link.sync_status != WbSupplySyncStatus.NONE.value)
+        ):
+            resp.wb_supply = WbSupplyStateBrief.model_validate(link)
 
 
 async def _enrich_source_vehicle_order_no(

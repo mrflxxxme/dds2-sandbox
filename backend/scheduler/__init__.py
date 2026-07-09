@@ -50,6 +50,7 @@ from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_re
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
 from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
 from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_stocks
+from backend.scheduler.jobs.wb_supply_states import sync_all_projects_wb_supply_states
 
 logger = logging.getLogger("dds.scheduler")
 
@@ -253,6 +254,19 @@ def start_scheduler():
         trigger=IntervalTrigger(hours=1),
         id="assembly_fbo_autorefresh",
         name="Assembly FBO auto-refresh (every 1h)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
+    )
+
+    # WB supply live-states sync: every 4h (≈6×/день) — фоновая «Обновить» WB-панели.
+    # Тянет listSupplies + справочник статусов кабинета и обновляет wb_supply_state
+    # локальных связей заявка↔WB-поставка (bulk, один клиент на проект).
+    _scheduler.add_job(
+        sync_all_projects_wb_supply_states,
+        trigger=IntervalTrigger(hours=4),
+        id="wb_supply_states_sync",
+        name="WB supply states sync (every 4h)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=600,

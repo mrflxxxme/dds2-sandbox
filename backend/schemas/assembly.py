@@ -10,6 +10,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from backend.schemas.assembly_wb import WbSupplyStateBrief
+
 PackageTypeStr = Literal["BOX", "MONOPALLET", "SUPERSAFE"]
 
 
@@ -357,6 +359,9 @@ class AssemblyRequestResponse(BaseModel):
     # По заявке есть активная (SENT/MATCHED) отправка в Газельку — логистику ведёт
     # агрегатор. Гейтит ручное «Назначить машину» (бэк-валидация + дизейбл на фронте).
     via_gazelka: bool = False
+    # WB FBW-поставка (реплей кабинета): компактная сводка стадии заноса + живого
+    # состояния кабинета. None — заявку в WB ещё не заводили (F1/F2).
+    wb_supply: WbSupplyStateBrief | None = None
 
 
 class AssemblyListResponse(BaseModel):
