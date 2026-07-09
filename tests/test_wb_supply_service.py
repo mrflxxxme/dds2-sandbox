@@ -106,6 +106,25 @@ class FakeClient:
     async def pass_history(self):
         return [{"firstName": "Иван", "lastName": "Иванов", "phone": "79001112233"}]
 
+    async def list_boxes(self, supply_id):
+        return [
+            {
+                "boxcode": "WB_111",
+                "quantity": 1,
+                "barcodes": [
+                    {"barcode": "BC1", "quantity": 40, "imtName": "Товар А", "brand": "Бренд", "saNm": "ART-1"},
+                ],
+            },
+            {
+                "boxcode": "WB_222",
+                "quantity": 1,
+                "barcodes": [
+                    {"barcode": "BC1", "quantity": 10},
+                    {"barcode": "BC2", "quantity": 5},
+                ],
+            },
+        ]
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def setup(db_session, project, other_project, monkeypatch):
@@ -527,3 +546,25 @@ async def test_push_pass_adopts_supply_id_from_fbo(db_session, monkeypatch):
     res = await wb_supply_service.push_pass(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert res.supply_id == 40503730
     assert res.sync_status == WbSupplySyncStatus.PASSED.value
+
+
+@pytest.mark.asyncio
+async def test_get_cabinet_boxes_from_adopted_supply(db_session, monkeypatch):
+    # Короба тянутся по supply_id, усыновлённому из FBO; сводка агрегируется.
+    await _attach_fbo(db_session, "40503730", "IN_PROGRESS")
+    await _patch_client(monkeypatch, FakeClient())
+    res = await wb_supply_service.get_cabinet_boxes(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert res.total_boxes == 2
+    assert res.total_barcodes == 2  # BC1, BC2 (BC1 в двух коробах — уникальных 2)
+    assert res.total_units == 55  # 40 + 10 + 5
+    assert res.boxes[0].boxcode == "WB_111"
+    assert res.boxes[0].items[0].imt_name == "Товар А"
+
+
+@pytest.mark.asyncio
+async def test_get_cabinet_boxes_empty_without_supply(db_session, monkeypatch):
+    # Без supply (нет ни реплея, ни FBO) — пустой ответ, в WB не ходим.
+    await _patch_client(monkeypatch, FakeClient())
+    res = await wb_supply_service.get_cabinet_boxes(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert res.total_boxes == 0
+    assert res.boxes == []

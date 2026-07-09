@@ -922,5 +922,9 @@ export function addWarehouseMethods(api: ApiClient) {
         wbSupplySyncAllStates() {
             return api.request<import('@/types/api').WbBulkSyncResult>('POST', '/api/v1/warehouse/assembly/wb/sync-states');
         },
+        // Короба поставки из кабинета WB (с содержимым) — вкладка «Упаковка».
+        wbSupplyCabinetBoxes(assemblyId: number) {
+            return api.request<import('@/types/api').WbCabinetBoxes>('GET', `/api/v1/warehouse/assembly/${assemblyId}/wb/cabinet-boxes`);
+        },
     };
 }

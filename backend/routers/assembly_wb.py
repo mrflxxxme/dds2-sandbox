@@ -16,6 +16,7 @@ from backend.project_context import get_current_project
 from backend.schemas.assembly_wb import (
     WbBoxesUpdate,
     WbBulkSyncResult,
+    WbCabinetBoxes,
     WbDriver,
     WbPassUpdate,
     WbPortalSessionSet,
@@ -166,6 +167,18 @@ async def push_pass(
     _: None = Depends(rate_limit_write),
 ) -> WbSupplyState:
     return await _call(wb_supply_service.push_pass(db, project.id, assembly_id))
+
+
+@router.get("/{assembly_id}/wb/cabinet-boxes", response_model=WbCabinetBoxes)
+async def get_cabinet_boxes(
+    assembly_id: int,
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+) -> WbCabinetBoxes:
+    try:
+        return await wb_supply_service.get_cabinet_boxes(db, project.id, assembly_id)
+    except WbSupplyError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/{assembly_id}/wb/drivers", response_model=list[WbDriver])

@@ -7,6 +7,7 @@ import type {
     AssemblyRequestItem,
     PackageType,
     WbBox,
+    WbCabinetBoxes,
     WbDriver,
     WbPortalStatus,
     WbSupplyState,
@@ -83,6 +84,10 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
 
     // Box editor (local)
     const [boxes, setBoxes] = useState<WbBox[]>([]);
+    // Короба из кабинета WB (read-only, с содержимым) + раскрытый короб.
+    const [cabinetBoxes, setCabinetBoxes] = useState<WbCabinetBoxes | null>(null);
+    const [cabinetLoading, setCabinetLoading] = useState(false);
+    const [expandedBox, setExpandedBox] = useState<string | null>(null);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -151,6 +156,22 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
             /* автозаполнение опционально */
         }
     }, [assemblyId]);
+
+    // Короба из кабинета WB (с содержимым) — для вкладки «Упаковка».
+    const loadCabinetBoxes = useCallback(async () => {
+        if (!state?.supply_id) {
+            setCabinetBoxes(null);
+            return;
+        }
+        setCabinetLoading(true);
+        try {
+            setCabinetBoxes(await api.wbSupplyCabinetBoxes(assemblyId));
+        } catch {
+            setCabinetBoxes(null);
+        } finally {
+            setCabinetLoading(false);
+        }
+    }, [assemblyId, state?.supply_id]);
 
     // Авто-раскладка: каждый баркод — в свой короб (как в кабинете WB).
     const autoLayout = useCallback(() => {
@@ -268,6 +289,7 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                             onClick={() => {
                                 setTab(key);
                                 if (key === 'pass') loadDrivers();
+                                if (key === 'boxes') loadCabinetBoxes();
                             }}
                         >
                             {label}
@@ -397,6 +419,94 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                             {busy === 'supply-stickers' ? 'Готовлю…' : '📄 Скачать ШК поставки'}
                         </button>
                     </div>
+
+                    {/* Короба из кабинета WB (как в «Упаковке» кабинета): список с раскрытием. */}
+                    {st?.supply_id && (
+                        <section>
+                            <div className="section-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span>Короба в кабинете</span>
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={loadCabinetBoxes}
+                                    disabled={cabinetLoading}
+                                    style={{ marginLeft: 'auto' }}
+                                >
+                                    {cabinetLoading ? 'Загрузка…' : 'Обновить'}
+                                </button>
+                            </div>
+                            {cabinetBoxes && cabinetBoxes.total_boxes > 0 ? (
+                                <>
+                                    <div className="text-muted" style={{ marginBottom: 8, fontSize: 13 }}>
+                                        {formatNumber(cabinetBoxes.total_boxes, 0)} коробов ·{' '}
+                                        {formatNumber(cabinetBoxes.total_barcodes, 0)} баркодов ·{' '}
+                                        {formatNumber(cabinetBoxes.total_units, 0)} шт
+                                    </div>
+                                    <div style={{ display: 'grid', gap: 6 }}>
+                                        {cabinetBoxes.boxes.map((b) => {
+                                            const units = b.items.reduce((s, it) => s + it.quantity, 0);
+                                            const open = expandedBox === b.boxcode;
+                                            return (
+                                                <div key={b.boxcode} className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+                                                    <button
+                                                        onClick={() => setExpandedBox(open ? null : b.boxcode)}
+                                                        style={{
+                                                            width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                                                            padding: '10px 12px', background: 'none', border: 'none',
+                                                            cursor: 'pointer', textAlign: 'left',
+                                                        }}
+                                                    >
+                                                        <span style={{ fontWeight: 600 }}>{open ? '▾' : '▸'} {b.boxcode}</span>
+                                                        <span className="text-muted" style={{ marginLeft: 'auto', fontSize: 13 }}>
+                                                            {formatNumber(b.items.length, 0)} баркод · {formatNumber(units, 0)} шт
+                                                        </span>
+                                                    </button>
+                                                    {open && (
+                                                        <div style={{ padding: '0 12px 8px' }}>
+                                                            {b.items.map((it) => (
+                                                                <div
+                                                                    key={it.barcode}
+                                                                    style={{
+                                                                        display: 'flex', gap: 10, alignItems: 'center',
+                                                                        padding: '8px 0', borderTop: '1px solid var(--color-border)',
+                                                                    }}
+                                                                >
+                                                                    {it.img_src && (
+                                                                        // eslint-disable-next-line @next/next/no-img-element
+                                                                        <img
+                                                                            src={it.img_src}
+                                                                            alt=""
+                                                                            width={40}
+                                                                            height={40}
+                                                                            style={{ objectFit: 'cover', borderRadius: 4, flexShrink: 0 }}
+                                                                        />
+                                                                    )}
+                                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                                        <div style={{ fontSize: 13, fontWeight: 500 }}>{it.imt_name ?? '—'}</div>
+                                                                        <div className="text-muted" style={{ fontSize: 12 }}>
+                                                                            {[it.brand, it.sa_nm, it.color_name].filter(Boolean).join(' · ')}
+                                                                        </div>
+                                                                        <div className="text-muted" style={{ fontSize: 12 }}>Баркод: {it.barcode}</div>
+                                                                    </div>
+                                                                    <div style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
+                                                                        {formatNumber(it.quantity, 0)} шт
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </>
+                            ) : cabinetLoading ? (
+                                <div className="text-muted">Загрузка коробов из кабинета…</div>
+                            ) : (
+                                <div className="text-muted">В кабинете пока нет коробов для этой поставки.</div>
+                            )}
+                        </section>
+                    )}
+
                     <section>
                         <div className="section-title">Раскладка коробов</div>
                         {boxes.length === 0 ? (

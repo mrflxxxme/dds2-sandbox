@@ -21,7 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.models import AssemblyRequest, AssemblyWbSupply, WbFboSupply, WbSupplySyncStatus
-from backend.schemas.assembly_wb import WbSupplyState
+from backend.schemas.assembly_wb import (
+    WbCabinetBox,
+    WbCabinetBoxes,
+    WbCabinetBoxItem,
+    WbSupplyState,
+)
 from backend.services import integrations_service
 from backend.integrations.wb_portal_client import (
     WbPortalClient,
@@ -565,6 +570,75 @@ async def get_drivers(db: AsyncSession, project_id: int) -> list[dict]:
     except WbSessionExpired as e:
         await integrations_service.mark_wb_portal_expired(db, project_id)
         raise WbSupplyError("Сессия WB-кабинета истекла. Обновите доступ WB.") from e
+
+
+async def get_cabinet_boxes(
+    db: AsyncSession, project_id: int, assembly_id: int
+) -> WbCabinetBoxes:
+    """
+    Короба поставки с содержимым из кабинета (вкладка «Упаковка», как в WB).
+
+    supply_id берётся из реплей-связи ИЛИ из забронированной FBO-поставки
+    (адопция) — так короба видны и для поставок, собранных прямо в кабинете.
+    """
+    assembly = await _load_assembly(db, project_id, assembly_id)
+    result = await db.execute(
+        select(AssemblyWbSupply).where(
+            AssemblyWbSupply.assembly_request_id == assembly_id,
+            AssemblyWbSupply.project_id == project_id,
+        )
+    )
+    link = result.scalar_one_or_none()
+    supply_id = (link.supply_id if link else None) or _adopted_supply_id(assembly)
+    if not supply_id:
+        return WbCabinetBoxes()
+
+    client = await _client(db, project_id)
+    try:
+        raw = await client.list_boxes(supply_id)
+    except WbSessionExpired as e:
+        await integrations_service.mark_wb_portal_expired(db, project_id)
+        raise WbSupplyError("Сессия WB-кабинета истекла. Обновите доступ WB.") from e
+    except WbPortalError as e:
+        raise WbSupplyError(f"WB отклонил операцию: {e}") from e
+
+    boxes: list[WbCabinetBox] = []
+    total_units = 0
+    seen_barcodes: set[str] = set()
+    for b in raw:
+        items = []
+        for it in b.get("barcodes") or []:
+            bc = str(it.get("barcode") or "")
+            qty = int(it.get("quantity") or 0)
+            total_units += qty
+            if bc:
+                seen_barcodes.add(bc)
+            items.append(
+                WbCabinetBoxItem(
+                    barcode=bc,
+                    quantity=qty,
+                    imt_name=it.get("imtName"),
+                    img_src=it.get("imgSrc"),
+                    brand=it.get("brand"),
+                    sa_nm=it.get("saNm"),
+                    nm_id=it.get("nmID"),
+                    color_name=it.get("colorName"),
+                    volume=it.get("volume"),
+                )
+            )
+        boxes.append(
+            WbCabinetBox(
+                boxcode=str(b.get("boxcode") or ""),
+                quantity=int(b.get("quantity") or 1),
+                items=items,
+            )
+        )
+    return WbCabinetBoxes(
+        boxes=boxes,
+        total_boxes=len(boxes),
+        total_barcodes=len(seen_barcodes),
+        total_units=total_units,
+    )
 
 
 # ─── парсеры ответов WB ──────────────────────────────────────────────────────
