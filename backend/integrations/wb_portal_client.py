@@ -387,8 +387,31 @@ class WbPortalClient:
             SUPPLY_BASE,
             "/ns/sm-supply/supply-manager/api/v1/supply/listSupplies",
         )
-        supplies = res.get("supplies", [])
+        # WB отдаёт список под ключом `data` (+ `totalCount`), НЕ `supplies`.
+        # Каждый элемент: {supplyId, preorderId, statusId, statusName, boxTypeName,
+        # warehouseName, boxQuantity, ...}. Страница максимум ~20.
+        supplies = res.get("data")
+        if not isinstance(supplies, list):
+            supplies = res.get("supplies", [])  # запас на случай смены схемы
         return supplies if isinstance(supplies, list) else []
+
+    async def supply_details(self, supply_id: int) -> dict:
+        """
+        Карточка поставки из кабинета (supplyDetails) — АВТОРИТЕТНЫЙ статус.
+
+        Возвращает объект `supply` с `statusId`/`statusName` («Запланировано» /
+        «Отгрузка разрешена» / «Идёт приёмка» / «Принято» …), а также
+        `boxQuantity`, `supplyDate`, `hasBoxes`, `warehouseName` и пр. Это тот
+        статус, что видит пользователь в кабинете (отличается от FBO Marketplace
+        API `WbFboSupply.wb_status`).
+        """
+        res = await self._call(
+            {"supplyID": supply_id, "preorderID": None, "pageNumber": 1, "pageSize": 1, "search": ""},
+            SUPPLY_BASE,
+            "/ns/sm-supply/supply-manager/api/v1/supply/supplyDetails",
+        )
+        supply = res.get("supply")
+        return supply if isinstance(supply, dict) else {}
 
     async def list_statuses(self) -> list[dict]:
         """
