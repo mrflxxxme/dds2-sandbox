@@ -455,3 +455,75 @@ async def test_get_state_mirrors_assembly_vehicle(db_session, monkeypatch):
     assert link.assembly_vehicle_brand == "Газель"
     assert link.assembly_driver_phone == "79001112233"
     assert link.assembly_pallets_count == 2
+
+
+# ─── адопция забронированной поставки из FBO ──────────────────────────────────
+
+
+async def _attach_fbo(db_session, wb_supply_id: str, wb_status: str) -> int:
+    """Прицепить FBO-поставку к тест-заявке (сырым INSERT), вернуть её id."""
+    await db_session.execute(
+        text(
+            "INSERT INTO wb_fbo_supplies "
+            "(project_id, wb_supply_id, wb_status, name, warehouse_name, created_at_wb, "
+            " total_qty, accepted_qty, created_at, updated_at) "
+            "VALUES (:pid, :sid, :st, :nm, :wh, NOW(), 0, 0, NOW(), NOW())"
+        ),
+        {"pid": PROJECT_ID, "sid": wb_supply_id, "st": wb_status, "nm": f"FBW-{wb_supply_id}", "wh": WH_NAME},
+    )
+    fid = (
+        await db_session.execute(
+            text("SELECT id FROM wb_fbo_supplies WHERE project_id = :pid AND wb_supply_id = :sid ORDER BY id DESC LIMIT 1"),
+            {"pid": PROJECT_ID, "sid": wb_supply_id},
+        )
+    ).scalar()
+    await db_session.execute(
+        text("UPDATE assembly_requests SET wb_fbo_supply_id = :fid WHERE id = :id"),
+        {"fid": fid, "id": ASSEMBLY_ID},
+    )
+    await db_session.commit()
+    db_session.expire_all()
+    return fid
+
+
+@pytest.mark.asyncio
+async def test_get_state_adopts_booked_fbo(db_session, monkeypatch):
+    # Реплей не заводили, но есть забронированная FBO-поставка → BOOKED + supply_id.
+    await _attach_fbo(db_session, "40503730", "IN_PROGRESS")
+    state = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert state.supply_id == 40503730
+    assert state.sync_status == WbSupplySyncStatus.BOOKED.value
+    assert state.wb_supply_state == "Разгрузка разрешена"
+
+
+@pytest.mark.asyncio
+async def test_get_state_no_adopt_when_cancelled(db_session, monkeypatch):
+    await _attach_fbo(db_session, "40503730", "CANCELLED")
+    state = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert state.supply_id is None
+    assert state.sync_status == WbSupplySyncStatus.NONE.value
+
+
+@pytest.mark.asyncio
+async def test_get_state_no_adopt_when_no_fbo(db_session, monkeypatch):
+    # Без FBO-привязки — прежнее поведение NONE.
+    state = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert state.supply_id is None
+    assert state.sync_status == WbSupplySyncStatus.NONE.value
+
+
+@pytest.mark.asyncio
+async def test_push_pass_adopts_supply_id_from_fbo(db_session, monkeypatch):
+    # Пропуск для «усыновлённой» поставки: строки нет, supply_id берётся из FBO.
+    await _attach_fbo(db_session, "40503730", "IN_PROGRESS")
+    client = FakeClient()
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.save_pass(
+        db_session,
+        PROJECT_ID,
+        ASSEMBLY_ID,
+        {"driver_first": "Антон", "driver_last": "Александров", "car_number": "B331YT69"},
+    )
+    res = await wb_supply_service.push_pass(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert res.supply_id == 40503730
+    assert res.sync_status == WbSupplySyncStatus.PASSED.value

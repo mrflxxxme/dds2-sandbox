@@ -15,6 +15,8 @@ from backend.database import get_db
 from backend.models import Project
 from backend.models.assembly import AssemblyRequest, AssemblyStatus
 from backend.models.assembly_wb import AssemblyWbSupply, WbSupplySyncStatus
+from backend.models.wb_fbo import WbFboSupply
+from backend.services.wb_supply_service import fbo_adopted_supply_id, fbo_state_label
 from backend.models.fulfillment import FulfillmentRequest
 from backend.models.warehouse import Warehouse
 from backend.project_context import get_current_project
@@ -149,11 +151,14 @@ async def _enrich_wb_supply(
     items: list,
     response_items: list[AssemblyRequestResponse],
 ) -> None:
-    """BATCH-обогащение WB-сводкой поставки (реплей кабинета).
+    """BATCH-обогащение WB-сводкой поставки (реплей кабинета + адопция из FBO).
 
-    Один индексированный запрос по ix_assembly_wb_supply_assembly_request_id —
-    без per-row get_state. Сводка заполняется только если заявку реально заводили
-    в WB (есть preorder/supply/статус ≠ NONE), иначе wb_supply остаётся None.
+    Два индексированных батч-запроса (без per-row get_state):
+      1) реплей-строки AssemblyWbSupply — если заявку заводили в WB (preorder/supply/
+         статус ≠ NONE);
+      2) для заявок БЕЗ реплей-строки, но с забронированной FBO-поставкой —
+         «усыновление»: supply_id = FBO.wb_supply_id, статус BOOKED, живое
+         состояние из FBO.wb_status (см. wb_supply_service.fbo_adopted_supply_id).
     """
     if not items:
         return
@@ -165,18 +170,42 @@ async def _enrich_wb_supply(
         )
     )
     by_assembly = {link.assembly_request_id: link for link in rows.scalars().all()}
-    if not by_assembly:
-        return
+
+    # Батч-загрузка FBO-поставок для адопции (без N+1).
+    fbo_ids = {req.wb_fbo_supply_id for req in items if req.wb_fbo_supply_id is not None}
+    by_fbo: dict[int, WbFboSupply] = {}
+    if fbo_ids:
+        fres = await db.execute(
+            select(WbFboSupply).where(
+                WbFboSupply.id.in_(fbo_ids),
+                WbFboSupply.project_id == project_id,
+            )
+        )
+        by_fbo = {f.id: f for f in fres.scalars().all()}
+    req_by_id = {req.id: req for req in items}
+
     for resp in response_items:
         link = by_assembly.get(resp.id)
-        if link is None:
-            continue
-        if (
+        if link is not None and (
             link.preorder_id
             or link.supply_id
             or (link.sync_status and link.sync_status != WbSupplySyncStatus.NONE.value)
         ):
             resp.wb_supply = WbSupplyStateBrief.model_validate(link)
+            continue
+        # Адопция из FBO для заявок без реальной реплей-связи.
+        req = req_by_id.get(resp.id)
+        fbo = by_fbo.get(req.wb_fbo_supply_id) if req and req.wb_fbo_supply_id else None
+        adopt = fbo_adopted_supply_id(fbo)
+        if adopt and fbo is not None:
+            resp.wb_supply = WbSupplyStateBrief(
+                sync_status=WbSupplySyncStatus.BOOKED.value,
+                wb_supply_state=fbo_state_label(fbo.wb_status),
+                supply_id=adopt,
+                preorder_id=None,
+                pass_pallets=link.pass_pallets if link else None,
+                wb_state_synced_at=None,
+            )
 
 
 async def _enrich_source_vehicle_order_no(

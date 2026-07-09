@@ -20,7 +20,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.models import AssemblyRequest, AssemblyWbSupply, WbSupplySyncStatus
+from backend.models import AssemblyRequest, AssemblyWbSupply, WbFboSupply, WbSupplySyncStatus
 from backend.schemas.assembly_wb import WbSupplyState
 from backend.services import integrations_service
 from backend.integrations.wb_portal_client import (
@@ -67,7 +67,10 @@ async def _load_assembly(db: AsyncSession, project_id: int, assembly_id: int) ->
 
 
 async def _get_or_create_link(
-    db: AsyncSession, project_id: int, assembly_id: int
+    db: AsyncSession,
+    project_id: int,
+    assembly_id: int,
+    adopt_supply_id: int | None = None,
 ) -> AssemblyWbSupply:
     result = await db.execute(
         select(AssemblyWbSupply).where(
@@ -78,8 +81,19 @@ async def _get_or_create_link(
     link = result.scalar_one_or_none()
     if link is None:
         link = AssemblyWbSupply(project_id=project_id, assembly_request_id=assembly_id)
+        # «Усыновление» забронированной поставки из FBO: строка сразу с реальным
+        # supply_id и статусом BOOKED → короба/пропуск идут по нему.
+        if adopt_supply_id:
+            link.supply_id = adopt_supply_id
+            link.sync_status = WbSupplySyncStatus.BOOKED.value
         db.add(link)
         await db.flush()
+    elif adopt_supply_id and not link.supply_id and not link.preorder_id:
+        # Строка была (напр. локальный черновик пропуска), но реплей не начинали —
+        # добираем supply_id из FBO.
+        link.supply_id = adopt_supply_id
+        if link.sync_status == WbSupplySyncStatus.NONE.value:
+            link.sync_status = WbSupplySyncStatus.BOOKED.value
     return link
 
 
@@ -88,6 +102,54 @@ def _direction_name(assembly: AssemblyRequest) -> str | None:
     if assembly.wb_fbo_supply and assembly.wb_fbo_supply.warehouse_name:
         return assembly.wb_fbo_supply.warehouse_name
     return assembly.wb_warehouse_name_manual
+
+
+# Метки статуса FBO-поставки (Marketplace API) для отображения живого состояния
+# «усыновлённых» поставок в панели/списке (см. _adopted_supply_id).
+_FBO_STATE_LABEL = {
+    "ACTIVE": "Запланирована",
+    "ON_DELIVERY": "В пути",  # noqa: RUF001
+    "IN_PROGRESS": "Разгрузка разрешена",
+    "ACCEPTED": "Принята",
+    "CANCELLED": "Отменена",
+}
+
+
+def fbo_adopted_supply_id(fbo: "WbFboSupply | None") -> int | None:
+    """
+    supply_id для «усыновления» уже забронированной поставки из FBO-привязки.
+
+    Портальный supply_id == `WbFboSupply.wb_supply_id` (подтверждено вживую:
+    trn_details принимает этот id). Для не-отменённых FBO-поставок с числовым
+    wb_supply_id возвращаем его — тогда панель «Поставка WB» оживает БЕЗ ручного
+    заведения (короба/пропуск идут по этому supply_id), а состояние берётся из
+    FBO-синка (обновляется Marketplace API каждые ~30 мин).
+
+    Портальный `list_supplies` для забронированных/в-приёмке поставок отдаёт
+    пусто, поэтому источник — именно FBO, а не реплей-список.
+    """
+    if (
+        fbo
+        and fbo.wb_status != "CANCELLED"
+        and fbo.wb_supply_id
+        and str(fbo.wb_supply_id).isdigit()
+    ):
+        return int(fbo.wb_supply_id)
+    return None
+
+
+def fbo_state_label(wb_status: str | None) -> str | None:
+    """Человекочитаемая метка живого статуса FBO-поставки."""
+    return _FBO_STATE_LABEL.get(wb_status, wb_status) if wb_status else None
+
+
+def _adopted_supply_id(assembly: AssemblyRequest) -> int | None:
+    return fbo_adopted_supply_id(assembly.wb_fbo_supply)
+
+
+def _fbo_state_label(assembly: AssemblyRequest) -> str | None:
+    fbo = assembly.wb_fbo_supply
+    return fbo_state_label(fbo.wb_status if fbo else None)
 
 
 def _build_goods(assembly: AssemblyRequest) -> list[dict]:
@@ -174,14 +236,26 @@ async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> WbSu
             boxes=[],
         )
     state = WbSupplyState.model_validate(link)
-    return state.model_copy(
-        update={
-            "assembly_vehicle_info": assembly.vehicle_info,
-            "assembly_vehicle_brand": assembly.vehicle_brand,
-            "assembly_driver_phone": assembly.driver_phone,
-            "assembly_pallets_count": assembly.pallets_count,
-        }
-    )
+    updates: dict = {
+        "assembly_vehicle_info": assembly.vehicle_info,
+        "assembly_vehicle_brand": assembly.vehicle_brand,
+        "assembly_driver_phone": assembly.driver_phone,
+        "assembly_pallets_count": assembly.pallets_count,
+    }
+    # Авто-адопция: если это НЕ DDS-реплей (нет preorder_id), а у заявки есть
+    # забронированная FBO-поставка — показываем её как BOOKED с supply_id из FBO
+    # и ЖИВЫМ статусом (обновляется FBO-синком Marketplace API ~30 мин).
+    #   • нет строки/supply_id → полностью синтезируем (транзиентно, на GET не пишем);
+    #   • строка уже усыновлена (supply_id из FBO) → освежаем живой статус.
+    # Реальная строка появляется при заносе коробов/пропуска (_get_or_create_link).
+    if not link.preorder_id:
+        adopt = _adopted_supply_id(assembly)
+        if adopt and link.supply_id in (None, adopt):
+            if not link.supply_id:
+                updates["supply_id"] = adopt
+                updates["sync_status"] = WbSupplySyncStatus.BOOKED.value
+            updates["wb_supply_state"] = _fbo_state_label(assembly)
+    return state.model_copy(update=updates)
 
 
 async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
@@ -255,8 +329,10 @@ async def save_boxes(
     db: AsyncSession, project_id: int, assembly_id: int, boxes: list[dict]
 ) -> AssemblyWbSupply:
     """Локально сохранить раскладку коробов (до заноса в WB)."""
-    await _load_assembly(db, project_id, assembly_id)
-    link = await _get_or_create_link(db, project_id, assembly_id)
+    assembly = await _load_assembly(db, project_id, assembly_id)
+    link = await _get_or_create_link(
+        db, project_id, assembly_id, adopt_supply_id=_adopted_supply_id(assembly)
+    )
     link.boxes = boxes
     await db.commit()
     return link
@@ -266,8 +342,10 @@ async def save_pass(
     db: AsyncSession, project_id: int, assembly_id: int, data: dict
 ) -> AssemblyWbSupply:
     """Локально сохранить данные пропуска (до заноса в WB)."""
-    await _load_assembly(db, project_id, assembly_id)
-    link = await _get_or_create_link(db, project_id, assembly_id)
+    assembly = await _load_assembly(db, project_id, assembly_id)
+    link = await _get_or_create_link(
+        db, project_id, assembly_id, adopt_supply_id=_adopted_supply_id(assembly)
+    )
     link.pass_driver_first = data.get("driver_first")
     link.pass_driver_last = data.get("driver_last")
     link.pass_driver_phone = data.get("driver_phone")
@@ -396,8 +474,10 @@ async def sync_supply_id(db: AsyncSession, project_id: int, assembly_id: int) ->
 
 async def push_boxes(db: AsyncSession, project_id: int, assembly_id: int) -> AssemblyWbSupply:
     """Шаг 6: создать короба и разложить товары по локальной раскладке link.boxes."""
-    await _load_assembly(db, project_id, assembly_id)
-    link = await _get_or_create_link(db, project_id, assembly_id)
+    assembly = await _load_assembly(db, project_id, assembly_id)
+    link = await _get_or_create_link(
+        db, project_id, assembly_id, adopt_supply_id=_adopted_supply_id(assembly)
+    )
     if not link.supply_id:
         raise WbSupplyError("Сначала забронируйте дату в кабинете WB (шаг брони)")
     supply_id = link.supply_id
@@ -435,8 +515,10 @@ async def push_boxes(db: AsyncSession, project_id: int, assembly_id: int) -> Ass
 
 async def push_pass(db: AsyncSession, project_id: int, assembly_id: int) -> AssemblyWbSupply:
     """Шаг 7: занести пропуск (водитель/авто/паллеты) через setTRNDetails."""
-    await _load_assembly(db, project_id, assembly_id)
-    link = await _get_or_create_link(db, project_id, assembly_id)
+    assembly = await _load_assembly(db, project_id, assembly_id)
+    link = await _get_or_create_link(
+        db, project_id, assembly_id, adopt_supply_id=_adopted_supply_id(assembly)
+    )
     if not link.supply_id:
         raise WbSupplyError("Сначала забронируйте дату в кабинете WB (шаг брони)")
     if not (link.pass_driver_first and link.pass_driver_last and link.pass_car_number):

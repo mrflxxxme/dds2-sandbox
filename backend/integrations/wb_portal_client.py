@@ -379,8 +379,11 @@ class WbPortalClient:
         (матч по преордеру) и bulk-синка статусов (F1). limit/offset — пагинация
         (bulk-синк тянет страницами до исчерпания).
         """
+        # statusIDs=[] кабинет трактует как «ничего» (пустой список). [-2] =
+        # «Все статусы» (из supply/listStatuses) → возвращаются реальные поставки.
+        # Явный фильтр статусов передаём как есть.
         res = await self._call(
-            {"statusIDs": status_ids or [], "limit": limit, "offset": offset},
+            {"statusIDs": status_ids if status_ids else [-2], "limit": limit, "offset": offset},
             SUPPLY_BASE,
             "/ns/sm-supply/supply-manager/api/v1/supply/listSupplies",
         )
