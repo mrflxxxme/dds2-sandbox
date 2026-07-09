@@ -449,8 +449,8 @@ async def test_sync_all_states_no_change_updates_synced_at(db_session, monkeypat
 
 @pytest.mark.asyncio
 async def test_sync_all_states_session_expired(db_session, monkeypatch):
-    # WbSessionExpired на listSupplies bulk-синка → WbSupplyError + пометка EXPIRED.
-    client = FakeClient(supplies=[{"supplyId": 40699158, "preorders": [52670743], "statusName": "Запланировано"}])
+    # WbSessionExpired на supplyDetails bulk-синка → WbSupplyError + пометка EXPIRED.
+    client = FakeClient(supplies=[{"supplyId": 40699158, "preorders": [52670743]}])
     await _patch_client(monkeypatch, client)
     await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
     await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
@@ -461,7 +461,7 @@ async def test_sync_all_states_session_expired(db_session, monkeypatch):
         called["marked"] = project_id
 
     monkeypatch.setattr(integrations_service, "mark_wb_portal_expired", fake_mark)
-    client.list_expire = True  # listSupplies бросит WbSessionExpired
+    client.details_expire = True  # supplyDetails бросит WbSessionExpired
 
     with pytest.raises(WbSupplyError, match="истекла"):
         await wb_supply_service.sync_all_states(db_session, PROJECT_ID)

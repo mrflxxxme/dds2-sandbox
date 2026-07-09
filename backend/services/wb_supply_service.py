@@ -11,6 +11,7 @@ Service: занос заявки-сборки в FBW-поставку WB чер�
 пробрасываем понятную ошибку (UI попросит обновить токен).
 """
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable
 from typing import TypeVar
@@ -289,43 +290,53 @@ async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> WbSu
     return state.model_copy(update=updates)
 
 
-_SYNC_MAX_PAGES = 40  # ≤ ~800 свежих поставок (страница listSupplies ≈ 20)
+# Статусы заявки, для которых WB-поставка ещё «живая» (её статус меняется и
+# интересен). Терминальные (SHIPPED/DELIVERED/CLOSED/CANCELLED/RETURNED) не синкаем —
+# их сотни в истории, а статус уже финальный → лишние вызовы и рейт-лимит.
+_SYNC_ACTIVE_STATUSES = ("IN_PROGRESS", "READY", "VEHICLE_ASSIGNED")
+_SYNC_SUPPLY_CAP = 200      # предохранитель от лавины вызовов
+_SYNC_DELAY = 0.25         # пауза между supplyDetails (щадим анти-бот)
 
 
 async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
     """
-    Bulk-синк АВТОРИТЕТНОГО кабинетного статуса поставок проекта.
+    Bulk-синк АВТОРИТЕТНОГО кабинетного статуса АКТИВНЫХ поставок проекта.
 
-    Кабинетный статус (`statusName`) отличается от FBO Marketplace API
-    (`WbFboSupply.wb_status`) — напр. кабинет «Запланировано» vs FBO «В пути».
-    Тянем его пагинацией `listSupplies` (ключ `data`, статус в каждом элементе,
-    ≈20 на страницу, свежие сверху) и строим карту supplyId→статус — так один
-    заход в кабинет ~десяток вызовов покрывает все активные поставки БЕЗ
-    рейт-лимита (per-supply `supplyDetails` для сотен поставок кабинет отбивает).
-    Матч по supply_id; для адоптированных из FBO без строки — строка создаётся.
-    supplyDetails остаётся для живого статуса ОДНОЙ поставки в панели (get_state).
-    Возврат: {checked, updated, supplies_seen}.
+    Кабинетный статус (`supplyDetails.statusName`) отличается от FBO Marketplace
+    API (`WbFboSupply.wb_status`) — напр. кабинет «Запланировано» vs FBO «В пути».
+    Берём его per-supply через `supplyDetails` (listSupplies НЕ пагинируется по
+    offset — отдаёт только верхние ~20). Чтобы не упереться в рейт-лимит,
+    синкаем ТОЛЬКО активные заявки (IN_PROGRESS/READY/VEHICLE_ASSIGNED — не
+    архивные, не терминальные): их немного. Пауза + 1 ретрай на WbPortalError.
+    Для адоптированных из FBO без строки — строка создаётся. supplyDetails также
+    используется в панели (get_state). Возврат: {checked, updated, supplies_seen}.
     """
-    # 1. Существующие связи с известным supply_id.
+    # 1. Связи с supply_id у АКТИВНЫХ незаархивированных заявок.
     links_res = await db.execute(
-        select(AssemblyWbSupply).where(
+        select(AssemblyWbSupply)
+        .join(AssemblyRequest, AssemblyWbSupply.assembly_request_id == AssemblyRequest.id)
+        .where(
             AssemblyWbSupply.project_id == project_id,
             AssemblyWbSupply.supply_id.isnot(None),
+            AssemblyRequest.status.in_(_SYNC_ACTIVE_STATUSES),
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.is_archived.is_(False),
         )
     )
     links = list(links_res.scalars().all())
     by_assembly = {link.assembly_request_id: link for link in links}
 
-    # 2. Заявки с забронированной FBO-поставкой (адопция) — supply_id из FBO.
+    # 2. Активные заявки с забронированной FBO-поставкой (адопция).
     fbo_res = await db.execute(
         select(AssemblyRequest.id, WbFboSupply)
         .join(WbFboSupply, AssemblyRequest.wb_fbo_supply_id == WbFboSupply.id)
         .where(
             AssemblyRequest.project_id == project_id,
+            AssemblyRequest.status.in_(_SYNC_ACTIVE_STATUSES),
             AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.is_archived.is_(False),
         )
     )
-    # work: (assembly_id, supply_id, link|None)
     work: list[tuple[int, int, AssemblyWbSupply | None]] = [
         (link.assembly_request_id, int(link.supply_id), link)
         for link in links
@@ -334,7 +345,7 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
     for aid, fbo in fbo_res.all():
         existing = by_assembly.get(aid)
         if existing and existing.supply_id:
-            continue  # уже покрыта связью
+            continue
         sid = fbo_adopted_supply_id(fbo)
         if sid:
             work.append((aid, sid, existing))
@@ -347,59 +358,44 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
     except ValueError as e:
         raise WbSupplyError(str(e)) from e
 
-    targets = {sid for _, sid, _ in work}
-    # Пагинация listSupplies → карта supplyId → (statusId, statusName).
-    status_map: dict[int, tuple[int | None, str | None]] = {}
-    try:
-        offset = 0
-        for _ in range(_SYNC_MAX_PAGES):
-            page = await client.list_supplies(limit=100, offset=offset)
-            if not page:
-                break
-            for s in page:
-                sid = s.get("supplyId") or s.get("id")
-                if isinstance(sid, int):
-                    status_map[sid] = (s.get("statusId"), s.get("statusName"))
-            if targets <= set(status_map):
-                break  # все наши поставки уже покрыты
-            offset += len(page)
-            if len(page) < 20:  # последняя страница (кабинет отдаёт ≈20)
-                break
-    except WbSessionExpired as e:
-        await integrations_service.mark_wb_portal_expired(db, project_id)
-        raise WbSupplyError(
-            "Сессия WB-кабинета истекла. Обновите доступ WB в настройках."
-        ) from e
-    except WbPortalError as e:
-        raise WbSupplyError(f"WB отклонил операцию: {e}") from e
-
     updated = 0
     checked = 0
-    for aid, sid, link in work:
-        st = status_map.get(sid)
-        if st is None:
-            continue  # поставки нет в свежих страницах (старая/архивная) — пропуск
+    for aid, sid, link in work[:_SYNC_SUPPLY_CAP]:
+        try:
+            name, state_id = await _cabinet_status(client, sid)
+        except WbSessionExpired as e:
+            await integrations_service.mark_wb_portal_expired(db, project_id)
+            raise WbSupplyError(
+                "Сессия WB-кабинета истекла. Обновите доступ WB в настройках."
+            ) from e
+        except WbPortalError:
+            # Рейт-лимит/транзиент — один ретрай с бэкоффом; иначе пропускаем.
+            await asyncio.sleep(1.5)
+            try:
+                name, state_id = await _cabinet_status(client, sid)
+            except WbPortalError:
+                await asyncio.sleep(_SYNC_DELAY)
+                continue
         checked += 1
-        state_id, name = st
-        if not name:
-            continue
-        if link is None:
-            link = AssemblyWbSupply(
-                project_id=project_id,
-                assembly_request_id=aid,
-                supply_id=sid,
-                sync_status=WbSupplySyncStatus.BOOKED.value,
-                boxes=[],
-            )
-            db.add(link)
-        if link.wb_supply_state != name or link.wb_supply_state_id != state_id:
-            link.wb_supply_state = name
-            link.wb_supply_state_id = state_id
-            updated += 1
-        link.wb_state_synced_at = utcnow()
+        if name:
+            if link is None:
+                link = AssemblyWbSupply(
+                    project_id=project_id,
+                    assembly_request_id=aid,
+                    supply_id=sid,
+                    sync_status=WbSupplySyncStatus.BOOKED.value,
+                    boxes=[],
+                )
+                db.add(link)
+            if link.wb_supply_state != name or link.wb_supply_state_id != state_id:
+                link.wb_supply_state = name
+                link.wb_supply_state_id = state_id
+                updated += 1
+            link.wb_state_synced_at = utcnow()
+        await asyncio.sleep(_SYNC_DELAY)
 
     await db.commit()
-    return {"checked": checked, "updated": updated, "supplies_seen": len(status_map)}
+    return {"checked": checked, "updated": updated, "supplies_seen": checked}
 
 
 async def save_boxes(
