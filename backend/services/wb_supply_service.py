@@ -289,19 +289,22 @@ async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> WbSu
     return state.model_copy(update=updates)
 
 
-_SYNC_SUPPLY_CAP = 300  # предохранитель от лавины supplyDetails-вызовов
+_SYNC_MAX_PAGES = 40  # ≤ ~800 свежих поставок (страница listSupplies ≈ 20)
 
 
 async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
     """
-    Bulk-синк АВТОРИТЕТНОГО статуса поставок проекта из кабинета (supplyDetails).
+    Bulk-синк АВТОРИТЕТНОГО кабинетного статуса поставок проекта.
 
-    Для каждой поставки с известным `supply_id` (реплей-связь ИЛИ адопция из
-    забронированной FBO-поставки) дёргает `supplyDetails` и пишет кабинетный
-    `statusName`/`statusId` в `wb_supply_state(_id)`. Для адоптированных без строки
-    строка создаётся (BOOKED). Именно этот статус видит пользователь в кабинете
-    (FBO Marketplace API `wb_status` расходится — напр. кабинет «Запланировано» vs
-    FBO «В пути»). Возврат: {checked, updated, supplies_seen}.
+    Кабинетный статус (`statusName`) отличается от FBO Marketplace API
+    (`WbFboSupply.wb_status`) — напр. кабинет «Запланировано» vs FBO «В пути».
+    Тянем его пагинацией `listSupplies` (ключ `data`, статус в каждом элементе,
+    ≈20 на страницу, свежие сверху) и строим карту supplyId→статус — так один
+    заход в кабинет ~десяток вызовов покрывает все активные поставки БЕЗ
+    рейт-лимита (per-supply `supplyDetails` для сотен поставок кабинет отбивает).
+    Матч по supply_id; для адоптированных из FBO без строки — строка создаётся.
+    supplyDetails остаётся для живого статуса ОДНОЙ поставки в панели (get_state).
+    Возврат: {checked, updated, supplies_seen}.
     """
     # 1. Существующие связи с известным supply_id.
     links_res = await db.execute(
@@ -344,19 +347,40 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
     except ValueError as e:
         raise WbSupplyError(str(e)) from e
 
+    targets = {sid for _, sid, _ in work}
+    # Пагинация listSupplies → карта supplyId → (statusId, statusName).
+    status_map: dict[int, tuple[int | None, str | None]] = {}
+    try:
+        offset = 0
+        for _ in range(_SYNC_MAX_PAGES):
+            page = await client.list_supplies(limit=100, offset=offset)
+            if not page:
+                break
+            for s in page:
+                sid = s.get("supplyId") or s.get("id")
+                if isinstance(sid, int):
+                    status_map[sid] = (s.get("statusId"), s.get("statusName"))
+            if targets <= set(status_map):
+                break  # все наши поставки уже покрыты
+            offset += len(page)
+            if len(page) < 20:  # последняя страница (кабинет отдаёт ≈20)
+                break
+    except WbSessionExpired as e:
+        await integrations_service.mark_wb_portal_expired(db, project_id)
+        raise WbSupplyError(
+            "Сессия WB-кабинета истекла. Обновите доступ WB в настройках."
+        ) from e
+    except WbPortalError as e:
+        raise WbSupplyError(f"WB отклонил операцию: {e}") from e
+
     updated = 0
     checked = 0
-    for aid, sid, link in work[:_SYNC_SUPPLY_CAP]:
+    for aid, sid, link in work:
+        st = status_map.get(sid)
+        if st is None:
+            continue  # поставки нет в свежих страницах (старая/архивная) — пропуск
         checked += 1
-        try:
-            name, state_id = await _cabinet_status(client, sid)
-        except WbSessionExpired as e:
-            await integrations_service.mark_wb_portal_expired(db, project_id)
-            raise WbSupplyError(
-                "Сессия WB-кабинета истекла. Обновите доступ WB в настройках."
-            ) from e
-        except WbPortalError:
-            continue  # одна поставка не должна ронять весь синк
+        state_id, name = st
         if not name:
             continue
         if link is None:
@@ -375,7 +399,7 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
         link.wb_state_synced_at = utcnow()
 
     await db.commit()
-    return {"checked": checked, "updated": updated, "supplies_seen": checked}
+    return {"checked": checked, "updated": updated, "supplies_seen": len(status_map)}
 
 
 async def save_boxes(
