@@ -43,7 +43,7 @@ async def get_sync_project_ids() -> list[int]:
         global_key = await db.execute(
             select(IntegrationKey.id)
             .where(
-                IntegrationKey.service.in_(["wb", "wb_analytics"]),
+                IntegrationKey.service.in_(["wb", "wb_analytics", "wb_advert"]),
                 IntegrationKey.is_active == True,
                 IntegrationKey.is_deleted == False,
                 IntegrationKey.project_id.is_(None),
@@ -62,7 +62,7 @@ async def get_sync_project_ids() -> list[int]:
                 select(IntegrationKey.project_id)
                 .join(Project, Project.id == IntegrationKey.project_id)
                 .where(
-                    IntegrationKey.service.in_(["wb", "wb_analytics"]),
+                    IntegrationKey.service.in_(["wb", "wb_analytics", "wb_advert"]),
                     IntegrationKey.is_active == True,  # noqa: E712
                     IntegrationKey.is_deleted == False,  # noqa: E712
                     IntegrationKey.project_id.isnot(None),
