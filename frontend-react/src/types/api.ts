@@ -3366,6 +3366,178 @@ export interface AdTabProduct {
   campaigns: AdCampaign[];
 }
 
+// ─── Кластеризатор рекламных запросов ───
+export type ClusterTier = 'HEAD' | 'EFFICIENT' | 'CONVERTS' | 'TRASH' | 'WASTE' | 'NOCONV';
+
+export interface ClusterWindow {
+  from: string;
+  to: string;
+}
+
+export interface ClusterDailyPoint {
+  date: string;
+  views: number;
+  clicks: number;
+  spend: number;
+  spend_pct: number;
+}
+
+/** Классифицированный поисковый кластер (запрос) кампании/категории. */
+export interface SearchCluster {
+  norm_query: string;
+  views: number;
+  clicks: number;
+  ctr: number;
+  cpc: number;
+  cpm: number;
+  spend: number;
+  orders: number;
+  atbs: number;
+  shks: number;
+  avg_pos: number;
+  cr: number;
+  cpo: number | null;
+  drr: number | null;
+  relevant: boolean;
+  tier: ClusterTier;
+  reason: string;
+  is_minused?: boolean;  // только в разрезе кампании; в категории отсутствует
+  bid?: number | null;   // текущая ставка CPM по кластеру, ₽ (null — не задана)
+  locked?: boolean;      // views < 100 — WB не даёт ставку/минус («стадия сбора данных»)
+}
+
+export interface ClusterTotals {
+  clusters: number;
+  views: number;
+  clicks: number;
+  orders: number;
+  spend: number;
+  ctr: number;
+  cpo: number | null;
+}
+
+export interface CampaignClustersResponse {
+  campaign_id: number;
+  name: string | null;
+  campaign_type: string | null;
+  nm_ids: number[];
+  subject: string | null;
+  window: ClusterWindow;
+  aov: number;
+  target_drr: number;
+  totals: ClusterTotals;
+  daily: ClusterDailyPoint[];
+  clusters: SearchCluster[];
+  error?: 'no_api_key' | 'campaign_not_found' | string;  // при ошибке остальные поля отсутствуют
+}
+
+export interface ClusterProduct {
+  nm_id: number;
+  vendor_code?: string | null;
+  brand?: string | null;
+  imt_id?: number | null;  // склейка карточек WB
+  views: number;
+  clicks: number;
+  orders: number;
+  spend: number;
+  drr: number | null;
+  cpo: number | null;
+  cr: number;
+}
+
+export interface CategoryClustersResponse {
+  subject: string;
+  window: ClusterWindow;
+  aov: number;
+  target_drr: number;
+  campaigns_count: number;
+  products_count: number;
+  pairs: number;
+  truncated: boolean;
+  totals: ClusterTotals;
+  clusters: SearchCluster[];
+  products: ClusterProduct[];
+  error?: string;
+}
+
+export interface AdCategory {
+  subject: string;
+  nm_count: number;
+}
+
+export interface ClusterMinusResult {
+  ok: boolean;
+  action?: 'add' | 'remove';
+  norm_query?: string;
+  minus?: string[];
+  error?: string;
+}
+
+/** Результат установки CPM-ставки на кластер (кампания или артикул). */
+export interface ClusterBidResult {
+  ok: boolean;
+  norm_query?: string;
+  bid?: number | null;
+  campaigns?: number;
+  error?: string;
+}
+
+export interface ProductClusterCampaign {
+  campaign_id: number;
+  name: string;
+}
+
+/** Кластеры одного артикула (nm_id) со всех его CPM-поиск-кампаний. */
+export interface ProductClustersResponse {
+  nm_id: number;
+  vendor_code: string | null;
+  subject: string | null;
+  campaigns: ProductClusterCampaign[];
+  window: ClusterWindow;
+  aov: number;
+  target_drr: number;
+  totals: ClusterTotals;
+  daily: ClusterDailyPoint[];
+  clusters: SearchCluster[];
+  error?: 'no_api_key' | 'no_campaign_for_nm' | string;  // при ошибке остальные поля отсутствуют
+}
+
+export interface ProductMinusResult {
+  ok: boolean;
+  action?: 'add' | 'remove';
+  norm_query?: string;
+  campaigns?: number;
+  error?: string;
+}
+
+/** Одна строка «По дням» карточки артикула (Decimal-поля могут прийти строкой → Number()). */
+export interface ProductDailyRow {
+  date: string;      // «YYYY-MM-DD» или «За всё время» у totals
+  views: number;
+  clicks: number;
+  ctr: number;
+  cpc: number;
+  spend: number;
+  opens: number;
+  carts: number;
+  cr1: number;
+  orders: number;
+  cr2: number;
+  revenue: number;
+  price: number | null;
+  cpo: number | null;
+  drr: number | null;
+}
+
+/** Дневная статистика артикула: РК + воронка продаж. */
+export interface ProductDailyResponse {
+  nm_id: number;
+  vendor_code: string | null;
+  window: { from: string; to: string };
+  totals: ProductDailyRow;
+  rows: ProductDailyRow[];
+}
+
 export interface AdTabGroupRow {
   group_name: string;
   adv_views: number;
