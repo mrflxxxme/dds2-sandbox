@@ -498,7 +498,7 @@ _CAMPAIGN_STATE_PATHS = {"start": "start", "pause": "pause"}
 
 
 async def set_campaign_state(api_key: str, campaign_id: int, action: str) -> dict:
-    """GET /adv/v1/{start|pause}?id={campaign_id} — запуск или пауза кампании.
+    """GET /adv/v0/{start|pause}?id={campaign_id} — запуск или пауза кампании.
 
     action="start" — запуск/возобновление (статус 4/11 → 9);
     action="pause" — пауза (9 → 11).
@@ -508,7 +508,9 @@ async def set_campaign_state(api_key: str, campaign_id: int, action: str) -> dic
     if action not in _CAMPAIGN_STATE_PATHS:
         return {"ok": False, "error": f"unknown action: {action}"}
     headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
-    url = f"https://advert-api.wildberries.ru/adv/v1/{_CAMPAIGN_STATE_PATHS[action]}?id={campaign_id}"
+    # ВАЖНО: управление статусом — на adv/v0 (v1 отдаёт 404 «path not found»,
+    # подтверждено на проде 2026-07-09). auth-слой s2s-api-auth-adv токен принимает.
+    url = f"https://advert-api.wildberries.ru/adv/v0/{_CAMPAIGN_STATE_PATHS[action]}?id={campaign_id}"
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, headers=headers)
