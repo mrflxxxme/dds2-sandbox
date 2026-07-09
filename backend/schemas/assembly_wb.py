@@ -133,6 +133,22 @@ class WbCabinetBoxes(BaseModel):
     total_units: int = 0
 
 
+class WbCabinetPass(BaseModel):
+    """Существующий пропуск поставки из кабинета WB (trn_details)."""
+
+    has_pass: bool = False
+    driver_first: str | None = None
+    driver_last: str | None = None
+    driver_phone: str | None = None
+    car_model: str | None = None
+    car_number: str | None = None
+    pallets: int | None = None
+    barcode_id: int | None = None
+    barcode_prefix: str | None = None  # напр. "WB-GI-"
+    date_from: str | None = None
+    date_to: str | None = None
+
+
 class WbDriver(BaseModel):
     firstName: str
     lastName: str

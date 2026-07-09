@@ -1887,6 +1887,21 @@ export interface WbCabinetBoxes {
   total_units: number;
 }
 
+// Существующий пропуск поставки из кабинета WB (trn_details).
+export interface WbCabinetPass {
+  has_pass: boolean;
+  driver_first: string | null;
+  driver_last: string | null;
+  driver_phone: string | null;
+  car_model: string | null;
+  car_number: string | null;
+  pallets: number | null;
+  barcode_id: number | null;
+  barcode_prefix: string | null;
+  date_from: string | null;
+  date_to: string | null;
+}
+
 export interface WbPassUpdate {
   driver_first?: string | null;
   driver_last?: string | null;

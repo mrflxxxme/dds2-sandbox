@@ -17,6 +17,7 @@ from backend.schemas.assembly_wb import (
     WbBoxesUpdate,
     WbBulkSyncResult,
     WbCabinetBoxes,
+    WbCabinetPass,
     WbDriver,
     WbPassUpdate,
     WbPortalSessionSet,
@@ -177,6 +178,18 @@ async def get_cabinet_boxes(
 ) -> WbCabinetBoxes:
     try:
         return await wb_supply_service.get_cabinet_boxes(db, project.id, assembly_id)
+    except WbSupplyError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/{assembly_id}/wb/cabinet-pass", response_model=WbCabinetPass)
+async def get_cabinet_pass(
+    assembly_id: int,
+    db: AsyncSession = Depends(get_db),
+    project: Project = Depends(get_current_project),
+) -> WbCabinetPass:
+    try:
+        return await wb_supply_service.get_cabinet_pass(db, project.id, assembly_id)
     except WbSupplyError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
