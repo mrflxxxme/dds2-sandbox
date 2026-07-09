@@ -434,7 +434,8 @@ async def deposit_campaign_budget(api_key: str, campaign_id: int, sum_rub: int, 
                 total = None
                 try:
                     body = resp.json()
-                    total = float(body.get("total")) if isinstance(body, dict) and body.get("total") is not None else None
+                    raw_total = body.get("total") if isinstance(body, dict) else None
+                    total = float(raw_total) if raw_total is not None else None
                 except ValueError:
                     pass
                 logger.info(f"WB adv deposit ok: campaign {campaign_id} +{sum_rub}₽ (type={source_type}), total={total}")
