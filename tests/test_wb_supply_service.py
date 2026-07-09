@@ -36,6 +36,8 @@ class FakeClient:
         goods_error=False,
         statuses=None,
         list_expire=False,
+        supply_status=None,
+        details_expire=False,
     ):
         self.expire = expire
         self.portal_error = portal_error
@@ -44,6 +46,10 @@ class FakeClient:
         self.goods_error = goods_error
         self.statuses = statuses if statuses is not None else []
         self.list_expire = list_expire  # WbSessionExpired на list_statuses (bulk-синк)
+        # supplyDetails: авторитетный кабинетный статус (по умолчанию «Запланировано»).
+        self.supply_status = supply_status if supply_status is not None else {"statusName": "Запланировано", "statusId": 1}
+        self.details_expire = details_expire  # WbSessionExpired на supply_details
+        self.details_calls = 0
         self.goods_sent = None
         self.bind_sent = None
         self.trn_saved = None
@@ -90,6 +96,12 @@ class FakeClient:
         if self.list_expire:
             raise WbSessionExpired("expired")
         return self.statuses
+
+    async def supply_details(self, supply_id):
+        self.details_calls += 1
+        if self.details_expire:
+            raise WbSessionExpired("expired")
+        return self.supply_status
 
     async def create_box_barcodes(self, supply_id, count):
         return [f"WB_{i}" for i in range(count)]
@@ -362,26 +374,20 @@ async def test_push_boxes_requires_supply(db_session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sync_all_states_empty_no_wb_call(db_session, monkeypatch):
-    # Нет заявок с preorder/supply → в кабинет не ходим, {0,0,0}.
-    called = {"list": False}
-
-    class Guard(FakeClient):
-        async def list_supplies(self, status_ids=None, limit=50, offset=0):
-            called["list"] = True
-            return []
-
-    await _patch_client(monkeypatch, Guard())
+    # Нет поставок с supply_id и без FBO → в кабинет не ходим, {0,0,0}.
+    client = FakeClient()
+    await _patch_client(monkeypatch, client)
     res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
     assert res == {"checked": 0, "updated": 0, "supplies_seen": 0}
-    assert called["list"] is False
+    assert client.details_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_sync_all_states_match_by_supply_id(db_session, monkeypatch):
-    # Связь с supply_id матчится по supplyId, статус резолвится по справочнику.
+async def test_sync_all_states_writes_cabinet_status(db_session, monkeypatch):
+    # Связь с supply_id → supplyDetails пишет АВТОРИТЕТНЫЙ кабинетный статус.
     client = FakeClient(
-        supplies=[{"supplyId": 40699158, "preorders": [52670743], "statusID": 3}],
-        statuses=[{"id": 3, "name": "В сборке"}],
+        supplies=[{"supplyId": 40699158, "preorders": [52670743]}],
+        supply_status={"statusName": "Отгрузка разрешена", "statusId": 3},
     )
     await _patch_client(monkeypatch, client)
     await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
@@ -390,37 +396,36 @@ async def test_sync_all_states_match_by_supply_id(db_session, monkeypatch):
     res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
     assert res["checked"] == 1
     assert res["updated"] == 1
-    assert res["supplies_seen"] == 1
 
     link = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
-    assert link.wb_supply_state == "В сборке"
+    assert link.wb_supply_state == "Отгрузка разрешена"
     assert link.wb_supply_state_id == 3
     assert link.wb_state_synced_at is not None
 
 
 @pytest.mark.asyncio
-async def test_sync_all_states_match_by_preorder_id(db_session, monkeypatch):
-    # Только преордер (дата ещё не забронирована) → матч по preorder_id.
-    client = FakeClient(
-        supplies=[{"supplyId": 40699158, "preorders": [52670743], "statusName": "Черновик"}],
-    )
+async def test_sync_all_states_creates_row_for_adopted_fbo(db_session, monkeypatch):
+    # Заявка с забронированной FBO-поставкой без реплей-строки → sync создаёт
+    # строку с кабинетным статусом (supplyDetails).
+    await _attach_fbo(db_session, "40503730", "IN_PROGRESS")
+    client = FakeClient(supply_status={"statusName": "Запланировано", "statusId": 1})
     await _patch_client(monkeypatch, client)
-    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
 
     res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
     assert res["checked"] == 1
     assert res["updated"] == 1
 
     link = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
-    assert link.wb_supply_state == "Черновик"
+    assert link.supply_id == 40503730
+    assert link.wb_supply_state == "Запланировано"
 
 
 @pytest.mark.asyncio
 async def test_sync_all_states_no_change_updates_synced_at(db_session, monkeypatch):
     # Второй прогон с тем же статусом → updated=0, но synced_at обновлён.
     client = FakeClient(
-        supplies=[{"supplyId": 40699158, "preorders": [52670743], "statusID": 3}],
-        statuses=[{"id": 3, "name": "В сборке"}],
+        supplies=[{"supplyId": 40699158, "preorders": [52670743]}],
+        supply_status={"statusName": "Запланировано", "statusId": 1},
     )
     await _patch_client(monkeypatch, client)
     await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
@@ -439,10 +444,11 @@ async def test_sync_all_states_no_change_updates_synced_at(db_session, monkeypat
 
 @pytest.mark.asyncio
 async def test_sync_all_states_session_expired(db_session, monkeypatch):
-    # WbSessionExpired на bulk-синке → WbSupplyError + пометка сессии EXPIRED.
-    client = FakeClient(list_expire=True)
+    # WbSessionExpired на supplyDetails → WbSupplyError + пометка сессии EXPIRED.
+    client = FakeClient(supplies=[{"supplyId": 40699158, "preorders": [52670743]}])
     await _patch_client(monkeypatch, client)
     await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
 
     called = {}
 
@@ -450,6 +456,7 @@ async def test_sync_all_states_session_expired(db_session, monkeypatch):
         called["marked"] = project_id
 
     monkeypatch.setattr(integrations_service, "mark_wb_portal_expired", fake_mark)
+    client.details_expire = True
 
     with pytest.raises(WbSupplyError, match="истекла"):
         await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
@@ -508,11 +515,23 @@ async def _attach_fbo(db_session, wb_supply_id: str, wb_status: str) -> int:
 @pytest.mark.asyncio
 async def test_get_state_adopts_booked_fbo(db_session, monkeypatch):
     # Реплей не заводили, но есть забронированная FBO-поставка → BOOKED + supply_id.
+    # Клиент не патчим → кабинет недоступен → статус из FBO-фолбэка.
     await _attach_fbo(db_session, "40503730", "IN_PROGRESS")
     state = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert state.supply_id == 40503730
     assert state.sync_status == WbSupplySyncStatus.BOOKED.value
     assert state.wb_supply_state == "Разгрузка разрешена"
+
+
+@pytest.mark.asyncio
+async def test_get_state_uses_cabinet_status(db_session, monkeypatch):
+    # Кабинет доступен → АВТОРИТЕТНЫЙ статус из supplyDetails (не FBO-метка).
+    await _attach_fbo(db_session, "40503730", "ON_DELIVERY")  # FBO бы дал «В пути»
+    await _patch_client(monkeypatch, FakeClient(supply_status={"statusName": "Запланировано", "statusId": 1}))
+    state = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert state.supply_id == 40503730
+    assert state.wb_supply_state == "Запланировано"  # кабинет, а не FBO «В пути»
+    assert state.wb_supply_state_id == 1
 
 
 @pytest.mark.asyncio
