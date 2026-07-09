@@ -10,14 +10,12 @@ async function renderBarcode(
 ): Promise<{ dataUrl: string; ratio: number }> {
     const bwipjs = (await import('bwip-js/browser')).default;
     const canvas = document.createElement('canvas');
-    bwipjs.toCanvas(canvas, {
-        bcid,
-        text,
-        scale: opts.scale,
-        height: opts.height,
-        includetext: opts.includetext,
-        textxalign: 'center',
-    });
+    // Шлём ТОЛЬКО заданные опции: bwip-js (новые версии) отвергает undefined
+    // (`invalidOptionType: height: not a realtype: undefined`) — для QR height не задаём.
+    const render: Record<string, unknown> = { bcid, text, scale: opts.scale, textxalign: 'center' };
+    if (opts.height !== undefined) render.height = opts.height;
+    if (opts.includetext !== undefined) render.includetext = opts.includetext;
+    bwipjs.toCanvas(canvas, render as unknown as Parameters<typeof bwipjs.toCanvas>[1]);
     return { dataUrl: canvas.toDataURL('image/png'), ratio: canvas.height / canvas.width };
 }
 

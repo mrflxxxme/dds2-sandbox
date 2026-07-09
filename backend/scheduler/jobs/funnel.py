@@ -37,7 +37,7 @@ async def _run_and_log(project_id: int, d_from: str, d_to: str, sync_type: str):
             select(IntegrationKey.id)
             .where(
                 IntegrationKey.project_id == project_id,
-                IntegrationKey.service.in_(["wb", "wb_analytics"]),
+                IntegrationKey.service.in_(["wb", "wb_analytics", "wb_advert"]),
                 IntegrationKey.is_active.is_(True),
                 IntegrationKey.is_deleted.is_(False),
             )

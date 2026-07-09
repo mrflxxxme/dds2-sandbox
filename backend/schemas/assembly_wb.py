@@ -102,6 +102,37 @@ class WbBulkSyncResult(BaseModel):
     supplies_seen: int  # сколько поставок вернул кабинет
 
 
+class WbCabinetBoxItem(BaseModel):
+    """Товар внутри короба кабинета (из ListBarcodesBoxes)."""
+
+    barcode: str
+    quantity: int = 0
+    imt_name: str | None = None  # название карточки
+    img_src: str | None = None  # фото
+    brand: str | None = None
+    sa_nm: str | None = None  # артикул продавца
+    nm_id: int | None = None
+    color_name: str | None = None
+    volume: float | None = None
+
+
+class WbCabinetBox(BaseModel):
+    """Короб поставки WB с содержимым (вкладка «Упаковка», как в кабинете)."""
+
+    boxcode: str
+    quantity: int = 1
+    items: list[WbCabinetBoxItem] = []
+
+
+class WbCabinetBoxes(BaseModel):
+    """Короба поставки из кабинета + сводка (шапка «N коробов · X/Y · Z шт»)."""
+
+    boxes: list[WbCabinetBox] = []
+    total_boxes: int = 0
+    total_barcodes: int = 0
+    total_units: int = 0
+
+
 class WbDriver(BaseModel):
     firstName: str
     lastName: str

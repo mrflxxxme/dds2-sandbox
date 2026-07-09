@@ -379,8 +379,11 @@ class WbPortalClient:
         (матч по преордеру) и bulk-синка статусов (F1). limit/offset — пагинация
         (bulk-синк тянет страницами до исчерпания).
         """
+        # statusIDs=[] кабинет трактует как «ничего» (пустой список). [-2] =
+        # «Все статусы» (из supply/listStatuses) → возвращаются реальные поставки.
+        # Явный фильтр статусов передаём как есть.
         res = await self._call(
-            {"statusIDs": status_ids or [], "limit": limit, "offset": offset},
+            {"statusIDs": status_ids if status_ids else [-2], "limit": limit, "offset": offset},
             SUPPLY_BASE,
             "/ns/sm-supply/supply-manager/api/v1/supply/listSupplies",
         )
@@ -427,6 +430,31 @@ class WbPortalClient:
             SUPPLY_BASE,
             "/ns/sm-box/supply-manager/api/v1/box/bindBarcodes",
         )
+
+    async def list_boxes(self, supply_id: int) -> list[dict]:
+        """
+        Короба поставки с содержимым (как в кабинете «Упаковка»).
+
+        Batch-метод `ListBarcodesBoxes` на /ns/sm-box/.../box. Возвращает
+        [{"boxcode": "WB_...", "quantity": int,
+          "barcodes": [{"barcode","quantity","imtName","imgSrc","brand","saNm",
+                        "nmID","colorName","volume", ...}]}].
+        """
+        body = [
+            {
+                "method": "ListBarcodesBoxes",
+                "params": {"incomeID": supply_id},
+                "id": self._rpc_id(),
+                "jsonrpc": "2.0",
+            }
+        ]
+        res = await self._post(SUPPLY_BASE, "/ns/sm-box/supply-manager/api/v1/box", body)
+        # Batch-ответ — массив RPC-результатов; берём первый.
+        if isinstance(res, list) and res:
+            inner = res[0].get("result") if isinstance(res[0], dict) else None
+            boxes = (inner or {}).get("boxes") if isinstance(inner, dict) else None
+            return boxes if isinstance(boxes, list) else []
+        return []
 
     # ─── шаг 7: пропуск ───────────────────────────────────────────────────
 

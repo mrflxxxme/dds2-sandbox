@@ -50,6 +50,40 @@ async def fetch_ad_campaigns(api_key: str, include_completed: bool = False) -> l
         return campaign_ids
 
 
+async def check_advert_scope(api_key: str) -> str:
+    """Probe whether an API token has the «Продвижение» (advertising) scope.
+
+    Calls GET /adv/v1/promotion/count on the WB advert API. Returns:
+        "ok"       — HTTP 200: token is valid and has advert access.
+        "no_scope" — HTTP 401/403: token rejected by the advert API (no scope).
+        "unknown"  — 429/5xx/network error: could not verify right now (rate-limit
+                     or transient). Caller MUST NOT treat this as an invalid key —
+                     this endpoint is aggressively rate-limited and shares the
+                     per-account limit with ads_autopay / ad_campaigns sync.
+    """
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                "https://advert-api.wildberries.ru/adv/v1/promotion/count",
+                headers=headers,
+            )
+    except httpx.HTTPError as e:
+        logger.warning(f"Advert scope check: network error, cannot verify — {e}")
+        return "unknown"
+
+    if resp.status_code == 200:
+        return "ok"
+    if resp.status_code in (401, 403):
+        logger.info(f"Advert scope check: token rejected ({resp.status_code}) — no Продвижение scope")
+        return "no_scope"
+    logger.warning(f"Advert scope check: transient {resp.status_code} from WB advert API, cannot verify")
+    return "unknown"
+
+
 async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str, end_date: str) -> dict:
     """Fetch detailed ad stats per nmId per date.
     Returns {date: {nm_id: {sum, clicks, views}}}.

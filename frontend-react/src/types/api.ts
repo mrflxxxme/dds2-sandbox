@@ -361,7 +361,7 @@ export interface CostOrderItem {
 export interface IntegrationKey {
   id: number;
   project_id?: number;
-  service: string;
+  service: 'wb' | 'wb_advert' | 'wb_analytics' | 'ozon' | (string & {});
   label?: string;
   is_active: boolean;
   created_at: string;
@@ -1859,6 +1859,32 @@ export interface WbBulkSyncResult {
 
 export interface WbBoxesUpdate {
   boxes: WbBox[];
+}
+
+// Короб поставки из кабинета WB (вкладка «Упаковка», как в кабинете).
+export interface WbCabinetBoxItem {
+  barcode: string;
+  quantity: number;
+  imt_name: string | null;
+  img_src: string | null;
+  brand: string | null;
+  sa_nm: string | null;
+  nm_id: number | null;
+  color_name: string | null;
+  volume: number | null;
+}
+
+export interface WbCabinetBox {
+  boxcode: string;
+  quantity: number;
+  items: WbCabinetBoxItem[];
+}
+
+export interface WbCabinetBoxes {
+  boxes: WbCabinetBox[];
+  total_boxes: number;
+  total_barcodes: number;
+  total_units: number;
 }
 
 export interface WbPassUpdate {

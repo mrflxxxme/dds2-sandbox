@@ -67,10 +67,10 @@ async def add_key(
     Returns dict with key info.
     Raises ValueError on validation failure.
     """
-    if service not in ("wb", "ozon"):
-        raise ValueError(f"Unsupported service: {service}. Use 'wb' or 'ozon'.")
+    if service not in ("wb", "wb_advert", "ozon"):
+        raise ValueError(f"Unsupported service: {service}. Use 'wb', 'wb_advert' or 'ozon'.")
 
-    # Test connection before saving
+    # Test connection before saving — different scope, different endpoint.
     if service == "wb":
         from backend.integrations.wb_api import WBApiClient
 
@@ -78,6 +78,18 @@ async def add_key(
         valid = await client.test_connection()
         if not valid:
             raise ValueError("WB API ключ невалидный. Проверьте ключ.")
+    elif service == "wb_advert":
+        from backend.services.funnel.wb_advertising_api import check_advert_scope
+
+        # "ok" → verified; "no_scope" (401/403) → reject; "unknown" (429/5xx/network)
+        # → could not verify due to rate-limit, save anyway (a bad token will surface
+        # as an error on the next ads sync, not block a legit key on a transient 429).
+        scope = await check_advert_scope(api_key)
+        if scope == "no_scope":
+            raise ValueError(
+                "Рекламный ключ без доступа «Продвижение». "
+                "Проверьте, что токен выпущен с категорией «Продвижение»."
+            )
 
     encrypted = _encrypt(api_key)
     key = IntegrationKey(
@@ -92,7 +104,7 @@ async def add_key(
     await db.refresh(key)
 
     # Auto-restart scheduler jobs + trigger first sync
-    if service == "wb":
+    if service in ("wb", "wb_advert"):
         try:
             from backend.scheduler import restart_backfill_jobs
 

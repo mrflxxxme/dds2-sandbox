@@ -71,6 +71,89 @@ async def test_add_and_list_key(client, auth_headers):
     assert "***" in found[0]["key_preview"]
 
 
+# ─── Advert-scope Key ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_add_wb_advert_key(client, auth_headers, monkeypatch):
+    """A wb_advert key is validated via the advert (Продвижение) endpoint, not sales."""
+
+    async def _ok(_api_key: str) -> str:
+        return "ok"
+
+    # Patch where add_key imports it (function-local import resolves the module attr).
+    monkeypatch.setattr(
+        "backend.services.funnel.wb_advertising_api.check_advert_scope", _ok
+    )
+
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.post(
+        "/api/v1/integrations/keys",
+        json={
+            "service": "wb_advert",
+            "api_key": "advert_token_1234567890_long_enough",
+            "label": "Реклама",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, f"Add advert key failed: {resp.text}"
+    assert resp.json()["service"] == "wb_advert"
+
+
+@pytest.mark.asyncio
+async def test_add_wb_advert_key_invalid_token(client, auth_headers, monkeypatch):
+    """An advert token without «Продвижение» access (401/403 → no_scope) is rejected with 400."""
+
+    async def _no_scope(_api_key: str) -> str:
+        return "no_scope"
+
+    monkeypatch.setattr(
+        "backend.services.funnel.wb_advertising_api.check_advert_scope", _no_scope
+    )
+
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.post(
+        "/api/v1/integrations/keys",
+        json={"service": "wb_advert", "api_key": "no_advert_scope_token_123456"},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert "Продвижение" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_add_wb_advert_key_transient_saves(client, auth_headers, monkeypatch):
+    """A rate-limited/transient probe ("unknown") must NOT block a legit key — it saves."""
+
+    async def _unknown(_api_key: str) -> str:
+        return "unknown"
+
+    monkeypatch.setattr(
+        "backend.services.funnel.wb_advertising_api.check_advert_scope", _unknown
+    )
+
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.post(
+        "/api/v1/integrations/keys",
+        json={"service": "wb_advert", "api_key": "rate_limited_probe_token_123456"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, f"Transient probe should save, got: {resp.text}"
+    assert resp.json()["service"] == "wb_advert"
+
+
+@pytest.mark.asyncio
+async def test_add_key_rejects_unknown_service(client, auth_headers):
+    """Unsupported service is rejected at the API boundary (422 from Literal)."""
+    headers = await _project_headers(client, auth_headers)
+    resp = await client.post(
+        "/api/v1/integrations/keys",
+        json={"service": "telegram", "api_key": "whatever_key_1234567890"},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
 # ─── Update Existing Key ────────────────────────────────────────────────────
 
 
