@@ -330,8 +330,11 @@ def _validate_schedule(form: ApplyForm, req: GazelkaSendRequest) -> None:
 
 # Служебные слова WB-названий, не несущие смысла для матча («Склад Шушары», «СЦ Домодедово М4»)
 _NOISE_TOKENS = frozenset(("склад", "сц", "рц"))
+# Спец-склады (крупногабарит/питание) — не подставляем их вместо обычного склада города
+_SPEC_TOKENS = frozenset(("сгт", "кгт", "питание"))
 _TOKEN_RE = re.compile(r"[^\w]+", re.UNICODE)
-_STEM = 4  # длина префикса для «Перспективная» ≈ «Перспективный»
+_MIN_STEM = 5  # общий префикс короче — разные слова («новосемейкино» ≠ «новосибирск»)
+_MAX_SUFFIX = 3  # столько букв может отличаться в хвосте («Перспективная» ≈ «Перспективный»)
 
 
 def _tokens(name: str) -> set[str]:
@@ -340,13 +343,21 @@ def _tokens(name: str) -> set[str]:
     return {t for t in _TOKEN_RE.split(flat) if t and t not in _NOISE_TOKENS}
 
 
+def _same_word(a: str, b: str) -> bool:
+    """Одно слово с точностью до окончания: «Перспективная» ≈ «Перспективный»."""
+    if a == b:
+        return True
+    common = 0
+    for ca, cb in zip(a, b):
+        if ca != cb:
+            break
+        common += 1
+    return common >= _MIN_STEM and common >= max(len(a), len(b)) - _MAX_SUFFIX
+
+
 def _token_score(wb: set[str], opt: set[str]) -> int:
-    """Сколько токенов WB-названия нашли пару в опции (по префиксу — учёт склонений)."""
-    return sum(
-        1
-        for w in wb
-        if any(w == o or (len(w) >= _STEM and len(o) >= _STEM and w[:_STEM] == o[:_STEM]) for o in opt)
-    )
+    """Сколько токенов WB-названия нашли пару в опции (с учётом склонений)."""
+    return sum(1 for w in wb if any(_same_word(w, o) for o in opt))
 
 
 def _match_warehouse(
@@ -379,7 +390,9 @@ def _match_warehouse(
             return opt.value
 
     # FBS-склад берём, только если сама поставка FBS: наши поставки — FBO.
-    wants_fbs = "fbs" in wb_tokens or "фбс" in wb_tokens
+    # Спец-склад (СГТ/питание) — только если он назван в самой поставке.
+    wants_fbs = bool({"fbs", "фбс"} & wb_tokens)
+    wants_spec = bool(_SPEC_TOKENS & wb_tokens)
     scored: list[tuple[int, str]] = []
     for opt in candidates:
         opt_tokens = _tokens(opt.label)
@@ -387,6 +400,8 @@ def _match_warehouse(
         if not score:
             continue
         if not wants_fbs and ({"fbs", "фбс"} & opt_tokens):
+            score -= 1
+        if not wants_spec and (_SPEC_TOKENS & opt_tokens):
             score -= 1
         scored.append((score, opt.value))
 
