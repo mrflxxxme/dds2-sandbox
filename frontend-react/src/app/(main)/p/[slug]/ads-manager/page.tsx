@@ -1,386 +1,86 @@
 'use client';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
-import { exportToExcel, formatNumber } from '@/lib/utils';
+import { exportToExcel } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
-import Link from 'next/link';
-import { useParams } from 'next/navigation';
-import ProductHistoryChart, { CampaignHistoryChart } from './components/ProductHistoryChart';
-import ClusterTable, { DailyBudgetBar, drrColor, clNum, clMoney, clMoneyN } from './components/ClusterTable';
-import type { AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsBudgetGap, AdTabProduct, FunnelFilters, FunnelSkuRow, CampaignClustersResponse, SearchCluster } from '@/types/api';
+import { useParams, useRouter } from 'next/navigation';
+import { IcMegaphone, IcRefresh, IcDownload, IcSliders, IcColumns, IcPause, IcPlay, IcClock, IcGear, IcHistory, IcExternal, IcSearch, IcX } from './components/icons';
+import SearchSelect from './components/SearchSelect';
+import AutopayModal from './components/AutopayModal';
+import AutopayLogModal from './components/AutopayLogModal';
+import WbThumb from './components/WbThumb';
+import AdsPeriodPicker from './components/AdsPeriodPicker';
+import InfoTip from './components/InfoTip';
+import { fmt, num, fmtPct, iso, STATUS_BADGE, thStyle, thLeft, tdStyle, tdLeft, wbCampaignUrl, campaignTypeBadge } from './components/adsShared';
+import type { AdsManagerCampaign, AdsAutopaySetting } from '@/types/api';
 
-const fmt = (n: number | undefined) => (Number(n) || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 });
-const num = (v: unknown) => Number(v) || 0;
-const fmtPct = (n: number | undefined) => (Number(n) || 0).toFixed(2) + '%';
-const iso = (d: Date) => d.toISOString().slice(0, 10);
-
-type Tab = 'campaigns' | 'high-drr' | 'no-ads' | 'no-organic' | 'budget-gap';
 type SortDir = 'asc' | 'desc';
 
-const TABS: { key: Tab; label: string }[] = [
-    { key: 'campaigns', label: '📋 Кампании' },
-    { key: 'high-drr', label: '🔥 Высокий ДРР' },
-    { key: 'no-ads', label: '💤 Не работает реклама' },
-    { key: 'no-organic', label: '🚫 Нет органики' },
-    { key: 'budget-gap', label: '⏳ Нехватка бюджета' },
+// Каталог артикулов для каскадных фильтров (предмет ↔ бренд ↔ артикул)
+type CatalogItem = { nm_id: number; vendor_code: string; subject: string; brand: string };
+
+// Фильтр по статусу (завершённые скрыты по умолчанию)
+const STATUS_FILTERS: { key: string; label: string }[] = [
+    { key: 'not_completed', label: 'Все, кроме завершённых' },
+    { key: 'active', label: 'Активные' },
+    { key: 'paused', label: 'Приостановленные' },
+    { key: 'completed', label: 'Завершённые' },
+    { key: 'all', label: 'Все' },
 ];
 
-const STATUS_BADGE: Record<number, string> = { 9: 'badge-success', 11: 'badge-warning', 7: 'badge-secondary' };
+// Колонки списка кампаний (для настройки видимости и рендера).
+// blockStart — начало логического блока: слева рисуем тонкую полупрозрачную линию-разделитель.
+const CAMP_COLS: { key: string; label: string; sort?: keyof AdsManagerCampaign; align?: 'left' | 'center' | 'right'; title?: string; fixed?: boolean; blockStart?: boolean }[] = [
+    { key: 'name', label: 'Кампания', align: 'left', fixed: true },
+    { key: 'status', label: 'Статус', align: 'left' },
+    { key: 'photo', label: 'Товар', align: 'center', fixed: true },
+    { key: 'budget', label: 'Остаток бюджета ₽', sort: 'budget', blockStart: true, title: 'Сверху — бюджет за сегодня (остаток + расход), снизу — текущий остаток' },
+    { key: 'spend', label: 'Расход ₽', sort: 'spend_period', title: 'Сверху — расход за период (30 дней), снизу — сегодня' },
+    { key: 'clicks_period', label: 'Клики', sort: 'clicks_period', blockStart: true, title: 'Клики по рекламе кампании за период' },
+    { key: 'ctr', label: 'CTR', sort: 'ctr', title: 'Конверсия из показа в клик' },
+    { key: 'cpc', label: 'CPC ₽', sort: 'cpc', title: 'Стоимость 1 клика: расход кампании / клики за период' },
+    { key: 'cpl', label: 'CPL ₽', sort: 'cpl', title: 'Стоимость 1 корзины: расход кампании / корзины её товаров за период' },
+    { key: 'cpo', label: 'CPO ₽', sort: 'cpo', title: 'Стоимость 1 заказа: расход кампании / заказы её товаров за период' },
+    { key: 'ad_click_share', label: 'Рекл. клики %', sort: 'ad_click_share', title: 'Доля рекламных кликов от всех переходов товаров кампании. ≥50% — органика слабеет, ≥60% — критично' },
+    { key: 'drr', label: 'ДРР', sort: 'drr', blockStart: true, title: 'Соотношение затрат к заказам: расход кампании / сумма заказов её товаров за период' },
+    { key: 'margin', label: 'Маржинальность', sort: 'margin', title: 'Маржинальность за период по товарам кампании: прибыль / выручка' },
+    { key: 'cr_cart', label: 'Конв. корзина', sort: 'cr_cart', title: 'Конверсия переход→корзина по товарам кампании' },
+    { key: 'cr_order', label: 'Конв. заказ', sort: 'cr_order', title: 'Конверсия корзина→заказ по товарам кампании' },
+    { key: 'nm_count', label: 'Товаров', sort: 'nm_count', blockStart: true },
+    { key: 'autopay', label: 'Автопополнение', align: 'center' },
+    { key: 'wb', label: 'WB', align: 'center' },
+];
+const CAMP_TOGGLE_KEYS = CAMP_COLS.filter(c => !c.fixed).map(c => c.key);
+// Тонкая полупрозрачная линия-разделитель блоков
+const BLOCK_DIVIDER = '1px solid rgba(17,24,39,0.08)';
+// Тёмно-серая шапка таблицы кампаний (выделяется на фоне данных)
+const cThStyle: React.CSSProperties = { ...thStyle, background: '#374151', color: '#e5e7eb', borderBottom: '1px solid #4b5563' };
+const cThLeft: React.CSSProperties = { ...cThStyle, textAlign: 'left' };
 
-const thStyle: React.CSSProperties = { background: '#f9fafb', color: '#4b5563', fontSize: 11, textAlign: 'right', borderBottom: '2px solid #e5e7eb', padding: '8px 10px', whiteSpace: 'nowrap' };
-const thLeft: React.CSSProperties = { ...thStyle, textAlign: 'left' };
-const tdStyle: React.CSSProperties = { textAlign: 'right', borderBottom: '1px solid #f3f4f6', padding: '7px 10px', fontSize: 13 };
-const tdLeft: React.CSSProperties = { ...tdStyle, textAlign: 'left' };
-
-function mskTime(isoStr: string | null): string {
-    if (!isoStr) return 'до первого синка';
-    try {
-        return new Date(isoStr).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
-    } catch { return '—'; }
-}
-
-/** Ссылка на кампанию в кабинете WB (best-effort deep-link). */
-function wbCampaignUrl(c: AdsManagerCampaign): string {
-    const kind = c.campaign_type === 'cpc' ? 'auction' : 'auto';
-    return `https://cmp.wildberries.ru/campaigns/list/all/edit/${kind}/${c.campaign_id}`;
-}
-
-/** Подпись типа рекламы (модель оплаты WB). Режим ставки CPM (единая/ручная)
- *  придёт из bid_mode, когда синк начнёт его сохранять. */
-function adTypeLabel(c: AdsManagerCampaign): { text: string; hint: string; color: string } {
-    const t = (c.campaign_type || '').toLowerCase();
-    const mode = c.bid_mode === 'unified' ? ' · единая ставка' : c.bid_mode === 'manual' ? ' · ручная ставка' : '';
-    if (t === 'cpm') return { text: `Реклама: CPM${mode}`, hint: 'CPM — оплата за 1000 показов', color: '#6366f1' };
-    if (t === 'cpc') return { text: 'Реклама: CPC', hint: 'CPC — оплата за клик', color: '#0ea5e9' };
-    return { text: `Реклама: ${c.campaign_type || '—'}`, hint: '', color: '#9ca3af' };
-}
-
-const DEFAULT_AUTOPAY: AdsAutopaySetting = { enabled: true, amount: 1000, hour: 9, threshold_pct: 50 };
-
-/** Модалка настройки автопополнения одной кампании. */
-function AutopayModal({ campaign, initial, onClose, onSave }: {
-    campaign: AdsManagerCampaign;
-    initial: AdsAutopaySetting | undefined;
-    onClose: () => void;
-    onSave: (s: AdsAutopaySetting) => Promise<void>;
-}) {
-    const [form, setForm] = useState<AdsAutopaySetting>(initial ?? DEFAULT_AUTOPAY);
-    const [saving, setSaving] = useState(false);
-
-    const handleSave = async () => {
-        setSaving(true);
-        try { await onSave(form); onClose(); }
-        catch { setSaving(false); }
-    };
-
-    const inputStyle: React.CSSProperties = { background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '8px 10px', fontSize: 14, color: 'var(--color-text)', width: '100%' };
-
-    return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
-            <div className="glass-card" style={{ width: 440, padding: 24, background: '#fff' }} onClick={e => e.stopPropagation()}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>⏰ Автопополнение бюджета</h3>
-                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 16 }}>{campaign.name || `#${campaign.campaign_id}`} · #{campaign.campaign_id}</div>
-
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, marginBottom: 14, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={form.enabled} onChange={e => setForm(f => ({ ...f, enabled: e.target.checked }))} />
-                    Пополнять автоматически
-                </label>
-
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
-                        Дневной бюджет X, ₽
-                        <input type="number" min={0} step={50} value={form.amount}
-                            onChange={e => setForm(f => ({ ...f, amount: Math.max(0, Number(e.target.value) || 0) }))} style={inputStyle} />
-                    </label>
-                    <label style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
-                        Час пополнения (МСК)
-                        <select value={form.hour} onChange={e => setForm(f => ({ ...f, hour: Number(e.target.value) }))} style={inputStyle}>
-                            {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
-                        </select>
-                    </label>
-                </div>
-                <label style={{ fontSize: 12, color: 'var(--color-text-dim)', display: 'block', marginBottom: 16 }}>
-                    Порог открута за сутки, %
-                    <input type="number" min={0} max={100} value={form.threshold_pct}
-                        onChange={e => setForm(f => ({ ...f, threshold_pct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) }))} style={inputStyle} />
-                    <span style={{ fontSize: 11 }}>Если за сутки открутилось меньше {form.threshold_pct}% от {form.amount || 'X'} ₽ — пополнения не будет. Иначе бюджет доливается до {form.amount || 'X'} ₽.</span>
-                </label>
-
-                <div style={{ fontSize: 11, color: 'var(--color-warning, #f59e0b)', marginBottom: 16 }}>
-                    ⚠️ Автопополнение активно: в заданный час бюджет доливается до X реальными деньгами
-                    (минимум 1000₽ за пополнение — ограничение WB). Все операции — в журнале (📜 в таблице).
-                </div>
-
-                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                    <button className="btn btn-secondary" onClick={onClose} disabled={saving}>Отмена</button>
-                    <button className="btn btn-primary" onClick={handleSave} disabled={saving}>{saving ? 'Сохранение…' : 'Сохранить'}</button>
-                </div>
-            </div>
-        </div>
-    );
-}
-
-const AUTOPAY_STATUS_BADGE: Record<AdsAutopayLogEntry['status'], { label: string; cls: string }> = {
-    ok: { label: 'Успешно', cls: 'badge-success' },
-    error: { label: 'Ошибка', cls: 'badge-danger' },
-    unknown: { label: 'Неизвестно', cls: 'badge-warning' },
-};
-
-/** Модалка истории автопополнений: по кампании или по всем сразу. */
-function AutopayLogModal({ campaign, onClose }: {
-    campaign: AdsManagerCampaign;
-    onClose: () => void;
-}) {
-    const [entries, setEntries] = useState<AdsAutopayLogEntry[] | null>(null);
-    const [error, setError] = useState('');
-    const [allCampaigns, setAllCampaigns] = useState(false);
-
-    useEffect(() => {
-        const controller = new AbortController();
-        setEntries(null);
-        setError('');
-        api.getAutopayLog(allCampaigns ? undefined : campaign.campaign_id)
-            .then(data => { if (!controller.signal.aborted) setEntries(data); })
-            .catch(() => { if (!controller.signal.aborted) setError('Не удалось загрузить журнал'); });
-        return () => controller.abort();
-    }, [campaign.campaign_id, allCampaigns]);
-
-    const fmtTs = (ts: string) => {
-        try {
-            return new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
-        } catch { return ts; }
-    };
-
-    return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
-            <div className="glass-card" style={{ width: 640, maxHeight: '80vh', overflow: 'auto', padding: 24, background: '#fff' }} onClick={e => e.stopPropagation()}>
-                <h3 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>📜 История пополнений</h3>
-                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 12 }}>
-                    {allCampaigns ? 'Все кампании' : <>{campaign.name || `#${campaign.campaign_id}`} · #{campaign.campaign_id}</>}
-                </div>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, marginBottom: 12, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={allCampaigns} onChange={e => setAllCampaigns(e.target.checked)} />
-                    Показать все кампании
-                </label>
-
-                {error && <div style={{ color: '#ef4444', fontSize: 13, padding: '12px 0' }}>{error}</div>}
-                {!error && entries === null && <div style={{ color: '#9ca3af', fontSize: 13, padding: '12px 0' }}>Загрузка…</div>}
-                {!error && entries !== null && entries.length === 0 && (
-                    <div style={{ color: '#9ca3af', fontSize: 13, padding: '12px 0' }}>Пополнений ещё не было.</div>
-                )}
-                {!error && entries !== null && entries.length > 0 && (
-                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                        <thead><tr>
-                            <th style={thLeft}>Кампания</th>
-                            <th style={thLeft}>Дата (МСК)</th>
-                            <th style={thStyle}>Сумма, ₽</th>
-                            <th style={thLeft}>Источник</th>
-                            <th style={thLeft}>Статус</th>
-                            <th style={thStyle} title="Бюджет кампании после пополнения">Бюджет после</th>
-                        </tr></thead>
-                        <tbody>
-                            {entries.map((e, i) => {
-                                const badge = AUTOPAY_STATUS_BADGE[e.status] ?? AUTOPAY_STATUS_BADGE.unknown;
-                                return (
-                                    <tr key={`${e.campaign_id}-${e.ts}-${i}`} style={{ color: '#111827' }}>
-                                        <td style={tdLeft}>#{e.campaign_id}</td>
-                                        <td style={tdLeft}>{fmtTs(e.ts)}</td>
-                                        <td style={{ ...tdStyle, fontWeight: 600 }}>{e.status === 'ok' ? fmt(e.amount) : fmt(e.requested)}</td>
-                                        <td style={tdLeft}>{e.source || '—'}</td>
-                                        <td style={tdLeft}>
-                                            <span className={`badge ${badge.cls}`} title={e.reason || undefined}>{badge.label}</span>
-                                        </td>
-                                        <td style={tdStyle}>{e.budget_after != null ? fmt(e.budget_after) : '—'}</td>
-                                    </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
-                )}
-
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
-                    <button className="btn btn-secondary" onClick={onClose}>Закрыть</button>
-                </div>
-            </div>
-        </div>
-    );
-}
-
-/** ДРР-цвет кампании: ≤8% зелёный, ≤12% янтарь, иначе красный. */
-/** Модалка «Кластеры» одной CPM-кампании (Features 1 & 2). */
-function ClustersModal({ campaign, onClose }: { campaign: AdsManagerCampaign; onClose: () => void }) {
-    const [dateFrom, setDateFrom] = useState(iso(new Date(Date.now() - 29 * 86400_000)));
-    const [dateTo, setDateTo] = useState(iso(new Date()));
-    const [data, setData] = useState<CampaignClustersResponse | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState('');
-    const [reloadKey, setReloadKey] = useState(0);
-    // Минус-фразы: набор norm_query, по которым идёт запрос, и текст последней ошибки
-    const [pending, setPending] = useState<Set<string>>(new Set());
-    const [minusError, setMinusError] = useState<string | null>(null);
-    // Ставки: набор norm_query, по которым идёт запись, и текст последней ошибки
-    const [bidPending, setBidPending] = useState<Set<string>>(new Set());
-    const [bidError, setBidError] = useState<string | null>(null);
-
-    useEffect(() => {
-        const controller = new AbortController();
-        setLoading(true); setError(''); setData(null);
-        api.getCampaignClusters(campaign.campaign_id, dateFrom, dateTo)
-            .then(res => {
-                if (controller.signal.aborted) return;
-                if (res.error) {
-                    setError(res.error === 'no_api_key' ? 'Не задан API-ключ WB — подключите ключ в настройках проекта, чтобы анализировать кластеры.'
-                        : res.error === 'campaign_not_found' ? 'Кампания не найдена в кабинете WB.'
-                        : res.error);
-                } else {
-                    setData(res);
-                }
-            })
-            .catch(e => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Ошибка загрузки кластеров'); })
-            .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-        return () => controller.abort();
-    }, [campaign.campaign_id, dateFrom, dateTo, reloadKey]);
-
-    const handleToggleMinus = async (c: SearchCluster) => {
-        const action: 'add' | 'remove' = c.is_minused ? 'remove' : 'add';
-        const nmId = data?.nm_ids?.[0] ?? campaign.nm_ids?.[0];
-        if (nmId == null) { setMinusError('Не удалось определить товар (nm_id) кампании'); return; }
-        const confirmText = action === 'add'
-            ? `Добавить «${c.norm_query}» в минус-фразы кампании в кабинете WB?`
-            : `Вернуть «${c.norm_query}» — убрать из минус-фраз кампании в кабинете WB?`;
-        if (!window.confirm(confirmText)) return;
-        setMinusError(null);
-        setPending(prev => new Set(prev).add(c.norm_query));
-        try {
-            const res = await api.toggleClusterMinus(campaign.campaign_id, { nm_id: nmId, norm_query: c.norm_query, action });
-            if (!res.ok) { setMinusError(res.error || 'WB отклонил операцию'); return; }
-            setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => x.norm_query === c.norm_query ? { ...x, is_minused: action === 'add' } : x) } : prev);
-        } catch (e) {
-            setMinusError(e instanceof Error ? e.message : 'Ошибка обращения к WB');
-        } finally {
-            setPending(prev => { const nx = new Set(prev); nx.delete(c.norm_query); return nx; });
-        }
-    };
-
-    const handleSetBid = async (c: SearchCluster, bid: number) => {
-        const nmId = data?.nm_ids?.[0] ?? campaign.nm_ids?.[0];
-        if (nmId == null) { setBidError('Не удалось определить товар (nm_id) кампании'); return; }
-        if (!window.confirm(`Поставить ставку ${formatNumber(bid, 0)} ₽ на кластер «${c.norm_query}» в кабинете WB?`)) return;
-        setBidError(null);
-        setBidPending(prev => new Set(prev).add(c.norm_query));
-        try {
-            const res = await api.setCampaignClusterBid(campaign.campaign_id, { nm_id: nmId, norm_query: c.norm_query, bid });
-            if (!res.ok) { setBidError(res.error || 'WB отклонил ставку'); return; }
-            setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => x.norm_query === c.norm_query ? { ...x, bid: res.bid ?? bid } : x) } : prev);
-        } catch (e) {
-            setBidError(e instanceof Error ? e.message : 'Ошибка обращения к WB');
-        } finally {
-            setBidPending(prev => { const nx = new Set(prev); nx.delete(c.norm_query); return nx; });
-        }
-    };
-
-    const totals = data?.totals;
-    const campDrr = data && num(data.aov) > 0 && num(totals?.orders) > 0 ? num(totals?.spend) / (num(totals?.orders) * num(data.aov)) * 100 : null;
-
-    return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '32px 16px', overflow: 'auto' }} onClick={onClose}>
-            <div className="glass-card" style={{ width: 'min(1080px, 96vw)', padding: 24, background: '#fff' }} onClick={e => e.stopPropagation()}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 4 }}>
-                    <div style={{ flex: 1 }}>
-                        <h3 style={{ fontSize: 17, fontWeight: 700, margin: '0 0 4px' }}>🧩 Кластеры запросов — {campaign.name || `#${campaign.campaign_id}`}</h3>
-                        <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>#{campaign.campaign_id}{data?.subject ? ` · ${data.subject}` : ''}</div>
-                    </div>
-                    <button className="btn btn-secondary btn-sm" onClick={onClose} style={{ fontSize: 13 }}>Закрыть</button>
-                </div>
-
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '12px 0' }}>
-                    <input type="date" value={dateFrom} max={dateTo} onChange={e => setDateFrom(e.target.value)}
-                        style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)' }} />
-                    <span style={{ color: 'var(--color-text-dim)' }}>—</span>
-                    <input type="date" value={dateTo} min={dateFrom} onChange={e => setDateTo(e.target.value)}
-                        style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)' }} />
-                    <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={() => { setDateFrom(iso(new Date(Date.now() - 29 * 86400_000))); setDateTo(iso(new Date())); }}>30 дней</button>
-                    <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={() => setReloadKey(k => k + 1)} disabled={loading}>🔄 Обновить</button>
-                </div>
-
-                {loading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка кластеров…</div>}
-                {!loading && error && (
-                    <div className="glass-card" style={{ padding: '16px 20px', border: '1px solid var(--color-danger)', background: '#fef2f2' }}>
-                        <span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {error}</span>
-                    </div>
-                )}
-                {!loading && !error && data && (
-                    <>
-                        {/* Тоталы + ДРР кампании */}
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
-                            {[
-                                { label: 'Кластеров', value: clNum(totals?.clusters) },
-                                { label: 'Показы', value: clNum(totals?.views) },
-                                { label: 'Клики', value: clNum(totals?.clicks) },
-                                { label: 'Заказы', value: clNum(totals?.orders) },
-                                { label: 'Расход', value: clMoney(totals?.spend) },
-                                { label: 'CPO', value: clMoneyN(totals?.cpo ?? null) },
-                            ].map(m => (
-                                <div key={m.label} style={{ minWidth: 92, padding: '8px 12px', border: '1px solid #e5e7eb', borderRadius: 12, background: '#f9fafb' }}>
-                                    <div style={{ fontSize: 11, color: '#6b7280' }}>{m.label}</div>
-                                    <div style={{ fontSize: 17, fontWeight: 700, color: '#111827' }}>{m.value}</div>
-                                </div>
-                            ))}
-                            <div style={{ minWidth: 92, padding: '8px 12px', border: '1px solid #e5e7eb', borderRadius: 12, background: '#f9fafb' }}>
-                                <div style={{ fontSize: 11, color: '#6b7280' }}>ДРР кампании</div>
-                                <div style={{ fontSize: 17, fontWeight: 700, color: drrColor(campDrr, data.target_drr) }}>
-                                    {campDrr == null ? '—' : `${formatNumber(campDrr, 1)}%`}
-                                </div>
-                            </div>
-                            {data.aov > 0 && (
-                                <div style={{ minWidth: 92, padding: '8px 12px', border: '1px solid #e5e7eb', borderRadius: 12, background: '#f9fafb' }}>
-                                    <div style={{ fontSize: 11, color: '#6b7280' }}>AOV</div>
-                                    <div style={{ fontSize: 17, fontWeight: 700, color: '#111827' }}>{clMoney(data.aov)}</div>
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Feature 1 — распределение бюджета по дням */}
-                        {data.daily && data.daily.length > 0 && (
-                            <div style={{ marginBottom: 20 }}>
-                                <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 6 }}>📊 Распределение расхода по дням</div>
-                                <DailyBudgetBar daily={data.daily} />
-                            </div>
-                        )}
-
-                        {/* Cluster table + Feature 2 (минус-фразы) */}
-                        {data.clusters.length === 0 ? (
-                            <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период у кампании нет данных по кластерам</div>
-                        ) : (
-                            <ClusterTable
-                                clusters={data.clusters}
-                                targetDrr={data.target_drr}
-                                exportName={`clusters_${campaign.campaign_id}_${dateFrom}_${dateTo}`}
-                                minus={{ pending, onToggle: handleToggleMinus, error: minusError }}
-                                bids={{ pending: bidPending, onSetBid: handleSetBid, error: bidError }}
-                            />
-                        )}
-                    </>
-                )}
-            </div>
-        </div>
-    );
+// Компактный список номеров страниц с многоточиями: 1 … 4 5 [6] 7 8 … 21
+function buildPageList(current: number, total: number): (number | '…')[] {
+    if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+    const nums = [...new Set([1, 2, current - 1, current, current + 1, total - 1, total])].filter(n => n >= 1 && n <= total).sort((a, b) => a - b);
+    const out: (number | '…')[] = [];
+    let prev = 0;
+    for (const n of nums) { if (n - prev > 1) out.push('…'); out.push(n); prev = n; }
+    return out;
 }
 
 export default function AdsManagerPage() {
     const routeParams = useParams();
+    const router = useRouter();
     const slug = typeof routeParams?.slug === 'string' ? routeParams.slug : Array.isArray(routeParams?.slug) ? routeParams.slug[0] : '';
-    const [clustersModal, setClustersModal] = useState<AdsManagerCampaign | null>(null);
-    const [tab, setTab] = useState<Tab>('campaigns');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
-    // Фильтры как в воронке: бренд/категория (сервер) + поиск по артикулу (клиент)
-    const [filters, setFilters] = useState<FunnelFilters | null>(null);
+    // Фильтры: каскад предмет ↔ бренд ↔ артикул + поиск по ID/названию
     const [brand, setBrand] = useState('');
     const [subject, setSubject] = useState('');
+    const [article, setArticle] = useState('');   // выбранный nm_id (строкой) в фильтре «Артикул»
+    const [catalog, setCatalog] = useState<CatalogItem[]>([]);
     const [search, setSearch] = useState('');
-    // Фильтр по типу кампании (только вкладка «Кампании»): CPM/CPC, а для CPM — режим ставки
+    // Фильтр по типу кампании: CPM/CPC, а для CPM — режим ставки
     const [campaignType, setCampaignType] = useState<'' | 'cpm' | 'cpc'>('');
     const [bidMode, setBidMode] = useState<'' | 'unified' | 'manual'>('');
 
@@ -392,33 +92,19 @@ export default function AdsManagerPage() {
     const [autopayModal, setAutopayModal] = useState<AdsManagerCampaign | null>(null);
     const [autopayLogModal, setAutopayLogModal] = useState<AdsManagerCampaign | null>(null);
     const [stateBusy, setStateBusy] = useState<number | null>(null);  // кампания в процессе смены статуса
+    // Тулбар списка: фильтр статуса (завершённые скрыты), видимость колонок, открытое меню
+    const [statusFilter, setStatusFilter] = useState('not_completed');
+    const [visibleCols, setVisibleCols] = useState<Set<string>>(() => new Set(CAMP_TOGGLE_KEYS));
+    const [openMenu, setOpenMenu] = useState<'filter' | 'cols' | null>(null);
+    const [page, setPage] = useState(1);
+    const [pageInput, setPageInput] = useState('');
+    const PER_PAGE = 50;
 
-    // Высокий ДРР / Не работает реклама — общий период
-    const today = new Date();
-    const weekAgo = new Date(Date.now() - 6 * 86400_000);
-    const yesterday = new Date(Date.now() - 86400_000);
-    const [dateFrom, setDateFrom] = useState(iso(weekAgo));
-    const [dateTo, setDateTo] = useState(iso(today));
-    const [drrThreshold, setDrrThreshold] = useState(7);
-    const [drrRows, setDrrRows] = useState<AdTabProduct[]>([]);
-    const [drrSort, setDrrSort] = useState<{ field: keyof AdTabProduct; dir: SortDir }>({ field: 'drr', dir: 'desc' });
-
-    // Не работает реклама
-    const [turnoverDays, setTurnoverDays] = useState(30);
-    const [noAdsRows, setNoAdsRows] = useState<FunnelSkuRow[]>([]);
-
-    // Нет органики — порог доли рекл. кликов (по анализу: 50% слабеет, 60% критично)
-    const [organicRows, setOrganicRows] = useState<FunnelSkuRow[]>([]);
-    const [organicThreshold, setOrganicThreshold] = useState(50);
-    const [minOpensOrganic, setMinOpensOrganic] = useState(300);
-
-    // Единый график сверху: выбранный артикул (nm_id) и выбранная кампания (campaign_id).
-    // Клик по строке лишь меняет выбор — график один, он перерисовывается.
-    const [selectedNm, setSelectedNm] = useState<number | null>(null);
-    const [selectedCamp, setSelectedCamp] = useState<number | null>(null);
-
-    // Нехватка бюджета
-    const [gaps, setGaps] = useState<AdsBudgetGap[]>([]);
+    // Календарь = период метрик по ВСЕМ кампаниям (день или диапазон). Пусто → дефолт последние 30 дней.
+    const [periodFrom, setPeriodFrom] = useState('');
+    const [periodTo, setPeriodTo] = useState('');
+    const dateFrom = periodFrom || iso(new Date(Date.now() - 29 * 86400_000));
+    const dateTo = periodTo || iso(new Date());
 
     const loadCampaigns = useCallback(async (df?: string, dt?: string) => {
         setLoading(true); setError('');
@@ -452,62 +138,43 @@ export default function AdsManagerPage() {
         } finally { setStateBusy(null); }
     }, [loadCampaigns, dateFrom, dateTo]);
 
-    const loadDrr = useCallback(async (df: string, dt: string, b = brand, s = subject) => {
-        setLoading(true); setError('');
-        try { setDrrRows(await api.getAdTab({ date_from: df, date_to: dt, brand: b || undefined, subject: s || undefined })); }
-        catch (e) { setError(e instanceof Error ? e.message : 'Ошибка загрузки'); }
-        finally { setLoading(false); }
-    }, [brand, subject]);
-
-    const loadNoAds = useCallback(async (df: string, dt: string, b = brand, s = subject) => {
-        setLoading(true); setError('');
+    // Каталог артикулов для каскадных фильтров (nm_id → предмет/бренд/название).
+    const loadCatalog = useCallback(async () => {
         try {
-            const res = await api.getFunnelData({ date_from: df, date_to: dt, brand: b || undefined, subject: s || undefined, group_by: 'sku', extended: true });
-            setNoAdsRows((res.data || []) as FunnelSkuRow[]);
-        } catch (e) { setError(e instanceof Error ? e.message : 'Ошибка загрузки'); }
-        finally { setLoading(false); }
-    }, [brand, subject]);
-
-    const loadNoOrganic = useCallback(async (df: string, dt: string, b = brand, s = subject) => {
-        setLoading(true); setError('');
-        try {
-            const res = await api.getFunnelData({ date_from: df, date_to: dt, brand: b || undefined, subject: s || undefined, group_by: 'sku' });
-            setOrganicRows((res.data || []) as FunnelSkuRow[]);
-        } catch (e) { setError(e instanceof Error ? e.message : 'Ошибка загрузки'); }
-        finally { setLoading(false); }
-    }, [brand, subject]);
-
-    const loadGaps = useCallback(async () => {
-        setLoading(true); setError('');
-        try { setGaps(await api.getAdsBudgetGaps()); }
-        catch (e) { setError(e instanceof Error ? e.message : 'Ошибка загрузки'); }
-        finally { setLoading(false); }
+            // Полный каталог артикулов (без топ-лимита/фильтра активности) — иначе часть артикулов выпадает из фильтра
+            const rows = await api.getAdArticleCatalog();
+            setCatalog(rows.map(r => ({ nm_id: r.nm_id, vendor_code: r.vendor_code || String(r.nm_id), subject: r.subject || '', brand: r.brand || '' })));
+        } catch { /* каталог не критичен — фильтры просто будут пустыми */ }
     }, []);
 
+    useEffect(() => { loadCatalog(); }, [loadCatalog]);  // каталог — один раз
+    // Список кампаний — при входе и при смене периода календаря (метрики за выбранный день/диапазон)
+    useEffect(() => { loadCampaigns(dateFrom, dateTo); }, [periodFrom, periodTo]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Видимость колонок — переживает перезагрузку
     useEffect(() => {
-        api.getFunnelFilters().then(setFilters).catch(() => { /* фильтры не критичны */ });
+        try {
+            const raw = localStorage.getItem('ads_camp_cols');
+            if (raw) {
+                const set = new Set<string>(JSON.parse(raw));
+                // Миграция: старые колонки расхода объединены в 'spend'
+                if (set.has('spend_period') || set.has('spend_today')) set.add('spend');
+                // Новые колонки CPL/CPO — один раз показываем тем, у кого набор сохранён до их появления
+                // (маркер обязателен: без него скрытые колонки возвращались бы при каждой загрузке)
+                if (!localStorage.getItem('ads_camp_cols_cpl_cpo')) {
+                    set.add('cpl'); set.add('cpo');
+                    localStorage.setItem('ads_camp_cols_cpl_cpo', '1');
+                    localStorage.setItem('ads_camp_cols', JSON.stringify([...set]));
+                }
+                setVisibleCols(set);
+            }
+        } catch { /* SSR / битый JSON */ }
     }, []);
-
-    useEffect(() => {
-        // Кампании/нехватка бюджета: бренд/категория фильтруются на клиенте — без перезагрузки
-        if (tab === 'campaigns') loadCampaigns(dateFrom, dateTo);
-        else if (tab === 'budget-gap') loadGaps();
-    }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    useEffect(() => {
-        // Товарные вкладки: бренд/категория — серверный фильтр, как в воронке
-        if (tab === 'high-drr') loadDrr(dateFrom, dateTo);
-        else if (tab === 'no-ads') loadNoAds(dateFrom, dateTo);
-        else if (tab === 'no-organic') loadNoOrganic(dateFrom, dateTo);
-    }, [tab, brand, subject]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    const applyPeriod = (df: string, dt: string) => {
-        setDateFrom(df); setDateTo(dt);
-        if (tab === 'campaigns') loadCampaigns(df, dt);
-        if (tab === 'high-drr') loadDrr(df, dt);
-        if (tab === 'no-ads') loadNoAds(df, dt);
-        if (tab === 'no-organic') loadNoOrganic(df, dt);
-    };
+    const toggleCol = (k: string) => setVisibleCols(prev => {
+        const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k);
+        try { localStorage.setItem('ads_camp_cols', JSON.stringify([...n])); } catch { /* SSR */ }
+        return n;
+    });
 
     const handleSync = async () => {
         setSyncing(true);
@@ -524,18 +191,54 @@ export default function AdsManagerPage() {
         finally { setSyncing(false); }
     };
 
-    // Поиск по артикулу: vendor_code / nm_id; для кампаний — ещё название и ID кампании
+    // Поиск по ID / названию кампании / nm_id её товаров
     const q = search.trim().toLowerCase();
-    const matchProduct = (vendorCode: string | null | undefined, nmId: number | undefined) =>
-        !q || (vendorCode || '').toLowerCase().includes(q) || String(nmId || '').includes(q);
     const matchCampaign = (name: string | null, campaignId: number, nmIds: number[]) =>
         !q || (name || '').toLowerCase().includes(q) || String(campaignId).includes(q) || nmIds.some(id => String(id).includes(q));
 
-    // Кампании: бренд/категория — по товарам кампании (клиентский фильтр)
+    // ─── Каскадные фильтры (предмет ↔ бренд ↔ артикул) по рекламируемым товарам ───
+    const advNmSet = useMemo(() => new Set(campaigns.flatMap(c => c.nm_ids)), [campaigns]);
+    const advTuples = useMemo(() => catalog.filter(t => advNmSet.has(t.nm_id)), [catalog, advNmSet]);
+    const uniqSorted = (arr: string[]) => Array.from(new Set(arr.filter(Boolean))).sort((a, b) => a.localeCompare(b, 'ru'));
+    // Опции каждого фильтра сужаются выбором в двух других
+    const subjectOptions = useMemo(() =>
+        uniqSorted(advTuples.filter(t => (!brand || t.brand === brand) && (!article || String(t.nm_id) === article)).map(t => t.subject)),
+        [advTuples, brand, article]);
+    const brandOptions = useMemo(() =>
+        uniqSorted(advTuples.filter(t => (!subject || t.subject === subject) && (!article || String(t.nm_id) === article)).map(t => t.brand)),
+        [advTuples, subject, article]);
+    const articleOptions = useMemo(() =>
+        advTuples.filter(t => (!subject || t.subject === subject) && (!brand || t.brand === brand))
+            .sort((a, b) => a.vendor_code.localeCompare(b.vendor_code, 'ru')),
+        [advTuples, subject, brand]);
+
+    // Выбор артикула автоматически подставляет его предмет и бренд
+    const onArticle = (v: string) => {
+        setArticle(v);
+        if (v) { const t = advTuples.find(x => String(x.nm_id) === v); if (t) { setSubject(t.subject); setBrand(t.brand); } }
+    };
+    // Смена предмета/бренда сбрасывает артикул, если он больше не подходит
+    const onSubject = (v: string) => {
+        setSubject(v);
+        if (article) { const t = advTuples.find(x => String(x.nm_id) === article); if (t && v && t.subject !== v) setArticle(''); }
+    };
+    const onBrand = (v: string) => {
+        setBrand(v);
+        if (article) { const t = advTuples.find(x => String(x.nm_id) === article); if (t && v && t.brand !== v) setArticle(''); }
+    };
+    const resetFilters = () => { setBrand(''); setSubject(''); setArticle(''); setSearch(''); setCampaignType(''); setBidMode(''); };
+
+    // Кампании: бренд/предмет — по товарам кампании; артикул — по nm_id (клиентский фильтр)
     const visibleCampaigns = campaigns
         .filter(c => matchCampaign(c.name, c.campaign_id, c.nm_ids))
+        .filter(c => statusFilter === 'all' ? true
+            : statusFilter === 'completed' ? c.status === 7
+            : statusFilter === 'active' ? c.status === 9
+            : statusFilter === 'paused' ? c.status === 11
+            : c.status !== 7)  // not_completed (по умолчанию)
         .filter(c => !brand || c.brands.includes(brand))
         .filter(c => !subject || c.subjects.includes(subject))
+        .filter(c => !article || c.nm_ids.includes(Number(article)))
         .filter(c => !campaignType || (c.campaign_type || '').toLowerCase() === campaignType)
         .filter(c => !bidMode || (c.bid_mode || '') === bidMode)
         .sort((a, b) => {
@@ -544,46 +247,16 @@ export default function AdsManagerPage() {
             const bv = Number(b[campSort.field]) || 0;
             return campSort.dir === 'asc' ? av - bv : bv - av;
         });
-    const campFiltered = !!(q || brand || subject || campaignType || bidMode);
+    const campFiltered = !!(q || brand || subject || article || campaignType || bidMode);
+
+    // Пагинация: 50 на страницу. Сброс на 1-ю при смене фильтров/выборки.
+    const pageCount = Math.max(1, Math.ceil(visibleCampaigns.length / PER_PAGE));
+    useEffect(() => { setPage(1); }, [q, brand, subject, article, statusFilter, campaignType, bidMode, campSort]);
+    const safePage = Math.min(page, pageCount);
+    const pageCampaigns = visibleCampaigns.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
     const toggleCampSort = (field: keyof AdsManagerCampaign) =>
         setCampSort(prev => ({ field, dir: prev?.field === field && prev.dir === 'desc' ? 'asc' : 'desc' }));
     const campArrow = (field: keyof AdsManagerCampaign) => campSort?.field === field ? (campSort.dir === 'desc' ? ' ↓' : ' ↑') : '';
-    // bid_mode начнёт приходить после доработки синка — до этого фильтр ставки задизейблен
-    const bidModeAvailable = campaigns.some(c => !!c.bid_mode);
-    const visibleGaps = gaps
-        .filter(g => matchCampaign(g.name, g.campaign_id, g.nm_ids))
-        .filter(g => !brand || g.brands.includes(brand))
-        .filter(g => !subject || g.subjects.includes(subject));
-
-    // Высокий ДРР: фильтр + сортировка
-    const highDrr = drrRows
-        .filter(r => (Number(r.drr) || 0) > drrThreshold)
-        .filter(r => matchProduct(r.vendor_code, r.nm_id))
-        .sort((a, b) => {
-            const av = Number(a[drrSort.field]) || 0;
-            const bv = Number(b[drrSort.field]) || 0;
-            return drrSort.dir === 'asc' ? av - bv : bv - av;
-        });
-    const toggleDrrSort = (field: keyof AdTabProduct) =>
-        setDrrSort(prev => ({ field, dir: prev.field === field && prev.dir === 'desc' ? 'asc' : 'desc' }));
-    const sortArrow = (field: keyof AdTabProduct) => drrSort.field === field ? (drrSort.dir === 'desc' ? ' ↓' : ' ↑') : '';
-
-    // Не работает реклама: запас ПО WB-остатку > N дней (нет продаж = 999+), реклама за период = 0.
-    // Считаем по остатку на WB (то, что реально лежит на площадке), а не по общему.
-    const noAds = noAdsRows.filter(r =>
-        (Number(r.adv_sum) || 0) === 0 && r.wb_stock_days_left != null && Number(r.wb_stock_days_left) > turnoverDays
-        && (Number(r.wb_stock_qty) || 0) > 0
-        && matchProduct(r.vendor_code, r.nm_id),
-    ).sort((a, b) => (Number(b.wb_stock_cost) || 0) - (Number(a.wb_stock_cost) || 0));
-
-    // Нет органики: доля рекл. кликов (adv_clicks / переходы) ≥ порога, с ощутимым трафиком
-    const adShare = (r: FunnelSkuRow) => {
-        const opens = Number(r.open_card) || 0;
-        return opens > 0 ? (Number(r.adv_clicks) || 0) / opens * 100 : 0;
-    };
-    const noOrganic = organicRows
-        .filter(r => (Number(r.open_card) || 0) >= minOpensOrganic && adShare(r) >= organicThreshold && matchProduct(r.vendor_code, r.nm_id))
-        .sort((a, b) => adShare(b) - adShare(a));
 
     // Excel-экспорт: выгружаем то, что видно (с учётом фильтров и сортировки)
     const exportCampaigns = () => exportToExcel(visibleCampaigns.map(c => ({
@@ -594,144 +267,107 @@ export default function AdsManagerPage() {
         'Рекл. клики %': num(c.ad_click_share), 'ДРР %': num(c.drr), 'Маржа %': num(c.margin),
         'Конв. корзина %': num(c.cr_cart), 'Конв. заказ %': num(c.cr_order), 'Товаров': c.nm_count, 'Бренды': c.brands.join(', '),
     })), `ads-campaigns_${dateFrom}_${dateTo}`);
-    const exportHighDrr = () => exportToExcel(highDrr.map(r => ({
-        'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Бренд': r.brand || '', 'Категория': r.subject || '',
-        'ДРР %': num(r.drr), 'Расход ₽': num(r.adv_sum), 'Заказы ₽': num(r.orders_sum_rub),
-        'CTR %': num(r.ctr), 'CPC ₽': num(r.cpc), 'Кампаний': num(r.active_campaigns),
-    })), `ads-high-drr_${dateFrom}_${dateTo}`);
-    const exportNoAds = () => exportToExcel(noAds.map(r => ({
-        'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Бренд': r.brand || '', 'Категория': r.subject || '',
-        'Остаток WB, шт': num(r.wb_stock_qty), 'Наши склады, шт': num(r.own_stock_qty),
-        'Себест. остатков ₽': num(r.wb_stock_cost) + num(r.own_stock_cost),
-        'Хватит на WB, дн': num(r.wb_stock_days_left), 'Хватит общий, дн': num(r.stock_days_left),
-        'Заказы за период ₽': num(r.orders_sum_rub),
-    })), `ads-no-ads_${dateFrom}_${dateTo}`);
-    const exportNoOrganic = () => exportToExcel(noOrganic.map(r => ({
-        'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Бренд': r.brand || '', 'Категория': r.subject || '',
-        'Рекл. клики %': Math.round(adShare(r) * 100) / 100, 'Переходы': num(r.open_card), 'Рекл. клики': num(r.adv_clicks),
-        'Заказы ₽': num(r.orders_sum_rub), 'Расход рекл. ₽': num(r.adv_sum), 'ДРР %': num(r.drr), 'В заказ %': num(r.cart_to_order_pct),
-    })), `ads-no-organic_${dateFrom}_${dateTo}`);
-    const exportGaps = () => exportToExcel(visibleGaps.map(g => ({
-        'Кампания': g.name || `#${g.campaign_id}`, 'ID': g.campaign_id, 'Тип': (g.campaign_type || '').toUpperCase(),
-        'Потрачено сегодня ₽': num(g.spend_today), 'Остановилась в (МСК)': mskTime(g.ran_out_at),
-        'Скорость ₽/час': num(g.burn_rate), 'Долить до 00:00 ₽': num(g.needed_till_midnight), 'Товаров': g.nm_count,
-    })), 'ads-budget-gap');
-    const excelBtn = (onClick: () => void, disabled: boolean) => (
-        <button className="btn btn-secondary btn-sm" style={{ fontSize: 13 }} onClick={onClick} disabled={disabled} title="Выгрузить таблицу в Excel (с учётом фильтров)">
-            📥 Excel
-        </button>
-    );
 
-    // Список nm_id текущей товарной вкладки — для авто-выбора первой строки в график
-    const currentNmRows = tab === 'high-drr' ? highDrr : tab === 'no-ads' ? noAds : tab === 'no-organic' ? noOrganic : [];
-    const currentNmIds = currentNmRows.map(r => r.nm_id);
-    const campIds = visibleCampaigns.map(c => c.campaign_id);
+    const openCampaign = (c: AdsManagerCampaign) => router.push(`/p/${slug}/ads-manager/campaign/${c.campaign_id}`);
 
-    // Если выбранного нет в текущем списке (сменили вкладку/фильтр/период) — берём первую строку
-    useEffect(() => {
-        if (currentNmIds.length && (selectedNm == null || !currentNmIds.includes(selectedNm))) setSelectedNm(currentNmIds[0]);
-    }, [currentNmIds.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
-    useEffect(() => {
-        if (tab === 'campaigns' && campIds.length && (selectedCamp == null || !campIds.includes(selectedCamp))) setSelectedCamp(campIds[0]);
-    }, [campIds.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    const selectedNmLabel = (() => {
-        const r = currentNmRows.find(x => x.nm_id === selectedNm);
-        return r ? `${r.vendor_code || r.nm_id} · ${r.brand || ''}${r.subject ? ' · ' + r.subject : ''} · #${r.nm_id}` : undefined;
-    })();
-    const selectedCampObj = visibleCampaigns.find(c => c.campaign_id === selectedCamp);
-    const selectedCampLabel = selectedCampObj ? `${selectedCampObj.name || `#${selectedCampObj.campaign_id}`} · #${selectedCampObj.campaign_id}` : undefined;
-
-    const periodControls = (
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <input type="date" value={dateFrom} onChange={e => applyPeriod(e.target.value, dateTo)}
-                style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)' }} />
-            <span style={{ color: 'var(--color-text-dim)' }}>—</span>
-            <input type="date" value={dateTo} onChange={e => applyPeriod(dateFrom, e.target.value)}
-                style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)' }} />
-            <button className="btn btn-secondary btn-sm" style={{ fontSize: 13 }} onClick={() => applyPeriod(iso(yesterday), iso(yesterday))}>Вчера</button>
-            <button className="btn btn-secondary btn-sm" style={{ fontSize: 13 }} onClick={() => applyPeriod(iso(weekAgo), iso(today))}>Последние 7 дней</button>
-        </div>
-    );
+    const visibleCampColumns = CAMP_COLS.filter(col => col.fixed || visibleCols.has(col.key));
+    const renderCampCell = (key: string, c: AdsManagerCampaign): React.ReactNode => {
+        switch (key) {
+            case 'name': return (
+                <div style={{ maxWidth: 240 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name || `#${c.campaign_id}`}</div>
+                    <div style={{ fontSize: 10, color: '#9ca3af', display: 'flex', alignItems: 'center', gap: 5 }}>
+                        #{c.campaign_id}
+                        {(() => { const b = campaignTypeBadge(c); return <span style={{ padding: '0 5px', borderRadius: 4, background: b.bg, color: b.color, fontWeight: 700, fontSize: 9.5, letterSpacing: 0.2 }}>{b.label}</span>; })()}
+                    </div>
+                </div>
+            );
+            case 'photo': return <WbThumb nmId={c.nm_ids[0]} size={38} />;
+            case 'status': return (
+                <>
+                    <span className={`badge ${STATUS_BADGE[c.status] || 'badge-secondary'}`} style={{ fontSize: 10, padding: '2px 7px' }}>{c.status_label}</span>
+                    {(c.status === 9 || c.status === 11) && (
+                        <button onClick={e => { e.stopPropagation(); toggleCampaignState(c); }} disabled={stateBusy === c.campaign_id}
+                            title={c.status === 9 ? 'Поставить на паузу' : 'Запустить кампанию'}
+                            style={{ marginLeft: 6, border: 'none', background: 'none', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', color: c.status === 9 ? '#f59e0b' : '#10b981' }}>
+                            {stateBusy === c.campaign_id ? '…' : c.status === 9 ? <IcPause size={13} /> : <IcPlay size={13} />}
+                        </button>
+                    )}
+                </>
+            );
+            case 'budget': {
+                // Сверху полупрозрачным — бюджет за сегодня (остаток + расход сегодня), снизу — остаток
+                const todayTotal = num(c.budget) + num(c.spend_today);
+                return (
+                    <div style={{ lineHeight: 1.25 }}>
+                        <div style={{ fontSize: 10.5, color: '#9ca3af' }} title="Бюджет за сегодня: остаток + расход сегодня">{fmt(todayTotal)}</div>
+                        <div style={{ fontWeight: 600, color: c.budget <= 0 && c.status === 9 ? '#ef4444' : '#111827' }}>{fmt(c.budget)}</div>
+                    </div>
+                );
+            }
+            case 'spend': return (
+                <div style={{ lineHeight: 1.25 }}>
+                    <div style={{ fontWeight: 600 }} title="Расход за период (30 дней)">{fmt(c.spend_period)}</div>
+                    <div style={{ fontSize: 10.5, color: '#9ca3af' }} title="Расход сегодня">{fmt(c.spend_today)}</div>
+                </div>
+            );
+            case 'clicks_period': return fmt(c.clicks_period);
+            case 'ctr': return fmtPct(c.ctr);
+            case 'cpc': return c.cpc > 0 ? fmt(c.cpc) : '—';
+            case 'cpl': return c.cpl > 0 ? fmt(c.cpl) : '—';
+            case 'cpo': return c.cpo > 0 ? fmt(c.cpo) : '—';
+            case 'ad_click_share': return <span style={{ fontWeight: 600, color: c.ad_click_share >= 60 ? '#ef4444' : c.ad_click_share >= 50 ? '#f59e0b' : c.ad_click_share > 0 ? '#374151' : '#9ca3af' }}>{c.ad_click_share > 0 ? fmtPct(c.ad_click_share) : '—'}</span>;
+            case 'drr': return <span style={{ fontWeight: 600, color: c.drr > 30 ? '#ef4444' : c.drr > 7 ? '#f59e0b' : c.drr > 0 ? '#10b981' : '#9ca3af' }}>{c.drr > 0 ? fmtPct(c.drr) : '—'}</span>;
+            case 'margin': return <span style={{ fontWeight: 600, color: c.margin > 20 ? '#10b981' : c.margin > 0 ? '#65a30d' : c.margin < 0 ? '#ef4444' : '#9ca3af' }}>{c.margin !== 0 ? fmtPct(c.margin) : '—'}</span>;
+            case 'cr_cart': return c.cr_cart > 0 ? fmtPct(c.cr_cart) : '—';
+            case 'cr_order': return c.cr_order > 0 ? fmtPct(c.cr_order) : '—';
+            case 'nm_count': return c.nm_count;
+            case 'autopay': {
+                const ap = autopay[String(c.campaign_id)];
+                // Зелёный — включено; красный — настроено, но выключено; серый — ни разу не настраивалось
+                const color = ap ? (ap.enabled ? '#10b981' : '#ef4444') : '#9ca3af';
+                const title = ap ? (ap.enabled ? 'Автопополнение включено' : 'Автопополнение настроено, но выключено') : 'Автопополнение ни разу не настраивалось';
+                return (
+                    <span style={{ whiteSpace: 'nowrap' }}>
+                        <button onClick={e => { e.stopPropagation(); setAutopayModal(c); }} title={title}
+                            style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, color, fontWeight: ap?.enabled ? 600 : 400, whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            {ap?.enabled
+                                ? <><IcClock size={13} />{`${String(ap.hour).padStart(2, '0')}:00 · ${fmt(ap.amount)}₽`}</>
+                                : <><IcGear size={13} />{ap ? 'выключено' : 'настроить'}</>}
+                        </button>
+                        <button onClick={e => { e.stopPropagation(); setAutopayLogModal(c); }} title="История пополнений"
+                            style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#6b7280', padding: '0 4px', display: 'inline-flex', alignItems: 'center' }}><IcHistory size={14} /></button>
+                    </span>
+                );
+            }
+            case 'wb': return (
+                <a href={wbCampaignUrl(c, { from: dateFrom, to: dateTo })} target="_blank" rel="noreferrer" title="Открыть кампанию в кабинете WB" onClick={e => e.stopPropagation()}
+                    style={{ color: 'var(--color-accent)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}><IcExternal size={15} /></a>
+            );
+            default: return null;
+        }
+    };
 
     return (
         <PageGuard page="ads-manager">
             <div className="animate-in">
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                    <div>
-                        <h1 style={{ fontSize: 28, fontWeight: 700, margin: '0 0 4px' }}>📢 Управление рекламой</h1>
-                        <p style={{ fontSize: 13, color: 'var(--color-text-dim)', margin: '0 0 16px' }}>
-                            Кампании WB: бюджеты, проблемный ДРР, товары без рекламы, нехватка дневного бюджета.
-                        </p>
-                    </div>
-                    <Link href={`/p/${slug}/ads-manager/categories`} className="btn btn-secondary btn-sm" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
-                        🧩 Кластеры по категории →
-                    </Link>
+                <div style={{ marginBottom: 16 }}>
+                    <h1 style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 28, fontWeight: 700, margin: 0 }}><IcMegaphone size={26} />Управление рекламой</h1>
                 </div>
 
-                {/* Вкладки */}
-                <div style={{ display: 'flex', gap: 0, border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', width: 'fit-content', marginBottom: 12 }}>
-                    {TABS.map((t, idx) => (
-                        <button key={t.key} onClick={() => setTab(t.key)}
-                            style={{
-                                padding: '8px 18px', fontSize: 13, fontWeight: 500, cursor: 'pointer', border: 'none',
-                                borderLeft: idx > 0 ? '1px solid #e5e7eb' : 'none',
-                                background: tab === t.key ? '#3b82f6' : '#fff', color: tab === t.key ? '#fff' : '#374151',
-                            }}>{t.label}</button>
-                    ))}
-                </div>
-
-                {/* Фильтры (как в воронке): артикул — везде; бренд/категория — там, где данные по товарам */}
+                {/* Каскад: предмет ↔ бренд ↔ артикул (взаимно сужаются) — с поиском */}
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-                    <input placeholder="🔍 Артикул..." value={search} onChange={e => setSearch(e.target.value)}
-                        style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', color: 'var(--color-text)', fontSize: 13, width: 170 }} />
-                    {(tab === 'campaigns' || tab === 'high-drr' || tab === 'no-ads' || tab === 'no-organic' || tab === 'budget-gap') && (
-                        <>
-                            <select value={brand} onChange={e => setBrand(e.target.value)}
-                                style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)' }}>
-                                <option value="">Все бренды</option>
-                                {filters?.brands?.map(b => <option key={b} value={b}>{b}</option>)}
-                            </select>
-                            <select value={subject} onChange={e => setSubject(e.target.value)}
-                                style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)', maxWidth: 260 }}>
-                                <option value="">Все категории</option>
-                                {filters?.subjects?.map(s => <option key={s} value={s}>{s}</option>)}
-                            </select>
-                        </>
-                    )}
-                    {/* Тип кампании (только «Кампании»): сначала CPM/CPC, для CPM — режим ставки */}
-                    {tab === 'campaigns' && (
-                        <>
-                            <select value={campaignType}
-                                onChange={e => { const v = e.target.value as '' | 'cpm' | 'cpc'; setCampaignType(v); if (v !== 'cpm') setBidMode(''); }}
-                                title="Тип оплаты рекламы WB: CPM — за 1000 показов, CPC — за клик"
-                                style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)' }}>
-                                <option value="">Все типы рекламы</option>
-                                <option value="cpm">CPM · за показы</option>
-                                <option value="cpc">CPC · за клик</option>
-                            </select>
-                            {campaignType === 'cpm' && (
-                                // Режим ставки задизейблен, пока синк не начнёт отдавать bid_mode — включится сам
-                                <select value={bidMode} onChange={e => setBidMode(e.target.value as '' | 'unified' | 'manual')}
-                                    disabled={!bidModeAvailable}
-                                    title={bidModeAvailable ? 'Режим ставки CPM: единая или ручная' : 'Фильтр по режиму ставки появится после обновления синхронизации WB'}
-                                    style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)', opacity: bidModeAvailable ? 1 : 0.55, cursor: bidModeAvailable ? 'pointer' : 'not-allowed' }}>
-                                    {bidModeAvailable ? (
-                                        <>
-                                            <option value="">Любая ставка</option>
-                                            <option value="unified">Единая ставка</option>
-                                            <option value="manual">Ручная ставка</option>
-                                        </>
-                                    ) : (
-                                        <option value="">Единая/ручная · скоро</option>
-                                    )}
-                                </select>
-                            )}
-                        </>
-                    )}
-                    {(brand || subject || search || campaignType || bidMode) && (
-                        <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }}
-                            onClick={() => { setBrand(''); setSubject(''); setSearch(''); setCampaignType(''); setBidMode(''); }}>✕ Сбросить</button>
+                    <SearchSelect value={subject} onChange={onSubject} placeholder="Предмет: все" maxWidth={260}
+                        options={subjectOptions.map(s => ({ value: s, label: s }))} />
+                    <SearchSelect value={brand} onChange={onBrand} placeholder="Бренд: все" maxWidth={220}
+                        options={brandOptions.map(b => ({ value: b, label: b }))} />
+                    <SearchSelect value={article} onChange={onArticle} placeholder="Артикул: все" maxWidth={280}
+                        options={articleOptions.map(t => ({ value: String(t.nm_id), label: t.vendor_code }))} />
+                    {/* Календарь = период метрик по всем кампаниям (день/диапазон). Пусто → последние 30 дней */}
+                    <AdsPeriodPicker from={periodFrom} to={periodTo} placeholder="календарь" minWidth={230}
+                        onApply={(f, t) => { setPeriodFrom(f); setPeriodTo(t); }} />
+                    {(brand || subject || article || search) && (
+                        <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12 }} onClick={resetFilters}><IcX size={13} />Сбросить</button>
                     )}
                 </div>
 
@@ -741,356 +377,119 @@ export default function AdsManagerPage() {
                     </div>
                 )}
 
-                {/* ─── Кампании ─── */}
-                {tab === 'campaigns' && (
-                  <>
-                    {selectedCamp != null && (
-                        <div className="glass-card" style={{ padding: 0, overflow: 'hidden', marginBottom: 12 }}>
-                            <CampaignHistoryChart campaignId={selectedCamp} dateFrom={dateFrom} dateTo={dateTo} title={selectedCampLabel} />
+                {/* ─── Список кампаний ─── */}
+                <div className="glass-card static" style={{ padding: 0, overflow: 'hidden' }}>
+                    <div style={{ padding: '10px 16px', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', borderBottom: '1px solid #e5e7eb', background: '#f9fafb' }}>
+                        <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                            <span style={{ position: 'absolute', left: 9, color: '#9ca3af', display: 'inline-flex' }}><IcSearch size={15} /></span>
+                            <input placeholder="Поиск по ID или названию" value={search} onChange={e => setSearch(e.target.value)}
+                                style={{ background: '#fff', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 10px 6px 30px', color: 'var(--color-text)', fontSize: 13, width: 240 }} />
                         </div>
-                    )}
-                    <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
-                        <div style={{ padding: '10px 16px', display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', borderBottom: '1px solid #e5e7eb', background: '#f9fafb' }}>
-                            {periodControls}
-                            <button onClick={handleSync} disabled={syncing} className="btn btn-secondary btn-sm" style={{ fontSize: 13 }}>
-                                {syncing ? 'Синхронизация…' : '🔄 Синхронизировать с WB'}
-                            </button>
-                            {excelBtn(exportCampaigns, visibleCampaigns.length === 0)}
-                            <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>
-                                {campFiltered ? `Найдено: ${visibleCampaigns.length} из ${campaigns.length}` : `Всего: ${campaigns.length} · Активных: ${campaigns.filter(c => c.status === 9).length}`}
+                        <button onClick={handleSync} disabled={syncing} className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                            <IcRefresh />{syncing ? 'Синхронизация…' : 'Синхронизировать'}
+                        </button>
+                        <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }} onClick={exportCampaigns} disabled={visibleCampaigns.length === 0} title="Выгрузить таблицу в Excel (с учётом фильтров)">
+                            <IcDownload />Excel
+                        </button>
+                        <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>
+                            Показано: {visibleCampaigns.length} из {campaigns.length}
+                        </span>
+                        {/* Фильтр по статусу */}
+                        <div style={{ position: 'relative' }}>
+                            <button onClick={() => setOpenMenu(openMenu === 'filter' ? null : 'filter')} className="btn btn-secondary btn-sm"
+                                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: statusFilter !== 'not_completed' ? 700 : 500 }}><IcSliders />Фильтр</button>
+                            {openMenu === 'filter' && (<>
+                                <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setOpenMenu(null)} />
+                                <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: 6, zIndex: 41, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', padding: 8, minWidth: 230 }}>
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', padding: '4px 8px' }}>СТАТУС КАМПАНИЙ</div>
+                                    {STATUS_FILTERS.map(sf => (
+                                        <div key={sf.key} onClick={() => { setStatusFilter(sf.key); setOpenMenu(null); }}
+                                            style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 8, cursor: 'pointer', fontSize: 13, color: '#111827', background: statusFilter === sf.key ? '#eff6ff' : undefined }}>
+                                            <span style={{ width: 15, height: 15, borderRadius: '50%', flexShrink: 0, border: `2px solid ${statusFilter === sf.key ? '#3b82f6' : '#cbd5e1'}`, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+                                                {statusFilter === sf.key && <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#3b82f6' }} />}
+                                            </span>
+                                            {sf.label}
+                                        </div>
+                                    ))}
+                                </div>
+                            </>)}
+                        </div>
+                        {/* Настройки колонок */}
+                        <div style={{ position: 'relative' }}>
+                            <button onClick={() => setOpenMenu(openMenu === 'cols' ? null : 'cols')} className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', fontSize: 14 }} title="Настройка колонок"><IcColumns /></button>
+                            {openMenu === 'cols' && (<>
+                                <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setOpenMenu(null)} />
+                                <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: 6, zIndex: 41, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', padding: 8, minWidth: 220, maxHeight: 380, overflowY: 'auto' }}>
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', padding: '4px 8px' }}>КОЛОНКИ</div>
+                                    {CAMP_COLS.filter(col => !col.fixed).map(col => (
+                                        <label key={col.key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: 8, cursor: 'pointer', fontSize: 13, color: '#111827' }}>
+                                            <input type="checkbox" checked={visibleCols.has(col.key)} onChange={() => toggleCol(col.key)} />
+                                            {col.label}
+                                        </label>
+                                    ))}
+                                </div>
+                            </>)}
+                        </div>
+                    </div>
+                    <div style={{ overflowX: 'auto' }}>
+                        {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> :
+                            visibleCampaigns.length === 0 ? <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>{campFiltered ? 'Ничего не найдено по заданным фильтрам' : 'Кампаний нет — нажмите «Синхронизировать»'}</div> : (
+                                <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
+                                    <thead><tr>
+                                        {visibleCampColumns.map(col => {
+                                            const b = col.align === 'left' ? cThLeft : col.align === 'center' ? { ...cThStyle, textAlign: 'center' as const } : cThStyle;
+                                            const base = col.blockStart ? { ...b, borderLeft: BLOCK_DIVIDER } : b;
+                                            return (
+                                                <th key={col.key} style={col.sort ? { ...base, cursor: 'pointer' } : base}
+                                                    onClick={col.sort ? () => toggleCampSort(col.sort!) : undefined}>
+                                                    {col.title ? <InfoTip text={col.title}>{col.label}</InfoTip> : col.label}{col.sort ? campArrow(col.sort) : ''}
+                                                </th>
+                                            );
+                                        })}
+                                    </tr></thead>
+                                    <tbody>
+                                        {pageCampaigns.map(c => (
+                                            <tr key={c.campaign_id} style={{ color: '#111827', cursor: 'pointer' }}
+                                                onClick={() => openCampaign(c)}
+                                                title="Открыть кампанию: метрики по дням и кластеризатор">
+                                                {visibleCampColumns.map(col => {
+                                                    const b = col.align === 'left' ? tdLeft : col.align === 'center' ? { ...tdStyle, textAlign: 'center' as const } : tdStyle;
+                                                    const base = col.blockStart ? { ...b, borderLeft: BLOCK_DIVIDER } : b;
+                                                    return <td key={col.key} style={base}>{renderCampCell(col.key, c)}</td>;
+                                                })}
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            )}
+                    </div>
+                    {/* Пагинация: 50 на страницу, номера + переход по номеру */}
+                    {!loading && visibleCampaigns.length > PER_PAGE && (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, flexWrap: 'wrap', padding: '10px 16px', borderTop: '1px solid #e5e7eb', background: '#f9fafb' }}>
+                            <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginRight: 'auto' }}>
+                                {(safePage - 1) * PER_PAGE + 1}–{Math.min(safePage * PER_PAGE, visibleCampaigns.length)} из {visibleCampaigns.length}
+                            </span>
+                            <button className="btn btn-secondary btn-sm" style={{ fontSize: 13 }} disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>←</button>
+                            {buildPageList(safePage, pageCount).map((it, i) => it === '…'
+                                ? <span key={`e${i}`} style={{ padding: '0 4px', color: '#9ca3af', fontSize: 13 }}>…</span>
+                                : <button key={it} onClick={() => setPage(it)}
+                                    className={`btn btn-sm ${it === safePage ? 'btn-primary' : 'btn-secondary'}`}
+                                    style={{ fontSize: 13, minWidth: 34, fontWeight: it === safePage ? 700 : 500 }}>{it}</button>
+                            )}
+                            <button className="btn btn-secondary btn-sm" style={{ fontSize: 13 }} disabled={safePage >= pageCount} onClick={() => setPage(safePage + 1)}>→</button>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 8 }}>
+                                Стр.
+                                <input type="number" min={1} max={pageCount} value={pageInput} placeholder={String(safePage)}
+                                    onChange={e => setPageInput(e.target.value)}
+                                    onKeyDown={e => { if (e.key === 'Enter') { const n = Number(pageInput); if (n >= 1 && n <= pageCount) setPage(n); setPageInput(''); (e.target as HTMLInputElement).blur(); } }}
+                                    onBlur={() => { const n = Number(pageInput); if (pageInput && n >= 1 && n <= pageCount) setPage(n); setPageInput(''); }}
+                                    style={{ width: 52, textAlign: 'center', border: '1px solid var(--color-border)', borderRadius: 8, padding: '4px 6px', fontSize: 13, background: '#fff', color: 'var(--color-text)' }} />
+                                из {pageCount}
                             </span>
                         </div>
-                        <div style={{ overflowX: 'auto' }}>
-                            {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> :
-                                visibleCampaigns.length === 0 ? <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>{campFiltered ? 'Ничего не найдено по заданным фильтрам' : 'Кампаний нет — нажмите «Синхронизировать с WB»'}</div> : (
-                                    <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
-                                        <thead><tr>
-                                            <th style={thLeft}>Кампания</th>
-                                            <th style={thLeft}>Статус</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('budget')}>Остаток бюджета ₽{campArrow('budget')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('spend_today')}>Расход сегодня ₽{campArrow('spend_today')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('spend_period')}>Расход за период ₽{campArrow('spend_period')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('clicks_period')}>Клики{campArrow('clicks_period')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('ctr')}>CTR{campArrow('ctr')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('cpc')} title="CPC за период: расход кампании / клики">CPC ₽{campArrow('cpc')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('ad_click_share')} title="Доля рекламных кликов от всех переходов товаров кампании. ≥50% — органика слабеет, ≥60% — критично">Рекл. клики %{campArrow('ad_click_share')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('drr')} title="ДРР за период: расход кампании / сумма заказов её товаров (из воронки)">ДРР{campArrow('drr')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('margin')} title="Маржа за период по товарам кампании (прибыль / выручка, из воронки)">Маржа{campArrow('margin')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('cr_cart')} title="Конверсия переход→корзина по товарам кампании">Конв. корзина{campArrow('cr_cart')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('cr_order')} title="Конверсия корзина→заказ по товарам кампании">Конв. заказ{campArrow('cr_order')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleCampSort('nm_count')}>Товаров{campArrow('nm_count')}</th>
-                                            <th style={{ ...thStyle, textAlign: 'center' }}>Автопополнение</th>
-                                            <th style={{ ...thStyle, textAlign: 'center' }}>WB</th>
-                                        </tr></thead>
-                                        <tbody>
-                                            {visibleCampaigns.map(c => {
-                                                const ap = autopay[String(c.campaign_id)];
-                                                return (
-                                                <tr key={c.campaign_id} style={{ color: '#111827', cursor: 'pointer', background: selectedCamp === c.campaign_id ? '#eff6ff' : undefined }} onClick={() => setSelectedCamp(c.campaign_id)}>
-                                                    <td style={tdLeft}>
-                                                        <div style={{ fontWeight: 600, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                            <span style={{ fontSize: 11, color: selectedCamp === c.campaign_id ? '#3b82f6' : '#d1d5db', width: 12 }}>{selectedCamp === c.campaign_id ? '●' : '○'}</span>
-                                                            {c.name || `#${c.campaign_id}`}
-                                                        </div>
-                                                        <div style={{ fontSize: 11, color: '#9ca3af', paddingLeft: 18, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                                            <span>#{c.campaign_id}</span>
-                                                            {(() => { const a = adTypeLabel(c); return <span title={a.hint} style={{ color: a.color, fontWeight: 600 }}>{a.text}</span>; })()}
-                                                            {c.brands.length > 0 && <span>· {c.brands.join(', ')}</span>}
-                                                        </div>
-                                                    </td>
-                                                    <td style={tdLeft}>
-                                                        <span className={`badge ${STATUS_BADGE[c.status] || 'badge-secondary'}`}>{c.status_label}</span>
-                                                        {(c.status === 9 || c.status === 11) && (
-                                                            <button onClick={e => { e.stopPropagation(); toggleCampaignState(c); }} disabled={stateBusy === c.campaign_id}
-                                                                title={c.status === 9 ? 'Поставить на паузу' : 'Запустить кампанию'}
-                                                                style={{ marginLeft: 8, border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: c.status === 9 ? '#f59e0b' : '#10b981' }}>
-                                                                {stateBusy === c.campaign_id ? '…' : c.status === 9 ? '⏸' : '▶'}
-                                                            </button>
-                                                        )}
-                                                    </td>
-                                                    <td style={{ ...tdStyle, fontWeight: 600, color: c.budget <= 0 && c.status === 9 ? '#ef4444' : '#111827' }}>{fmt(c.budget)}</td>
-                                                    <td style={tdStyle}>{fmt(c.spend_today)}</td>
-                                                    <td style={tdStyle}>{fmt(c.spend_period)}</td>
-                                                    <td style={tdStyle}>{fmt(c.clicks_period)}</td>
-                                                    <td style={tdStyle}>{fmtPct(c.ctr)}</td>
-                                                    <td style={tdStyle}>{c.cpc > 0 ? fmt(c.cpc) : '—'}</td>
-                                                    <td style={{ ...tdStyle, fontWeight: 600, color: c.ad_click_share >= 60 ? '#ef4444' : c.ad_click_share >= 50 ? '#f59e0b' : c.ad_click_share > 0 ? '#374151' : '#9ca3af' }}>{c.ad_click_share > 0 ? fmtPct(c.ad_click_share) : '—'}</td>
-                                                    <td style={{ ...tdStyle, fontWeight: 600, color: c.drr > 30 ? '#ef4444' : c.drr > 7 ? '#f59e0b' : c.drr > 0 ? '#10b981' : '#9ca3af' }}>{c.drr > 0 ? fmtPct(c.drr) : '—'}</td>
-                                                    <td style={{ ...tdStyle, fontWeight: 600, color: c.margin > 20 ? '#10b981' : c.margin > 0 ? '#65a30d' : c.margin < 0 ? '#ef4444' : '#9ca3af' }}>{c.margin !== 0 ? fmtPct(c.margin) : '—'}</td>
-                                                    <td style={tdStyle}>{c.cr_cart > 0 ? fmtPct(c.cr_cart) : '—'}</td>
-                                                    <td style={tdStyle}>{c.cr_order > 0 ? fmtPct(c.cr_order) : '—'}</td>
-                                                    <td style={tdStyle}>{c.nm_count}</td>
-                                                    <td style={{ ...tdStyle, textAlign: 'center', whiteSpace: 'nowrap' }}>
-                                                        <button onClick={e => { e.stopPropagation(); setAutopayModal(c); }} title="Настроить автопополнение"
-                                                            style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, color: ap?.enabled ? '#10b981' : '#9ca3af', fontWeight: ap?.enabled ? 600 : 400, whiteSpace: 'nowrap' }}>
-                                                            {ap?.enabled ? `⏰ ${String(ap.hour).padStart(2, '0')}:00 · ${fmt(ap.amount)}₽` : '⚙ настроить'}
-                                                        </button>
-                                                        <button onClick={e => { e.stopPropagation(); setAutopayLogModal(c); }} title="История пополнений"
-                                                            style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 13, color: '#6b7280', padding: '0 2px' }}>
-                                                            📜
-                                                        </button>
-                                                    </td>
-                                                    <td style={{ ...tdStyle, textAlign: 'center', whiteSpace: 'nowrap' }}>
-                                                        {(c.campaign_type || '').toLowerCase() === 'cpm' && (
-                                                            <button onClick={e => { e.stopPropagation(); setClustersModal(c); }} title="Кластеризатор поисковых запросов кампании"
-                                                                className="btn btn-secondary btn-sm" style={{ fontSize: 12, marginRight: 6 }}>🧩 Кластеры</button>
-                                                        )}
-                                                        <a href={wbCampaignUrl(c)} target="_blank" rel="noreferrer" title="Открыть кампанию в кабинете WB" onClick={e => e.stopPropagation()}
-                                                            style={{ color: 'var(--color-accent)', textDecoration: 'none', fontSize: 15 }}>↗</a>
-                                                    </td>
-                                                </tr>
-                                            ); })}
-                                        </tbody>
-                                    </table>
-                                )}
-                        </div>
-                    </div>
-                  </>
-                )}
-
-                {/* ─── Высокий ДРР ─── */}
-                {tab === 'high-drr' && (
-                  <>
-                    {selectedNm != null && (
-                        <div className="glass-card" style={{ padding: 0, overflow: 'hidden', marginBottom: 12 }}>
-                            <ProductHistoryChart nmId={selectedNm} dateFrom={dateFrom} dateTo={dateTo} title={selectedNmLabel} />
-                        </div>
                     )}
-                    <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
-                        <div style={{ padding: '10px 16px', display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', borderBottom: '1px solid #e5e7eb', background: '#f9fafb' }}>
-                            {periodControls}
-                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--color-text-dim)' }}>
-                                ДРР выше
-                                <input type="number" min={0} step={0.5} value={drrThreshold}
-                                    onChange={e => setDrrThreshold(Number(e.target.value) || 0)}
-                                    style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 8px', fontSize: 13, color: 'var(--color-text)', width: 64 }} />%
-                            </label>
-                            {excelBtn(exportHighDrr, highDrr.length === 0)}
-                            <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>Найдено: {highDrr.length}</span>
-                        </div>
-                        <div style={{ overflowX: 'auto' }}>
-                            {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> :
-                                highDrr.length === 0 ? <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>Нет товаров с ДРР выше {drrThreshold}% за период 🎉</div> : (
-                                    <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
-                                        <thead><tr>
-                                            <th style={thLeft}>Товар</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleDrrSort('drr')}>ДРР{sortArrow('drr')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleDrrSort('adv_sum')}>Расход ₽{sortArrow('adv_sum')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleDrrSort('orders_sum_rub')}>Заказы ₽{sortArrow('orders_sum_rub')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleDrrSort('ctr')}>CTR{sortArrow('ctr')}</th>
-                                            <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => toggleDrrSort('cpc')}>CPC{sortArrow('cpc')}</th>
-                                            <th style={thStyle}>Кампаний</th>
-                                        </tr></thead>
-                                        <tbody>
-                                            {highDrr.map(r => (
-                                                <tr key={r.nm_id} style={{ color: '#111827', cursor: 'pointer', background: selectedNm === r.nm_id ? '#eff6ff' : undefined }} onClick={() => setSelectedNm(r.nm_id)}>
-                                                    <td style={tdLeft}>
-                                                        <div style={{ fontWeight: 600, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                            <span style={{ fontSize: 11, color: selectedNm === r.nm_id ? '#3b82f6' : '#d1d5db', width: 12 }}>{selectedNm === r.nm_id ? '●' : '○'}</span>
-                                                            {r.vendor_code || r.nm_id}
-                                                        </div>
-                                                        <div style={{ fontSize: 11, color: '#9ca3af', paddingLeft: 18 }}>{r.brand} · {r.subject} · <a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }} onClick={e => e.stopPropagation()}>#{r.nm_id}</a></div>
-                                                    </td>
-                                                    <td style={{ ...tdStyle, fontWeight: 700, color: (Number(r.drr) || 0) > 30 ? '#ef4444' : '#f59e0b' }}>{fmtPct(r.drr)}</td>
-                                                    <td style={{ ...tdStyle, color: '#f97316' }}>{fmt(r.adv_sum)}</td>
-                                                    <td style={tdStyle}>{fmt(r.orders_sum_rub)}</td>
-                                                    <td style={tdStyle}>{fmtPct(r.ctr)}</td>
-                                                    <td style={tdStyle}>{fmt(r.cpc)}</td>
-                                                    <td style={tdStyle}>{r.active_campaigns}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                )}
-                        </div>
-                    </div>
-                  </>
-                )}
+                </div>
 
-                {/* ─── Не работает реклама ─── */}
-                {tab === 'no-ads' && (
-                  <>
-                    {selectedNm != null && (
-                        <div className="glass-card" style={{ padding: 0, overflow: 'hidden', marginBottom: 12 }}>
-                            <ProductHistoryChart nmId={selectedNm} dateFrom={dateFrom} dateTo={dateTo} title={selectedNmLabel} />
-                        </div>
-                    )}
-                    <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
-                        <div style={{ padding: '10px 16px', display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', borderBottom: '1px solid #e5e7eb', background: '#f9fafb' }}>
-                            {periodControls}
-                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--color-text-dim)' }}
-                                title="Товар попадает в список, если остатка хватит больше чем на N дней при текущем темпе продаж, а расход рекламы за период = 0">
-                                Запас более
-                                <input type="number" min={1} value={turnoverDays}
-                                    onChange={e => setTurnoverDays(Math.max(1, Number(e.target.value) || 30))}
-                                    style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 8px', fontSize: 13, color: 'var(--color-text)', width: 64 }} /> дн
-                            </label>
-                            {excelBtn(exportNoAds, noAds.length === 0)}
-                            <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>Найдено: {noAds.length}</span>
-                        </div>
-                        <div style={{ overflowX: 'auto' }}>
-                            {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> :
-                                noAds.length === 0 ? <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>Все залежавшиеся товары под рекламой 🎉</div> : (
-                                    <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
-                                        <thead><tr>
-                                            <th style={thLeft}>Товар</th>
-                                            <th style={thStyle}>Остаток WB, шт</th>
-                                            <th style={thStyle}>Наши склады, шт</th>
-                                            <th style={thStyle}>Себест. остатков ₽</th>
-                                            <th style={thStyle} title="Запас в днях по остатку на WB (без наших складов). Внизу — общий, с учётом наших складов.">Хватит на WB, дн</th>
-                                            <th style={thStyle}>Заказы за период ₽</th>
-                                            <th style={thStyle}>Расход рекл. ₽</th>
-                                        </tr></thead>
-                                        <tbody>
-                                            {noAds.map(r => (
-                                                <tr key={r.nm_id} style={{ color: '#111827', cursor: 'pointer', background: selectedNm === r.nm_id ? '#eff6ff' : undefined }} onClick={() => setSelectedNm(r.nm_id)}>
-                                                    <td style={tdLeft}>
-                                                        <div style={{ fontWeight: 600, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                            <span style={{ fontSize: 11, color: selectedNm === r.nm_id ? '#3b82f6' : '#d1d5db', width: 12 }}>{selectedNm === r.nm_id ? '●' : '○'}</span>
-                                                            {r.vendor_code || r.nm_id}
-                                                        </div>
-                                                        <div style={{ fontSize: 11, color: '#9ca3af', paddingLeft: 18 }}>{r.brand} · {r.subject} · <a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }} onClick={e => e.stopPropagation()}>#{r.nm_id}</a></div>
-                                                    </td>
-                                                    <td style={tdStyle}>{fmt(r.wb_stock_qty)}</td>
-                                                    <td style={tdStyle}>{fmt(r.own_stock_qty)}</td>
-                                                    <td style={{ ...tdStyle, fontWeight: 600 }}>{fmt((Number(r.wb_stock_cost) || 0) + (Number(r.own_stock_cost) || 0))}</td>
-                                                    <td style={{ ...tdStyle, fontWeight: 600, color: '#ef4444' }}>
-                                                        {r.wb_stock_days_left != null && Number(r.wb_stock_days_left) >= 999 ? '∞' : fmt(r.wb_stock_days_left)}
-                                                        <div style={{ fontSize: 10, fontWeight: 400, color: '#9ca3af' }} title="Запас с учётом наших складов">
-                                                            общий: {r.stock_days_left != null && Number(r.stock_days_left) >= 999 ? '∞' : fmt(r.stock_days_left)}
-                                                        </div>
-                                                    </td>
-                                                    <td style={tdStyle}>{fmt(r.orders_sum_rub)}</td>
-                                                    <td style={{ ...tdStyle, color: '#9ca3af' }}>0</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                )}
-                        </div>
-                    </div>
-                  </>
-                )}
-
-                {/* ─── Нет органики ─── */}
-                {tab === 'no-organic' && (
-                  <>
-                    {selectedNm != null && (
-                        <div className="glass-card" style={{ padding: 0, overflow: 'hidden', marginBottom: 12 }}>
-                            <ProductHistoryChart nmId={selectedNm} dateFrom={dateFrom} dateTo={dateTo} title={selectedNmLabel} />
-                        </div>
-                    )}
-                    <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
-                        <div style={{ padding: '10px 16px', display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', borderBottom: '1px solid #e5e7eb', background: '#f9fafb' }}>
-                            {periodControls}
-                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--color-text-dim)' }}
-                                title="Доля рекламных кликов от всех переходов. По анализу «Ковров» и «Чехлов»: ≥50% органика слабеет, ≥60% конверсия в заказ падает вдвое">
-                                Доля рекл. кликов ≥
-                                <input type="number" min={0} max={100} value={organicThreshold}
-                                    onChange={e => setOrganicThreshold(Math.min(100, Math.max(0, Number(e.target.value) || 0)))}
-                                    style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 8px', fontSize: 13, color: 'var(--color-text)', width: 60 }} />%
-                            </label>
-                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--color-text-dim)' }}
-                                title="Минимум переходов за период, чтобы отсечь товары без трафика (шум)">
-                                Мин. переходов
-                                <input type="number" min={0} value={minOpensOrganic}
-                                    onChange={e => setMinOpensOrganic(Math.max(0, Number(e.target.value) || 0))}
-                                    style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', borderRadius: 8, padding: '6px 8px', fontSize: 13, color: 'var(--color-text)', width: 70 }} />
-                            </label>
-                            {excelBtn(exportNoOrganic, noOrganic.length === 0)}
-                            <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>Найдено: {noOrganic.length}</span>
-                        </div>
-                        <div style={{ padding: '8px 16px', fontSize: 12, color: 'var(--color-text-dim)', borderBottom: '1px solid #f3f4f6' }}>
-                            Товары, у которых большинство переходов — платные (органика площадки их не продвигает). Порог 50% выбран по анализу «Ковров» и «Чехлов»: на 60%+ конверсия в заказ падает вдвое. С такими товарами надо работать (цена, карточка, отзывы) или выводить.
-                        </div>
-                        <div style={{ overflowX: 'auto' }}>
-                            {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> :
-                                noOrganic.length === 0 ? <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>Нет товаров с долей рекл. кликов ≥ {organicThreshold}% 🎉</div> : (
-                                    <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
-                                        <thead><tr>
-                                            <th style={thLeft}>Товар</th>
-                                            <th style={thStyle} title="Доля рекламных кликов от всех переходов">Рекл. клики %</th>
-                                            <th style={thStyle}>Переходы</th>
-                                            <th style={thStyle}>Рекл. клики</th>
-                                            <th style={thStyle}>Заказы ₽</th>
-                                            <th style={thStyle}>Расход рекл. ₽</th>
-                                            <th style={thStyle}>ДРР</th>
-                                            <th style={thStyle}>В заказ %</th>
-                                        </tr></thead>
-                                        <tbody>
-                                            {noOrganic.map(r => {
-                                                const share = adShare(r);
-                                                return (
-                                                <tr key={r.nm_id} style={{ color: '#111827', cursor: 'pointer', background: selectedNm === r.nm_id ? '#eff6ff' : undefined }} onClick={() => setSelectedNm(r.nm_id)}>
-                                                    <td style={tdLeft}>
-                                                        <div style={{ fontWeight: 600, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                            <span style={{ fontSize: 11, color: selectedNm === r.nm_id ? '#3b82f6' : '#d1d5db', width: 12 }}>{selectedNm === r.nm_id ? '●' : '○'}</span>
-                                                            {r.vendor_code || r.nm_id}
-                                                        </div>
-                                                        <div style={{ fontSize: 11, color: '#9ca3af', paddingLeft: 18 }}>{r.brand} · {r.subject} · <a href={`https://www.wildberries.ru/catalog/${r.nm_id}/detail.aspx`} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }} onClick={e => e.stopPropagation()}>#{r.nm_id}</a></div>
-                                                    </td>
-                                                    <td style={{ ...tdStyle, fontWeight: 700, color: share >= 60 ? '#ef4444' : '#f59e0b' }}>{fmtPct(share)}</td>
-                                                    <td style={tdStyle}>{fmt(r.open_card)}</td>
-                                                    <td style={tdStyle}>{fmt(r.adv_clicks)}</td>
-                                                    <td style={tdStyle}>{fmt(r.orders_sum_rub)}</td>
-                                                    <td style={{ ...tdStyle, color: '#f97316' }}>{fmt(r.adv_sum)}</td>
-                                                    <td style={{ ...tdStyle, color: (Number(r.drr) || 0) > 15 ? '#ef4444' : '#374151' }}>{fmtPct(r.drr)}</td>
-                                                    <td style={tdStyle}>{fmtPct(r.cart_to_order_pct)}</td>
-                                                </tr>
-                                            ); })}
-                                        </tbody>
-                                    </table>
-                                )}
-                        </div>
-                    </div>
-                  </>
-                )}
-
-                {/* ─── Нехватка бюджета ─── */}
-                {tab === 'budget-gap' && (
-                    <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
-                        <div style={{ padding: '10px 16px', display: 'flex', gap: 12, alignItems: 'center', borderBottom: '1px solid #e5e7eb', background: '#f9fafb' }}>
-                            <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
-                                Активные кампании, у которых сегодня закончился бюджет. Час остановки — по данным часовой синхронизации (точность ±1 час). Доливка — при текущей скорости траты до 00:00 МСК, но не меньше минимума пополнения WB (1000 ₽).
-                            </span>
-                            <button onClick={loadGaps} className="btn btn-secondary btn-sm" style={{ fontSize: 13, marginLeft: 'auto', whiteSpace: 'nowrap' }}>Обновить</button>
-                            {excelBtn(exportGaps, visibleGaps.length === 0)}
-                        </div>
-                        <div style={{ overflowX: 'auto' }}>
-                            {loading ? <div style={{ padding: 40, textAlign: 'center' }}>Загрузка...</div> :
-                                visibleGaps.length === 0 ? <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>{q ? 'Ничего не найдено по запросу' : 'Сегодня бюджет нигде не кончался 🎉'}</div> : (
-                                    <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
-                                        <thead><tr>
-                                            <th style={thLeft}>Кампания</th>
-                                            <th style={thStyle}>Потрачено сегодня ₽</th>
-                                            <th style={thStyle}>Остановилась в (МСК)</th>
-                                            <th style={thStyle}>Скорость ₽/час</th>
-                                            <th style={thStyle}>Долить до 00:00 ₽</th>
-                                            <th style={thStyle}>Товаров</th>
-                                        </tr></thead>
-                                        <tbody>
-                                            {visibleGaps.map(g => (
-                                                <tr key={g.campaign_id} style={{ color: '#111827' }}>
-                                                    <td style={tdLeft}>
-                                                        <div style={{ fontWeight: 600, fontSize: 13 }}>{g.name || `#${g.campaign_id}`}</div>
-                                                        <div style={{ fontSize: 11, color: '#9ca3af' }}>#{g.campaign_id} · {g.campaign_type || '—'}</div>
-                                                    </td>
-                                                    <td style={tdStyle}>{fmt(g.spend_today)}</td>
-                                                    <td style={{ ...tdStyle, fontWeight: 700, color: '#ef4444' }}>{mskTime(g.ran_out_at)}</td>
-                                                    <td style={tdStyle}>{fmt(g.burn_rate)}</td>
-                                                    <td style={{ ...tdStyle, fontWeight: 700, color: 'var(--color-accent)' }}
-                                                        title={g.raw_needed < g.min_topup ? `Расчётная нужда ${fmt(g.raw_needed)} ₽ округлена вверх до минимума пополнения WB ${fmt(g.min_topup)} ₽` : undefined}>
-                                                        {fmt(g.needed_till_midnight)}{g.raw_needed < g.min_topup && g.raw_needed > 0 ? ' *' : ''}
-                                                    </td>
-                                                    <td style={tdStyle}>{g.nm_count}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                )}
-                        </div>
-                    </div>
-                )}
                 {autopayModal && (
                     <AutopayModal
                         campaign={autopayModal}
@@ -1104,9 +503,6 @@ export default function AdsManagerPage() {
                         campaign={autopayLogModal}
                         onClose={() => setAutopayLogModal(null)}
                     />
-                )}
-                {clustersModal && (
-                    <ClustersModal campaign={clustersModal} onClose={() => setClustersModal(null)} />
                 )}
             </div>
         </PageGuard>

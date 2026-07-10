@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbAdCampaign, WbAdCampaignEvent, WbFunnelDaily
-from backend.models.integrations import WbAdCampaignDaily
+from backend.models.integrations import WbAdCampaignDaily, WbAdNmDaily
 from backend.services.funnel.bdr_rates import BdrRatesLookup
 from backend.utils.time import utcnow
 
@@ -134,6 +134,8 @@ async def list_ad_campaigns(
                 "campaign_id": c.campaign_id,
                 "name": c.name,
                 "campaign_type": c.campaign_type,
+                "advert_type": c.advert_type,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
                 "status": c.status,
                 "status_label": CAMPAIGN_STATUS_LABELS.get(c.status, str(c.status)),
                 "budget": float(c.budget or 0),
@@ -147,6 +149,9 @@ async def list_ad_campaigns(
                 "clicks_period": clicks_period,
                 "ctr": round(clicks_period / views_period * 100, 2) if views_period else 0,
                 "cpc": round(spend_period / clicks_period, 2) if clicks_period else 0,
+                # Стоимость корзины/заказа за период: расход кампании / корзины (заказы) её товаров
+                "cpl": round(spend_period / carts_p, 2) if carts_p else 0,
+                "cpo": round(spend_period / order_cnt_p, 2) if order_cnt_p else 0,
                 "drr": round(spend_period / orders_p * 100, 2) if orders_p else 0,
                 "margin": round(profit_p / revenue_p * 100, 2) if revenue_p else 0,
                 # Режим ставки CPM (единая/ручная) — из WB bid_type, заполняется синком
@@ -247,6 +252,268 @@ async def get_campaign_history(
             )
         d += timedelta(days=1)
     return result
+
+
+def _metric_row(
+    label: str, views: int, clicks: int, spend: float,
+    opens: int, carts: int, orders: int, orders_sum: float, price: float | None,
+) -> dict:
+    """Сводит сырые агрегаты дня/периода в строку метрик (РК + воронка)."""
+    return {
+        "date": label,
+        # Статистика по РК
+        "views": int(views),
+        "clicks": int(clicks),
+        "ctr": round(clicks / views * 100, 2) if views else 0.0,
+        "cpc": round(spend / clicks, 2) if clicks else 0.0,
+        "spend": round(spend, 2),
+        # Воронка продаж
+        "open_card": int(opens),
+        "add_to_cart": int(carts),
+        "cr1": round(carts / opens * 100, 2) if opens else 0.0,
+        "orders": int(orders),
+        "cr2": round(orders / carts * 100, 2) if carts else 0.0,
+        "orders_sum": round(orders_sum, 2),
+        "cpl": round(spend / carts, 2) if carts else None,  # стоимость 1 корзины
+        "cpo": round(spend / orders, 2) if orders else None,  # стоимость 1 заказа
+        "avg_price": round(price, 2) if price else 0.0,
+        "drr": round(spend / orders_sum * 100, 2) if orders_sum else 0.0,
+    }
+
+
+async def list_ad_article_catalog(db: AsyncSession, project_id: int) -> list[dict]:
+    """Полный каталог артикулов проекта для каскадных фильтров рекламы:
+    nm_id → артикул/предмет/бренд. Без фильтра активности и без топ-лимита —
+    иначе в фильтре «Артикул» выпадают товары без свежих продаж/показов.
+    """
+    rows = (
+        await db.execute(
+            select(
+                WbFunnelDaily.nm_id,
+                func.max(WbFunnelDaily.vendor_code),
+                func.max(WbFunnelDaily.subject),
+                func.max(WbFunnelDaily.brand),
+            )
+            .where(WbFunnelDaily.project_id == project_id)
+            .group_by(WbFunnelDaily.nm_id)
+            .limit(50000)
+        )
+    ).all()
+    return [
+        {"nm_id": int(r[0]), "vendor_code": r[1] or str(r[0]), "subject": r[2] or "", "brand": r[3] or ""}
+        for r in rows
+        if r[0] is not None
+    ]
+
+
+async def get_campaign_zones(
+    db: AsyncSession, project_id: int, campaign_id: int,
+    date_from: str | None = None, date_to: str | None = None, nm_id: int | None = None,
+) -> dict:
+    """Зоны показов кампании: что включено, по какой ставке и как ставка устроена.
+
+    Правила WB (подтверждены на живых кампаниях):
+    - `payment_type=cpm` + `bid_type=unified` — обе зоны всегда включены и крутятся
+      одновременно, ставка одна на все зоны (отключить зону нельзя);
+    - `payment_type=cpc` — только «Поиск»; ставка — цена за клик, единая для всех фраз
+      (в bids_kopecks.recommendations приходит 0).
+
+    Дневного лимита в API WB нет — в кабинете он есть, наружу не отдаётся.
+    """
+    from backend.services.funnel.wb_advertising_api import fetch_campaign_placements
+
+    camp = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if camp is None:
+        return {"error": "campaign_not_found"}
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"error": "no_api_key"}
+
+    info = await fetch_campaign_placements(api_key, campaign_id)
+    payment_type = (camp.campaign_type or "").lower()
+
+    # У CPC зона одна («Поиск»), поэтому её статистика = вся РК-статистика кампании.
+    # Берём её из wb_ad_nm_daily: там рекламные заказы, а не заказы воронки со всех источников.
+    zone_stats = None
+    if payment_type == "cpc" and date_from and date_to:
+        from backend.services.funnel.cluster_analysis_service import zone_metrics
+
+        conds = [
+            WbAdNmDaily.project_id == project_id, WbAdNmDaily.campaign_id == campaign_id,
+            WbAdNmDaily.date >= datetime.strptime(date_from, "%Y-%m-%d").date(),
+            WbAdNmDaily.date <= datetime.strptime(date_to, "%Y-%m-%d").date(),
+        ]
+        if nm_id is not None:
+            conds.append(WbAdNmDaily.nm_id == nm_id)
+        row = (
+            await db.execute(
+                select(
+                    func.coalesce(func.sum(WbAdNmDaily.views), 0),
+                    func.coalesce(func.sum(WbAdNmDaily.clicks), 0),
+                    func.coalesce(func.sum(WbAdNmDaily.spend), 0),
+                    func.coalesce(func.sum(WbAdNmDaily.orders), 0),
+                ).where(*conds)
+            )
+        ).one()
+        zone_stats = {
+            "search": zone_metrics(int(row[0]), int(row[1]), float(row[2]), int(row[3])),
+            "recommendations": None,
+            "derived": False,  # у CPC зона одна — это прямые данные, не вычитание
+        }
+
+    return {
+        "zone_stats": zone_stats,
+        "campaign_id": campaign_id,
+        "payment_type": payment_type,          # cpm | cpc
+        "bid_mode": camp.bid_mode,             # unified | manual
+        "placements": info["placements"],      # {"search": bool, "recommendations": bool}
+        "bids": info["bids"],                  # ₽ по зонам
+        # Зоны нельзя переключать: у CPM-единой они всегда обе, у CPC — только поиск
+        "zones_locked": True,
+        # Ставка задаётся сразу на все зоны (CPM-единая) или на все фразы (CPC)
+        "single_bid": payment_type == "cpc" or (camp.bid_mode or "") == "unified",
+    }
+
+
+async def get_campaign_metrics(
+    db: AsyncSession,
+    project_id: int,
+    campaign_id: int,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    days: int = 30,
+    nm_id: int | None = None,
+) -> dict:
+    """Посуточные метрики кампании: статистика РК (показы/клики/CTR/CPC/затраты)
+    + воронка её товаров (переходы/корзины/CR1/заказы/CR2/сумма/CPO/цена/ДРР).
+
+    nm_id — если задан, И воронка, И РК-статистика считаются ТОЛЬКО по этому товару:
+    разбивку РК по товарам даёт WB (/adv/v3/fullstats → nms), мы храним её в
+    WbAdNmDaily. Флаг ответа `ad_by_nm` говорит, отфильтрована ли РК по товару —
+    за даты до появления таблицы разбивки нет, и там РК-цифры будут нулевыми.
+
+    Строки отсортированы по убыванию даты; сверху — строка-итог «За всё время».
+    """
+    camp = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if camp is None:
+        return {"error": "campaign_not_found"}
+    nm_ids = camp.nm_ids or []
+    # Фильтр по одному товару. Не сверяем с camp.nm_ids: там текущий состав кампании,
+    # а в статистике бывают товары, выведенные из неё позже (история остаётся за ними).
+    if nm_id is not None:
+        nm_ids = [nm_id]
+
+    today_msk = utcnow().astimezone(MSK).date() if utcnow().tzinfo else utcnow().date()
+    period_to = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else today_msk
+    period_from = (
+        datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else period_to - timedelta(days=days - 1)
+    )
+
+    if nm_id is not None:
+        # РК по одному товару — из разбивки кампания × товар (источник: WB fullstats → nms)
+        ND = WbAdNmDaily
+        ad_rows = (
+            await db.execute(
+                select(
+                    ND.date,
+                    func.coalesce(func.sum(ND.views), 0).label("views"),
+                    func.coalesce(func.sum(ND.clicks), 0).label("clicks"),
+                    func.coalesce(func.sum(ND.spend), Decimal("0")).label("spend"),
+                )
+                .where(
+                    ND.project_id == project_id, ND.campaign_id == campaign_id, ND.nm_id == nm_id,
+                    ND.date >= period_from, ND.date <= period_to,
+                )
+                .group_by(ND.date)
+            )
+        ).all()
+    else:
+        CD = WbAdCampaignDaily
+        ad_rows = (
+            await db.execute(
+                select(
+                    CD.date,
+                    func.coalesce(func.sum(CD.views), 0).label("views"),
+                    func.coalesce(func.sum(CD.clicks), 0).label("clicks"),
+                    func.coalesce(func.sum(CD.spend), Decimal("0")).label("spend"),
+                )
+                .where(
+                    CD.project_id == project_id, CD.campaign_id == campaign_id,
+                    CD.date >= period_from, CD.date <= period_to,
+                )
+                .group_by(CD.date)
+            )
+        ).all()
+    ad_by_date = {r.date: r for r in ad_rows}
+
+    funnel_by_date: dict = {}
+    if nm_ids:
+        F = WbFunnelDaily
+        f_rows = (
+            await db.execute(
+                select(
+                    F.date,
+                    func.coalesce(func.sum(F.open_card), 0).label("opens"),
+                    func.coalesce(func.sum(F.add_to_cart), 0).label("carts"),
+                    func.coalesce(func.sum(F.orders_count), 0).label("orders"),
+                    func.coalesce(func.sum(F.orders_sum_rub), Decimal("0")).label("orders_sum"),
+                    func.avg(func.nullif(F.avg_price, 0)).label("avg_price"),
+                )
+                .where(F.project_id == project_id, F.nm_id.in_(nm_ids), F.date >= period_from, F.date <= period_to)
+                .group_by(F.date)
+            )
+        ).all()
+        funnel_by_date = {r.date: r for r in f_rows}
+
+    rows: list[dict] = []
+    tot = {"views": 0, "clicks": 0, "spend": 0.0, "opens": 0, "carts": 0, "orders": 0, "orders_sum": 0.0, "price_sum": 0.0, "price_n": 0}
+    all_dates = sorted(set(ad_by_date) | set(funnel_by_date), reverse=True)
+    for d in all_dates:
+        a = ad_by_date.get(d)
+        f = funnel_by_date.get(d)
+        views = int(a.views) if a else 0
+        clicks = int(a.clicks) if a else 0
+        spend = float(a.spend) if a else 0.0
+        opens = int(f.opens) if f else 0
+        carts = int(f.carts) if f else 0
+        orders = int(f.orders) if f else 0
+        orders_sum = float(f.orders_sum) if f else 0.0
+        price = float(f.avg_price) if f and f.avg_price else None
+        rows.append(_metric_row(d.isoformat(), views, clicks, spend, opens, carts, orders, orders_sum, price))
+        tot["views"] += views; tot["clicks"] += clicks; tot["spend"] += spend
+        tot["opens"] += opens; tot["carts"] += carts; tot["orders"] += orders; tot["orders_sum"] += orders_sum
+        if price:
+            tot["price_sum"] += price; tot["price_n"] += 1
+
+    totals = _metric_row(
+        "За всё время", int(tot["views"]), int(tot["clicks"]), tot["spend"],
+        int(tot["opens"]), int(tot["carts"]), int(tot["orders"]), tot["orders_sum"],
+        tot["price_sum"] / tot["price_n"] if tot["price_n"] else None,
+    )
+
+    return {
+        "campaign_id": campaign_id,
+        "name": camp.name,
+        "window": {"from": period_from.isoformat(), "to": period_to.isoformat()},
+        "nm_id": nm_id,
+        # РК-метрики отфильтрованы по товару (а не по всей кампании)
+        "ad_by_nm": nm_id is not None,
+        "totals": totals,
+        "rows": rows,
+    }
 
 
 # ─── Настройки автопополнения (project_settings, без миграций) ──────────────
@@ -362,6 +629,51 @@ async def set_campaign_active(db: AsyncSession, project_id: int, campaign_id: in
         row.status = new_status
         await db.commit()
     return {"ok": True, "status": new_status, "error": None}
+
+
+async def deposit_campaign_budget_manual(
+    db: AsyncSession, project_id: int, campaign_id: int, amount: int, source: int
+) -> dict:
+    """Ручное пополнение бюджета кампании (реальные деньги). Инициируется пользователем.
+
+    Пишет запись в тот же журнал, что и автопополнение; при успехе синхронно
+    обновляет наш WbAdCampaign.budget новым значением из WB.
+    """
+    from backend.services.funnel.wb_advertising_api import deposit_campaign_budget
+
+    if amount < 1000:
+        return {"ok": False, "error": "Минимальная сумма пополнения — 1000 ₽ (ограничение WB)."}
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, "error": "Нет WB-ключа с доступом к рекламе."}
+
+    row = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id,
+            )
+        )
+    ).scalar_one_or_none()
+    budget_before = float(row.budget) if row and row.budget is not None else None
+
+    res = await deposit_campaign_budget(api_key, campaign_id, amount, source)
+    budget_after = res.get("total")
+    if res.get("ok") and row is not None and budget_after is not None:
+        row.budget = Decimal(str(budget_after))
+        await db.commit()
+
+    await append_autopay_log(db, project_id, {
+        "campaign_id": campaign_id,
+        "ts": utcnow().isoformat(),
+        "amount": amount if res.get("ok") else 0,
+        "requested": amount,
+        "source": "вручную",
+        "status": res.get("status", "unknown"),
+        "budget_before": budget_before,
+        "budget_after": budget_after,
+        "reason": res.get("error"),
+    })
+    return {"ok": bool(res.get("ok")), "status": res.get("status"), "budget_after": budget_after, "error": res.get("error")}
 
 
 # ─── Автопополнение: журнал и исполнение (реальные деньги) ───────────────────

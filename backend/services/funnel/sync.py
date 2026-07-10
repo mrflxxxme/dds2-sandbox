@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbFunnelDaily
 from backend.models.integrations import WbAdCampaignDaily
+from backend.services.funnel.ad_nm_stats import upsert_ad_nm_daily
 from backend.services.funnel.wb_api_client import (
     fetch_ad_campaigns,
     fetch_ad_stats,
@@ -333,6 +334,19 @@ async def run_funnel_sync(
                 logger.info(f"Campaign daily stats upserted: {len(camp_rows)} rows")
         except Exception as e:
             logger.error(f"Campaign daily stats save error: {e}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+    # ── Upsert РК-статистики в разбивке кампания × товар ────────────────────
+    # Данные уже есть в том же ответе fullstats — лишних запросов к WB нет.
+    by_nm_campaign = ad_stats.get("_by_nm_campaign") or {}
+    if by_nm_campaign:
+        try:
+            await upsert_ad_nm_daily(db, pid, by_nm_campaign)
+        except Exception as e:
+            logger.error(f"Ad nm daily save error: {e}")
             try:
                 await db.rollback()
             except Exception:

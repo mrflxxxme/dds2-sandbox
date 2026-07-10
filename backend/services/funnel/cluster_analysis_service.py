@@ -20,8 +20,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Nomenclature, WbAdCampaign, WbFunnelDaily
-from backend.models.integrations import WbAdCampaignDaily
+from backend.models.integrations import WbAdCampaignDaily, WbAdNmDaily
 from backend.services.funnel.wb_advertising_api import (
+    fetch_campaign_placements,
     fetch_normquery_stats,
     get_normquery_bids,
     get_normquery_minus,
@@ -229,14 +230,84 @@ def _totals(clusters: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-async def get_campaign_clusters(
-    db: AsyncSession, project_id: int, campaign_id: int, date_from: str, date_to: str
+def zone_metrics(views: int, clicks: int, spend: float, orders: int) -> dict[str, Any]:
+    """Метрики одной зоны. Отрицательные значения зажимаются нулём: «рекомендации»
+    считаются вычитанием поиска из итога, а источники расходятся (кластеры — из WB
+    напрямую, итог — из нашей таблицы), поэтому разность может уйти в минус.
+    Производные (CTR/CPC/CPO) считаются от ЗАЖАТЫХ значений — иначе получим отрицательный CTR.
+    """
+    v, cl, o = max(0, views), max(0, clicks), max(0, orders)
+    sp = max(0.0, spend)
+    return {
+        "views": v, "clicks": cl, "spend": round(sp, 2), "orders": o,
+        "ctr": round(cl / v * 100, 2) if v > 0 else 0.0,
+        "cpc": round(sp / cl, 2) if cl > 0 else 0.0,
+        "cpo": round(sp / o, 2) if o > 0 else None,
+    }
+
+
+async def _zone_stats(
+    db: AsyncSession, project_id: int, campaign_id: int, date_from: str, date_to: str,
+    nm_id: int | None, search: dict,
 ) -> dict:
-    """Кластеры одной кампании: статистика + классификация + минус-флаги + дневной бюджет."""
+    """Статистика по зонам показов: поиск и рекомендации.
+
+    ВАЖНО: WB НЕ отдаёт разбивку статистики по зонам (fullstats делит только по платформам).
+    Поэтому «Поиск» = сумма поисковых кластеров (normquery), а «Рекомендации» = итог кампании
+    из wb_ad_nm_daily МИНУС поиск. Это расчёт, а не цифра из кабинета: если WB когда-нибудь
+    начнёт отдавать зоны, эту функцию нужно заменить прямыми данными.
+    """
+    ND = WbAdNmDaily
+    conds = [
+        ND.project_id == project_id, ND.campaign_id == campaign_id,
+        ND.date >= _d(date_from), ND.date <= _d(date_to),
+    ]
+    if nm_id is not None:
+        conds.append(ND.nm_id == nm_id)
+    row = (
+        await db.execute(
+            select(
+                func.coalesce(func.sum(ND.views), 0),
+                func.coalesce(func.sum(ND.clicks), 0),
+                func.coalesce(func.sum(ND.spend), 0),
+                func.coalesce(func.sum(ND.orders), 0),
+            ).where(*conds)
+        )
+    ).one()
+    total = {"views": int(row[0]), "clicks": int(row[1]), "spend": round(float(row[2]), 2), "orders": int(row[3])}
+    has_total = any(total.values())
+
+    s = zone_metrics(search["views"], search["clicks"], search["spend"], search["orders"])
+    rec = (
+        zone_metrics(
+            total["views"] - search["views"], total["clicks"] - search["clicks"],
+            total["spend"] - search["spend"], total["orders"] - search["orders"],
+        )
+        if has_total
+        else None
+    )
+    return {
+        "search": s,
+        "recommendations": rec,  # None — нет посуточной разбивки по товарам за период
+        "total": total if has_total else None,
+        "derived": True,  # обе зоны получены расчётом, а не напрямую из WB
+    }
+
+
+async def get_campaign_clusters(
+    db: AsyncSession, project_id: int, campaign_id: int, date_from: str, date_to: str, nm_id: int | None = None
+) -> dict:
+    """Кластеры одной кампании: статистика + классификация + минус-флаги + дневной бюджет.
+
+    nm_id — если задан, кластеры считаются только по этому товару кампании
+    (WB отдаёт статистику кластеров парами advert_id × nm_id).
+    """
     camp = await _campaign_row(db, project_id, campaign_id)
     if camp is None:
         return {"error": "campaign_not_found"}
     nm_ids = [int(n) for n in (camp.nm_ids or [])]
+    if nm_id is not None:
+        nm_ids = [nm_id]
     key = await _resolve_key(db, project_id)
     if not key:
         return {"error": "no_api_key"}
@@ -245,6 +316,13 @@ async def get_campaign_clusters(
     stats = await fetch_normquery_stats(key, pairs, date_from, date_to)
     minus = await get_normquery_minus(key, pairs)
     bids = await get_normquery_bids(key, pairs)
+    # Зоны показов (поиск/рекомендации) и ставка по каждой из них
+    zones = await fetch_campaign_placements(key, campaign_id)
+    placements = zones["placements"]
+    zone_bids = zones["bids"]
+    # Ставка «по умолчанию» для кластеров без своей — по активной зоне (поиск приоритетнее)
+    default_bid = zone_bids["search"] if placements.get("search", True) and zone_bids["search"] is not None \
+        else (zone_bids["recommendations"] or zone_bids["search"])
     minus_set = {q for lst in minus.values() for q in lst}
     bid_map = _bid_map(bids)
 
@@ -279,6 +357,10 @@ async def get_campaign_clusters(
         "window": {"from": date_from, "to": date_to},
         "aov": round(aov, 2),
         "target_drr": TARGET_DRR,
+        "default_bid": default_bid,  # ставка кампании для кластеров без своей
+        "placements": placements,     # {"search": bool, "recommendations": bool}
+        "zone_bids": zone_bids,       # ставка по каждой зоне, ₽
+        "zone_stats": await _zone_stats(db, project_id, campaign_id, date_from, date_to, nm_id, _totals(clusters_raw)),
         "totals": _totals(clusters_raw),
         "daily": await _daily_budget(db, project_id, campaign_id, date_from, date_to),
         "clusters": clusters,
