@@ -14,7 +14,7 @@ send_order   — РЕАЛЬНОЕ создание заявки во внешн�
 
 import html as _html
 import re
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -26,8 +26,10 @@ from sqlalchemy.orm import selectinload
 from backend.integrations.gazelka_client import (
     BASE_URL,
     ApplyForm,
+    DeliveryPlace,
     GazelkaApiError,
     GazelkaClient,
+    SchedulePlan,
 )
 from backend.integrations.resilience import CircuitOpenError
 from backend.models import GazelkaOrder, GazelkaOrderStatus, IntegrationKey, Warehouse
@@ -43,10 +45,12 @@ from backend.schemas.gazelka import (
     GazelkaOrderList,
     GazelkaOrderRow,
     GazelkaPrefill,
+    GazelkaSchedulePlan,
     GazelkaSelectOption,
     GazelkaSendRequest,
     GazelkaSendResult,
 )
+from backend.utils.time import utcnow
 from backend.utils.crypto import decrypt as _decrypt
 
 logger = structlog.get_logger("dds.gazelka_service")
@@ -148,26 +152,180 @@ def _opt_list(form: ApplyForm, name: str, skip: tuple[str, ...] = ()) -> list[Ga
     return out
 
 
+def _warehouse_options(form: ApplyForm) -> list[GazelkaSelectOption]:
+    """Склады назначения с привязкой к маркетплейсу и графику.
+
+    Дедуп по ``value`` тут недопустим: одно название принадлежит нескольким
+    маркетплейсам («Волгоград» — Ozon place 87 и WB place 77), и графики у них разные.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[GazelkaSelectOption] = []
+    for place in form.places:
+        key = (place.value, place.marketplace_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            GazelkaSelectOption(
+                value=place.value,
+                label=place.label,
+                place_id=place.place_id,
+                marketplace_id=place.marketplace_id,
+            )
+        )
+    return out
+
+
 def _options_from_form(form: ApplyForm) -> GazelkaFormOptions:
     return GazelkaFormOptions(
         entities=_opt_list(form, "entity_id", skip=("",)),
         price_lists=_opt_list(form, "price_id", skip=("",)),
         marketplaces=_opt_list(form, "marketplace_id", skip=("", "0")),
-        delivery_warehouses=_opt_list(form, "delivery_address", skip=("",)),
+        delivery_warehouses=_warehouse_options(form),
         supply_types=_opt_list(form, "monomix", skip=("", "0")),
         timeslots=_opt_list(form, "daily_delivery_timeslot", skip=("",)),
+        schedule={
+            key: GazelkaSchedulePlan(
+                loading_days=plan.loading_days,
+                delivery_days=plan.delivery_days,
+                eta_days=plan.eta_days,
+            )
+            for key, plan in form.schedule.items()
+            if plan.active
+        },
+        min_departure_date=form.min_departure,
+        min_delivery_date=form.min_delivery,
     )
 
 
-def _match_warehouse(wb_name: str | None, options: GazelkaFormOptions) -> str | None:
-    """Сматчить WB-склад назначения с их dropdown (value == label у delivery_address)."""
+# ─── График: допустимые дни отправки/доставки ────────────────────────────────
+
+_DOW_NAMES = ("Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб")
+_SEARCH_HORIZON = 21  # дней вперёд ищем ближайший подходящий день (как их JS)
+
+
+def _dow(d: date) -> int:
+    """День недели в конвенции портала/JS: 0 = воскресенье."""
+    return (d.weekday() + 1) % 7
+
+
+def _days_label(days: list[int] | None) -> str:
+    return "/".join(_DOW_NAMES[d] for d in sorted(days)) if days else "любой день"
+
+
+def _next_allowed(start: date, days: list[int] | None) -> date | None:
+    """Ближайшая (включая ``start``) дата с допустимым днём недели."""
+    if not days:
+        return start
+    for offset in range(_SEARCH_HORIZON):
+        candidate = start + timedelta(days=offset)
+        if _dow(candidate) in days:
+            return candidate
+    return None
+
+
+def _find_place(form: ApplyForm, address: str | None, marketplace_id: str | None) -> DeliveryPlace | None:
+    """Опция склада по (название, маркетплейс) — название само по себе неуникально."""
+    if not address:
+        return None
+    for place in form.places:
+        if place.value == address and (not marketplace_id or place.marketplace_id == marketplace_id):
+            return place
+    return None
+
+
+def _find_plan(form: ApplyForm, price_id: str, place: DeliveryPlace) -> SchedulePlan | None:
+    plan = form.schedule.get(f"{price_id}-{place.place_id}")
+    return plan if plan is not None and plan.active else None
+
+
+def _suggest_dates(
+    plan: SchedulePlan, earliest_departure: date
+) -> tuple[date | None, date | None]:
+    """Ближайшие допустимые (дата отправки, дата доставки) — как считает их форма."""
+    departure = _next_allowed(earliest_departure, plan.loading_days)
+    if departure is None:
+        return None, None
+    delivery = _next_allowed(departure + timedelta(days=plan.eta_days), plan.delivery_days)
+    return departure, delivery
+
+
+def _validate_schedule(form: ApplyForm, req: GazelkaSendRequest) -> None:
+    """Отбить заявку с недопустимыми датами ДО реального POST (портал отвечает 500).
+
+    Для не-маркетплейсной доставки график не применяется — там свободные даты.
+    """
+    if (req.is_marketplace or "").lower() != "yes":
+        return
+    if not form.places or not form.schedule:
+        # Портал сменил разметку — парсер вернул пусто. Это неотличимо от «направление
+        # не обслуживается», поэтому не блокируем весь WB-поток, а пропускаем проверку.
+        logger.warning("gazelka.schedule_unparsed", places=len(form.places), rows=len(form.schedule))
+        return
+    place = _find_place(form, req.delivery_address, req.marketplace_id)
+    if place is None:
+        raise GazelkaServiceError(
+            f"Газелька: склад «{req.delivery_address}» не обслуживается для выбранного маркетплейса",
+            status_code=400,
+        )
+    plan = _find_plan(form, req.price_id, place)
+    if plan is None:
+        raise GazelkaServiceError(
+            f"Газелька: направление на «{place.label}» из выбранного города не обслуживается",
+            status_code=400,
+        )
+
+    min_departure = form.min_departure or utcnow().date()
+    if req.departure_date is None or req.delivery_date is None:
+        raise GazelkaServiceError("Газелька: укажите дату отправки и дату доставки", status_code=400)
+
+    suggested_dep, suggested_del = _suggest_dates(plan, min_departure)
+    if req.departure_date < min_departure:
+        raise GazelkaServiceError(
+            f"Газелька: дата отправки раньше {min_departure.strftime('%d.%m.%Y')}. "
+            f"Ближайшая доступная — {suggested_dep.strftime('%d.%m.%Y') if suggested_dep else '—'}",
+            status_code=400,
+        )
+    if plan.loading_days and _dow(req.departure_date) not in plan.loading_days:
+        raise GazelkaServiceError(
+            f"Газелька: «{place.label}» грузят по {_days_label(plan.loading_days)}. "
+            f"Ближайшая дата отправки — {suggested_dep.strftime('%d.%m.%Y') if suggested_dep else '—'}",
+            status_code=400,
+        )
+
+    earliest_delivery = _next_allowed(req.departure_date + timedelta(days=plan.eta_days), plan.delivery_days)
+    if plan.delivery_days and _dow(req.delivery_date) not in plan.delivery_days:
+        raise GazelkaServiceError(
+            f"Газелька: «{place.label}» принимает доставку по {_days_label(plan.delivery_days)}. "
+            f"Ближайшая дата доставки — {earliest_delivery.strftime('%d.%m.%Y') if earliest_delivery else '—'}",
+            status_code=400,
+        )
+    if earliest_delivery is not None and req.delivery_date < earliest_delivery:
+        raise GazelkaServiceError(
+            f"Газелька: доставка не раньше {earliest_delivery.strftime('%d.%m.%Y')} "
+            f"(путь занимает {plan.eta_days} дн. от даты отправки)",
+            status_code=400,
+        )
+    if suggested_del is None:  # график есть, но подобрать дату не удалось — не блокируем
+        logger.warning("gazelka.schedule_unresolved", place=place.label, price_id=req.price_id)
+
+
+def _match_warehouse(wb_name: str | None, options: GazelkaFormOptions, marketplace_id: str | None) -> str | None:
+    """Сматчить WB-склад назначения с их dropdown (value == label у delivery_address).
+
+    Матч только среди складов выбранного маркетплейса: у Ozon и WB есть одноимённые
+    склады с разными графиками.
+    """
     if not wb_name:
         return None
+    candidates = [
+        o for o in options.delivery_warehouses if not marketplace_id or o.marketplace_id == marketplace_id
+    ]
     low = wb_name.strip().lower()
-    for opt in options.delivery_warehouses:
+    for opt in candidates:
         if opt.label.strip().lower() == low:
             return opt.value
-    for opt in options.delivery_warehouses:
+    for opt in candidates:
         if low in opt.label.strip().lower() or opt.label.strip().lower() in low:
             return opt.value
     return None
@@ -180,6 +338,23 @@ def _default_marketplace(options: GazelkaFormOptions) -> str | None:
     return None
 
 
+def _prefill_dates(
+    ar: AssemblyRequest, form: ApplyForm, price_id: str, address: str | None, marketplace_id: str | None
+) -> tuple[date | None, date | None]:
+    """Даты сборки, подтянутые к графику склада: не в прошлое и в допустимые дни недели.
+
+    Даты сборки часто уже протухли (заявку шлют позже, чем планировали) — портал такие
+    отвергает пятисоткой, поэтому предлагаем ближайшие рабочие.
+    """
+    min_departure = form.min_departure or utcnow().date()
+    place = _find_place(form, address, marketplace_id)
+    plan = _find_plan(form, price_id, place) if place else None
+    if plan is None:
+        return max(ar.pickup_date, min_departure) if ar.pickup_date else None, ar.delivery_date
+    earliest = max(ar.pickup_date, min_departure) if ar.pickup_date else min_departure
+    return _suggest_dates(plan, earliest)
+
+
 def _prefill_from_assembly(
     ar: AssemblyRequest, form: ApplyForm, options: GazelkaFormOptions
 ) -> GazelkaPrefill:
@@ -188,16 +363,20 @@ def _prefill_from_assembly(
     total_weight: Decimal | None = None
     if ar.pallets_count and ar.pallet_weight_kg is not None:
         total_weight = Decimal(ar.pallets_count) * ar.pallet_weight_kg
+    marketplace_id = _default_marketplace(options)
+    address = _match_warehouse(wb_name, options, marketplace_id)
+    price_id = form.defaults.get("price_id") or (options.price_lists[0].value if options.price_lists else "")
+    departure_date, delivery_date = _prefill_dates(ar, form, price_id, address, marketplace_id)
     return GazelkaPrefill(
         customer_phone=form.inputs.get("customer_phone") or None,
-        delivery_address=_match_warehouse(wb_name, options),
+        delivery_address=address,
         delivery_address_x2=wb_name,
-        departure_date=ar.pickup_date,
-        delivery_date=ar.delivery_date,
+        departure_date=departure_date,
+        delivery_date=delivery_date,
         delivery_contact=None,
         daily_delivery_timeslot=None,
         supply_id=(supply.wb_supply_id if supply else None),
-        marketplace_id=_default_marketplace(options),
+        marketplace_id=marketplace_id,
         pallets=ar.pallets_count or 0,
         boxes=0,
         weight=total_weight,
@@ -290,8 +469,10 @@ def _payload_from_request(req: GazelkaSendRequest) -> dict[str, object]:
         "notes": req.notes,
     }
     if req.palleting:
-        payload["palleting"] = "1"
-    return {k: v for k, v in payload.items() if v is not None}
+        payload["palleting"] = "on"  # как шлёт браузер: у чекбокса нет value=
+    # None-поля НЕ выкидываем в пустоту: клиент подставит дефолт формы (портал 500-ит,
+    # если именованное поле формы вовсе отсутствует в теле POST).
+    return payload
 
 
 async def send_order(
@@ -333,11 +514,16 @@ async def send_order(
     try:
         async with _client_from_key(key) as client:
             await client.authenticate()
-            result = await client.create_order(payload)
+            # Форму снимаем ОДИН раз: с неё берём и график для валидации, и CSRF для POST.
+            form = await client.fetch_apply_form()
+            _validate_schedule(form, req)
+            result = await client.create_order(payload, form=form)
         status = GazelkaOrderStatus.SENT if result.ok else GazelkaOrderStatus.UNCERTAIN
         ref = result.ref
         message = result.message
         excerpt = result.excerpt
+    except GazelkaServiceError:
+        raise  # недопустимые даты/склад — заявку не создавали, audit-строка не нужна
     except GazelkaApiError as e:
         message = _scrub(str(e))
         error = message
@@ -677,10 +863,14 @@ async def save_edit(
     try:
         async with _client_from_key(key) as client:
             await client.authenticate()
-            result = await client.update_order(plan_id, payload)
+            form = await client.fetch_edit_form(plan_id)
+            _validate_schedule(form, req)
+            result = await client.update_order(plan_id, payload, form=form)
         status = GazelkaOrderStatus.SENT if result.ok else GazelkaOrderStatus.UNCERTAIN
         message = result.message
         excerpt = result.excerpt
+    except GazelkaServiceError:
+        raise
     except GazelkaApiError as e:
         message = _scrub(str(e))
         error = message

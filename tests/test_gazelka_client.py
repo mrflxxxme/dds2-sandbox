@@ -6,6 +6,7 @@ Uses fixture tests/fixtures/gazelka_apply_sample.html (representative apply form
 No network: only pure parsing/heuristic functions.
 """
 
+from datetime import date
 from pathlib import Path
 
 import httpx
@@ -17,13 +18,16 @@ from backend.integrations.gazelka_client import (
     _extract_json_array,
     _hidden_inputs,
     _login_ok,
+    _merge_payload,
     _normalize_host,
+    _parse_apply_page,
     _parse_create_result,
     _redact,
     _selects,
     _validate_customer_id,
     _validate_plan_id,
     _visible_input_values,
+    decode_days,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "gazelka_apply_sample.html"
@@ -186,6 +190,81 @@ def test_extract_json_array_balances_brackets_in_strings():
 
 def test_extract_json_array_missing_key_returns_empty():
     assert _extract_json_array("ничего тут нет", "plans") == []
+
+
+# ─── Снимок формы: дефолты, склады, график ───────────────────────────────────
+
+
+def test_form_defaults_mirror_browser_submission(apply_html: str):
+    """Браузер шлёт ВСЕ поля формы; портал 500-ит, если поля нет в теле POST."""
+    form = _parse_apply_page(apply_html)
+    # прешитые нули — именно их не хватало в POST
+    assert form.defaults["volume"] == "0"
+    assert form.defaults["weight2"] == "0"
+    assert form.defaults["notes"] == ""
+    # select без selected → первая опция, с selected → выбранная
+    assert form.defaults["price_id"] == "1"
+    assert form.defaults["marketplace_id"] == "0"
+    # чекбоксы/submit/hidden браузер в дефолтах не шлёт
+    assert "palleting" not in form.defaults
+    assert "dosubmit" not in form.defaults
+    assert "action" not in form.defaults
+    # сиблинг-форма не протекает
+    assert form.defaults["entity_id"] == "6596"
+
+
+def test_parse_apply_page_reads_min_dates(apply_html: str):
+    form = _parse_apply_page(apply_html)
+    assert form.min_departure == date(2026, 7, 10)
+    assert form.min_delivery == date(2026, 7, 11)
+
+
+def test_delivery_places_keep_marketplace_twins(apply_html: str):
+    """«Казань» есть у WB (place 25) и у Ozon (26) — это разные направления."""
+    places = _parse_apply_page(apply_html).places
+    assert ("Казань", "25", "4") in [(p.value, p.place_id, p.marketplace_id) for p in places]
+    assert ("Казань", "26", "1") in [(p.value, p.place_id, p.marketplace_id) for p in places]
+    assert all(p.value for p in places)  # плейсхолдер без value отброшен
+
+
+def test_parse_schedule_decodes_days_and_active(apply_html: str):
+    schedule = _parse_apply_page(apply_html).schedule
+    kazan = schedule["1-25"]
+    assert kazan.loading_days == [1, 3]  # Пн/Ср
+    assert kazan.delivery_days == [2, 4]  # Вт/Чт
+    assert kazan.eta_days == 1
+    assert kazan.active is True
+    assert schedule["1-18"].loading_days is None  # код «2» = любой день
+    assert schedule["1-99"].active is False
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("151113", [5, 1, 3]),  # Пт/Пн/Ср
+        ("161214", [6, 2, 4]),
+        ("15", [5]),
+        ("2", None),  # любой день
+        ("3", None),
+        ("0", None),
+        ("", None),
+        ("111116", [0, 1, 2, 3, 4, 5]),  # все, кроме Сб
+        ("мусор", None),
+    ],
+)
+def test_decode_days(raw, expected):
+    assert decode_days(raw) == expected
+
+
+def test_merge_payload_fills_defaults_and_keeps_csrf(apply_html: str):
+    form = _parse_apply_page(apply_html)
+    payload = _merge_payload(form, {"pallets": "2", "notes": None, "weight": "370"})
+    assert payload["action"] == "save_plan"
+    assert payload["j927b4gtyf0m"] == "abc123def456token"
+    assert payload["pallets"] == "2"  # наше значение поверх дефолта
+    assert payload["notes"] == ""  # None → дефолт формы, поле НЕ исчезает
+    assert payload["volume"] == "0"  # поле, которого не было в старом POST
+    assert payload["weight"] == "370"
 
 
 def test_validate_plan_id():

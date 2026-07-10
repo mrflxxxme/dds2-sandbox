@@ -11,6 +11,11 @@ gazelka.space — клиент передачи заявки логиста пе
 3. GET  /customer/apply/{cid}      — форма заявки: справочники-селекты + свежий CSRF
 4. POST /customer/apply/{cid}      — создание заявки (action=save_plan + поля формы)
 
+POST повторяет браузер буквально: отправляются ВСЕ поля формы с их дефолтами (портал
+отвечает 500, если поле отсутствует в теле, — напр. ``volume``), а свои значения
+накладываются сверху. Допустимые дни отправки/доставки лежат в JS-переменной
+``schedule`` на той же странице (см. ``_parse_schedule``).
+
 Создание заявки (``create_order``) — РЕАЛЬНЫЙ заказ во внешнем сервисе, идемпотентности
 на стороне клиента нет: повторный POST создаст вторую заявку. Поэтому БЕЗ retry —
 ошибку/неопределённость пробрасываем, вызывающий решает.
@@ -27,6 +32,7 @@ import html as _html
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from urllib.parse import urlparse
 
 import httpx
@@ -125,6 +131,141 @@ def _extract_apply_form(html_text: str) -> str:
     return m.group(0) if m else html_text
 
 
+_TEXTAREA_RE = re.compile(r"<textarea\b([^>]*)>(.*?)</textarea>", re.I | re.S)
+_SELECTED_RE = re.compile(r"\bselected\b", re.I)
+# Поля, которые браузер НЕ отправляет (submit-кнопки, невыбранные чекбоксы)
+_NON_SUBMITTED_TYPES = ("submit", "button", "image", "reset", "checkbox", "radio", "hidden")
+
+
+def _form_defaults(block: str) -> dict[str, str]:
+    """Значения ВСЕХ именованных полей формы «как их отправил бы браузер».
+
+    Портал 500-ит, если поле формы вовсе отсутствует в POST (напр. ``volume``:
+    у него в разметке прешит ``value="0"``, а пустой строки клиент не слал).
+    Поэтому payload строим от полного снимка формы, а свои значения накладываем сверху.
+    """
+    out: dict[str, str] = {}
+    for a in _input_attrs(block):
+        name = a.get("name")
+        if name and a.get("type", "text").lower() not in _NON_SUBMITTED_TYPES:
+            out[name] = a.get("value", "")
+    for sm in _SELECT_RE.finditer(block):
+        name = _attrs(sm.group(1)).get("name")
+        if not name:
+            continue
+        first: str | None = None
+        selected: str | None = None
+        for om in _OPTION_RE.finditer(sm.group(2)):
+            value = _attrs(om.group(1)).get("value", "")
+            if first is None:
+                first = value
+            if _SELECTED_RE.search(om.group(1)):
+                selected = value
+        out[name] = selected if selected is not None else (first or "")
+    for tm in _TEXTAREA_RE.finditer(block):
+        name = _attrs(tm.group(1)).get("name")
+        if name:
+            out[name] = _html.unescape(_TAGS_RE.sub("", tm.group(2))).strip()
+    return out
+
+
+def _data_min(block: str, input_id: str) -> date | None:
+    """``data-min`` датапикера (нижняя граница, ISO). Портал не принимает даты раньше."""
+    m = re.search(rf'<input\b[^>]*id="{re.escape(input_id)}"[^>]*>', block, re.I)
+    if not m:
+        return None
+    raw = _attrs(m.group(0)).get("data-min", "")
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+@dataclass
+class DeliveryPlace:
+    """Опция склада назначения: ``value`` == название, но привязка — по place/marketplace.
+
+    Одно и то же название встречается у разных маркетплейсов («Волгоград» = Ozon 87
+    и WB 77), поэтому идентичность опции — пара ``(marketplace_id, place_id)``.
+    """
+
+    value: str
+    label: str
+    place_id: str
+    marketplace_id: str
+
+
+# Коды дней недели портала → номер дня как у JS ``Date.getDay()`` (0 = Вс)
+_DAY_CODES = {11: 1, 12: 2, 13: 3, 14: 4, 15: 5, 16: 6, 17: 0}
+
+
+def decode_days(raw: object) -> list[int] | None:
+    """``"151113"`` → ``[5, 1, 3]`` (Пт/Пн/Ср). ``None`` = ограничения нет.
+
+    Зеркало ``decodeDays`` из их ``applyv9.min.js``: коды идут парами (11=Пн … 17=Вс),
+    ``2``/``3`` означают «любой день», префикс ``1111`` — «все дни, кроме последней пары».
+    """
+    try:
+        num = int(str(raw or "0"))
+    except ValueError:
+        return None
+    if num <= 3:  # 0/1 — не задано, 2/3 — все дни
+        return None
+    s = str(num)
+    if s[:4] == "1111":
+        excluded = _DAY_CODES.get(int(s[-2:]))
+        return [d for d in range(7) if d != excluded] if excluded is not None else None
+    days = [_DAY_CODES[code] for i in range(0, len(s) - 1, 2) if (code := int(s[i : i + 2])) in _DAY_CODES]
+    return days or None
+
+
+@dataclass
+class SchedulePlan:
+    """График склада: в какие дни он грузит, в какие принимает, и срок в пути."""
+
+    loading_days: list[int] | None  # None = ограничения нет
+    delivery_days: list[int] | None
+    eta_days: int
+    active: bool
+
+
+def _parse_schedule(html_text: str) -> dict[str, SchedulePlan]:
+    """Встроенный в страницу ``schedule`` — ключ ``"{price_id}-{place_id}"``."""
+    raw = _extract_json_object(html_text, "schedule")
+    out: dict[str, SchedulePlan] = {}
+    for key, row in raw.items():
+        if not isinstance(row, dict):
+            continue
+        try:
+            eta = int(str(row.get("delivery_time") or "1"))
+        except ValueError:
+            eta = 1
+        out[key] = SchedulePlan(
+            loading_days=decode_days(row.get("loading_days")),
+            delivery_days=decode_days(row.get("delivery_days")),
+            eta_days=eta or 1,  # у них 0 трактуется как «сегодня же», минимум 1 день
+            active=str(row.get("active") or "").lower() in ("t", "true", "1"),
+        )
+    return out
+
+
+def _delivery_places(block: str) -> list[DeliveryPlace]:
+    """Опции ``delivery_address`` с их ``data-plid`` / ``data-mpid``."""
+    sm = re.search(r'<select\b[^>]*name="delivery_address"[^>]*>(.*?)</select>', block, re.I | re.S)
+    if not sm:
+        return []
+    out: list[DeliveryPlace] = []
+    for om in _OPTION_RE.finditer(sm.group(1)):
+        a = _attrs(om.group(1))
+        value = a.get("value", "")
+        plid, mpid = a.get("data-plid", ""), a.get("data-mpid", "")
+        if not value or not plid:
+            continue
+        label = _html.unescape(_TAGS_RE.sub("", om.group(2))).strip() or value
+        out.append(DeliveryPlace(value=value, label=label, place_id=plid, marketplace_id=mpid))
+    return out
+
+
 @dataclass
 class ApplyForm:
     """Снимок формы /customer/apply: селекты + предзаполненные значения + скрытые поля."""
@@ -132,6 +273,26 @@ class ApplyForm:
     selects: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     inputs: dict[str, str] = field(default_factory=dict)
     hidden: dict[str, str] = field(default_factory=dict)
+    defaults: dict[str, str] = field(default_factory=dict)
+    places: list[DeliveryPlace] = field(default_factory=list)
+    schedule: dict[str, SchedulePlan] = field(default_factory=dict)
+    min_departure: date | None = None
+    min_delivery: date | None = None
+
+
+def _parse_apply_page(html_text: str) -> ApplyForm:
+    """Страница /customer/apply → снимок формы (справочники, дефолты, график)."""
+    block = _extract_apply_form(html_text)
+    return ApplyForm(
+        selects=_selects(block),
+        inputs=_visible_input_values(block),
+        hidden=_hidden_inputs(block),
+        defaults=_form_defaults(block),
+        places=_delivery_places(block),
+        schedule=_parse_schedule(html_text),  # schedule живёт в <script>, вне формы
+        min_departure=_data_min(block, "departure_date"),
+        min_delivery=_data_min(block, "delivery_date"),
+    )
 
 
 def _validate_customer_id(raw: str | int) -> str:
@@ -150,18 +311,13 @@ def _validate_plan_id(raw: str | int) -> str:
     return value
 
 
-def _extract_json_array(html_text: str, key: str) -> list[dict]:
-    """Достать массив ``"key":[...]`` из встроенного в страницу JSON (данные Tabulator).
+def _balanced_json(html_text: str, open_idx: int, opener: str, closer: str) -> object | None:
+    """Скобко-сбалансированный разбор JSON-литерала с учётом строк.
 
-    Скобко-сбалансированный разбор с учётом строк (значения вроде ``history`` сами
-    содержат ``[`` / ``]``). Значения могут нести HTML-сущности (``&quot;``) —
-    unescape делается потребителем при показе.
+    Значения (напр. ``history``) сами содержат скобки, поэтому наивный поиск закрывашки
+    не годится. Значения могут нести HTML-сущности (``&quot;``) — unescape делается
+    потребителем при показе.
     """
-    marker = f'"{key}":['
-    start = html_text.find(marker)
-    if start < 0:
-        return []
-    open_idx = html_text.find("[", start)
     depth = 0
     in_str = False
     esc = False
@@ -177,17 +333,36 @@ def _extract_json_array(html_text: str, key: str) -> list[dict]:
             continue
         if c == '"':
             in_str = True
-        elif c == "[":
+        elif c == opener:
             depth += 1
-        elif c == "]":
+        elif c == closer:
             depth -= 1
             if depth == 0:
                 try:
-                    data = json.loads(html_text[open_idx : k + 1])
+                    return json.loads(html_text[open_idx : k + 1])
                 except (ValueError, json.JSONDecodeError):
-                    return []
-                return [r for r in data if isinstance(r, dict)]
-    return []
+                    return None
+    return None
+
+
+def _extract_json_array(html_text: str, key: str) -> list[dict]:
+    """Достать массив ``"key":[...]`` из встроенного в страницу JSON (данные Tabulator)."""
+    start = html_text.find(f'"{key}":[')
+    if start < 0:
+        return []
+    data = _balanced_json(html_text, html_text.find("[", start), "[", "]")
+    if not isinstance(data, list):
+        return []
+    return [r for r in data if isinstance(r, dict)]
+
+
+def _extract_json_object(html_text: str, var_name: str) -> dict:
+    """Достать объект из JS-переменной ``const {var_name} = {...}`` внутри <script>."""
+    m = re.search(rf"\b{re.escape(var_name)}\s*=\s*\{{", html_text)
+    if not m:
+        return {}
+    data = _balanced_json(html_text, m.end() - 1, "{", "}")
+    return data if isinstance(data, dict) else {}
 
 
 def _normalize_host(raw: str) -> str:
@@ -297,50 +472,36 @@ class GazelkaClient:
                 )
 
     async def fetch_apply_form(self) -> ApplyForm:
-        """Снять справочники-селекты и предзаполнение формы заявки (нужен логин)."""
+        """Снять справочники-селекты, предзаполнение и график формы заявки (нужен логин)."""
         async with self._circuit:
-            resp = await self._http.get(self._apply_path)
-            if resp.status_code >= 500:
-                raise ValueError(f"Gazelka apply {resp.status_code}")
-            if resp.status_code != 200:
-                raise GazelkaApiError(
-                    f"Газелька: форма заявки недоступна ({resp.status_code})",
-                    status_code=resp.status_code,
-                )
-            block = _extract_apply_form(resp.text)
-            return ApplyForm(
-                selects=_selects(block),
-                inputs=_visible_input_values(block),
-                hidden=_hidden_inputs(block),
-            )
+            return _parse_apply_page(await self._get_form_page(self._apply_path))
 
-    async def create_order(self, fields: dict[str, object]) -> "GazelkaCreateResult":
+    async def _get_form_page(self, path: str) -> str:
+        resp = await self._http.get(path)
+        if resp.status_code >= 500:
+            raise ValueError(f"Gazelka apply {resp.status_code}")
+        if resp.status_code != 200:
+            raise GazelkaApiError(
+                f"Газелька: форма заявки недоступна ({resp.status_code})",
+                status_code=resp.status_code,
+            )
+        return resp.text
+
+    async def create_order(
+        self, fields: dict[str, object], form: ApplyForm | None = None
+    ) -> "GazelkaCreateResult":
         """Создать заявку: POST action=save_plan. БЕЗ retry — это реальный заказ.
 
-        Свежий CSRF и action берём с актуальной формы (GET перед POST).
-        ``fields`` — уже отрендеренные строковые значения полей формы.
+        ``form`` — снимок формы, с которого берём свежий CSRF и дефолты полей; если не
+        передан, снимаем сами. ``fields`` — наши значения поверх дефолтов; ``None``
+        оставляет дефолт формы (пустое поле в POST всё равно уходит, как у браузера).
         """
         async with self._circuit:
-            page = await self._http.get(self._apply_path)
-            if page.status_code >= 500:
-                raise ValueError(f"Gazelka apply {page.status_code}")
-            if page.status_code != 200:
-                raise GazelkaApiError(
-                    f"Газелька: форма заявки недоступна ({page.status_code})",
-                    status_code=page.status_code,
-                )
-            block = _extract_apply_form(page.text)
-            payload: dict[str, object] = {**_hidden_inputs(block)}  # CSRF + action
-            payload.setdefault("action", "save_plan")
-            payload["action"] = "save_plan"
-            for key, value in fields.items():
-                if value is None:
-                    continue
-                payload[key] = value
-
-            resp = await self._http.post(self._apply_path, data=payload)
+            if form is None:
+                form = _parse_apply_page(await self._get_form_page(self._apply_path))
+            resp = await self._http.post(self._apply_path, data=_merge_payload(form, fields))
             if resp.status_code >= 500:
-                raise ValueError(f"Gazelka create {resp.status_code}")
+                raise ValueError(f"Gazelka create {resp.status_code}: {_excerpt(resp.text)}")
             return _parse_create_result(resp, self._apply_path)
 
     async def _get_authed(self, path: str) -> str:
@@ -382,38 +543,27 @@ class GazelkaClient:
             ct = resp.headers.get("content-type") or "text/html; charset=utf-8"
             return resp.content, ct
 
+    def _edit_path(self, plan_id: str) -> str:
+        return f"/customer/apply/{self.customer_id}?update={plan_id}"
+
     async def fetch_edit_form(self, plan_id: str | int) -> ApplyForm:
         """Форма редактирования заявки (предзаполнена): GET /customer/apply/{cid}?update=ID."""
         pid = _validate_plan_id(plan_id)
         async with self._circuit:
-            text = await self._get_authed(f"/customer/apply/{self.customer_id}?update={pid}")
-        block = _extract_apply_form(text)
-        return ApplyForm(
-            selects=_selects(block),
-            inputs=_visible_input_values(block),
-            hidden=_hidden_inputs(block),
-        )
+            return _parse_apply_page(await self._get_authed(self._edit_path(pid)))
 
-    async def update_order(self, plan_id: str | int, fields: dict[str, object]) -> "GazelkaCreateResult":
+    async def update_order(
+        self, plan_id: str | int, fields: dict[str, object], form: ApplyForm | None = None
+    ) -> "GazelkaCreateResult":
         """Сохранить правку заявки: POST /customer/apply/{cid}?update=ID. БЕЗ retry."""
         pid = _validate_plan_id(plan_id)
-        path = f"/customer/apply/{self.customer_id}?update={pid}"
+        path = self._edit_path(pid)
         async with self._circuit:
-            page = await self._http.get(path)
-            if page.status_code >= 500:
-                raise ValueError(f"Gazelka edit {page.status_code}")
-            if page.status_code != 200:
-                raise GazelkaApiError(f"Газелька: форма правки недоступна ({page.status_code})", status_code=page.status_code)
-            block = _extract_apply_form(page.text)
-            payload: dict[str, object] = {**_hidden_inputs(block)}
-            payload["action"] = "save_plan"
-            for key, value in fields.items():
-                if value is None:
-                    continue
-                payload[key] = value
-            resp = await self._http.post(path, data=payload)
+            if form is None:
+                form = _parse_apply_page(await self._get_form_page(path))
+            resp = await self._http.post(path, data=_merge_payload(form, fields))
             if resp.status_code >= 500:
-                raise ValueError(f"Gazelka edit-save {resp.status_code}")
+                raise ValueError(f"Gazelka edit-save {resp.status_code}: {_excerpt(resp.text)}")
             return _parse_create_result(resp, self._apply_path)
 
     async def test_connection(self) -> bool:
@@ -439,6 +589,20 @@ def _login_ok(resp: httpx.Response) -> bool:
     return bool(path and path.startswith(("/customer", "/manager")))
 
 
+def _merge_payload(form: ApplyForm, fields: dict[str, object]) -> dict[str, object]:
+    """Дефолты формы + CSRF/action + наши значения. ``None`` = оставить дефолт."""
+    payload: dict[str, object] = {**form.defaults, **form.hidden}
+    payload["action"] = "save_plan"
+    payload.update({k: v for k, v in fields.items() if v is not None})
+    return payload
+
+
+def _excerpt(text: str, limit: int = 200) -> str:
+    """Текстовая выжимка HTML-ответа без тегов и контактов — для логов и сверки."""
+    stripped = re.sub(r"\s+", " ", _TAGS_RE.sub(" ", text)).strip()
+    return _redact(stripped)[:limit]
+
+
 _ORDER_REF_RE = re.compile(r"/customer/(?:order|orders)/[^/]*?(\d{3,})", re.I)
 
 
@@ -456,8 +620,7 @@ def _parse_create_result(resp: httpx.Response, apply_path: str) -> GazelkaCreate
 
     # Форма вернулась без редиректа — вероятно ошибка валидации. НО заявка могла
     # и создаться: не ретраим и не утверждаем обратное, отдаём исход на сверку.
-    excerpt = _TAGS_RE.sub(" ", resp.text)
-    excerpt = _redact(re.sub(r"\s+", " ", excerpt).strip())[:300]
+    excerpt = _excerpt(resp.text, limit=300)
     return GazelkaCreateResult(
         ok=False,
         ref=None,
