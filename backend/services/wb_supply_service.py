@@ -12,8 +12,11 @@ Service: занос заявки-сборки в FBW-поставку WB чер�
 """
 
 import asyncio
+import re
 from collections import defaultdict
 from collections.abc import Awaitable
+from dataclasses import dataclass
+from datetime import datetime
 from typing import TypeVar
 
 import structlog
@@ -49,6 +52,16 @@ BOX_TYPE_ID_LABEL = {2: "Короб", 5: "Монопаллета", 6: "Супе�
 
 class WbSupplyError(Exception):
     """Доменная ошибка заноса поставки (для 400 в роутере)."""
+
+
+@dataclass(frozen=True)
+class _CabinetMeta:
+    """Сводка карточки поставки из кабинета (supplyDetails)."""
+
+    name: str | None
+    state_id: int | None
+    supply_date: datetime | None
+    reject_reason: str | None
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -159,19 +172,40 @@ def _fbo_state_label(assembly: AssemblyRequest) -> str | None:
     return fbo_state_label(fbo.wb_status if fbo else None)
 
 
-async def _cabinet_status(client: WbPortalClient, supply_id: int) -> tuple[str | None, int | None]:
-    """
-    АВТОРИТЕТНЫЙ статус поставки из кабинета (supplyDetails.statusName/statusId).
+def _parse_wb_dt(value: object) -> datetime | None:
+    """ISO-дата кабинета («2026-07-23T00:00:00+03:00») → naive datetime.
 
-    Именно его видит пользователь в кабинете. Отличается от FBO Marketplace API
-    (`WbFboSupply.wb_status`): напр. кабинет «Запланировано» vs FBO «В пути».
+    tzinfo отбрасываем БЕЗ конверсии в UTC: `supplyDate` — это календарная дата
+    слота сдачи в таймзоне склада; перевод в UTC сдвинул бы её на сутки назад.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=None)
+
+
+async def _cabinet_status(client: WbPortalClient, supply_id: int) -> "_CabinetMeta":
+    """
+    АВТОРИТЕТНАЯ сводка поставки из кабинета (supplyDetails).
+
+    Статус (`statusName`/`statusId`) — именно тот, что видит пользователь в
+    кабинете (отличается от FBO Marketplace API `WbFboSupply.wb_status`: напр.
+    кабинет «Запланировано» vs FBO «В пути»). Плюс `supplyDate` (забронированный
+    слот сдачи) и `rejectReason` (текст кабинетных ошибок поставки — «Не заполнены
+    ШК коробов…», «Не заполнен пропуск…»).
     """
     detail = await client.supply_details(supply_id)
     name = detail.get("statusName")
     sid = detail.get("statusId")
-    return (
-        name if isinstance(name, str) and name else None,
-        sid if isinstance(sid, int) else None,
+    reason = detail.get("rejectReason")
+    return _CabinetMeta(
+        name=name if isinstance(name, str) and name else None,
+        state_id=sid if isinstance(sid, int) else None,
+        supply_date=_parse_wb_dt(detail.get("supplyDate")),
+        reject_reason=reason.strip() if isinstance(reason, str) and reason.strip() else None,
     )
 
 
@@ -278,14 +312,26 @@ async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> WbSu
 
     # АВТОРИТЕТНЫЙ живой статус — из кабинета (supplyDetails), best-effort: при
     # недоступности WB оставляем сохранённое/FBO-метку, панель не роняем.
+    # Заодно тянем дату брони слота и текст кабинетных ошибок поставки; если
+    # строка связи реальна (есть в БД) — персистим, чтобы список сборок показывал
+    # их без похода в WB на каждую строку.
     supply_id_eff = link.supply_id or adopt
     if supply_id_eff:
         try:
             client = await _client(db, project_id)
-            name, state_id = await _cabinet_status(client, supply_id_eff)
-            if name:
-                updates["wb_supply_state"] = name
-                updates["wb_supply_state_id"] = state_id
+            meta = await _cabinet_status(client, supply_id_eff)
+            if meta.name:
+                updates["wb_supply_state"] = meta.name
+                updates["wb_supply_state_id"] = meta.state_id
+            updates["supply_date"] = meta.supply_date
+            updates["reject_reason"] = meta.reject_reason
+            if link.id is not None:
+                link.wb_supply_state = meta.name or link.wb_supply_state
+                link.wb_supply_state_id = meta.state_id
+                link.supply_date = meta.supply_date
+                link.reject_reason = meta.reject_reason
+                link.wb_state_synced_at = utcnow()
+                await db.commit()
         except (WbSessionExpired, WbPortalError, ValueError):
             pass
     return state.model_copy(update=updates)
@@ -363,7 +409,7 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
     checked = 0
     for aid, sid, link in work[:_SYNC_SUPPLY_CAP]:
         try:
-            name, state_id = await _cabinet_status(client, sid)
+            meta = await _cabinet_status(client, sid)
         except WbSessionExpired as e:
             await integrations_service.mark_wb_portal_expired(db, project_id)
             raise WbSupplyError(
@@ -373,12 +419,12 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
             # Рейт-лимит/транзиент — один ретрай с бэкоффом; иначе пропускаем.
             await asyncio.sleep(1.5)
             try:
-                name, state_id = await _cabinet_status(client, sid)
+                meta = await _cabinet_status(client, sid)
             except WbPortalError:
                 await asyncio.sleep(_SYNC_DELAY)
                 continue
         checked += 1
-        if name:
+        if meta.name:
             if link is None:
                 link = AssemblyWbSupply(
                     project_id=project_id,
@@ -388,10 +434,12 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
                     boxes=[],
                 )
                 db.add(link)
-            if link.wb_supply_state != name or link.wb_supply_state_id != state_id:
-                link.wb_supply_state = name
-                link.wb_supply_state_id = state_id
+            if link.wb_supply_state != meta.name or link.wb_supply_state_id != meta.state_id:
+                link.wb_supply_state = meta.name
+                link.wb_supply_state_id = meta.state_id
                 updated += 1
+            link.supply_date = meta.supply_date
+            link.reject_reason = meta.reject_reason
             link.wb_state_synced_at = utcnow()
         await asyncio.sleep(_SYNC_DELAY)
 
@@ -428,6 +476,92 @@ async def save_pass(
     link.pass_pallets = data.get("pallets")
     await db.commit()
     return link
+
+
+# Русский госномер: логист вводит «Номер, водитель, ТК» одной строкой (vehicle_info).
+# Вынимаем сам номер (кабинет WB хранит его отдельным полем) и best-effort ФИО.
+_PLATE_RE = re.compile(
+    r"[АВЕКМНОРСТУХABEKMHOPCTYX]\d{3}[АВЕКМНОРСТУХABEKMHOPCTYX]{2}\d{2,3}",
+    re.IGNORECASE,
+)
+# Телефон: 6+ подряд цифр (с разделителями) — убираем из строки перед парсингом ФИО.
+_PHONE_RE = re.compile(r"[+()\d][\d\-()\s]{5,}\d")
+
+
+def _extract_plate(text: str) -> str | None:
+    """Госномер из свободной строки машины заявки (или None)."""
+    m = _PLATE_RE.search(text or "")
+    return m.group(0) if m else None
+
+
+def _parse_driver_name(text: str, plate: str | None) -> tuple[str | None, str | None]:
+    """Best-effort ФИО из строки машины: убираем госномер и телефон, остаток —
+    слова ФИО (порядок кабинета WB: Фамилия Имя …). Возвращает (first, last).
+
+    Парсинг эвристический — логист дозаполняет/правит поля в панели пропуска
+    перед заносом в WB, поэтому ошибка парсинга не критична.
+    """
+    rest = text or ""
+    if plate:
+        rest = rest.replace(plate, " ")
+    rest = _PHONE_RE.sub(" ", rest)
+    words = [w for w in re.split(r"[\s,]+", rest) if w and any(ch.isalpha() for ch in w)]
+    if not words:
+        return None, None
+    last = words[0]
+    first = words[1] if len(words) > 1 else None
+    return first, last
+
+
+async def sync_pass_from_vehicle(
+    db: AsyncSession, project_id: int, assembly: AssemblyRequest
+) -> None:
+    """F3: при назначении машины зеркалим её реквизиты в WB-пропуск заявки.
+
+    Госномер/марку/телефон берём из машины (источник истины — назначение,
+    перезаписываем). ФИО парсим best-effort и ставим ТОЛЬКО если пусто (не
+    затираем ручной ввод). Число паллет — из заявки, если в пропуске пусто.
+    Занос в WB (push_pass) остаётся ручным: логист дозаполняет ФИО и жмёт
+    «Занести пропуск в WB». Строку НЕ коммитим — коммитит вызывающий
+    (assign_vehicle) в своей транзакции.
+    """
+    veh_info = (assembly.vehicle_info or "").strip()
+    veh_brand = (assembly.vehicle_brand or "").strip()
+    veh_phone = (assembly.driver_phone or "").strip()
+    first_name = (assembly.driver_first_name or "").strip()
+    last_name = (assembly.driver_last_name or "").strip()
+    if not (veh_info or veh_brand or veh_phone or first_name or last_name):
+        return
+    # adopt_supply_id=None: siblings совместной поставки могут не иметь загруженного
+    # relationship wb_fbo_supply (lazy-load в async упадёт). Пропуск сохраняем
+    # локально; supply_id доберётся при заносе/открытии панели (get_state).
+    link = await _get_or_create_link(db, project_id, assembly.id)
+
+    # Госномер: с приведением модалки к составу пропуска `vehicle_info` — это чистый
+    # госномер. У СТАРЫХ заявок там свободная строка «Номер, водитель, ТК» → regex.
+    if veh_info:
+        link.pass_car_number = _extract_plate(veh_info) or veh_info
+    if veh_brand:
+        link.pass_car_model = veh_brand
+    if veh_phone:
+        link.pass_driver_phone = veh_phone
+
+    # ФИО: явные поля заявки — источник истины. Их нет только у старых заявок →
+    # тогда best-effort парсинг из свободной строки, и только в пустой пропуск.
+    if first_name or last_name:
+        if first_name:
+            link.pass_driver_first = first_name
+        if last_name:
+            link.pass_driver_last = last_name
+    elif not (link.pass_driver_first or link.pass_driver_last):
+        parsed_first, parsed_last = _parse_driver_name(veh_info, _extract_plate(veh_info))
+        if parsed_first:
+            link.pass_driver_first = parsed_first
+        if parsed_last:
+            link.pass_driver_last = parsed_last
+
+    if link.pass_pallets is None and assembly.pallets_count:
+        link.pass_pallets = assembly.pallets_count
 
 
 async def create_preorder(

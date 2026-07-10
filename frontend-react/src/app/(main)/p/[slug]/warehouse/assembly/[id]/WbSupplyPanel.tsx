@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-import { downloadBoxStickers, downloadSupplyStickers } from '@/lib/wbBoxStickers';
+import { downloadBoxStickers, downloadPassSticker } from '@/lib/wbBoxStickers';
 import type {
     AssemblyRequestItem,
     PackageType,
@@ -53,6 +53,13 @@ const normalizePlate = (s: string): string =>
     s.toUpperCase().split('').map((c) => PLATE_HOMOGLYPH[c] ?? c).join('').replace(/[^A-Z0-9]/g, '');
 const extractPlate = (s: string): string => s.match(PLATE_RE)?.[0] ?? s.trim();
 const onlyDigits = (s: string): string => s.replace(/\D/g, '');
+
+/** Звёздочка «поле обязательно» — WB не примет пропуск без всех полей. */
+const Req = () => <span style={{ color: 'var(--color-danger)', marginLeft: 2 }}>*</span>;
+
+/** Красная рамка у незаполненного обязательного поля. */
+const emptyStyle = (isEmpty: boolean) =>
+    isEmpty ? { borderColor: 'var(--color-danger)' } : undefined;
 
 interface Props {
     assemblyId: number;
@@ -221,25 +228,27 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
         }
     }, [state, assemblyId]);
 
-    // Скачать PDF со ШК поставки и пропуска (QR + Code128) — целиком на клиенте.
-    // Штрихкод пропуска WB имеет префикс WB-GI- перед его id (barcode_id).
-    const downloadSupply = useCallback(async () => {
-        const passBarcode = state?.barcode_id != null ? `WB-GI-${state.barcode_id}` : null;
-        if (state?.supply_id == null && !passBarcode) return;
-        setBusy('supply-stickers');
+    // ШК пропуска: у поставки WB нет собственного штрихкода — на складе сканируют
+    // ШК ПРОПУСКА (`WB-GI-<barcode_id>`) и ШК коробов. barcode_id приходит из
+    // кабинета (trn_details) либо проставляется при заносе пропуска.
+    const passBarcode = state?.barcode_id != null
+        ? `WB-GI-${state.barcode_id}`
+        : (cabinetPass?.barcode_id != null
+            ? `${cabinetPass.barcode_prefix ?? 'WB-GI-'}${cabinetPass.barcode_id}`
+            : null);
+
+    const downloadPass = useCallback(async () => {
+        if (!passBarcode) return;
+        setBusy('pass-sticker');
         setError('');
         try {
-            await downloadSupplyStickers({
-                supplyId: state?.supply_id ?? null,
-                passBarcode,
-                fileName: `wb-supply-${assemblyId}.pdf`,
-            });
+            await downloadPassSticker({ passBarcode, fileName: `ШК_пропуск_${assemblyId}.pdf` });
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Не удалось сгенерировать ШК поставки');
+            setError(e instanceof Error ? e.message : 'Не удалось сгенерировать ШК пропуска');
         } finally {
             setBusy('');
         }
-    }, [state, assemblyId]);
+    }, [passBarcode, assemblyId]);
 
     // Префилл полей пропуска из назначенной машины заявки (только непустые значения).
     const fillFromVehicle = useCallback(() => {
@@ -269,6 +278,20 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
     // Телефон — по цифрам (игнорируем +/пробелы/скобки).
     const driverPhoneMismatch =
         !!driverPhone.trim() && !!vehPhone.trim() && onlyDigits(driverPhone) !== onlyDigits(vehPhone);
+    // Паллеты пропуска ≠ паллетам заявки (F2): оба заданы и различаются.
+    const asmPallets = st?.assembly_pallets_count ?? null;
+    const palletsMismatch = pallets !== '' && asmPallets != null && Number(pallets) !== asmPallets;
+    // Пропуск: WB требует ВСЕ поля — иначе setTRNDetails не примет. Считаем, чего
+    // не хватает, чтобы подсветить поля и объяснить, почему занос заблокирован.
+    const missingPass = [
+        !driverFirst.trim() && 'Имя',
+        !driverLast.trim() && 'Фамилия',
+        !driverPhone.trim() && 'Телефон',
+        (pallets === '' || Number(pallets) <= 0) && 'Кол-во паллет',
+        !carModel.trim() && 'Марка авто',
+        !carNumber.trim() && 'Госномер',
+    ].filter((v): v is string => typeof v === 'string');
+    const passComplete = missingPass.length === 0;
     const sessionActive = session?.status === 'ACTIVE';
     const statusCfg = st ? STATUS_LABEL[st.sync_status] : STATUS_LABEL.NONE;
 
@@ -282,6 +305,28 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
             {error && <div className="badge badge-danger" style={{ marginBottom: 12 }}>{error}</div>}
             {st?.last_error && st.sync_status === 'ERROR' && (
                 <div className="badge badge-danger" style={{ marginBottom: 12 }}>{st.last_error}</div>
+            )}
+
+            {/* Ошибки поставки из кабинета WB (supplyDetails.rejectReason): «Не заполнены
+                ШК коробов…», «Не заполнен пропуск…». Показываем как в кабинете —
+                списком строк. WB присылает их одним текстом с переводами строк. */}
+            {st?.reject_reason && (
+                <div
+                    className="glass-card"
+                    style={{
+                        padding: '12px 14px', marginBottom: 12,
+                        borderLeft: '3px solid var(--color-danger)', fontSize: 13,
+                    }}
+                >
+                    <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--color-danger)' }}>
+                        Исправьте ошибки
+                    </div>
+                    {st.reject_reason.split('\n').map((line, i) => (
+                        line.trim() ? (
+                            <div key={i} className="text-muted" style={{ marginTop: 2 }}>{line.trim()}</div>
+                        ) : null
+                    ))}
+                </div>
             )}
 
             {/* Сессия кабинета */}
@@ -336,6 +381,7 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                                 <thead>
                                     <tr>
                                         <th>Баркод</th>
+                                        <th>Артикул</th>
                                         <th style={{ textAlign: 'right' }}>Кол-во</th>
                                     </tr>
                                 </thead>
@@ -343,6 +389,7 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                                     {items.map((it) => (
                                         <tr key={it.id}>
                                             <td>{it.barcode}</td>
+                                            <td style={{ fontFamily: 'monospace', fontSize: 13 }}>{it.article || '—'}</td>
                                             <td style={{ textAlign: 'right' }}>{formatNumber(it.quantity, 0)}</td>
                                         </tr>
                                     ))}
@@ -431,18 +478,6 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                             onClick={downloadStickers}
                         >
                             {busy === 'stickers' ? 'Готовлю…' : '📄 Скачать ШК коробов'}
-                        </button>
-                        <button
-                            className="btn btn-secondary btn-sm"
-                            disabled={busy === 'supply-stickers' || (st?.supply_id == null && st?.barcode_id == null)}
-                            title={
-                                st?.supply_id != null || st?.barcode_id != null
-                                    ? 'Скачать PDF со ШК поставки и пропуска (QR + Code128)'
-                                    : 'Сначала забронируйте дату / занесите пропуск в WB'
-                            }
-                            onClick={downloadSupply}
-                        >
-                            {busy === 'supply-stickers' ? 'Готовлю…' : '📄 Скачать ШК поставки'}
                         </button>
                     </div>
 
@@ -620,16 +655,16 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                     </datalist>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                         <div className="form-group">
-                            <label className="form-label">Имя</label>
-                            <input className="form-input" list="wb-drivers" value={driverFirst} onChange={(e) => setDriverFirst(e.target.value)} />
+                            <label className="form-label">Имя<Req /></label>
+                            <input className="form-input" list="wb-drivers" value={driverFirst} onChange={(e) => setDriverFirst(e.target.value)} style={emptyStyle(!driverFirst.trim())} />
                         </div>
                         <div className="form-group">
-                            <label className="form-label">Фамилия</label>
-                            <input className="form-input" value={driverLast} onChange={(e) => setDriverLast(e.target.value)} />
+                            <label className="form-label">Фамилия<Req /></label>
+                            <input className="form-input" value={driverLast} onChange={(e) => setDriverLast(e.target.value)} style={emptyStyle(!driverLast.trim())} />
                         </div>
                         <div className="form-group">
                             <label className="form-label">
-                                Телефон
+                                Телефон<Req />
                                 {driverPhoneMismatch && (
                                     <span title={`В машине заявки: ${vehPhone}`} style={{ marginLeft: 6, color: 'var(--color-warning)', cursor: 'help' }}>⚠</span>
                                 )}
@@ -638,21 +673,27 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                                 className="form-input"
                                 value={driverPhone}
                                 onChange={(e) => setDriverPhone(e.target.value)}
-                                style={driverPhoneMismatch ? { borderColor: 'var(--color-warning)' } : undefined}
+                                style={driverPhoneMismatch ? { borderColor: 'var(--color-warning)' } : emptyStyle(!driverPhone.trim())}
                             />
                         </div>
                         <div className="form-group">
-                            <label className="form-label">Кол-во паллет</label>
+                            <label className="form-label">
+                                Кол-во паллет<Req />
+                                {palletsMismatch && (
+                                    <span title={`В заявке: ${formatNumber(asmPallets ?? 0, 0)} паллет`} style={{ marginLeft: 6, color: 'var(--color-warning)', cursor: 'help' }}>⚠</span>
+                                )}
+                            </label>
                             <input
                                 className="form-input"
                                 type="number"
                                 value={pallets}
                                 onChange={(e) => setPallets(e.target.value === '' ? '' : Number(e.target.value))}
+                                style={palletsMismatch ? { borderColor: 'var(--color-warning)' } : emptyStyle(pallets === '' || Number(pallets) <= 0)}
                             />
                         </div>
                         <div className="form-group">
                             <label className="form-label">
-                                Марка авто
+                                Марка авто<Req />
                                 {carModelMismatch && (
                                     <span title={`В машине заявки: ${vehBrand}`} style={{ marginLeft: 6, color: 'var(--color-warning)', cursor: 'help' }}>⚠</span>
                                 )}
@@ -661,12 +702,12 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                                 className="form-input"
                                 value={carModel}
                                 onChange={(e) => setCarModel(e.target.value)}
-                                style={carModelMismatch ? { borderColor: 'var(--color-warning)' } : undefined}
+                                style={carModelMismatch ? { borderColor: 'var(--color-warning)' } : emptyStyle(!carModel.trim())}
                             />
                         </div>
                         <div className="form-group">
                             <label className="form-label">
-                                Госномер
+                                Госномер<Req />
                                 {carNumberMismatch && (
                                     <span title={`В машине заявки: ${vehInfo}`} style={{ marginLeft: 6, color: 'var(--color-warning)', cursor: 'help' }}>⚠</span>
                                 )}
@@ -675,10 +716,16 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                                 className="form-input"
                                 value={carNumber}
                                 onChange={(e) => setCarNumber(e.target.value)}
-                                style={carNumberMismatch ? { borderColor: 'var(--color-warning)' } : undefined}
+                                style={carNumberMismatch ? { borderColor: 'var(--color-warning)' } : emptyStyle(!carNumber.trim())}
                             />
                         </div>
                     </div>
+
+                    {!passComplete && (
+                        <div className="text-muted" style={{ fontSize: 13 }}>
+                            WB не примет пропуск без всех полей. Не заполнено: {missingPass.join(', ')}.
+                        </div>
+                    )}
                     <div style={{ display: 'flex', gap: 8 }}>
                         <button
                             className="btn btn-secondary btn-sm"
@@ -700,10 +747,27 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                         </button>
                         <button
                             className="btn btn-primary btn-sm"
-                            disabled={!sessionActive || busy === 'pushpass' || !st?.supply_id}
+                            disabled={!sessionActive || busy === 'pushpass' || !st?.supply_id || !passComplete}
+                            title={
+                                !passComplete
+                                    ? `Заполните все поля пропуска: ${missingPass.join(', ')}`
+                                    : !st?.supply_id
+                                        ? 'Сначала забронируйте дату в кабинете WB'
+                                        : 'Занести пропуск в кабинет WB'
+                            }
                             onClick={() => run('pushpass', () => api.wbSupplyPushPass(assemblyId))}
                         >
                             {busy === 'pushpass' ? 'Заношу…' : 'Занести пропуск в WB'}
+                        </button>
+                        <button
+                            className="btn btn-secondary btn-sm"
+                            disabled={busy === 'pass-sticker' || !passBarcode}
+                            title={passBarcode
+                                ? `Скачать PDF со ШК пропуска (${passBarcode})`
+                                : 'ШК пропуска появится после заноса пропуска в WB'}
+                            onClick={downloadPass}
+                        >
+                            {busy === 'pass-sticker' ? 'Готовлю…' : '📄 Скачать ШК пропуска'}
                         </button>
                     </div>
                 </div>

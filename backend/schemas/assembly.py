@@ -123,6 +123,8 @@ class AssemblyRequestUpdate(BaseModel):
     vehicle_info: str | None = None
     vehicle_brand: str | None = None
     driver_phone: str | None = None
+    driver_first_name: str | None = None
+    driver_last_name: str | None = None
     carrier_inn: str | None = None
     carrier_name: str | None = None
 
@@ -158,9 +160,12 @@ class AssemblyMergeRequest(BaseModel):
 
 
 class AssignVehicle(BaseModel):
+    # Состав 1:1 с WB-пропуском: vehicle_info = госномер, vehicle_brand = марка.
     vehicle_info: str
     vehicle_brand: str
     driver_phone: str
+    driver_first_name: str | None = None
+    driver_last_name: str | None = None
     pickup_date: date
     pickup_time_slot: str
     pickup_cost: Decimal
@@ -181,6 +186,8 @@ class AssignVehicleBulk(BaseModel):
     vehicle_info: str
     vehicle_brand: str
     driver_phone: str
+    driver_first_name: str | None = None
+    driver_last_name: str | None = None
     carrier_inn: str | None = None
     carrier_name: str | None = None
     items: list[BulkAssignItem]
@@ -300,6 +307,8 @@ class AssemblyRequestResponse(BaseModel):
     vehicle_info: str | None = None
     vehicle_brand: str | None = None
     driver_phone: str | None = None
+    driver_first_name: str | None = None
+    driver_last_name: str | None = None
     pickup_date: date | None = None
     pickup_time_slot: str | None = None
     pickup_cost: Decimal | None = None

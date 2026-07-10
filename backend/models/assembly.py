@@ -154,9 +154,15 @@ class AssemblyRequest(Base, TimestampMixin, SoftDeleteMixin):
     pallet_manifest: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
 
     # Vehicle & shipping
+    # vehicle_info — госномер машины (поле «Госномер» в «Назначить машину»). Исторически
+    # это была свободная строка «Номер, водитель, ТК», поэтому у старых заявок там текст:
+    # читатели госномера обязаны терпеть оба формата (см. wb_supply_service._extract_plate).
     vehicle_info: Mapped[str | None] = mapped_column(String(300), nullable=True)
     vehicle_brand: Mapped[str | None] = mapped_column(String(100), nullable=True)
     driver_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # ФИО водителя — 1:1 с полями WB-пропуска (pass_driver_first/last).
+    driver_first_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    driver_last_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     counterparty_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("counterparty.id"), nullable=True)
     pickup_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     pickup_time_slot: Mapped[str | None] = mapped_column(String(20), nullable=True)
