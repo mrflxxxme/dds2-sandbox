@@ -116,6 +116,10 @@ class ColdStartTableRow(BaseModel):
     is_newcomer: bool  # first_sale_date IS NULL OR < 14 days
     allocations: dict[str, int]  # warehouse_name → qty
     total_allocated: int
+    # Гвард пересорта: посев уже лежит на WB и не продаётся → авто-досев остановлен
+    # (allocations пусто). Ручной override на UI гвардом не ограничивается.
+    oversort_guard: bool = False
+    guard_reason: str | None = None
 
 
 class ColdStartTableResponse(BaseModel):

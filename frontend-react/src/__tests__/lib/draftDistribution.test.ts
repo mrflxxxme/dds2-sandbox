@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
     allocSrcAcrossFf,
+    buildDraftSkus,
     buildPinnedRowsFf,
     buildTopUpRowsFf,
     planBoxTopUpFf,
     type CellEdits,
     type PinnedPkgOf,
+    type DraftDistInput,
 } from '@/lib/assembly/draftDistribution';
 import type { PackageType, StockNeedArticle } from '@/types/api';
 
@@ -107,5 +109,55 @@ describe('planBoxTopUpFf', () => {
     it('капится свободным (available − allocByBc), целыми коробами', () => {
         const out = planBoxTopUpFf([{ nmId: 1, boxes: 5 }], 'Тула', [article('A', 1, { 1: 40 })], new Map([['A', 15]]), new Map([[1, 10]]));
         expect(out).toEqual([{ barcode: 'A', wb: 'Тула', units: 20 }]); // free=25 → 2 короба
+    });
+});
+
+
+describe('buildDraftSkus — канал новинок (cold-start)', () => {
+    const input = (
+        articles: StockNeedArticle[],
+        newcomerSet: Set<number>,
+        newcomerAlloc?: Map<number, Record<string, number>>,
+    ): DraftDistInput => ({
+        articles,
+        stockNeed: null, // need-канал пуст — изолируем канал новинок
+        nmPpb: new Map([[1, 4]]),
+        nmBoxSize: new Map(),
+        palletOverrides: {},
+        newcomerSet,
+        newcomerAlloc,
+    });
+
+    it('новинка получает target из backend cold-start allocations', () => {
+        const a = article('A', 1, { 4: 300 });
+        const alloc = new Map([[1, { 'Екатеринбург - Перспективная 14': 52, Краснодар: 8 }]]);
+        const { skus } = buildDraftSkus(input([a], new Set([1]), alloc));
+        expect(skus).toHaveLength(1);
+        expect(skus[0].target).toEqual({ 'Екатеринбург - Перспективная 14': 52, Краснодар: 8 });
+        expect(sumRec(skus[0].ffStock as unknown as Record<string, number>)).toBe(300);
+    });
+
+    it('гвард пересорта: guarded nm приходит без alloc → новинка остаётся с нулями', () => {
+        const a = article('A', 1, { 4: 300 });
+        const { skus } = buildDraftSkus(input([a], new Set([1]), new Map()));
+        expect(skus).toHaveLength(0);
+    });
+
+    it('без newcomerAlloc — прежнее поведение (новинки без авто-раскладки)', () => {
+        const a = article('A', 1, { 4: 300 });
+        const { skus } = buildDraftSkus(input([a], new Set([1]), undefined));
+        expect(skus).toHaveLength(0);
+    });
+
+    it('alloc чужого nm (не новинки) не сеется — канал только для is_newcomer', () => {
+        const a = article('A', 1, { 4: 300 });
+        const { skus } = buildDraftSkus(input([a], new Set(), new Map([[1, { 'Тула': 10 }]])));
+        expect(skus).toHaveLength(0);
+    });
+
+    it('новинка без свободного ФФ-остатка не сеется даже с alloc', () => {
+        const a = article('A', 1, { 4: 0 });
+        const { skus } = buildDraftSkus(input([a], new Set([1]), new Map([[1, { 'Тула': 10 }]])));
+        expect(skus).toHaveLength(0);
     });
 });

@@ -60,6 +60,11 @@ export interface DraftDistInput {
     palletOverrides: Record<string, number>;
     /** Новинки (cold-start) — засеваются отдельно, в base-skus помечаются is_newcomer. */
     newcomerSet: Set<number>;
+    /** Авто-раздача новинок из backend cold-start (`allocations` per nm_id) — канал
+     *  новинок ручной раскладки. Гвард пересорта уже применён на бэке (guarded SKU
+     *  приходит с пустым alloc → новинка остаётся с нулями, причина — в guard_reason
+     *  строки cold-start). Не задан → новинки без авто-раскладки (как раньше). */
+    newcomerAlloc?: Map<number, Record<string, number>>;
 }
 
 /** Геометрия движка из DraftDistInput (кратность/габарит per nm + паллет-override). */
@@ -118,6 +123,33 @@ export function buildDraftSkus(input: DraftDistInput): {
 } {
     const { skus: distSkus, nmByBarcode } = articlesToDistSkus(input.articles, input.newcomerSet);
     const skus = buildDistributionSkus(distSkus, input.stockNeed, draftAvailabilityOf(input.articles), draftGeom(input));
+    // Канал новинок: движок исключает is_newcomer из need-канала (потребность от
+    // продаж у новинки ~всегда 0) — target берём из backend cold-start `allocations`
+    // (там уже вычтены WB-сток/сборки, применены концентрация, ship-кап и гвард
+    // пересорта). Дальше новинка идёт общим конвейером: приёмка → целые
+    // коробы/паллеты → предбронь.
+    if (input.newcomerAlloc && input.newcomerAlloc.size > 0) {
+        const geom = draftGeom(input);
+        for (const a of input.articles) {
+            if (!input.newcomerSet.has(a.nm_id)) continue;
+            const alloc = input.newcomerAlloc.get(a.nm_id);
+            if (!alloc) continue;
+            const target = Object.fromEntries(Object.entries(alloc).filter(([, q]) => (q || 0) > 0));
+            if (Object.keys(target).length === 0) continue;
+            const avail = ffAvailOf(a);
+            if (Object.values(avail).reduce((s, v) => s + v, 0) <= 0) continue;
+            skus.push({
+                nm_id: a.nm_id,
+                barcode: a.barcode,
+                vendor_code: a.vendor_code || a.barcode,
+                target,
+                ffStock: avail,
+                ppb: geom.ppbOf(a.nm_id),
+                box_size: geom.boxSizeOf(a.nm_id) ?? null,
+                packageType: 'BOX',
+            });
+        }
+    }
     return { skus, nmByBarcode };
 }
 

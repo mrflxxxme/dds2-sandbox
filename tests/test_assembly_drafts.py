@@ -2554,6 +2554,36 @@ async def test_remove_rows_clears_handed_units(db_session):
 
 
 @pytest.mark.asyncio
+async def test_remove_rows_clears_prebook(db_session):
+    """remove_rows_by_nm чистит и предбронь удаляемых SKU.
+
+    Кейс «швабры» 2026-07-10: rows вычищались, а предбронь (348 шт) оставалась
+    жить в черновике навсегда — её не трогала ни матрица (владеет только своими
+    SKU), ни этот endpoint."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5})]
+    prebook = [
+        AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 8}, tgt={"Электросталь": 8}),
+        AssemblyDraftRow(nm_id=222, barcode=TEST_BARCODE_2, src={str(wh_a): 3}, tgt={"Казань": 3}),
+    ]
+    create = AssemblyDraftCreate(
+        name="P",
+        distribution=AssemblyDraftDistribution(
+            source_warehouse_ids=[wh_a],
+            target_warehouse_names=["Электросталь", "Казань"],
+            rows=rows,
+            prebook=prebook,
+        ),
+    )
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, create)
+
+    updated = await assembly_draft_service.remove_rows_by_nm(db_session, PROJECT_ID, draft.id, [111])
+    dist = AssemblyDraftDistribution.model_validate(updated.distribution)
+    assert dist.rows == []
+    assert {r.nm_id for r in dist.prebook} == {222}
+
+
+@pytest.mark.asyncio
 async def test_remove_rows_404(db_session):
     """remove_rows_by_nm на несуществующем черновике → 404."""
     with pytest.raises(HTTPException) as ei:

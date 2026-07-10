@@ -739,6 +739,15 @@ export function WarehouseNeedView({
             }
             const overrideQty = coldStartQtyOverrides[row.nm_id];
             const useOverride = overrideQty !== undefined && overrideQty !== row.total_allocated;
+            // Гвард пересорта (backend): прошлый посев лежит на WB и не продаётся →
+            // авто-досев 0 (иначе фронтовый K-засев ниже сеет из полного freeFf мимо
+            // backend-аллокаций и после каждой поставки перетаривает склады — кейс
+            // «швабры» 2026-07-10). Правка ячеек (выше) и явный qty-override —
+            // осознанные действия юзера, их гвард не режет.
+            if (row.oversort_guard && !useOverride) {
+                m.set(row.nm_id, { alloc: {}, total: 0 });
+                continue;
+            }
             const { ppb, use } = resolveSkuLevelPpb(row.nm_id);
             const hasK = !!(ppb && ppb > 0 && use);
             const boxPpb = hasK && ppb ? ppb : 1;

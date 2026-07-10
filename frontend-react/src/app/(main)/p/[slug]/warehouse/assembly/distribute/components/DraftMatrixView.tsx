@@ -51,7 +51,7 @@ const districtTint = (d: string): string | undefined => {
     return c ? `color-mix(in srgb, ${c} 6%, transparent)` : undefined;
 };
 
-type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'need' | 'revenue' | 'loc' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
+type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'need' | 'revenue' | 'loc' | 'ship' | 'draft' | 'boxes' | 'stays' | `wb:${string}`;
 
 // Цвет «Лок %» по статусу КТР (excellent/neutral/weak/critical) — как на странице «Локализация».
 const LOC_STATUS_COLOR: Record<string, string> = {
@@ -137,6 +137,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const [stockNeed, setStockNeed] = useState<StockNeedResponse | null>(null);
     const [locByNm, setLocByNm] = useState<Map<number, LocalizationSkuRow>>(new Map());
     const [newcomerSet, setNewcomerSet] = useState<Set<number>>(new Set());
+    // Канал новинок: авто-раздача из backend cold-start (allocations per nm) и
+    // причины гварда пересорта (посев лежит на WB без продаж → авто-досев 0).
+    const [newcomerAlloc, setNewcomerAlloc] = useState<Map<number, Record<string, number>>>(new Map());
+    const [guardByNm, setGuardByNm] = useState<Map<number, string>>(new Map());
+    // Текущее содержимое черновика (rows+prebook) — колонка «В черновике» и чистка per-SKU.
+    const [draftRows, setDraftRowsState] = useState<AssemblyDraftRow[]>([]);
+    const [draftPrebook, setDraftPrebook] = useState<AssemblyDraftRow[]>([]);
+    const [removingNm, setRemovingNm] = useState<number | null>(null);
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
     const [nmBoxSize, setNmBoxSize] = useState<Map<number, string | null>>(new Map());
     const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
@@ -214,6 +222,19 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                 for (const r of cold?.rows ?? []) if (r.is_newcomer) ncs.add(r.nm_id);
                 setNewcomerSet(ncs);
 
+                // Раздача новинок и гвард пересорта — из тех же cold-start строк.
+                const nAlloc = new Map<number, Record<string, number>>();
+                const guards = new Map<number, string>();
+                for (const r of cold?.rows ?? []) {
+                    if (r.oversort_guard) {
+                        guards.set(r.nm_id, r.guard_reason || 'посев уже лежит на WB и не продаётся');
+                        continue;
+                    }
+                    if (r.allocations && Object.keys(r.allocations).length > 0) nAlloc.set(r.nm_id, r.allocations);
+                }
+                setNewcomerAlloc(nAlloc);
+                setGuardByNm(guards);
+
                 const ppbMap = new Map<number, number | null>();
                 const sizeMap = new Map<number, string | null>();
                 for (const r of boxMult?.items ?? []) {
@@ -264,7 +285,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         if (articles.length === 0 && cellEdits.size === 0) { setDistRows([]); setPrebookRows([]); setDistRowsBox([]); setAcceptanceNote(null); return; }
         setDistComputing(true);
         try {
-            const distInput: DraftDistInput = { articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, newcomerSet };
+            const distInput: DraftDistInput = { articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc };
             const { skus: allSkus } = buildDraftSkus(distInput);
             const { shippable: skus } = splitByKratnost(allSkus, (nm) => nmPpb.get(nm));
 
@@ -357,7 +378,56 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
-    }, [articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, newcomerSet, showToast]);
+    }, [articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, newcomerSet, newcomerAlloc, showToast]);
+
+    // ─── Черновик: что уже записано (per SKU) + чистка ───────────────────────
+    const refreshDraftInfo = useCallback(async () => {
+        try {
+            const d = await api.getAssemblyDraft(draftId);
+            setDraftRowsState(d.distribution?.rows ?? []);
+            setDraftPrebook(d.distribution?.prebook ?? []);
+        } catch {
+            // Черновик мог быть удалён/пересоздан — колонка остаётся пустой.
+        }
+    }, [draftId]);
+    useEffect(() => { refreshDraftInfo(); }, [refreshDraftInfo]);
+
+    const draftByNm = useMemo(() => {
+        const m = new Map<number, { rows: number; prebook: number; vendor: string }>();
+        const sumTgt = (r: AssemblyDraftRow) => Object.values(r.tgt || {}).reduce((s, v) => s + (v || 0), 0);
+        const acc = (list: AssemblyDraftRow[], key: 'rows' | 'prebook') => {
+            for (const r of list) {
+                if (!r.nm_id) continue;
+                const cur = m.get(r.nm_id) ?? { rows: 0, prebook: 0, vendor: r.vendor_code || String(r.nm_id) };
+                cur[key] += sumTgt(r);
+                m.set(r.nm_id, cur);
+            }
+        };
+        acc(draftRows, 'rows');
+        acc(draftPrebook, 'prebook');
+        return m;
+    }, [draftRows, draftPrebook]);
+    const draftTotalUnits = useMemo(() => [...draftByNm.values()].reduce((s, v) => s + v.rows, 0), [draftByNm]);
+    /** SKU черновика без свободного остатка на ФФ — их нет среди articles, но видеть и чистить их нужно. */
+    const draftOnlyNms = useMemo(() => {
+        const inArticles = new Set(articles.map((a) => a.nm_id));
+        return [...draftByNm.entries()].filter(([nm, v]) => !inArticles.has(nm) && v.rows + v.prebook > 0);
+    }, [draftByNm, articles]);
+
+    const removeFromDraft = useCallback(async (nm: number, label: string) => {
+        if (!window.confirm(`Убрать «${label}» из черновика? Удалятся строки и предбронь этого SKU.`)) return;
+        setRemovingNm(nm);
+        try {
+            await api.removeAssemblyDraftRows(draftId, [nm]);
+            await refreshDraftInfo();
+            showToast(`«${label}» убран из черновика`, 'success');
+            onWritten?.();
+        } catch (err) {
+            showToast(err instanceof Error ? err.message : 'Не удалось убрать из черновика', 'error');
+        } finally {
+            setRemovingNm(null);
+        }
+    }, [draftId, refreshDraftInfo, showToast, onWritten]);
 
     useEffect(() => {
         if (!geomReady) return;
@@ -595,11 +665,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             case 'revenue': return Number(a.revenue_30d) || 0;
             case 'loc': return locByNm.has(nm) ? Number(locByNm.get(nm)!.loc_pct) || 0 : -1;
             case 'ship': return ship;
+            case 'draft': { const d = draftByNm.get(nm); return d ? d.rows + d.prebook : 0; }
             case 'boxes': return boxesOf(ship, nmPpb.get(nm));
             case 'stays': return Math.max(0, avail - ship);
             default: return viewAgg.cellByBc.get(a.barcode)?.get(key.slice(3))?.qty ?? 0;
         }
-    }, [enrichMap, viewAgg, availOf, nmPpb, locByNm]);
+    }, [enrichMap, viewAgg, availOf, nmPpb, locByNm, draftByNm]);
 
     const sortedRows = useMemo(() => {
         const rows = [...articles];
@@ -700,13 +771,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                 event: { event_type: 'MATRIX_WRITE', summary: `Ручная раскладка: ${formatNumber(commit.totalShip, 0)} шт` },
             });
             showToast(`Записано в черновик: ${formatNumber(commit.totalShip, 0)} шт (замена по SKU)`, 'success');
+            refreshDraftInfo();
             onWritten?.();
         } catch (e) {
             showToast(e instanceof Error ? e.message : 'Ошибка записи в черновик', 'error');
         } finally {
             setWriting(false);
         }
-    }, [shipRows, effPrebook, writing, draftId, commit, showToast, onWritten]);
+    }, [shipRows, effPrebook, writing, draftId, commit, showToast, onWritten, refreshDraftInfo]);
 
     // ─── States ────────────────────────────────────────────────────────────
     if (loading) {
@@ -833,6 +905,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                         Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · что сдаём коробом.
                         Метрики SKU за окно 14 дней: <b style={{ color: 'var(--color-text)' }}>Потр. 14д</b> (потребность движка) · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> (выручка) · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (индекс локализации, цвет — статус КТР).
                         В <b style={{ color: 'var(--color-text)' }}>черновик</b> пишутся только целые паллеты; неполные — в 🅿️ Предбронь. Поэтому числа матрицы и черновика могут расходиться.
+                        Новинки (🆕) раскладываются каналом cold-start (посев закупки по сети); если прошлый посев лежит на WB без продаж — авто-досев останавливает гвард ⚠ (ручные −/+ работают всегда).
+                        Колонка <b style={{ color: 'var(--color-text)' }}>«В черновике»</b> — уже записанное по SKU; ✕ убирает SKU из черновика целиком.
                     </div>
                     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
                         <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>🔎 Фильтр:</span>
@@ -888,7 +962,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                             {g.label}
                                         </th>
                                     ))}
-                                    <th colSpan={3} />
+                                    <th colSpan={4} />
                                 </tr>
                                 <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-muted)', textAlign: 'right' }}>
                                     <th style={{ padding: '8px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2, ...sortableTh }} onClick={() => toggleSort('label')} title="Сортировать по названию">Товар{sortArrow('label')}</th>
@@ -902,6 +976,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                         <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap', background: districtTint(c.district), ...sortableTh }} onClick={() => toggleSort(`wb:${c.name}`)} title={`Сортировать по отправке в «${c.name}»`}>{c.name}{sortArrow(`wb:${c.name}`)}</th>
                                     ))}
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('ship')} title="Сортировать по сумме отправки">Σ отпр.{sortArrow('ship')}</th>
+                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('draft')} title="Сколько этого SKU уже записано в черновике (строками; +N 🅿️ — предбронь). ⚠ — черновик расходится с текущим расчётом. ✕ — убрать SKU из черновика.">В черновике{sortArrow('draft')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('boxes')} title="Коробов к отправке">Мест{sortArrow('boxes')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('stays')} title="Сортировать по остатку на ФФ">Остаётся ФФ{sortArrow('stays')}</th>
                                 </tr>
@@ -921,6 +996,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                         );
                                     })}
                                     <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }} title="Всего штук к отправке">{formatNumber(matrixView.totalShip, 0)} шт</td>
+                                    <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего штук строками в черновике (без предброни)">{draftTotalUnits > 0 ? `${formatNumber(draftTotalUnits, 0)} шт` : '·'}</td>
                                     <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего коробов">{formatNumber(matrixView.totalBoxes, 0)} кор</td>
                                     <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Остаётся на хранении ФФ">{formatNumber(matrixViewOnHold, 0)}</td>
                                 </tr>
@@ -945,6 +1021,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                                     <span style={{ fontWeight: 600 }}>{label}</span>
                                                     {e?.isNew && <span className="badge" style={{ background: 'rgba(168,85,247,0.16)', color: '#a855f7', fontSize: 10, padding: '1px 6px' }}>🆕 новинка</span>}
+                                                    {guardByNm.has(nm) && (
+                                                        <span className="badge" title={`Гвард пересорта: ${guardByNm.get(nm)}. Авто-досев выключен; ручные −/+ работают.`}
+                                                            style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>
+                                                            ⚠ посев лежит без продаж
+                                                        </span>
+                                                    )}
                                                     {ppb ? <span className="badge badge-secondary" style={{ fontSize: 10, padding: '1px 6px' }}>📦 кратно {formatNumber(ppb, 0)}</span> : <span className="badge" style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>без кратности</span>}
                                                     {editRec && (
                                                         <button type="button" className="badge" title="Сбросить ручные правки строки"
@@ -995,6 +1077,29 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                                 );
                                             })}
                                             <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600 }}>{ship > 0 ? formatNumber(ship, 0) : '·'}</td>
+                                            {(() => {
+                                                const d = draftByNm.get(nm);
+                                                const total = d ? d.rows + d.prebook : 0;
+                                                const mismatch = total > 0 && ship === 0;
+                                                return (
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: mismatch ? 'var(--color-warning)' : total > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}
+                                                        title={d && total > 0
+                                                            ? `В черновике: ${formatNumber(d.rows, 0)} шт строками${d.prebook > 0 ? ` + ${formatNumber(d.prebook, 0)} шт в предброни` : ''}${mismatch ? '. Текущий расчёт этому SKU ничего не предлагает — план в черновике мог устареть.' : ''}`
+                                                            : 'В черновике этого SKU нет'}>
+                                                        {total > 0 ? (
+                                                            <>
+                                                                {mismatch ? '⚠ ' : ''}{formatNumber(d!.rows, 0)}
+                                                                {d!.prebook > 0 && <span style={{ color: 'var(--color-muted)', fontWeight: 400 }}> +{formatNumber(d!.prebook, 0)}🅿️</span>}
+                                                                <button type="button" title="Убрать SKU из черновика (строки + предбронь)" disabled={removingNm === nm}
+                                                                    style={{ marginLeft: 6, border: 'none', background: 'transparent', color: 'var(--color-danger)', cursor: 'pointer', fontSize: 12, padding: 0 }}
+                                                                    onClick={() => removeFromDraft(nm, label)}>
+                                                                    {removingNm === nm ? '…' : '✕'}
+                                                                </button>
+                                                            </>
+                                                        ) : '·'}
+                                                    </td>
+                                                );
+                                            })()}
                                             <td style={{ padding: '6px 8px', textAlign: 'right' }}>{rowBoxes > 0 ? formatNumber(rowBoxes, 0) : '·'}</td>
                                             <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-muted)' }}>{formatNumber(stays, 0)}</td>
                                         </tr>
@@ -1002,7 +1107,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                 })}
                                 {visibleRows.length === 0 && (
                                     <tr>
-                                        <td colSpan={wbCols.length + 10} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
+                                        <td colSpan={wbCols.length + 11} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
                                             Ничего не найдено по выбранному фильтру
                                         </td>
                                     </tr>
@@ -1016,7 +1121,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                         <td key={c.name} style={{ padding: '8px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{formatNumber(matrixView.shipByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
                                     <td style={{ padding: '8px 8px', textAlign: 'right' }}>{formatNumber(matrixView.totalShip, 0)}</td>
-                                    <td colSpan={2} />
+                                    <td colSpan={3} />
                                 </tr>
                                 <tr style={{ color: 'var(--color-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>📦 Коробов</td>
@@ -1025,7 +1130,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                         <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.boxesByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
                                     <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.totalBoxes, 0)}</td>
-                                    <td colSpan={2} />
+                                    <td colSpan={3} />
                                 </tr>
                                 <tr style={{ color: 'var(--color-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>🚚 Паллет</td>
@@ -1034,10 +1139,34 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                         <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.palletsByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
                                     <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.totalPallets, 0)}</td>
-                                    <td colSpan={2} />
+                                    <td colSpan={3} />
                                 </tr>
                             </tfoot>
                         </table>
+                    </div>
+                )}
+                {draftOnlyNms.length > 0 && (
+                    <div className="glass-card" style={{ padding: 12, marginTop: 16 }}>
+                        <div style={{ fontWeight: 700, marginBottom: 6 }}>
+                            📋 В черновике, но без свободного остатка на ФФ ({formatNumber(draftOnlyNms.length, 0)})
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--color-muted)', marginBottom: 8 }}>
+                            Эти SKU записаны в черновике, но свободного остатка ФФ у них нет — раскладка их не пересчитывает.
+                            Отправятся как записано, либо убери их отсюда.
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            {draftOnlyNms.map(([nm, v]) => (
+                                <div key={nm} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
+                                    <span style={{ fontWeight: 600 }}>{v.vendor}</span>
+                                    <span style={{ color: 'var(--color-muted)' }}>
+                                        {formatNumber(v.rows, 0)} шт{v.prebook > 0 ? ` + ${formatNumber(v.prebook, 0)} 🅿️` : ''}
+                                    </span>
+                                    <button className="btn btn-sm btn-secondary" disabled={removingNm === nm} onClick={() => removeFromDraft(nm, v.vendor)}>
+                                        {removingNm === nm ? 'Убираю…' : '✕ из черновика'}
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
                     </div>
                 )}
             </>)}

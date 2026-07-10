@@ -5135,6 +5135,9 @@ export interface ColdStartTableRow {
   is_newcomer: boolean;
   allocations: Record<string, number>;
   total_allocated: number;
+  /** Гвард пересорта: посев лежит на WB и не продаётся → авто-досев остановлен. */
+  oversort_guard?: boolean;
+  guard_reason?: string | null;
 }
 export interface ColdStartTableResponse {
   rows: ColdStartTableRow[];

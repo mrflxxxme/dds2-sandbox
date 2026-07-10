@@ -348,9 +348,10 @@ async def remove_rows_by_nm(
     draft_id: int,
     nm_ids: list[int],
 ) -> AssemblyDraft:
-    """Убрать из черновика все строки и handed-юниты указанных SKU (удаление неликвида
-    из прогноза). handed-юниты с несколькими SKU очищаются от этих nm_id; пустые
-    юниты выбрасываются. Остальные поля черновика не трогаются. 404 если не найден."""
+    """Убрать из черновика все строки, ПРЕДБРОНЬ и handed-юниты указанных SKU
+    (удаление неликвида из прогноза / чистка SKU из ручной раскладки). handed-юниты
+    с несколькими SKU очищаются от этих nm_id; пустые юниты выбрасываются.
+    Остальные поля черновика не трогаются. 404 если не найден."""
     draft = await get_draft(db, project_id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
@@ -358,6 +359,7 @@ async def remove_rows_by_nm(
     nm_set = set(nm_ids)
     distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
     distribution.rows = [r for r in distribution.rows if r.nm_id not in nm_set]
+    distribution.prebook = [r for r in distribution.prebook if r.nm_id not in nm_set]
     kept_units = []
     for unit in distribution.handed_units:
         unit.items = [it for it in unit.items if it.nm_id not in nm_set]
