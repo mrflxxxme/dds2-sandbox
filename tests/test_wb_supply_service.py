@@ -709,3 +709,49 @@ async def test_sync_pass_noop_without_vehicle(db_session):
     link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert link.pass_car_number is None
     assert link.pass_driver_phone is None
+
+
+# ─── supplyDate / rejectReason из карточки поставки кабинета ───────────────────
+
+
+def test_parse_wb_dt_keeps_calendar_date():
+    # +03:00 не конвертируем в UTC — иначе слот 23 июля уехал бы на 22-е.
+    dt = wb_supply_service._parse_wb_dt("2026-07-23T00:00:00+03:00")
+    assert dt is not None
+    assert (dt.year, dt.month, dt.day, dt.hour) == (2026, 7, 23, 0)
+    assert dt.tzinfo is None
+
+
+def test_parse_wb_dt_bad_input():
+    assert wb_supply_service._parse_wb_dt(None) is None
+    assert wb_supply_service._parse_wb_dt("") is None
+    assert wb_supply_service._parse_wb_dt("не дата") is None
+
+
+@pytest.mark.asyncio
+async def test_get_state_exposes_supply_date_and_reject_reason(db_session, monkeypatch):
+    await _attach_fbo(db_session, "40566125", "IN_PROGRESS")
+    client = FakeClient(
+        supply_status={
+            "statusName": "Запланировано",
+            "statusId": 1,
+            "supplyDate": "2026-07-23T00:00:00+03:00",
+            "rejectReason": "Не заполнены ШК коробов.\nНе заполнен пропуск.",
+        }
+    )
+    await _patch_client(monkeypatch, client)
+
+    st = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert st.supply_date is not None
+    assert (st.supply_date.month, st.supply_date.day) == (7, 23)
+    assert "Не заполнен пропуск" in (st.reject_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_get_state_reject_reason_empty_string_is_none(db_session, monkeypatch):
+    await _attach_fbo(db_session, "40566125", "IN_PROGRESS")
+    client = FakeClient(supply_status={"statusName": "Принято", "statusId": 5, "rejectReason": "   "})
+    await _patch_client(monkeypatch, client)
+    st = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert st.reject_reason is None
+    assert st.supply_date is None

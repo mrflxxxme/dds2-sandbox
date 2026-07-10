@@ -1518,6 +1518,20 @@ async def update_assembly_request(
         if deficits:
             raise ValueError(_format_deficit_error(deficits))
 
+    # Ручная правка реквизитов машины в шапке заявки тоже тянется в WB-пропуск
+    # (как и при assign_vehicle). Best-effort: сбой синка не роняет сохранение.
+    if (
+        payload.vehicle_info is not None
+        or payload.vehicle_brand is not None
+        or payload.driver_phone is not None
+    ):
+        from backend.services import wb_supply_service
+
+        try:
+            await wb_supply_service.sync_pass_from_vehicle(db, project_id, req)
+        except Exception:  # noqa: BLE001
+            logger.warning("sync_pass_from_vehicle failed for request %s", req.id)
+
     await db.commit()
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")

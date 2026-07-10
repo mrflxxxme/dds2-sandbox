@@ -1824,6 +1824,9 @@ export interface WbSupplyState {
   wb_supply_state: string | null;
   wb_supply_state_id: number | null;
   wb_state_synced_at: string | null;
+  // Дата забронированного слота сдачи + текст кабинетных ошибок поставки.
+  supply_date: string | null;
+  reject_reason: string | null;
   boxes: WbBox[];
   pass_driver_first: string | null;
   pass_driver_last: string | null;
@@ -1853,6 +1856,8 @@ export interface WbSupplyStateBrief {
   pass_driver_phone: string | null;
   pass_car_model: string | null;
   pass_car_number: string | null;
+  // Дата брони слота WB — колонка «Дата брони WB» в списке сборок.
+  supply_date: string | null;
   wb_state_synced_at: string | null;
 }
 

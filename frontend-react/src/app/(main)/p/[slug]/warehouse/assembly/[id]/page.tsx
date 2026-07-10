@@ -958,6 +958,11 @@ export default function AssemblyDetailPage() {
                         />
                     )}
                     <InfoField label="Создана" value={formatDateTime(assembly.created_at)} />
+                    {/* Дата забронированного слота сдачи в WB (supplyDetails.supplyDate). */}
+                    <InfoField
+                        label="Дата брони WB"
+                        value={wbState?.supply_date ? formatDate(wbState.supply_date) : '—'}
+                    />
                     <EditableInfoField
                         label="Дата готовности (план)"
                         value={assembly.estimated_ready_date?.slice(0, 10) || ''}

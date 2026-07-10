@@ -210,6 +210,7 @@ async def _enrich_wb_supply(
                 pass_driver_phone=link.pass_driver_phone if link else None,
                 pass_car_model=link.pass_car_model if link else None,
                 pass_car_number=link.pass_car_number if link else None,
+                supply_date=link.supply_date if link else None,
                 wb_state_synced_at=None,
             )
         elif link is not None and _link_has_pass(link):

@@ -1020,6 +1020,19 @@ export default function AssemblyListPage() {
             },
         },
         {
+            // Дата забронированного слота сдачи в WB (supplyDetails.supplyDate).
+            key: 'wb_supply_date', label: 'Дата брони WB',
+            getValue: (row: AssemblyRequest) => row.wb_supply?.supply_date || '',
+            render: (_v, row: AssemblyRequest) => (
+                row.wb_supply?.supply_date
+                    ? <span>{formatDate(row.wb_supply.supply_date)}</span>
+                    : <span style={{ color: 'var(--color-text-muted)' }}>—</span>
+            ),
+            exportValue: (row: AssemblyRequest) => (
+                row.wb_supply?.supply_date ? formatDate(row.wb_supply.supply_date) : ''
+            ),
+        },
+        {
             key: 'items_qty', label: 'Товары', align: 'right',
             getValue: itemsQty,
             render: (_v, row: AssemblyRequest) => row.items ? formatNumber(itemsQty(row), 0) : '—',
