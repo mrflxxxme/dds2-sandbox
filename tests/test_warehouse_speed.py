@@ -44,8 +44,12 @@ async def test_okrug_info_basic(client, auth_headers):
     assert volga["anchors_top"][0]["warehouse_name"] == "Казань"
     assert volga["anchors_top"][0]["cities_count"] > 0
 
+    # Depth-aware (top-2) подсчёт: Котовск ворует 2 города ПФО в top-2,
+    # Владимир — 1 (НН#1); глубокие слоты больше не считаются.
     assert len(volga["stealers_top"]) > 0
-    assert volga["stealers_top"][0]["warehouse_name"] == "Владимир"
+    assert volga["stealers_top"][0]["warehouse_name"] == "Котовск"
+    stealer_names = {s["warehouse_name"] for s in volga["stealers_top"]}
+    assert "Владимир" in stealer_names
 
     # Не более 5 элементов
     assert len(volga["anchors_top"]) <= 5
@@ -233,3 +237,103 @@ def test_find_priority_warehouse_unknown_okrug_returns_none():
     open_set = {"Казань", "Краснодар"}
     # 'unknown' не в speed cities_by_okrug → пустой scored → None
     assert find_priority_warehouse(None, open_set, okrug="unknown") is None
+
+
+# ─── Depth-aware воришки + локализуемый знаменатель (аудит 2026-07-09) ──────
+
+
+class TestStealerDepthAware:
+    """Воришка = top-2 слот в цепочке города чужого ФО; глубже — fallback WB."""
+
+    def test_shushary_not_stealer_anywhere(self):
+        """Шушары в чужих цепочках только глубоко (Чита#4, Алматы#6) → не воришка."""
+        from backend.services.warehouse_speed import is_stealer_for_okrug
+
+        for okrug in ("central", "volga", "ural", "south_caucasus", "far_east_siberia"):
+            assert not is_stealer_for_okrug("СПБ Шушары", okrug), okrug
+
+    def test_elektrostal_still_stealer_for_northwest(self):
+        """Электросталь — top-1 у Пскова/Вологды/Мурманска/Архангельска СЗФО."""
+        from backend.services.warehouse_speed import is_stealer_for_okrug
+
+        assert is_stealer_for_okrug("Электросталь", "northwest")
+
+    def test_koledino_depth2_not_northwest_stealer(self):
+        """Коледино в цепочках СЗФО только с глубины 3 → для СЗФО не воришка,
+        но top-2 far_east (Брест#2) — там флаг остаётся."""
+        from backend.services.warehouse_speed import is_stealer_for_okrug
+
+        assert not is_stealer_for_okrug("Коледино", "northwest")
+        assert is_stealer_for_okrug("Коледино", "far_east_siberia")
+
+    def test_own_okrug_never_stealer(self):
+        from backend.services.warehouse_speed import is_stealer_for_okrug
+
+        assert not is_stealer_for_okrug("СПБ Шушары", "northwest")
+        assert not is_stealer_for_okrug("Электросталь", "central")
+
+    def test_stealers_list_depth_aware(self):
+        """get_stealers_for_okrug той же семантики: Коледино/Рязань выпали из
+        списка воришек СЗФО, Электросталь — 7 городов top-2."""
+        from backend.services.warehouse_speed import get_stealers_for_okrug
+
+        nw = dict(get_stealers_for_okrug("northwest"))
+        assert nw.get("Электросталь") == 7
+        assert "Коледино" not in nw
+        assert "Рязань (Тюшевское)" not in nw
+
+
+class TestAliasesMatchSpeedNames:
+    """Дыры нормализации: регистр «Белая Дача», короткие «Тула»/«Рязань»."""
+
+    def test_belaya_dacha_case_mismatch_fixed(self):
+        """JSON пишет «Белая Дача», карта ФО — «Белая дача»: скор и thief-флаг
+        (top-1 Петропавловска-Камчатского) теперь работают."""
+        from backend.services.warehouse_speed import get_priority_score, is_stealer_for_okrug
+
+        assert get_priority_score("Белая дача", "central") > 0
+        assert is_stealer_for_okrug("Белая дача", "far_east_siberia")
+
+    def test_tula_aliases_to_aleksin(self):
+        from backend.services.warehouse_speed import get_priority_score, is_stealer_for_okrug
+
+        assert get_priority_score("Тула", "central") > 0
+        assert is_stealer_for_okrug("Тула", "far_east_siberia")
+
+    def test_ryazan_aliases_to_tyushevskoe(self):
+        """«Рязань» = «Рязань (Тюшевское)»: top-1 города Рязань (скор > 0),
+        по top-2 чужих ФО не ворует."""
+        from backend.services.warehouse_speed import get_priority_score, is_stealer_for_okrug
+
+        assert get_priority_score("Рязань", "central") > 0
+        for okrug in ("northwest", "volga", "south_caucasus", "far_east_siberia"):
+            assert not is_stealer_for_okrug("Рязань", okrug), okrug
+
+
+class TestLocalizableDenominator:
+    """Знаменатель score — города ФО, достижимые складами своего ФО."""
+
+    def test_northwest_denominator_is_4(self):
+        """СЗФО: из 10 городов только 4 локализуемы (СПб, В.Новгород,
+        Петрозаводск, Калининград) — Псков/Мурманск/… скор не размывают."""
+        from backend.services.warehouse_speed import get_priority_score
+
+        # Шушары: top-1 у 3 городов → 3×1.0 / 4 = 0.75 (было 0.300 при /10).
+        assert get_priority_score("СПБ Шушары", "northwest") == pytest.approx(0.75)
+        # Калининград: top-1 своего города → 1/4 = 0.25.
+        assert get_priority_score("Калининград", "northwest") == pytest.approx(0.25)
+
+    def test_fully_localizable_okrug_unchanged(self):
+        """УФО: все 7 городов локализуемы — скор ЕКБ остаётся 1.0."""
+        from backend.services.warehouse_speed import get_priority_score
+
+        assert get_priority_score("Екатеринбург - Перспективная 14", "ural") == pytest.approx(1.0)
+
+    def test_okrug_fallback_ordering_preserved(self):
+        """Знаменатель константен внутри ФО → порядок argmax в
+        find_priority_warehouse не меняется (Электросталь всё ещё
+        обслуживает немапленные города СЗФО — фикс этого в пакете 3)."""
+        from backend.services.warehouse_speed import find_priority_warehouse
+
+        open_set = {"Электросталь", "СПБ Шушары", "Казань"}
+        assert find_priority_warehouse("несуществующий-город", open_set, okrug="northwest") == "Электросталь"

@@ -146,7 +146,13 @@ class TestColdStartTableLocalizationTarget:
 
     @pytest.mark.asyncio
     async def test_tail_districts_not_seeded_at_target_75(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Хвостовой ФО (мелкая доля сверх 75%) не получает seed — остаётся на ФФ."""
+        """Хвостовой ФО (мелкая доля сверх 75%) не получает seed — остаётся на ФФ.
+
+        ИСКЛЮЧЕНИЕ — Северо-Западный: гарантия СЗФО (аудит 2026-07-09) даёт ему
+        ровно min_pack поверх концентрации при партии ≥ 4×min_pack — иначе
+        новинки никогда не заезжали в СЗФО и его локализация не набиралась.
+        Прочие хвостовые ФО (здесь ural) по-прежнему не сидируются.
+        """
         share = {
             "central": 0.30,
             "south_caucasus": 0.18,
@@ -167,10 +173,18 @@ class TestColdStartTableLocalizationTarget:
             localization_target=75,
         )
         row = resp.rows[0]
-        # хвостовой северо-западный (последняя доля, cum уже ≥75 до него) не сидируется
-        assert row.allocations.get("WH_northwest", 0) == 0, f"хвост не должен сидироваться: {row.allocations}"
-        # топовый central — сидируется
+        # cum (нормированный): central .33 → south .53 → volga .70 → far_east .85
+        # ≥ .75 → kept; хвост = ural + northwest. УФО получает ТОЛЬКО переброс
+        # ДВ-излишка (FAR_EAST_MAX_SHARE=6%: сверх-капа доля ДВ уходит на Урал —
+        # «ворота в Сибирь», существующая механика _cap_far_east_share), а не
+        # свою хвостовую долю: ДВ зажат ровно в 6% партии.
+        assert row.allocations.get("WH_far_east_siberia", 0) == 60, f"ДВ-кап 6%: {row.allocations}"
+        # СЗФО — гарантия (аудит 2026-07-09): ровно min_pack поверх концентрации,
+        # НЕ полная доля (0.05×1.18×1000 ≈ 59) и НЕ ноль.
+        assert row.allocations.get("WH_northwest", 0) == 5, f"гарантия СЗФО = min_pack: {row.allocations}"
+        # топовый central — сидируется; консервация партии соблюдена.
         assert row.allocations.get("WH_central", 0) > 0
+        assert sum(row.allocations.values()) == 1000
 
     @pytest.mark.asyncio
     async def test_target_100_seeds_all_districts(self, monkeypatch: pytest.MonkeyPatch) -> None:

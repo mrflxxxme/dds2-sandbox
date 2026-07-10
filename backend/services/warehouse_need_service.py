@@ -116,6 +116,51 @@ def _normalize_wb_warehouse(name: str | None) -> str:
     return stripped
 
 
+_HAMILTON_OKRUGS = (
+    "central",
+    "northwest",
+    "south_caucasus",
+    "volga",
+    "ural",
+    "far_east_siberia",
+)
+
+
+def _hamilton_priority_weight(wh: str) -> float:
+    """Вес склада («схема воришек») в распределении cap шага 4.6 get_warehouse_need.
+
+    Потребитель — greedy_allocate_to_target (распределение до целевой
+    локализации): якоря наливаются первыми, воришки — в последнюю очередь.
+
+    Формула: `(1 + priority_score(склад, свой ФО)) × penalty`, где
+      • priority_score — доля top-слотов склада в цепочках ЛОКАЛИЗУЕМЫХ
+        городов своего ФО (см. get_priority_score: нелокализуемые города,
+        куда WB возит только чужими складами, скор не размывают);
+      • penalty = 0.6, если склад стоит в top-2 цепочки города ЧУЖОГО ФО
+        (is_stealer_for_okrug) — реально отбирает чужой спрос. Глубокие
+        fallback-слоты (3+) штраф НЕ дают: за них душился якорь СЗФО
+        (Шушары, слоты #4/#6 у far_east → вес 0.78; аудит 2026-07-09).
+
+    Ориентиры на карте 2026-05-14: якоря — СПБ Шушары ≈1.75, Невинномысск
+    ≈1.76; штрафованные якоря — Казань ≈0.98 (top-1 Сыктывкара, СЗФО),
+    ЕКБ-Перспективная 1.20 (top-слоты Сибири); воришки — Электросталь ≈0.86,
+    Коледино ≈0.75, Владимир ≈0.68; склады вне speed-карты и unknown/abroad —
+    нейтральные 1.0.
+    """
+    from backend.services.warehouse_district import warehouse_to_district
+    from backend.services.warehouse_speed import get_priority_score, is_stealer_for_okrug
+
+    own = warehouse_to_district(wh)
+    if own in ("abroad", "unknown"):
+        # У зарубежных и неизвестных складов нет «своего ФО» в speed-карте —
+        # оставляем нейтральный вес (без штрафа).
+        return 1.0
+    score = get_priority_score(wh, own)
+    is_thief = any(is_stealer_for_okrug(wh, ok) for ok in _HAMILTON_OKRUGS if ok != own)
+    penalty = 0.6 if is_thief else 1.0
+    return (1.0 + score) * penalty
+
+
 @cached(prefix="reports:warehouse_need", ttl=300)
 async def get_warehouse_need(
     db: AsyncSession,
@@ -788,34 +833,13 @@ async def get_warehouse_need(
         # («не перетаривать»). Единый авторитет логики — helper
         # localization_target.greedy_allocate_to_target.
         #
-        # «Схема воришек» (_priority_weight) сохранена: anchor чистого ФО
-        # (Екатеринбург УФО pri=1.00, Невинномысск ЮФО pri=0.76) получает вес
-        # выше, а склад-воришка (имя в priority-chain чужого ФО — `🐭` на
+        # «Схема воришек» (_hamilton_priority_weight, модульный уровень —
+        # формула и калибровка в его докстринге) сохранена: якорь ФО
+        # (Шушары ≈1.75, Невинномысск ≈1.76) получает вес выше, а воришка —
+        # склад в top-2 priority-chain города чужого ФО (`🐭` на
         # /warehouse/speed) — penalty 0.6 → заполняется в последнюю очередь.
         from backend.services.localization_target import greedy_allocate_to_target
         from backend.services.warehouse_district import warehouse_to_district as _wh_to_d
-        from backend.services.warehouse_speed import get_priority_score, is_stealer_for_okrug
-
-        _ALL_OKRUGS = (
-            "central",
-            "northwest",
-            "south_caucasus",
-            "volga",
-            "ural",
-            "far_east_siberia",
-        )
-
-        def _priority_weight(wh: str) -> float:
-            own = _wh_to_d(wh)
-            if own in ("abroad", "unknown"):
-                # У зарубежных и неизвестных складов нет «своего ФО» в
-                # speed-карте — оставляем нейтральный вес (без штрафа).
-                return 1.0
-            score = get_priority_score(wh, own)
-            is_thief = any(is_stealer_for_okrug(wh, ok) for ok in _ALL_OKRUGS if ok != own)
-            penalty = 0.6 if is_thief else 1.0
-            return (1.0 + score) * penalty
-
         for nm_id, cap_total in can_send_per_nm.items():
             # Склады nm с положительной остаточной потребностью (per-cell need).
             wbs = []
@@ -871,7 +895,7 @@ async def get_warehouse_need(
                 need_wh = arts[nm_id]["need"]
                 if need_wh > 0:
                     wh_demand[wh_name] = need_wh
-                    wh_weight[wh_name] = _priority_weight(wh_name)
+                    wh_weight[wh_name] = _hamilton_priority_weight(wh_name)
                     wh_okrug[wh_name] = okrug
 
             unmapped_gross = (unmapped_demand.get(nm_id, 0) / max(actual_days, 1)) * supply_days
