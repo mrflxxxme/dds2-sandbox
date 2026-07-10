@@ -34,7 +34,7 @@ from .mappers import (
 # to avoid burning FBW rate-limit (6 req/min).
 ACCEPTED_REENRICH_COOLDOWN_HOURS = 24
 
-# Re-enrich active (IN_PROGRESS / ON_DELIVERY) supplies once per 24h to catch
+# Re-enrich active (ACTIVE / ON_DELIVERY / IN_PROGRESS) supplies once per 24h to catch
 # warehouse changes done by user in WB partner cabinet (list API doesn't return
 # warehouseName, so without periodic detail refresh stale data lingers until
 # supply transitions to ACCEPTED). Same cooldown to bound rate-limit usage.
@@ -42,14 +42,16 @@ ACTIVE_REENRICH_COOLDOWN_HOURS = 24
 
 # Статусы, для которых enrich перетягивает построчный состав (goods → WbFboSupplyItem),
 # не только агрегаты из detail. ACCEPTED — нужен per-SKU accepted_qty при приёмке.
-# IN_PROGRESS / ON_DELIVERY — состав поставки в WB ещё может меняться после создания
-# (напр. FBW-40012237: +152 шт добавили в кабинете), а detail отдаёт только итоги →
-# без goods зеркало item-ов застревает и расходится с WB и заявками ФФ.
-_GOODS_REFRESH_STATUSES = (
-    WbSupplyStatus.ACCEPTED,
-    WbSupplyStatus.IN_PROGRESS,
+# ACTIVE / ON_DELIVERY / IN_PROGRESS — состав поставки в WB ещё может меняться после
+# создания (напр. FBW-40012237: +152 шт добавили в кабинете), а detail отдаёт только
+# итоги → без goods зеркало item-ов застревает и расходится с WB и заявками ФФ.
+_ACTIVE_STATUSES = (
+    WbSupplyStatus.ACTIVE,
     WbSupplyStatus.ON_DELIVERY,
+    WbSupplyStatus.IN_PROGRESS,
 )
+
+_GOODS_REFRESH_STATUSES = (WbSupplyStatus.ACCEPTED, *_ACTIVE_STATUSES)
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +227,7 @@ async def enrich_fbo_supplies(
                 WbFboSupply.warehouse_name.is_(None),
                 WbFboSupply.wb_status == WbSupplyStatus.CANCELLED,
                 and_(
-                    WbFboSupply.wb_status.in_([WbSupplyStatus.IN_PROGRESS, WbSupplyStatus.ON_DELIVERY]),
+                    WbFboSupply.wb_status.in_(_ACTIVE_STATUSES),
                     or_(
                         WbFboSupply.synced_at.is_(None),
                         WbFboSupply.synced_at < active_cooldown_threshold,

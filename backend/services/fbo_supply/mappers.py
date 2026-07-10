@@ -20,13 +20,16 @@ FBW_RATE_LIMIT_DELAY = 11  # seconds between detail/goods API calls
 
 # ─── FBW status/boxType mappings ─────────────────────────────────────────────
 
+# statusID у Suppliers API и у кабинета — ОДНА шкала (сверено: supply 40732469 =
+# statusID 3 в /api/v1/supplies и wb_supply_state_id=3 «Отгрузка разрешена» из
+# supplyDetails). Черновик приходит без supplyID и отсеивается в sync.
 FBW_STATUS_MAP: dict[int, str] = {
-    1: WbSupplyStatus.ACTIVE,  # Запланирована
-    2: WbSupplyStatus.ON_DELIVERY,  # В пути  # noqa: RUF003
-    3: WbSupplyStatus.IN_PROGRESS,  # Разгрузка
-    4: WbSupplyStatus.ACCEPTED,  # Принята
-    5: WbSupplyStatus.ACCEPTED,  # Принята (WB docs say "Отменена", but real data = accepted)
-    6: WbSupplyStatus.ACCEPTED,  # Частично принята -> ACCEPTED
+    1: WbSupplyStatus.ACTIVE,  # Черновик (без supplyID)
+    2: WbSupplyStatus.ACTIVE,  # Запланирована
+    3: WbSupplyStatus.ON_DELIVERY,  # Отгрузка разрешена
+    4: WbSupplyStatus.IN_PROGRESS,  # Идёт приёмка (unloadingQuantity > 0)
+    5: WbSupplyStatus.ACCEPTED,  # Принята (в т.ч. частично: acceptedQuantity < quantity)
+    6: WbSupplyStatus.CANCELLED,  # Отклонена (acceptedQuantity == 0)
 }
 
 FBW_BOX_TYPE_MAP: dict[int, str | None] = {

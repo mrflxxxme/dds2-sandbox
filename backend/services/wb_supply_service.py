@@ -128,10 +128,10 @@ def _direction_name(assembly: AssemblyRequest) -> str | None:
 # «усыновлённых» поставок в панели/списке (см. _adopted_supply_id).
 _FBO_STATE_LABEL = {
     "ACTIVE": "Запланирована",
-    "ON_DELIVERY": "В пути",  # noqa: RUF001
-    "IN_PROGRESS": "Разгрузка разрешена",
+    "ON_DELIVERY": "Отгрузка разрешена",
+    "IN_PROGRESS": "Идёт приёмка",
     "ACCEPTED": "Принята",
-    "CANCELLED": "Отменена",
+    "CANCELLED": "Отклонена",
 }
 
 
@@ -192,8 +192,8 @@ async def _cabinet_status(client: WbPortalClient, supply_id: int) -> "_CabinetMe
     АВТОРИТЕТНАЯ сводка поставки из кабинета (supplyDetails).
 
     Статус (`statusName`/`statusId`) — именно тот, что видит пользователь в
-    кабинете (отличается от FBO Marketplace API `WbFboSupply.wb_status`: напр.
-    кабинет «Запланировано» vs FBO «В пути»). Плюс `supplyDate` (забронированный
+    кабинете; `statusId` — та же шкала, что `statusID` Suppliers API (см.
+    `FBW_STATUS_MAP`), но с готовым текстом. Плюс `supplyDate` (забронированный
     слот сдачи) и `rejectReason` (текст кабинетных ошибок поставки — «Не заполнены
     ШК коробов…», «Не заполнен пропуск…»).
     """
@@ -349,8 +349,7 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
     """
     Bulk-синк АВТОРИТЕТНОГО кабинетного статуса АКТИВНЫХ поставок проекта.
 
-    Кабинетный статус (`supplyDetails.statusName`) отличается от FBO Marketplace
-    API (`WbFboSupply.wb_status`) — напр. кабинет «Запланировано» vs FBO «В пути».
+    Кабинетный `statusName` — готовый текст той же шкалы, что `WbFboSupply.wb_status`.
     Берём его per-supply через `supplyDetails` (listSupplies НЕ пагинируется по
     offset — отдаёт только верхние ~20). Чтобы не упереться в рейт-лимит,
     синкаем ТОЛЬКО активные заявки (IN_PROGRESS/READY/VEHICLE_ASSIGNED — не
