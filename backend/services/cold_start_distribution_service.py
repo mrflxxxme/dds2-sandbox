@@ -325,13 +325,30 @@ def _canonicalize_asm_warehouse(name: str) -> str:
     return ACCEPTANCE_TO_STOCK_NAME.get(name, name)
 
 
-async def fetch_active_assemblies_for_sku(db: AsyncSession, project_id: int, nm_id: int) -> dict[str, int]:
+# Статусы «товар уже едет/собран» — вычитаются из per-склад целей и из свободного ФФ.
+_ACTIVE_ASM_STATUSES: tuple[str, ...] = ("PENDING", "READY", "SHIPPED", "VEHICLE_ASSIGNED", "IN_PROGRESS")
+# PRE_DISTRIBUTED — резерв под машину В ПУТИ: реал-стока на ФФ ещё нет, поэтому
+# из СВОБОДНОГО ФФ (rf_qty) его вычитать нельзя, а из per-склад ЦЕЛЕЙ — нужно:
+# иначе cold-start/черновик предлагают повторно то, что уже зарезервировано
+# предраспределением машины (прод-кейс «швабры апл» 2026-07-10).
+_ACTIVE_ASM_STATUSES_WITH_PD: tuple[str, ...] = (*_ACTIVE_ASM_STATUSES, "PRE_DISTRIBUTED")
+
+
+async def fetch_active_assemblies_for_sku(
+    db: AsyncSession,
+    project_id: int,
+    nm_id: int,
+    include_pre_distributed: bool = False,
+) -> dict[str, int]:
     """Сколько уже едет/собрано в каждый WB-склад для этого SKU.
 
-    Учитываются только активные сборки (PENDING/READY/SHIPPED/VEHICLE_ASSIGNED/IN_PROGRESS).
+    Учитываются активные сборки (_ACTIVE_ASM_STATUSES); `include_pre_distributed=True`
+    добавляет PRE_DISTRIBUTED (резерв машины в пути) — использовать ТОЛЬКО для
+    per-склад вычета целей, НЕ для вычета из свободного ФФ (товара ещё нет на ФФ).
     Iron rule: assembly_requests — SoftDeleteMixin → фильтр is_deleted = false.
     Ключи result — каноничные имена (см. `_canonicalize_asm_warehouse`).
     """
+    statuses = _ACTIVE_ASM_STATUSES_WITH_PD if include_pre_distributed else _ACTIVE_ASM_STATUSES
     sql = text(
         """
         SELECT COALESCE(ar.wb_warehouse_name_manual, '?') AS wb_target,
@@ -341,11 +358,11 @@ async def fetch_active_assemblies_for_sku(db: AsyncSession, project_id: int, nm_
         WHERE ari.project_id = :project_id
           AND ari.nomenclature_id = :nm_id
           AND ar.is_deleted = false
-          AND ar.status IN ('PENDING', 'READY', 'SHIPPED', 'VEHICLE_ASSIGNED', 'IN_PROGRESS')
+          AND ar.status = ANY(:statuses)
         GROUP BY ar.wb_warehouse_name_manual
         """
     )
-    result = await db.execute(sql, {"project_id": project_id, "nm_id": nm_id})
+    result = await db.execute(sql, {"project_id": project_id, "nm_id": nm_id, "statuses": list(statuses)})
     out: dict[str, int] = {}
     for row in result.mappings():
         raw = row["wb_target"]
@@ -353,6 +370,55 @@ async def fetch_active_assemblies_for_sku(db: AsyncSession, project_id: int, nm_
             continue
         canon = _canonicalize_asm_warehouse(raw)
         out[canon] = out.get(canon, 0) + int(row["qty"])
+    return out
+
+
+async def fetch_in_transit_by_nm(
+    db: AsyncSession,
+    project_id: int,
+    nm_ids: list[int],
+) -> dict[int, dict[str, int]]:
+    """Batch: {nm_id (article_wb) → {канон-склад → qty}} по ВСЕМ активным заявкам.
+
+    Включает PRE_DISTRIBUTED (резерв машины): для сверки ПЛАНОВ (строки черновика)
+    резерв — такой же «уже едет», как PENDING. Источник «одного мира» для
+    reconcile черновика: то, что уже едет/зарезервировано на склад, не должно
+    повторно предлагаться к отправке (прод-кейс «швабры апл» 2026-07-10).
+    """
+    if not nm_ids:
+        return {}
+    sql = text(
+        """
+        SELECT n.article_wb AS nm_id,
+               COALESCE(ar.wb_warehouse_name_manual, '?') AS wb_target,
+               SUM(ari.quantity) AS qty
+        FROM assembly_request_items ari
+        JOIN assembly_requests ar ON ar.id = ari.assembly_request_id
+        JOIN nomenclature n ON n.id = ari.nomenclature_id
+        WHERE ari.project_id = :project_id
+          AND n.project_id = :project_id
+          AND n.article_wb = ANY(:nm_ids)
+          AND ar.is_deleted = false
+          AND ar.status = ANY(:statuses)
+        GROUP BY n.article_wb, ar.wb_warehouse_name_manual
+        """
+    )
+    result = await db.execute(
+        sql,
+        {
+            "project_id": project_id,
+            "nm_ids": [int(x) for x in nm_ids],
+            "statuses": list(_ACTIVE_ASM_STATUSES_WITH_PD),
+        },
+    )
+    out: dict[int, dict[str, int]] = {}
+    for row in result.mappings():
+        raw = row["wb_target"]
+        if raw == "?":
+            continue
+        canon = _canonicalize_asm_warehouse(raw)
+        per_wh = out.setdefault(int(row["nm_id"]), {})
+        per_wh[canon] = per_wh.get(canon, 0) + int(row["qty"])
     return out
 
 
@@ -1079,7 +1145,14 @@ async def compute_cold_start_table(
     for sku in segment:
         # asm_by_warehouse нужен в обеих ветках: и для прозрачности «куда едет»,
         # и для per-warehouse subtraction в активной ветке распределения.
-        active_asm = await fetch_active_assemblies_for_sku(db, project_id, sku["internal_id"])
+        # include_pre_distributed: резерв машины (PRE_DISTRIBUTED) закрывает цель
+        # склада так же, как PENDING — без него панель «Новинки»/матрица повторно
+        # предлагали то, что уже зарезервировано предраспределением (швабры апл).
+        # В total_qty (свободный ФФ) PD НЕ входит — товар машины ещё не на ФФ
+        # (sku["asm_qty"] считается по _ACTIVE_ASM_STATUSES без PD).
+        active_asm = await fetch_active_assemblies_for_sku(
+            db, project_id, sku["internal_id"], include_pre_distributed=True
+        )
 
         # ФФ-остаток минус уже идущие сборки — иначе размазываем «фантом» по складам где asm под другим именем (Новосемейкино vs Самара).
         total_qty = max(0, sku["rf_qty"] - sku["asm_qty"])

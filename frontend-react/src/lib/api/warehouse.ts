@@ -2,6 +2,7 @@
 import { ApiClient } from './client';
 import type {
     AcceptanceCheckRequest,
+    InTransitResponse,
     AcceptanceCheckResponse,
     AcceptanceLimitsResponse,
     SupplyAcceptanceSlotsResponse,
@@ -622,6 +623,12 @@ export function addWarehouseMethods(api: ApiClient) {
         // ─── Assembly Drafts ────────────────────────────────────────────
         listAssemblyDrafts() {
             return api.request<AssemblyDraft[]>('GET', '/api/v1/assembly/drafts');
+        },
+        /** Что уже едет/зарезервировано активными заявками по SKU (вкл. PRE_DISTRIBUTED) — reconcile черновика. */
+        getAssemblyInTransit(nmIds: number[]) {
+            const q = new URLSearchParams();
+            q.set('nm_ids', nmIds.join(','));
+            return api.request<InTransitResponse>('GET', `/api/v1/warehouse/assembly/in-transit?${q.toString()}`);
         },
         getAssemblyDraft(id: number) {
             return api.request<AssemblyDraft>('GET', `/api/v1/assembly/drafts/${id}`);

@@ -22,6 +22,8 @@ from backend.models.warehouse import Warehouse
 from backend.project_context import get_current_project
 from backend.schemas.assembly import (
     AssemblyAttempt,
+    InTransitItem,
+    InTransitResponse,
     AssemblyFlowAnalyticsResponse,
     AssemblyHistoryResponse,
     AssemblyListResponse,
@@ -455,6 +457,36 @@ async def list_wb_warehouses(
 ):
     """Get distinct WB warehouse names from assembly history and FBO supplies."""
     return await assembly_service.list_wb_warehouses(db, project.id)
+
+
+@router.get("/in-transit", response_model=InTransitResponse)
+async def get_in_transit(
+    nm_ids: str = Query(..., description="Comma-separated nm_id (article_wb)"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Что уже едет/зарезервировано на WB-склады активными заявками по SKU.
+
+    Включая PRE_DISTRIBUTED (резерв под машину в пути). Источник «одного мира»
+    для reconcile черновика распределения: строки, дублирующие уже едущее,
+    урезаются на фронте при загрузке (прод-кейс «швабры апл» 2026-07-10).
+    """
+    from backend.services.cold_start_distribution_service import fetch_in_transit_by_nm
+
+    try:
+        ids = [int(x) for x in nm_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="nm_ids: ожидаются числа через запятую")
+    if not ids or len(ids) > 500:
+        raise HTTPException(status_code=422, detail="nm_ids: от 1 до 500 значений")
+    per_nm = await fetch_in_transit_by_nm(db, project.id, ids)
+    items = [
+        InTransitItem(nm_id=nm, warehouse_name=wh, quantity=qty)
+        for nm, per_wh in per_nm.items()
+        for wh, qty in per_wh.items()
+        if qty > 0
+    ]
+    return InTransitResponse(items=items)
 
 
 # --- Shipment analytics ----------------------------------------------------
