@@ -113,7 +113,7 @@ def _rows_to_text(rows: list[list[str]]) -> str:
 def _extract_text_xls(data: bytes) -> str:
     """Legacy BIFF `.xls` (OLE2) через xlrd. Даты-ячейки приводим к ДД.ММ.ГГГГ, иначе
     «от <дата>» в основании/назначении приехало бы серийным числом Excel."""
-    import xlrd
+    import xlrd  # type: ignore  # нет py.typed и стабов → глушим import-untyped (как pillow_heif)
 
     book = xlrd.open_workbook(file_contents=data)
     rows: list[list[str]] = []
