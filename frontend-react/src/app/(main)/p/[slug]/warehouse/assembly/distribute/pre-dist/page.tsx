@@ -241,7 +241,8 @@ export default function PreDistVehiclePage() {
                     if (nm && pr.is_newcomer) ncs.add(nm);
                 }
                 setNewcomerSet(ncs);
-                setAnchors((cold?.main_warehouses ?? []).map(w => ({ warehouse: w.warehouse, share_pct: w.share_pct })));
+                // district — для гарантии СЗФО в seedNewcomerWholeBoxes (≥4 коробов → 1 короб СЗФО).
+                setAnchors((cold?.main_warehouses ?? []).map(w => ({ warehouse: w.warehouse, share_pct: w.share_pct, district: w.district_key })));
 
                 // Кратность/габарит короба — приоритет: pool-row машины → справочник.
                 // Машина ещё в пути → её кратность НЕ попала в справочник принятых приёмок
@@ -435,7 +436,7 @@ export default function PreDistVehiclePage() {
                     const covAnchors = anchors.map(a => {
                         const c = byWh?.[a.warehouse];
                         const existing = (c ? c.stock + c.asm + c.transit : 0) + (needWh?.get(a.warehouse) ?? 0);
-                        return { warehouse: a.warehouse, share_pct: a.share_pct, existing };
+                        return { warehouse: a.warehouse, share_pct: a.share_pct, existing, district: a.district };
                     });
                     const seeded = seedNewcomerWholeBoxes(remaining, nmPpb.get(nm), covAnchors);
                     const tot = Object.values(seeded).reduce((s, v) => s + v, 0);

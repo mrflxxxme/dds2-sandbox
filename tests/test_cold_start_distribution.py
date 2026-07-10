@@ -806,6 +806,93 @@ class TestDistributeMulti:
         assert sum(out.values()) == 8
 
 
+@pytest.mark.unit
+class TestNwGuarantee:
+    """Гарантия СЗФО (аудит 2026-07-09): при партии ≥ 4×min_pack Северо-Западный
+    получает минимум min_pack, даже если floor дал 0 или концентрация долей
+    срезала northwest из district_share целиком."""
+
+    def test_multi_floor_zero_bumped_with_guarantee(self) -> None:
+        """Доля СЗФО 4% → floor 0; с гарантией и партией 4×min_pack — min_pack."""
+        share = {"central": 0.96, "northwest": 0.04}
+        wpd = {
+            "central": [("Электросталь", 1)],
+            "northwest": [("СПБ Шушары", 1)],
+        }
+        # 20 шт, min_pack=5: raw nw = int(20×0.04)=0 — без гарантии пропуск.
+        out = distribute_multi(20, share, min_pack=5, wh_per_district=wpd)
+        assert out.get("СПБ Шушары") is None
+        out = distribute_multi(
+            20, share, min_pack=5, wh_per_district=wpd, guarantee_districts={"northwest"}
+        )
+        assert out == {"Электросталь": 15, "СПБ Шушары": 5}
+        assert sum(out.values()) == 20
+
+    def test_multi_concentration_cut_district_restored(self) -> None:
+        """northwest срезан концентрацией (нет в district_share вовсе) — гарантия
+        возвращает его с min_pack за счёт крупнейшего ФО."""
+        share = {"central": 0.7, "volga": 0.3}  # СЗФО срезан concentrate()
+        wpd = {
+            "central": [("Электросталь", 1)],
+            "volga": [("Казань", 1)],
+            "northwest": [("СПБ Шушары", 1)],
+        }
+        out = distribute_multi(
+            40, share, min_pack=5, wh_per_district=wpd, guarantee_districts={"northwest"}
+        )
+        assert out.get("СПБ Шушары") == 5
+        assert sum(out.values()) == 40
+
+    def test_multi_below_threshold_no_guarantee(self) -> None:
+        """Партия < 4×min_pack → честный ноль СЗФО (порог согласован)."""
+        share = {"central": 0.96, "northwest": 0.04}
+        wpd = {
+            "central": [("Электросталь", 1)],
+            "northwest": [("СПБ Шушары", 1)],
+        }
+        out = distribute_multi(
+            19, share, min_pack=5, wh_per_district=wpd, guarantee_districts={"northwest"}
+        )
+        assert out.get("СПБ Шушары") is None
+        assert sum(out.values()) == 19
+
+    def test_multi_nw_with_own_qty_untouched(self) -> None:
+        """СЗФО с нормальной долей (≥min_pack сам по себе) — гарантия не вмешивается."""
+        share = {"central": 0.7, "northwest": 0.3}
+        wpd = {
+            "central": [("Электросталь", 1)],
+            "northwest": [("СПБ Шушары", 1)],
+        }
+        out = distribute_multi(
+            100, share, min_pack=5, wh_per_district=wpd, guarantee_districts={"northwest"}
+        )
+        assert out == {"Электросталь": 70, "СПБ Шушары": 30}
+
+    def test_single_distribute_guarantee_after_pool(self) -> None:
+        """distribute(): пул «<min_pack → крупнейшему» больше не оставляет СЗФО
+        пустым при достаточной партии."""
+        share = {"central": 0.96, "northwest": 0.04}
+        main_wh = {"central": "Электросталь", "northwest": "СПБ Шушары"}
+        out = cs.distribute(20, share, min_pack=5, main_wh_per_district=main_wh)
+        assert out.get("СПБ Шушары") is None
+        out = cs.distribute(
+            20, share, min_pack=5, main_wh_per_district=main_wh, guarantee_districts={"northwest"}
+        )
+        assert out == {"Электросталь": 15, "СПБ Шушары": 5}
+        assert sum(out.values()) == 20
+
+    def test_single_distribute_donor_guard(self) -> None:
+        """Донор — крупнейший получатель; после передачи min_pack он остаётся ≥ min_pack."""
+        share = {"central": 0.5, "volga": 0.46, "northwest": 0.04}
+        main_wh = {"central": "Электросталь", "volga": "Казань", "northwest": "СПБ Шушары"}
+        out = cs.distribute(
+            20, share, min_pack=5, main_wh_per_district=main_wh, guarantee_districts={"northwest"}
+        )
+        assert out.get("СПБ Шушары") == 5
+        assert all(q >= 5 for q in out.values())
+        assert sum(out.values()) == 20
+
+
 class TestPickWithPriorityTiebreak:
     """priority-rank tiebreak в `pick_main_warehouse_per_district` /
     `pick_warehouses_per_district`: при равном трафике anchor speed-карты

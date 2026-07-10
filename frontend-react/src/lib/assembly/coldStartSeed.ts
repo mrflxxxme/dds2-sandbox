@@ -23,7 +23,17 @@ export interface SeedAnchor {
     share_pct: number;
     /** Уже на этом складе/едет/в сборке (остаток WB + assembly + transit). Вычитается. */
     existing?: number;
+    /** Ключ ФО анкера (district_key из cold_start_table.main_warehouses). Нужен для
+     *  гарантии СЗФО — без него гарантия просто не срабатывает (поведение прежнее). */
+    district?: string;
 }
+
+/** Гарантия СЗФО: при партии ≥ этого числа коробов открытый непокрытый якорь
+ *  СЗФО получает минимум 1 короб (short-доля СЗФО ~9% проигрывала largest-remainder
+ *  крупным ФО до ~6-8 коробов → новинки системно не заезжали в СЗФО и его
+ *  локализация не набиралась; порог согласован с пользователем — аудит 2026-07-09). */
+export const NW_GUARANTEE_MIN_BOXES = 4;
+const NW_DISTRICT_KEY = 'northwest';
 
 export function seedNewcomerWholeBoxes(
     totalQty: number,
@@ -36,7 +46,7 @@ export function seedNewcomerWholeBoxes(
 
     // Уникальные анкеры; доли/покрытие коэрсим в число.
     const seen = new Set<string>();
-    const open: { warehouse: string; share: number; existing: number }[] = [];
+    const open: { warehouse: string; share: number; existing: number; district?: string }[] = [];
     for (const a of anchors) {
         if (!a.warehouse || seen.has(a.warehouse)) continue;
         seen.add(a.warehouse);
@@ -44,6 +54,7 @@ export function seedNewcomerWholeBoxes(
             warehouse: a.warehouse,
             share: Math.max(0, Number(a.share_pct) || 0),
             existing: Math.max(0, Math.floor(Number(a.existing) || 0)),
+            district: a.district,
         });
     }
     if (open.length === 0) return {};
@@ -55,7 +66,7 @@ export function seedNewcomerWholeBoxes(
     // его доли) → 0 (туда не слать). Хвост остаётся на ФФ.
     const shortfalls = open.map(a => {
         const idealShare = shareSum > 0 ? qty * (a.share / shareSum) : qty / open.length;
-        return { wh: a.warehouse, sf: Math.max(0, idealShare - a.existing) };
+        return { wh: a.warehouse, sf: Math.max(0, idealShare - a.existing), district: a.district };
     });
     const sfSum = shortfalls.reduce((s, x) => s + x.sf, 0);
     if (sfSum <= 0) return {}; // всё покрыто → ничего не слать (не перетаривать)
@@ -83,6 +94,30 @@ export function seedNewcomerWholeBoxes(
     for (let i = 0; leftover > 0; i++, leftover--) {
         const wh = ranked[i % ranked.length].wh;
         boxesByWh.set(wh, (boxesByWh.get(wh) || 0) + 1);
+    }
+
+    // Гарантия СЗФО: партия ≥ NW_GUARANTEE_MIN_BOXES коробов, есть открытый
+    // НЕПОКРЫТЫЙ (sf>0 — не перетарен) якорь СЗФО, но largest-remainder дал ему
+    // 0 коробов → передаём 1 короб от донора. Донор — склад с максимумом коробов
+    // (tie-break: наименьший shortfall — жертвуем наименее нуждающимся); СЗФО
+    // с sf=0 (уже покрыт стоком/транзитом) гарантию не получает. Закрытые по
+    // приёмке якоря отфильтрованы callers'ами ДО вызова. Σ коробов сохраняется.
+    if (totalBoxes >= NW_GUARANTEE_MIN_BOXES) {
+        const nw = shortfalls
+            .filter(x => x.district === NW_DISTRICT_KEY && x.sf > 0)
+            .sort((a, b) => b.sf - a.sf)[0];
+        if (nw && (boxesByWh.get(nw.wh) || 0) === 0) {
+            const donor = shortfalls
+                .filter(x => x.wh !== nw.wh && (boxesByWh.get(x.wh) || 0) > 0)
+                .sort((a, b) => {
+                    const d = (boxesByWh.get(b.wh) || 0) - (boxesByWh.get(a.wh) || 0);
+                    return d !== 0 ? d : a.sf - b.sf;
+                })[0];
+            if (donor) {
+                boxesByWh.set(donor.wh, (boxesByWh.get(donor.wh) || 0) - 1);
+                boxesByWh.set(nw.wh, 1);
+            }
+        }
     }
 
     const out: Record<string, number> = {};
