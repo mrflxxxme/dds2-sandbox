@@ -29,6 +29,8 @@ function options(): GazelkaFormOptions {
         ],
         supply_types: [],
         timeslots: [],
+        default_entity_id: '6596',
+        default_price_id: '1',
         schedule: { '1-25': KAZAN, '1-18': TULA, '1-26': { ...KAZAN, loading_days: [5] } },
         min_departure_date: '2026-07-10',
         min_delivery_date: '2026-07-11',
