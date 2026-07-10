@@ -769,6 +769,8 @@ export function WarehouseNeedView({
                         share_pct: w.share_pct,
                         // coverage: уже на складе (WB) + в сборке/в пути → не перетаривать.
                         existing: (wbW[w.warehouse] || 0) + (asmW[w.warehouse] || 0),
+                        // district — гарантия СЗФО в seedNewcomerWholeBoxes (≥4 коробов → 1 короб).
+                        district: w.district_key,
                     }));
                 // Источник засева = СВОБОДНЫЙ ФФ-остаток = полный rf_qty МИНУС уже
                 // зарезервированное активными заявками (in_assembly_total). Иначе засев

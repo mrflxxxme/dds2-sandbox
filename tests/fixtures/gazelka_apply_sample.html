@@ -9,15 +9,15 @@
   <input type="text" name="customer_phone" value="+79203491330">
   <select class="select" name="entity_id">
     <option value="">Выбор организации</option>
-    <option value="6596">ПЛЮС ВАЙБ ООО</option>
+    <option value="6596" selected>ПЛЮС ВАЙБ ООО</option>
   </select>
   <select class="select" name="payer_id">
     <option value="">Выбор организации</option>
-    <option value="6596">ПЛЮС ВАЙБ ООО</option>
+    <option value="6596" selected>ПЛЮС ВАЙБ ООО</option>
   </select>
   <select name="price_id">
     <option value="5">Симферополь</option>
-    <option value="1">Иваново</option>
+    <option value="1" selected>Иваново</option>
   </select>
   <select name="marketplace_id">
     <option value="0">Выбрать Маркетплейс</option>
@@ -25,10 +25,10 @@
     <option value="4">WildBerries</option>
   </select>
   <select name="delivery_address">
-    <option value="">На какой склад доставка?</option>
-    <option value="Тула">Тула</option>
-    <option value="Казань">Казань</option>
-    <option value="Казань">Казань</option>
+    <option value="" data-mpid="0">На какой склад доставка?</option>
+    <option value="Тула" data-plid="18" data-mpid="4">Тула</option>
+    <option value="Казань" data-plid="25" data-mpid="4">Казань</option>
+    <option value="Казань" data-plid="26" data-mpid="1">Казань</option>
   </select>
   <select name="monomix">
     <option value="0">Тип поставки</option>
@@ -40,7 +40,12 @@
     <option value="Утром-Днём">Утром-Днём</option>
     <option value="Вечером">Вечером</option>
   </select>
+  <input id="departure_date" type="text" value="" data-min="2026-07-10" name="departure_date">
+  <input id="delivery_date" type="text" data-allowed-days="" data-min="2026-07-11" value="" name="delivery_date">
   <input type="number" name="pallets" value="0">
+  <input type="number" name="weight2" value="0">
+  <input type="number" name="volume" value="0">
+  <input type="text" name="notes" value="">
   <input type="checkbox" name="palleting" value="">
   <input type="submit" value="Сохранить" name="dosubmit">
 </form>
@@ -48,5 +53,8 @@
   <input type="hidden" name="OTHER_TOKEN" value="should_not_leak">
   <select name="entity_id"><option value="999">WRONG_FORM</option></select>
 </form>
+<script>
+const schedule = {"1-18":{"id":"1","place_id":"18","marketplace_id":"4","loading_days":"2","delivery_days":"2","delivery_time":"2","timeslot":"","pricelist_id":"1","active":"t"},"1-25":{"id":"2","place_id":"25","marketplace_id":"4","loading_days":"1113","delivery_days":"1214","delivery_time":"1","timeslot":"","pricelist_id":"1","active":"t"},"1-26":{"id":"3","place_id":"26","marketplace_id":"1","loading_days":"15","delivery_days":"16","delivery_time":"1","timeslot":"","pricelist_id":"1","active":"t"},"1-99":{"id":"4","place_id":"99","marketplace_id":"4","loading_days":"11","delivery_days":"12","delivery_time":"1","timeslot":"","pricelist_id":"1","active":"f"}};
+</script>
 </body>
 </html>

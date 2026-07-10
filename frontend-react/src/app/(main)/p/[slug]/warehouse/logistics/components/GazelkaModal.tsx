@@ -1,6 +1,14 @@
 'use client';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import {
+    dateChoices,
+    findPlan,
+    formatAllowedDays,
+    formatDateOption,
+    validDelivery,
+    warehousesFor,
+} from '@/lib/gazelkaSchedule';
 import { formatNumber } from '@/lib/utils';
 import type {
     GazelkaDraft,
@@ -56,7 +64,7 @@ function SelectField({
             >
                 {placeholder && <option value="">{placeholder}</option>}
                 {options.map(o => (
-                    <option key={o.value} value={o.value}>{o.label}</option>
+                    <option key={o.place_id ?? o.value} value={o.value}>{o.label}</option>
                 ))}
             </select>
         </div>
@@ -149,7 +157,8 @@ function initForm(options: GazelkaFormOptions, prefill: GazelkaPrefill) {
         is_marketplace: 'yes' as string,
         marketplace_id: prefill.marketplace_id ?? options.marketplaces[0]?.value ?? '',
         supply_id: prefill.supply_id ?? '',
-        delivery_address: prefill.delivery_address ?? options.delivery_warehouses[0]?.value ?? '',
+        // Без матча склад НЕ угадываем: первый в списке может принадлежать другому маркетплейсу
+        delivery_address: prefill.delivery_address ?? '',
         delivery_address_x2: prefill.delivery_address_x2 ?? '',
         departure_date: prefill.departure_date ?? '',
         delivery_date: prefill.delivery_date ?? '',
@@ -260,8 +269,42 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
         ? (editDraft?.options ?? null)
         : (draft?.options ?? null);
 
+    // График выбранного направления. Для не-маркетплейсной доставки его нет — даты свободные.
+    const isMarketplace = form?.is_marketplace === 'yes';
+    const plan = formOptions && form && isMarketplace
+        ? findPlan(formOptions, form.price_id, form.delivery_address, form.marketplace_id)
+        : null;
+    const warehouses = formOptions && form && isMarketplace
+        ? warehousesFor(formOptions, form.price_id, form.marketplace_id)
+        : (formOptions?.delivery_warehouses ?? []);
+    // Даты, реально допустимые для этого направления. Протухший prefill (или дата уже
+    // созданной заявки) в списки не попадает и потому НЕ считается выбранным.
+    const dates = formOptions && form && plan ? dateChoices(formOptions, plan, form.departure_date) : null;
+    const departureValue = dates ? dates.departure : (form?.departure_date ?? '');
+    const deliveryValue = dates ? validDelivery(dates, form?.delivery_date ?? '') : (form?.delivery_date ?? '');
+
     const set = <K extends keyof FormState>(key: K, value: FormState[K]) => {
         setForm(prev => prev ? { ...prev, [key]: value } : prev);
+        setValidationError('');
+        setSubmitError('');
+    };
+
+    /** Смена маркетплейса/города обнуляет склад: у каждого направления свой график. */
+    const setScopeField = (key: 'price_id' | 'marketplace_id', value: string) => {
+        setForm(prev => prev ? { ...prev, [key]: value, delivery_address: '', departure_date: '', delivery_date: '' } : prev);
+        setValidationError('');
+        setSubmitError('');
+    };
+
+    /** Смена склада или даты отправки делает прежнюю дату доставки невалидной. */
+    const setDeliveryAddress = (value: string) => {
+        setForm(prev => prev ? { ...prev, delivery_address: value, departure_date: '', delivery_date: '' } : prev);
+        setValidationError('');
+        setSubmitError('');
+    };
+
+    const setDepartureDate = (value: string) => {
+        setForm(prev => prev ? { ...prev, departure_date: value, delivery_date: '' } : prev);
         setValidationError('');
         setSubmitError('');
     };
@@ -273,6 +316,12 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
         if (!form.entity_id) { setValidationError('Выберите юрлицо'); return; }
         if (!form.payer_id) { setValidationError('Выберите плательщика'); return; }
         if (!form.price_id) { setValidationError('Выберите прайс-лист (город-источник)'); return; }
+        if (isMarketplace) {
+            if (!form.delivery_address) { setValidationError('Выберите склад назначения'); return; }
+            if (!plan) { setValidationError('Это направление не обслуживается из выбранного города'); return; }
+            if (!departureValue) { setValidationError('Выберите дату отправки'); return; }
+            if (!deliveryValue) { setValidationError('Выберите дату доставки'); return; }
+        }
 
         const body: GazelkaSendRequest = {
             entity_id: form.entity_id,
@@ -283,8 +332,9 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
             supply_id: form.supply_id || null,
             delivery_address: form.delivery_address || null,
             delivery_address_x2: form.delivery_address_x2 || null,
-            departure_date: form.departure_date || null,
-            delivery_date: form.delivery_date || null,
+            // Только нормализованные даты: залипшее в стейте протухшее значение не уедет
+            departure_date: departureValue || null,
+            delivery_date: deliveryValue || null,
             delivery_time: form.delivery_time || null,
             daily_delivery_timeslot: form.daily_delivery_timeslot || null,
             delivery_contact: form.delivery_contact || null,
@@ -452,7 +502,7 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                                 <SelectField
                                     label="Прайс-лист (город-источник)"
                                     value={form.price_id}
-                                    onChange={v => set('price_id', v)}
+                                    onChange={v => setScopeField('price_id', v)}
                                     options={formOptions.price_lists}
                                     required
                                     placeholder="— выберите —"
@@ -479,7 +529,7 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                                     <SelectField
                                         label="ID маркетплейса"
                                         value={form.marketplace_id}
-                                        onChange={v => set('marketplace_id', v)}
+                                        onChange={v => setScopeField('marketplace_id', v)}
                                         options={formOptions.marketplaces}
                                         placeholder="— выберите —"
                                     />
@@ -509,19 +559,19 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                                 Адрес и доставка
                             </div>
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                                {formOptions.delivery_warehouses.length > 0 ? (
+                                {warehouses.length > 0 ? (
                                     <SelectField
                                         label="Склад назначения"
                                         value={form.delivery_address}
-                                        onChange={v => set('delivery_address', v)}
-                                        options={formOptions.delivery_warehouses}
+                                        onChange={setDeliveryAddress}
+                                        options={warehouses}
                                         placeholder="— выберите —"
                                     />
                                 ) : (
                                     <TextField
                                         label="Адрес доставки"
                                         value={form.delivery_address}
-                                        onChange={v => set('delivery_address', v)}
+                                        onChange={setDeliveryAddress}
                                         placeholder="Адрес"
                                     />
                                 )}
@@ -531,18 +581,41 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                                     onChange={v => set('delivery_address_x2', v)}
                                     placeholder="Доп. адрес (опционально)"
                                 />
-                                <TextField
-                                    label="Дата отправки"
-                                    value={form.departure_date}
-                                    onChange={v => set('departure_date', v)}
-                                    type="date"
-                                />
-                                <TextField
-                                    label="Дата доставки"
-                                    value={form.delivery_date}
-                                    onChange={v => set('delivery_date', v)}
-                                    type="date"
-                                />
+                                {/* С графиком — только допустимые дни (портал 500-ит на «серый» день
+                                    календаря). Без графика доставка идёт свободными датами. */}
+                                {dates ? (
+                                    <>
+                                        <SelectField
+                                            label="Дата отправки"
+                                            value={departureValue}
+                                            onChange={setDepartureDate}
+                                            options={dates.departures.map(d => ({ value: d, label: formatDateOption(d) }))}
+                                            placeholder="— выберите —"
+                                        />
+                                        <SelectField
+                                            label="Дата доставки"
+                                            value={deliveryValue}
+                                            onChange={v => set('delivery_date', v)}
+                                            options={dates.deliveries.map(d => ({ value: d, label: formatDateOption(d) }))}
+                                            placeholder={departureValue ? '— выберите —' : 'сначала дата отправки'}
+                                        />
+                                    </>
+                                ) : (
+                                    <>
+                                        <TextField
+                                            label="Дата отправки"
+                                            value={form.departure_date}
+                                            onChange={setDepartureDate}
+                                            type="date"
+                                        />
+                                        <TextField
+                                            label="Дата доставки"
+                                            value={form.delivery_date}
+                                            onChange={v => set('delivery_date', v)}
+                                            type="date"
+                                        />
+                                    </>
+                                )}
                                 <TextField
                                     label="Время доставки"
                                     value={form.delivery_time}
@@ -566,6 +639,17 @@ export default function GazelkaModal({ assemblyId, assemblyNumber, onClose, onSu
                                     />
                                 )}
                             </div>
+                            {plan && (
+                                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
+                                    График склада: погрузка {formatAllowedDays(plan.loading_days)} · доставка{' '}
+                                    {formatAllowedDays(plan.delivery_days)} · в пути {formatNumber(plan.eta_days, 0)} дн.
+                                </div>
+                            )}
+                            {isMarketplace && !plan && form.delivery_address && (
+                                <div style={{ fontSize: 12, color: 'var(--color-danger)', marginTop: 8 }}>
+                                    Это направление не обслуживается из выбранного города — выберите другой склад или прайс-лист.
+                                </div>
+                            )}
                         </div>
 
                         {/* ── Контакты ── */}

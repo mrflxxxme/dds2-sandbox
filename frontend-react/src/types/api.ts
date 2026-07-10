@@ -2204,6 +2204,16 @@ export interface GazelkaConfig {
 export interface GazelkaSelectOption {
   value: string;
   label: string;
+  /** Только у складов назначения: id направления и маркетплейса (название неуникально). */
+  place_id?: string | null;
+  marketplace_id?: string | null;
+}
+
+/** График склада: дни недели (0=Вс … 6=Сб) и срок в пути. null — ограничения нет. */
+export interface GazelkaSchedulePlan {
+  loading_days: number[] | null;
+  delivery_days: number[] | null;
+  eta_days: number;
 }
 
 export interface GazelkaFormOptions {
@@ -2213,6 +2223,10 @@ export interface GazelkaFormOptions {
   delivery_warehouses: GazelkaSelectOption[];
   supply_types: GazelkaSelectOption[];
   timeslots: GazelkaSelectOption[];
+  /** Активные направления, ключ «{price_id}-{place_id}». Нет ключа — склад недоступен. */
+  schedule: Record<string, GazelkaSchedulePlan>;
+  min_departure_date: string | null;
+  min_delivery_date: string | null;
 }
 
 export interface GazelkaPrefill {

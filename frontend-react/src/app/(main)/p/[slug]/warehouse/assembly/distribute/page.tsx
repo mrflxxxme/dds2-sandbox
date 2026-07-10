@@ -193,7 +193,13 @@ export default function AssemblyDraftPage() {
                 const [draftResp, whs, stockNeedResp] = await Promise.all([
                     api.getOrCreateCurrentDraft(),
                     api.getWarehouses(),
-                    api.getStockNeed(14, 14, 'actual').catch(() => null) as Promise<StockNeedResponse | null>,
+                    // Флаги ТЕ ЖЕ, что у матрицы черновика (DraftMatrixView): loc-opt
+                    // (гео-привязка спроса по speed-карте вместо bench по складу-источнику —
+                    // рвёт петлю «пусто→заказы уезжают в ЦФО→need=0») + only_available
+                    // (greedy-cap до целевой локализации с весами воришек). Иначе панель
+                    // «Добавить из потребности» строила target по сырому bench без всей
+                    // механики распределения (аудит 2026-07-09).
+                    api.getStockNeed(14, 14, 'actual', true, true, 0).catch(() => null) as Promise<StockNeedResponse | null>,
                 ]);
                 if (cancelled) return;
                 applyDraft(draftResp);
