@@ -631,3 +631,81 @@ async def test_get_cabinet_pass_empty_without_supply(db_session, monkeypatch):
     await _patch_client(monkeypatch, FakeClient())
     p = await wb_supply_service.get_cabinet_pass(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert p.has_pass is False
+
+
+# ─── sync_pass_from_vehicle (F3: назначение машины → пропуск) ──────────────────
+
+
+async def _reload_assembly(db):
+    return await wb_supply_service._load_assembly(db, PROJECT_ID, ASSEMBLY_ID)
+
+
+def test_extract_plate_and_name_parsing():
+    # Кириллица-номер + ФИО (порядок кабинета: Фамилия Имя …) + телефон.
+    s = "В874УА37 Крапива Дмитрий Васильевич 89158491778"
+    plate = wb_supply_service._extract_plate(s)
+    assert plate == "В874УА37"
+    first, last = wb_supply_service._parse_driver_name(s, plate)
+    assert last == "Крапива"
+    assert first == "Дмитрий"
+
+
+def test_extract_plate_none_when_absent():
+    assert wb_supply_service._extract_plate("просто водитель без номера") is None
+
+
+@pytest.mark.asyncio
+async def test_sync_pass_from_vehicle_mirrors_fields(db_session):
+    assembly = await _reload_assembly(db_session)
+    assembly.vehicle_info = "В874УА37 Крапива Дмитрий 89158491778"
+    assembly.vehicle_brand = "ГАЗ-330"
+    assembly.driver_phone = "+7 915 849 17 78"
+    await db_session.flush()
+
+    await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
+    await db_session.commit()
+
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.pass_car_number == "В874УА37"
+    assert link.pass_car_model == "ГАЗ-330"
+    assert link.pass_driver_phone == "+7 915 849 17 78"
+    assert link.pass_driver_last == "Крапива"
+    assert link.pass_driver_first == "Дмитрий"
+    # pallets_count заявки = 2 (фикстура) → проставился в пустой пропуск.
+    assert link.pass_pallets == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_pass_preserves_existing_name(db_session):
+    # Уже заполненное ФИО не затираем best-effort парсингом.
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    link.pass_driver_first = "Иван"
+    link.pass_driver_last = "Иванов"
+    link.pass_pallets = 5
+    await db_session.commit()
+
+    assembly = await _reload_assembly(db_session)
+    assembly.vehicle_info = "О253РУ790 Петров Пётр"
+    assembly.vehicle_brand = "КАМАЗ"
+    await db_session.flush()
+    await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
+    await db_session.commit()
+
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    # ФИО и pallets сохранены, номер/марка — перезаписаны машиной.
+    assert link.pass_driver_first == "Иван"
+    assert link.pass_driver_last == "Иванов"
+    assert link.pass_pallets == 5
+    assert link.pass_car_number == "О253РУ790"
+    assert link.pass_car_model == "КАМАЗ"
+
+
+@pytest.mark.asyncio
+async def test_sync_pass_noop_without_vehicle(db_session):
+    assembly = await _reload_assembly(db_session)
+    # Без данных машины — строку пропуска не трогаем/не плодим.
+    await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
+    await db_session.commit()
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.pass_car_number is None
+    assert link.pass_driver_phone is None

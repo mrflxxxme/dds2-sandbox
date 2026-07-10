@@ -282,6 +282,17 @@ export default function AssemblyDetailPage() {
     const handleStart = () => doAction(() => api.startAssembly(id));
     const handleReady = () => doAction(() => api.markAssemblyReady(id));
 
+    // Открыть «Назначить машину» с префиллом: назначенная машина заявки, иначе —
+    // данные уже заведённого WB-пропуска (панель «Поставка WB» / кабинет).
+    const openVehicleModal = () => {
+        const passInfo = [wbState?.pass_car_number, wbState?.pass_driver_last, wbState?.pass_driver_first]
+            .filter(Boolean).join(' ');
+        setVehicleInfo(assembly?.vehicle_info || passInfo || '');
+        setVehicleBrand(assembly?.vehicle_brand || wbState?.pass_car_model || '');
+        setDriverPhone(assembly?.driver_phone || wbState?.pass_driver_phone || '');
+        setShowVehicleModal(true);
+    };
+
     const vehicleFormValid = vehicleInfo.trim() && vehicleBrand.trim() && driverPhone.trim()
         && pickupDate && pickupTimeSlot && pickupCost !== '' && deliveryDate;
 
@@ -609,7 +620,7 @@ export default function AssemblyDetailPage() {
                 break;
             case 'READY':
                 buttons.push(
-                    <button key="vehicle" className="btn btn-primary" onClick={() => setShowVehicleModal(true)} disabled={actionLoading}>
+                    <button key="vehicle" className="btn btn-primary" onClick={openVehicleModal} disabled={actionLoading}>
                         Назначить машину
                     </button>,
                     <Link key="edit" href={`/p/${slug}/warehouse/assembly/${assembly.id}/edit`}>

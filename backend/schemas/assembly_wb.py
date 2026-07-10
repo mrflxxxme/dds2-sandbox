@@ -91,6 +91,13 @@ class WbSupplyStateBrief(BaseModel):
     supply_id: int | None = None
     preorder_id: int | None = None
     pass_pallets: int | None = None
+    # Данные пропуска — для префилла модалки «Назначить машину» из уже заведённого
+    # пропуска (F1). Отдаём в строке списка, чтобы логист не перевводил вручную.
+    pass_driver_first: str | None = None
+    pass_driver_last: str | None = None
+    pass_driver_phone: str | None = None
+    pass_car_model: str | None = None
+    pass_car_number: str | None = None
     wb_state_synced_at: datetime | None = None
 
 

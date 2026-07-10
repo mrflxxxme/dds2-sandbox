@@ -142,6 +142,29 @@ function jointPendingWarehouses(item: AssemblyRequest): string[] {
         .map(r => r.warehouse_name || `склад #${r.warehouse_id}`);
 }
 
+/** Префилл модалки «Назначить машину» из уже известных данных выбранных заявок.
+ *  Приоритет: назначенная машина заявки → данные WB-пропуска (могли завести раньше
+ *  в панели «Поставка WB» или подтянуть из кабинета). Берём первую заявку, у которой
+ *  что-то есть: машина у всех выбранных заявок одна (bulk-назначение). */
+function vehiclePrefill(items: AssemblyRequest[]): { info: string; brand: string; phone: string } {
+    for (const it of items) {
+        if (it.vehicle_info || it.vehicle_brand || it.driver_phone) {
+            return { info: it.vehicle_info || '', brand: it.vehicle_brand || '', phone: it.driver_phone || '' };
+        }
+    }
+    for (const it of items) {
+        const wb = it.wb_supply;
+        if (!wb) continue;
+        // «Описание машины» — свободная строка «Номер, водитель, ТК»: собираем из
+        // структурных полей пропуска (порядок кабинета: Фамилия Имя).
+        const info = [wb.pass_car_number, wb.pass_driver_last, wb.pass_driver_first].filter(Boolean).join(' ');
+        if (info || wb.pass_car_model || wb.pass_driver_phone) {
+            return { info, brand: wb.pass_car_model || '', phone: wb.pass_driver_phone || '' };
+        }
+    }
+    return { info: '', brand: '', phone: '' };
+}
+
 /** Коллапс совместных поставок: из плоского списка оставляем по одной заявке-«якорю»
  *  на каждую WB FBO-поставку (минимальный id среди сборок этой поставки в загруженном
  *  списке), остальные joint-сёстры выкидываем, чтобы не рисовать их отдельными карточками.
@@ -482,9 +505,13 @@ export default function LogisticsPage() {
 
     const openVehicleModal = (ids: number[]) => {
         setSelectedIds(ids);
-        setVehicleInfo('');
-        setVehicleBrand('');
-        setDriverPhone('');
+        // Префилл: если пропуск уже заведён (вручную в панели «Поставка WB» или
+        // подтянут из кабинета) — подставляем его данные в ячейки, чтобы логист
+        // не перевводил номер/марку/телефон.
+        const pre = vehiclePrefill(items.filter(i => ids.includes(i.id)));
+        setVehicleInfo(pre.info);
+        setVehicleBrand(pre.brand);
+        setDriverPhone(pre.phone);
         const params: Record<number, PerRequestParams> = {};
         for (const id of ids) {
             params[id] = { pickup_date: '', pickup_time_slot: '', pickup_cost: '', delivery_date: '' };

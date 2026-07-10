@@ -269,6 +269,9 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
     // Телефон — по цифрам (игнорируем +/пробелы/скобки).
     const driverPhoneMismatch =
         !!driverPhone.trim() && !!vehPhone.trim() && onlyDigits(driverPhone) !== onlyDigits(vehPhone);
+    // Паллеты пропуска ≠ паллетам заявки (F2): оба заданы и различаются.
+    const asmPallets = st?.assembly_pallets_count ?? null;
+    const palletsMismatch = pallets !== '' && asmPallets != null && Number(pallets) !== asmPallets;
     const sessionActive = session?.status === 'ACTIVE';
     const statusCfg = st ? STATUS_LABEL[st.sync_status] : STATUS_LABEL.NONE;
 
@@ -642,12 +645,18 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
                             />
                         </div>
                         <div className="form-group">
-                            <label className="form-label">Кол-во паллет</label>
+                            <label className="form-label">
+                                Кол-во паллет
+                                {palletsMismatch && (
+                                    <span title={`В заявке: ${formatNumber(asmPallets ?? 0, 0)} паллет`} style={{ marginLeft: 6, color: 'var(--color-warning)', cursor: 'help' }}>⚠</span>
+                                )}
+                            </label>
                             <input
                                 className="form-input"
                                 type="number"
                                 value={pallets}
                                 onChange={(e) => setPallets(e.target.value === '' ? '' : Number(e.target.value))}
+                                style={palletsMismatch ? { borderColor: 'var(--color-warning)' } : undefined}
                             />
                         </div>
                         <div className="form-group">

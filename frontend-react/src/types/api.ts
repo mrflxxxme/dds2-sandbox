@@ -1847,6 +1847,12 @@ export interface WbSupplyStateBrief {
   supply_id: number | null;
   preorder_id: number | null;
   pass_pallets: number | null;
+  // Данные пропуска — для префилла модалки «Назначить машину» (F1).
+  pass_driver_first: string | null;
+  pass_driver_last: string | null;
+  pass_driver_phone: string | null;
+  pass_car_model: string | null;
+  pass_car_number: string | null;
   wb_state_synced_at: string | null;
 }
 

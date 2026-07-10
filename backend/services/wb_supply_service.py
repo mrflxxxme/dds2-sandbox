@@ -12,6 +12,7 @@ Service: занос заявки-сборки в FBW-поставку WB чер�
 """
 
 import asyncio
+import re
 from collections import defaultdict
 from collections.abc import Awaitable
 from typing import TypeVar
@@ -428,6 +429,79 @@ async def save_pass(
     link.pass_pallets = data.get("pallets")
     await db.commit()
     return link
+
+
+# Русский госномер: логист вводит «Номер, водитель, ТК» одной строкой (vehicle_info).
+# Вынимаем сам номер (кабинет WB хранит его отдельным полем) и best-effort ФИО.
+_PLATE_RE = re.compile(
+    r"[АВЕКМНОРСТУХABEKMHOPCTYX]\d{3}[АВЕКМНОРСТУХABEKMHOPCTYX]{2}\d{2,3}",
+    re.IGNORECASE,
+)
+# Телефон: 6+ подряд цифр (с разделителями) — убираем из строки перед парсингом ФИО.
+_PHONE_RE = re.compile(r"[+()\d][\d\-()\s]{5,}\d")
+
+
+def _extract_plate(text: str) -> str | None:
+    """Госномер из свободной строки машины заявки (или None)."""
+    m = _PLATE_RE.search(text or "")
+    return m.group(0) if m else None
+
+
+def _parse_driver_name(text: str, plate: str | None) -> tuple[str | None, str | None]:
+    """Best-effort ФИО из строки машины: убираем госномер и телефон, остаток —
+    слова ФИО (порядок кабинета WB: Фамилия Имя …). Возвращает (first, last).
+
+    Парсинг эвристический — логист дозаполняет/правит поля в панели пропуска
+    перед заносом в WB, поэтому ошибка парсинга не критична.
+    """
+    rest = text or ""
+    if plate:
+        rest = rest.replace(plate, " ")
+    rest = _PHONE_RE.sub(" ", rest)
+    words = [w for w in re.split(r"[\s,]+", rest) if w and any(ch.isalpha() for ch in w)]
+    if not words:
+        return None, None
+    last = words[0]
+    first = words[1] if len(words) > 1 else None
+    return first, last
+
+
+async def sync_pass_from_vehicle(
+    db: AsyncSession, project_id: int, assembly: AssemblyRequest
+) -> None:
+    """F3: при назначении машины зеркалим её реквизиты в WB-пропуск заявки.
+
+    Госномер/марку/телефон берём из машины (источник истины — назначение,
+    перезаписываем). ФИО парсим best-effort и ставим ТОЛЬКО если пусто (не
+    затираем ручной ввод). Число паллет — из заявки, если в пропуске пусто.
+    Занос в WB (push_pass) остаётся ручным: логист дозаполняет ФИО и жмёт
+    «Занести пропуск в WB». Строку НЕ коммитим — коммитит вызывающий
+    (assign_vehicle) в своей транзакции.
+    """
+    veh_info = (assembly.vehicle_info or "").strip()
+    veh_brand = (assembly.vehicle_brand or "").strip()
+    veh_phone = (assembly.driver_phone or "").strip()
+    if not (veh_info or veh_brand or veh_phone):
+        return
+    # adopt_supply_id=None: siblings совместной поставки могут не иметь загруженного
+    # relationship wb_fbo_supply (lazy-load в async упадёт). Пропуск сохраняем
+    # локально; supply_id доберётся при заносе/открытии панели (get_state).
+    link = await _get_or_create_link(db, project_id, assembly.id)
+    plate = _extract_plate(veh_info)
+    if plate:
+        link.pass_car_number = plate
+    if veh_brand:
+        link.pass_car_model = veh_brand
+    if veh_phone:
+        link.pass_driver_phone = veh_phone
+    if not (link.pass_driver_first or link.pass_driver_last):
+        first, last = _parse_driver_name(veh_info, plate)
+        if first:
+            link.pass_driver_first = first
+        if last:
+            link.pass_driver_last = last
+    if link.pass_pallets is None and assembly.pallets_count:
+        link.pass_pallets = assembly.pallets_count
 
 
 async def create_preorder(
