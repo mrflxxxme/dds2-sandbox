@@ -69,7 +69,13 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(), nullable=False),
         sa.ForeignKeyConstraint(['project_id'], ['projects.id'], ),
         sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('project_id', 'dim_id', 'penalty_date', name='uq_wb_measurement_penalty_project_dim_date'),
+        # penalty_date nullable (WB не всегда шлёт dtBonus). Без NULLS NOT DISTINCT
+        # postgres считает NULL различными → ON CONFLICT не срабатывает → дубли на каждом синке.
+        sa.UniqueConstraint(
+            'project_id', 'dim_id', 'penalty_date',
+            name='uq_wb_measurement_penalty_project_dim_date',
+            postgresql_nulls_not_distinct=True,
+        ),
     )
     op.create_index('ix_wb_measurement_penalty_project_date', 'wb_measurement_penalties', ['project_id', 'penalty_date'], unique=False)
     op.create_index('ix_wb_measurement_penalty_project_nm', 'wb_measurement_penalties', ['project_id', 'nm_id'], unique=False)

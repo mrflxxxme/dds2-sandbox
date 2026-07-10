@@ -103,9 +103,12 @@ class WbMeasurementPenalty(Base):
     __table_args__ = (
         # Грейн WB — одна запись на (замер × день начисления/сторно). dim_id
         # повторяется по дням (dtBonus), поэтому дата входит в ключ.
+        # penalty_date nullable → без NULLS NOT DISTINCT постгрес считает NULL
+        # различными, ON CONFLICT не срабатывает и upsert плодит дубли.
         UniqueConstraint(
             "project_id", "dim_id", "penalty_date",
             name="uq_wb_measurement_penalty_project_dim_date",
+            postgresql_nulls_not_distinct=True,
         ),
         Index("ix_wb_measurement_penalty_project_nm", "project_id", "nm_id"),
         Index("ix_wb_measurement_penalty_project_date", "project_id", "penalty_date"),
