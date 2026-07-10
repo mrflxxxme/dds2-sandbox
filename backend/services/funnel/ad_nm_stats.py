@@ -28,6 +28,8 @@ _WINDOW_PAUSE_SEC = 10
 _CHUNK_PAUSE_SEC = 20
 _MAX_429_RETRIES = 5
 _UPSERT_BATCH = 1000
+# WB доуточняет свежую статистику — двое последних суток перезаливаем при каждом догоне
+_RECHECK_DAYS = 2
 
 
 def _rows_from_stats(project_id: int, by_nm_campaign: dict) -> list[dict]:
@@ -87,6 +89,42 @@ async def upsert_ad_nm_daily(db: AsyncSession, project_id: int, by_nm_campaign: 
     await db.commit()
     logger.info(f"Ad nm daily upserted: {len(rows)} rows (project {project_id})")
     return len(rows)
+
+
+def catch_up_window(last: date | None, earliest: date | None, today: date) -> date | None:
+    """С какой даты догонять историю. None — догонять нечего.
+
+    Пустая таблица → от создания старейшей кампании (первый проход после релиза).
+    Иначе → от последнего залитого дня минус _RECHECK_DAYS: WB доуточняет свежую
+    статистику, поэтому хвост перезаливаем (upsert идемпотентен).
+    """
+    if last is None:
+        if earliest is None:
+            return None            # у проекта нет кампаний
+        return min(earliest, today)
+    start = last - timedelta(days=_RECHECK_DAYS)
+    return None if start > today else start
+
+
+async def catch_up_ad_nm_daily(db: AsyncSession, project_id: int) -> dict:
+    """Догнать историю разбивки по товарам до сегодняшнего дня.
+
+    Пустая таблица (первый запуск после релиза) → тянем всю доступную глубину:
+    от создания старейшей кампании. Иначе — только дни после последнего залитого.
+    Идемпотентно: upsert по (project_id, campaign_id, nm_id, date).
+
+    Последние двое суток перезаливаем всегда: WB доуточняет свежую статистику.
+    """
+    today = date.today()
+    last = (
+        await db.execute(select(func.max(WbAdNmDaily.date)).where(WbAdNmDaily.project_id == project_id))
+    ).scalar_one_or_none()
+    earliest = await _earliest_known_date(db, project_id) if last is None else None
+
+    start = catch_up_window(last, earliest, today)
+    if start is None:
+        return {"ok": True, "skipped": "нет кампаний" if last is None else "история актуальна", "rows": 0}
+    return await backfill_ad_nm_daily(db, project_id, start, today)
 
 
 _backfill_progress: dict[int, dict] = {}

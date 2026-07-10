@@ -8,7 +8,7 @@ Tests for backend/services/funnel/ad_nm_stats.py — РК-статистика �
 
 from datetime import date
 
-from backend.services.funnel.ad_nm_stats import _rows_from_stats
+from backend.services.funnel.ad_nm_stats import _rows_from_stats, catch_up_window
 
 PROJECT_ID = 1
 
@@ -62,3 +62,30 @@ def test_service_keys_are_skipped():
 def test_empty_input():
     assert _rows_from_stats(PROJECT_ID, {}) == []
     assert _rows_from_stats(PROJECT_ID, None) == []
+
+
+# ─── catch_up_window: с какой даты догонять историю ──────────────────────────
+
+
+def test_catch_up_empty_table_starts_from_oldest_campaign():
+    """Первый проход после релиза: таблица пуста → тянем всю доступную глубину."""
+    assert catch_up_window(None, date(2026, 2, 24), date(2026, 7, 10)) == date(2026, 2, 24)
+
+
+def test_catch_up_empty_table_without_campaigns():
+    assert catch_up_window(None, None, date(2026, 7, 10)) is None
+
+
+def test_catch_up_reloads_recent_days():
+    """WB доуточняет свежую статистику — хвост перезаливаем (last − 2 дня)."""
+    assert catch_up_window(date(2026, 7, 9), None, date(2026, 7, 10)) == date(2026, 7, 7)
+
+
+def test_catch_up_nothing_to_do_when_ahead_of_today():
+    """Данные уже за пределами сегодняшнего дня — догонять нечего."""
+    assert catch_up_window(date(2026, 7, 20), None, date(2026, 7, 10)) is None
+
+
+def test_catch_up_earliest_after_today_clamped():
+    """Кампания создана «в будущем» (часовые пояса) — не уезжаем вперёд сегодня."""
+    assert catch_up_window(None, date(2026, 7, 20), date(2026, 7, 10)) == date(2026, 7, 10)

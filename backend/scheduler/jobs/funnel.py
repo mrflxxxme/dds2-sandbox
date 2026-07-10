@@ -508,3 +508,39 @@ async def ads_autopay_tick():
             raise
         except Exception as e:
             logger.error(f"Ads autopay error: {e}\n{traceback.format_exc()}")
+
+
+_ad_nm_lock = asyncio.Lock()
+
+
+async def ad_nm_backfill_tick():
+    """Догон РК-статистики в разбивке по товарам (wb_ad_nm_daily).
+
+    Раз в сутки ночью. Первый запуск после релиза видит пустую таблицу и тянет
+    всю доступную глубину — так история пересобирается на проде сама, без ручного
+    запуска. Дальше догоняет только новые дни (плюс перезалив свежих суток).
+
+    Идёт окнами по 31 дню с паузами: WB жёстко лимитирует /adv/v3/fullstats.
+    """
+    if _ad_nm_lock.locked():
+        logger.info("Ad nm backfill: предыдущий проход ещё идёт, пропускаем")
+        return
+    async with _ad_nm_lock:
+        from backend.services.funnel.ad_nm_stats import catch_up_ad_nm_daily
+
+        try:
+            for pid in await get_sync_project_ids():
+                async with AsyncSessionLocal() as db:
+                    res = await catch_up_ad_nm_daily(db, pid)
+                if res.get("skipped"):
+                    logger.info(f"📊 Ad nm backfill: project {pid} — {res['skipped']}")
+                    continue
+                logger.info(
+                    f"📊 Ad nm backfill: project {pid} — {res.get('rows', 0)} строк, "
+                    f"{res.get('date_from')}→{res.get('date_to')}, "
+                    f"пропущено чанков: {res.get('skipped_chunks', 0)}"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Ad nm backfill error: {e}\n{traceback.format_exc()}")
