@@ -64,6 +64,15 @@ export function TelegramBot() {
         }
     };
 
+    const handleToggleMeasurements = async (id: number, current: boolean) => {
+        try {
+            await api.toggleTelegramMeasurementsNotify(id, !current);
+            setChats(prev => prev.map(c => c.id === id ? { ...c, measurements_notify_enabled: !current } : c));
+        } catch (e: any) {
+            setMsg(e.message);
+        }
+    };
+
     const handleSetBoard = async (id: number, enabled: boolean, warehouseId: number | null) => {
         try {
             await api.setTelegramFfBoard(id, enabled, warehouseId);
@@ -104,6 +113,18 @@ export function TelegramBot() {
                     title="о готовности сборки и принятой приёмке"
                 >
                     {row.ff_notify_enabled ? '📦 Вкл' : '📦 Выкл'}
+                </button>
+            ),
+        },
+        {
+            key: 'measurements_notify_enabled', label: 'Замеры',
+            render: (_v: any, row: any) => (
+                <button
+                    className={`btn btn-sm ${row.measurements_notify_enabled ? 'btn-success' : 'btn-secondary'}`}
+                    onClick={() => handleToggleMeasurements(row.id, row.measurements_notify_enabled)}
+                    title="Ежедневная сводка замеров WB в 09:00 МСК (за вчера + сегодня)"
+                >
+                    {row.measurements_notify_enabled ? '📐 Вкл' : '📐 Выкл'}
                 </button>
             ),
         },
@@ -173,6 +194,8 @@ export function TelegramBot() {
                     В колонке <strong>«Табло ФФ»</strong> выберите склад — в чат добавится закреплённое авто-табло
                     заявок только этого склада (или <em>«Все склады»</em> для общего табло). Бот должен быть админом чата,
                     чтобы закрепить сообщение; табло появится при ближайшей синхронизации.
+                    Тумблер <strong>«Замеры»</strong> включает ежедневную сводку замеров WB в этот чат
+                    (в 09:00 МСК за вчера + сегодня).
                 </p>
 
                 {deepLink && (

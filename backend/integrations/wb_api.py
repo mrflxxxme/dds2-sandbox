@@ -153,6 +153,82 @@ class WBApiClient:
             params,
         )
 
+    # ─── Warehouse measurements / dimension penalties (Analytics API) ────────
+
+    @staticmethod
+    def _rfc3339(d: date) -> str:
+        """WB analytics measurements require RFC3339 with trailing Z."""
+        return datetime(d.year, d.month, d.day, tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def _get_analytics_reports(self, path: str, params: dict) -> list[dict]:
+        """
+        GET a seller-analytics report whose payload is {"data": {"reports": [...]}}.
+        Single page — pagination is handled by the caller via limit/offset.
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_SELLER_ANALYTICS_API_BASE}{path}"
+                logger.info("wb_api.request", method="GET", path=path, params=params)
+                response = await client.get(url, headers=self.headers, params=params)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401)")
+                if response.status_code == 403:
+                    raise ValueError("WB API: у ключа нет доступа к категории «Аналитика» (403)")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Analytics API server error: HTTP {response.status_code}")
+                if response.status_code == 204:
+                    return []
+                if response.status_code != 200:
+                    raise ValueError(f"WB Analytics API error: HTTP {response.status_code} — {response.text[:200]}")
+
+                data = response.json()
+                reports = (data or {}).get("data", {}).get("reports")
+                return reports if isinstance(reports, list) else []
+
+    async def _paginate_analytics(
+        self, path: str, date_from: date, date_to: date, page_size: int = 1000, max_pages: int = 50
+    ) -> list[dict]:
+        """Walk offset pages of a seller-analytics report until a short page is returned."""
+        rows: list[dict] = []
+        offset = 0
+        for _ in range(max_pages):
+            params = {
+                "dateFrom": self._rfc3339(date_from),
+                "dateTo": self._rfc3339(date_to),
+                "limit": page_size,
+                "offset": offset,
+            }
+            page = await self._get_analytics_reports(path, params)
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return rows
+
+    async def get_warehouse_measurements(self, date_from: date, date_to: date) -> list[dict]:
+        """
+        Контрольные замеры товаров на складах WB за период.
+        WB Analytics API: GET /api/analytics/v1/warehouse-measurements
+        Row: {nmId, subjectName, dimId, volume, width, length, height, photoUrls[], dt}
+        """
+        return await self._paginate_analytics(
+            "/api/analytics/v1/warehouse-measurements", date_from, date_to
+        )
+
+    async def get_measurement_penalties(self, date_from: date, date_to: date) -> list[dict]:
+        """
+        Удержания за занижение габаритов (по результатам замеров) за период.
+        WB Analytics API: GET /api/analytics/v1/measurement-penalties
+        """
+        return await self._paginate_analytics(
+            "/api/analytics/v1/measurement-penalties", date_from, date_to
+        )
+
     # ─── FBO Supplies (Marketplace API) ─────────────────────────────────────
 
     @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)

@@ -46,6 +46,7 @@ const navGroups = [
             { href: '/warehouse/acceptance-limits', label: 'Лимиты приёмки', icon: '📅', pageKey: 'fbo' },
             { href: '/warehouse/wb-returns', label: 'Возвраты на ПВЗ', icon: '↩️', pageKey: 'warehouse' },
             { href: '/warehouse/wb-stocks', label: 'Остатки WB', icon: '🏭', pageKey: 'stocks' },
+            { href: '/measurements', label: 'Замеры', icon: '📐', pageKey: 'measurements' },
             { href: '/warehouse/analytics', label: 'Аналитика остатков', icon: '📊', pageKey: 'stock-analytics' },
             { href: '/warehouse/speed', label: 'Приоритет складов', icon: '🚀', pageKey: 'stock-analytics' },
             { href: '/barcode-labels', label: 'Генератор ШК', icon: '🏷️', pageKey: 'barcode-labels' },
