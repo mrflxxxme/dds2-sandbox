@@ -30,6 +30,9 @@ class TestWarehouseToDistrict:
             ("Электросталь", DISTRICT_CENTRAL),
             ("Подольск 3", DISTRICT_CENTRAL),
             ("Голицыно СГТ", DISTRICT_CENTRAL),
+            # Новый склад WB (2026-05-15), в API приходит коротким именем —
+            # до фикса аудита 2026-07-09 улетал в unknown.
+            ("Тверь", DISTRICT_CENTRAL),
             ("Шушары: Питание", DISTRICT_NORTHWEST),
             ("СПБ Шушары", DISTRICT_NORTHWEST),
             ("Краснодар", DISTRICT_SOUTH_CAUCASUS),
@@ -109,3 +112,37 @@ class TestStructure:
         # но все ключи WAREHOUSE_LOGISTICS_COEF должны быть в WAREHOUSE_TO_DISTRICT.
         extra = set(WAREHOUSE_LOGISTICS_COEF) - set(WAREHOUSE_TO_DISTRICT)
         assert not extra, f"warehouses in coef but not in district map: {extra}"
+
+
+class TestCanonicalWarehouseName:
+    """Алиасы 3rd-party/коротких имён → канон WB API (фиксы аудита 2026-07-09)."""
+
+    @pytest.mark.parametrize(
+        ("raw", "canon"),
+        [
+            # Регистр speed-JSON («Белая Дача») vs карта ФО («Белая дача»).
+            ("Белая Дача", "Белая дача"),
+            # Короткие имена WB orders/stocks → полные имена speed-карты.
+            ("Тула", "Алексин (Тула)"),
+            ("Рязань", "Рязань (Тюшевское)"),
+            # Существующие алиасы не сломаны.
+            ("Новосемейкино", "Самара (Новосемейкино)"),
+            ("Склад СПБ Шушары Московское", "СПБ Шушары"),
+            # Passthrough без алиаса.
+            ("Коледино", "Коледино"),
+        ],
+    )
+    def test_aliases(self, raw: str, canon: str) -> None:
+        from backend.services.warehouse_district import canonical_warehouse_name
+
+        assert canonical_warehouse_name(raw) == canon
+
+    def test_aliased_names_resolve_to_known_district(self) -> None:
+        """Каждый канон из алиасов обязан быть в WAREHOUSE_TO_DISTRICT —
+        иначе алиас создаёт новую дыру unknown."""
+        from backend.services.warehouse_district import WAREHOUSE_NAME_ALIASES
+
+        for raw, canon in WAREHOUSE_NAME_ALIASES.items():
+            assert warehouse_to_district(canon) != DISTRICT_UNKNOWN, (
+                f"алиас {raw!r} → {canon!r} ведёт в unknown-округ"
+            )
