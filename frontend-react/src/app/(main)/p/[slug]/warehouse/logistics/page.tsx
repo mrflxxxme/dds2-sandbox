@@ -218,11 +218,11 @@ const STATUS_MAP: Record<AssemblyStatus, { label: string; className: string }> =
 };
 
 const WB_STATUS_MAP: Record<string, { label: string; className: string }> = {
-    ACTIVE:       { label: 'Запланирована',  className: 'badge-warning' },
-    ON_DELIVERY:  { label: 'В пути',         className: 'badge-info' },
-    IN_PROGRESS:  { label: 'Разгрузка',      className: 'badge-info' },
-    ACCEPTED:     { label: 'Принята',         className: 'badge-success' },
-    CANCELLED:    { label: 'Отменена',        className: 'badge-secondary' },
+    ACTIVE:       { label: 'Запланирована',      className: 'badge-warning' },
+    ON_DELIVERY:  { label: 'Отгрузка разрешена', className: 'badge-info' },
+    IN_PROGRESS:  { label: 'Идёт приёмка',       className: 'badge-info' },
+    ACCEPTED:     { label: 'Принята',            className: 'badge-success' },
+    CANCELLED:    { label: 'Отклонена',          className: 'badge-secondary' },
 };
 
 type GroupBy = 'wb_warehouse' | 'warehouse';

@@ -10,10 +10,10 @@ import type { WbFboSupply } from '@/types/api';
 
 const STATUS_LABEL: Record<string, string> = {
     ACTIVE: 'Запланирована',
-    ON_DELIVERY: 'В пути',
-    IN_PROGRESS: 'Разгрузка разрешена',
+    ON_DELIVERY: 'Отгрузка разрешена',
+    IN_PROGRESS: 'Идёт приёмка',
     ACCEPTED: 'Принята',
-    CANCELLED: 'Отменена',
+    CANCELLED: 'Отклонена',
 };
 
 export default function FboArchivePage() {

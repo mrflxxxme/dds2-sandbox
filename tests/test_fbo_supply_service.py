@@ -148,12 +148,14 @@ class TestHelpers:
         assert _parse_wb_date(None) is None
 
     def test_map_fbw_status(self):
-        assert _map_fbw_status(1) == WbSupplyStatus.ACTIVE
-        assert _map_fbw_status(2) == WbSupplyStatus.ON_DELIVERY
-        assert _map_fbw_status(3) == WbSupplyStatus.IN_PROGRESS
-        assert _map_fbw_status(4) == WbSupplyStatus.ACCEPTED
-        assert _map_fbw_status(5) == WbSupplyStatus.ACCEPTED
-        assert _map_fbw_status(6) == WbSupplyStatus.ACCEPTED  # Частично принята
+        # Шкала WB: 1 черновик · 2 запланирована · 3 отгрузка разрешена ·
+        # 4 идёт приёмка · 5 принята · 6 отклонена. Совпадает со statusId кабинета.
+        assert _map_fbw_status(1) == WbSupplyStatus.ACTIVE  # Черновик
+        assert _map_fbw_status(2) == WbSupplyStatus.ACTIVE  # Запланирована
+        assert _map_fbw_status(3) == WbSupplyStatus.ON_DELIVERY  # Отгрузка разрешена
+        assert _map_fbw_status(4) == WbSupplyStatus.IN_PROGRESS  # Идёт приёмка
+        assert _map_fbw_status(5) == WbSupplyStatus.ACCEPTED  # Принята
+        assert _map_fbw_status(6) == WbSupplyStatus.CANCELLED  # Отклонена
         assert _map_fbw_status(99) == WbSupplyStatus.ACTIVE  # Unknown → default
 
     def test_map_fbw_box_type(self):
@@ -168,7 +170,7 @@ class TestHelpers:
     def test_create_supply_from_fbw_list(self):
         wb_data = {
             "supplyID": 37847227,
-            "statusID": 2,
+            "statusID": 3,
             "createDate": "2026-03-12T16:12:14Z",
             "supplyDate": "2026-03-21",
             "factDate": "2026-03-20",
@@ -182,6 +184,25 @@ class TestHelpers:
         assert supply.actual_date == date(2026, 3, 20)
         assert supply.project_id == 1
 
+    def test_planned_supply_is_not_on_delivery(self):
+        """FBW-40749690: слот забронирован, машина не выехала → statusID=2.
+
+        Кабинет показывает «Запланировано»; до фикса шкала была сдвинута на
+        единицу и такая поставка попадала в ON_DELIVERY («В пути»).
+        """
+        supply = _create_supply_from_fbw_list(
+            project_id=1,
+            wb_data={
+                "supplyID": 40749690,
+                "statusID": 2,
+                "createDate": "2026-07-10T12:41:56Z",
+                "supplyDate": "2026-07-24",
+                "boxTypeID": 2,
+            },
+        )
+        assert supply.wb_status == WbSupplyStatus.ACTIVE
+        assert supply.actual_date is None
+
     def test_update_supply_from_fbw_list(self):
         supply = WbFboSupply(
             wb_supply_id="37847227",
@@ -190,7 +211,7 @@ class TestHelpers:
             created_at_wb=datetime(2026, 3, 1),
         )
         wb_data = {
-            "statusID": 4,
+            "statusID": 5,
             "supplyDate": "2026-03-21",
             "factDate": "2026-03-20",
             "boxTypeID": 5,
@@ -708,7 +729,7 @@ class TestSyncFboStatuses:
         mock_client.get_fbw_supplies.return_value = [
             {
                 "supplyID": 37847227,
-                "statusID": 3,  # IN_PROGRESS
+                "statusID": 4,  # IN_PROGRESS (идёт приёмка)
                 "createDate": datetime.utcnow().isoformat() + "Z",
             },
         ]
@@ -1018,7 +1039,7 @@ class TestEnrichActiveWarehouseRefresh:
         mock_client.get_fbw_supply_detail.return_value = {
             "warehouseName": "Коледино",
             "quantity": 192,
-            "statusID": 3,
+            "statusID": 4,
         }
         # Состав в WB вырос (192 → 230): enrich непринятой поставки обязан
         # перетянуть goods, иначе зеркало item-ов застрянет на старом наполнении.
@@ -1087,7 +1108,7 @@ class TestEnrichActiveWarehouseRefresh:
         mock_client.get_fbw_supply_detail.return_value = {
             "warehouseName": "Электросталь",
             "quantity": 100,
-            "statusID": 2,
+            "statusID": 3,
         }
         mock_client.get_fbw_supply_goods.return_value = [
             {"barcode": "BC-OD-1", "vendorCode": "VC1", "nmID": 1, "quantity": 100, "acceptedQuantity": 0},
@@ -1836,7 +1857,7 @@ class TestAutoShipOnWbAccepted:
         assert ids == []
 
     async def test_collect_picks_partial_acceptance(self, db_session):
-        """Частичная приёмка (statusID 5/6 → ACCEPTED, accepted_qty < total_qty) ТОЖЕ
+        """Частичная приёмка (statusID 5 → ACCEPTED, accepted_qty < total_qty) ТОЖЕ
         отгружается — порога по qty нет; недоприёмка добивается отдельным flow
         (process_fbo_return). Пиннит намеренное поведение от тихого регресса."""
         wh = await _make_ff_warehouse(db_session)
@@ -2020,7 +2041,7 @@ class TestAutoShipOnWbAccepted:
 
     async def test_status_sync_ships_on_fresh_accept(self, db_session):
         """E2E status-sync (основной триггер «вб уже принял»): поставка в БД ещё
-        IN_PROGRESS, WB отдаёт её ACCEPTED (statusID=4) → VEHICLE_ASSIGNED сборка
+        IN_PROGRESS, WB отдаёт её ACCEPTED (statusID=5) → VEHICLE_ASSIGNED сборка
         авто-отгружается. Покрывает path-specific pre-filter + in-place мутацию."""
         wh = await _make_ff_warehouse(db_session)
         bc = f"BC-{_uid()}"
@@ -2034,11 +2055,11 @@ class TestAutoShipOnWbAccepted:
         await db_session.refresh(key)
 
         mock_client = AsyncMock()
-        # WB отдаёт ту же поставку уже принятой (statusID=4 → ACCEPTED)
+        # WB отдаёт ту же поставку уже принятой (statusID=5 → ACCEPTED)
         mock_client.get_fbw_supplies.return_value = [
             {
                 "supplyID": supply.wb_supply_id,
-                "statusID": 4,
+                "statusID": 5,
                 "createDate": datetime.utcnow().isoformat() + "Z",
             },
         ]

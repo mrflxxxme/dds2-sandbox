@@ -541,7 +541,7 @@ async def test_get_state_adopts_booked_fbo(db_session, monkeypatch):
     state = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert state.supply_id == 40503730
     assert state.sync_status == WbSupplySyncStatus.BOOKED.value
-    assert state.wb_supply_state == "Разгрузка разрешена"
+    assert state.wb_supply_state == "Идёт приёмка"
 
 
 @pytest.mark.asyncio

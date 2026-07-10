@@ -402,8 +402,8 @@ class WbPortalClient:
         Возвращает объект `supply` с `statusId`/`statusName` («Запланировано» /
         «Отгрузка разрешена» / «Идёт приёмка» / «Принято» …), а также
         `boxQuantity`, `supplyDate`, `hasBoxes`, `warehouseName` и пр. Это тот
-        статус, что видит пользователь в кабинете (отличается от FBO Marketplace
-        API `WbFboSupply.wb_status`).
+        статус, что видит пользователь в кабинете; `statusId` — та же шкала, что
+        `statusID` Suppliers API (см. `FBW_STATUS_MAP`).
         """
         res = await self._call(
             {"supplyID": supply_id, "preorderID": None, "pageNumber": 1, "pageSize": 1, "search": ""},
