@@ -1,9 +1,22 @@
 """Service for WB advertising campaigns — sync and query for Ads tab."""
 
 import logging
-from datetime import date as date_type, timedelta
+from datetime import date as date_type, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+
+
+def _parse_wb_created(value: Any) -> datetime | None:
+    """WB createTime (ISO, часто с 'Z') → naive UTC datetime; при ошибке — None."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except (ValueError, TypeError):
+        return None
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -122,6 +135,8 @@ async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
                 "campaign_id": cid,
                 "name": str(c.get("name") or cid),
                 "campaign_type": c.get("type"),
+                "advert_type": c.get("advert_type"),  # числовой тип WB (8=авто/рекоменд., 9=аукцион)
+                "created_at": _parse_wb_created(c.get("create_time")),  # дата создания в WB
                 "bid_mode": c.get("bid_mode"),  # unified/manual из WB bid_type (_parse_advert_item)
                 "status": c.get("status") or 9,
                 "budget": campaign_budget or Decimal("0"),
@@ -182,6 +197,9 @@ async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
             set_={
                 "name": stmt.excluded.name,
                 "campaign_type": stmt.excluded.campaign_type,
+                "advert_type": stmt.excluded.advert_type,
+                # createTime от WB приоритетнее; если WB не прислал — сохраняем прежнее (в т.ч. бэкфилл)
+                "created_at": func.coalesce(stmt.excluded.created_at, WbAdCampaign.created_at),
                 "bid_mode": stmt.excluded.bid_mode,
                 "status": stmt.excluded.status,
                 "budget": stmt.excluded.budget,

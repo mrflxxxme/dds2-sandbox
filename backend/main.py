@@ -39,6 +39,7 @@ from backend.routers import (
     loans,
     localization,
     measurements,
+    media,
     migfull_portal,
     monitoring,
     payment_requests,
@@ -471,6 +472,8 @@ Instrumentator(
 
 # Public routes (no auth required)
 app.include_router(auth.router, prefix="/api/v1", tags=["Auth"])
+# Публичные медиа (кэш фото товаров) — без авторизации: <img> не шлёт JWT
+app.include_router(media.router, prefix="/api/v1", tags=["Media"])
 app.include_router(
     projects.router,
     prefix="/api/v1",

@@ -29,7 +29,7 @@ input[type="number"] {
     --color-success: #34c759;
     --color-warning: #ff9f0a;
     --color-danger: #ff3b30;
-    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-sans: var(--font-roboto), 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
 
     /* Apple style glass shadows */
     --shadow-glass: 0 4px 24px rgba(0, 0, 0, 0.04);
@@ -115,7 +115,25 @@ input[type="number"] {
 
 .glass-card:hover {
     box-shadow: inset 0 1px 0 0 var(--color-border-inner), var(--shadow-glass-hover);
-    transform: translateY(-2px);
+}
+
+/* Статичная карточка — без «подпрыгивания» при наведении (крупные окна) */
+.glass-card.static,
+.glass-card.static:hover {
+    transform: none;
+}
+
+/* Опция поискового дропдауна (SearchSelect) */
+.ss-opt {
+    padding: 6px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #111827;
+}
+
+.ss-opt:hover {
+    background: #f3f4f6;
 }
 
 /* ─── Buttons ───────────────────────────────────────────────────────────────── */
@@ -310,7 +328,6 @@ input[type="number"] {
 
 .stat-card:hover {
     box-shadow: inset 0 1px 0 0 var(--color-border-inner), var(--shadow-glass-hover);
-    transform: translateY(-2px);
 }
 
 .stat-card-label {
@@ -411,6 +428,94 @@ input[type="number"] {
     letter-spacing: 0.1em;
     color: var(--color-text-dim);
     padding: 24px 16px 8px;
+}
+
+.sidebar-section-btn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text);
+    padding: 10px 14px;
+    margin-top: 2px;
+    border-radius: 12px;
+    transition: background 0.2s ease, color 0.2s ease;
+}
+
+.sidebar-section-btn:hover {
+    background: var(--color-bg-hover);
+}
+
+/* Иконка и подпись секции — строго в одну строку, без переноса */
+.sidebar-section-btn {
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    text-align: left;
+}
+
+.sidebar-section-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sidebar-section-icon,
+.sidebar-link-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+/* Иконки заголовков секций — всегда приглушённые */
+.sidebar-section-icon {
+    color: var(--color-text-muted);
+}
+
+/* Иконки пунктов наследуют цвет ссылки (muted → hover → accent на активном) */
+.sidebar-link-icon {
+    color: inherit;
+}
+
+.sidebar-section-icon svg,
+.sidebar-link-icon svg {
+    width: 18px;
+    height: 18px;
+}
+
+.sidebar-section-label {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sidebar-section-chevron {
+    font-size: 12px;
+    line-height: 1;
+    opacity: 0.55;
+    flex-shrink: 0;
+    transition: transform 0.2s ease;
+}
+
+.sidebar-section-chevron.collapsed {
+    transform: rotate(-90deg);
+}
+
+/* Пункты внутри секции — лёгкий отступ для иерархии */
+.sidebar-nav .sidebar-link.nested {
+    padding-left: 26px;
+    font-weight: 500;
+    color: var(--color-text-muted);
 }
 
 .sidebar-user {
@@ -523,7 +628,6 @@ input[type="number"] {
 .project-selector:hover {
     background: white;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
-    transform: translateY(-1px);
 }
 
 /* ─── Auth Page ─────────────────────────────────────────────────────────────── */
@@ -1769,7 +1873,6 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .sc-status-pill:hover {
     border-color: var(--color-text-muted);
     color: var(--color-text);
-    transform: translateY(-1px);
 }
 
 .sc-status-pill-active {
@@ -2739,7 +2842,6 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
     transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
 }
 .sc-supplier-card:hover {
-    transform: translateY(-2px);
     box-shadow: var(--shadow-glass-hover);
 }
 .sc-badge-colored {

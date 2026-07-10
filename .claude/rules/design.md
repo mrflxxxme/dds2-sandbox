@@ -16,7 +16,7 @@ Apple-inspired glassmorphism. Все стили — в `globals.css` (основ
 ## Скругления: 8 (мини) / 12 (кнопки) / 14 (TMA) / 20 (карточки) / 24 (бейджи-pill)
 ## Отступы: сетка 4/8px (стандарт: 4, 8, 12, 16, 20, 24, 32, 48)
 
-## Типографика (Inter)
+## Типографика (Roboto)
 Заголовок 28/700, метрика 32/700, тело 14-15/400, мелкий 12-13/500.
 
 ## Классы: `btn btn-primary/secondary/danger/success/sm`, `badge badge-success/warning/danger/info/secondary`

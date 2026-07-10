@@ -13,6 +13,7 @@ from datetime import date
 from sqlalchemy import func, select, update as sa_update
 
 from backend.models import WbFunnelDaily
+from backend.services.funnel.ad_nm_stats import upsert_ad_nm_daily
 from backend.services.funnel.wb_api_client import (
     fetch_ad_campaigns,
     fetch_ad_stats,
@@ -146,7 +147,16 @@ async def batch_resync_ads(project_id: int) -> dict:
                 ad_stats = await fetch_ad_stats(adv_key, campaign_ids, w_from, w_to)
 
                 if ad_stats:
+                    # Разбивка кампания × товар — из того же ответа, без лишних запросов
+                    try:
+                        await upsert_ad_nm_daily(db, project_id, ad_stats.get("_by_nm_campaign") or {})
+                    except Exception as e:
+                        logger.warning(f"🔄 Ad nm daily save failed for window {w_from}→{w_to}: {e}")
+                        await db.rollback()
+
                     for date_str, nm_data in ad_stats.items():
+                        if date_str.startswith("_"):
+                            continue  # служебные ключи: _by_campaign, _by_nm_campaign
                         day_count = 0
                         for nm_id, ad in nm_data.items():
                             res = await db.execute(

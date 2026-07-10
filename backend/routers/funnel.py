@@ -827,6 +827,108 @@ async def get_campaign_history_endpoint(
     return await get_campaign_history(db, project.id, campaign_id, date_from=date_from, date_to=date_to)
 
 
+@router.get("/ad-article-catalog")
+async def get_ad_article_catalog_ep(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Полный каталог артикулов (nm_id → артикул/предмет/бренд) для каскадных фильтров рекламы."""
+    from backend.services.funnel.ads_manager import list_ad_article_catalog
+
+    return await list_ad_article_catalog(db, project.id)
+
+
+@router.get("/campaigns/{campaign_id}/metrics")
+async def get_campaign_metrics_endpoint(
+    campaign_id: int,
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    nm_id: int | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Посуточные метрики кампании: статистика РК + воронка её товаров, со строкой-итогом.
+    nm_id — воронка только по этому товару."""
+    from backend.services.funnel.ads_manager import get_campaign_metrics
+
+    return await get_campaign_metrics(db, project.id, campaign_id, date_from=date_from, date_to=date_to, nm_id=nm_id)
+
+
+class DepositRequest(BaseModel):
+    amount: int  # ₽, минимум 1000 (ограничение WB)
+    source: int = 0  # 0 = счёт кабинета Продвижения, иные — баланс/бонусы
+
+
+@router.post("/campaigns/{campaign_id}/deposit", dependencies=[Depends(rate_limit_write)])
+async def deposit_campaign_budget_endpoint(
+    campaign_id: int,
+    body: DepositRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ручное пополнение бюджета кампании (реальные деньги!). Инициируется пользователем."""
+    from backend.services.funnel.ads_manager import deposit_campaign_budget_manual
+
+    result = await deposit_campaign_budget_manual(db, project.id, campaign_id, body.amount, body.source)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "Не удалось пополнить бюджет")
+    return result
+
+
+@router.get("/campaigns/{campaign_id}/zones")
+async def get_campaign_zones_ep(
+    campaign_id: int,
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    nm_id: int | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Зоны показов кампании (поиск/рекомендации), ставки по зонам и правила ставки.
+
+    Для CPC (зона одна) отдаёт ещё и её статистику за период.
+    """
+    from backend.services.funnel.ads_manager import get_campaign_zones
+
+    return await get_campaign_zones(db, project.id, campaign_id, date_from, date_to, nm_id)
+
+
+class AdNmBackfillRequest(BaseModel):
+    date_from: str | None = None  # ISO; по умолчанию — от создания старейшей кампании
+    date_to: str | None = None
+
+
+@router.post("/ads/nm-backfill", dependencies=[Depends(rate_limit_write)])
+async def start_ad_nm_backfill(
+    body: AdNmBackfillRequest | None = None,
+    project: Project = Depends(get_current_project),
+):
+    """Фоновый сбор истории РК-статистики в разбивке по товарам (кампания × nmId × дата).
+
+    Идёт окнами по 31 дню с паузами (rate limit WB). Копим у себя: WB историю не хранит вечно.
+    """
+    from datetime import date as _date
+
+    from backend.services.funnel.ad_nm_stats import get_backfill_progress, run_ad_nm_backfill_bg
+
+    if get_backfill_progress(project.id).get("status") == "running":
+        return {"status": "already_running"}
+
+    body = body or AdNmBackfillRequest()
+    d_from = _date.fromisoformat(body.date_from) if body.date_from else None
+    d_to = _date.fromisoformat(body.date_to) if body.date_to else None
+    asyncio.create_task(run_ad_nm_backfill_bg(project.id, d_from, d_to))  # noqa: RUF006
+    return {"status": "started"}
+
+
+@router.get("/ads/nm-backfill/progress")
+async def ad_nm_backfill_progress(project: Project = Depends(get_current_project)):
+    """Статус фонового сбора разбивки по товарам."""
+    from backend.services.funnel.ad_nm_stats import get_backfill_progress
+
+    return get_backfill_progress(project.id)
+
+
 @router.get("/campaigns/budget_gaps")
 async def get_campaigns_budget_gaps(
     project: Project = Depends(get_current_project),
@@ -1018,6 +1120,7 @@ async def get_campaign_clusters_ep(
     campaign_id: int,
     date_from: str = Query(...),
     date_to: str = Query(...),
+    nm_id: int | None = Query(None, description="Считать кластеры только по этому товару кампании"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1025,7 +1128,7 @@ async def get_campaign_clusters_ep(
     дневное распределение бюджета (%) и флаги минус-фраз."""
     from backend.services.funnel.cluster_analysis_service import get_campaign_clusters
 
-    return await get_campaign_clusters(db, project.id, campaign_id, date_from, date_to)
+    return await get_campaign_clusters(db, project.id, campaign_id, date_from, date_to, nm_id)
 
 
 @router.post("/campaigns/{campaign_id}/clusters/minus", dependencies=[Depends(rate_limit_write)])

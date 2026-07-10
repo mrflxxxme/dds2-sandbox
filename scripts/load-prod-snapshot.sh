@@ -82,7 +82,7 @@ rm -f "backups/${LOCAL_COPY_NAME}"
 echo "🔌 Поднимаю pgbouncer..."
 docker compose up -d pgbouncer >/dev/null
 # Wait until healthy
-until [[ "$(docker inspect -f '{{.State.Health.Status}}' dds_app-pgbouncer-1 2>/dev/null)" == "healthy" ]]; do
+until [[ "$(docker compose ps -q pgbouncer | xargs -r docker inspect -f '{{.State.Health.Status}}' 2>/dev/null)" == "healthy" ]]; do
   sleep 1
 done
 echo "✅ Дамп залит."

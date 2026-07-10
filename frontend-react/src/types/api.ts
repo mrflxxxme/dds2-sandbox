@@ -3309,6 +3309,8 @@ export interface AdsManagerCampaign {
   campaign_id: number;
   name: string | null;
   campaign_type: string | null;
+  advert_type?: number | null;  // числовой тип WB: 8=авто/рекомендации, 9=аукцион (цветовая кодировка)
+  created_at?: string | null;  // дата создания кампании в WB (ISO) — фильтр по дате добавления
   status: number;
   status_label: string;
   budget: number;
@@ -3322,6 +3324,8 @@ export interface AdsManagerCampaign {
   clicks_period: number;
   ctr: number;
   cpc: number;
+  cpl: number;  // стоимость одной корзины за период
+  cpo: number;  // стоимость одного заказа за период
   drr: number;
   margin: number;
   ad_click_share: number;  // доля рекл. кликов от всех переходов товаров кампании
@@ -3478,6 +3482,39 @@ export interface ClusterTotals {
   cpo: number | null;
 }
 
+/** Метрики одной зоны показов (поиск / рекомендации). */
+export interface ZoneMetrics {
+  views: number;
+  clicks: number;
+  spend: number;
+  orders: number;
+  ctr: number;
+  cpc: number;
+  cpo: number | null;
+}
+
+/** Статистика по зонам. WB не отдаёт её напрямую: поиск = кластеры,
+ *  рекомендации = итог кампании минус поиск (флаг derived). */
+export interface CampaignZoneStats {
+  search: ZoneMetrics;
+  recommendations: ZoneMetrics | null;
+  total: { views: number; clicks: number; spend: number; orders: number } | null;
+  derived: boolean;
+}
+
+/** Зоны показов кампании и правила ставки (GET /campaigns/{id}/zones). */
+export interface CampaignZones {
+  campaign_id: number;
+  payment_type: string;   // cpm | cpc
+  bid_mode: string | null;  // unified | manual
+  placements: Record<string, boolean>;
+  bids: { search: number | null; recommendations: number | null };
+  zones_locked: boolean;  // зоны нельзя включать/выключать
+  single_bid: boolean;    // ставка одна: на все зоны (CPM-единая) или на все фразы (CPC)
+  zone_stats?: CampaignZoneStats | null;  // только для CPC: зона одна, данные прямые
+  error?: string;
+}
+
 export interface CampaignClustersResponse {
   campaign_id: number;
   name: string | null;
@@ -3487,10 +3524,45 @@ export interface CampaignClustersResponse {
   window: ClusterWindow;
   aov: number;
   target_drr: number;
+  default_bid?: number | null;  // ставка кампании — действует на кластеры без своей ставки
+  placements?: Record<string, boolean>;  // зоны показов: search / recommendations
+  zone_bids?: { search: number | null; recommendations: number | null };
+  zone_stats?: CampaignZoneStats;
   totals: ClusterTotals;
   daily: ClusterDailyPoint[];
   clusters: SearchCluster[];
   error?: 'no_api_key' | 'campaign_not_found' | string;  // при ошибке остальные поля отсутствуют
+}
+
+/** Строка посуточных метрик кампании (РК + воронка); date может быть меткой «За всё время». */
+export interface CampaignMetricRow {
+  date: string;
+  views: number;
+  clicks: number;
+  ctr: number;
+  cpc: number;
+  spend: number;
+  open_card: number;
+  add_to_cart: number;
+  cr1: number;
+  orders: number;
+  cr2: number;
+  orders_sum: number;
+  cpl: number | null;  // стоимость 1 корзины
+  cpo: number | null;  // стоимость 1 заказа
+  avg_price: number;
+  drr: number;
+}
+
+export interface CampaignMetricsResponse {
+  campaign_id: number;
+  name: string | null;
+  window: ClusterWindow;
+  nm_id?: number | null;
+  ad_by_nm?: boolean;  // РК-метрики отфильтрованы по товару, а не по всей кампании
+  totals: CampaignMetricRow;
+  rows: CampaignMetricRow[];
+  error?: string;
 }
 
 export interface ClusterProduct {
