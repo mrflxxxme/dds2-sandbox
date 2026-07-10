@@ -598,7 +598,7 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                     <button type="button" className="btn btn-secondary btn-sm" onClick={() => invoiceParseRef.current?.click()} disabled={parsing}>
                         {parsing ? 'Распознаю...' : '📄 Загрузить счёт или фото → распознать реквизиты'}
                     </button>
-                    <input ref={invoiceParseRef} type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,.heic" style={{ display: 'none' }}
+                    <input ref={invoiceParseRef} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp,.heic" style={{ display: 'none' }}
                         onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleParseInvoice(f); }} />
                     {parseInfo && <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6 }}>{parseInfo}</div>}
                 </div>
@@ -998,12 +998,12 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                                 <div style={{ fontSize: 24, marginBottom: 6 }}>📄</div>
                                 <div style={{ fontSize: 13, fontWeight: 600 }}>Счёт (INVOICE)</div>
                                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                                    {invoiceFile ? invoiceFile.name : 'PDF, Word или фото'}
+                                    {invoiceFile ? invoiceFile.name : 'PDF, Word, Excel или фото'}
                                 </div>
                                 <input
                                     ref={invoiceRef}
                                     type="file"
-                                    accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,.heic"
+                                    accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp,.heic"
                                     style={{ display: 'none' }}
                                     onChange={e => setInvoiceFile(e.target.files?.[0] ?? null)}
                                 />
@@ -1023,12 +1023,12 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
                                 <div style={{ fontSize: 24, marginBottom: 6 }}>📋</div>
                                 <div style={{ fontSize: 13, fontWeight: 600 }}>Акт (ACT)</div>
                                 <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                                    {actFile ? actFile.name : 'PDF, Word или фото'}
+                                    {actFile ? actFile.name : 'PDF, Word, Excel или фото'}
                                 </div>
                                 <input
                                     ref={actRef}
                                     type="file"
-                                    accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,.heic"
+                                    accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp,.heic"
                                     style={{ display: 'none' }}
                                     onChange={e => setActFile(e.target.files?.[0] ?? null)}
                                 />

@@ -67,7 +67,16 @@
   PENDING_REVIEW/DRAFT → CANCELLED (НЕ из DRAFT_CREATED — там платёжка уже в банке); отменённая
   заявка освобождает свои заборы (CANCELLED исключён из `_assert_shipments_free`/`already_requested`).
 - `payment_request_documents.py` — upload/download(стрим через бэк, project-scoped)/delete (MinIO).
-  Счёт/акт: **PDF, Word или фото** (MIME-allowlist + magic-bytes; исполняемые отсекаются).
+  Счёт/акт: **PDF, Word, Excel или фото** (MIME- **или** ext-allowlist + magic-bytes; исполняемые
+  отсекаются). Ext-фолбэк обязателен: браузер шлёт `.heic`/`.xls` с пустым/`octet-stream` типом.
+- `invoice_parser.py` — `POST /parse-invoice`: файл счёта → реквизиты получателя (ПОДСКАЗКА для
+  формы, в БД не пишется). Текст: PDF → pdfplumber, `.docx` → stdlib zipfile, `.xls` (BIFF, печатная
+  форма 1С) → xlrd, `.xlsx` → openpyxl, HTML-таблица под именем `.xls` → снятие тегов; скан-PDF и
+  фото → vision-Claude. Текст разбирает Haiku (понимает «Продавец vs Покупатель») с regex-fallback.
+  Гейты доверия: р/с surface'ится только пройдя контроль-ключ ЦБ по БИК; счёт, совпавший с НАШИМ
+  (`own_accounts`), чистится как блок плательщика. Банк по БИК — `enrich_bank_from_db` (полный
+  справочник `cbr_bic`, фолбэк на 9 зашитых): без неё счета ИП из региональных филиалов
+  («Тульское отделение N8604 ПАО Сбербанк») оставались без банка и к/с.
 - `faktura_payment.py` — `create_payment_draft`: authenticate→get_accounts→build body→
   validate_payment→persist `bank_guid` ДО save→save_payment→DRAFT_CREATED. Идемпотентно по guid.
 - `etl/sync_payment_requests.py` — **матчер заявок**: хук в `persist_df` (sync). На каждый синк

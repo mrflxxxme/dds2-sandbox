@@ -7,6 +7,7 @@ asyncpg==0.31.0
 psycopg2-binary==2.9.12
 pandas==2.3.3
 openpyxl==3.1.5
+xlrd==2.0.1  # legacy BIFF .xls — в нём 1С печатает счёт на оплату (openpyxl такое не читает)
 python-multipart==0.0.32
 pydantic==2.13.4
 pydantic-settings==2.14.2

@@ -1,5 +1,5 @@
 # ruff: noqa: RUF001, RUF002, RUF003
-"""Детерминированное распознавание реквизитов из файла счёта (PDF/Word).
+"""Детерминированное распознавание реквизитов из файла счёта (PDF/Word/Excel).
 
 БЕЗ ИИ/OCR — только разбор извлечённого текста по якорям («ИНН», «БИК», «Банк
 получателя», «Получатель», «Всего к оплате») и структуре российской платёжки.
@@ -8,14 +8,17 @@
 их пользователь вводит вручную.
 
 Текст из PDF — через pdfplumber (как `services/planning/customs.py`); из .docx —
-stdlib zipfile + регулярка по `word/document.xml` (без python-docx). Новых
-зависимостей не добавляем.
+stdlib zipfile + регулярка по `word/document.xml` (без python-docx); из Excel —
+xlrd (legacy BIFF `.xls` — так печатает счёт 1С) / openpyxl (`.xlsx`), плюс
+фолбэк на HTML-таблицу, сохранённую под именем `.xls` (выгрузки банков).
 """
 
 import asyncio
+import datetime as dt
 import html
 import io
 import logging
+import math
 import re
 import zipfile
 from decimal import Decimal, InvalidOperation
@@ -24,10 +27,11 @@ from typing import TYPE_CHECKING
 from backend.config import settings
 from backend.schemas.payment_request import InvoiceParseResult, ParsedDocument
 from backend.services import invoice_split
-from backend.services.bank_directory import resolve_bank
+from backend.services.bank_directory import resolve_bank, resolve_bank_db
 
 if TYPE_CHECKING:
     from PIL import Image
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger("dds.payment_request")
 
@@ -35,8 +39,11 @@ logger = logging.getLogger("dds.payment_request")
 
 _PDF_MAGIC = b"%PDF"
 _ZIP_MAGIC = b"PK\x03\x04"
+_OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # Compound Document: legacy .xls И .doc
 _MAX_PDF_PAGES = 10              # счёт — 1-2 страницы; глубже не разбираем (анти-DoS)
 _MAX_XML_BYTES = 20 * 1024 * 1024  # потолок РАСПАКОВАННОГО document.xml (анти zip-bomb)
+_MAX_SHEETS = 5                  # счёт — один лист; глубже не разбираем (анти-DoS)
+_MAX_SHEET_ROWS = 500            # печатная форма счёта ≪ 500 строк
 
 
 def _extract_text_pdf(data: bytes) -> str:
@@ -69,12 +76,110 @@ def _extract_text_docx(data: bytes) -> str:
     return html.unescape(text)
 
 
+# ─── Excel-счёт (1С печатает счёт в legacy .xls) ────────────────────────────────
+# Лист счёта — та же платёжка, только в клетках. Склеиваем непустые ячейки строки через
+# пробел, строки — через \n: якоря («ИНН», «Всего к оплате») и значения оказываются рядом,
+# и дальше работает общий текстовый путь (Claude + regex-fallback).
+
+
+def _fmt_number(v: float) -> str:
+    """Числовая ячейка → строка. Длинное целое (ИНН/р/с/БИК, если 1С положила его числом) —
+    как есть; остальное — с копейками: `_TOTAL_RE` ждёт два знака, а xlrd отдаёт «63300.0»,
+    и «Всего к оплате: 63300.0» иначе не матчится."""
+    if not math.isfinite(v):
+        return ""
+    if v == int(v) and abs(v) >= 1e10:
+        return str(int(v))
+    return f"{v:.2f}"
+
+
+def _fmt_cell(v: object) -> str:
+    """Значение ячейки → строка для текстового счёта («» для пустых/булевых)."""
+    if v is None or isinstance(v, bool):
+        return ""
+    if isinstance(v, dt.datetime | dt.date):
+        return v.strftime("%d.%m.%Y")
+    if isinstance(v, int | float):
+        return _fmt_number(float(v))
+    return str(v).strip()
+
+
+def _rows_to_text(rows: list[list[str]]) -> str:
+    """Строки ячеек → текст: пустые ячейки и пустые строки выкидываем."""
+    lines = [" ".join(c for c in row if c) for row in rows]
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _extract_text_xls(data: bytes) -> str:
+    """Legacy BIFF `.xls` (OLE2) через xlrd. Даты-ячейки приводим к ДД.ММ.ГГГГ, иначе
+    «от <дата>» в основании/назначении приехало бы серийным числом Excel."""
+    import xlrd  # type: ignore  # нет py.typed и стабов → глушим import-untyped (как pillow_heif)
+
+    book = xlrd.open_workbook(file_contents=data)
+    rows: list[list[str]] = []
+    for sheet in book.sheets()[:_MAX_SHEETS]:
+        for r in range(min(sheet.nrows, _MAX_SHEET_ROWS)):
+            row: list[str] = []
+            for c in range(sheet.ncols):
+                cell = sheet.cell(r, c)
+                if cell.ctype == xlrd.XL_CELL_DATE:
+                    try:
+                        row.append(xlrd.xldate_as_datetime(cell.value, book.datemode).strftime("%d.%m.%Y"))
+                        continue
+                    except (ValueError, OverflowError):  # XLDateError — подкласс ValueError
+                        pass  # битая дата → отдаём как обычное значение
+                row.append(_fmt_cell(cell.value))
+            rows.append(row)
+    return _rows_to_text(rows)
+
+
+def _extract_text_xlsx(data: bytes) -> str:
+    """`.xlsx` через openpyxl (уже в зависимостях). `data_only` — считанные значения формул."""
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    try:
+        rows: list[list[str]] = []
+        for ws in wb.worksheets[:_MAX_SHEETS]:
+            for row in ws.iter_rows(max_row=_MAX_SHEET_ROWS, values_only=True):
+                rows.append([_fmt_cell(v) for v in row])
+        return _rows_to_text(rows)
+    finally:
+        wb.close()
+
+
+def _extract_text_html(data: bytes) -> str:
+    """HTML-таблица, сохранённая под именем `.xls` (выгрузки банков — см. `file_validation`).
+    Ячейки/строки → переносы, затем снимаем теги. Кодировка: cp1251, если объявлена явно."""
+    raw = data[:_MAX_XML_BYTES]
+    head = raw[:2048].lower()
+    enc = "cp1251" if (b"windows-1251" in head or b"cp1251" in head) else "utf-8"
+    text = raw.decode(enc, errors="replace")
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", text)
+    text = re.sub(r"(?i)</(td|th)\s*>", " ", text)
+    text = re.sub(r"(?i)</(tr|p|div|h\d)\s*>|<br\s*/?>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text)
+
+
+def _extract_text_spreadsheet(data: bytes) -> str:
+    """Табличный счёт → текст по РЕАЛЬНОМУ формату: `.xls` бывает и OLE2, и xlsx, и HTML."""
+    if data[:8] == _OLE2_MAGIC:
+        return _extract_text_xls(data)
+    if data[:4] == _ZIP_MAGIC:
+        return _extract_text_xlsx(data)
+    return _extract_text_html(data)
+
+
 def _extract_text(data: bytes, filename: str) -> str:
     """Извлечь текст из счёта по расширению/магическим байтам. Неизвестный тип → ""."""
     name = (filename or "").lower()
     head = data[:4]
     if name.endswith(".pdf") or head == _PDF_MAGIC:
         return _extract_text_pdf(data)
+    # Excel — ДО ZIP-ветки (.xlsx тоже ZIP) и до OLE2-ветки Word (.doc делит магию с .xls).
+    if name.endswith((".xls", ".xlsx")) or (data[:8] == _OLE2_MAGIC and not name.endswith(".doc")):
+        return _extract_text_spreadsheet(data)
     if name.endswith(".docx") or head == _ZIP_MAGIC:
         return _extract_text_docx(data)
     return ""
@@ -159,7 +264,16 @@ _CONTRACT_RE = re.compile(
 )
 # НДС: явная ставка «НДС 20%» (+ сумма рядом, если есть) либо пометка «Без НДС / не облагается».
 _VAT_RATE_RE = re.compile(r"НДС\s*(\d{1,2})\s*%(?:[^\d\-%]{0,25}?(\d[\d\s]*[,.]\d{2}))?", re.IGNORECASE)
-_VAT_NONE_RE = re.compile(r"Без\s+НДС|НДС\s+не\s+облага|не\s+облага\w*\s+НДС", re.IGNORECASE)
+# «Без налога (НДС)» — формулировка печатной формы 1С (счёт ИП на УСН).
+_VAT_NONE_RE = re.compile(
+    r"Без\s+НДС|Без\s+налога\s*\(?\s*НДС|НДС\s+не\s+облага|не\s+облага\w*\s+НДС", re.IGNORECASE
+)
+
+
+def _bank_unknown_warning(bik: str) -> str:
+    """Единый текст «банк по БИК не опознан» — `enrich_bank_from_db` снимает его, добив банк
+    из полного справочника ЦБ (`cbr_bic`). Формулировка общая для regex- и LLM-пути."""
+    return f"БИК {bik} не найден в справочнике — проверьте реквизиты банка вручную"
 
 
 def _valid_bik(bik: str) -> bool:
@@ -341,7 +455,8 @@ def extract_requisites_from_text(
         result.payee_kpp = m.group(1)
         found.append("payee_kpp")
 
-    # БИК → справочник (заполняет банк + к/с). Вне справочника → в warnings.
+    # БИК → справочник (заполняет банк + к/с). Структурно валидный БИК отдаём в любом случае
+    # (как LLM-путь в `_finalize`); банк/к-с вне зашитого набора добьёт `enrich_bank_from_db`.
     bik: str | None = None
     corr_from_bik: str | None = None
     if m := _BIK_RE.search(text):
@@ -350,15 +465,16 @@ def extract_requisites_from_text(
             warnings.append("БИК распознан некорректно — проверьте реквизиты банка вручную")
         else:
             bik = cand
+            result.payee_bik = bik
+            found.append("payee_bik")
             bank = resolve_bank(bik)
             if bank is not None:
-                result.payee_bik = bik
                 result.payee_bank_name = bank["name"]
                 result.payee_corr_account = bank["corr_account"]
                 corr_from_bik = bank["corr_account"]
-                found += ["payee_bik", "payee_bank_name", "payee_corr_account"]
+                found += ["payee_bank_name", "payee_corr_account"]
             else:
-                warnings.append(f"БИК {bik} не найден в справочнике — проверьте реквизиты банка вручную")
+                warnings.append(_bank_unknown_warning(bik))
 
     # Счета: р/с + к/с.
     rs, corr = _split_accounts(text, corr_from_bik)
@@ -566,6 +682,8 @@ def _finalize(payee: dict, own_accounts: frozenset[str] = frozenset()) -> Invoic
             r.payee_bank_name = bank["name"]
             r.payee_corr_account = bank["corr_account"]
             found += ["payee_bank_name", "payee_corr_account"]
+        else:  # региональный филиал вне зашитого набора → добьёт enrich_bank_from_db
+            warnings.append(_bank_unknown_warning(bik))
     elif bik:
         warnings.append("БИК распознан некорректно — проверьте реквизиты банка вручную")
 
@@ -852,6 +970,30 @@ async def parse_invoice_async(
     if not text or not text.strip():
         return InvoiceParseResult(warnings=["Файл пуст или текст не распознан — введите реквизиты вручную"])
     return await _requisites_from_text(text, own_accounts)
+
+
+async def enrich_bank_from_db(db: "AsyncSession", r: InvoiceParseResult) -> InvoiceParseResult:
+    """Добить банк получателя из ПОЛНОГО справочника ЦБ (`cbr_bic`), если зашитый набор не знал БИК.
+
+    Зашиты только 9 крупных банков — счета от ИП обычно приходят из регионального филиала
+    («ТУЛЬСКОЕ ОТДЕЛЕНИЕ N8604 ПАО СБЕРБАНК», БИК 047003608), и банк/к-с оставались пустыми,
+    хотя платёжка (`faktura_payment`) тот же БИК резолвит через `cbr_bic`. Мутирует результат
+    на месте и снимает предупреждение «не найден в справочнике». Справочник пуст (джоба
+    `cbr_bic_sync` ещё не отработала) → всё остаётся как было, предупреждение сохраняется.
+    """
+    if not r.payee_bik or r.payee_bank_name:
+        return r
+    bank = await resolve_bank_db(db, r.payee_bik)
+    if bank is None:
+        return r
+    r.payee_bank_name = bank["name"]
+    r.fields_found = [*r.fields_found, "payee_bank_name"]
+    if not r.payee_corr_account:  # к/с из текста счёта приоритетнее — он уже распознан
+        r.payee_corr_account = bank["corr_account"]
+        r.fields_found = [*r.fields_found, "payee_corr_account"]
+    warn = _bank_unknown_warning(r.payee_bik)
+    r.warnings = [w for w in r.warnings if w != warn]
+    return r
 
 
 def parse_invoice(data: bytes, filename: str) -> InvoiceParseResult:

@@ -246,7 +246,7 @@ export default function ShipmentPaymentsTab() {
                     {parsing ? 'Распознаю счёт...' : '📄 Загрузить счёт → подобрать заборы'}
                 </button>
                 <input
-                    ref={fileRef} type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,.heic" style={{ display: 'none' }}
+                    ref={fileRef} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp,.heic" style={{ display: 'none' }}
                     onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleUploadMatch(f); }}
                 />
                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>подберёт заборы по ИНН и сумме счёта</span>

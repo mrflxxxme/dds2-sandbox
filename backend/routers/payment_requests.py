@@ -643,14 +643,14 @@ async def parse_invoice_file(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> InvoiceParseResult:
-    """Распознать реквизиты получателя из файла счёта (PDF/Word/фото) — ПОДСКАЗКА для формы.
+    """Распознать реквизиты получателя из файла счёта (PDF/Word/Excel/фото) — ПОДСКАЗКА для формы.
 
     В БД ничего не пишется. Поля, не прошедшие проверку (контроль-ключ р/с по БИК, БИК в
-    справочнике), остаются None — вводятся вручную. PDF/Word разбираются текстовым Claude+regex,
-    фото (jpg/png/webp/heic) — vision-Claude. Наши счета (проекта) передаём в распозналку, чтобы
-    отсечь блок ПЛАТЕЛЬЩИКА (наш счёт), ошибочно принятый за получателя.
+    справочнике), остаются None — вводятся вручную. PDF/Word/Excel разбираются текстовым
+    Claude+regex, фото (jpg/png/webp/heic) — vision-Claude. Наши счета (проекта) передаём в
+    распозналку, чтобы отсечь блок ПЛАТЕЛЬЩИКА (наш счёт), ошибочно принятый за получателя.
     """
-    # Счёт: PDF/Word/фото. Валидация как у upload_payment_request_document:
+    # Счёт: PDF/Word/Excel/фото. Валидация как у upload_payment_request_document:
     # allowlist MIME ИЛИ расширение (браузер часто шлёт пустой content_type на HEIC)
     # + блок исполняемых + magic-проверка ниже.
     content_type = (file.content_type or "").lower()
@@ -658,16 +658,18 @@ async def parse_invoice_file(
     allowed_mime = (
         "application/pdf",
         "application/msword",
+        "application/vnd.ms-excel",  # legacy .xls — в нём 1С печатает счёт
         "application/vnd.openxmlformats-officedocument",
         "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif",
     )
     allowed_ext = (
-        ".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif",
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+        ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif",
     )
     bad_ext = (".exe", ".bat", ".cmd", ".dll", ".sh", ".msi", ".ps1", ".com")
     ok_type = any(content_type.startswith(p) for p in allowed_mime) or filename_lower.endswith(allowed_ext)
     if filename_lower.endswith(bad_ext) or not ok_type:
-        raise HTTPException(status_code=415, detail="Поддерживаются PDF, Word или фото счёта (JPG/PNG/HEIC)")
+        raise HTTPException(status_code=415, detail="Поддерживаются PDF, Word, Excel или фото счёта (JPG/PNG/HEIC)")
 
     # Распознавание (без записи в БД) допускает файл крупнее хранимого документа: многостраничные
     # телефонные сканы счёта легко >20 МБ. Кап = MAX_UPLOAD_SIZE_MB; разнесённые части ужимаются.
@@ -693,9 +695,12 @@ async def parse_invoice_file(
     ).scalars().all()
     own_accounts = frozenset(re.sub(r"\D", "", a) for a in own_rows if a)
 
-    return await invoice_parser.parse_invoice_async(
+    result = await invoice_parser.parse_invoice_async(
         data, file.filename or "invoice", own_accounts
     )
+    # Банк по БИК — из полного справочника ЦБ (счета ИП приходят из региональных филиалов,
+    # которых нет в зашитом наборе крупных банков).
+    return await invoice_parser.enrich_bank_from_db(db, result)
 
 
 # ─── Documents ────────────────────────────────────────────────────────────────
@@ -718,18 +723,25 @@ async def upload_payment_request_document(
     if doc_type not in ALLOWED_PR_DOC_TYPES:
         raise HTTPException(status_code=400, detail=f"doc_type must be one of: {ALLOWED_PR_DOC_TYPES}")
 
-    # Счёт/акт: PDF, Word или фото (как и документы контрагента). Исполняемые — отсекаем.
+    # Счёт/акт: PDF, Word, Excel или фото (как и документы контрагента). Исполняемые — отсекаем.
+    # Тип берём по MIME ИЛИ расширению: браузер шлёт .heic и .xls с пустым/octet-stream типом.
     content_type = (file.content_type or "").lower()
     filename_lower = (file.filename or "").lower()
     allowed_mime = (
         "application/pdf",
         "image/",
         "application/msword",
+        "application/vnd.ms-excel",  # legacy .xls — в нём 1С печатает счёт
         "application/vnd.openxmlformats-officedocument",
     )
+    allowed_ext = (
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+        ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif",
+    )
     bad_ext = (".exe", ".bat", ".cmd", ".dll", ".sh", ".msi", ".ps1", ".com")
-    if filename_lower.endswith(bad_ext) or not any(content_type.startswith(p) for p in allowed_mime):
-        raise HTTPException(status_code=415, detail="Поддерживаются PDF, Word или фото (JPG/PNG)")
+    ok_type = any(content_type.startswith(p) for p in allowed_mime) or filename_lower.endswith(allowed_ext)
+    if filename_lower.endswith(bad_ext) or not ok_type:
+        raise HTTPException(status_code=415, detail="Поддерживаются PDF, Word, Excel или фото (JPG/PNG)")
 
     data = await file.read()
     validate_file_content(data, file.filename or "document")  # magic-bytes integrity по расширению
