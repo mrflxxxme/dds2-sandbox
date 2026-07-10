@@ -133,3 +133,89 @@ async def test_active_asm_pd_flag(db_session, project, ff_warehouse):
     with_pd = await fetch_active_assemblies_for_sku(db_session, project.id, nom.id, include_pre_distributed=True)
     assert without_pd == {"Сарапул": 6}
     assert with_pd == {"Сарапул": 30}
+
+
+@pytest.mark.asyncio
+async def test_update_draft_gate_subtracts_in_transit(db_session, project, ff_warehouse):
+    """Server-side гейт PUT: stale-вкладка не может записать план, дублирующий
+    уже едущее (прод-кейс: 7 PUT за 20с возвращали дубль после клиентской очистки)."""
+    from backend.schemas.assembly_draft import (
+        AssemblyDraftCreate,
+        AssemblyDraftDistribution,
+        AssemblyDraftRow,
+        AssemblyDraftUpdate,
+    )
+    from backend.services import assembly_draft_service
+
+    nm_id = 896_300_000 + int(_uid()[:4], 16)
+    nom = await _nom(db_session, project.id, nm_id)
+    # Уже едет: 30 на Самару (имя заявки — «Новосемейкино»), 24 на Сарапул (резерв машины).
+    await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.IN_PROGRESS, wb_name="Новосемейкино", qty=30)
+    await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.PRE_DISTRIBUTED, wb_name="Сарапул", qty=24)
+
+    draft = await assembly_draft_service.create_draft(
+        db_session,
+        project.id,
+        AssemblyDraftCreate(name="Гейт", distribution=AssemblyDraftDistribution()),
+    )
+
+    # Stale-вкладка присылает план с дублем: Самара 32 (едет 30), Сарапул 12 (едет 24), ЕКБ 52.
+    stale = AssemblyDraftDistribution(
+        source_warehouse_ids=[ff_warehouse.id],
+        target_warehouse_names=["Самара (Новосемейкино)", "Сарапул", "Екатеринбург - Перспективная 14"],
+        rows=[
+            AssemblyDraftRow(
+                nm_id=nm_id,
+                barcode=nom.barcode,
+                vendor_code="швабра",
+                src={str(ff_warehouse.id): 96},
+                tgt={"Самара (Новосемейкино)": 32, "Сарапул": 12, "Екатеринбург - Перспективная 14": 52},
+            )
+        ],
+    )
+    updated = await assembly_draft_service.update_draft(
+        db_session, project.id, draft.id, AssemblyDraftUpdate(distribution=stale)
+    )
+
+    from backend.schemas.assembly_draft import AssemblyDraftDistribution as Dist
+
+    dist = Dist.model_validate(updated.distribution)
+    assert len(dist.rows) == 1
+    row = dist.rows[0]
+    # Самара 32−30=2, Сарапул 12−24→0 (ключ выпал), ЕКБ не тронут.
+    assert row.tgt == {"Самара (Новосемейкино)": 2, "Екатеринбург - Перспективная 14": 52}
+    # src ужат до Σtgt (carve): 96 → 54.
+    assert sum(row.src.values()) == 54
+
+
+@pytest.mark.asyncio
+async def test_update_draft_gate_no_transit_untouched(db_session, project, ff_warehouse):
+    """Без активных заявок PUT сохраняет план как есть (гейт нейтрален)."""
+    from backend.schemas.assembly_draft import (
+        AssemblyDraftCreate,
+        AssemblyDraftDistribution,
+        AssemblyDraftRow,
+        AssemblyDraftUpdate,
+    )
+    from backend.services import assembly_draft_service
+
+    nm_id = 896_400_000 + int(_uid()[:4], 16)
+    nom = await _nom(db_session, project.id, nm_id)
+    draft = await assembly_draft_service.create_draft(
+        db_session, project.id, AssemblyDraftCreate(name="Чисто", distribution=AssemblyDraftDistribution())
+    )
+    dist_in = AssemblyDraftDistribution(
+        source_warehouse_ids=[ff_warehouse.id],
+        target_warehouse_names=["Казань"],
+        rows=[
+            AssemblyDraftRow(nm_id=nm_id, barcode=nom.barcode, vendor_code="x", src={str(ff_warehouse.id): 10}, tgt={"Казань": 10})
+        ],
+    )
+    updated = await assembly_draft_service.update_draft(
+        db_session, project.id, draft.id, AssemblyDraftUpdate(distribution=dist_in)
+    )
+    from backend.schemas.assembly_draft import AssemblyDraftDistribution as Dist
+
+    dist = Dist.model_validate(updated.distribution)
+    assert dist.rows[0].tgt == {"Казань": 10}
+    assert dist.rows[0].src == {str(ff_warehouse.id): 10}
