@@ -20,9 +20,8 @@ async function renderBarcode(
 }
 
 /**
- * Собирает PDF (A4, портрет) со стикерами коробов и запускает скачивание.
- * @param codes    коды коробов (уже отфильтрованные от null)
- * @param fileName имя файла для скачивания
+ * PDF со стикерами коробов (`WB_…`) — формат кабинета WB: один ярлык на страницу
+ * A4 (по эталонному PDF кабинета). Пустой список → ничего не делает.
  */
 export async function downloadBoxStickers(codes: string[], fileName: string): Promise<void> {
     if (codes.length === 0) return;
@@ -30,108 +29,67 @@ export async function downloadBoxStickers(codes: string[], fileName: string): Pr
     const { jsPDF } = await import('jspdf');
     const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
 
-    // Геометрия страницы и сетки 2×3.
-    const PAGE_W = 210;
-    const PAGE_H = 297;
-    const MARGIN = 10;
-    const GAP = 10;
-    const COLS = 2;
-    const ROWS = 3;
-    const PER_PAGE = COLS * ROWS;
-    const CELL_W = (PAGE_W - 2 * MARGIN - GAP * (COLS - 1)) / COLS; // 90 мм
-    const CELL_H = (PAGE_H - 2 * MARGIN - GAP * (ROWS - 1)) / ROWS; // ~85 мм
-    const PAD = 4;
-
-    const total = codes.length;
-
-    for (let i = 0; i < total; i++) {
-        const code = codes[i];
-        const posOnPage = i % PER_PAGE;
-        if (i > 0 && posOnPage === 0) doc.addPage();
-
-        const col = posOnPage % COLS;
-        const row = Math.floor(posOnPage / COLS);
-        const x = MARGIN + col * (CELL_W + GAP);
-        const y = MARGIN + row * (CELL_H + GAP);
-
-        // Рамка стикера.
-        doc.setDrawColor(200);
-        doc.setLineWidth(0.2);
-        doc.rect(x, y, CELL_W, CELL_H);
-
-        // Заголовок «Короб N из M».
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(11);
-        doc.setTextColor(20);
-        doc.text(`Box ${i + 1} / ${total}`, x + CELL_W / 2, y + PAD + 4, { align: 'center' });
-
-        // QR-код (квадрат), по центру.
-        const qr = await renderBarcode('qrcode', code, { scale: 4 });
-        const QR = 26;
-        doc.addImage(qr.dataUrl, 'PNG', x + (CELL_W - QR) / 2, y + PAD + 8, QR, QR, undefined, 'FAST');
-
-        // Штрихкод Code128 с человекочитаемым текстом.
-        const bc = await renderBarcode('code128', code, { scale: 3, height: 12, includetext: true });
-        const bcW = CELL_W - 2 * PAD;
-        const bcH = Math.min(bcW * bc.ratio, 20);
-        doc.addImage(bc.dataUrl, 'PNG', x + PAD, y + PAD + 8 + QR + 3, bcW, bcH, undefined, 'FAST');
-
-        // Подпись — сам код короба.
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(10);
-        doc.setTextColor(60);
-        doc.text(code, x + CELL_W / 2, y + CELL_H - PAD, { align: 'center' });
+    for (let i = 0; i < codes.length; i++) {
+        if (i > 0) doc.addPage();
+        await drawWbLabel(doc, codes[i]);
     }
 
     doc.save(fileName);
 }
 
 /**
- * Собирает PDF (A4, портрет) с ШК всей поставки: штрихкод/QR поставки (WB-{supplyId})
- * и штрихкод/QR пропуска (passBarcode). Одна страница, до двух блоков.
- * Если обе части пусты — ничего не делает (мягко).
+ * Один ярлык на страницу A4 — как печатает кабинет WB (проверено по эталонным
+ * PDF кабинета): крупный QR (~63 мм) слева-сверху, справа от него Code128 и сам
+ * код текстом ~18pt. Ярлык занимает верхнюю треть листа, остальное — пусто.
  */
-export async function downloadSupplyStickers(opts: {
-    supplyId: number | null;
+async function drawWbLabel(
+    doc: import('jspdf').jsPDF,
+    code: string,
+): Promise<void> {
+    // Геометрия эталона WB: белое поле 595×340 pt ≈ 210×120 мм (вся ширина A4).
+    const LABEL_H = 120;
+    const QR = 63;
+    const QR_X = 55;
+    const QR_Y = 12;
+
+    // QR-код — основной носитель кода (его и сканирует склад).
+    const qr = await renderBarcode('qrcode', code, { scale: 6 });
+    doc.addImage(qr.dataUrl, 'PNG', QR_X, QR_Y, QR, QR, undefined, 'FAST');
+
+    // Code128 под QR — на случай ручного линейного сканера.
+    const bc = await renderBarcode('code128', code, { scale: 4, height: 14, includetext: false });
+    const bcW = 120;
+    const bcH = Math.min(bcW * bc.ratio, 22);
+    doc.addImage(bc.dataUrl, 'PNG', (210 - bcW) / 2, QR_Y + QR + 5, bcW, bcH, undefined, 'FAST');
+
+    // Сам код текстом — 18pt, как в эталоне WB.
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(18);
+    doc.setTextColor(0);
+    doc.text(code, 210 / 2, QR_Y + QR + 5 + bcH + 9, { align: 'center' });
+
+    // Разделительная линия низа ярлыка (в кабинете — край белого поля).
+    doc.setDrawColor(220);
+    doc.setLineWidth(0.2);
+    doc.line(0, LABEL_H, 210, LABEL_H);
+}
+
+/**
+ * PDF со ШК пропуска поставки (`WB-GI-<barcodeId>`) — формат кабинета WB:
+ * один ярлык на страницу A4. Пустой `passBarcode` → ничего не делает (мягко).
+ *
+ * ВАЖНО: у поставки WB нет собственного «ШК поставки» — на складе сканируют
+ * ШК ПРОПУСКА (`WB-GI-…`) и ШК КОРОБОВ (`WB_…`, см. downloadBoxStickers).
+ */
+export async function downloadPassSticker(opts: {
     passBarcode: string | null;
     fileName: string;
 }): Promise<void> {
-    const { supplyId, passBarcode, fileName } = opts;
-    const blocks: { code: string; caption: string }[] = [];
-    if (supplyId != null) blocks.push({ code: `WB-${supplyId}`, caption: `Поставка WB-${supplyId}` });
-    if (passBarcode) blocks.push({ code: passBarcode, caption: `Пропуск ${passBarcode}` });
-    if (blocks.length === 0) return;
+    const { passBarcode, fileName } = opts;
+    if (!passBarcode) return;
 
     const { jsPDF } = await import('jspdf');
     const doc = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
-
-    const PAGE_W = 210;
-    const MARGIN = 15;
-    const CONTENT_W = PAGE_W - 2 * MARGIN;
-    // Каждый блок: заголовок + QR + Code128.
-    const BLOCK_H = 90;
-
-    for (let i = 0; i < blocks.length; i++) {
-        const { code, caption } = blocks[i];
-        const top = MARGIN + i * (BLOCK_H + 10);
-
-        // Заголовок блока.
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(14);
-        doc.setTextColor(20);
-        doc.text(caption, PAGE_W / 2, top + 6, { align: 'center' });
-
-        // QR-код (квадрат), по центру.
-        const qr = await renderBarcode('qrcode', code, { scale: 5 });
-        const QR = 45;
-        doc.addImage(qr.dataUrl, 'PNG', (PAGE_W - QR) / 2, top + 12, QR, QR, undefined, 'FAST');
-
-        // Штрихкод Code128 с человекочитаемым текстом.
-        const bc = await renderBarcode('code128', code, { scale: 4, height: 16, includetext: true });
-        const bcW = CONTENT_W;
-        const bcH = Math.min(bcW * bc.ratio, 28);
-        doc.addImage(bc.dataUrl, 'PNG', MARGIN, top + 12 + QR + 4, bcW, bcH, undefined, 'FAST');
-    }
-
+    await drawWbLabel(doc, passBarcode);
     doc.save(fileName);
 }

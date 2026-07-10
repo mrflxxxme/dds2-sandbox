@@ -186,11 +186,12 @@ async def _enrich_wb_supply(
 
     for resp in response_items:
         link = by_assembly.get(resp.id)
-        if link is not None and (
+        is_real = link is not None and (
             link.preorder_id
             or link.supply_id
             or (link.sync_status and link.sync_status != WbSupplySyncStatus.NONE.value)
-        ):
+        )
+        if is_real:
             resp.wb_supply = WbSupplyStateBrief.model_validate(link)
             continue
         # Адопция из FBO для заявок без реальной реплей-связи.
@@ -204,8 +205,34 @@ async def _enrich_wb_supply(
                 supply_id=adopt,
                 preorder_id=None,
                 pass_pallets=link.pass_pallets if link else None,
+                pass_driver_first=link.pass_driver_first if link else None,
+                pass_driver_last=link.pass_driver_last if link else None,
+                pass_driver_phone=link.pass_driver_phone if link else None,
+                pass_car_model=link.pass_car_model if link else None,
+                pass_car_number=link.pass_car_number if link else None,
+                supply_date=link.supply_date if link else None,
                 wb_state_synced_at=None,
             )
+        elif link is not None and _link_has_pass(link):
+            # Голый локальный черновик пропуска (машину назначили → зеркалим её в
+            # пропуск, но поставку в WB ещё не заводили): отдаём для префилла
+            # модалки «Назначить машину» (F1). WB-статус остаётся «—» на фронте
+            # (sync_status=NONE + нет supply/preorder).
+            resp.wb_supply = WbSupplyStateBrief.model_validate(link)
+
+
+def _link_has_pass(link: AssemblyWbSupply) -> bool:
+    """У связи есть данные пропуска (для префилла модалки логиста)."""
+    return any(
+        (
+            link.pass_driver_first,
+            link.pass_driver_last,
+            link.pass_driver_phone,
+            link.pass_car_model,
+            link.pass_car_number,
+            link.pass_pallets,
+        )
+    )
 
 
 async def _enrich_source_vehicle_order_no(
@@ -1064,10 +1091,16 @@ async def assign_vehicle_bulk(
                 vehicle_info=payload.vehicle_info,
                 vehicle_brand=payload.vehicle_brand,
                 driver_phone=payload.driver_phone,
+                driver_first_name=payload.driver_first_name,
+                driver_last_name=payload.driver_last_name,
                 pickup_date=item.pickup_date,
                 pickup_time_slot=item.pickup_time_slot,
                 pickup_cost=item.pickup_cost,
                 delivery_date=item.delivery_date,
+                # Подрядчик приходит в bulk-payload, но раньше не прокидывался в
+                # per-request AssignVehicle → при массовом назначении терялся.
+                carrier_inn=payload.carrier_inn,
+                carrier_name=payload.carrier_name,
             )
             req = await assembly_service.assign_vehicle(db, project.id, item.request_id, assign_payload)
             results.append(req)

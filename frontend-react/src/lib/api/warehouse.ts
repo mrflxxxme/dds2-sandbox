@@ -439,9 +439,12 @@ export function addWarehouseMethods(api: ApiClient) {
             return api.request<AssemblyRequest>('POST', `/api/v1/warehouse/assembly/${id}/ready`);
         },
         assignVehicle(id: number, data: {
+            /** госномер машины (поле «Госномер») */
             vehicle_info: string;
             vehicle_brand: string;
             driver_phone: string;
+            driver_first_name?: string | null;
+            driver_last_name?: string | null;
             pickup_date: string;
             pickup_time_slot: string;
             pickup_cost: number;
@@ -510,9 +513,12 @@ export function addWarehouseMethods(api: ApiClient) {
             return api.request<PrebookingCreateResult>('POST', '/api/v1/warehouse/assembly/prebooking', payload);
         },
         assignVehicleBulk(data: {
+            /** госномер машины (поле «Госномер») */
             vehicle_info: string;
             vehicle_brand: string;
             driver_phone: string;
+            driver_first_name?: string | null;
+            driver_last_name?: string | null;
             carrier_inn?: string | null;
             carrier_name?: string | null;
             items: Array<{

@@ -142,6 +142,48 @@ function jointPendingWarehouses(item: AssemblyRequest): string[] {
         .map(r => r.warehouse_name || `склад #${r.warehouse_id}`);
 }
 
+interface VehiclePrefill {
+    info: string;       // госномер (vehicle_info)
+    brand: string;
+    phone: string;
+    firstName: string;
+    lastName: string;
+}
+
+/** Префилл модалки «Назначить машину» из уже известных данных выбранных заявок.
+ *  Приоритет: назначенная машина заявки → данные WB-пропуска (могли завести раньше
+ *  в панели «Поставка WB» или подтянуть из кабинета). Берём первую заявку, у которой
+ *  что-то есть: машина у всех выбранных заявок одна (bulk-назначение). */
+function vehiclePrefill(items: AssemblyRequest[]): VehiclePrefill {
+    const empty: VehiclePrefill = { info: '', brand: '', phone: '', firstName: '', lastName: '' };
+    for (const it of items) {
+        if (it.vehicle_info || it.vehicle_brand || it.driver_phone) {
+            return {
+                info: it.vehicle_info || '',
+                brand: it.vehicle_brand || '',
+                phone: it.driver_phone || '',
+                firstName: it.driver_first_name || '',
+                lastName: it.driver_last_name || '',
+            };
+        }
+    }
+    for (const it of items) {
+        const wb = it.wb_supply;
+        if (!wb) continue;
+        if (wb.pass_car_number || wb.pass_car_model || wb.pass_driver_phone
+            || wb.pass_driver_first || wb.pass_driver_last) {
+            return {
+                info: wb.pass_car_number || '',
+                brand: wb.pass_car_model || '',
+                phone: wb.pass_driver_phone || '',
+                firstName: wb.pass_driver_first || '',
+                lastName: wb.pass_driver_last || '',
+            };
+        }
+    }
+    return empty;
+}
+
 /** Коллапс совместных поставок: из плоского списка оставляем по одной заявке-«якорю»
  *  на каждую WB FBO-поставку (минимальный id среди сборок этой поставки в загруженном
  *  списке), остальные joint-сёстры выкидываем, чтобы не рисовать их отдельными карточками.
@@ -260,6 +302,8 @@ export default function LogisticsPage() {
     const [vehicleInfo, setVehicleInfo] = useState('');
     const [vehicleBrand, setVehicleBrand] = useState('');
     const [driverPhone, setDriverPhone] = useState('');
+    const [driverFirstName, setDriverFirstName] = useState('');
+    const [driverLastName, setDriverLastName] = useState('');
     const [carrierInn, setCarrierInn] = useState('');
     const [carrierName, setCarrierName] = useState('');
     const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -482,9 +526,15 @@ export default function LogisticsPage() {
 
     const openVehicleModal = (ids: number[]) => {
         setSelectedIds(ids);
-        setVehicleInfo('');
-        setVehicleBrand('');
-        setDriverPhone('');
+        // Префилл: если пропуск уже заведён (вручную в панели «Поставка WB» или
+        // подтянут из кабинета) — подставляем его данные в ячейки, чтобы логист
+        // не перевводил номер/марку/телефон.
+        const pre = vehiclePrefill(items.filter(i => ids.includes(i.id)));
+        setVehicleInfo(pre.info);
+        setVehicleBrand(pre.brand);
+        setDriverPhone(pre.phone);
+        setDriverFirstName(pre.firstName);
+        setDriverLastName(pre.lastName);
         const params: Record<number, PerRequestParams> = {};
         for (const id of ids) {
             params[id] = { pickup_date: '', pickup_time_slot: '', pickup_cost: '', delivery_date: '' };
@@ -493,7 +543,10 @@ export default function LogisticsPage() {
         setShowVehicleModal(true);
     };
 
+    // Все поля водителя/машины обязательны — их состав совпадает с WB-пропуском,
+    // который WB не примет без единого пропущенного поля.
     const vehicleFormValid = vehicleInfo.trim() && vehicleBrand.trim() && driverPhone.trim()
+        && driverFirstName.trim() && driverLastName.trim()
         && selectedIds.every(id => {
             const p = perRequestParams[id];
             return p && p.pickup_date && p.pickup_time_slot && p.pickup_cost !== '' && p.delivery_date;
@@ -525,19 +578,22 @@ export default function LogisticsPage() {
                 carrier_inn: carrierInn.trim() || null,
                 carrier_name: carrierName.trim() || null,
             };
+            const driverPayload = {
+                vehicle_info: vehicleInfo.trim(),
+                vehicle_brand: vehicleBrand.trim(),
+                driver_phone: driverPhone.trim(),
+                driver_first_name: driverFirstName.trim(),
+                driver_last_name: driverLastName.trim(),
+            };
             if (selectedIds.length === 1) {
                 await api.assignVehicle(selectedIds[0], {
-                    vehicle_info: vehicleInfo.trim(),
-                    vehicle_brand: vehicleBrand.trim(),
-                    driver_phone: driverPhone.trim(),
+                    ...driverPayload,
                     ...carrierPayload,
                     ...bulkItems[0],
                 });
             } else {
                 await api.assignVehicleBulk({
-                    vehicle_info: vehicleInfo.trim(),
-                    vehicle_brand: vehicleBrand.trim(),
-                    driver_phone: driverPhone.trim(),
+                    ...driverPayload,
                     ...carrierPayload,
                     items: bulkItems,
                 });
@@ -1539,19 +1595,29 @@ export default function LogisticsPage() {
                     <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 960, width: '95vw', maxHeight: '90vh', overflow: 'auto', background: '#fff' }}>
                         <h2 className="modal-title">Назначить машину</h2>
 
-                        {/* Block 1: Common vehicle data */}
+                        {/* Block 1: данные водителя и машины — состав 1:1 с WB-пропуском
+                            (Имя / Фамилия / Телефон / Марка / Госномер), чтобы занос
+                            пропуска не требовал ручного перевода полей. */}
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 12 }}>
                             <div className="form-group" style={{ margin: 0 }}>
-                                <label className="form-label">Описание машины *</label>
-                                <input className="form-input" value={vehicleInfo} onChange={e => setVehicleInfo(e.target.value)} placeholder="Номер, водитель, ТК..." autoFocus />
+                                <label className="form-label">Имя водителя *</label>
+                                <input className="form-input" value={driverFirstName} onChange={e => setDriverFirstName(e.target.value)} placeholder="Дмитрий" autoFocus />
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label">Фамилия водителя *</label>
+                                <input className="form-input" value={driverLastName} onChange={e => setDriverLastName(e.target.value)} placeholder="Крапива" />
+                            </div>
+                            <div className="form-group" style={{ margin: 0 }}>
+                                <label className="form-label">Телефон водителя *</label>
+                                <input className="form-input" value={driverPhone} onChange={e => setDriverPhone(e.target.value)} placeholder="+7 999 123-45-67" />
                             </div>
                             <div className="form-group" style={{ margin: 0 }}>
                                 <label className="form-label">Марка машины *</label>
                                 <input className="form-input" value={vehicleBrand} onChange={e => setVehicleBrand(e.target.value)} placeholder="ГАЗ-330, КАМАЗ..." />
                             </div>
                             <div className="form-group" style={{ margin: 0 }}>
-                                <label className="form-label">Телефон водителя *</label>
-                                <input className="form-input" value={driverPhone} onChange={e => setDriverPhone(e.target.value)} placeholder="+7 999 123-45-67" />
+                                <label className="form-label">Госномер *</label>
+                                <input className="form-input" value={vehicleInfo} onChange={e => setVehicleInfo(e.target.value)} placeholder="В874УА37" />
                             </div>
                         </div>
 
