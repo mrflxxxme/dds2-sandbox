@@ -631,3 +631,159 @@ async def test_get_cabinet_pass_empty_without_supply(db_session, monkeypatch):
     await _patch_client(monkeypatch, FakeClient())
     p = await wb_supply_service.get_cabinet_pass(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert p.has_pass is False
+
+
+# ─── sync_pass_from_vehicle (F3: назначение машины → пропуск) ──────────────────
+
+
+async def _reload_assembly(db):
+    return await wb_supply_service._load_assembly(db, PROJECT_ID, ASSEMBLY_ID)
+
+
+def test_extract_plate_and_name_parsing():
+    # Кириллица-номер + ФИО (порядок кабинета: Фамилия Имя …) + телефон.
+    s = "В874УА37 Крапива Дмитрий Васильевич 89158491778"
+    plate = wb_supply_service._extract_plate(s)
+    assert plate == "В874УА37"
+    first, last = wb_supply_service._parse_driver_name(s, plate)
+    assert last == "Крапива"
+    assert first == "Дмитрий"
+
+
+def test_extract_plate_none_when_absent():
+    assert wb_supply_service._extract_plate("просто водитель без номера") is None
+
+
+@pytest.mark.asyncio
+async def test_sync_pass_from_vehicle_uses_explicit_names(db_session):
+    # Новый формат: vehicle_info = чистый госномер, ФИО — явные колонки заявки.
+    assembly = await _reload_assembly(db_session)
+    assembly.vehicle_info = "В874УА37"
+    assembly.vehicle_brand = "ГАЗ-330"
+    assembly.driver_phone = "+7 915 849 17 78"
+    assembly.driver_first_name = "Дмитрий"
+    assembly.driver_last_name = "Крапива"
+    await db_session.flush()
+
+    await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
+    await db_session.commit()
+
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.pass_car_number == "В874УА37"
+    assert link.pass_car_model == "ГАЗ-330"
+    assert link.pass_driver_phone == "+7 915 849 17 78"
+    assert link.pass_driver_last == "Крапива"
+    assert link.pass_driver_first == "Дмитрий"
+    # pallets_count заявки = 2 (фикстура) → проставился в пустой пропуск.
+    assert link.pass_pallets == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_pass_from_vehicle_legacy_freeform_string(db_session):
+    # Старые заявки: vehicle_info = «Номер, водитель, ТК», ФИО-колонки пусты → парсим.
+    assembly = await _reload_assembly(db_session)
+    assembly.vehicle_info = "В874УА37 Крапива Дмитрий 89158491778"
+    assembly.vehicle_brand = "ГАЗ-330"
+    await db_session.flush()
+
+    await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
+    await db_session.commit()
+
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.pass_car_number == "В874УА37"  # выдран regex'ом из свободной строки
+    assert link.pass_driver_last == "Крапива"
+    assert link.pass_driver_first == "Дмитрий"
+
+
+@pytest.mark.asyncio
+async def test_sync_pass_car_number_falls_back_to_raw_value(db_session):
+    # Госномер нестандартного формата (не матчится regex'ом) — кладём как есть.
+    assembly = await _reload_assembly(db_session)
+    assembly.vehicle_info = "AB-1234-XY"
+    await db_session.flush()
+    await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
+    await db_session.commit()
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.pass_car_number == "AB-1234-XY"
+
+
+@pytest.mark.asyncio
+async def test_sync_pass_preserves_existing_name(db_session):
+    # Уже заполненное ФИО не затираем best-effort парсингом.
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    link.pass_driver_first = "Иван"
+    link.pass_driver_last = "Иванов"
+    link.pass_pallets = 5
+    await db_session.commit()
+
+    assembly = await _reload_assembly(db_session)
+    assembly.vehicle_info = "О253РУ790 Петров Пётр"
+    assembly.vehicle_brand = "КАМАЗ"
+    await db_session.flush()
+    await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
+    await db_session.commit()
+
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    # ФИО и pallets сохранены, номер/марка — перезаписаны машиной.
+    assert link.pass_driver_first == "Иван"
+    assert link.pass_driver_last == "Иванов"
+    assert link.pass_pallets == 5
+    assert link.pass_car_number == "О253РУ790"
+    assert link.pass_car_model == "КАМАЗ"
+
+
+@pytest.mark.asyncio
+async def test_sync_pass_noop_without_vehicle(db_session):
+    assembly = await _reload_assembly(db_session)
+    # Без данных машины — строку пропуска не трогаем/не плодим.
+    await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
+    await db_session.commit()
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.pass_car_number is None
+    assert link.pass_driver_phone is None
+
+
+# ─── supplyDate / rejectReason из карточки поставки кабинета ───────────────────
+
+
+def test_parse_wb_dt_keeps_calendar_date():
+    # +03:00 не конвертируем в UTC — иначе слот 23 июля уехал бы на 22-е.
+    dt = wb_supply_service._parse_wb_dt("2026-07-23T00:00:00+03:00")
+    assert dt is not None
+    assert (dt.year, dt.month, dt.day, dt.hour) == (2026, 7, 23, 0)
+    assert dt.tzinfo is None
+
+
+def test_parse_wb_dt_bad_input():
+    assert wb_supply_service._parse_wb_dt(None) is None
+    assert wb_supply_service._parse_wb_dt("") is None
+    assert wb_supply_service._parse_wb_dt("не дата") is None
+
+
+@pytest.mark.asyncio
+async def test_get_state_exposes_supply_date_and_reject_reason(db_session, monkeypatch):
+    await _attach_fbo(db_session, "40566125", "IN_PROGRESS")
+    client = FakeClient(
+        supply_status={
+            "statusName": "Запланировано",
+            "statusId": 1,
+            "supplyDate": "2026-07-23T00:00:00+03:00",
+            "rejectReason": "Не заполнены ШК коробов.\nНе заполнен пропуск.",
+        }
+    )
+    await _patch_client(monkeypatch, client)
+
+    st = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert st.supply_date is not None
+    assert (st.supply_date.month, st.supply_date.day) == (7, 23)
+    assert "Не заполнен пропуск" in (st.reject_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_get_state_reject_reason_empty_string_is_none(db_session, monkeypatch):
+    await _attach_fbo(db_session, "40566125", "IN_PROGRESS")
+    client = FakeClient(supply_status={"statusName": "Принято", "statusId": 5, "rejectReason": "   "})
+    await _patch_client(monkeypatch, client)
+    st = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert st.reject_reason is None
+    assert st.supply_date is None

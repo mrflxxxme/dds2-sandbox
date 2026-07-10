@@ -94,6 +94,12 @@ class AssemblyWbSupply(Base, TimestampMixin):
     wb_supply_state_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     wb_state_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Дата забронированного слота сдачи в WB (supplyDetails.supplyDate) и текст
+    # кабинетных ошибок поставки (supplyDetails.rejectReason — «Не заполнены ШК
+    # коробов…», «Не заполнен пропуск…»). Обновляются при чтении карточки поставки.
+    supply_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Раскладка коробов: [{"boxcode": str|null, "items": [{"barcode": str, "quantity": int}]}]
     # boxcode = null, пока короб не создан в WB (createBoxBarcodes), затем заполняется.
     boxes: Mapped[list[dict[str, Any]]] = mapped_column(

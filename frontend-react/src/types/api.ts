@@ -749,6 +749,7 @@ export interface TelegramChatBinding {
   brand: string | null;
   notify_enabled: boolean;
   ff_notify_enabled: boolean;
+  measurements_notify_enabled: boolean;
   ff_board_enabled: boolean;
   /** NULL = табло по всем складам; иначе — заявки только этого склада ФФ. */
   ff_board_warehouse_id: number | null;
@@ -1824,6 +1825,9 @@ export interface WbSupplyState {
   wb_supply_state: string | null;
   wb_supply_state_id: number | null;
   wb_state_synced_at: string | null;
+  // Дата забронированного слота сдачи + текст кабинетных ошибок поставки.
+  supply_date: string | null;
+  reject_reason: string | null;
   boxes: WbBox[];
   pass_driver_first: string | null;
   pass_driver_last: string | null;
@@ -1847,6 +1851,14 @@ export interface WbSupplyStateBrief {
   supply_id: number | null;
   preorder_id: number | null;
   pass_pallets: number | null;
+  // Данные пропуска — для префилла модалки «Назначить машину» (F1).
+  pass_driver_first: string | null;
+  pass_driver_last: string | null;
+  pass_driver_phone: string | null;
+  pass_car_model: string | null;
+  pass_car_number: string | null;
+  // Дата брони слота WB — колонка «Дата брони WB» в списке сборок.
+  supply_date: string | null;
   wb_state_synced_at: string | null;
 }
 
@@ -1958,9 +1970,12 @@ export interface AssemblyRequest {
   suggested_pallets_count?: number | null;
   /** расчётный ВЕС ОТГРУЗКИ (кандидат в «Общий вес»): нетто товаров + тара коробов; Decimal — приходит строкой; null если нет нетто-веса */
   suggested_total_weight_kg?: number | string | null;
+  /** госномер машины; у старых заявок — свободная строка «Номер, водитель, ТК» */
   vehicle_info?: string;
   vehicle_brand?: string;
   driver_phone?: string;
+  driver_first_name?: string | null;
+  driver_last_name?: string | null;
   pickup_date?: string;
   pickup_time_slot?: string;
   pickup_cost?: number;
@@ -2209,6 +2224,9 @@ export interface GazelkaFormOptions {
   delivery_warehouses: GazelkaSelectOption[];
   supply_types: GazelkaSelectOption[];
   timeslots: GazelkaSelectOption[];
+  /** Выбранные порталом значения: порядок опций произвольный, «первая» ≠ «выбранная». */
+  default_entity_id: string | null;
+  default_price_id: string | null;
   /** Активные направления, ключ «{price_id}-{place_id}». Нет ключа — склад недоступен. */
   schedule: Record<string, GazelkaSchedulePlan>;
   min_departure_date: string | null;
@@ -2774,6 +2792,8 @@ export interface AssemblyRequestUpdate {
   vehicle_info?: string;
   vehicle_brand?: string;
   driver_phone?: string;
+  driver_first_name?: string | null;
+  driver_last_name?: string | null;
   carrier_inn?: string | null;
   carrier_name?: string | null;
 }
@@ -4672,6 +4692,17 @@ export interface LocalizationDailyPoint {
 
 // ─── Assembly Drafts (NxM distribution: RF source × WB target) ──────────────────
 
+/** Уже едет/зарезервировано на WB-склад активной заявкой (вкл. PRE_DISTRIBUTED). */
+export interface InTransitItem {
+  nm_id: number;
+  warehouse_name: string;
+  quantity: number;
+}
+
+export interface InTransitResponse {
+  items: InTransitItem[];
+}
+
 export interface AssemblyDraftRow {
   nm_id: number;
   barcode: string;
@@ -5843,4 +5874,89 @@ export interface FfBulkArchivePayload {
 
 export interface FfBulkArchiveResult {
   updated: number;
+}
+
+// ─── WB Measurements (замеры складов + удержания за габариты) ────────────────
+
+export interface WarehouseMeasurement {
+  id: number;
+  dim_id: number;
+  nm_id: number;
+  subject_name: string | null;
+  brand: string | null;
+  length: number | null;
+  width: number | null;
+  height: number | null;
+  volume: string | null;
+  /** текущий объём карточки WB (л) — для сравнения с замером */
+  card_volume: string | null;
+  photo_urls: string[] | null;
+  measured_at: string | null;
+}
+
+export interface MeasurementPenalty {
+  id: number;
+  dim_id: number;
+  nm_id: number;
+  subject_name: string | null;
+  brand: string | null;
+  prc_over: string | null;
+  /** фактический замер WB */
+  act_length: number | null;
+  act_width: number | null;
+  act_height: number | null;
+  act_volume: string | null;
+  /** заявлено продавцом */
+  dec_length: number | null;
+  dec_width: number | null;
+  dec_height: number | null;
+  dec_volume: string | null;
+  penalty_amount: string | null;
+  reversal_amount: string | null;
+  units_count: number | null;
+  is_valid: boolean | null;
+  is_valid_at: string | null;
+  penalty_date: string | null;
+  photo_urls: string[] | null;
+}
+
+export interface WarehouseMeasurementListResponse {
+  items: WarehouseMeasurement[];
+  total: number;
+}
+
+export interface MeasurementPenaltyListResponse {
+  items: MeasurementPenalty[];
+  total: number;
+  total_penalty: string;
+  total_reversal: string;
+}
+
+export interface MeasurementFiltersResponse {
+  brands: string[];
+  subjects: string[];
+}
+
+export interface MeasurementSyncResult {
+  warehouse: number;
+  penalties: number;
+}
+
+export interface PenaltyArticleSummaryRow {
+  nm_id: number;
+  subject_name: string | null;
+  brand: string | null;
+  total_penalty: string;
+  total_reversal: string;
+  net: string;
+  penalties_count: number;
+  measurements_count: number;
+}
+
+export interface PenaltyArticleSummaryResponse {
+  items: PenaltyArticleSummaryRow[];
+  articles: number;
+  total_penalty: string;
+  total_reversal: string;
+  net: string;
 }

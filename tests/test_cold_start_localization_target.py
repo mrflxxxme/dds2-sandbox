@@ -246,9 +246,14 @@ class TestTransitNettingNotDoubled:
         (в пути) → новинка не перетаривается поверх уже едущего."""
         import inspect
 
-        src = inspect.getsource(cs.fetch_active_assemblies_for_sku)
-        assert "SHIPPED" in src, "SHIPPED должен входить в active-статусы (учёт транзита)"
-        assert "VEHICLE_ASSIGNED" in src
-        # тот же набор статусов в сегментном запросе
+        # Статусы вынесены в константы (2026-07-10, «один мир» черновика).
+        assert "SHIPPED" in cs._ACTIVE_ASM_STATUSES, "SHIPPED должен входить в active-статусы (учёт транзита)"
+        assert "VEHICLE_ASSIGNED" in cs._ACTIVE_ASM_STATUSES
+        # PRE_DISTRIBUTED — резерв машины: вычитается из per-склад ЦЕЛЕЙ,
+        # но НЕ из свободного ФФ (товара ещё нет на ФФ).
+        assert "PRE_DISTRIBUTED" not in cs._ACTIVE_ASM_STATUSES
+        assert "PRE_DISTRIBUTED" in cs._ACTIVE_ASM_STATUSES_WITH_PD
+        # тот же active-набор в сегментном запросе (вычет из свободного ФФ, без PD)
         seg_src = inspect.getsource(cs.fetch_cold_start_segment)
         assert "SHIPPED" in seg_src
+        assert "PRE_DISTRIBUTED" not in seg_src

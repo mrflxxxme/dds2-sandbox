@@ -202,7 +202,9 @@ def test_form_defaults_mirror_browser_submission(apply_html: str):
     assert form.defaults["volume"] == "0"
     assert form.defaults["weight2"] == "0"
     assert form.defaults["notes"] == ""
-    # select без selected → первая опция, с selected → выбранная
+    # select без selected → первая опция, с selected → выбранная.
+    # Порядок опций у портала произвольный: Симферополь(5) первый, выбран Иваново(1).
+    assert form.selects["price_id"][0][0] == "5"
     assert form.defaults["price_id"] == "1"
     assert form.defaults["marketplace_id"] == "0"
     # чекбоксы/submit/hidden браузер в дефолтах не шлёт

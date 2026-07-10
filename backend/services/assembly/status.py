@@ -8,6 +8,7 @@ One-way dependency: status -> crud (never crud -> status, except _log_status_cha
 
 from datetime import date
 
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +36,8 @@ from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.assembly import AssignVehicle
 from backend.services.warehouse_service import _next_number, _update_stock
 from backend.utils.time import utcnow
+
+logger = structlog.get_logger("dds.assembly.status")
 
 
 async def _resolve_carrier(db: AsyncSession, project_id: int, inn: str | None, name: str | None) -> int | None:
@@ -312,6 +315,10 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
         s.vehicle_info = payload.vehicle_info
         s.vehicle_brand = payload.vehicle_brand
         s.driver_phone = payload.driver_phone
+        if payload.driver_first_name is not None:
+            s.driver_first_name = payload.driver_first_name
+        if payload.driver_last_name is not None:
+            s.driver_last_name = payload.driver_last_name
         s.pickup_date = payload.pickup_date
         s.pickup_time_slot = payload.pickup_time_slot
         s.pickup_cost = payload.pickup_cost
@@ -319,6 +326,15 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
         s.vehicle_assigned_at = utcnow()
         if cp_id is not None:
             s.counterparty_id = cp_id
+        # F3: зеркалим реквизиты машины в WB-пропуск заявки (госномер/марка/телефон
+        # + best-effort ФИО), чтобы логист не перевводил их в панели «Поставка WB».
+        # Занос в WB остаётся ручным. Best-effort: сбой sync не роняет назначение.
+        from backend.services import wb_supply_service
+
+        try:
+            await wb_supply_service.sync_pass_from_vehicle(db, project_id, s)
+        except Exception:  # noqa: BLE001
+            logger.warning("assign_vehicle: sync_pass_from_vehicle failed", request_id=s.id)
         await _log_status_change(
             db, project_id, s.id, old, AssemblyStatus.VEHICLE_ASSIGNED, comment=payload.vehicle_info
         )

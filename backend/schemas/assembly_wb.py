@@ -37,6 +37,9 @@ class WbSupplyState(BaseModel):
     wb_supply_state: str | None = None
     wb_supply_state_id: int | None = None
     wb_state_synced_at: datetime | None = None
+    # Дата забронированного слота сдачи + текст кабинетных ошибок поставки.
+    supply_date: datetime | None = None
+    reject_reason: str | None = None
     boxes: list[WbBox] = []
     pass_driver_first: str | None = None
     pass_driver_last: str | None = None
@@ -91,6 +94,15 @@ class WbSupplyStateBrief(BaseModel):
     supply_id: int | None = None
     preorder_id: int | None = None
     pass_pallets: int | None = None
+    # Данные пропуска — для префилла модалки «Назначить машину» из уже заведённого
+    # пропуска (F1). Отдаём в строке списка, чтобы логист не перевводил вручную.
+    pass_driver_first: str | None = None
+    pass_driver_last: str | None = None
+    pass_driver_phone: str | None = None
+    pass_car_model: str | None = None
+    pass_car_number: str | None = None
+    # Дата брони слота WB — колонка «Дата брони WB» в списке сборок.
+    supply_date: datetime | None = None
     wb_state_synced_at: datetime | None = None
 
 

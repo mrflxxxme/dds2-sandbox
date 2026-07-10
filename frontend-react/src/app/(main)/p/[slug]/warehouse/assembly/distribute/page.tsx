@@ -4,6 +4,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { dropCommittedRows } from '@/lib/utils/assemblyDraftReconcile';
+import { inTransitMap, subtractInTransitFromRows } from '@/lib/assembly/reconcileInTransit';
 import { parseBoxSize, effectiveBoxesPerPallet, maxPalletHeightCm, packMonoPallets, MONO_MAX_PALLET_ARTICLES } from '@/lib/utils/boxPallet';
 import { normalizeDraft, consolidatePrebookWholePallets, reconcileFillWithReserved, type NormalizeDraftCtx } from '@/lib/utils/normalizeDraft';
 import { topUpPrebookLooseBoxes, releaseUnfixableLooseBoxes } from '@/lib/utils/assemblyRoundBoxes';
@@ -206,6 +207,34 @@ export default function AssemblyDraftPage() {
                 setWarehouses(whs);
                 setStockNeed(stockNeedResp);
                 initialLoadRef.current = true;
+
+                // «Один мир»: строки черновика сверяем с УЖЕ ЕДУЩИМ в активных
+                // заявках (вкл. PRE_DISTRIBUTED — резерв машины). Заявки внешних
+                // потоков (предраспределение машины, ручные) dropCommittedRows не
+                // видит → черновик предлагал дубль уже едущего (кейс «швабры апл»
+                // 2026-07-10). Вычитаем per (nm, WB-склад); state → автосейв
+                // зафиксирует очистку на сервере. Сбой запроса — не блокируем.
+                try {
+                    const dist = draftResp.distribution;
+                    const nmIds = [...new Set([...(dist.rows || []), ...(dist.prebook || [])].map(r => r.nm_id).filter(Boolean))];
+                    if (nmIds.length > 0) {
+                        const transitResp = await api.getAssemblyInTransit(nmIds);
+                        if (cancelled) return;
+                        const transit = inTransitMap(transitResp.items || []);
+                        if (transit.size > 0) {
+                            const recRows = subtractInTransitFromRows(dedupeRows(dist.rows || []), transit);
+                            // Предбронь сверяем ПОСЛЕ заявок: остаток transit после rows.
+                            const recPrebook = subtractInTransitFromRows(dist.prebook || [], recRows.remainingTransit);
+                            if (recRows.changed || recPrebook.changed) {
+                                setRows(recRows.rows);
+                                setPrebook(recPrebook.rows);
+                                const units = recRows.subtractedUnits + recPrebook.subtractedUnits;
+                                const skus = new Set([...recRows.touchedNm, ...recPrebook.touchedNm]).size;
+                                showToast(`⚠ Вычтено уже едущее в заявках: ${formatNumber(units, 0)} шт · ${formatNumber(skus, 0)} SKU`, 'success');
+                            }
+                        }
+                    }
+                } catch { /* best-effort: черновик остаётся как есть */ }
             } catch (e: unknown) {
                 if (!cancelled) setError(e instanceof Error ? e.message : 'Ошибка загрузки черновика');
             } finally {
@@ -214,7 +243,7 @@ export default function AssemblyDraftPage() {
         };
         load();
         return () => { cancelled = true; };
-    }, [applyDraft]);
+    }, [applyDraft, showToast]);
 
     // Кратность короба + размер + предмет/бренд per nm (для редактора и предпросмотра).
     const loadGeometry = useCallback((cancelledRef?: { current: boolean }) => {

@@ -33,6 +33,8 @@ class TelegramChatBinding(Base):
     brand: Mapped[str | None] = mapped_column(String(200), nullable=True)
     notify_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     ff_notify_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # Ежедневная сводка замеров WB (джоб 09:00 MSK) — отдельный opt-in на чат.
+    measurements_notify_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     # Закреплённое авто-табло заявок ФФ: отдельный opt-in (/board on) + id
     # закреплённого сообщения, которое правим на каждом синке (не шлём новое).
     ff_board_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())

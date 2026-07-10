@@ -82,6 +82,21 @@ async def toggle_ff_notify(
     return {"message": f"Уведомления ФФ {status}"}
 
 
+@router.patch("/chats/{binding_id}/measurements-notify")
+async def toggle_measurements_notify(
+    binding_id: int,
+    body: ToggleNotifyRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle the daily WB measurements digest (09:00 MSK) for a chat binding."""
+    ok = await telegram_service.toggle_measurements_notify(db, binding_id, project.id, body.enabled)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Привязка не найдена")
+    status = "включена" if body.enabled else "выключена"
+    return {"message": f"Сводка замеров {status}"}
+
+
 @router.patch("/chats/{binding_id}/ff-board")
 async def set_ff_board(
     binding_id: int,
