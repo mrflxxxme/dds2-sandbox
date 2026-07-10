@@ -499,8 +499,8 @@ async def get_campaign_metrics(
             tot["price_sum"] += price; tot["price_n"] += 1
 
     totals = _metric_row(
-        "За всё время", tot["views"], tot["clicks"], tot["spend"],
-        tot["opens"], tot["carts"], tot["orders"], tot["orders_sum"],
+        "За всё время", int(tot["views"]), int(tot["clicks"]), tot["spend"],
+        int(tot["opens"]), int(tot["carts"]), int(tot["orders"]), tot["orders_sum"],
         tot["price_sum"] / tot["price_n"] if tot["price_n"] else None,
     )
 

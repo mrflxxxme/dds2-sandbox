@@ -391,8 +391,9 @@ async def fetch_campaign_default_bid(api_key: str, campaign_id: int) -> float | 
     pl, bids = info["placements"], info["bids"]
     # Если поиск выключен, действует ставка рекомендаций
     if pl.get("search", True) and bids.get("search") is not None:
-        return bids["search"]
-    return bids.get("recommendations") or bids.get("search")
+        return float(bids["search"])
+    bid = bids.get("recommendations") or bids.get("search")
+    return float(bid) if bid is not None else None
 
 
 async def fetch_ad_campaigns_detailed(
