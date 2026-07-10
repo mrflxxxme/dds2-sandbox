@@ -303,6 +303,17 @@ async def update_draft(
     if payload.distribution is not None:
         payload.distribution.rows = _dedupe_rows(payload.distribution.rows)
         _reconcile_handed_with_rows(payload.distribution)
+        # «Один мир», server-side гейт: план не может дублировать уже едущее в
+        # активных заявках (вкл. PRE_DISTRIBUTED — резерв машины). Клиентский
+        # reconcile при загрузке страницы НЕ защищает от stale-вкладки: открытая
+        # до создания заявок вкладка автосейвом PUT'ила старые строки поверх
+        # очищенных (прод-кейс «швабры апл» 2026-07-10: 7 PUT за 20с вернули
+        # дубль 54 шт после клиентской очистки). Гейт на записи закрывает гонку
+        # для ЛЮБОГО источника PUT. Сбой выборки не валит автосейв (best-effort).
+        try:
+            await _subtract_in_transit(db, project_id, payload.distribution)
+        except Exception:
+            logger.warning("draft %s: in-transit гейт пропущен (ошибка выборки)", draft_id, exc_info=True)
         draft.distribution = payload.distribution.model_dump()
     if payload.comment is not None:
         draft.comment = payload.comment
@@ -1127,6 +1138,77 @@ def _find_handed_index(units: list[HandedUnit], ff: int, wb: str, pkg: str) -> i
         if u.source_ff_id == ff and u.target_wb_name == wb and (u.package_type or "BOX") == pkg:
             return i
     return None
+
+
+def _subtract_in_transit_rows(
+    rows: list[AssemblyDraftRow],
+    remaining: dict[int, dict[str, int]],
+) -> tuple[list[AssemblyDraftRow], int]:
+    """Вычесть «уже едет» per (nm, WB-склад) из строк; вернуть (строки, Σ вычтено).
+
+    Greedy по порядку строк; remaining мутируется (расходуется) — вызывающий
+    передаёт один и тот же dict для rows → prebook (нет двойного вычета).
+    src ужимается с крупнейших источников до Σtgt (carve, Σsrc == Σtgt);
+    строки с Σtgt=0 выпадают. Зеркало фронтового reconcileInTransit.ts.
+    """
+    kept: list[AssemblyDraftRow] = []
+    subtracted = 0
+    for r in rows:
+        per = remaining.get(r.nm_id)
+        if not per:
+            kept.append(r)
+            continue
+        row_sub = 0
+        for wh, q in list(r.tgt.items()):
+            avail = per.get(wh, 0)
+            if avail <= 0 or (q or 0) <= 0:
+                continue
+            take = min(int(q), int(avail))
+            r.tgt[wh] = int(q) - take
+            per[wh] = int(avail) - take
+            row_sub += take
+        if row_sub == 0:
+            kept.append(r)
+            continue
+        subtracted += row_sub
+        tgt_total = sum(r.tgt.values())
+        if tgt_total <= 0:
+            continue  # весь план строки уже едет — строка выпадает
+        excess = sum((r.src or {}).values()) - tgt_total
+        for ff in sorted(r.src or {}, key=lambda k: -r.src[k]):
+            if excess <= 0:
+                break
+            cut = min(r.src[ff], excess)
+            r.src[ff] -= cut
+            excess -= cut
+        r.tgt = {k: v for k, v in r.tgt.items() if v > 0}
+        r.src = {k: v for k, v in (r.src or {}).items() if v > 0}
+        kept.append(r)
+    return kept, subtracted
+
+
+async def _subtract_in_transit(
+    db: AsyncSession,
+    project_id: int,
+    distribution: AssemblyDraftDistribution,
+) -> int:
+    """Server-side «один мир»: урезать rows+prebook на уже едущее в активных
+    заявках (fetch_in_transit_by_nm, вкл. PRE_DISTRIBUTED). Возвращает Σ вычтено."""
+    from backend.services.cold_start_distribution_service import fetch_in_transit_by_nm
+
+    nm_ids = sorted(
+        {r.nm_id for r in (distribution.rows or []) if r.nm_id}
+        | {r.nm_id for r in (distribution.prebook or []) if r.nm_id}
+    )
+    if not nm_ids:
+        return 0
+    transit = await fetch_in_transit_by_nm(db, project_id, nm_ids)
+    if not transit:
+        return 0
+    remaining = {nm: dict(per) for nm, per in transit.items()}
+    distribution.rows, sub_rows = _subtract_in_transit_rows(distribution.rows or [], remaining)
+    distribution.prebook, sub_pb = _subtract_in_transit_rows(distribution.prebook or [], remaining)
+    return sub_rows + sub_pb
 
 
 def _reconcile_handed_with_rows(distribution: AssemblyDraftDistribution) -> bool:

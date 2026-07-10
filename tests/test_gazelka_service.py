@@ -62,12 +62,16 @@ def _form() -> ApplyForm:
             DeliveryPlace(value="Владимир FBS (Воршинское)", label="Владимир FBS (Воршинское)", place_id="34", marketplace_id="4"),
             DeliveryPlace(value="Чехов", label="Чехов", place_id="35", marketplace_id="4"),
             DeliveryPlace(value="Чехов-2", label="Чехов-2", place_id="36", marketplace_id="4"),
+            DeliveryPlace(value="Самара (Новосемейкино)", label="Самара (Новосемейкино)", place_id="37", marketplace_id="4"),
+            DeliveryPlace(value="Новосибирск (Петухова)", label="Новосибирск (Петухова)", place_id="38", marketplace_id="4"),
+            DeliveryPlace(value="Воронеж РЦ (Новоусманский)", label="Воронеж РЦ (Новоусманский)", place_id="39", marketplace_id="4"),
+            DeliveryPlace(value="Воронеж СГТ", label="Воронеж СГТ", place_id="40", marketplace_id="4"),
         ],
         schedule={
             "1-18": _TULA_WB,
             "1-25": _KAZAN_WB,
             "1-26": _KAZAN_OZON,
-            **{f"1-{pid}": _TULA_WB for pid in ("28", "29", "30", "31", "32", "33", "34", "35", "36")},
+            **{f"1-{pid}": _TULA_WB for pid in ("28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40")},
         },
         min_departure=date(2026, 7, 10),
         min_delivery=date(2026, 7, 11),
@@ -158,6 +162,19 @@ def test_match_warehouse_prefers_fbo_over_fbs():
     opts = _options_from_form(_form())
     assert _match_warehouse("Владимир Воршинское", opts, "4") == "Владимир FBO (Воршинское)"
     assert _match_warehouse("Владимир FBS Воршинское", opts, "4") == "Владимир FBS (Воршинское)"
+
+
+def test_match_warehouse_stem_does_not_glue_different_cities():
+    """«Новосемейкино» и «Новосибирск» делят префикс «ново» — это разные слова."""
+    opts = _options_from_form(_form())
+    assert _match_warehouse("Новосемейкино", opts, "4") == "Самара (Новосемейкино)"
+
+
+def test_match_warehouse_skips_spec_warehouse():
+    """СГТ — спец-склад крупногабарита: подставлять его вместо обычного нельзя."""
+    opts = _options_from_form(_form())
+    assert _match_warehouse("Воронеж", opts, "4") == "Воронеж РЦ (Новоусманский)"
+    assert _match_warehouse("Воронеж СГТ", opts, "4") == "Воронеж СГТ"
 
 
 def test_match_warehouse_prefers_exact_over_numbered_twin():
