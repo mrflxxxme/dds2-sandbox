@@ -52,8 +52,23 @@ def _form() -> ApplyForm:
             DeliveryPlace(value="Тула", label="Тула", place_id="18", marketplace_id="4"),
             DeliveryPlace(value="Казань", label="Казань", place_id="25", marketplace_id="4"),
             DeliveryPlace(value="Казань", label="Казань", place_id="26", marketplace_id="1"),
+            # Названия, которые не совпадают с именами WB-складов буквально
+            DeliveryPlace(value="Санкт-Петербург (Шушары)", label="Санкт-Петербург (Шушары)", place_id="28", marketplace_id="4"),
+            DeliveryPlace(value="Санкт-Петербург (Уткина Заводь)", label="Санкт-Петербург (Уткина Заводь)", place_id="29", marketplace_id="4"),
+            DeliveryPlace(value="Екатеринбург (Перспективный)", label="Екатеринбург (Перспективный)", place_id="30", marketplace_id="4"),
+            DeliveryPlace(value="Екатеринбург (Испытателей)", label="Екатеринбург (Испытателей)", place_id="31", marketplace_id="4"),
+            DeliveryPlace(value="Домодедово 2", label="Домодедово 2", place_id="32", marketplace_id="4"),
+            DeliveryPlace(value="Владимир FBO (Воршинское)", label="Владимир FBO (Воршинское)", place_id="33", marketplace_id="4"),
+            DeliveryPlace(value="Владимир FBS (Воршинское)", label="Владимир FBS (Воршинское)", place_id="34", marketplace_id="4"),
+            DeliveryPlace(value="Чехов", label="Чехов", place_id="35", marketplace_id="4"),
+            DeliveryPlace(value="Чехов-2", label="Чехов-2", place_id="36", marketplace_id="4"),
         ],
-        schedule={"1-18": _TULA_WB, "1-25": _KAZAN_WB, "1-26": _KAZAN_OZON},
+        schedule={
+            "1-18": _TULA_WB,
+            "1-25": _KAZAN_WB,
+            "1-26": _KAZAN_OZON,
+            **{f"1-{pid}": _TULA_WB for pid in ("28", "29", "30", "31", "32", "33", "34", "35", "36")},
+        },
         min_departure=date(2026, 7, 10),
         min_delivery=date(2026, 7, 11),
     )
@@ -87,18 +102,26 @@ def test_options_expose_only_active_schedule():
     assert opts.min_departure_date == date(2026, 7, 10)
 
 
-def test_default_price_id_is_selected_option_not_first():
-    """У портала price_id идёт Симферополь…Иваново, а выбрано Иваново. График зависит от прайса."""
+def test_default_price_id_is_home_city_not_first_option():
+    """Наш город отгрузки — Иваново. Первая опция портала (Симферополь) не дефолт."""
     opts = _options_from_form(_form())
     assert opts.price_lists[0].value == "5"  # Симферополь — первая в разметке
-    assert opts.default_price_id == "1"  # Иваново — selected
+    assert opts.default_price_id == "1"  # Иваново
     assert opts.default_entity_id == "6596"
 
 
-def test_default_price_id_falls_back_to_first_option():
+def test_default_price_id_prefers_home_city_over_portal_selection():
     form = _form()
+    form.defaults["price_id"] = "5"  # портал выбрал Симферополь — всё равно берём Иваново
+    assert _options_from_form(form).default_price_id == "1"
+
+
+def test_default_price_id_falls_back_when_home_city_absent():
+    form = _form()
+    form.selects["price_id"] = [("5", "Симферополь"), ("2", "Кострома")]
+    assert _options_from_form(form).default_price_id == "1"  # selected портала
     form.defaults.pop("price_id")
-    assert _options_from_form(form).default_price_id == "5"
+    assert _options_from_form(form).default_price_id == "5"  # первая опция
 
 
 def test_default_marketplace_picks_wb():
@@ -106,11 +129,11 @@ def test_default_marketplace_picks_wb():
     assert _default_marketplace(opts) == "4"
 
 
-def test_match_warehouse_exact_and_contains():
+def test_match_warehouse_exact_and_tokens():
     opts = _options_from_form(_form())
     assert _match_warehouse("Казань", opts, "4") == "Казань"
     assert _match_warehouse("казань", opts, "4") == "Казань"
-    assert _match_warehouse("Казань WB", opts, "4") == "Казань"  # contains
+    assert _match_warehouse("Казань WB", opts, "4") == "Казань"
     assert _match_warehouse("Москва", opts, "4") is None
     assert _match_warehouse(None, opts, "4") is None
 
@@ -120,6 +143,33 @@ def test_match_warehouse_ignores_other_marketplace_warehouses():
     opts = _options_from_form(_form())
     assert _match_warehouse("Тула", opts, "1") is None
     assert _match_warehouse("Тула", opts, "4") == "Тула"
+
+
+def test_match_warehouse_drops_noise_words_and_declensions():
+    """Реальные имена WB-складов не совпадают с их дропдауном буквально."""
+    opts = _options_from_form(_form())
+    assert _match_warehouse("Склад Шушары", opts, "4") == "Санкт-Петербург (Шушары)"
+    assert _match_warehouse("Екатеринбург - Перспективная 14", opts, "4") == "Екатеринбург (Перспективный)"
+    assert _match_warehouse("СЦ Домодедово М4", opts, "4") == "Домодедово 2"
+
+
+def test_match_warehouse_prefers_fbo_over_fbs():
+    """Наши поставки — FBO; одноимённый FBS-склад брать нельзя."""
+    opts = _options_from_form(_form())
+    assert _match_warehouse("Владимир Воршинское", opts, "4") == "Владимир FBO (Воршинское)"
+    assert _match_warehouse("Владимир FBS Воршинское", opts, "4") == "Владимир FBS (Воршинское)"
+
+
+def test_match_warehouse_prefers_exact_over_numbered_twin():
+    opts = _options_from_form(_form())
+    assert _match_warehouse("Чехов", opts, "4") == "Чехов"
+
+
+def test_match_warehouse_skips_warehouse_without_schedule_for_price():
+    """Склад без активного графика из нашего города подставлять бессмысленно."""
+    opts = _options_from_form(_form())
+    assert _match_warehouse("Казань", opts, "4", "1") == "Казань"
+    assert _match_warehouse("Казань", opts, "4", "5") is None  # Симферополь → графика нет
 
 
 # ─── График (слоты сдачи) ─────────────────────────────────────────────────────
