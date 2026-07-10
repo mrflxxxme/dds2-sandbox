@@ -4692,6 +4692,17 @@ export interface LocalizationDailyPoint {
 
 // ─── Assembly Drafts (NxM distribution: RF source × WB target) ──────────────────
 
+/** Уже едет/зарезервировано на WB-склад активной заявкой (вкл. PRE_DISTRIBUTED). */
+export interface InTransitItem {
+  nm_id: number;
+  warehouse_name: string;
+  quantity: number;
+}
+
+export interface InTransitResponse {
+  items: InTransitItem[];
+}
+
 export interface AssemblyDraftRow {
   nm_id: number;
   barcode: string;

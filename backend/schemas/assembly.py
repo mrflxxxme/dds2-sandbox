@@ -1075,3 +1075,17 @@ class StockDistributionHistoryResponse(BaseModel):
     """Динамика распределения остатков по дням (накопительные снимки)."""
 
     daily: list[StockDistributionDailyStat]
+
+
+class InTransitItem(BaseModel):
+    """Уже едет/зарезервировано на WB-склад активной заявкой (вкл. PRE_DISTRIBUTED)."""
+
+    nm_id: int
+    warehouse_name: str  # каноничное имя (ACCEPTANCE_TO_STOCK_NAME)
+    quantity: int
+
+
+class InTransitResponse(BaseModel):
+    """Ответ /warehouse/assembly/in-transit — источник reconcile черновика («один мир»)."""
+
+    items: list[InTransitItem]
