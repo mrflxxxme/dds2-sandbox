@@ -2224,6 +2224,9 @@ export interface GazelkaFormOptions {
   delivery_warehouses: GazelkaSelectOption[];
   supply_types: GazelkaSelectOption[];
   timeslots: GazelkaSelectOption[];
+  /** Выбранные порталом значения: порядок опций произвольный, «первая» ≠ «выбранная». */
+  default_entity_id: string | null;
+  default_price_id: string | null;
   /** Активные направления, ключ «{price_id}-{place_id}». Нет ключа — склад недоступен. */
   schedule: Record<string, GazelkaSchedulePlan>;
   min_departure_date: string | null;

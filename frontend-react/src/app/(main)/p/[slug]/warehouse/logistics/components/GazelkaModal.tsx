@@ -149,11 +149,13 @@ function NumberField({
 }
 
 function initForm(options: GazelkaFormOptions, prefill: GazelkaPrefill) {
-    const firstEntity = options.entities[0]?.value ?? '';
+    // Дефолты берём из выбранных порталом значений: у него первая опция ≠ выбранная
+    // (price_id идёт Симферополь…Иваново, выбрано Иваново), а от price_id зависит график.
+    const entity = options.default_entity_id ?? options.entities[0]?.value ?? '';
     return {
-        entity_id: firstEntity,
-        payer_id: firstEntity,
-        price_id: options.price_lists[0]?.value ?? '',
+        entity_id: entity,
+        payer_id: entity,
+        price_id: options.default_price_id ?? options.price_lists[0]?.value ?? '',
         is_marketplace: 'yes' as string,
         marketplace_id: prefill.marketplace_id ?? options.marketplaces[0]?.value ?? '',
         supply_id: prefill.supply_id ?? '',

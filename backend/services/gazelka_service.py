@@ -176,6 +176,15 @@ def _warehouse_options(form: ApplyForm) -> list[GazelkaSelectOption]:
     return out
 
 
+def _default_price_id(form: ApplyForm) -> str | None:
+    """Прайс-лист, выбранный порталом. Первая опция — НЕ он (см. GazelkaFormOptions)."""
+    selected = form.defaults.get("price_id")
+    if selected:
+        return selected
+    options = form.selects.get("price_id") or []
+    return options[0][0] if options else None
+
+
 def _options_from_form(form: ApplyForm) -> GazelkaFormOptions:
     return GazelkaFormOptions(
         entities=_opt_list(form, "entity_id", skip=("",)),
@@ -184,6 +193,8 @@ def _options_from_form(form: ApplyForm) -> GazelkaFormOptions:
         delivery_warehouses=_warehouse_options(form),
         supply_types=_opt_list(form, "monomix", skip=("", "0")),
         timeslots=_opt_list(form, "daily_delivery_timeslot", skip=("",)),
+        default_entity_id=form.defaults.get("entity_id") or None,
+        default_price_id=_default_price_id(form),
         schedule={
             key: GazelkaSchedulePlan(
                 loading_days=plan.loading_days,
@@ -365,7 +376,7 @@ def _prefill_from_assembly(
         total_weight = Decimal(ar.pallets_count) * ar.pallet_weight_kg
     marketplace_id = _default_marketplace(options)
     address = _match_warehouse(wb_name, options, marketplace_id)
-    price_id = form.defaults.get("price_id") or (options.price_lists[0].value if options.price_lists else "")
+    price_id = options.default_price_id or ""
     departure_date, delivery_date = _prefill_dates(ar, form, price_id, address, marketplace_id)
     return GazelkaPrefill(
         customer_phone=form.inputs.get("customer_phone") or None,
