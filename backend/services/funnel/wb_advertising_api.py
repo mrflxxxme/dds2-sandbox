@@ -85,15 +85,33 @@ async def check_advert_scope(api_key: str) -> str:
     return "unknown"
 
 
-async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str, end_date: str) -> dict:
+async def fetch_ad_stats(
+    api_key: str,
+    campaign_ids: list[int],
+    begin_date: str,
+    end_date: str,
+    *,
+    time_budget: float | None = 300,
+    chunk_pause: float = 5,
+    max_429_retries: int = 2,
+) -> dict:
     """Fetch detailed ad stats per nmId per date.
-    Returns {date: {nm_id: {sum, clicks, views}}}.
+    Returns {date: {nm_id: {sum, clicks, views}}} — суммарно по всем кампаниям.
 
-    Also populates result["_by_campaign"] = {date: {campaign_id: {sum, clicks, views}}}
-    for per-campaign daily stats.
+    Служебные ключи (начинаются с "_", итерируя result по датам — пропускай их):
+    - result["_by_campaign"]    = {date: {campaign_id: {sum, clicks, views}}}
+    - result["_by_nm_campaign"] = {date: {campaign_id: {nm_id: {...полный набор WB}}}}
+    - result["_skipped_chunks"] = сколько чанков кампаний не удалось получить
+
+    Полный набор WB на уровне nm: views, clicks, sum (затраты), atbs (корзины),
+    orders и shks (заказы/штуки, атрибуция рекламы), sum_price (сумма заказов ₽).
 
     WB API limit: max 31 days per request. Automatically splits into windows.
-    Uses a 300-second time budget: returns partial data if exceeded.
+
+    Темп задаётся вызывающим:
+    - интерактивный синк — `time_budget=300` (лучше частичные данные, чем висящий запрос);
+    - фоновый бэкфилл — `time_budget=None`, длинные `chunk_pause` и больше ретраев на 429
+      (полнота важнее скорости; данные копим у себя, второй раз их взять неоткуда).
     """
     from datetime import datetime, timedelta
 
@@ -111,10 +129,11 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
 
     result: dict[str, dict[int, dict]] = {}
     by_campaign: dict[str, dict[int, dict]] = {}  # date -> campaign_id -> stats
+    by_nm_campaign: dict[str, dict[int, dict[int, dict]]] = {}  # date -> campaign_id -> nm_id -> stats
     chunks = [campaign_ids[i : i + 50] for i in range(0, len(campaign_ids), 50)]
     skipped_chunks = 0
     budget_exceeded = False
-    TIME_BUDGET = 300
+    TIME_BUDGET = time_budget if time_budget is not None else float("inf")
     t_start = time.monotonic()
 
     async with httpx.AsyncClient(timeout=60) as client:
@@ -136,7 +155,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
                     break
 
                 if idx > 0 or win_begin != windows[0][0]:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(chunk_pause)
 
                 ids_param = ",".join(str(c) for c in chunk)
                 url = (
@@ -145,7 +164,7 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
                 )
 
                 chunk_ok = False
-                for attempt in range(2):
+                for attempt in range(max_429_retries):
                     try:
                         resp = await client.get(
                             url,
@@ -159,10 +178,15 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
                         break
 
                     if resp.status_code == 429:
-                        wait = [20, 40][attempt]
+                        # Уважаем Retry-After, иначе экспонента 20/40/80… (капаем на 120с)
+                        try:
+                            wait = float(resp.headers.get("Retry-After", "") or 0)
+                        except ValueError:
+                            wait = 0
+                        wait = wait or min(20 * 2**attempt, 120)
                         logger.warning(
-                            f"WB adv 429 rate limit, waiting {wait}s "
-                            f"(attempt {attempt+1}/2, elapsed {time.monotonic()-t_start:.0f}s)"
+                            f"WB adv 429 rate limit, waiting {wait:.0f}s "
+                            f"(attempt {attempt+1}/{max_429_retries}, elapsed {time.monotonic()-t_start:.0f}s)"
                         )
                         if time.monotonic() - t_start + wait >= TIME_BUDGET:
                             logger.warning(
@@ -215,6 +239,29 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
                                     day_clicks += cl
                                     day_views += v
 
+                                    # Разбивка кампания × товар: суммируем по площадкам (apps)
+                                    if camp_id:
+                                        nm_slot = by_nm_campaign.setdefault(res_date, {}).setdefault(camp_id, {})
+                                        cell = nm_slot.setdefault(
+                                            nm_id,
+                                            {
+                                                "views": 0,
+                                                "clicks": 0,
+                                                "sum": 0.0,
+                                                "atbs": 0,
+                                                "orders": 0,
+                                                "shks": 0,
+                                                "sum_price": 0.0,
+                                            },
+                                        )
+                                        cell["views"] += v
+                                        cell["clicks"] += cl
+                                        cell["sum"] += s
+                                        cell["atbs"] += nm.get("atbs", 0) or 0
+                                        cell["orders"] += nm.get("orders", 0) or 0
+                                        cell["shks"] += nm.get("shks", 0) or 0
+                                        cell["sum_price"] += nm.get("sum_price", 0) or 0
+
                             # Per-campaign daily aggregation
                             if camp_id and (day_sum or day_clicks or day_views):
                                 if res_date not in by_campaign:
@@ -245,6 +292,8 @@ async def fetch_ad_stats(api_key: str, campaign_ids: list[int], begin_date: str,
         logger.info(f"WB adv: all chunks OK " f"for {begin_date}→{end_date} in {elapsed_total:.0f}s")
 
     result["_by_campaign"] = by_campaign  # type: ignore[assignment]
+    result["_by_nm_campaign"] = by_nm_campaign  # type: ignore[assignment]
+    result["_skipped_chunks"] = skipped_chunks  # type: ignore[assignment]
     return result
 
 
@@ -277,16 +326,74 @@ def _parse_advert_item(c: dict) -> dict | None:
         name = c.get("name")
     # ID: "id" or "advertId"
     advert_id = c.get("id") or c.get("advertId")
+    # Числовой тип рекламы WB (8=авто/рекомендации, 9=аукцион и т.п.) — для цветовой кодировки.
+    # Хранится отдельно от payment_type, который перетирает "type" ниже.
+    raw_type = c.get("type")
+    advert_type = raw_type if isinstance(raw_type, int) else None
     return {
         "advertId": advert_id,
         "name": name or str(advert_id or ""),
         # campaign_type: payment_type ('cpm'/'cpc'); фолбэк на bid_type только если payment_type пуст
         "type": payment_type or c.get("bid_type"),
+        "advert_type": advert_type,
+        "create_time": c.get("createTime"),  # ISO-строка создания кампании в WB (дата добавления)
         # bid_mode: режим ставки WB — 'unified'/'manual' как есть (совпадает с контрактом фронта)
         "bid_mode": c.get("bid_type"),
         "status": c.get("status"),
         "nm_ids": nm_ids,
     }
+
+
+async def fetch_campaign_placements(api_key: str, campaign_id: int) -> dict:
+    """Зоны показов кампании и ставки по каждой из них.
+
+    GET /api/advert/v2/adverts?ids={id}:
+    - settings.placements = {"search": bool, "recommendations": bool} — включена ли зона;
+    - nm_settings[].bids_kopecks = {"search": коп., "recommendations": коп.}.
+
+    Ставка у товаров кампании обычно одна; при расхождении берём максимальную.
+    Возвращает {"placements": {...}, "bids": {"search": ₽|None, "recommendations": ₽|None}}.
+    """
+    empty = {"placements": {}, "bids": {"search": None, "recommendations": None}}
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = f"https://advert-api.wildberries.ru/api/advert/v2/adverts?ids={campaign_id}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            logger.warning(f"WB adverts detail {resp.status_code}: {resp.text[:200]}")
+            return empty
+        adverts = (resp.json() or {}).get("adverts") or []
+    except Exception as e:
+        logger.warning(f"WB adverts detail failed: {e}")
+        return empty
+
+    placements: dict[str, bool] = {}
+    kopecks: dict[str, list[int]] = {"search": [], "recommendations": []}
+    for adv in adverts:
+        settings = adv.get("settings") or {}
+        for zone, on in (settings.get("placements") or {}).items():
+            placements[zone] = bool(on)
+        for ns in adv.get("nm_settings") or []:
+            bids = ns.get("bids_kopecks") or {}
+            for zone in kopecks:
+                if bids.get(zone):
+                    kopecks[zone].append(int(bids[zone]))
+    return {
+        "placements": placements,
+        "bids": {z: (round(max(v) / 100, 2) if v else None) for z, v in kopecks.items()},
+    }
+
+
+async def fetch_campaign_default_bid(api_key: str, campaign_id: int) -> float | None:
+    """Ставка кампании по умолчанию (₽) — по активной зоне (поиск приоритетнее)."""
+    info = await fetch_campaign_placements(api_key, campaign_id)
+    pl, bids = info["placements"], info["bids"]
+    # Если поиск выключен, действует ставка рекомендаций
+    if pl.get("search", True) and bids.get("search") is not None:
+        return float(bids["search"])
+    bid = bids.get("recommendations") or bids.get("search")
+    return float(bid) if bid is not None else None
 
 
 async def fetch_ad_campaigns_detailed(

@@ -1,6 +1,14 @@
 import type { Metadata, Viewport } from 'next';
+import { Roboto } from 'next/font/google';
 import '../globals.css';
 import './ff.css';
+
+const roboto = Roboto({
+    subsets: ['latin', 'cyrillic'],
+    weight: ['400', '500', '700', '900'],
+    variable: '--font-roboto',
+    display: 'swap',
+});
 
 export const metadata: Metadata = {
     title: 'ФФ-портал',
@@ -15,15 +23,7 @@ export const viewport: Viewport = {
 
 export default function FfRootLayout({ children }: { children: React.ReactNode }) {
     return (
-        <html lang="ru">
-            <head>
-                <link rel="preconnect" href="https://fonts.googleapis.com" />
-                <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-                <link
-                    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-                    rel="stylesheet"
-                />
-            </head>
+        <html lang="ru" className={roboto.variable}>
             <body>{children}</body>
         </html>
     );

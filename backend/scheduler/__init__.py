@@ -29,6 +29,7 @@ from backend.scheduler.jobs.fbo_supplies import (
 from backend.scheduler.jobs.fulfillment_sync import sync_all_fulfillment_warehouses
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
+    ad_nm_backfill_tick,
     ads_autopay_tick,
     fast_backfill_tick,
     sync_ad_campaigns_all_projects,
@@ -149,6 +150,18 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,
+    )
+
+    # РК-статистика по товарам: раз в сутки ночью. Первый проход после релиза
+    # видит пустую wb_ad_nm_daily и пересобирает всю доступную историю сам.
+    _scheduler.add_job(
+        ad_nm_backfill_tick,
+        trigger=CronTrigger(hour=4, minute=20, timezone=MSK),
+        id="ad_nm_backfill",
+        name="WB Ads: РК-статистика по товарам (догон истории)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
     )
 
     # Funnel hourly sync: every hour at :45 — last 2 days

@@ -1,6 +1,6 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsCampaignStateResult, AdsAutopaySaveResult, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, ClusterMinusResult, ClusterBidResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
+import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsCampaignStateResult, AdsAutopaySaveResult, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZones, ClusterMinusResult, ClusterBidResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -128,6 +128,21 @@ export function addFunnelMethods(api: ApiClient) {
             if (dateTo) q.set('date_to', dateTo);
             return api.request<AdsHistoryPoint[]>('GET', `/api/v1/funnel/campaigns/${campaignId}/history?${q.toString()}`);
         },
+        getAdArticleCatalog() {
+            return api.request<{ nm_id: number; vendor_code: string; subject: string; brand: string }[]>('GET', '/api/v1/funnel/ad-article-catalog');
+        },
+        getCampaignMetrics(campaignId: number, dateFrom?: string, dateTo?: string, nmId?: number | null) {
+            const q = new URLSearchParams();
+            if (dateFrom) q.set('date_from', dateFrom);
+            if (dateTo) q.set('date_to', dateTo);
+            if (nmId != null) q.set('nm_id', String(nmId));
+            return api.request<CampaignMetricsResponse>('GET', `/api/v1/funnel/campaigns/${campaignId}/metrics?${q.toString()}`);
+        },
+        /** Ручное пополнение бюджета кампании (реальные деньги). */
+        depositCampaignBudget(campaignId: number, amount: number, source = 0) {
+            return api.request<{ ok: boolean; status: string | null; budget_after: number | null; error: string | null }>(
+                'POST', `/api/v1/funnel/campaigns/${campaignId}/deposit`, { amount, source });
+        },
         getCampaignsAutopay() {
             return api.request<Record<string, AdsAutopaySetting>>('GET', '/api/v1/funnel/campaigns/autopay');
         },
@@ -166,8 +181,16 @@ export function addFunnelMethods(api: ApiClient) {
             return api.request<{ status: string }>('POST', '/api/v1/funnel/first_sync');
         },
         // ─── Кластеризатор рекламных запросов ───
-        getCampaignClusters(campaignId: number, dateFrom: string, dateTo: string) {
+        getCampaignZones(campaignId: number, dateFrom?: string, dateTo?: string, nmId?: number | null) {
+            const q = new URLSearchParams();
+            if (dateFrom) q.set('date_from', dateFrom);
+            if (dateTo) q.set('date_to', dateTo);
+            if (nmId != null) q.set('nm_id', String(nmId));
+            return api.request<CampaignZones>('GET', `/api/v1/funnel/campaigns/${campaignId}/zones?${q.toString()}`);
+        },
+        getCampaignClusters(campaignId: number, dateFrom: string, dateTo: string, nmId?: number | null) {
             const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
+            if (nmId != null) q.set('nm_id', String(nmId));
             return api.request<CampaignClustersResponse>('GET', `/api/v1/funnel/campaigns/${campaignId}/clusters?${q.toString()}`);
         },
         toggleClusterMinus(campaignId: number, body: { nm_id: number; norm_query: string; action: 'add' | 'remove' }) {

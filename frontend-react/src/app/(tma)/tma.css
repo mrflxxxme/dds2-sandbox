@@ -2,7 +2,7 @@
 /* Clean, native Telegram feel — uses TG theme variables with graceful fallbacks */
 
 .tma-body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: var(--font-roboto), 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: var(--tg-theme-bg-color, #ffffff);
     color: var(--tg-theme-text-color, #1d1d1f);
     margin: 0;

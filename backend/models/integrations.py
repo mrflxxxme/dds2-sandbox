@@ -6,6 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -118,6 +119,8 @@ class WbAdCampaign(Base):
     campaign_id: Mapped[int] = mapped_column(Integer, nullable=False)  # WB advertId
     name: Mapped[str | None] = mapped_column(String(500))
     campaign_type: Mapped[str | None] = mapped_column(String(20))  # cpm, cpc (модель оплаты WB)
+    advert_type: Mapped[int | None] = mapped_column(Integer)  # числовой тип WB: 8=авто/рекомендации, 9=аукцион (для цветовой кодировки)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime)  # дата создания кампании в WB (createTime) — для фильтра по дате добавления
     bid_mode: Mapped[str | None] = mapped_column(String(20))  # режим ставки: unified (единая) / manual (ручная)
     status: Mapped[int] = mapped_column(Integer, default=9)  # 7=completed, 9=active, 11=paused
     budget: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # remaining budget (rubles)
@@ -166,6 +169,43 @@ class WbAdCampaignDaily(Base):
         UniqueConstraint("project_id", "campaign_id", "date", name="uq_ad_campaign_daily"),
         Index("ix_ad_campaign_daily_project_date", "project_id", "date"),
         Index("ix_ad_campaign_daily_campaign", "project_id", "campaign_id"),
+    )
+
+
+class WbAdNmDaily(Base):
+    """Посуточная РК-статистика в разбивке по товару: кампания × nmId × дата.
+
+    Источник — WB /adv/v3/fullstats (кампания → days → apps → nms). WB отдаёт nm-разбивку
+    в том же ответе, из которого мы берём итоги кампании, поэтому таблица наполняется
+    без единого дополнительного запроса.
+
+    Копим историю у себя: WB хранит статистику ограниченное время, а нам нужна глубина.
+
+    ВНИМАНИЕ: orders/sum_price — заказы, АТРИБУТИРОВАННЫЕ рекламе, а не все заказы товара
+    (те лежат в WbFunnelDaily по всем источникам трафика). Числа не взаимозаменяемы.
+    """
+
+    __tablename__ = "wb_ad_nm_daily"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    campaign_id: Mapped[int] = mapped_column(Integer, nullable=False)  # WB advertId
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    spend: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    atbs: Mapped[int] = mapped_column(Integer, default=0)  # корзины
+    orders: Mapped[int] = mapped_column(Integer, default=0)  # заказы (атрибуция рекламы)
+    shks: Mapped[int] = mapped_column(Integer, default=0)  # штуки
+    orders_sum: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # WB sum_price
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "campaign_id", "nm_id", "date", name="uq_ad_nm_daily"),
+        # Страница кампании: метрики одного товара (или всех) за период
+        Index("ix_ad_nm_daily_campaign_date", "project_id", "campaign_id", "date"),
+        # Аналитика по товару поверх всех кампаний
+        Index("ix_ad_nm_daily_nm_date", "project_id", "nm_id", "date"),
     )
 
 
