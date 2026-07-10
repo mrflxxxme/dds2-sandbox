@@ -655,11 +655,14 @@ def test_extract_plate_none_when_absent():
 
 
 @pytest.mark.asyncio
-async def test_sync_pass_from_vehicle_mirrors_fields(db_session):
+async def test_sync_pass_from_vehicle_uses_explicit_names(db_session):
+    # Новый формат: vehicle_info = чистый госномер, ФИО — явные колонки заявки.
     assembly = await _reload_assembly(db_session)
-    assembly.vehicle_info = "В874УА37 Крапива Дмитрий 89158491778"
+    assembly.vehicle_info = "В874УА37"
     assembly.vehicle_brand = "ГАЗ-330"
     assembly.driver_phone = "+7 915 849 17 78"
+    assembly.driver_first_name = "Дмитрий"
+    assembly.driver_last_name = "Крапива"
     await db_session.flush()
 
     await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
@@ -673,6 +676,35 @@ async def test_sync_pass_from_vehicle_mirrors_fields(db_session):
     assert link.pass_driver_first == "Дмитрий"
     # pallets_count заявки = 2 (фикстура) → проставился в пустой пропуск.
     assert link.pass_pallets == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_pass_from_vehicle_legacy_freeform_string(db_session):
+    # Старые заявки: vehicle_info = «Номер, водитель, ТК», ФИО-колонки пусты → парсим.
+    assembly = await _reload_assembly(db_session)
+    assembly.vehicle_info = "В874УА37 Крапива Дмитрий 89158491778"
+    assembly.vehicle_brand = "ГАЗ-330"
+    await db_session.flush()
+
+    await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
+    await db_session.commit()
+
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.pass_car_number == "В874УА37"  # выдран regex'ом из свободной строки
+    assert link.pass_driver_last == "Крапива"
+    assert link.pass_driver_first == "Дмитрий"
+
+
+@pytest.mark.asyncio
+async def test_sync_pass_car_number_falls_back_to_raw_value(db_session):
+    # Госномер нестандартного формата (не матчится regex'ом) — кладём как есть.
+    assembly = await _reload_assembly(db_session)
+    assembly.vehicle_info = "AB-1234-XY"
+    await db_session.flush()
+    await wb_supply_service.sync_pass_from_vehicle(db_session, PROJECT_ID, assembly)
+    await db_session.commit()
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.pass_car_number == "AB-1234-XY"
 
 
 @pytest.mark.asyncio

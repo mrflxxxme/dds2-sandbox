@@ -1091,10 +1091,16 @@ async def assign_vehicle_bulk(
                 vehicle_info=payload.vehicle_info,
                 vehicle_brand=payload.vehicle_brand,
                 driver_phone=payload.driver_phone,
+                driver_first_name=payload.driver_first_name,
+                driver_last_name=payload.driver_last_name,
                 pickup_date=item.pickup_date,
                 pickup_time_slot=item.pickup_time_slot,
                 pickup_cost=item.pickup_cost,
                 delivery_date=item.delivery_date,
+                # Подрядчик приходит в bulk-payload, но раньше не прокидывался в
+                # per-request AssignVehicle → при массовом назначении терялся.
+                carrier_inn=payload.carrier_inn,
+                carrier_name=payload.carrier_name,
             )
             req = await assembly_service.assign_vehicle(db, project.id, item.request_id, assign_payload)
             results.append(req)

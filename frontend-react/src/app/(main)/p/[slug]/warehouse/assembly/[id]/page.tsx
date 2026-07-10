@@ -70,6 +70,8 @@ export default function AssemblyDetailPage() {
     const [vehicleInfo, setVehicleInfo] = useState('');
     const [vehicleBrand, setVehicleBrand] = useState('');
     const [driverPhone, setDriverPhone] = useState('');
+    const [driverFirstName, setDriverFirstName] = useState('');
+    const [driverLastName, setDriverLastName] = useState('');
     const [carrierInn, setCarrierInn] = useState('');
     const [carrierName, setCarrierName] = useState('');
     const [pickupDate, setPickupDate] = useState('');
@@ -285,15 +287,17 @@ export default function AssemblyDetailPage() {
     // Открыть «Назначить машину» с префиллом: назначенная машина заявки, иначе —
     // данные уже заведённого WB-пропуска (панель «Поставка WB» / кабинет).
     const openVehicleModal = () => {
-        const passInfo = [wbState?.pass_car_number, wbState?.pass_driver_last, wbState?.pass_driver_first]
-            .filter(Boolean).join(' ');
-        setVehicleInfo(assembly?.vehicle_info || passInfo || '');
+        setVehicleInfo(assembly?.vehicle_info || wbState?.pass_car_number || '');
         setVehicleBrand(assembly?.vehicle_brand || wbState?.pass_car_model || '');
         setDriverPhone(assembly?.driver_phone || wbState?.pass_driver_phone || '');
+        setDriverFirstName(assembly?.driver_first_name || wbState?.pass_driver_first || '');
+        setDriverLastName(assembly?.driver_last_name || wbState?.pass_driver_last || '');
         setShowVehicleModal(true);
     };
 
+    // Все поля водителя/машины обязательны — состав совпадает с WB-пропуском.
     const vehicleFormValid = vehicleInfo.trim() && vehicleBrand.trim() && driverPhone.trim()
+        && driverFirstName.trim() && driverLastName.trim()
         && pickupDate && pickupTimeSlot && pickupCost !== '' && deliveryDate;
 
     const handleAssignVehicle = async () => {
@@ -305,6 +309,8 @@ export default function AssemblyDetailPage() {
                 vehicle_info: vehicleInfo.trim(),
                 vehicle_brand: vehicleBrand.trim(),
                 driver_phone: driverPhone.trim(),
+                driver_first_name: driverFirstName.trim(),
+                driver_last_name: driverLastName.trim(),
                 pickup_date: pickupDate,
                 pickup_time_slot: pickupTimeSlot,
                 pickup_cost: Number(pickupCost),
@@ -529,6 +535,12 @@ export default function AssemblyDetailPage() {
             } else if (field === 'driver_phone') {
                 setAssembly({ ...assembly, driver_phone: String(value) });
                 update.driver_phone = String(value);
+            } else if (field === 'driver_first_name') {
+                setAssembly({ ...assembly, driver_first_name: String(value) });
+                update.driver_first_name = String(value);
+            } else if (field === 'driver_last_name') {
+                setAssembly({ ...assembly, driver_last_name: String(value) });
+                update.driver_last_name = String(value);
             } else if (field === 'carrier_inn') {
                 setAssembly({ ...assembly, carrier_inn: String(value) });
                 update.carrier_inn = String(value);
@@ -1001,7 +1013,7 @@ export default function AssemblyDetailPage() {
                     )}
                     {(assembly.vehicle_info || canEditAlways) && (
                         <EditableInfoField
-                            label="Машина"
+                            label="Госномер"
                             value={assembly.vehicle_info || ''}
                             displayValue={assembly.vehicle_info || '\u2014'}
                             type="text"
@@ -1027,6 +1039,26 @@ export default function AssemblyDetailPage() {
                             type="text"
                             editable={!!canEditAlways}
                             onSave={(v) => handleFieldSave('driver_phone', v)}
+                        />
+                    )}
+                    {(assembly.driver_first_name || canEditAlways) && (
+                        <EditableInfoField
+                            label="Имя водителя"
+                            value={assembly.driver_first_name || ''}
+                            displayValue={assembly.driver_first_name || '—'}
+                            type="text"
+                            editable={!!canEditAlways}
+                            onSave={(v) => handleFieldSave('driver_first_name', v)}
+                        />
+                    )}
+                    {(assembly.driver_last_name || canEditAlways) && (
+                        <EditableInfoField
+                            label="Фамилия водителя"
+                            value={assembly.driver_last_name || ''}
+                            displayValue={assembly.driver_last_name || '—'}
+                            type="text"
+                            editable={!!canEditAlways}
+                            onSave={(v) => handleFieldSave('driver_last_name', v)}
                         />
                     )}
                     {(assembly.carrier_inn || canEditAlways) && (
@@ -1421,10 +1453,20 @@ export default function AssemblyDetailPage() {
                 <div className="modal-overlay" onClick={() => setShowVehicleModal(false)}>
                     <div className="modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
                         <h2 className="modal-title">Назначить машину</h2>
+                        {/* Состав полей 1:1 с WB-пропуском — чтобы занос пропуска
+                            не требовал ручного перевода полей. */}
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                                <label className="form-label">Описание машины *</label>
-                                <input className="form-input" value={vehicleInfo} onChange={e => setVehicleInfo(e.target.value)} placeholder="Номер, водитель, ТК..." autoFocus />
+                            <div className="form-group">
+                                <label className="form-label">Имя водителя *</label>
+                                <input className="form-input" value={driverFirstName} onChange={e => setDriverFirstName(e.target.value)} placeholder="Дмитрий" autoFocus />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Фамилия водителя *</label>
+                                <input className="form-input" value={driverLastName} onChange={e => setDriverLastName(e.target.value)} placeholder="Крапива" />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Госномер *</label>
+                                <input className="form-input" value={vehicleInfo} onChange={e => setVehicleInfo(e.target.value)} placeholder="В874УА37" />
                             </div>
                             <div className="form-group">
                                 <label className="form-label">Марка машины *</label>

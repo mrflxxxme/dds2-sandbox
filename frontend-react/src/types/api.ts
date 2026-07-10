@@ -1969,9 +1969,12 @@ export interface AssemblyRequest {
   suggested_pallets_count?: number | null;
   /** расчётный ВЕС ОТГРУЗКИ (кандидат в «Общий вес»): нетто товаров + тара коробов; Decimal — приходит строкой; null если нет нетто-веса */
   suggested_total_weight_kg?: number | string | null;
+  /** госномер машины; у старых заявок — свободная строка «Номер, водитель, ТК» */
   vehicle_info?: string;
   vehicle_brand?: string;
   driver_phone?: string;
+  driver_first_name?: string | null;
+  driver_last_name?: string | null;
   pickup_date?: string;
   pickup_time_slot?: string;
   pickup_cost?: number;
@@ -2771,6 +2774,8 @@ export interface AssemblyRequestUpdate {
   vehicle_info?: string;
   vehicle_brand?: string;
   driver_phone?: string;
+  driver_first_name?: string | null;
+  driver_last_name?: string | null;
   carrier_inn?: string | null;
   carrier_name?: string | null;
 }

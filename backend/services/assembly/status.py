@@ -315,6 +315,10 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
         s.vehicle_info = payload.vehicle_info
         s.vehicle_brand = payload.vehicle_brand
         s.driver_phone = payload.driver_phone
+        if payload.driver_first_name is not None:
+            s.driver_first_name = payload.driver_first_name
+        if payload.driver_last_name is not None:
+            s.driver_last_name = payload.driver_last_name
         s.pickup_date = payload.pickup_date
         s.pickup_time_slot = payload.pickup_time_slot
         s.pickup_cost = payload.pickup_cost

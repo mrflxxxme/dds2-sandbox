@@ -528,25 +528,38 @@ async def sync_pass_from_vehicle(
     veh_info = (assembly.vehicle_info or "").strip()
     veh_brand = (assembly.vehicle_brand or "").strip()
     veh_phone = (assembly.driver_phone or "").strip()
-    if not (veh_info or veh_brand or veh_phone):
+    first_name = (assembly.driver_first_name or "").strip()
+    last_name = (assembly.driver_last_name or "").strip()
+    if not (veh_info or veh_brand or veh_phone or first_name or last_name):
         return
     # adopt_supply_id=None: siblings совместной поставки могут не иметь загруженного
     # relationship wb_fbo_supply (lazy-load в async упадёт). Пропуск сохраняем
     # локально; supply_id доберётся при заносе/открытии панели (get_state).
     link = await _get_or_create_link(db, project_id, assembly.id)
-    plate = _extract_plate(veh_info)
-    if plate:
-        link.pass_car_number = plate
+
+    # Госномер: с приведением модалки к составу пропуска `vehicle_info` — это чистый
+    # госномер. У СТАРЫХ заявок там свободная строка «Номер, водитель, ТК» → regex.
+    if veh_info:
+        link.pass_car_number = _extract_plate(veh_info) or veh_info
     if veh_brand:
         link.pass_car_model = veh_brand
     if veh_phone:
         link.pass_driver_phone = veh_phone
-    if not (link.pass_driver_first or link.pass_driver_last):
-        first, last = _parse_driver_name(veh_info, plate)
-        if first:
-            link.pass_driver_first = first
-        if last:
-            link.pass_driver_last = last
+
+    # ФИО: явные поля заявки — источник истины. Их нет только у старых заявок →
+    # тогда best-effort парсинг из свободной строки, и только в пустой пропуск.
+    if first_name or last_name:
+        if first_name:
+            link.pass_driver_first = first_name
+        if last_name:
+            link.pass_driver_last = last_name
+    elif not (link.pass_driver_first or link.pass_driver_last):
+        parsed_first, parsed_last = _parse_driver_name(veh_info, _extract_plate(veh_info))
+        if parsed_first:
+            link.pass_driver_first = parsed_first
+        if parsed_last:
+            link.pass_driver_last = parsed_last
+
     if link.pass_pallets is None and assembly.pallets_count:
         link.pass_pallets = assembly.pallets_count
 
