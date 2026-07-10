@@ -4,7 +4,7 @@
 (measurement-penalties). Источник — WB Analytics API.
 
 Revision ID: e0551748b04f
-Revises: wbp02_wb_supply_state
+Revises: wbp04_assembly_driver_name
 Create Date: 2026-07-09 12:50:02.896710
 
 """
@@ -16,7 +16,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'e0551748b04f'
-down_revision: Union[str, None] = 'wbp02_wb_supply_state'
+down_revision: Union[str, None] = 'wbp04_assembly_driver_name'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
