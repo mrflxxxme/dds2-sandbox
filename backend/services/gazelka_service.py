@@ -60,6 +60,9 @@ GAZELKA_SERVICE = "gazelka"
 # Маркеры WB в названиях маркетплейсов Газельки (для дефолта marketplace_id)
 _WB_MARKERS = ("wildberries", "вайлдберриз", "вб")
 
+# Наш город отгрузки: прайс-лист Газельки по умолчанию
+PRICE_LIST_HOME = "Иваново"
+
 
 class GazelkaServiceError(Exception):
     """Доменная ошибка отправки (роутер мапит в HTTPException)."""
@@ -177,12 +180,16 @@ def _warehouse_options(form: ApplyForm) -> list[GazelkaSelectOption]:
 
 
 def _default_price_id(form: ApplyForm) -> str | None:
-    """Прайс-лист, выбранный порталом. Первая опция — НЕ он (см. GazelkaFormOptions)."""
-    selected = form.defaults.get("price_id")
-    if selected:
-        return selected
+    """Прайс-лист по умолчанию: наш город отгрузки — Иваново.
+
+    Порядок предпочтений: «Иваново» → выбранное порталом (`option[selected]`) → первая
+    опция. Первая опция сама по себе — НЕ дефолт (у портала это Симферополь).
+    """
     options = form.selects.get("price_id") or []
-    return options[0][0] if options else None
+    for value, label in options:
+        if value and label.strip().lower() == PRICE_LIST_HOME.lower():
+            return value
+    return form.defaults.get("price_id") or (options[0][0] if options else None)
 
 
 def _options_from_form(form: ApplyForm) -> GazelkaFormOptions:
@@ -321,25 +328,73 @@ def _validate_schedule(form: ApplyForm, req: GazelkaSendRequest) -> None:
         logger.warning("gazelka.schedule_unresolved", place=place.label, price_id=req.price_id)
 
 
-def _match_warehouse(wb_name: str | None, options: GazelkaFormOptions, marketplace_id: str | None) -> str | None:
-    """Сматчить WB-склад назначения с их dropdown (value == label у delivery_address).
+# Служебные слова WB-названий, не несущие смысла для матча («Склад Шушары», «СЦ Домодедово М4»)
+_NOISE_TOKENS = frozenset(("склад", "сц", "рц"))
+_TOKEN_RE = re.compile(r"[^\w]+", re.UNICODE)
+_STEM = 4  # длина префикса для «Перспективная» ≈ «Перспективный»
 
-    Матч только среди складов выбранного маркетплейса: у Ozon и WB есть одноимённые
-    склады с разными графиками.
+
+def _tokens(name: str) -> set[str]:
+    """Нормализованные значимые токены названия склада."""
+    flat = name.strip().lower().replace("ё", "е")
+    return {t for t in _TOKEN_RE.split(flat) if t and t not in _NOISE_TOKENS}
+
+
+def _token_score(wb: set[str], opt: set[str]) -> int:
+    """Сколько токенов WB-названия нашли пару в опции (по префиксу — учёт склонений)."""
+    return sum(
+        1
+        for w in wb
+        if any(w == o or (len(w) >= _STEM and len(o) >= _STEM and w[:_STEM] == o[:_STEM]) for o in opt)
+    )
+
+
+def _match_warehouse(
+    wb_name: str | None,
+    options: GazelkaFormOptions,
+    marketplace_id: str | None,
+    price_id: str | None = None,
+) -> str | None:
+    """Сматчить склад WB-поставки с их dropdown (value == label у delivery_address).
+
+    Названия у сторон разные: «Склад Шушары» ↔ «Санкт-Петербург (Шушары)»,
+    «Екатеринбург - Перспективная 14» ↔ «Екатеринбург (Перспективный)». Поэтому матч
+    идёт по значимым токенам с префиксным сравнением, а не по вхождению подстроки.
+
+    Кандидаты — только склады выбранного маркетплейса (у Ozon и WB одноимённые склады
+    с разными графиками) и, если задан ``price_id``, только с активным графиком оттуда.
+    При неоднозначности склад НЕ угадываем: пусть логист выберет сам.
     """
     if not wb_name:
         return None
     candidates = [
-        o for o in options.delivery_warehouses if not marketplace_id or o.marketplace_id == marketplace_id
+        o
+        for o in options.delivery_warehouses
+        if (not marketplace_id or o.marketplace_id == marketplace_id)
+        and (not price_id or (o.place_id and f"{price_id}-{o.place_id}" in options.schedule))
     ]
-    low = wb_name.strip().lower()
+    wb_tokens = _tokens(wb_name)
     for opt in candidates:
-        if opt.label.strip().lower() == low:
+        if _tokens(opt.label) == wb_tokens:
             return opt.value
+
+    # FBS-склад берём, только если сама поставка FBS: наши поставки — FBO.
+    wants_fbs = "fbs" in wb_tokens or "фбс" in wb_tokens
+    scored: list[tuple[int, str]] = []
     for opt in candidates:
-        if low in opt.label.strip().lower() or opt.label.strip().lower() in low:
-            return opt.value
-    return None
+        opt_tokens = _tokens(opt.label)
+        score = _token_score(wb_tokens, opt_tokens)
+        if not score:
+            continue
+        if not wants_fbs and ({"fbs", "фбс"} & opt_tokens):
+            score -= 1
+        scored.append((score, opt.value))
+
+    if not scored:
+        return None
+    best = max(s for s, _ in scored)
+    winners = {value for score, value in scored if score == best}
+    return winners.pop() if best > 0 and len(winners) == 1 else None
 
 
 def _default_marketplace(options: GazelkaFormOptions) -> str | None:
@@ -375,8 +430,8 @@ def _prefill_from_assembly(
     if ar.pallets_count and ar.pallet_weight_kg is not None:
         total_weight = Decimal(ar.pallets_count) * ar.pallet_weight_kg
     marketplace_id = _default_marketplace(options)
-    address = _match_warehouse(wb_name, options, marketplace_id)
     price_id = options.default_price_id or ""
+    address = _match_warehouse(wb_name, options, marketplace_id, price_id)
     departure_date, delivery_date = _prefill_dates(ar, form, price_id, address, marketplace_id)
     return GazelkaPrefill(
         customer_phone=form.inputs.get("customer_phone") or None,
