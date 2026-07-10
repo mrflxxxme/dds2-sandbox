@@ -48,6 +48,11 @@ class GazelkaFormOptions(BaseModel):
     delivery_warehouses: list[GazelkaSelectOption] = Field(default_factory=list)  # delivery_address
     supply_types: list[GazelkaSelectOption] = Field(default_factory=list)  # monomix
     timeslots: list[GazelkaSelectOption] = Field(default_factory=list)  # daily_delivery_timeslot
+    # Значения, ВЫБРАННЫЕ порталом в форме (option[selected]). Порядок опций у него
+    # произвольный — «первая» ≠ «выбранная»: price_id идёт Симферополь…Иваново, а
+    # выбрано Иваново. График зависит от price_id, поэтому дефолт брать только отсюда.
+    default_entity_id: str | None = None
+    default_price_id: str | None = None
     # Активные направления: ключ «{price_id}-{place_id}». Склад без записи для выбранного
     # прайса недоступен — фронт его прячет, бэк не даёт отправить заявку.
     schedule: dict[str, GazelkaSchedulePlan] = Field(default_factory=dict)

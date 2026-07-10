@@ -46,7 +46,8 @@ def _form() -> ApplyForm:
         },
         inputs={"customer_phone": "+79203491330"},
         hidden={"action": "save_plan"},
-        defaults={"price_id": "1", "volume": "0", "weight2": "0", "notes": ""},
+        # price_id="1" (Иваново) — именно selected-опция, а не первая в разметке
+        defaults={"entity_id": "6596", "price_id": "1", "volume": "0", "weight2": "0", "notes": ""},
         places=[
             DeliveryPlace(value="Тула", label="Тула", place_id="18", marketplace_id="4"),
             DeliveryPlace(value="Казань", label="Казань", place_id="25", marketplace_id="4"),
@@ -84,6 +85,20 @@ def test_options_expose_only_active_schedule():
     assert "1-99" not in opts.schedule
     assert opts.schedule["1-25"].loading_days == [1, 3]
     assert opts.min_departure_date == date(2026, 7, 10)
+
+
+def test_default_price_id_is_selected_option_not_first():
+    """У портала price_id идёт Симферополь…Иваново, а выбрано Иваново. График зависит от прайса."""
+    opts = _options_from_form(_form())
+    assert opts.price_lists[0].value == "5"  # Симферополь — первая в разметке
+    assert opts.default_price_id == "1"  # Иваново — selected
+    assert opts.default_entity_id == "6596"
+
+
+def test_default_price_id_falls_back_to_first_option():
+    form = _form()
+    form.defaults.pop("price_id")
+    assert _options_from_form(form).default_price_id == "5"
 
 
 def test_default_marketplace_picks_wb():
