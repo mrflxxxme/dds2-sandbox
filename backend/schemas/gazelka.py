@@ -19,10 +19,24 @@ from pydantic import BaseModel, Field
 
 
 class GazelkaSelectOption(BaseModel):
-    """Опция их select-поля: value уходит в POST, label показывается логисту."""
+    """Опция их select-поля: value уходит в POST, label показывается логисту.
+
+    У складов назначения название неуникально («Волгоград» есть и у Ozon, и у WB) —
+    опции различают ``marketplace_id`` + ``place_id``; последний связывает её с графиком.
+    """
 
     value: str
     label: str
+    place_id: str | None = None
+    marketplace_id: str | None = None
+
+
+class GazelkaSchedulePlan(BaseModel):
+    """График склада: дни погрузки/доставки (0=Вс … 6=Сб) и срок в пути."""
+
+    loading_days: list[int] | None = None  # None — ограничения нет, годится любой день
+    delivery_days: list[int] | None = None
+    eta_days: int = 1
 
 
 class GazelkaFormOptions(BaseModel):
@@ -34,6 +48,11 @@ class GazelkaFormOptions(BaseModel):
     delivery_warehouses: list[GazelkaSelectOption] = Field(default_factory=list)  # delivery_address
     supply_types: list[GazelkaSelectOption] = Field(default_factory=list)  # monomix
     timeslots: list[GazelkaSelectOption] = Field(default_factory=list)  # daily_delivery_timeslot
+    # Активные направления: ключ «{price_id}-{place_id}». Склад без записи для выбранного
+    # прайса недоступен — фронт его прячет, бэк не даёт отправить заявку.
+    schedule: dict[str, GazelkaSchedulePlan] = Field(default_factory=dict)
+    min_departure_date: date | None = None
+    min_delivery_date: date | None = None
 
 
 class GazelkaPrefill(BaseModel):

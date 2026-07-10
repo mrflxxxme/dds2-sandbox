@@ -252,6 +252,7 @@ export function seedNewcomerRows(input: SeedNewcomerInput): AssemblyDraftRow[] {
             warehouse: a.warehouse,
             share_pct: a.share_pct,
             existing: coverageOf(s.nm_id, a.warehouse),
+            district: a.district,
         }));
         const alloc = seedNewcomerWholeBoxes(remaining, ppbOf(s.nm_id), covAnchors);
         const tot = sumRec(alloc);

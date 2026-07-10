@@ -7,9 +7,12 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
-from backend.integrations.gazelka_client import ApplyForm
+import pytest
+
+from backend.integrations.gazelka_client import ApplyForm, DeliveryPlace, SchedulePlan
 from backend.schemas.gazelka import GazelkaSendRequest
 from backend.services.gazelka_service import (
+    GazelkaServiceError,
     _attach_suggestion,
     _clean_date,
     _default_marketplace,
@@ -20,8 +23,15 @@ from backend.services.gazelka_service import (
     _prefill_from_assembly,
     _row_from_plan,
     _status_label,
+    _validate_schedule,
     _values_from_plan,
 )
+
+# Казань WB (place 25): грузят Пн/Ср, доставка Вт/Чт, путь 1 день.
+# У Ozon (place 26) склад называется так же, но график другой — этим и проверяем матч по mpid.
+_KAZAN_WB = SchedulePlan(loading_days=[1, 3], delivery_days=[2, 4], eta_days=1, active=True)
+_KAZAN_OZON = SchedulePlan(loading_days=[5], delivery_days=[6], eta_days=1, active=True)
+_TULA_WB = SchedulePlan(loading_days=None, delivery_days=None, eta_days=2, active=True)
 
 
 def _form() -> ApplyForm:
@@ -31,12 +41,20 @@ def _form() -> ApplyForm:
             "payer_id": [("", "Выбор организации"), ("6596", "ПЛЮС ВАЙБ ООО")],
             "price_id": [("5", "Симферополь"), ("1", "Иваново")],
             "marketplace_id": [("0", "Выбрать Маркетплейс"), ("1", "Ozon"), ("4", "WildBerries")],
-            "delivery_address": [("", "На какой склад?"), ("Тула", "Тула"), ("Казань", "Казань"), ("Казань", "Казань")],
             "monomix": [("0", "Тип поставки"), ("1", "Моно"), ("2", "Микс")],
             "daily_delivery_timeslot": [("", "Время"), ("Вечером", "Вечером")],
         },
         inputs={"customer_phone": "+79203491330"},
         hidden={"action": "save_plan"},
+        defaults={"price_id": "1", "volume": "0", "weight2": "0", "notes": ""},
+        places=[
+            DeliveryPlace(value="Тула", label="Тула", place_id="18", marketplace_id="4"),
+            DeliveryPlace(value="Казань", label="Казань", place_id="25", marketplace_id="4"),
+            DeliveryPlace(value="Казань", label="Казань", place_id="26", marketplace_id="1"),
+        ],
+        schedule={"1-18": _TULA_WB, "1-25": _KAZAN_WB, "1-26": _KAZAN_OZON},
+        min_departure=date(2026, 7, 10),
+        min_delivery=date(2026, 7, 11),
     )
 
 
@@ -48,10 +66,24 @@ def test_options_drop_placeholders_and_dedupe():
     assert [o.value for o in opts.entities] == ["6596"]
     # маркетплейс-плейсхолдер "0" отброшен
     assert all(o.value != "0" for o in opts.marketplaces)
-    # дубль "Казань" схлопнут
-    assert [o.value for o in opts.delivery_warehouses] == ["Тула", "Казань"]
     # monomix без плейсхолдера "0"
     assert {o.value for o in opts.supply_types} == {"1", "2"}
+
+
+def test_warehouse_options_keep_same_name_across_marketplaces():
+    """Одноимённые склады разных маркетплейсов — разные опции: у них разные графики."""
+    opts = _options_from_form(_form())
+    kazan = [o for o in opts.delivery_warehouses if o.value == "Казань"]
+    assert {(o.place_id, o.marketplace_id) for o in kazan} == {("25", "4"), ("26", "1")}
+
+
+def test_options_expose_only_active_schedule():
+    form = _form()
+    form.schedule["1-99"] = SchedulePlan(loading_days=[1], delivery_days=[2], eta_days=1, active=False)
+    opts = _options_from_form(form)
+    assert "1-99" not in opts.schedule
+    assert opts.schedule["1-25"].loading_days == [1, 3]
+    assert opts.min_departure_date == date(2026, 7, 10)
 
 
 def test_default_marketplace_picks_wb():
@@ -61,11 +93,102 @@ def test_default_marketplace_picks_wb():
 
 def test_match_warehouse_exact_and_contains():
     opts = _options_from_form(_form())
-    assert _match_warehouse("Казань", opts) == "Казань"
-    assert _match_warehouse("казань", opts) == "Казань"
-    assert _match_warehouse("Казань WB", opts) == "Казань"  # contains
-    assert _match_warehouse("Москва", opts) is None
-    assert _match_warehouse(None, opts) is None
+    assert _match_warehouse("Казань", opts, "4") == "Казань"
+    assert _match_warehouse("казань", opts, "4") == "Казань"
+    assert _match_warehouse("Казань WB", opts, "4") == "Казань"  # contains
+    assert _match_warehouse("Москва", opts, "4") is None
+    assert _match_warehouse(None, opts, "4") is None
+
+
+def test_match_warehouse_ignores_other_marketplace_warehouses():
+    """«Тула» есть только у WB — для Ozon её предлагать нельзя."""
+    opts = _options_from_form(_form())
+    assert _match_warehouse("Тула", opts, "1") is None
+    assert _match_warehouse("Тула", opts, "4") == "Тула"
+
+
+# ─── График (слоты сдачи) ─────────────────────────────────────────────────────
+
+
+def _sched_req(**kw) -> GazelkaSendRequest:
+    base = dict(
+        entity_id="6596",
+        payer_id="6596",
+        price_id="1",
+        is_marketplace="yes",
+        marketplace_id="4",
+        delivery_address="Казань",
+        departure_date=date(2026, 7, 13),  # понедельник — день погрузки
+        delivery_date=date(2026, 7, 14),  # вторник — день доставки, +1 день пути
+    )
+    base.update(kw)
+    return GazelkaSendRequest(**base)
+
+
+def test_validate_schedule_passes_on_allowed_days():
+    _validate_schedule(_form(), _sched_req())  # не бросает
+
+
+def test_validate_schedule_rejects_departure_on_non_loading_day():
+    with pytest.raises(GazelkaServiceError) as e:
+        # вторник — Казань WB грузят Пн/Ср
+        _validate_schedule(_form(), _sched_req(departure_date=date(2026, 7, 14), delivery_date=date(2026, 7, 16)))
+    assert "грузят по Пн/Ср" in str(e.value)
+    assert e.value.status_code == 400
+
+
+def test_validate_schedule_rejects_delivery_on_non_delivery_day():
+    with pytest.raises(GazelkaServiceError) as e:
+        # среда — Казань WB принимает Вт/Чт
+        _validate_schedule(_form(), _sched_req(departure_date=date(2026, 7, 13), delivery_date=date(2026, 7, 15)))
+    assert "принимает доставку по Вт/Чт" in str(e.value)
+
+
+def test_validate_schedule_rejects_past_departure():
+    """Причина 500 в проде: даты сборки протухли, портал их не принимает."""
+    with pytest.raises(GazelkaServiceError) as e:
+        _validate_schedule(_form(), _sched_req(departure_date=date(2026, 6, 30), delivery_date=date(2026, 7, 4)))
+    assert "10.07.2026" in str(e.value)
+
+
+def test_validate_schedule_rejects_delivery_before_eta():
+    with pytest.raises(GazelkaServiceError) as e:
+        # доставка в тот же вторник, что и погрузка... но путь 1 день от Пн 13-го → 14-е ок;
+        # берём Ср 15-го как отправку? нет — проверяем доставку 14-го при отправке 15-го (Ср)
+        _validate_schedule(_form(), _sched_req(departure_date=date(2026, 7, 15), delivery_date=date(2026, 7, 14)))
+    assert "не раньше 16.07.2026" in str(e.value)
+
+
+def test_validate_schedule_rejects_unserved_direction():
+    with pytest.raises(GazelkaServiceError) as e:
+        _validate_schedule(_form(), _sched_req(price_id="5"))  # Симферополь → Казань не в графике
+    assert "не обслуживается" in str(e.value)
+
+
+def test_validate_schedule_rejects_warehouse_of_other_marketplace():
+    with pytest.raises(GazelkaServiceError) as e:
+        _validate_schedule(_form(), _sched_req(marketplace_id="1", delivery_address="Тула"))
+    assert "не обслуживается" in str(e.value)
+
+
+def test_validate_schedule_fails_open_when_portal_markup_unparsed():
+    """Пустой график = «портал сменил разметку», а не «направления нет» — не блокируем WB-поток."""
+    form = _form()
+    form.schedule = {}
+    _validate_schedule(form, _sched_req(departure_date=date(2026, 6, 30)))
+
+
+def test_validate_schedule_skipped_for_non_marketplace_delivery():
+    """Обычная доставка (не маркетплейс) идёт свободными датами — график не применяем."""
+    _validate_schedule(_form(), _sched_req(is_marketplace="no", departure_date=date(2026, 7, 14)))
+
+
+def test_validate_schedule_allows_any_day_when_unrestricted():
+    """Тула без ограничений по дням: любой день ≥ min, доставка ≥ отправка + 2."""
+    _validate_schedule(
+        _form(),
+        _sched_req(delivery_address="Тула", departure_date=date(2026, 7, 14), delivery_date=date(2026, 7, 16)),
+    )
 
 
 # ─── Prefill ──────────────────────────────────────────────────────────────────
@@ -95,8 +218,14 @@ def test_prefill_maps_assembly_fields():
     assert pre.pallets == 3
     assert pre.customer_phone == "+79203491330"
     assert pre.marketplace_id == "4"
-    assert pre.departure_date == date(2026, 7, 1)
-    assert pre.delivery_date == date(2026, 7, 3)
+
+
+def test_prefill_pulls_stale_dates_forward_to_schedule():
+    """Даты сборки (1–3 июля) протухли: предлагаем ближайшие Пн погрузки и Вт доставки."""
+    form = _form()
+    pre = _prefill_from_assembly(_assembly(), form, _options_from_form(form))
+    assert pre.departure_date == date(2026, 7, 13)  # пн, день погрузки Казани
+    assert pre.delivery_date == date(2026, 7, 14)  # вт, +1 день пути
 
 
 def test_prefill_without_fbo_supply_falls_back_to_manual_name():
@@ -107,6 +236,9 @@ def test_prefill_without_fbo_supply_falls_back_to_manual_name():
     assert pre.supply_id is None
     assert pre.delivery_address == "Тула"
     assert pre.delivery_address_x2 == "Тула"
+    # Тула без ограничений по дням: отправка — с нижней границы портала, доставка +2 дня
+    assert pre.departure_date == date(2026, 7, 10)
+    assert pre.delivery_date == date(2026, 7, 12)
 
 
 # ─── Payload ──────────────────────────────────────────────────────────────────
@@ -118,7 +250,7 @@ def _send_req(**kw) -> GazelkaSendRequest:
     return GazelkaSendRequest(**base)
 
 
-def test_payload_drops_none_and_formats_dates():
+def test_payload_keeps_none_and_formats_dates():
     req = _send_req(
         delivery_date=date(2026, 7, 3),
         departure_date=date(2026, 7, 1),
@@ -132,9 +264,10 @@ def test_payload_drops_none_and_formats_dates():
     assert payload["departure_date"] == "2026-07-01"
     assert payload["pallets"] == "3"
     assert payload["weight"] == "300.00"
-    assert payload["palleting"] == "1"  # чекбокс присутствует только когда True
+    assert payload["palleting"] == "on"  # чекбокс присутствует только когда True
     assert payload["is_marketplace"] == "yes"  # дефолт
-    assert "marketplace_id" not in payload  # None отброшен
+    # None остаётся ключом: клиент подставит дефолт формы, а не выкинет поле из POST
+    assert payload["marketplace_id"] is None
     # action добавляет клиент, не сервис
     assert "action" not in payload
 

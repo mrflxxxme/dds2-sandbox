@@ -14,9 +14,10 @@ tg:@POSTAVLENOru_BOT, лист `bot_data`). Структура:
   }
 
 Что даёт сервис:
-  • `get_priority_score(warehouse, okrug)` — насколько склад быстр для ФО (0..1).
+  • `get_priority_score(warehouse, okrug)` — насколько склад быстр для ФО.
   • `sort_warehouses_by_priority(warehouses, okrug)` — упорядочить по приоритету.
-  • `is_stealer_for_okrug(warehouse, target_okrug)` — склад другого ФО лезет в target.
+  • `is_stealer_for_okrug(warehouse, target_okrug)` — склад другого ФО стоит
+    в top-2 цепочки хотя бы одного города target (реально отбирает спрос).
   • `get_stealers_for_okrug(target_okrug)` — список «воришек» с количеством городов.
   • `get_anchors_for_okrug(target_okrug)` — якорные склады ФО (top-1/top-2).
   • `compute_realistic_ceiling(loaded_warehouses)` — доля городов, для которых
@@ -47,6 +48,12 @@ from backend.services.warehouse_district import (
 
 _SPEED_TABLE_PATH = Path(__file__).resolve().parent.parent / "data" / "wb_warehouse_speed.json"
 _MAX_PRIORITY_SLOTS = 6
+
+# Склад считается «воришкой» чужого ФО, только если стоит в top-N цепочки
+# хотя бы одного города этого ФО. Глубокие слоты (3+) — fallback-маршруты WB,
+# туда почти ничего не едет; бинарный флаг по ЛЮБОЙ глубине душил якоря:
+# СПБ Шушары получал штраф 0.6 за слоты #4/#6 у Читы и Алматы (аудит 2026-07-09).
+_STEALER_MAX_DEPTH = 2
 
 WarningKind = Literal["anchor_missing", "stealer_without_anchor", "low_ceiling"]
 Severity = Literal["info", "warning", "error"]
@@ -135,15 +142,36 @@ def iter_all_cities() -> list[CityPriority]:
     return _all_cities()
 
 
+@lru_cache(maxsize=16)
+def _localizable_cities_count(okrug: str) -> int:
+    """Число городов ФО, в чью priority-chain входит хотя бы один склад ЭТОГО ЖЕ ФО.
+
+    «Нелокализуемые» города (Псков/Мурманск/Архангельск/… — WB возит туда
+    только чужими складами) не должны размывать скор якорей: продавец не
+    может на них повлиять никаким выбором склада. Без этого якорь СЗФО
+    (Шушары, top-1 у 3 из 4 достижимых городов) весил 0.300 против 1.000
+    у якоря УФО и проигрывал cap на каждом SKU (аудит 2026-07-09).
+
+    Fallback: если у ФО вообще нет своих складов в карте — len(всех городов),
+    чтобы не делить на ноль (скоры складов там всё равно межокружные).
+    """
+    cities = _cities_by_okrug().get(okrug, [])
+    n = sum(1 for c in cities if any(warehouse_to_district(wh) == okrug for wh in c.warehouses))
+    return n or len(cities)
+
+
 @lru_cache(maxsize=1024)
 def get_priority_score(warehouse: str, okrug: str) -> float:
     """Скор склада как быстрого для городов этого ФО.
 
     Для каждого города ФО, в priority list которого встречается склад,
     прибавляем 1/(idx+1) (priority 1 → +1.0, p2 → +0.5, p3 → +0.33, …).
-    Делим на число городов ФО → нормализованный [0..1].
+    Делим на число ЛОКАЛИЗУЕМЫХ городов ФО (см. _localizable_cities_count).
 
-    1.0 = склад первый приоритет во ВСЕХ городах ФО.
+    Для склада СВОЕГО ФО скор нормализован [0..1]: 1.0 = первый приоритет
+    во всех локализуемых городах (его города-вхождения локализуемы по
+    определению). Для чужого склада скор может превышать 1.0 — потребители
+    сравнивают скоры только внутри одного ФО, порядок сохраняется.
     0.0 = склад вообще не встречается в priority chains этого ФО.
     """
     canon = canonical_warehouse_name(warehouse)
@@ -157,7 +185,7 @@ def get_priority_score(warehouse: str, okrug: str) -> float:
         if canon in c.warehouses:
             idx = c.warehouses.index(canon)
             score += 1.0 / (idx + 1)
-    return score / len(cities)
+    return score / _localizable_cities_count(okrug)
 
 
 def find_priority_warehouse(
@@ -231,7 +259,13 @@ def sort_warehouses_by_priority(warehouses: list[str], okrug: str) -> list[str]:
 
 
 def is_stealer_for_okrug(warehouse: str, target_okrug: str) -> bool:
-    """Принадлежит другому ФО, но WB всё равно направляет в target_okrug."""
+    """Принадлежит другому ФО и стоит в top-2 цепочки города target_okrug.
+
+    Учитываются только слоты idx < _STEALER_MAX_DEPTH: туда WB реально
+    маршрутизирует заказы. Глубокое (3+) появление в чужой цепочке —
+    fallback-маршрут, не кража спроса, штрафовать за него нельзя
+    (кейс Шушар: слоты #4/#6 у far_east давали бинарный thief-флаг).
+    """
     canon = canonical_warehouse_name(warehouse)
     if not canon:
         return False
@@ -239,19 +273,21 @@ def is_stealer_for_okrug(warehouse: str, target_okrug: str) -> bool:
     if own in (DISTRICT_UNKNOWN, target_okrug):
         return False
     cities = _cities_by_okrug().get(target_okrug, [])
-    return any(canon in c.warehouses for c in cities)
+    return any(canon in c.warehouses[:_STEALER_MAX_DEPTH] for c in cities)
 
 
 @lru_cache(maxsize=16)
 def get_stealers_for_okrug(target_okrug: str) -> tuple[tuple[str, int], ...]:
-    """Все склады других ФО, встречающиеся в priority chains target_okrug.
+    """Склады других ФО, стоящие в top-2 priority chains городов target_okrug.
 
-    Возвращает `((warehouse_canon, cities_count), ...)` по убыванию count.
+    Возвращает `((warehouse_canon, cities_count), ...)` по убыванию count,
+    где count — число городов, у которых склад в top-2 (та же семантика,
+    что is_stealer_for_okrug: глубокие fallback-слоты не считаются).
     """
     cities = _cities_by_okrug().get(target_okrug, [])
     counts: dict[str, int] = {}
     for c in cities:
-        for wh in c.warehouses:
+        for wh in c.warehouses[:_STEALER_MAX_DEPTH]:
             own = warehouse_to_district(wh)
             if own != target_okrug and own != DISTRICT_UNKNOWN:
                 counts[wh] = counts.get(wh, 0) + 1

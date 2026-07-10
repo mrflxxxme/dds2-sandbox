@@ -81,6 +81,17 @@ _DEFAULT_MAIN_WAREHOUSES: dict[str, str] = {
 
 _SKIP_DISTRICTS_DEFAULT: frozenset[str] = frozenset({"abroad", "unknown"})
 
+# Гарантия СЗФО (аудит 2026-07-09, порог согласован с пользователем): при партии
+# ≥ NW_GUARANTEE_MIN_PACKS × min_pack Северо-Западный ФО получает минимум min_pack
+# за счёт крупнейшего ФО. Без неё доля СЗФО (~9%) на малых партиях давала floor→0
+# (bump пропускает нулевые округа) либо пул «<min_pack → крупнейшему» — новинки
+# системно не заезжали в СЗФО и его локализация не набиралась. Гарантию собирает
+# caller по ИСХОДНОЙ bench-доле (ДО concentrate_share_to_target: концентрация
+# может срезать СЗФО из долей целиком). Для коробочных SKU то же правило в коробах
+# держит фронт (coldStartSeed.seedNewcomerWholeBoxes, NW_GUARANTEE_MIN_BOXES).
+NW_GUARANTEE_MIN_PACKS = 4
+NW_DISTRICT_KEY = "northwest"
+
 # ДВ (Дальневосточный) снабжаем со склада максимум на эту долю заказов — дальше
 # товар физически не довезти. Излишек доли ДВ перекидываем на Урал (Екатеринбург —
 # ворота в Сибирь/ДВ: туда довозим, а WB дотягивает последнюю милю восточнее).
@@ -422,12 +433,16 @@ def distribute(
     min_pack: int,
     main_wh_per_district: dict[str, str],
     skip_districts: set[str] | None = None,
+    guarantee_districts: set[str] | None = None,
 ) -> dict[str, int]:
     """Главное: разнести total_qty по {warehouse → qty}.
 
     Шаги:
     1. Сырое распределение по ФО (округление вниз), остаток крупнейшему ФО.
     2. Pool: ФО с qty < min_pack отдают свои штуки крупнейшему ФО.
+    2b. Гарантия (guarantee_districts, обычно {northwest}): при партии
+        ≥ NW_GUARANTEE_MIN_PACKS × min_pack непокрытый гарантированный ФО
+        получает min_pack за счёт крупнейшего (см. NW_GUARANTEE_MIN_PACKS).
     3. ФО → главный склад ФО (если склад не назначен — pool в крупнейший
        доступный).
 
@@ -464,6 +479,18 @@ def distribute(
     if pool_sum > 0:
         pooled[biggest] = pooled.get(biggest, 0) + pool_sum
 
+    # 2b. Гарантия СЗФО: концентрация/пул могли оставить гарантированный ФО без
+    # штук — при достаточной партии выделяем min_pack от самого крупного
+    # получателя (не роняя его ниже min_pack).
+    if guarantee_districts and total_qty >= NW_GUARANTEE_MIN_PACKS * min_pack:
+        for district in sorted(guarantee_districts):
+            if district in skip or pooled.get(district, 0) > 0:
+                continue
+            donor = max(pooled, key=lambda k: pooled[k], default=None)
+            if donor and donor != district and pooled[donor] - min_pack >= min_pack:
+                pooled[donor] -= min_pack
+                pooled[district] = min_pack
+
     # 3. ФО → главный склад ФО
     by_warehouse: dict[str, int] = {}
     for district, qty in pooled.items():
@@ -487,6 +514,7 @@ def distribute_multi(
     min_pack: int,
     wh_per_district: dict[str, list[tuple[str, int]]],
     skip_districts: set[str] | None = None,
+    guarantee_districts: set[str] | None = None,
 ) -> dict[str, int]:
     """Как distribute(), но qty внутри округа делится между несколькими складами.
 
@@ -495,6 +523,9 @@ def distribute_multi(
     2. Bump-up: ФО с 0 < qty < min_pack поднимаются до min_pack за счёт
        крупнейшего ФО (но biggest не должен упасть ниже min_pack). Это даёт
        равномерное географическое покрытие — мелкие ФО тоже получают партию.
+       Гарантированные ФО (guarantee_districts, обычно {northwest}) bump-аются
+       и с qty=0 — при партии ≥ NW_GUARANTEE_MIN_PACKS × min_pack (floor и
+       концентрация долей не оставляют СЗФО без новинок).
     3. Внутри округа qty делится между складами пропорционально их трафику;
        остаток от округлений — крупнейшему складу округа.
        Если в округе qty достаточно (>= min_pack × N_складов) — малые склады
@@ -517,16 +548,27 @@ def distribute_multi(
         biggest = max(raw, key=lambda k: district_share.get(k, 0))
         raw[biggest] += leftover
 
+    # Гарантированные ФО участвуют в bump даже при raw=0 (и даже если их долю
+    # срезала концентрация — тогда ФО нет в district_share и сортировка ниже
+    # ставит его последним). Порог партии — как в distribute().
+    guarantee: set[str] = {
+        d
+        for d in (guarantee_districts or ())
+        if d not in skip and total_qty >= NW_GUARANTEE_MIN_PACKS * min_pack
+    }
+    for d in guarantee:
+        raw.setdefault(d, 0)
+
     # Bump-up: округа с qty < min_pack поднимаем до min_pack за счёт biggest.
     # Идём в порядке убывания доли — крупные ФО bump-аются первыми (приоритет
     # географического покрытия). Стоп когда biggest не может отдать (упадёт
     # ниже min_pack). Округа с qty=0 (доля × total < 1) — пропускаем (нет
-    # «адреса» откуда брать товар; они и так пустые).
+    # «адреса» откуда брать товар; они и так пустые), КРОМЕ гарантированных.
     biggest_d = max(raw, key=lambda k: district_share.get(k, 0))
     for d in sorted(raw.keys(), key=lambda k: -district_share.get(k, 0)):
         if d == biggest_d:
             continue
-        if 0 < raw[d] < min_pack:
+        if 0 < raw[d] < min_pack or (raw[d] == 0 and d in guarantee):
             need = min_pack - raw[d]
             if raw[biggest_d] - need >= min_pack:
                 raw[biggest_d] -= need
@@ -655,6 +697,10 @@ async def compute_distribution(
         bench_source = "wb_fallback"
         bench_total = 0
 
+    # Гарантия СЗФО собирается по ИСХОДНОЙ доле — концентрация ниже может
+    # срезать northwest из bench_share целиком (см. NW_GUARANTEE_MIN_PACKS).
+    nw_guarantee: set[str] = {NW_DISTRICT_KEY} if bench_share.get(NW_DISTRICT_KEY, 0) > 0 else set()
+
     # Концентрация «до target% локализации»: топ-ФО по доле, хвост дальних не
     # сидируется (seed остаётся на ФФ). Применяем ДО far-east-капа, чтобы кап
     # бил по уже сконцентрированной раздаче.
@@ -671,7 +717,7 @@ async def compute_distribution(
         main_wh = {d: wh for d, wh in _DEFAULT_MAIN_WAREHOUSES.items() if wh not in excluded}
 
     # 6. Распределение и вычитание уже идущих сборок (active_asm уже загружены выше)
-    allocation = distribute(total_qty, bench_share, req.min_pack, main_wh)
+    allocation = distribute(total_qty, bench_share, req.min_pack, main_wh, guarantee_districts=nw_guarantee)
     if fe_excess_share > 0:
         _route_far_east_excess(allocation, round(fe_excess_share * total_qty))
 
@@ -910,6 +956,9 @@ async def compute_cold_start_table(
         bench_source = "wb_fallback"
         bench_total = 0
 
+    # Гарантия СЗФО — по ИСХОДНОЙ доле (до концентрации), см. NW_GUARANTEE_MIN_PACKS.
+    nw_guarantee: set[str] = {NW_DISTRICT_KEY} if bench_share.get(NW_DISTRICT_KEY, 0) > 0 else set()
+
     # Концентрация «до target% локализации» (как у обычных SKU): топ-ФО по доле,
     # хвост дальних/мелких округов сверх target НЕ сидируется. Применяем ДО far-east
     # капа, чтобы кап бил по уже сконцентрированной раздаче.
@@ -925,11 +974,21 @@ async def compute_cold_start_table(
     else:
         wh_per_district = {d: [(wh, 1)] for d, wh in _DEFAULT_MAIN_WAREHOUSES.items() if wh not in excluded}
 
-    # Принцип /warehouse/speed: кандидаты per-ФО — speed-anchor склады (быстрые
-    # для своего ФО из speed-карты POSTAVLENO), вес = cities_count. Товар уходит
-    # на склад, с которого WB замкнёт первый (быстрый) приоритет города, а не на
-    # склад с наибольшим sales-трафиком. Имена канонизируем в stock-пространство
-    # (чтобы совпали с wb_by_warehouse при вычете). ФО без anchor — fallback на трафик.
+    # Принцип /warehouse/speed: СОСТАВ кандидатов per-ФО — speed-anchor склады
+    # (быстрые для своего ФО из speed-карты POSTAVLENO): товар уходит на склад,
+    # с которого WB замкнёт первый (быстрый) приоритет города. ВЕС внутри ФО —
+    # реальный трафик заказов склада, НЕ cities_count: вес по числу городов давал
+    # Калининграду 25% доли СЗФО (Шушары:Калининград = 3:1 городов) при ~0.3%
+    # реального трафика (809:6 доставок за 14д) — аудит 2026-07-09. Трафик-веса
+    # применяются, только когда трафик есть у ВСЕХ кандидатов ФО: нулевой вес
+    # одного из якорей хоронил бы новый склад без истории и ломал «не перетаривать»
+    # (вся цель ФО уезжает на перетаренный склад с трафиком). Иначе — cities_count.
+    # Имена канонизируем в stock-пространство (чтобы совпали с wb_by_warehouse
+    # при вычете). ФО без anchor — fallback на трафик.
+    canon_traffic: dict[str, int] = {}
+    for wh, t in bench_wh_traffic.items():
+        c = _canonicalize_asm_warehouse(wh)
+        canon_traffic[c] = canon_traffic.get(c, 0) + t
     for d in DISTRICT_ORDER:
         if d in {"abroad", "unknown"}:
             continue
@@ -938,6 +997,9 @@ async def compute_cold_start_table(
             :3
         ]
         if speed_whs:
+            traffic_whs = [(wh, canon_traffic.get(wh, 0)) for wh, _ in speed_whs]
+            if all(t > 0 for _, t in traffic_whs):
+                speed_whs = traffic_whs
             wh_per_district[d] = speed_whs
 
     # Канонизируем имена складов в stock-пространство (трафик заказов зовёт склад
@@ -1055,7 +1117,9 @@ async def compute_cold_start_table(
         target_whs = {wh for whs in wh_per_district.values() for wh, _ in whs}
         existing_at_targets = sum(wb_by_wh.get(wh, 0) + active_asm.get(wh, 0) for wh in target_whs)
         network_total = total_qty + existing_at_targets
-        targets = distribute_multi(network_total, bench_share, min_pack, wh_per_district)
+        targets = distribute_multi(
+            network_total, bench_share, min_pack, wh_per_district, guarantee_districts=nw_guarantee
+        )
         if fe_excess_share > 0:
             _route_far_east_excess(targets, round(fe_excess_share * network_total))
         final_alloc: dict[str, int] = {}
