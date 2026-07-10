@@ -1,0 +1,144 @@
+"""
+Tests for the daily WB measurements digest (Telegram, 09:00 MSK).
+
+Covers:
+- Pure helpers: _ru_plural, build_measurement_digest_text (format, empty, attention).
+- warehouse_digest_data: subject grouping, ≥10% deviation-from-card detection,
+  project isolation and period filtering.
+"""
+
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import pytest
+
+from backend.models.cost import Nomenclature
+from backend.models.wb_measurements import WbWarehouseMeasurement
+from backend.services import measurements_service as m
+
+
+# ── Pure helpers ─────────────────────────────────────────────────────────────
+
+
+class TestRuPlural:
+    def test_one(self):
+        assert m._ru_plural(1, "замер", "замера", "замеров") == "замер"
+
+    def test_few(self):
+        assert m._ru_plural(3, "замер", "замера", "замеров") == "замера"
+
+    def test_many(self):
+        assert m._ru_plural(5, "замер", "замера", "замеров") == "замеров"
+
+    def test_teens_are_many(self):
+        # 11–14 — исключение: всегда «замеров», хотя оканчиваются на 1..4
+        assert m._ru_plural(11, "замер", "замера", "замеров") == "замеров"
+        assert m._ru_plural(12, "замер", "замера", "замеров") == "замеров"
+
+    def test_21_is_one(self):
+        assert m._ru_plural(21, "замер", "замера", "замеров") == "замер"
+
+
+class TestBuildDigestText:
+    def _data(self):
+        return {
+            "total": 6,
+            "subjects": [("Пледы", 3), ("Чехлы для мебели", 2), ("Ковры", 1)],
+            "attention": [
+                {"nm_id": 946288655, "subject": "Диван", "meas": Decimal("62.5"),
+                 "card": Decimal("48.0"), "dev": Decimal("30.2")},
+            ],
+        }
+
+    def test_empty_returns_none(self):
+        assert m.build_measurement_digest_text(date(2026, 7, 9), date(2026, 7, 10), {"total": 0}) is None
+
+    def test_header_and_period(self):
+        text = m.build_measurement_digest_text(date(2026, 7, 9), date(2026, 7, 10), self._data())
+        assert "Замеры WB за 09.07 – 10.07" in text
+        assert "Поступило <b>6</b> замеров по <b>3</b> предметам" in text
+
+    def test_subject_lines_and_plural(self):
+        text = m.build_measurement_digest_text(date(2026, 7, 9), date(2026, 7, 10), self._data())
+        assert "• Пледы — <b>3</b> замера" in text
+        assert "• Ковры — <b>1</b> замер" in text
+
+    def test_attention_block(self):
+        text = m.build_measurement_digest_text(date(2026, 7, 9), date(2026, 7, 10), self._data())
+        assert "Отклонение от карточки ≥10%: 1 замер" in text
+        assert "<code>946288655</code>" in text
+        assert "62.5 л vs 48 л (+30%)" in text
+
+    def test_no_attention_block_when_empty(self):
+        data = self._data()
+        data["attention"] = []
+        text = m.build_measurement_digest_text(date(2026, 7, 9), date(2026, 7, 10), data)
+        assert "Отклонение от карточки" not in text
+
+    def test_html_escaped_subject(self):
+        data = {"total": 1, "subjects": [("A & B <x>", 1)], "attention": []}
+        text = m.build_measurement_digest_text(date(2026, 7, 9), date(2026, 7, 10), data)
+        assert "A &amp; B &lt;x&gt;" in text
+
+
+# ── DB-backed: warehouse_digest_data ─────────────────────────────────────────
+
+_DF = datetime(2026, 7, 9, 0, 0, tzinfo=timezone.utc)
+_DT = datetime(2026, 7, 10, 23, 59, 59, tzinfo=timezone.utc)
+_IN_PERIOD = datetime(2026, 7, 10, 8, 0, tzinfo=timezone.utc)
+_OUT_PERIOD = datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+
+
+def _meas(project_id, dim_id, nm_id, subject, volume, measured_at):
+    return WbWarehouseMeasurement(
+        project_id=project_id, dim_id=dim_id, nm_id=nm_id,
+        subject_name=subject, volume=Decimal(str(volume)), measured_at=measured_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_digest_data_grouping_and_period(db_session, project):
+    db_session.add_all([
+        _meas(project.id, 1, 101, "Ковры", 10.0, _IN_PERIOD),
+        _meas(project.id, 2, 102, "Пледы", 20.0, _IN_PERIOD),
+        _meas(project.id, 3, 103, "Пледы", 21.0, _IN_PERIOD),
+        _meas(project.id, 4, 104, "Ковры", 11.0, _OUT_PERIOD),  # вне периода — не считается
+    ])
+    await db_session.commit()
+
+    data = await m.warehouse_digest_data(db_session, project.id, _DF, _DT)
+    assert data["total"] == 3
+    # Пледы (2) впереди Ковров (1)
+    assert data["subjects"][0] == ("Пледы", 2)
+    assert dict(data["subjects"]) == {"Пледы": 2, "Ковры": 1}
+
+
+@pytest.mark.asyncio
+async def test_digest_data_attention_threshold(db_session, project):
+    # Карточка 100 л. Замер 130 л = +30% (≥10 → attention); замер 105 л = +5% (нет).
+    db_session.add_all([
+        Nomenclature(project_id=project.id, barcode=f"bc-big-{project.id}", article_wb=201, volume_l=Decimal("100")),
+        Nomenclature(project_id=project.id, barcode=f"bc-ok-{project.id}", article_wb=202, volume_l=Decimal("100")),
+        _meas(project.id, 11, 201, "Диван", 130.0, _IN_PERIOD),
+        _meas(project.id, 12, 202, "Кресло", 105.0, _IN_PERIOD),
+    ])
+    await db_session.commit()
+
+    data = await m.warehouse_digest_data(db_session, project.id, _DF, _DT)
+    assert data["total"] == 2
+    nm_ids = [a["nm_id"] for a in data["attention"]]
+    assert nm_ids == [201]  # только превышение ≥10%
+    assert data["attention"][0]["dev"] == pytest.approx(Decimal("30"))
+
+
+@pytest.mark.asyncio
+async def test_digest_data_project_isolation(db_session, project, other_project):
+    db_session.add_all([
+        _meas(project.id, 21, 301, "Ковры", 10.0, _IN_PERIOD),
+        _meas(other_project.id, 22, 302, "Пледы", 20.0, _IN_PERIOD),  # чужой проект
+    ])
+    await db_session.commit()
+
+    data = await m.warehouse_digest_data(db_session, project.id, _DF, _DT)
+    assert data["total"] == 1
+    assert dict(data["subjects"]) == {"Ковры": 1}

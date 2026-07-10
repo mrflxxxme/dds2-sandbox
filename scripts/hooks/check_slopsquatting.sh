@@ -81,10 +81,16 @@ fi
 
 # 2. TypeScript/JS imports — только новые в package.json
 if git diff $DIFF_ARGS --name-only | grep -q 'package.json$'; then
-  # Новые зависимости — грубый diff
+  # Новые зависимости — грубый diff.
+  # awk с [[:space:]] переносим между GNU и BSD (macOS): sed -E '\s' на BSD
+  # не матчит пробел → строка не парсилась и рвалась на мусорные токены.
   NEW_DEPS=$(git diff $DIFF_ARGS -- '*/package.json' 2>/dev/null | \
-    grep -E '^\+\s*"[^"]+":\s*"[\^~]?[0-9]' | \
-    sed -E 's/^\+\s*"([^"]+)".*/\1/' | sort -u || true)
+    awk '/^[+][[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"[~^]?[0-9]/ {
+      line=$0
+      sub(/^[+][[:space:]]*"/, "", line)
+      sub(/".*/, "", line)
+      print line
+    }' | sort -u || true)
 
   for pkg in $NEW_DEPS; do
     [ -z "$pkg" ] && continue

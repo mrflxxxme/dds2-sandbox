@@ -749,6 +749,7 @@ export interface TelegramChatBinding {
   brand: string | null;
   notify_enabled: boolean;
   ff_notify_enabled: boolean;
+  measurements_notify_enabled: boolean;
   ff_board_enabled: boolean;
   /** NULL = табло по всем складам; иначе — заявки только этого склада ФФ. */
   ff_board_warehouse_id: number | null;
@@ -5862,4 +5863,89 @@ export interface FfBulkArchivePayload {
 
 export interface FfBulkArchiveResult {
   updated: number;
+}
+
+// ─── WB Measurements (замеры складов + удержания за габариты) ────────────────
+
+export interface WarehouseMeasurement {
+  id: number;
+  dim_id: number;
+  nm_id: number;
+  subject_name: string | null;
+  brand: string | null;
+  length: number | null;
+  width: number | null;
+  height: number | null;
+  volume: string | null;
+  /** текущий объём карточки WB (л) — для сравнения с замером */
+  card_volume: string | null;
+  photo_urls: string[] | null;
+  measured_at: string | null;
+}
+
+export interface MeasurementPenalty {
+  id: number;
+  dim_id: number;
+  nm_id: number;
+  subject_name: string | null;
+  brand: string | null;
+  prc_over: string | null;
+  /** фактический замер WB */
+  act_length: number | null;
+  act_width: number | null;
+  act_height: number | null;
+  act_volume: string | null;
+  /** заявлено продавцом */
+  dec_length: number | null;
+  dec_width: number | null;
+  dec_height: number | null;
+  dec_volume: string | null;
+  penalty_amount: string | null;
+  reversal_amount: string | null;
+  units_count: number | null;
+  is_valid: boolean | null;
+  is_valid_at: string | null;
+  penalty_date: string | null;
+  photo_urls: string[] | null;
+}
+
+export interface WarehouseMeasurementListResponse {
+  items: WarehouseMeasurement[];
+  total: number;
+}
+
+export interface MeasurementPenaltyListResponse {
+  items: MeasurementPenalty[];
+  total: number;
+  total_penalty: string;
+  total_reversal: string;
+}
+
+export interface MeasurementFiltersResponse {
+  brands: string[];
+  subjects: string[];
+}
+
+export interface MeasurementSyncResult {
+  warehouse: number;
+  penalties: number;
+}
+
+export interface PenaltyArticleSummaryRow {
+  nm_id: number;
+  subject_name: string | null;
+  brand: string | null;
+  total_penalty: string;
+  total_reversal: string;
+  net: string;
+  penalties_count: number;
+  measurements_count: number;
+}
+
+export interface PenaltyArticleSummaryResponse {
+  items: PenaltyArticleSummaryRow[];
+  articles: number;
+  total_penalty: string;
+  total_reversal: string;
+  net: string;
 }

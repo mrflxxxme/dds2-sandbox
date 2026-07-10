@@ -244,6 +244,10 @@ from backend.models.wb_order_cancel import (
 from backend.models.wb_tariff import (
     WbTariff,
 )
+from backend.models.wb_measurements import (
+    WbMeasurementPenalty,
+    WbWarehouseMeasurement,
+)
 
 # Assembly (единая «Сборка»: заявки, черновики, распределение остатков)
 from backend.models.assembly import (
@@ -368,6 +372,9 @@ __all__ = [
     "PAYMENT_REQUEST_TRANSITIONS",
     # WB Tariffs
     "WbTariff",
+    # WB Measurements (замеры складов + удержания за габариты)
+    "WbWarehouseMeasurement",
+    "WbMeasurementPenalty",
     # Assembly
     "AssemblyDraft",
     "AssemblyRequest",

@@ -38,6 +38,7 @@ from backend.routers import (
     integrations_faktura,
     loans,
     localization,
+    measurements,
     migfull_portal,
     monitoring,
     payment_requests,
@@ -583,6 +584,12 @@ app.include_router(
     warehouse.router,
     prefix="/api/v1",
     tags=["Warehouse"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    measurements.router,
+    prefix="/api/v1",
+    tags=["Measurements"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
