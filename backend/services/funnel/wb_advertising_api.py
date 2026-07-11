@@ -385,6 +385,81 @@ async def fetch_campaign_placements(api_key: str, campaign_id: int) -> dict:
     }
 
 
+async def set_campaign_placements(api_key: str, campaign_id: int, placements: dict[str, bool]) -> dict:
+    """PUT /adv/v0/auction/placements — включить/выключить зоны показов кампании.
+
+    Тело: {"placements": [{"advert_id": id, "placements": {"search": bool, "recommendations": bool}}]}.
+    Успех — 204 без тела.
+
+    WB разрешает менять зоны ТОЛЬКО у кампаний с ручной ставкой (bid_type=manual)
+    и оплатой за показы (cpm), в статусах 4/9/11. Проверку типа делает вызывающий
+    (`ads_manager.set_campaign_zones`) — WB на нарушение отвечает 400.
+    Лимит WB — 1 запрос в секунду, поэтому 429 повторяем один раз.
+
+    Возвращает {"ok": bool, "error": str | None}.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = "https://advert-api.wildberries.ru/adv/v0/auction/placements"
+    body = {"placements": [{"advert_id": campaign_id, "placements": placements}]}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.put(url, headers=headers, json=body)
+            if resp.status_code == 429:
+                ra = resp.headers.get("Retry-After", "2")
+                await asyncio.sleep(int(ra) if ra.isdigit() else 2)
+                resp = await client.put(url, headers=headers, json=body)
+    except httpx.HTTPError as e:
+        logger.warning(f"WB set placements failed for {campaign_id}: {e}")
+        return {"ok": False, "error": str(e)[:300]}
+
+    if resp.status_code in (200, 204):
+        logger.info(f"WB placements updated: campaign {campaign_id} → {placements}")
+        return {"ok": True, "error": None}
+    if resp.status_code in (401, 403):
+        logger.warning(f"WB set placements forbidden {resp.status_code} for {campaign_id} — read-only токен?")
+        return {"ok": False, "error": "Нет доступа: токен «Продвижение» должен быть с правом записи (не read-only)."}
+    err = resp.text[:300]
+    logger.warning(f"WB set placements rejected {resp.status_code} for {campaign_id}: {err}")
+    return {"ok": False, "error": f"HTTP {resp.status_code}: {err}"}
+
+
+async def set_campaign_bid(
+    api_key: str, campaign_id: int, nm_ids: list[int], bid_rub: float, placement: str
+) -> dict:
+    """PATCH /api/advert/v1/bids — сменить ставку кампании по её товарам.
+
+    placement: "combined" (единая ставка), "search"/"recommendations" (ручная), для CPC — за клик.
+    Тело: {"bids":[{"advert_id":id,"nm_bids":[{"nm_id","bid_kopecks","placement"} ...]}]}. Ставка —
+    в копейках (₽×100). WB: только статусы 4/9/11; проверку типа/статуса делает вызывающий.
+    Лимит WB — 1 запрос/сек, 429 повторяем один раз. Возвращает {"ok","error","bid"}.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = "https://advert-api.wildberries.ru/api/advert/v1/bids"
+    kop = int(round(bid_rub * 100))
+    nm_bids = [{"nm_id": nm, "bid_kopecks": kop, "placement": placement} for nm in nm_ids]
+    body = {"bids": [{"advert_id": campaign_id, "nm_bids": nm_bids}]}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.patch(url, headers=headers, json=body)
+            if resp.status_code == 429:
+                ra = resp.headers.get("Retry-After", "1")
+                await asyncio.sleep(int(ra) if ra.isdigit() else 1)
+                resp = await client.patch(url, headers=headers, json=body)
+    except httpx.HTTPError as e:
+        logger.warning(f"WB set bid failed for {campaign_id}: {e}")
+        return {"ok": False, "error": str(e)[:300], "bid": None}
+
+    if resp.status_code == 200:
+        logger.info(f"WB bid updated: campaign {campaign_id} → {bid_rub} ₽ ({placement})")
+        return {"ok": True, "error": None, "bid": round(kop / 100, 2)}
+    if resp.status_code in (401, 403):
+        logger.warning(f"WB set bid forbidden {resp.status_code} for {campaign_id} — read-only токен?")
+        return {"ok": False, "error": "Нет доступа: токен «Продвижение» должен быть с правом записи (не read-only).", "bid": None}
+    err = resp.text[:300]
+    logger.warning(f"WB set bid rejected {resp.status_code} for {campaign_id}: {err}")
+    return {"ok": False, "error": f"HTTP {resp.status_code}: {err}", "bid": None}
+
+
 async def fetch_campaign_default_bid(api_key: str, campaign_id: int) -> float | None:
     """Ставка кампании по умолчанию (₽) — по активной зоне (поиск приоритетнее)."""
     info = await fetch_campaign_placements(api_key, campaign_id)
@@ -550,6 +625,47 @@ async def fetch_adv_balance(api_key: str) -> dict | None:
         return None
 
 
+async def fetch_adv_upd(api_key: str, date_from: str, date_to: str) -> list[dict]:
+    """GET /adv/v1/upd?from=&to= — история фактических затрат (списаний) за период.
+
+    Даты — YYYY-MM-DD. Возвращает список списаний:
+    [{updNum, updTime, updSum, advertId, campName, advertType, paymentType, advertStatus, currency}].
+    204 (нет данных) → []. Ошибки не роняют вызывающего — возвращаем [].
+    """
+    return await _fetch_adv_history(api_key, "/adv/v1/upd", date_from, date_to)
+
+
+async def fetch_adv_payments(api_key: str, date_from: str, date_to: str) -> list[dict]:
+    """GET /adv/v1/payments?from=&to= — история пополнений счёта WB Продвижение.
+
+    Возвращает список [{id, date, sum, type, statusId, currency, cardStatus}]. 204 → [].
+    """
+    return await _fetch_adv_history(api_key, "/adv/v1/payments", date_from, date_to)
+
+
+async def _fetch_adv_history(api_key: str, path: str, date_from: str, date_to: str) -> list[dict]:
+    """Общая обёртка для GET-эндпоинтов истории (upd/payments): период from/to, 204 → []."""
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = f"https://advert-api.wildberries.ru{path}"
+    params = {"from": date_from, "to": date_to}
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(url, headers=headers, params=params)
+            if resp.status_code == 429:
+                await asyncio.sleep(int(resp.headers.get("Retry-After", "5")))
+                resp = await client.get(url, headers=headers, params=params)
+        if resp.status_code == 204:
+            return []
+        if resp.status_code != 200:
+            logger.warning(f"WB{path} error {resp.status_code}: {resp.text[:200]}")
+            return []
+        data = resp.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.warning(f"WB{path} failed: {e}")
+        return []
+
+
 async def deposit_campaign_budget(api_key: str, campaign_id: int, sum_rub: int, source_type: int) -> dict:
     """POST /adv/v1/budget/deposit?id={campaign_id} — пополнение бюджета кампании.
 
@@ -596,11 +712,205 @@ async def deposit_campaign_budget(api_key: str, campaign_id: int, sum_rub: int, 
         return {"ok": False, "status": "error", "total": None, "error": str(e)[:300]}
 
 
-# ─── Управление состоянием кампании (пауза / запуск) ─────────────────────────
+# ─── Управление кампанией (запуск / пауза / завершение / переим. / товары / ставки) ──
 
-# action → путь WB. start: запускает кампанию в статусе 4 (готова) или 11 (пауза)
-# → 9 (активна); pause: 9 → 11. Требует WRITE-доступа скоупа «Продвижение».
-_CAMPAIGN_STATE_PATHS = {"start": "start", "pause": "pause"}
+async def _adv_mutation(api_key: str, method: str, path: str, body: dict | None = None) -> dict:
+    """Единая обёртка для write-эндпоинтов рекламы (rename/delete/bids/nms).
+
+    200/204 → ok; 401/403 → read-only токен; 429 → один повтор; иначе HTTP {code}.
+    Возвращает {"ok": bool, "error": str | None}. Для операций с деньгами (deposit)
+    и состоянием (start/pause/stop) — свои функции с особой политикой.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = f"https://advert-api.wildberries.ru{path}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.request(method, url, headers=headers, json=body)
+            if resp.status_code == 429:
+                await asyncio.sleep(int(resp.headers.get("Retry-After", "5")))
+                resp = await client.request(method, url, headers=headers, json=body)
+    except httpx.HTTPError as e:
+        logger.warning(f"WB {method} {path} failed: {e}")
+        return {"ok": False, "error": str(e)[:300]}
+    if resp.status_code in (200, 204):
+        return {"ok": True, "error": None}
+    if resp.status_code in (401, 403):
+        return {"ok": False, "error": "Нет доступа: токен «Продвижение» должен быть с правом записи (не read-only)."}
+    err = resp.text[:300]
+    logger.warning(f"WB {method} {path} rejected {resp.status_code}: {err}")
+    return {"ok": False, "error": f"HTTP {resp.status_code}: {err}"}
+
+
+async def rename_campaign(api_key: str, campaign_id: int, name: str) -> dict:
+    """POST /adv/v0/rename — переименовать кампанию (можно в любом статусе)."""
+    return await _adv_mutation(api_key, "POST", "/adv/v0/rename", {"advertId": campaign_id, "name": name})
+
+
+async def delete_campaign(api_key: str, campaign_id: int) -> dict:
+    """GET /adv/v0/delete?id= — удалить кампанию (только статус 4 «готова»)."""
+    return await _adv_mutation(api_key, "GET", f"/adv/v0/delete?id={campaign_id}")
+
+
+async def set_card_bids(api_key: str, campaign_id: int, bids: list[dict]) -> dict:
+    """PATCH /api/advert/v1/bids — ставки карточек товаров (статусы 4/9/11).
+
+    bids — [{"nm_id": int, "bid_kopecks": int, "placement": "search"|"recommendations"}].
+    """
+    body = {"bids": [{"advert_id": campaign_id, "nm_bids": bids}]}
+    return await _adv_mutation(api_key, "PATCH", "/api/advert/v1/bids", body)
+
+
+async def change_campaign_nms(api_key: str, campaign_id: int, add: list[int], delete: list[int]) -> dict:
+    """PATCH /adv/v0/auction/nms — добавить/убрать товары в кампании (статусы 4/9/11).
+
+    Добавляемым WB ставит текущую минимальную ставку.
+    """
+    body = {"nms": [{"advert_id": campaign_id, "nms": {"add": add, "delete": delete}}]}
+    return await _adv_mutation(api_key, "PATCH", "/adv/v0/auction/nms", body)
+
+
+# ─── Создание кампании ───────────────────────────────────────────────────────
+
+async def fetch_search_daily(api_key: str, campaign_id: int, nm_ids: list[int], date_from: str, date_to: str) -> dict:
+    """POST /adv/v1/normquery/stats — посуточная статистика поисковых кластеров.
+
+    Тело: {"from","to","items":[{"advertId","nmId"}]}. Возвращает по каждому товару
+    dailyStats (кластер × день). Суммируем кластеры по (nm_id, date) — это зона «Поиск».
+
+    Возвращает {(nm_id, "YYYY-MM-DD"): {views, clicks, spend, atbs, orders, shks}}.
+    nmId обязателен — без него WB отдаёт items=null.
+    """
+    if not nm_ids:
+        return {}
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = "https://advert-api.wildberries.ru/adv/v1/normquery/stats"
+    body = {"from": date_from, "to": date_to, "items": [{"advertId": campaign_id, "nmId": nm} for nm in nm_ids]}
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(url, headers=headers, json=body)
+            if resp.status_code == 429:
+                await asyncio.sleep(int(resp.headers.get("Retry-After", "5")))
+                resp = await client.post(url, headers=headers, json=body)
+        if resp.status_code != 200:
+            logger.warning(f"WB normquery/stats {resp.status_code}: {resp.text[:200]}")
+            return {}
+        items = (resp.json() or {}).get("items") or []
+    except Exception as e:
+        logger.warning(f"WB normquery/stats failed: {e}")
+        return {}
+
+    agg: dict[tuple[int, str], dict] = {}
+    for it in items:
+        nm_id = it.get("nmId")  # nmId — на уровне item; в dailyStats его нет
+        if nm_id is None:
+            continue
+        for day in it.get("dailyStats") or []:
+            date_key = day.get("date")
+            st = day.get("stat") or {}
+            key = (int(nm_id), date_key)
+            a = agg.setdefault(key, {"views": 0, "clicks": 0, "spend": 0.0, "atbs": 0, "orders": 0, "shks": 0})
+            a["views"] += int(st.get("views") or 0)
+            a["clicks"] += int(st.get("clicks") or 0)
+            a["spend"] += float(st.get("spend") or 0)
+            a["atbs"] += int(st.get("atbs") or 0)
+            a["orders"] += int(st.get("orders") or 0)
+            a["shks"] += int(st.get("shks") or 0)
+    return agg
+
+
+async def fetch_ad_subjects(api_key: str) -> list[dict]:
+    """GET /adv/v1/supplier/subjects — предметы, по которым можно создать кампанию.
+
+    Возвращает [{"id": int, "name": str, "count": int}] (count — сколько товаров в предмете).
+    """
+    return await _fetch_adv_history_get(api_key, "/adv/v1/supplier/subjects")
+
+
+async def _fetch_adv_history_get(api_key: str, path: str) -> list[dict]:
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(f"https://advert-api.wildberries.ru{path}", headers=headers)
+            if resp.status_code == 429:
+                await asyncio.sleep(int(resp.headers.get("Retry-After", "5")))
+                resp = await client.get(f"https://advert-api.wildberries.ru{path}", headers=headers)
+        if resp.status_code == 204:
+            return []
+        if resp.status_code != 200:
+            logger.warning(f"WB{path} error {resp.status_code}: {resp.text[:200]}")
+            return []
+        data = resp.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.warning(f"WB{path} failed: {e}")
+        return []
+
+
+async def fetch_ad_nms(api_key: str, subject_ids: list[int]) -> list[dict]:
+    """POST /adv/v2/supplier/nms — карточки товаров для кампании по предметам.
+
+    Тело — массив ID предметов. Возвращает [{"nm": int, "title": str, "subjectId": int}].
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = "https://advert-api.wildberries.ru/adv/v2/supplier/nms"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, json=subject_ids)
+            if resp.status_code == 429:
+                await asyncio.sleep(int(resp.headers.get("Retry-After", "5")))
+                resp = await client.post(url, headers=headers, json=subject_ids)
+        if resp.status_code != 200:
+            logger.warning(f"WB supplier/nms error {resp.status_code}: {resp.text[:200]}")
+            return []
+        data = resp.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.warning(f"WB supplier/nms failed: {e}")
+        return []
+
+
+async def create_campaign(
+    api_key: str, name: str, nms: list[int], bid_type: str, payment_type: str,
+    placement_types: list[str] | None,
+) -> dict:
+    """POST /adv/v2/seacat/save-ad — создать кампанию. Возвращает advertId.
+
+    placement_types указывается только для ручной ставки (bid_type=manual).
+    Возвращает {"ok": bool, "campaign_id": int | None, "error": str | None}.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = "https://advert-api.wildberries.ru/adv/v2/seacat/save-ad"
+    body: dict = {"name": name, "nms": nms, "bid_type": bid_type, "payment_type": payment_type}
+    if bid_type == "manual" and placement_types:
+        body["placement_types"] = placement_types
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers=headers, json=body)
+            if resp.status_code == 429:
+                await asyncio.sleep(int(resp.headers.get("Retry-After", "5")))
+                resp = await client.post(url, headers=headers, json=body)
+    except httpx.HTTPError as e:
+        logger.warning(f"WB create campaign failed: {e}")
+        return {"ok": False, "campaign_id": None, "error": str(e)[:300]}
+    if resp.status_code == 200:
+        try:
+            campaign_id = int(resp.json())
+        except (ValueError, TypeError):
+            campaign_id = None
+        logger.info(f"WB campaign created: {campaign_id} (name={name!r}, {len(nms)} nms)")
+        return {"ok": True, "campaign_id": campaign_id, "error": None}
+    if resp.status_code in (401, 403):
+        return {"ok": False, "campaign_id": None, "error": "Нет доступа: токен «Продвижение» должен быть с правом записи (не read-only)."}
+    err = resp.text[:300]
+    logger.warning(f"WB create campaign rejected {resp.status_code}: {err}")
+    return {"ok": False, "campaign_id": None, "error": f"HTTP {resp.status_code}: {err}"}
+
+
+# ─── Управление состоянием кампании (пауза / запуск / завершение) ────────────
+
+# action → путь WB. start: 4/11 → 9; pause: 9 → 11; stop: 4/9/11 → 7 (завершена,
+# НЕОБРАТИМО). Требует WRITE-доступа скоупа «Продвижение».
+_CAMPAIGN_STATE_PATHS = {"start": "start", "pause": "pause", "stop": "stop"}
 
 
 async def set_campaign_state(api_key: str, campaign_id: int, action: str) -> dict:

@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbAdCampaign, WbAdCampaignEvent, WbFunnelDaily
-from backend.models.integrations import WbAdCampaignDaily, WbAdNmDaily
+from backend.models.integrations import WbAdCampaignDaily, WbAdNmDaily, WbAdCampaignSnapshot
 from backend.services.funnel.bdr_rates import BdrRatesLookup
 from backend.utils.time import utcnow
 
@@ -62,6 +62,7 @@ async def list_ad_campaigns(
     today_msk = utcnow().astimezone(MSK).date() if utcnow().tzinfo else utcnow().date()
     period_to = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else today_msk
     period_from = datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else period_to - timedelta(days=6)
+    period_days = (period_to - period_from).days + 1  # дней в периоде — для «затраты в час»
 
     CD = WbAdCampaignDaily
     spend_rows = (
@@ -86,6 +87,34 @@ async def list_ad_campaigns(
         )
     ).all()
     today_map = {r.campaign_id: float(r.today) for r in today_rows}
+
+    # Выручка ВЧЕРА по товарам (для «ДРР план»): сумма заказов из воронки (all-traffic),
+    # тот же источник, что у ДРР списка. Фронт умножит её на целевой ДРР % из шапки.
+    yesterday = today_msk - timedelta(days=1)
+    yest_rows = (
+        await db.execute(
+            select(
+                WbFunnelDaily.nm_id,
+                func.coalesce(func.sum(WbFunnelDaily.orders_sum_rub), Decimal("0")).label("rev"),
+            )
+            .where(WbFunnelDaily.project_id == project_id, WbFunnelDaily.date == yesterday)
+            .group_by(WbFunnelDaily.nm_id)
+        )
+    ).all()
+    yest_rev_map = {r.nm_id: float(r.rev) for r in yest_rows}
+
+    # Расход кампаний ВЧЕРА — для ДРР за вчерашний день (расход вчера / заказы вчера)
+    yest_spend_rows = (
+        await db.execute(
+            select(CD.campaign_id, func.coalesce(func.sum(CD.spend), Decimal("0")).label("spend"))
+            .where(CD.project_id == project_id, CD.date == yesterday)
+            .group_by(CD.campaign_id)
+        )
+    ).all()
+    yest_spend_map = {r.campaign_id: float(r.spend) for r in yest_spend_rows}
+
+    # Недобор бюджета за сегодня (до полуночи) по кампаниям с исчерпанным бюджетом
+    gap_map = await _budget_gap_today_map(db, project_id, campaigns, today_map)
 
     # Карта nm_id → бренд/категория (для фильтров на фронте)
     nm_meta_rows = (
@@ -129,6 +158,8 @@ async def list_ad_campaigns(
                 order_cnt_p += int(row.get("orders_count") or 0)
         brands = sorted({nm_meta[nm][0] for nm in nm_ids if nm in nm_meta and nm_meta[nm][0]})
         subjects = sorted({nm_meta[nm][1] for nm in nm_ids if nm in nm_meta and nm_meta[nm][1]})
+        rev_yesterday = sum(yest_rev_map.get(nm, 0.0) for nm in nm_ids)  # сумма заказов товаров вчера
+        spend_yesterday = yest_spend_map.get(c.campaign_id, 0.0)  # расход кампании вчера
         result.append(
             {
                 "campaign_id": c.campaign_id,
@@ -152,14 +183,19 @@ async def list_ad_campaigns(
                 # Стоимость корзины/заказа за период: расход кампании / корзины (заказы) её товаров
                 "cpl": round(spend_period / carts_p, 2) if carts_p else 0,
                 "cpo": round(spend_period / order_cnt_p, 2) if order_cnt_p else 0,
-                "drr": round(spend_period / orders_p * 100, 2) if orders_p else 0,
+                # ДРР за вчера: расход кампании вчера / сумма заказов её товаров вчера
+                "drr": round(spend_yesterday / rev_yesterday * 100, 2) if rev_yesterday else 0,
                 "margin": round(profit_p / revenue_p * 100, 2) if revenue_p else 0,
+                # Средний расход в час за день = расход за период / (дней × 24 ч)
+                "spend_per_hour": round(spend_period / (period_days * 24), 2) if period_days > 0 else 0,
                 # Режим ставки CPM (единая/ручная) — из WB bid_type, заполняется синком
                 "bid_mode": c.bid_mode,
                 # Доля рекл. кликов = клики кампании / все переходы её товаров
                 "ad_click_share": round(clicks_period / opens_p * 100, 2) if opens_p else 0,
                 "cr_cart": round(carts_p / opens_p * 100, 2) if opens_p else 0,  # конверсия в корзину
                 "cr_order": round(order_cnt_p / carts_p * 100, 2) if carts_p else 0,  # конверсия в заказ
+                "rev_yesterday": round(rev_yesterday, 2),  # сумма заказов товаров вчера (для «ДРР план»)
+                "budget_gap": gap_map.get(c.campaign_id, 0.0),  # недобор бюджета до конца дня, ₽
                 "updated_at": c.updated_at.isoformat() if c.updated_at else None,
             }
         )
@@ -257,8 +293,14 @@ async def get_campaign_history(
 def _metric_row(
     label: str, views: int, clicks: int, spend: float,
     opens: int, carts: int, orders: int, orders_sum: float, price: float | None,
+    customer_price: float | None = None, spp: float = 0.0,
 ) -> dict:
-    """Сводит сырые агрегаты дня/периода в строку метрик (РК + воронка)."""
+    """Сводит сырые агрегаты дня/периода в строку метрик (РК + воронка).
+
+    customer_price — «Цена Клиенту»: цена товара с учётом СПП (avg_price × (1 − spp_rate)),
+    т.е. сколько реально платил покупатель в тот день. Нужна, чтобы видеть, как цена влияла
+    на рекламу. None → 0 (нет данных по СПП за день).
+    """
     return {
         "date": label,
         # Статистика по РК
@@ -277,7 +319,29 @@ def _metric_row(
         "cpl": round(spend / carts, 2) if carts else None,  # стоимость 1 корзины
         "cpo": round(spend / orders, 2) if orders else None,  # стоимость 1 заказа
         "avg_price": round(price, 2) if price else 0.0,
+        "customer_price": round(customer_price, 2) if customer_price else 0.0,  # цена с СПП
+        "spp": round(spp, 1),  # средний СПП за день, % (для графика)
         "drr": round(spend / orders_sum * 100, 2) if orders_sum else 0.0,
+    }
+
+
+def _ad_metric_row(label: str, views: int, clicks: int, spend: float, atbs: int, orders: int) -> dict:
+    """Строка чисто РК-метрик зоны показов (без воронки продаж).
+
+    atbs/orders — корзины/заказы, АТРИБУТИРОВАННЫЕ рекламе (из WbAdNmDaily/WbAdSearchDaily),
+    а не все продажи товара (те — в воронке по кампании). Числа не взаимозаменяемы.
+    """
+    return {
+        "date": label,
+        "views": int(views),
+        "clicks": int(clicks),
+        "ctr": round(clicks / views * 100, 2) if views else 0.0,
+        "cpc": round(spend / clicks, 2) if clicks else 0.0,
+        "cpm": round(spend / views * 1000, 2) if views else 0.0,  # цена 1000 показов зоны
+        "spend": round(spend, 2),
+        "atbs": int(atbs),  # корзины (реклама)
+        "orders": int(orders),  # заказы (реклама)
+        "cpo": round(spend / orders, 2) if orders else None,  # стоимость 1 заказа
     }
 
 
@@ -368,6 +432,7 @@ async def get_campaign_zones(
             "derived": False,  # у CPC зона одна — это прямые данные, не вычитание
         }
 
+    locked, lock_reason = _zones_lock(payment_type, camp.bid_mode, camp.status)
     return {
         "zone_stats": zone_stats,
         "campaign_id": campaign_id,
@@ -375,11 +440,116 @@ async def get_campaign_zones(
         "bid_mode": camp.bid_mode,             # unified | manual
         "placements": info["placements"],      # {"search": bool, "recommendations": bool}
         "bids": info["bids"],                  # ₽ по зонам
-        # Зоны нельзя переключать: у CPM-единой они всегда обе, у CPC — только поиск
-        "zones_locked": True,
+        # Переключать зоны WB даёт только у CPM с ручной ставкой (статусы 4/9/11)
+        "zones_locked": locked,
+        "lock_reason": lock_reason,
         # Ставка задаётся сразу на все зоны (CPM-единая) или на все фразы (CPC)
         "single_bid": payment_type == "cpc" or (camp.bid_mode or "") == "unified",
     }
+
+
+# Статусы, в которых WB разрешает менять зоны: 4 — готова, 9 — активна, 11 — пауза
+ZONE_EDIT_STATUSES = (4, 9, 11)
+
+
+def _zones_lock(payment_type: str, bid_mode: str | None, status: int | None) -> tuple[bool, str | None]:
+    """Можно ли переключать зоны показов, и если нет — почему.
+
+    WB (PUT /adv/v0/auction/placements) принимает только CPM с ручной ставкой
+    в статусах 4/9/11. Возвращает (locked, lock_reason | None).
+    """
+    if payment_type == "cpc":
+        return True, "CPC · показы только в поиске, зону выключить нельзя"
+    if (bid_mode or "") != "manual":
+        return True, "CPM · единая ставка: зоны работают одновременно, WB не даёт выключить"
+    if status not in ZONE_EDIT_STATUSES:
+        return True, "Зоны можно менять только у готовой, активной или приостановленной кампании"
+    return False, None
+
+
+async def set_campaign_zones(
+    db: AsyncSession, project_id: int, campaign_id: int, placements: dict[str, bool],
+) -> dict:
+    """Включить/выключить зоны показов кампании (только CPM с ручной ставкой).
+
+    `placements` — итоговое состояние обеих зон, напр. {"search": True, "recommendations": False}.
+    WB заменяет набор целиком, поэтому передаём обе зоны, а не дельту.
+    Возвращает {"ok": bool, "error": str | None, "placements": {...} | None}.
+    """
+    from backend.services.funnel.wb_advertising_api import set_campaign_placements
+
+    camp = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if camp is None:
+        return {"ok": False, "error": "Кампания не найдена", "placements": None}
+
+    locked, reason = _zones_lock((camp.campaign_type or "").lower(), camp.bid_mode, camp.status)
+    if locked:
+        return {"ok": False, "error": reason, "placements": None}
+
+    # Кампания без единой зоны показов нигде не крутится — WB такое молча принимает,
+    # реклама встаёт. Требуем хотя бы одну включённую.
+    if not any(placements.values()):
+        return {"ok": False, "error": "Нельзя выключить обе зоны: реклама перестанет показываться", "placements": None}
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, "error": "Не настроен API-ключ «Продвижение»", "placements": None}
+
+    res = await set_campaign_placements(api_key, campaign_id, placements)
+    if not res["ok"]:
+        return {"ok": False, "error": res["error"], "placements": None}
+    # Зоны у нас не хранятся — их читает fetch_campaign_placements напрямую из WB.
+    return {"ok": True, "error": None, "placements": placements}
+
+
+async def set_campaign_zone_bid(
+    db: AsyncSession, project_id: int, campaign_id: int, zone: str, bid: float,
+) -> dict:
+    """Сменить ставку кампании для зоны (Поиск/Рекомендации) по всем её товарам.
+
+    Единая ставка → placement 'combined' (одна на обе зоны), ручная → placement=зона,
+    CPC → 'search'. WB (PATCH /api/advert/v1/bids) принимает статусы 4/9/11. Реальные деньги.
+    Возвращает {"ok", "error", "bid"} (bid — применённая ставка ₽).
+    """
+    from backend.services.funnel.wb_advertising_api import set_campaign_bid
+
+    if bid is None or bid <= 0:
+        return {"ok": False, "error": "Ставка должна быть больше 0", "bid": None}
+
+    camp = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if camp is None:
+        return {"ok": False, "error": "Кампания не найдена", "bid": None}
+    if camp.status not in ZONE_EDIT_STATUSES:
+        return {"ok": False, "error": "Ставку можно менять только у готовой, активной или приостановленной кампании", "bid": None}
+    nm_ids = [int(n) for n in (camp.nm_ids or [])]
+    if not nm_ids:
+        return {"ok": False, "error": "У кампании нет товаров", "bid": None}
+
+    ptype = (camp.campaign_type or "").lower()
+    if ptype == "cpc":
+        placement = "search"  # CPC крутится только в поиске
+    elif (camp.bid_mode or "unified") == "manual":
+        placement = zone if zone in ("search", "recommendations") else "search"
+    else:
+        placement = "combined"  # единая ставка — одна на обе зоны
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, "error": "Не настроен API-ключ «Продвижение»", "bid": None}
+
+    return await set_campaign_bid(api_key, campaign_id, nm_ids, bid, placement)
 
 
 async def get_campaign_metrics(
@@ -390,6 +560,8 @@ async def get_campaign_metrics(
     date_to: str | None = None,
     days: int = 30,
     nm_id: int | None = None,
+    zone: str | None = None,
+    bdr_rates_map: BdrRatesLookup | None = None,
 ) -> dict:
     """Посуточные метрики кампании: статистика РК (показы/клики/CTR/CPC/затраты)
     + воронка её товаров (переходы/корзины/CR1/заказы/CR2/сумма/CPO/цена/ДРР).
@@ -478,8 +650,48 @@ async def get_campaign_metrics(
         ).all()
         funnel_by_date = {r.date: r for r in f_rows}
 
+    # Разбивка РК-части по зоне показов (только CPM). WB не даёт зоны по дням готовыми:
+    # «Поиск» — из wb_ad_search_daily (сумма кластеров), «Рекомендации» — итог минус поиск.
+    # Воронка по зонам НЕ разбивается — остаётся по кампании/товару (флаг zone_note).
+    zone_applied = None
+    if zone in ("search", "recommendations") and (camp.campaign_type or "").lower() == "cpm":
+        from types import SimpleNamespace
+
+        from backend.services.funnel.ad_search_stats import get_search_daily
+
+        search_by_date = await get_search_daily(db, project_id, campaign_id, period_from, period_to, nm_id)
+        if zone == "search":
+            ad_by_date = {
+                d: SimpleNamespace(views=v["views"], clicks=v["clicks"], spend=v["spend"])
+                for d, v in search_by_date.items()
+            }
+        else:  # recommendations = итог кампании по дням минус поиск (зажим нулём)
+            rec: dict = {}
+            for d, a in ad_by_date.items():
+                s = search_by_date.get(d, {"views": 0, "clicks": 0, "spend": 0.0})
+                rec[d] = SimpleNamespace(
+                    views=max(0, int(a.views) - s["views"]),
+                    clicks=max(0, int(a.clicks) - s["clicks"]),
+                    spend=max(0.0, float(a.spend) - s["spend"]),
+                )
+            ad_by_date = rec
+        zone_applied = zone
+
+    # Средний СПП кампании за день = среднее spp_rate по её товарам (из финотчёта, per (nm,дата)).
+    # «Цена Клиенту» = цена дня × (1 − СПП). Нет карты СПП → 0 (customer_price = сама цена).
+    def _spp_for_day(d) -> float:
+        if not bdr_rates_map or not nm_ids:
+            return 0.0
+        rates = [
+            br.spp_rate for nm in nm_ids
+            if (br := bdr_rates_map.get(int(nm), d)) is not None
+        ]
+        return sum(rates) / len(rates) if rates else 0.0
+
     rows: list[dict] = []
-    tot = {"views": 0, "clicks": 0, "spend": 0.0, "opens": 0, "carts": 0, "orders": 0, "orders_sum": 0.0, "price_sum": 0.0, "price_n": 0}
+    tot = {"views": 0, "clicks": 0, "spend": 0.0, "opens": 0, "carts": 0, "orders": 0,
+           "orders_sum": 0.0, "price_sum": 0.0, "price_n": 0, "cust_sum": 0.0, "cust_n": 0,
+           "spp_sum": 0.0, "spp_n": 0}
     all_dates = sorted(set(ad_by_date) | set(funnel_by_date), reverse=True)
     for d in all_dates:
         a = ad_by_date.get(d)
@@ -492,16 +704,24 @@ async def get_campaign_metrics(
         orders = int(f.orders) if f else 0
         orders_sum = float(f.orders_sum) if f else 0.0
         price = float(f.avg_price) if f and f.avg_price else None
-        rows.append(_metric_row(d.isoformat(), views, clicks, spend, opens, carts, orders, orders_sum, price))
+        spp_frac = _spp_for_day(d)  # средний СПП кампании за день (доля)
+        customer_price = round(price * (1 - spp_frac), 2) if price else None
+        rows.append(_metric_row(d.isoformat(), views, clicks, spend, opens, carts, orders, orders_sum, price, customer_price, spp=spp_frac * 100))
         tot["views"] += views; tot["clicks"] += clicks; tot["spend"] += spend
         tot["opens"] += opens; tot["carts"] += carts; tot["orders"] += orders; tot["orders_sum"] += orders_sum
         if price:
             tot["price_sum"] += price; tot["price_n"] += 1
+        if customer_price:
+            tot["cust_sum"] += customer_price; tot["cust_n"] += 1
+        if spp_frac > 0:
+            tot["spp_sum"] += spp_frac * 100; tot["spp_n"] += 1
 
     totals = _metric_row(
         "За всё время", tot["views"], tot["clicks"], tot["spend"],
         tot["opens"], tot["carts"], tot["orders"], tot["orders_sum"],
         tot["price_sum"] / tot["price_n"] if tot["price_n"] else None,
+        tot["cust_sum"] / tot["cust_n"] if tot["cust_n"] else None,
+        spp=tot["spp_sum"] / tot["spp_n"] if tot["spp_n"] else 0.0,
     )
 
     return {
@@ -511,6 +731,116 @@ async def get_campaign_metrics(
         "nm_id": nm_id,
         # РК-метрики отфильтрованы по товару (а не по всей кампании)
         "ad_by_nm": nm_id is not None,
+        # Зона показов, по которой отфильтрована РК-часть (воронка остаётся по кампании)
+        "zone": zone_applied,
+        "totals": totals,
+        "rows": rows,
+    }
+
+
+async def get_campaign_zone_metrics(
+    db: AsyncSession,
+    project_id: int,
+    campaign_id: int,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    days: int = 30,
+    zone: str = "total",
+) -> dict:
+    """Посуточные РК-метрики кампании в разрезе зоны показов: Всего / Поиск / Рекомендации.
+
+    Только рекламная статистика (показы/клики/CTR/CPC/затраты + рекламные корзины/заказы/CPO):
+    воронку продаж по зонам делить нельзя — WB не отдаёт её в разбивке по зонам.
+
+    Источники: «Всего» — WbAdNmDaily (итог кампании по дням, из fullstats, там же рекламные
+    корзины/заказы); «Поиск» — WbAdSearchDaily (сумма поисковых кластеров, /adv/v1/normquery/stats);
+    «Рекомендации» = Всего − Поиск (по каждой метрике, зажим нулём; считается на чтении).
+    Разбивка по зонам — только для CPM (у CPC поиск = вся кампания).
+
+    Строки по убыванию даты; сверху — итог «За всё время».
+    """
+    camp = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if camp is None:
+        return {"error": "campaign_not_found"}
+
+    today_msk = utcnow().astimezone(MSK).date() if utcnow().tzinfo else utcnow().date()
+    period_to = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else today_msk
+    period_from = (
+        datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else period_to - timedelta(days=days - 1)
+    )
+
+    # «Всего» по кампании и дням — из разбивки по товарам (в ней есть рекламные корзины/заказы)
+    ND = WbAdNmDaily
+    tot_rows = (
+        await db.execute(
+            select(
+                ND.date,
+                func.coalesce(func.sum(ND.views), 0).label("views"),
+                func.coalesce(func.sum(ND.clicks), 0).label("clicks"),
+                func.coalesce(func.sum(ND.spend), Decimal("0")).label("spend"),
+                func.coalesce(func.sum(ND.atbs), 0).label("atbs"),
+                func.coalesce(func.sum(ND.orders), 0).label("orders"),
+            )
+            .where(
+                ND.project_id == project_id, ND.campaign_id == campaign_id,
+                ND.date >= period_from, ND.date <= period_to,
+            )
+            .group_by(ND.date)
+        )
+    ).all()
+    total_by_date = {
+        r.date: {
+            "views": int(r.views), "clicks": int(r.clicks), "spend": float(r.spend),
+            "atbs": int(r.atbs), "orders": int(r.orders),
+        }
+        for r in tot_rows
+    }
+
+    is_cpm = (camp.campaign_type or "").lower() == "cpm"
+    zone_applied = "total"
+    if zone in ("search", "recommendations") and is_cpm:
+        from backend.services.funnel.ad_search_stats import get_search_daily
+
+        search_by_date = await get_search_daily(db, project_id, campaign_id, period_from, period_to)
+        if zone == "search":
+            data_by_date = search_by_date  # {date: {views, clicks, spend, atbs, orders}}
+        else:  # recommendations = Всего − Поиск (по каждой метрике, зажим нулём)
+            data_by_date = {}
+            for d, t in total_by_date.items():
+                s = search_by_date.get(d, {"views": 0, "clicks": 0, "spend": 0.0, "atbs": 0, "orders": 0})
+                data_by_date[d] = {
+                    "views": max(0, t["views"] - s["views"]),
+                    "clicks": max(0, t["clicks"] - s["clicks"]),
+                    "spend": max(0.0, t["spend"] - s["spend"]),
+                    "atbs": max(0, t["atbs"] - s["atbs"]),
+                    "orders": max(0, t["orders"] - s["orders"]),
+                }
+        zone_applied = zone
+    else:
+        # Не CPM или зона не запрошена — отдаём «Всего» (зоны неприменимы)
+        data_by_date = total_by_date
+
+    tot = {"views": 0, "clicks": 0, "spend": 0.0, "atbs": 0, "orders": 0}
+    rows: list[dict] = []
+    for d in sorted(data_by_date, reverse=True):
+        m = data_by_date[d]
+        rows.append(_ad_metric_row(d.isoformat(), m["views"], m["clicks"], m["spend"], m["atbs"], m["orders"]))
+        for k in tot:
+            tot[k] += m[k]
+
+    totals = _ad_metric_row("За всё время", tot["views"], tot["clicks"], tot["spend"], tot["atbs"], tot["orders"])
+
+    return {
+        "campaign_id": campaign_id,
+        "name": camp.name,
+        "zone": zone_applied,
+        "window": {"from": period_from.isoformat(), "to": period_to.isoformat()},
         "totals": totals,
         "rows": rows,
     }
@@ -520,14 +850,37 @@ async def get_campaign_metrics(
 
 
 def _sanitize_autopay(entry: dict) -> dict:
-    """Нормализация записи настроек автопополнения одной кампании."""
+    """Нормализация записи настроек автопополнения одной кампании.
+
+    Два режима:
+      to_target  — долить до дневного бюджета X в заданный час МСК при пороге по обороту (наш режим);
+      low_balance — «как на ВБ»: когда остаток < low_balance_threshold, долить topup_amount (в любой час, повторяемо).
+    Старые записи без mode считаются to_target (обратная совместимость).
+    """
     hour = int(entry.get("hour", 9))
+    mode = entry.get("mode", "to_target")
+    if mode not in ("to_target", "low_balance"):
+        mode = "to_target"
     return {
         "enabled": bool(entry.get("enabled", False)),
+        "mode": mode,
         "amount": max(0.0, float(entry.get("amount", 0) or 0)),
         "hour": min(23, max(0, hour)),
         "threshold_pct": min(100, max(0, int(entry.get("threshold_pct", 50) or 50))),
+        "low_balance_threshold": max(0.0, float(entry.get("low_balance_threshold", 1000) or 0)),
+        "topup_amount": max(0.0, float(entry.get("topup_amount", 1000) or 0)),
+        # low_balance: «не чаще N раз в день». 0 = без ограничения (как чекбокс WB снят).
+        "daily_cap": max(0, int(entry.get("daily_cap", 1) or 0)),
     }
+
+
+def _autopay_active(s: dict) -> bool:
+    """Настройка реально работает: включена и у соответствующего режиму поля суммы > 0."""
+    if not s.get("enabled"):
+        return False
+    if s.get("mode") == "low_balance":
+        return float(s.get("topup_amount") or 0) > 0
+    return float(s.get("amount") or 0) > 0
 
 
 async def get_autopay_settings(db: AsyncSession, project_id: int) -> dict:
@@ -548,8 +901,8 @@ async def set_autopay_setting(db: AsyncSession, project_id: int, campaign_id: in
 
     settings = await get_autopay_settings(db, project_id)
     settings[str(campaign_id)] = _sanitize_autopay(entry)
-    # Выключенные с нулевой суммой не храним — не раздуваем JSON
-    settings = {k: v for k, v in settings.items() if v["enabled"] or v["amount"] > 0}
+    # Выключенные с нулевыми суммами не храним — не раздуваем JSON (topup_amount держит конфиг low_balance)
+    settings = {k: v for k, v in settings.items() if v["enabled"] or v["amount"] > 0 or v["topup_amount"] > 0}
     await set_setting(db, project_id, AUTOPAY_SETTINGS_KEY, json.dumps(settings, ensure_ascii=False))
     return settings
 
@@ -567,7 +920,8 @@ async def save_autopay_and_maybe_activate(
     """
     settings = await set_autopay_setting(db, project_id, campaign_id, entry)
     activation = None
-    if bool(entry.get("enabled")) and float(entry.get("amount") or 0) > 0:
+    saved = settings.get(str(campaign_id))
+    if saved and _autopay_active(saved):
         # Активируем ТОЛЬКО кампанию на паузе. На уже активной (9) WB start
         # отбился бы ошибкой → ложный баннер + лишний write при правке суммы.
         status = (
@@ -585,8 +939,37 @@ async def save_autopay_and_maybe_activate(
 
 # ─── Пауза / запуск кампании (реальный вызов WB) ─────────────────────────────
 
+CAMPAIGN_STATUS_READY = 4       # готова к запуску (создана, не запускалась)
+CAMPAIGN_STATUS_COMPLETED = 7   # завершена (необратимо)
 CAMPAIGN_STATUS_ACTIVE = 9
 CAMPAIGN_STATUS_PAUSED = 11
+
+# В каких статусах WB разрешает операцию (см. openapi promotion)
+MANAGE_ALLOWED_STATUSES = {
+    "stop": (4, 9, 11),
+    "delete": (4,),
+    "bids": (4, 9, 11),
+    "nms": (4, 9, 11),
+    "rename": (4, 7, 9, 11, -1),  # можно в любой момент
+}
+
+
+def _manage_guard(action: str, status: int | None) -> str | None:
+    """Причина, по которой операцией нельзя, либо None если можно.
+
+    Отбиваем у себя ДО похода в WB: у завершённой/в-процессе-удаления кампании
+    большинство операций WB вернёт 400, а удаление доступно только «готовой».
+    """
+    allowed = MANAGE_ALLOWED_STATUSES.get(action)
+    if allowed is None:
+        return f"Неизвестная операция: {action}"
+    if status in allowed:
+        return None
+    if action == "delete":
+        return "Удалить можно только кампанию в статусе «Готова» (не запускавшуюся)"
+    if action == "stop":
+        return "Завершить можно только готовую, активную или приостановленную кампанию"
+    return "Операция недоступна в текущем статусе кампании"
 
 
 async def _get_advert_api_key(db: AsyncSession, project_id: int) -> str | None:
@@ -629,6 +1012,254 @@ async def set_campaign_active(db: AsyncSession, project_id: int, campaign_id: in
         row.status = new_status
         await db.commit()
     return {"ok": True, "status": new_status, "error": None}
+
+
+async def _load_campaign(db: AsyncSession, project_id: int, campaign_id: int) -> WbAdCampaign | None:
+    return (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def stop_campaign(db: AsyncSession, project_id: int, campaign_id: int) -> dict:
+    """Завершить кампанию в WB (НЕОБРАТИМО: статус → 7). Только из 4/9/11."""
+    from backend.services.funnel.wb_advertising_api import set_campaign_state
+
+    camp = await _load_campaign(db, project_id, campaign_id)
+    if camp is None:
+        return {"ok": False, "error": "Кампания не найдена"}
+    reason = _manage_guard("stop", camp.status)
+    if reason:
+        return {"ok": False, "error": reason}
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, "error": "Нет WB-ключа с доступом к рекламе."}
+    res = await set_campaign_state(api_key, campaign_id, "stop")
+    if not res["ok"]:
+        return {"ok": False, "error": res.get("error")}
+    camp.status = CAMPAIGN_STATUS_COMPLETED
+    await db.commit()
+    return {"ok": True, "status": CAMPAIGN_STATUS_COMPLETED, "error": None}
+
+
+async def rename_campaign(db: AsyncSession, project_id: int, campaign_id: int, name: str) -> dict:
+    """Переименовать кампанию в WB (в любом статусе). При успехе обновляем наше имя."""
+    from backend.services.funnel.wb_advertising_api import rename_campaign as wb_rename
+
+    name = (name or "").strip()
+    if not name:
+        return {"ok": False, "error": "Название не может быть пустым"}
+    if len(name) > 50:
+        return {"ok": False, "error": "Название длиннее 50 символов"}
+    camp = await _load_campaign(db, project_id, campaign_id)
+    if camp is None:
+        return {"ok": False, "error": "Кампания не найдена"}
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, "error": "Нет WB-ключа с доступом к рекламе."}
+    res = await wb_rename(api_key, campaign_id, name)
+    if not res["ok"]:
+        return {"ok": False, "error": res.get("error")}
+    camp.name = name
+    await db.commit()
+    return {"ok": True, "name": name, "error": None}
+
+
+async def delete_campaign(db: AsyncSession, project_id: int, campaign_id: int) -> dict:
+    """Удалить кампанию в WB (только статус 4). После удаления WB держит её в -1."""
+    from backend.services.funnel.wb_advertising_api import delete_campaign as wb_delete
+
+    camp = await _load_campaign(db, project_id, campaign_id)
+    if camp is None:
+        return {"ok": False, "error": "Кампания не найдена"}
+    reason = _manage_guard("delete", camp.status)
+    if reason:
+        return {"ok": False, "error": reason}
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, "error": "Нет WB-ключа с доступом к рекламе."}
+    res = await wb_delete(api_key, campaign_id)
+    if not res["ok"]:
+        return {"ok": False, "error": res.get("error")}
+    # WB переводит в -1 (в процессе удаления); полное удаление — позже. Пометим у себя.
+    camp.status = -1
+    await db.commit()
+    return {"ok": True, "error": None}
+
+
+async def change_campaign_nms(
+    db: AsyncSession, project_id: int, campaign_id: int, add: list[int], delete: list[int]
+) -> dict:
+    """Добавить/убрать товары кампании в WB (статусы 4/9/11)."""
+    from backend.services.funnel.wb_advertising_api import change_campaign_nms as wb_change
+
+    add = [int(x) for x in (add or [])]
+    delete = [int(x) for x in (delete or [])]
+    if not add and not delete:
+        return {"ok": False, "error": "Не указаны товары для добавления или удаления"}
+    camp = await _load_campaign(db, project_id, campaign_id)
+    if camp is None:
+        return {"ok": False, "error": "Кампания не найдена"}
+    reason = _manage_guard("nms", camp.status)
+    if reason:
+        return {"ok": False, "error": reason}
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, "error": "Нет WB-ключа с доступом к рекламе."}
+    res = await wb_change(api_key, campaign_id, add, delete)
+    if not res["ok"]:
+        return {"ok": False, "error": res.get("error")}
+    return {"ok": True, "error": None}
+
+
+async def set_card_bids(
+    db: AsyncSession, project_id: int, campaign_id: int, bids: list[dict]
+) -> dict:
+    """Ставки карточек товаров (статусы 4/9/11).
+
+    bids — [{"nm_id": int, "bid_rub": float, "placement": "search"|"recommendations"}].
+    Ставку в рублях переводим в копейки для WB.
+    """
+    from backend.services.funnel.wb_advertising_api import set_card_bids as wb_set_bids
+
+    camp = await _load_campaign(db, project_id, campaign_id)
+    if camp is None:
+        return {"ok": False, "error": "Кампания не найдена"}
+    reason = _manage_guard("bids", camp.status)
+    if reason:
+        return {"ok": False, "error": reason}
+
+    wb_bids = []
+    for b in bids or []:
+        placement = b.get("placement", "search")
+        if placement not in ("search", "recommendations"):
+            return {"ok": False, "error": f"Недопустимая зона: {placement}"}
+        bid_rub = float(b.get("bid_rub") or 0)
+        if bid_rub <= 0:
+            return {"ok": False, "error": "Ставка должна быть больше нуля"}
+        wb_bids.append({
+            "nm_id": int(b["nm_id"]),
+            "bid_kopecks": round(bid_rub * 100),
+            "placement": placement,
+        })
+    if not wb_bids:
+        return {"ok": False, "error": "Не переданы ставки"}
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, "error": "Нет WB-ключа с доступом к рекламе."}
+    res = await wb_set_bids(api_key, campaign_id, wb_bids)
+    if not res["ok"]:
+        return {"ok": False, "error": res.get("error")}
+    return {"ok": True, "error": None}
+
+
+async def get_ad_subjects(db: AsyncSession, project_id: int) -> dict:
+    """Предметы, по которым можно создать рекламную кампанию."""
+    from backend.services.funnel.wb_advertising_api import fetch_ad_subjects
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"error": "no_api_key", "subjects": []}
+    subjects = await fetch_ad_subjects(api_key)
+    return {"subjects": subjects}
+
+
+async def get_ad_nms(db: AsyncSession, project_id: int, subject_ids: list[int]) -> dict:
+    """Карточки товаров для кампании по выбранным предметам."""
+    from backend.services.funnel.wb_advertising_api import fetch_ad_nms
+
+    if not subject_ids:
+        return {"nms": []}
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"error": "no_api_key", "nms": []}
+    nms = await fetch_ad_nms(api_key, subject_ids)
+    return {"nms": nms}
+
+
+# Ограничения WB на создание кампании
+CREATE_MAX_NMS = 50
+CREATE_BID_TYPES = ("manual", "unified")
+CREATE_PAYMENT_TYPES = ("cpm", "cpc")
+CREATE_PLACEMENTS = ("search", "recommendations")
+
+
+def validate_create_campaign(
+    name: str, nms: list[int], bid_type: str, payment_type: str, placement_types: list[str] | None,
+) -> str | None:
+    """Проверка параметров создания ДО похода в WB. None — ок, иначе текст ошибки.
+
+    Правила WB: ≤50 товаров; placement_types только для ручной ставки; CPC — показы
+    только в поиске (зона одна). Единая ставка — зоны не выбираются, крутятся обе.
+    """
+    name = (name or "").strip()
+    if not name:
+        return "Укажите название кампании"
+    if len(name) > 50:
+        return "Название длиннее 50 символов"
+    if not nms:
+        return "Выберите хотя бы один товар"
+    if len(nms) > CREATE_MAX_NMS:
+        return f"Не больше {CREATE_MAX_NMS} товаров в кампании"
+    if bid_type not in CREATE_BID_TYPES:
+        return "Недопустимый тип ставки"
+    if payment_type not in CREATE_PAYMENT_TYPES:
+        return "Недопустимый тип оплаты"
+    if placement_types:
+        bad = [p for p in placement_types if p not in CREATE_PLACEMENTS]
+        if bad:
+            return f"Недопустимая зона показа: {', '.join(bad)}"
+    # Ручной CPM крутится по выбранным зонам — без единой зоны кампания нигде не покажется
+    if bid_type == "manual" and payment_type == "cpm" and not placement_types:
+        return "Для ручной ставки выберите хотя бы одну зону показа"
+    return None
+
+
+async def create_campaign(
+    db: AsyncSession, project_id: int, name: str, nms: list[int],
+    bid_type: str = "manual", payment_type: str = "cpm", placement_types: list[str] | None = None,
+) -> dict:
+    """Создать рекламную кампанию в WB. Возвращает {"ok", "campaign_id", "error"}.
+
+    После создания синкаем список кампаний, чтобы новая сразу появилась у нас.
+    """
+    from backend.services.funnel.wb_advertising_api import create_campaign as wb_create
+
+    name = (name or "").strip()
+    nms = [int(x) for x in (nms or [])]
+    # Для единой ставки и CPC зоны не задаются вручную (WB решает сам)
+    if bid_type != "manual":
+        placement_types = None
+    elif payment_type == "cpc":
+        placement_types = ["search"]
+
+    reason = validate_create_campaign(name, nms, bid_type, payment_type, placement_types)
+    if reason:
+        return {"ok": False, "campaign_id": None, "error": reason}
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"ok": False, "campaign_id": None, "error": "Нет WB-ключа с доступом к рекламе."}
+
+    res = await wb_create(api_key, name, nms, bid_type, payment_type, placement_types)
+    if not res["ok"]:
+        return res
+    # Подтянем новую кампанию в наш список (не критично, если не успеет)
+    try:
+        from backend.services.funnel.ad_campaigns_service import sync_ad_campaigns
+
+        await sync_ad_campaigns(db, project_id)
+    except Exception as e:
+        logger.warning("create_campaign: sync после создания не удался: %s", e)
+    return res
 
 
 async def deposit_campaign_budget_manual(
@@ -717,19 +1348,40 @@ def compute_autopay_decision(
     now_hour_msk: int,
     already_topped_today: bool,
     pending_unknown: bool,
+    topped_today_count: int = 0,
 ) -> dict:
     """Чистое решение «пополнять ли кампанию сейчас и на сколько».
 
-    setting — {enabled, amount(X, дневной бюджет), hour, threshold_pct};
+    setting — {enabled, mode, amount(X), hour, threshold_pct, low_balance_threshold, topup_amount, daily_cap};
     budget — текущий бюджет кампании ₽; spend_day — открут за последние сутки ₽;
-    already_topped_today — в журнале уже есть успешное пополнение за сегодня (МСК);
+    already_topped_today — в журнале уже есть успешное пополнение за сегодня (МСК, для to_target);
+    topped_today_count — сколько успешных пополнений уже было сегодня (для low_balance daily_cap);
     pending_unknown — последняя попытка сегодня закончилась timeout/5xx (исход
     неизвестен) → не пополняем, пока бюджет не пересинкается.
 
     Возвращает {"action": "deposit"|"skip", "sum": int, "reason": str}.
     """
+    if not setting.get("enabled"):
+        return {"action": "skip", "sum": 0, "reason": "disabled"}
+
+    # Режим «как на ВБ»: остаток упал ниже порога → долить фиксированную сумму (любой час, повторяемо).
+    if setting.get("mode") == "low_balance":
+        topup = float(setting.get("topup_amount") or 0)
+        if topup <= 0:
+            return {"action": "skip", "sum": 0, "reason": "disabled"}
+        if pending_unknown:  # исход прошлой попытки неизвестен — не рискуем двойным списанием
+            return {"action": "skip", "sum": 0, "reason": "pending_unknown"}
+        cap = int(setting.get("daily_cap", 1) or 0)  # «не чаще N раз в день»; 0 = без ограничения
+        if cap > 0 and topped_today_count >= cap:
+            return {"action": "skip", "sum": 0, "reason": "cap_reached"}
+        thr = float(setting.get("low_balance_threshold") or 0)
+        if float(budget or 0) >= thr:
+            return {"action": "skip", "sum": 0, "reason": "above_threshold"}
+        return {"action": "deposit", "sum": _round_up_50(max(MIN_TOPUP_RUB, topup)), "reason": "ok"}
+
+    # Режим to_target (наш): долить до X в заданный час при пороге по обороту.
     x = float(setting.get("amount") or 0)
-    if not setting.get("enabled") or x <= 0:
+    if x <= 0:
         return {"action": "skip", "sum": 0, "reason": "disabled"}
     if now_hour_msk != int(setting.get("hour", 9)):
         return {"action": "skip", "sum": 0, "reason": "not_time"}
@@ -749,9 +1401,11 @@ def compute_autopay_decision(
 async def run_autopay_tick(db: AsyncSession, project_id: int, api_key: str) -> dict:
     """Один проход автопополнения проекта: решения + реальные списания + журнал.
 
-    Вызывается scheduler'ом каждые ~15 минут. Срабатывает только для кампаний,
-    у которых enabled и текущий час МСК == настроенному. Идемпотентность —
-    по журналу (одно успешное пополнение в день на кампанию).
+    Вызывается scheduler'ом каждые ~15 минут.
+      to_target — срабатывает в настроенный час МСК, идемпотентность по журналу
+        (одно успешное пополнение в день на кампанию);
+      low_balance — проверяется каждый проход, доливает как только остаток < порога
+        (несколько раз в день); повтор в тот же тик исключён свежим чтением бюджета из WB.
     """
     from backend.services.funnel.wb_advertising_api import (
         DEPOSIT_SOURCE_ACCOUNT,
@@ -763,18 +1417,22 @@ async def run_autopay_tick(db: AsyncSession, project_id: int, api_key: str) -> d
     )
 
     settings = await get_autopay_settings(db, project_id)
-    enabled = {int(cid): s for cid, s in settings.items() if s.get("enabled") and (s.get("amount") or 0) > 0}
+    enabled = {int(cid): s for cid, s in settings.items() if _autopay_active(s)}
     if not enabled:
         return {"deposits": 0, "checked": 0}
 
     now_msk = utcnow().astimezone(MSK)
     today_msk = now_msk.date()
-    due_ids = [cid for cid, s in enabled.items() if now_msk.hour == int(s.get("hour", 9))]
+    # to_target срабатывает только в свой час МСК; low_balance проверяется каждый проход (по остатку)
+    due_ids = [
+        cid for cid, s in enabled.items()
+        if s.get("mode") == "low_balance" or now_msk.hour == int(s.get("hour", 9))
+    ]
     if not due_ids:
         return {"deposits": 0, "checked": 0}
 
     log = await get_autopay_log(db, project_id)
-    topped_today: set[int] = set()
+    topped_count_today: dict[int, int] = {}  # успешных пополнений сегодня на кампанию (для daily_cap)
     unknown_today: set[int] = set()
     for e in log:
         try:
@@ -786,7 +1444,7 @@ async def run_autopay_tick(db: AsyncSession, project_id: int, api_key: str) -> d
             continue
         cid = int(e.get("campaign_id") or 0)
         if e.get("status") == "ok":
-            topped_today.add(cid)
+            topped_count_today[cid] = topped_count_today.get(cid, 0) + 1
         elif e.get("status") == "unknown":
             unknown_today.add(cid)
 
@@ -812,8 +1470,10 @@ async def run_autopay_tick(db: AsyncSession, project_id: int, api_key: str) -> d
         if budget < 0:
             logger.warning(f"Autopay: project {project_id} campaign {cid} — бюджет из WB не получен, скип")
             continue
+        topped_n = topped_count_today.get(cid, 0)
         decision = compute_autopay_decision(
-            setting, budget, spend_day_map.get(cid, 0.0), now_msk.hour, cid in topped_today, cid in unknown_today
+            setting, budget, spend_day_map.get(cid, 0.0), now_msk.hour,
+            topped_n > 0, cid in unknown_today, topped_today_count=topped_n,
         )
         if decision["action"] != "deposit":
             continue
@@ -1001,3 +1661,194 @@ async def get_budget_gaps(db: AsyncSession, project_id: int) -> list[dict]:
         )
     result.sort(key=lambda r: -r["spend_today"])
     return result
+
+
+async def _budget_gap_today_map(
+    db: AsyncSession, project_id: int, campaigns: list, today_map: dict[int, float],
+) -> dict[int, float]:
+    """{campaign_id: ₽ недобора до полуночи} для кампаний, у которых сегодня (МСК)
+    исчерпан бюджет (status=9, budget<=0, был расход). Момент остановки — последнее
+    событие budget_change→0 за сегодня (как в get_budget_gaps); если события нет —
+    считаем от текущего часа. Остальным кампаниям недобора нет (в карте отсутствуют).
+    """
+    ids = [
+        c.campaign_id for c in campaigns
+        if c.status == 9 and float(c.budget or 0) <= 0 and today_map.get(c.campaign_id, 0.0) > 0
+    ]
+    if not ids:
+        return {}
+    now_utc = utcnow()
+    now_msk = now_utc.astimezone(MSK) if now_utc.tzinfo else MSK.localize(now_utc.replace(tzinfo=None), is_dst=None).astimezone(MSK)
+    today_msk = now_msk.date()
+    day_start_utc = MSK.localize(datetime.combine(today_msk, datetime.min.time())).astimezone(pytz.UTC).replace(tzinfo=None)
+    ev_rows = (
+        (
+            await db.execute(
+                select(WbAdCampaignEvent)
+                .where(
+                    WbAdCampaignEvent.project_id == project_id,
+                    WbAdCampaignEvent.campaign_id.in_(ids),
+                    WbAdCampaignEvent.event_type == "budget_change",
+                    WbAdCampaignEvent.created_at >= day_start_utc,
+                )
+                .order_by(WbAdCampaignEvent.created_at)
+                .limit(5000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    ran_out_at: dict[int, datetime] = {}
+    for ev in ev_rows:
+        new_v = _parse_num(ev.new_value)
+        if new_v is not None and new_v <= 0:
+            ran_out_at[ev.campaign_id] = ev.created_at  # последний по времени выигрывает
+        elif new_v is not None and new_v > 0:
+            ran_out_at.pop(ev.campaign_id, None)  # после пополнения не считается остановленной
+    now_hour = now_msk.hour + now_msk.minute / 60
+    out: dict[int, float] = {}
+    for cid in ids:
+        stopped = ran_out_at.get(cid)
+        if stopped is not None:
+            st = pytz.UTC.localize(stopped).astimezone(MSK)
+            ran_out_hour: float | None = st.hour + st.minute / 60
+        else:
+            ran_out_hour = None
+        out[cid] = compute_budget_gap(today_map[cid], ran_out_hour, now_hour)["needed_till_midnight"]
+    return out
+
+
+async def get_hourly_spend(
+    db: AsyncSession, project_id: int, campaign_id: int, date: str | None = None,
+) -> dict:
+    """Почасовой расход кампании за день, восстановленный из снимков остатка бюджета.
+
+    WB НЕ отдаёт показы/клики/заказы по часам — только суточно. Но остаток бюджета
+    синкается каждые ~10 мин (WbAdCampaignEvent budget_change), и убывание остатка между
+    снимками = потраченные деньги. Суммируем убывания по часу МСК (рост = пополнение —
+    пропускаем). Точность — до интервала синка (~10 мин); события есть только пока кампания
+    активна (status=9). Возвращает 24 часа (0..23) с расходом ₽ + итог.
+    """
+    camp = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if camp is None:
+        return {"error": "campaign_not_found"}
+
+    now_utc = utcnow()
+    now_msk = now_utc.astimezone(MSK) if now_utc.tzinfo else MSK.localize(now_utc.replace(tzinfo=None), is_dst=None).astimezone(MSK)
+    day = datetime.strptime(date, "%Y-%m-%d").date() if date else now_msk.date()
+    day_start_utc = MSK.localize(datetime.combine(day, datetime.min.time())).astimezone(pytz.UTC).replace(tzinfo=None)
+    day_end_utc = MSK.localize(datetime.combine(day, datetime.min.time()) + timedelta(days=1)).astimezone(pytz.UTC).replace(tzinfo=None)
+
+    events = (
+        (
+            await db.execute(
+                select(WbAdCampaignEvent)
+                .where(
+                    WbAdCampaignEvent.project_id == project_id,
+                    WbAdCampaignEvent.campaign_id == campaign_id,
+                    WbAdCampaignEvent.event_type == "budget_change",
+                    WbAdCampaignEvent.created_at >= day_start_utc,
+                    WbAdCampaignEvent.created_at < day_end_utc,
+                )
+                .order_by(WbAdCampaignEvent.created_at)
+                .limit(5000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    hourly = [0.0] * 24
+    for ev in events:
+        old_v = _parse_num(ev.old_value)
+        new_v = _parse_num(ev.new_value)
+        if old_v is None or new_v is None:
+            continue
+        delta = old_v - new_v  # >0 = потрачено; <0 = пополнение (пропускаем)
+        if delta > 0:
+            hour = pytz.UTC.localize(ev.created_at).astimezone(MSK).hour
+            hourly[hour] += delta
+
+    rows = [{"hour": h, "spend": round(hourly[h], 2)} for h in range(24)]
+    return {
+        "campaign_id": campaign_id,
+        "name": camp.name,
+        "date": day.isoformat(),
+        "total": round(sum(hourly), 2),
+        "hours": rows,
+    }
+
+
+async def get_intraday_metrics(
+    db: AsyncSession, project_id: int, campaign_id: int, date: str | None = None,
+) -> dict:
+    """Внутридневные показы/клики/расход по кампании из снимков накопительного счётчика.
+
+    WB нативно почасовку показов/кликов НЕ отдаёт (мин. ось — сутки). Мы копим снимки
+    кабинетного campaigns-stats каждые ~30 мин (WbAdCampaignSnapshot / snapshot_ad_intraday).
+    Дельта между соседними снимками одного дня = метрики за интервал (стиль mkeeper,
+    «место принятия решения»). Первый снимок дня = накопление от полуночи МСК.
+
+    CTR и порог «мин показов» считает ФРОНТ (интерактивный контрол), поэтому отдаём сырые
+    дельты. points[] упорядочены; time = ЧЧ:ММ МСК момента снимка (конец интервала).
+    totals = последний накопительный счётчик (авторитетное число WB за день).
+    """
+    camp = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if camp is None:
+        return {"error": "campaign_not_found"}
+
+    now_msk = pytz.UTC.localize(utcnow()).astimezone(MSK)
+    day = datetime.strptime(date, "%Y-%m-%d").date() if date else now_msk.date()
+
+    snaps = (
+        (
+            await db.execute(
+                select(WbAdCampaignSnapshot)
+                .where(
+                    WbAdCampaignSnapshot.project_id == project_id,
+                    WbAdCampaignSnapshot.campaign_id == campaign_id,
+                    WbAdCampaignSnapshot.stat_date == day,
+                )
+                .order_by(WbAdCampaignSnapshot.captured_at)
+                .limit(500)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    points = []
+    prev_v = prev_c = 0
+    prev_s = 0.0
+    for snap in snaps:
+        cum_v, cum_c = snap.views_cum or 0, snap.clicks_cum or 0
+        cum_s = float(snap.spend_cum or 0)
+        points.append(
+            {
+                "time": pytz.UTC.localize(snap.captured_at).astimezone(MSK).strftime("%H:%M"),
+                "views": max(0, cum_v - prev_v),  # clamp: WB может скорректировать счётчик вниз
+                "clicks": max(0, cum_c - prev_c),
+                "spend": round(max(0.0, cum_s - prev_s), 2),
+            }
+        )
+        prev_v, prev_c, prev_s = cum_v, cum_c, cum_s
+
+    return {
+        "campaign_id": campaign_id,
+        "name": camp.name,
+        "date": day.isoformat(),
+        "points": points,
+        "totals": {"views": prev_v, "clicks": prev_c, "spend": round(prev_s, 2)},
+        "snapshots": len(snaps),
+    }

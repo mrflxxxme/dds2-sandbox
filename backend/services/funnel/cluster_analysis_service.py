@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.cache import cached
 from backend.models import Nomenclature, WbAdCampaign, WbFunnelDaily
 from backend.models.integrations import WbAdCampaignDaily, WbAdNmDaily
 from backend.services.funnel.wb_advertising_api import (
@@ -50,14 +51,23 @@ def _bid_map(bids: dict[tuple[int, int], dict[str, float]]) -> dict[str, float]:
     return out
 
 
-def _enrich(cluster: dict[str, Any], minus_set: set[str], bid_map: dict[str, float]) -> dict[str, Any]:
-    """Доклеить к кластеру: is_minused, текущую ставку и флаг locked (<100 показов)."""
+def _enrich(
+    cluster: dict[str, Any], minus_set: set[str], bid_map: dict[str, float],
+    all_views: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Доклеить к кластеру: is_minused, текущую ставку и флаг locked.
+
+    locked («сбор данных») = показов по ВСЕЙ истории кампании < 100 (all_views), а не за
+    выбранный период. Иначе на узкой дате (напр. 1 день) фраза с исторически ≥100 показов
+    ложно уходила бы в «сбор данных». all_views=None → фолбэк на показы кластера (легаси).
+    """
     q = cluster["norm_query"]
+    lifetime_views = all_views.get(q, cluster["views"]) if all_views is not None else cluster["views"]
     return {
         **cluster,
         "is_minused": q in minus_set,
         "bid": bid_map.get(q),
-        "locked": cluster["views"] < LOCK_MIN_VIEWS,
+        "locked": lifetime_views < LOCK_MIN_VIEWS,
     }
 
 # порядок важен: длинные окончания раньше коротких (re-альтернатива берёт первое совпадение)
@@ -294,6 +304,50 @@ async def _zone_stats(
     }
 
 
+def _merge_norm(stats: dict) -> dict[str, dict[str, Any]]:
+    """Слить кластеры по всем nm-парам в {norm_query: cluster} (суммируя объёмы)."""
+    merged: dict[str, dict[str, Any]] = {}
+    for lst in stats.values():
+        for c in lst:
+            q = c["norm_query"]
+            m = merged.get(q)
+            if m is None:
+                merged[q] = dict(c)
+            else:
+                for f in ("views", "clicks", "spend", "orders", "atbs", "shks"):
+                    m[f] = m.get(f, 0) + c.get(f, 0)
+    return merged
+
+
+@cached(prefix="ad_clusters_alltime", ttl=1800)
+async def _alltime_cluster_index(
+    db: AsyncSession, project_id: int, campaign_id: int, nm_ids: list[int], since: str
+) -> dict[str, dict]:
+    """Все кластеры кампании за её жизнь: {norm_query: {views, avg_pos}}. Кэш 30 мин.
+
+    Нужен, чтобы (1) показывать ВЕСЬ список кластеров независимо от выбранной на экране даты и
+    (2) считать «сбор данных» (locked) по показам за ВСЮ историю, а не за выбранный период.
+    У WB all-time-эндпоинта нет — тянем от старта кампании (since) до сегодня; fetch_normquery_stats
+    сам режет на 30-дневные окна. Медленно на первом открытии → кэшируем.
+    """
+    key = await _resolve_key(db, project_id)
+    if not key:
+        return {}
+    pairs = [(campaign_id, nm) for nm in nm_ids]
+    today = date_type.today().isoformat()
+    stats = await fetch_normquery_stats(key, pairs, since, today)
+    idx: dict[str, dict] = {}
+    for lst in stats.values():
+        for c in lst:
+            q = c["norm_query"]
+            e = idx.get(q)
+            if e is None:
+                idx[q] = {"views": int(c.get("views", 0)), "avg_pos": c.get("avg_pos", 0)}
+            else:
+                e["views"] += int(c.get("views", 0))
+    return idx
+
+
 async def get_campaign_clusters(
     db: AsyncSession, project_id: int, campaign_id: int, date_from: str, date_to: str, nm_id: int | None = None
 ) -> dict:
@@ -326,24 +380,32 @@ async def get_campaign_clusters(
     minus_set = {q for lst in minus.values() for q in lst}
     bid_map = _bid_map(bids)
 
-    # слить кластеры по всем nm кампании в один список
-    merged: dict[str, dict[str, Any]] = {}
-    for lst in stats.values():
-        for c in lst:
-            q = c["norm_query"]
-            m = merged.get(q)
-            if m is None:
-                merged[q] = dict(c)
-            else:
-                for f in ("views", "clicks", "spend", "orders", "atbs", "shks"):
-                    m[f] = m.get(f, 0) + c.get(f, 0)
-    clusters_raw = list(merged.values())
+    # Метрики за выбранный период
+    range_merged = _merge_norm(stats)
+    # Полный список кластеров + показы за ВСЮ историю (кэш): «все кластеры вне зависимости от
+    # даты» + locked по all-time. WB all-time не отдаёт — тянем от старта кампании до сегодня.
+    since = camp.created_at.date().isoformat() if getattr(camp, "created_at", None) else date_from
+    alltime = await _alltime_cluster_index(db, project_id, campaign_id, nm_ids, since)
+    all_views = {q: v["views"] for q, v in alltime.items()}
+    # Список = объединение (all-time даёт полный набор); метрики — за период (нули, если в
+    # периоде фраза не крутилась, но исторически была — иначе она бы пропала при узкой дате).
+    order_qs = list(dict.fromkeys([*range_merged.keys(), *alltime.keys()]))
+    clusters_raw: list[dict[str, Any]] = []
+    for q in order_qs:
+        if q in range_merged:
+            clusters_raw.append(dict(range_merged[q]))
+        else:
+            clusters_raw.append({
+                "norm_query": q, "views": 0, "clicks": 0, "spend": 0.0, "orders": 0,
+                "atbs": 0, "shks": 0, "avg_pos": alltime[q].get("avg_pos", 0),
+                "ctr": 0.0, "cpc": 0.0, "cpm": 0.0,
+            })
 
     aov, subject = await _aov_and_subject(db, project_id, nm_ids, date_from, date_to)
     vocab = _build_vocab(clusters_raw, _subject_stems(subject))
     total_spend = sum(c["spend"] for c in clusters_raw) or 0.0
     clusters = [
-        _enrich(_classify(c, aov, total_spend, vocab), minus_set, bid_map)
+        _enrich(_classify(c, aov, total_spend, vocab), minus_set, bid_map, all_views)
         for c in clusters_raw
     ]
     clusters.sort(key=lambda x: -x["spend"])

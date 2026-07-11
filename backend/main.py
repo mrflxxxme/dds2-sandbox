@@ -42,6 +42,7 @@ from backend.routers import (
     media,
     migfull_portal,
     monitoring,
+    raw_data,
     payment_requests,
     planning,
     pricing,
@@ -545,6 +546,12 @@ app.include_router(
     monitoring.router,
     prefix="/api/v1",
     tags=["Monitoring"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    raw_data.router,
+    prefix="/api/v1",
+    tags=["RawData"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

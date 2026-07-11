@@ -32,6 +32,7 @@ from backend.scheduler.jobs.funnel import (
     ad_nm_backfill_tick,
     ads_autopay_tick,
     fast_backfill_tick,
+    snapshot_ad_intraday_all_projects,
     sync_ad_campaigns_all_projects,
     sync_all_projects_funnel,
     sync_budgets_all_projects,
@@ -147,6 +148,20 @@ def start_scheduler():
         trigger=CronTrigger(minute="1,16,31,46", timezone=MSK),
         id="ads_autopay",
         name="WB Ads Autopay (every 15min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+
+    # Ad intraday snapshots: тик каждые 10 мин (:7,:17,…) — накопительные показы/клики/расход
+    # из кабинетной сессии (cmp campaigns-stats) для интрадей-графика «место принятия решения».
+    # Фактическая частота на проект — настройка ads_snapshot_interval_min (10/20/30/60): гейт
+    # внутри snapshot_ad_intraday пропускает тик, если с прошлого снимка прошло меньше интервала.
+    _scheduler.add_job(
+        snapshot_ad_intraday_all_projects,
+        trigger=CronTrigger(minute="7,17,27,37,47,57", timezone=MSK),
+        id="snapshot_ad_intraday",
+        name="WB Ad Intraday Snapshots (every 10min tick)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,

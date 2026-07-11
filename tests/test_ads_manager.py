@@ -171,12 +171,17 @@ async def test_list_campaigns_sorted_active_first():
     active = _campaign(202, budget=500, status=9)
     period_row = MagicMock(campaign_id=202, spend=Decimal("2100"), views=10000, clicks=250)
     today_row = MagicMock(campaign_id=202, today=Decimal("300"))
+    yest_row = MagicMock(nm_id=111, rev=Decimal("100000"))  # выручка вчера по товару 111
     nm_meta_row = MagicMock(nm_id=111, brand="НУ-НУ", subject="Ковры")
     active.nm_ids = [111]
+    # Обе кампании: у active budget=500 (>0), у paused status=11 → недобор не считается,
+    # _budget_gap_today_map не ходит в БД, лишнего db.execute нет.
     db = _db_seq(
         _scalars_result([paused, active]),
         _rows_result([period_row]),
         _rows_result([today_row]),
+        _rows_result([yest_row]),
+        _rows_result([]),  # расход кампаний вчера (yest_spend) — для ДРР за вчера
         _rows_result([nm_meta_row]),
     )
 
@@ -188,10 +193,73 @@ async def test_list_campaigns_sorted_active_first():
     assert rows[0]["clicks_period"] == 250
     assert rows[0]["ctr"] == 2.5  # 250/10000
     assert rows[0]["cpc"] == 8.4  # 2100/250
+    assert rows[0]["spend_per_hour"] == 12.5  # 2100 / (7 дней × 24 ч)
     assert rows[0]["brands"] == ["НУ-НУ"]
     assert rows[0]["subjects"] == ["Ковры"]
     assert rows[0]["status_label"] == "Активна"
     assert rows[1]["status_label"] == "Пауза"
+    # Новые поля: выручка вчера (для «ДРР план») и недобор бюджета (0 — бюджет не исчерпан)
+    assert rows[0]["rev_yesterday"] == 100000.0
+    assert rows[0]["budget_gap"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_budget_gap_today_map_only_exhausted():
+    """Недобор считаем только активным кампаниям с исчерпанным бюджетом и расходом сегодня."""
+    from backend.services.funnel.ads_manager import _budget_gap_today_map
+
+    exhausted = _campaign(301, budget=0, status=9)      # исчерпан, крутился
+    has_budget = _campaign(302, budget=500, status=9)   # бюджет есть → не считаем
+    paused = _campaign(303, budget=0, status=11)        # не активна → не считаем
+    ev = _event(301, "0", datetime(2026, 7, 3, 9, 0, 0))  # 09:00 UTC = 12:00 МСК
+    db = _db_seq(_scalars_result([ev]))
+    today_map = {301: 1200.0, 302: 400.0, 303: 100.0}
+
+    gaps = await _budget_gap_today_map(db, PROJECT_ID, [exhausted, has_budget, paused], today_map)
+
+    assert set(gaps) == {301}          # только исчерпанная активная с расходом
+    # стоп в 12:00: burn=1200/12=100 ₽/ч, до полуночи 12 ч → 1200 ₽
+    assert gaps[301] == 1200.0
+
+
+@pytest.mark.asyncio
+async def test_budget_gap_today_map_none_qualify_no_db():
+    """Нет исчерпанных кампаний — пустая карта, в БД не ходим."""
+    from backend.services.funnel.ads_manager import _budget_gap_today_map
+
+    db = AsyncMock()
+    gaps = await _budget_gap_today_map(db, PROJECT_ID, [_campaign(401, budget=500, status=9)], {401: 100.0})
+
+    assert gaps == {}
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hourly_spend_reconstructs_from_budget_deltas():
+    """Расход по часам = убывание остатка бюджета между снимками; пополнение (рост) пропускаем."""
+    from backend.services.funnel.ads_manager import get_hourly_spend
+
+    def ev(old: str, new: str, dt: datetime) -> MagicMock:
+        e = MagicMock()
+        e.event_type = "budget_change"; e.old_value = old; e.new_value = new; e.created_at = dt
+        return e
+
+    camp = _campaign(501)
+    events = [
+        ev("10000", "9500", datetime(2026, 7, 3, 9, 0, 0)),    # 12:00 МСК, −500
+        ev("9500", "9000", datetime(2026, 7, 3, 9, 30, 0)),    # 12:30 МСК, −500
+        ev("9000", "8700", datetime(2026, 7, 3, 10, 0, 0)),    # 13:00 МСК, −300
+        ev("8700", "10000", datetime(2026, 7, 3, 10, 30, 0)),  # пополнение (+1300) — пропускаем
+    ]
+    db = _db_seq(_scalars_result([camp]), _scalars_result(events))
+
+    res = await get_hourly_spend(db, PROJECT_ID, 501, date="2026-07-03")
+
+    by_hour = {r["hour"]: r["spend"] for r in res["hours"]}
+    assert by_hour[12] == 1000.0  # 500 + 500 в 12:00 и 12:30 МСК
+    assert by_hour[13] == 300.0
+    assert res["total"] == 1300.0  # пополнение не учтено
+    assert len(res["hours"]) == 24 and res["date"] == "2026-07-03"
 
 
 def test_sanitize_autopay_clamps():
@@ -199,9 +267,15 @@ def test_sanitize_autopay_clamps():
     from backend.services.funnel.ads_manager import _sanitize_autopay
 
     s = _sanitize_autopay({"enabled": True, "amount": -5, "hour": 25, "threshold_pct": 150})
-    assert s == {"enabled": True, "amount": 0.0, "hour": 23, "threshold_pct": 100}
+    assert s == {"enabled": True, "mode": "to_target", "amount": 0.0, "hour": 23, "threshold_pct": 100,
+                 "low_balance_threshold": 1000.0, "topup_amount": 1000.0, "daily_cap": 1}
     d = _sanitize_autopay({})
-    assert d == {"enabled": False, "amount": 0.0, "hour": 9, "threshold_pct": 50}
+    assert d == {"enabled": False, "mode": "to_target", "amount": 0.0, "hour": 9, "threshold_pct": 50,
+                 "low_balance_threshold": 1000.0, "topup_amount": 1000.0, "daily_cap": 1}
+    # Неизвестный режим откатывается к to_target; low_balance-поля нормализуются
+    lb = _sanitize_autopay({"enabled": True, "mode": "wat", "low_balance_threshold": -1, "topup_amount": 1200, "daily_cap": -3})
+    assert lb["mode"] == "to_target" and lb["low_balance_threshold"] == 0.0 and lb["topup_amount"] == 1200.0
+    assert lb["daily_cap"] == 0  # отрицательный клампится к 0 (без ограничения)
 
 
 # ─── compute_autopay_decision ────────────────────────────────────────────────
@@ -257,6 +331,57 @@ def test_autopay_threshold():
 def test_autopay_zero_amount_disabled():
     d = _decision(setting={"enabled": True, "amount": 0, "hour": 9, "threshold_pct": 0})
     assert d["reason"] == "disabled"
+
+
+# ─── Режим low_balance («как на ВБ»): долив по остатку, любой час, повторяемо ──
+
+
+def _lb(**setting):
+    base = {"enabled": True, "mode": "low_balance", "low_balance_threshold": 1000, "topup_amount": 1000}
+    base.update(setting)
+    return base
+
+
+def test_autopay_low_balance_tops_up_when_below():
+    """Остаток < порога → долить topup; час/«уже пополняли сегодня» игнорируются в этом режиме."""
+    d = _decision(setting=_lb(), budget=800.0, now_hour_msk=15, already_topped_today=True)
+    assert d == {"action": "deposit", "sum": 1000, "reason": "ok"}
+
+
+def test_autopay_low_balance_skips_when_above():
+    d = _decision(setting=_lb(), budget=1200.0)
+    assert d["reason"] == "above_threshold"
+
+
+def test_autopay_low_balance_pending_unknown_skips():
+    """Неизвестный исход прошлой попытки — не рискуем двойным списанием."""
+    d = _decision(setting=_lb(), budget=100.0, pending_unknown=True)
+    assert d["reason"] == "pending_unknown"
+
+
+def test_autopay_low_balance_min_topup_and_round50():
+    d = _decision(setting=_lb(topup_amount=300), budget=100.0)
+    assert d["sum"] == 1000  # минимум 1000
+    d = _decision(setting=_lb(topup_amount=1230), budget=100.0)
+    assert d["sum"] == 1250  # округление вверх до 50
+
+
+def test_autopay_low_balance_zero_topup_disabled():
+    d = _decision(setting=_lb(topup_amount=0), budget=100.0)
+    assert d["reason"] == "disabled"
+
+
+def test_autopay_low_balance_daily_cap():
+    """«Не чаще N раз в день»: при достижении cap — скип; 0 = без ограничения."""
+    # cap=1: одно пополнение уже было сегодня → скип
+    d = _decision(setting=_lb(daily_cap=1), budget=100.0, topped_today_count=1)
+    assert d["reason"] == "cap_reached"
+    # cap=2: одно было — ещё можно
+    d = _decision(setting=_lb(daily_cap=2), budget=100.0, topped_today_count=1)
+    assert d["action"] == "deposit"
+    # cap=0 (без ограничения): сколько бы ни было — доливаем
+    d = _decision(setting=_lb(daily_cap=0), budget=100.0, topped_today_count=5)
+    assert d["action"] == "deposit"
 
 
 # ─── Журнал автопополнений ───────────────────────────────────────────────────
@@ -513,3 +638,47 @@ async def test_set_campaign_state_uses_adv_v0(monkeypatch):
     assert res["ok"] is True
     assert "/adv/v0/start?id=555" in captured["url"]
     assert "/adv/v1/" not in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_campaign_metrics_customer_price_applies_spp():
+    """«Цена Клиенту» = avg_price × (1 − СПП per день) из bdr_rates_map."""
+    from datetime import date
+
+    from backend.services.funnel.ads_manager import get_campaign_metrics
+    from backend.services.funnel.bdr_rates import BdrRates, BdrRatesLookup
+
+    d = date(2026, 7, 10)
+    camp = MagicMock(nm_ids=[111], campaign_type="cpm", name="C")
+    camp_res = MagicMock()
+    camp_res.scalar_one_or_none.return_value = camp
+    ad_row = MagicMock(date=d, views=1000, clicks=50, spend=Decimal("200"))
+    f_row = MagicMock(date=d, opens=100, carts=10, orders=5, orders_sum=Decimal("5000"), avg_price=Decimal("1000"))
+    db = _db_seq(camp_res, _rows_result([ad_row]), _rows_result([f_row]))
+
+    bdr = BdrRatesLookup({(111, d): BdrRates(to_pay_rate=0.6, spp_rate=0.2, buyout_pct=0.9)}, {})
+    res = await get_campaign_metrics(db, PROJECT_ID, 999, date_from="2026-07-10", date_to="2026-07-10", bdr_rates_map=bdr)
+
+    row = res["rows"][0]
+    assert row["avg_price"] == 1000.0
+    assert row["customer_price"] == 800.0        # 1000 × (1 − 0.2)
+    assert res["totals"]["customer_price"] == 800.0
+
+
+@pytest.mark.asyncio
+async def test_campaign_metrics_customer_price_zero_without_spp_map():
+    """Без карты СПП «Цена Клиенту» = сама цена (СПП 0)."""
+    from datetime import date
+
+    from backend.services.funnel.ads_manager import get_campaign_metrics
+
+    d = date(2026, 7, 10)
+    camp = MagicMock(nm_ids=[111], campaign_type="cpm", name="C")
+    camp_res = MagicMock()
+    camp_res.scalar_one_or_none.return_value = camp
+    ad_row = MagicMock(date=d, views=1000, clicks=50, spend=Decimal("200"))
+    f_row = MagicMock(date=d, opens=100, carts=10, orders=5, orders_sum=Decimal("5000"), avg_price=Decimal("1000"))
+    db = _db_seq(camp_res, _rows_result([ad_row]), _rows_result([f_row]))
+
+    res = await get_campaign_metrics(db, PROJECT_ID, 999, date_from="2026-07-10", date_to="2026-07-10")
+    assert res["rows"][0]["customer_price"] == 1000.0  # СПП нет → цена как есть

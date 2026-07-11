@@ -46,6 +46,7 @@ logger = structlog.get_logger("dds.wb_portal")
 
 SUPPLY_BASE = "https://seller-supply.wildberries.ru"
 AUTH_BASE = "https://seller.wildberries.ru"
+CMP_BASE = "https://cmp.wildberries.ru"  # кабинет рекламы (стата кампаний) — GET, authorizev3
 ROOT_VERSION = "v1.100.0"
 TIMEOUT = 30
 
@@ -98,6 +99,16 @@ def _parse_session(session: "str | dict") -> tuple[str, str | None, list[dict], 
         cookies,
         data.get("root_version") or ROOT_VERSION,
     )
+
+
+def _stat_val(field: object) -> float:
+    """campaigns-stats оборачивает каждую метрику в {value, percent} — берём value."""
+    if isinstance(field, dict):
+        field = field.get("value")
+    try:
+        return float(field or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class WbPortalClient:
@@ -217,6 +228,29 @@ class WbPortalClient:
             raise WbPortalError(f"WB недоступен ({url}): {type(e).__name__}") from e
         raise WbPortalError(f"Не удалось выполнить {url}")
 
+    async def _raw_get(self, base: str, path: str, params: dict) -> dict | list:
+        """GET на кабинетный хост (cmp) через shared-клиент с authorizev3+cookie.
+
+        В отличие от supply-POST, cmp-стата НЕ использует wb-seller-lk, поэтому 401 здесь =
+        недействительный authorizev3/cookie → сразу WbSessionExpired (без refresh_lk,
+        который ходит в supply-auth и к рекламному кабинету отношения не имеет).
+        origin/referer подменяем на cmp — зеркало реального вызова браузера.
+        """
+        client = self._ensure_client()
+        headers = {**self._headers(), "origin": base, "referer": base + "/"}
+        headers.pop("wb-seller-lk", None)  # supply-токен на cmp не нужен
+        try:
+            resp = await client.get(base + path, headers=headers, params=params)
+        except httpx.HTTPError as e:
+            raise WbPortalError(f"WB недоступен ({base + path}): {type(e).__name__}") from e
+        if resp.status_code == 401:
+            raise WbSessionExpired(
+                f"401 на {path}: сессия рекламного кабинета недействительна (нужен свежий доступ WB)"
+            )
+        if resp.status_code >= 400:
+            raise WbPortalError(self._http_error(path, resp))
+        return resp.json()
+
     async def _post(self, base: str, path: str, body: dict | list) -> dict | list:
         """
         POST JSON-RPC. Ленивое обновление wb-seller-lk + ретрай на транзиентный
@@ -290,6 +324,45 @@ class WbPortalClient:
         finally:
             await self.aclose()
         return True
+
+    # ─── реклама: кабинетная стата кампаний (cmp) ─────────────────────────
+
+    async def fetch_campaigns_stats(
+        self, campaign_ids: list[int], date_from: str, date_to: str
+    ) -> list[dict]:
+        """Стата кампаний за период из кабинета рекламы (cmp/api/v1/campaigns-stats).
+
+        Для внутридневных снимков зовётся с date_from == date_to == сегодня (МСК): WB
+        отдаёт НАКОПИТЕЛЬНЫЙ счётчик за день (обнуляется в полночь МСК). Дельта между
+        соседними снимками = показы/клики/расход за интервал (см. WbAdCampaignSnapshot).
+
+        Возвращает [{campaign_id, views, clicks, spend}]. clicks WB напрямую не отдаёт —
+        восстанавливаем из views·ctr% (как считает сам кабинет). Даты — 'YYYY-MM-DD'.
+        """
+        if not campaign_ids:
+            return []
+        ids_csv = ",".join(str(i) for i in campaign_ids)
+        data = await self._raw_get(
+            CMP_BASE,
+            "/api/v1/campaigns-stats",
+            {"campaigns_ids": ids_csv, "from": date_from, "to": date_to},
+        )
+        rows = data.get("data") if isinstance(data, dict) else None
+        out: list[dict] = []
+        for r in rows or []:
+            if not isinstance(r, dict) or r.get("id") is None:
+                continue
+            views = int(_stat_val(r.get("views")))
+            ctr = _stat_val(r.get("ctr"))
+            out.append(
+                {
+                    "campaign_id": int(r["id"]),
+                    "views": views,
+                    "clicks": round(views * ctr / 100),
+                    "spend": _stat_val(r.get("sum")),
+                }
+            )
+        return out
 
     # ─── шаг 1-4: черновик → преордер ─────────────────────────────────────
 
