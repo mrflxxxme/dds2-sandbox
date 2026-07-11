@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -19,6 +19,9 @@ from backend.models import Project, ProjectInvite, ProjectMember, User
 from backend.rbac import ALL_PAGES, ROLE_HIERARCHY, get_effective_pages, parse_pages
 from backend.utils.rate_limit import rate_limit_write
 from backend.utils.time import utcnow
+
+# Invite links expire this many days after creation.
+INVITE_TTL_DAYS = 7
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,7 @@ class InviteResponse(BaseModel):
     pages: list[str] = []
     status: str
     created_at: datetime
+    expires_at: datetime | None = None
     accepted_at: datetime | None = None
 
 
@@ -490,7 +494,7 @@ async def invite_by_email(
     db: AsyncSession = Depends(get_db),
 ):
     """Invite a user to the project by email with role and pages."""
-    project = await _get_project_with_access(slug, user, db)
+    project = await _require_invite_manager(slug, user, db)
 
     # Validate role — cannot invite as owner
     if role not in ROLE_HIERARCHY or role == "owner":
@@ -510,6 +514,7 @@ async def invite_by_email(
         role=role,
         pages=json.dumps(pages_list) if pages_list else None,
         status="pending",
+        expires_at=utcnow() + timedelta(days=INVITE_TTL_DAYS),
     )
     db.add(invite)
     await db.commit()
@@ -527,7 +532,7 @@ async def get_invite_link(
     db: AsyncSession = Depends(get_db),
 ):
     """Generate a new unique invite link for the project with role and pages."""
-    project = await _get_project_with_access(slug, user, db)
+    project = await _require_invite_manager(slug, user, db)
 
     # Validate role — cannot invite as owner
     if role not in ROLE_HIERARCHY or role == "owner":
@@ -547,6 +552,7 @@ async def get_invite_link(
         role=role,
         pages=json.dumps(pages_list) if pages_list else None,
         status="pending",
+        expires_at=utcnow() + timedelta(days=INVITE_TTL_DAYS),
     )
     db.add(invite)
     await db.commit()
@@ -566,8 +572,12 @@ async def list_invites(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all invitations for a project (history)."""
-    project = await _get_project_with_access(slug, user, db)
+    """List all invitations for a project (history).
+
+    Manager-only: the response exposes raw invite tokens, so a viewer/editor must
+    not be able to read (and then replay) a link granting a higher role.
+    """
+    project = await _require_invite_manager(slug, user, db)
     result = await db.execute(
         select(ProjectInvite).where(ProjectInvite.project_id == project.id).order_by(ProjectInvite.created_at.desc())
     )
@@ -593,6 +603,10 @@ async def accept_invite(
     invite = result.scalar_one_or_none()
     if not invite:
         raise HTTPException(404, "Приглашение не найдено или уже использовано")
+    if invite.expires_at is not None and invite.expires_at < utcnow():
+        invite.status = "expired"
+        await db.commit()
+        raise HTTPException(410, "Срок действия приглашения истёк")
 
     # Check if user is already a member — include soft-deleted rows, because the
     # uq_project_member (project_id, user_id) constraint ignores is_deleted: a
@@ -673,6 +687,32 @@ async def _get_project_with_access(slug: str, user: User, db: AsyncSession) -> P
     return project
 
 
+async def _require_invite_manager(slug: str, user: User, db: AsyncSession) -> Project:
+    """Like `_get_project_with_access`, but also requires the actor to be
+    owner/admin. Only project managers may create invitations — otherwise a
+    viewer/editor could mint a link granting a role at or above their own.
+    """
+    project = await _get_project_with_access(slug, user, db)
+    # The project owner always manages invites, even if their ProjectMember.role
+    # is not literally "owner" (personal projects created before the register fix
+    # carry role="editor" for the owner — owner_id is the source of truth).
+    if project.owner_id == user.id:
+        return project
+    member = (
+        await db.execute(
+            select(ProjectMember).where(
+                ProjectMember.project_id == project.id,
+                ProjectMember.user_id == user.id,
+                ProjectMember.is_deleted == False,  # noqa: E712
+            )
+        )
+    ).scalar_one_or_none()
+    actor_role = member.role if member else ""
+    if ROLE_HIERARCHY.get(actor_role, 0) < ROLE_HIERARCHY["admin"]:
+        raise HTTPException(403, "Приглашать участников может только владелец или администратор проекта")
+    return project
+
+
 def _invite_to_response(invite: ProjectInvite) -> dict:
     """Convert ProjectInvite model to response dict with parsed pages."""
     return {
@@ -684,5 +724,6 @@ def _invite_to_response(invite: ProjectInvite) -> dict:
         "pages": parse_pages(invite.pages),
         "status": invite.status,
         "created_at": invite.created_at,
+        "expires_at": invite.expires_at,
         "accepted_at": invite.accepted_at,
     }
