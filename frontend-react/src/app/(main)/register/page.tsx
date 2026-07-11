@@ -1,11 +1,23 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+
+/** Read a pending invite token from localStorage or the `?invite=` query param. */
+function readInviteToken(): string | null {
+    if (typeof window === 'undefined') return null;
+    return localStorage.getItem('dds_pending_invite')
+        || new URLSearchParams(window.location.search).get('invite');
+}
 
 export default function RegisterPage() {
     const [form, setForm] = useState({ username: '', password: '', email: '', first_name: '', last_name: '' });
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
+    const [hasInvite, setHasInvite] = useState(false);
+
+    useEffect(() => {
+        setHasInvite(!!readInviteToken());
+    }, []);
 
     const set = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }));
 
@@ -14,17 +26,13 @@ export default function RegisterPage() {
         setError('');
         setLoading(true);
         try {
-            const res = await api.register(form);
+            const inviteToken = readInviteToken();
+            const res = await api.register({ ...form, invite_token: inviteToken ?? undefined });
             api.setToken(res.access_token);
             if (res.refresh_token) api.setRefreshToken(res.refresh_token);
-            // Check for pending invite
-            const pendingInvite = localStorage.getItem('dds_pending_invite');
-            if (pendingInvite) {
-                localStorage.removeItem('dds_pending_invite');
-                window.location.href = `/invite/${pendingInvite}`;
-            } else {
-                window.location.href = '/projects';
-            }
+            // With an invite the backend already joined us to the project — go home.
+            localStorage.removeItem('dds_pending_invite');
+            window.location.href = '/projects';
         } catch (err: any) {
             setError(err.message || 'Ошибка регистрации');
         } finally {
@@ -37,7 +45,9 @@ export default function RegisterPage() {
             <div className="auth-card animate-in">
                 <div className="auth-logo">DDS</div>
                 <div className="auth-title">Создать аккаунт</div>
-                <div className="auth-subtitle">Заполните данные для регистрации</div>
+                <div className="auth-subtitle">
+                    {hasInvite ? 'Регистрация по приглашению в проект' : 'Заполните данные для регистрации'}
+                </div>
 
                 {error && <div className="auth-error">{error}</div>}
 

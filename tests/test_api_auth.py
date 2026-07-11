@@ -304,3 +304,156 @@ async def test_update_telegram_of_removed_member_returns_404(client, auth_header
         headers=owner_headers,
     )
     assert resp.status_code == 404
+
+
+# ─── Registration by invite ───────────────────────────────────────────────────
+
+
+async def _register_with_invite(client, invite_token: str | None):
+    """Register a fresh user, optionally with an invite token. Returns the response."""
+    uid = uuid.uuid4().hex[:8]
+    body = {
+        "username": f"invited_{uid}",
+        "password": "invitedpass123",
+        "email": f"invited_{uid}@test.com",
+    }
+    if invite_token is not None:
+        body["invite_token"] = invite_token
+    return await client.post("/api/v1/auth/register", json=body)
+
+
+@pytest.mark.asyncio
+async def test_register_with_invite_joins_project_and_skips_personal(client, auth_headers):
+    """Registering with a valid invite joins the invited project (role from invite)
+    and does NOT auto-create a personal 'Мой проект'."""
+    project = await _create_project(client, auth_headers, name="Invited Project")
+    slug = project["slug"]
+    token = await _make_invite_token(client, auth_headers, slug, role="editor", pages=["reports"])
+
+    resp = await _register_with_invite(client, token)
+    assert resp.status_code == 200, resp.text
+    new_headers = {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+    # The new user is a member of exactly one project — the invited one, not a personal one.
+    projects = (await client.get("/api/v1/projects", headers=new_headers)).json()
+    assert len(projects) == 1, f"expected only the invited project: {projects}"
+    assert projects[0]["slug"] == slug
+    assert projects[0]["name"] == "Invited Project"
+
+
+@pytest.mark.asyncio
+async def test_register_invite_only_blocks_open_registration(client, auth_headers, monkeypatch):
+    """When REGISTER_ENABLED is false, registration without an invite is rejected,
+    but a valid invite still works."""
+    from backend.config import settings
+
+    monkeypatch.setattr(settings, "REGISTER_ENABLED", False)
+
+    # No invite → blocked.
+    resp = await _register_with_invite(client, None)
+    assert resp.status_code == 403, resp.text
+
+    # Valid invite → allowed despite the flag being off.
+    project = await _create_project(client, auth_headers, name="Gated Project")
+    token = await _make_invite_token(client, auth_headers, project["slug"], role="editor")
+    resp = await _register_with_invite(client, token)
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_register_with_expired_invite_rejected(client, auth_headers, db_session):
+    """An expired invite cannot be used to register."""
+    from sqlalchemy import text
+
+    project = await _create_project(client, auth_headers, name="Expired Invite Project")
+    token = await _make_invite_token(client, auth_headers, project["slug"], role="editor")
+
+    await db_session.execute(
+        text("UPDATE project_invites SET expires_at = '2020-01-01 00:00:00' WHERE invite_token = :t"),
+        {"t": token},
+    )
+    await db_session.commit()
+
+    resp = await _register_with_invite(client, token)
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_accept_expired_invite_returns_410(client, auth_headers, db_session):
+    """An already-registered user accepting an expired invite gets 410."""
+    from sqlalchemy import text
+
+    project = await _create_project(client, auth_headers, name="Expired Accept Project")
+    token = await _make_invite_token(client, auth_headers, project["slug"], role="editor")
+    invitee_headers, _ = await _register_user(client)
+
+    await db_session.execute(
+        text("UPDATE project_invites SET expires_at = '2020-01-01 00:00:00' WHERE invite_token = :t"),
+        {"t": token},
+    )
+    await db_session.commit()
+
+    resp = await client.post(f"/api/v1/projects/invite/accept/{token}", headers=invitee_headers)
+    assert resp.status_code == 410, resp.text
+
+
+@pytest.mark.asyncio
+async def test_non_admin_member_cannot_create_invite(client, auth_headers):
+    """Only owner/admin may mint invites — an editor member is rejected with 403."""
+    project = await _create_project(client, auth_headers, name="Invite Gate Project")
+    slug = project["slug"]
+
+    # An editor joins the project.
+    editor_headers, _ = await _register_user(client)
+    token = await _make_invite_token(client, auth_headers, slug, role="editor")
+    resp = await client.post(f"/api/v1/projects/invite/accept/{token}", headers=editor_headers)
+    assert resp.status_code == 200, resp.text
+
+    # The editor must NOT be able to create a new invite link.
+    resp = await client.get(f"/api/v1/projects/{slug}/invite-link", params={"role": "editor"}, headers=editor_headers)
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.asyncio
+async def test_legacy_owner_with_editor_role_can_still_invite(client, db_session):
+    """Regression guard: a personal-project owner whose ProjectMember.role is
+    'editor' (accounts created before the register fix) must still manage invites
+    — owner_id is the source of truth, not the membership role."""
+    from sqlalchemy import text
+
+    owner_headers, owner_id = await _register_user(client)
+    project = await _create_project(client, owner_headers, name="Legacy Owner Project")
+
+    # Simulate a legacy owner: downgrade their membership role below admin.
+    await db_session.execute(
+        text("UPDATE project_members SET role='editor' WHERE project_id=:pid AND user_id=:uid"),
+        {"pid": project["id"], "uid": owner_id},
+    )
+    await db_session.commit()
+
+    resp = await client.get(
+        f"/api/v1/projects/{project['slug']}/invite-link",
+        params={"role": "editor"},
+        headers=owner_headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_non_admin_cannot_list_invites(client, auth_headers):
+    """list_invites exposes raw tokens → manager-only; an editor member gets 403."""
+    project = await _create_project(client, auth_headers, name="List Gate Project")
+    slug = project["slug"]
+
+    editor_headers, _ = await _register_user(client)
+    token = await _make_invite_token(client, auth_headers, slug, role="editor")
+    resp = await client.post(f"/api/v1/projects/invite/accept/{token}", headers=editor_headers)
+    assert resp.status_code == 200, resp.text
+
+    # editor cannot read the invite list …
+    resp = await client.get(f"/api/v1/projects/{slug}/invites", headers=editor_headers)
+    assert resp.status_code == 403, resp.text
+
+    # … but the owner can.
+    resp = await client.get(f"/api/v1/projects/{slug}/invites", headers=auth_headers)
+    assert resp.status_code == 200, resp.text

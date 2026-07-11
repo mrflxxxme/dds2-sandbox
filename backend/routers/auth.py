@@ -9,7 +9,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.auth import (
@@ -94,6 +94,10 @@ class RegisterRequest(BaseModel):
     email: str | None = None
     first_name: str | None = None
     last_name: str | None = None
+    # When present, registration is allowed regardless of REGISTER_ENABLED and the
+    # new user is added straight to the invited project (no personal project is
+    # created). REGISTER_ENABLED now means "allow registration WITHOUT an invite".
+    invite_token: str | None = None
 
 
 class ProfileResponse(BaseModel):
@@ -150,17 +154,42 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
 
 @router.post("/register", response_model=TokenResponse)
 async def register(body: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    """Register a new user. Auto-creates a 'default' project.
-    Can be disabled via REGISTER_ENABLED=false in config.
+    """Register a new user.
+
+    Two paths:
+    - With a valid `invite_token` → always allowed; the user joins the invited
+      project with the invite's role/pages and NO personal project is created.
+    - Without an invite → only when `REGISTER_ENABLED` is true; a personal
+      "Мой проект" is auto-created and the user becomes its owner.
     """
-    # Check if registration is enabled
-    if not settings.REGISTER_ENABLED:
+    from backend.models import Project, ProjectInvite, ProjectMember
+    from backend.utils.time import utcnow
+
+    # Rate-limit first — before any DB work — so an unauthenticated caller can't
+    # probe invite tokens without limit.
+    await check_rate_limit(request, "register")
+
+    # Resolve the invite — it decides whether open registration applies.
+    invite: ProjectInvite | None = None
+    if body.invite_token:
+        invite = (
+            await db.execute(
+                select(ProjectInvite).where(
+                    ProjectInvite.invite_token == body.invite_token,
+                    ProjectInvite.status == "pending",
+                )
+            )
+        ).scalar_one_or_none()
+        if invite is None or (invite.expires_at is not None and invite.expires_at < utcnow()):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Приглашение недействительно или истекло.",
+            )
+    elif not settings.REGISTER_ENABLED:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Регистрация отключена. Обратитесь к администратору.",
+            detail="Регистрация возможна только по приглашению. Обратитесь к администратору проекта.",
         )
-
-    await check_rate_limit(request, "register")
 
     # Validate password strength
     validate_password_strength(body.password)
@@ -168,8 +197,6 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     # Validate username
     if len(body.username) < 3:
         raise HTTPException(400, "Логин должен быть не менее 3 символов")
-
-    from backend.models import Project, ProjectMember
 
     # Check if username exists
     existing = await db.execute(select(User).where(User.username == body.username))
@@ -192,23 +219,50 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     db.add(user)
     await db.flush()
 
-    # Auto-create default project
-    import uuid
+    if invite is not None:
+        # Join the invited project directly — brand-new user, so no prior
+        # membership row to restore. Role/pages come from the invite.
+        member = ProjectMember(
+            project_id=invite.project_id,
+            user_id=user.id,
+            role=invite.role,
+            pages=invite.pages,
+        )
+        db.add(member)
+        # Atomically claim the invite: the conditional UPDATE enforces one-time
+        # semantics under concurrency — two parallel registers with the same
+        # token race here, the loser gets rowcount 0 and is rolled back.
+        claim = await db.execute(
+            update(ProjectInvite)
+            .where(ProjectInvite.id == invite.id, ProjectInvite.status == "pending")
+            .values(status="accepted", accepted_at=utcnow(), accepted_by_id=user.id)
+        )
+        if claim.rowcount == 0:  # type: ignore[attr-defined]
+            await db.rollback()
+            raise HTTPException(status.HTTP_409_CONFLICT, "Приглашение уже использовано")
+        await db.commit()
+        logger.info(
+            f"New user registered via invite: {body.username} (id={user.id}), "
+            f"project_id={invite.project_id}, role={invite.role}"
+        )
+    else:
+        # Open registration — auto-create a personal project.
+        import uuid
 
-    slug = f"project-{uuid.uuid4().hex[:8]}"
-    project = Project(
-        name="Мой проект",
-        slug=slug,
-        owner_id=user.id,
-    )
-    db.add(project)
-    await db.flush()
+        slug = f"project-{uuid.uuid4().hex[:8]}"
+        project = Project(
+            name="Мой проект",
+            slug=slug,
+            owner_id=user.id,
+        )
+        db.add(project)
+        await db.flush()
 
-    member = ProjectMember(project_id=project.id, user_id=user.id)
-    db.add(member)
-    await db.commit()
+        member = ProjectMember(project_id=project.id, user_id=user.id, role="owner")
+        db.add(member)
+        await db.commit()
+        logger.info(f"New user registered: {body.username} (id={user.id}), project slug={slug}")
 
-    logger.info(f"New user registered: {body.username} (id={user.id}), project slug={slug}")
     access = create_access_token(user.id, user.username)
     refresh = await create_refresh_token(user.id)
     return TokenResponse(access_token=access, refresh_token=refresh)
