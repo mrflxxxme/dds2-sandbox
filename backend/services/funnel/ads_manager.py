@@ -717,8 +717,8 @@ async def get_campaign_metrics(
             tot["spp_sum"] += spp_frac * 100; tot["spp_n"] += 1
 
     totals = _metric_row(
-        "За всё время", tot["views"], tot["clicks"], tot["spend"],
-        tot["opens"], tot["carts"], tot["orders"], tot["orders_sum"],
+        "За всё время", int(tot["views"]), int(tot["clicks"]), tot["spend"],
+        int(tot["opens"]), int(tot["carts"]), int(tot["orders"]), tot["orders_sum"],
         tot["price_sum"] / tot["price_n"] if tot["price_n"] else None,
         tot["cust_sum"] / tot["cust_n"] if tot["cust_n"] else None,
         spp=tot["spp_sum"] / tot["spp_n"] if tot["spp_n"] else 0.0,

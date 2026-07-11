@@ -11,19 +11,20 @@ import type { WbFboSupply, WbFboSupplyItem, Warehouse, FboReturnType, FboPartial
 // ─── Status config ──────────────────────────────────────────────────────────
 
 const STATUS_MAP: Record<string, { label: string; className: string }> = {
-    ACTIVE:       { label: 'Запланирована',       className: 'badge-warning' },
-    ON_DELIVERY:  { label: 'Запланирована',       className: 'badge-warning' },
-    IN_PROGRESS:  { label: 'Разгрузка разрешена', className: 'badge-info' },
-    ACCEPTED:     { label: 'Принята',             className: 'badge-success' },
-    CANCELLED:    { label: 'Отменена',            className: 'badge-secondary' },
+    ACTIVE:       { label: 'Запланирована',      className: 'badge-warning' },
+    ON_DELIVERY:  { label: 'Отгрузка разрешена', className: 'badge-info' },
+    IN_PROGRESS:  { label: 'Идёт приёмка',       className: 'badge-info' },
+    ACCEPTED:     { label: 'Принята',            className: 'badge-success' },
+    CANCELLED:    { label: 'Отклонена',          className: 'badge-secondary' },
 };
 
 const STATUS_OPTIONS = [
     { value: '', label: 'Все статусы' },
-    { value: 'ACTIVE,ON_DELIVERY', label: 'Запланирована' },
-    { value: 'IN_PROGRESS', label: 'Разгрузка разрешена' },
+    { value: 'ACTIVE', label: 'Запланирована' },
+    { value: 'ON_DELIVERY', label: 'Отгрузка разрешена' },
+    { value: 'IN_PROGRESS', label: 'Идёт приёмка' },
     { value: 'ACCEPTED', label: 'Принята' },
-    { value: 'CANCELLED', label: 'Отменена' },
+    { value: 'CANCELLED', label: 'Отклонена' },
 ];
 
 // ─── Component ──────────────────────────────────────────────────────────────

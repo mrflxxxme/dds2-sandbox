@@ -55,7 +55,7 @@ async def get_cached(nm_id: int) -> bytes | None:
     try:
         async with aiohttp.ClientSession() as session:
             resp = await client.get_object(settings.MINIO_BUCKET, _key(nm_id), session)
-            data = await resp.read()
+            data: bytes = await resp.read()
             resp.close()
         return data
     except Exception:

@@ -9,7 +9,7 @@ export function addAuthMethods(api: ApiClient) {
                 'POST', '/api/v1/auth/login', { username, password }
             );
         },
-        register(data: { username: string; password: string; email?: string; first_name?: string; last_name?: string }) {
+        register(data: { username: string; password: string; email?: string; first_name?: string; last_name?: string; invite_token?: string }) {
             return api.request<{ access_token: string; refresh_token?: string; token_type: string }>(
                 'POST', '/api/v1/auth/register', data
             );
