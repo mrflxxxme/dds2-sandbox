@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     allocSrcAcrossFf,
     applyDraftCellEdit,
+    buildAutoSyncPlan,
     buildDraftSkus,
     buildWriteDistribution,
     buildPinnedRowsFf,
@@ -287,5 +288,35 @@ describe('buildWriteDistribution — владение по nm целиком', (
         const calcBox = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 20 }, tgt: { 'Казань': 20 }, package_type: 'BOX' as const };
         const out = buildWriteDistribution({ rows: [oldMono], prebook: [] }, [calcBox], [], new Set());
         expect(out.rows).toEqual([calcBox]); // MONO того же nm вычищена, суммы не задвоены
+    });
+});
+
+
+describe('buildAutoSyncPlan — авто-синк черновика с расчётом', () => {
+    const row = (nm: number, bc: string, tgt: Record<string, number>, src: Record<string, number> = { '4': 10 }) =>
+        ({ nm_id: nm, barcode: bc, vendor_code: `art-${nm}`, src, tgt });
+
+    it('авто-SKU приводится к расчёту, ручной SKU не тронут', () => {
+        const dist = { rows: [row(1, 'A', { 'Тула': 10 }), row(2, 'B', { 'Казань': 5 })], prebook: [] };
+        const calc = [row(1, 'A', { 'Тула': 20 }, { '4': 20 }), row(2, 'B', { 'Казань': 50 }, { '4': 50 })];
+        const out = buildAutoSyncPlan(dist, calc, [], new Set(), new Set([2]));
+        expect(out).not.toBeNull();
+        const byNm = new Map(out!.rows.map((r) => [r.nm_id, r.tgt]));
+        expect(byNm.get(1)).toEqual({ 'Тула': 20 });  // авто → расчёт
+        expect(byNm.get(2)).toEqual({ 'Казань': 5 }); // ручной → как было
+    });
+
+    it('guarded-новинка вычищается, но ручная guarded — нет', () => {
+        const dist = { rows: [row(7, 'M', { 'ЕКБ': 24 }), row(8, 'N', { 'Тула': 12 })], prebook: [row(7, 'M', { 'Электросталь': 60 })] };
+        const out = buildAutoSyncPlan(dist, [], [], new Set([7, 8]), new Set([8]));
+        expect(out).not.toBeNull();
+        expect(out!.rows.map((r) => r.nm_id)).toEqual([8]); // 7 вычищен (гвард), 8 защищён (ручной)
+        expect(out!.prebook).toEqual([]);
+    });
+
+    it('нет дельты → null (не спамим PUT на каждом заходе)', () => {
+        const calcRow = row(1, 'A', { 'Тула': 20 }, { '4': 20 });
+        const dist = { rows: [calcRow], prebook: [] };
+        expect(buildAutoSyncPlan(dist, [calcRow], [], new Set(), new Set())).toBeNull();
     });
 });

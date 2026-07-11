@@ -9,6 +9,7 @@ import { Toast } from '@/components';
 import {
     applyAcceptanceSplits,
     applyDraftCellEdit,
+    buildAutoSyncPlan,
     buildDraftSkus,
     buildWriteDistribution,
     enrichArticles,
@@ -45,7 +46,7 @@ const districtTint = (d: string): string | undefined => {
     return c ? `color-mix(in srgb, ${c} 6%, transparent)` : undefined;
 };
 
-type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'need' | 'revenue' | 'loc' | 'ship' | 'calc' | 'boxes' | 'stays' | `wb:${string}`;
+type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'need' | 'revenue' | 'loc' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
 
 // Цвет «Лок %» по статусу КТР (excellent/neutral/weak/critical) — как на странице «Локализация».
 const LOC_STATUS_COLOR: Record<string, string> = {
@@ -112,12 +113,9 @@ interface DraftMatrixViewProps {
     draftId: number;
     /** Справочник WB-складов (id→имя) для резолва имени ФФ-источника в предброни. */
     ffNameById: Map<number, string>;
-    /** Явное действие «⟳ Пересчитать от потребности» завершилось записью —
-     *  родитель может перейти на вкладку черновика показать результат. */
-    onWritten?: () => void;
-    /** Тихая синхронизация: автосейв степпера / ✕ обновили черновик. Родитель
-     *  должен обновить свой стейт БЕЗ смены вкладки и БЕЗ полного self-heal
-     *  (ручная правка = точный план юзера). */
+    /** Черновик изменён редактором (автосейв степпера / ✕ / авто-синк с расчётом).
+     *  Родитель обновляет свой стейт БЕЗ смены вкладки и БЕЗ полного self-heal
+     *  (план редактора = точное состояние). */
     onDraftChanged?: (draft: AssemblyDraft) => void;
 }
 
@@ -126,7 +124,7 @@ interface DraftMatrixViewProps {
  *  напрямую с автосейвом; «⟳ Пересчитать от потребности» пишет живой расчёт
  *  (need-канал + новинки cold-start с гвардом пересорта) заменой по SKU:
  *  целые паллеты → строки, хвосты → предбронь. */
-export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraftChanged }: DraftMatrixViewProps) {
+export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }: DraftMatrixViewProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -142,6 +140,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
     const [draftRows, setDraftRowsState] = useState<AssemblyDraftRow[]>([]);
     const [draftPrebook, setDraftPrebook] = useState<AssemblyDraftRow[]>([]);
     const [removingNm, setRemovingNm] = useState<number | null>(null);
+    // РУЧНЫЕ SKU (правлены степпером/✕; персистятся в distribution.manual_nms) —
+    // авто-синк с расчётом их не трогает, пока юзер не вернёт SKU «в авто» (↺).
+    const [manualNms, setManualNms] = useState<Set<number>>(new Set());
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
     const [nmBoxSize, setNmBoxSize] = useState<Map<number, string | null>>(new Map());
     const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
@@ -333,6 +334,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
             draftDistRef.current = d.distribution ?? null;
             setDraftRowsState(d.distribution?.rows ?? []);
             setDraftPrebook(d.distribution?.prebook ?? []);
+            setManualNms(new Set(d.distribution?.manual_nms ?? []));
         } catch {
             // Черновик мог быть удалён/пересоздан — таблица остаётся пустой.
         }
@@ -349,7 +351,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
      *  - серверный гейт мог вычесть «уже едущее» — про это говорит тост. */
     const editGenRef = useRef(0);
     const saveInFlightRef = useRef(false);
-    const pendingSaveRef = useRef<{ rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } | null>(null);
+    const pendingSaveRef = useRef<{ rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; manualNms: number[] } | null>(null);
     const sumUnits = (rows: AssemblyDraftRow[]) => rows.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0);
     const flushDraftSave = useCallback(async (): Promise<void> => {
         if (saveInFlightRef.current) return; // доедет из finally текущего PUT
@@ -373,7 +375,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
             // Событие истории: правка степпером — значимое изменение (снапшот для
             // отката). Дебаунс+сериализация PUT-ов не дают спама на серию кликов.
             const d = await api.updateAssemblyDraft(draftId, {
-                distribution: { ...base, ...next },
+                distribution: { ...base, ...next, manual_nms: pending.manualNms },
                 event: { event_type: 'MATRIX_EDIT', summary: `Степпер: план ${formatNumber(sent, 0)} шт` },
             });
             draftDistRef.current = d.distribution ?? null;
@@ -385,6 +387,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                 // Новых правок не было — ответ сервера канон.
                 setDraftRowsState(d.distribution?.rows ?? []);
                 setDraftPrebook(d.distribution?.prebook ?? []);
+                setManualNms(new Set(d.distribution?.manual_nms ?? pending.manualNms));
                 onDraftChanged?.(d);
             }
             // Были новые правки → базу обновили, стейт не трогаем; pending уже ждёт.
@@ -395,9 +398,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
             if (pendingSaveRef.current) void flushDraftSave();
         }
     }, [draftId, onDraftChanged, showToast]);
-    const scheduleDraftSave = useCallback((rows: AssemblyDraftRow[], prebook: AssemblyDraftRow[]) => {
+    const scheduleDraftSave = useCallback((rows: AssemblyDraftRow[], prebook: AssemblyDraftRow[], manual: number[]) => {
         editGenRef.current += 1;
-        pendingSaveRef.current = { rows, prebook };
+        pendingSaveRef.current = { rows, prebook, manualNms: manual };
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
         saveTimerRef.current = setTimeout(() => {
             saveTimerRef.current = null;
@@ -456,11 +459,16 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                 saveTimerRef.current = null;
             }
             await flushDraftSave();
-            const d = await api.removeAssemblyDraftRows(draftId, [nm]);
+            const removed = await api.removeAssemblyDraftRows(draftId, [nm]);
+            // ✕ — ручное решение «не отправлять»: помечаем SKU ручным, иначе
+            // авто-синк с расчётом вернул бы его на следующем заходе.
+            const withManual = [...new Set([...(removed.distribution?.manual_nms ?? []), nm])];
+            const d = await api.updateAssemblyDraft(draftId, { distribution: { ...removed.distribution, manual_nms: withManual } });
             draftDistRef.current = d.distribution ?? null;
             setDraftRowsState(d.distribution?.rows ?? []);
             setDraftPrebook(d.distribution?.prebook ?? []);
-            showToast(`«${label}» убран из черновика`, 'success');
+            setManualNms(new Set(withManual));
+            showToast(`«${label}» убран из черновика (✋ ручное решение — авто-синк не вернёт)`, 'success');
             onDraftChanged?.(d);
         } catch (err) {
             showToast(err instanceof Error ? err.message : 'Не удалось убрать из черновика', 'error');
@@ -671,10 +679,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
         }
         const nextRows = [...draftRows.filter((r) => r.nm_id !== nm), ...out.rows];
         const nextPrebook = [...draftPrebook.filter((r) => r.nm_id !== nm), ...out.prebook];
+        const nextManual = manualNms.has(nm) ? manualNms : new Set([...manualNms, nm]);
         setDraftRowsState(nextRows);
         setDraftPrebook(nextPrebook);
-        scheduleDraftSave(nextRows, nextPrebook);
-    }, [nmPpb, articles, draftOnlyArticles, handedNms, draftRows, draftPrebook, acceptanceByNm, scheduleDraftSave, showToast]);
+        if (nextManual !== manualNms) setManualNms(nextManual);
+        scheduleDraftSave(nextRows, nextPrebook, [...nextManual]);
+    }, [nmPpb, articles, draftOnlyArticles, handedNms, manualNms, draftRows, draftPrebook, acceptanceByNm, scheduleDraftSave, showToast]);
 
     // Вход в ручной режим = просто показать степперы поверх авто-раскладки. НЕ сеем пины:
     // нетронутые строки остаются авто, «вручную» помечается лишь та, где юзер кликнул −/+.
@@ -694,7 +704,6 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
             case 'revenue': return Number(a.revenue_30d) || 0;
             case 'loc': return locByNm.has(nm) ? Number(locByNm.get(nm)!.loc_pct) || 0 : -1;
             case 'ship': return ship;
-            case 'calc': return calcAgg.allocByBc.get(a.barcode) ?? 0;
             case 'boxes': return boxesOf(ship, nmPpb.get(nm));
             case 'stays': return Math.max(0, avail - ship);
             default: return viewAgg.cellByBc.get(a.barcode)?.get(key.slice(3))?.qty ?? 0;
@@ -767,33 +776,16 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
 
     // «Записать в черновик» — ЗАМЕНА по SKU (не сложение): строки черновика по SKU, которые
     // разложила матрица, заменяются её результатом (целые паллеты → rows, под-паллетные хвосты
-    // → prebook «дозабить»), прочие строки черновика сохраняются. Так повторная запись
-    // идемпотентна и нет двойного счёта/двойного использования остатка. Дальше штатная
-    // логика черновика (self-heal: целые коробы/паллеты, дозабор хвостов) доводит до ума.
-    const handleWrite = useCallback(async () => {
-        if ((shipRows.length === 0 && effPrebook.length === 0) || writing) return;
-        const ownedNm = new Set([...shipRows, ...effPrebook].map((r) => r.nm_id));
-        // Guarded-новинки (гвард пересорта: посев лежит на WB без продаж) расчёт
-        // не предлагает → при записи их старый план вычищается целиком, иначе он
-        // (особенно предбронь) висит в черновике вечно.
-        const guardedInDraft = new Set<number>();
-        for (const nm of guardByNm.keys()) {
-            const d = draftByNm.get(nm);
-            if (d && d.rows + d.prebook > 0) guardedInDraft.add(nm);
-        }
-        if (!window.confirm(
-            `Пересчитать от потребности и записать в черновик?\n\n` +
-            `Заменится план по ${ownedNm.size} SKU: ${formatNumber(commit.totalShip, 0)} шт строками` +
-            (prebookUnits > 0 ? ` + ${formatNumber(prebookUnits, 0)} шт в предбронь` : '') +
-            `.` +
-            (guardedInDraft.size > 0
-                ? `\nЗаодно будут УБРАНЫ ${guardedInDraft.size} новинок под гвардом пересорта (посев лежит на WB без продаж — расчёт им даёт 0).`
-                : '') +
-            `\nРучные правки этих SKU будут перезаписаны; прочие SKU не тронутся.`,
-        )) return;
+    /** СИНК плана с живым расчётом (авто-режим черновика): авто-SKU приводится к
+     *  расчёту (замена по nm; целые паллеты → строки, хвосты → предбронь),
+     *  guarded-новинки вычищаются, РУЧНЫЕ SKU (✋) не тронуты. Запускается сам
+     *  один раз при заходе (trigger='auto', молчит без дельты) и кнопкой
+     *  «⟳ Обновить сейчас». Confirm не нужен: ручные решения защищены флагом. */
+    const runAutoSync = useCallback(async (trigger: 'auto' | 'manual') => {
+        if (writing || distRows === null) return;
         setWriting(true);
         try {
-            // Висящий автосейв дожимаем ДО пересчёта — иначе стейл-PUT затёр бы запись.
+            // Висящий автосейв дожимаем ДО синка — иначе стейл-PUT затёр бы запись.
             if (saveTimerRef.current) {
                 clearTimeout(saveTimerRef.current);
                 saveTimerRef.current = null;
@@ -801,20 +793,57 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
             await flushDraftSave();
             const cur = await api.getAssemblyDraft(draftId);
             const dist = cur.distribution;
-            const next = buildWriteDistribution(dist ?? {}, shipRows, effPrebook, guardedInDraft);
-            await api.updateAssemblyDraft(draftId, {
-                distribution: { ...dist, ...next },
-                event: { event_type: 'MATRIX_WRITE', summary: `Ручная раскладка: ${formatNumber(commit.totalShip, 0)} шт` },
+            const curManual = new Set<number>(dist?.manual_nms ?? []);
+            const guarded = new Set<number>(guardByNm.keys());
+            const plan = buildAutoSyncPlan(dist ?? {}, shipRows, effPrebook, guarded, curManual);
+            if (!plan) {
+                if (trigger === 'manual') showToast('План уже соответствует расчёту', 'success');
+                return;
+            }
+            const before = sumUnits(dist?.rows ?? []) + sumUnits(dist?.prebook ?? []);
+            const after = sumUnits(plan.rows) + sumUnits(plan.prebook);
+            const d = await api.updateAssemblyDraft(draftId, {
+                distribution: { ...dist, ...plan },
+                event: {
+                    event_type: 'AUTO_SYNC',
+                    summary: `Авто-синк с расчётом: ${formatNumber(before, 0)} → ${formatNumber(after, 0)} шт` +
+                        (curManual.size > 0 ? ` (✋ ручных не тронуто: ${curManual.size})` : ''),
+                },
             });
-            showToast(`Записано в черновик: ${formatNumber(commit.totalShip, 0)} шт (замена по SKU)`, 'success');
-            refreshDraftInfo();
-            onWritten?.();
+            draftDistRef.current = d.distribution ?? null;
+            setDraftRowsState(d.distribution?.rows ?? []);
+            setDraftPrebook(d.distribution?.prebook ?? []);
+            setManualNms(new Set(d.distribution?.manual_nms ?? []));
+            showToast(`⟳ План синхронизирован с расчётом: ${formatNumber(before, 0)} → ${formatNumber(after, 0)} шт${curManual.size > 0 ? ` · ✋ ручных не тронуто: ${curManual.size}` : ''}`, 'success');
+            onDraftChanged?.(d);
         } catch (e) {
-            showToast(e instanceof Error ? e.message : 'Ошибка записи в черновик', 'error');
+            showToast(e instanceof Error ? e.message : 'Ошибка синка с расчётом', 'error');
         } finally {
             setWriting(false);
         }
-    }, [shipRows, effPrebook, writing, draftId, commit, prebookUnits, guardByNm, draftByNm, flushDraftSave, showToast, onWritten, refreshDraftInfo]);
+    }, [writing, distRows, draftId, guardByNm, shipRows, effPrebook, flushDraftSave, showToast, onDraftChanged]);
+
+    // Авто-запуск синка: один раз за заход, когда готовы И расчёт, И черновик.
+    const autoSyncDoneRef = useRef(false);
+    useEffect(() => {
+        if (autoSyncDoneRef.current || distRows === null || draftDistRef.current === null) return;
+        autoSyncDoneRef.current = true;
+        void runAutoSync('auto');
+    }, [distRows, draftRows, runAutoSync]);
+
+    /** ↺ Вернуть SKU в авто: снять ✋ и сразу синкануть его к расчёту. */
+    const returnToAuto = useCallback(async (nm: number) => {
+        try {
+            const cur = await api.getAssemblyDraft(draftId);
+            const without = (cur.distribution?.manual_nms ?? []).filter((x) => x !== nm);
+            const d = await api.updateAssemblyDraft(draftId, { distribution: { ...cur.distribution, manual_nms: without } });
+            draftDistRef.current = d.distribution ?? null;
+            setManualNms(new Set(without));
+            await runAutoSync('manual');
+        } catch (e) {
+            showToast(e instanceof Error ? e.message : 'Не удалось вернуть в авто', 'error');
+        }
+    }, [draftId, runAutoSync, showToast]);
 
     // ─── States ────────────────────────────────────────────────────────────
     if (loading) {
@@ -875,11 +904,11 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                 )}
                 <span style={{ color: 'var(--color-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
-                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="Живой расчёт от потребности (need-канал + новинки cold-start с гвардом пересорта). Кнопка заменяет план по SKU расчёта: целые паллеты → строки черновика, хвосты → предбронь.">
-                        {computing ? 'расчёт от потребности…' : `расчёт предлагает: ${formatNumber(calcAgg.totalShip, 0)} шт${prebookUnits > 0 ? ` (в т.ч. 🅿️ ${formatNumber(prebookUnits, 0)})` : ''}`}
+                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="План сам синхронизируется с живым расчётом при заходе (need-канал + новинки cold-start с гвардом пересорта): целые паллеты → строки, хвосты → предбронь. ✋ ручные SKU (правленные степпером/✕) авто-синк не трогает — вернуть SKU в авто можно кнопкой ↺ на его строке.">
+                        {computing ? 'расчёт от потребности…' : `авто-синк с расчётом включён${manualNms.size > 0 ? ` · ✋ ручных SKU: ${formatNumber(manualNms.size, 0)}` : ''}`}
                     </span>
-                    <button className="btn btn-primary" onClick={handleWrite} disabled={writing || computing || (shipRows.length === 0 && effPrebook.length === 0)}>
-                        {writing ? 'Запись…' : `⟳ Пересчитать от потребности (${formatNumber(commit.totalShip, 0)} шт)`}
+                    <button className="btn btn-primary" onClick={() => runAutoSync('manual')} disabled={writing || computing}>
+                        {writing ? 'Синк…' : '⟳ Обновить сейчас'}
                     </button>
                 </div>
             </div>
@@ -899,7 +928,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                     <div style={{ color: 'var(--color-muted)', fontSize: 13 }}>
                         Таблица показывает <b style={{ color: 'var(--color-text)' }}>черновик</b>: строки и 🅿️ предбронь каждого SKU единой суммой (ячейки с предбронью подсвечены, доля — в подсказке «Σ отпр.»).
                         Правки степперами сохраняются в черновик сразу; ✕ убирает SKU целиком.
-                        Кнопка <b style={{ color: 'var(--color-text)' }}>«⟳ Пересчитать от потребности»</b> считает свежую раскладку (need-канал + новинки cold-start с гвардом пересорта ⚠) и записывает её: целые паллеты → строки, хвосты → предбронь; SKU вне расчёта не трогаются.
+                        План <b style={{ color: 'var(--color-text)' }}>сам синхронизируется</b> с живым расчётом при заходе (need-канал + новинки cold-start с гвардом пересорта ⚠): целые паллеты → строки, хвосты → предбронь. SKU, правленный руками, помечается ✋ и авто-синком не трогается (↺ на строке возвращает в авто); «⟳ Обновить сейчас» — форс-синк без перезахода.
                         Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность. Метрики SKU за 14 дней: <b style={{ color: 'var(--color-text)' }}>Потр. 14д</b> · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (цвет — статус КТР).
                         Колонка <b style={{ color: 'var(--color-text)' }}>«Расчёт»</b> — что предлагает живой расчёт (для сравнения с планом).
                     </div>
@@ -955,7 +984,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                                             {g.label}
                                         </th>
                                     ))}
-                                    <th colSpan={4} />
+                                    <th colSpan={3} />
                                 </tr>
                                 <tr style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-muted)', textAlign: 'right' }}>
                                     <th style={{ padding: '8px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2, ...sortableTh }} onClick={() => toggleSort('label')} title="Сортировать по названию">Товар{sortArrow('label')}</th>
@@ -969,7 +998,6 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                                         <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap', background: districtTint(c.district), ...sortableTh }} onClick={() => toggleSort(`wb:${c.name}`)} title={`Сортировать по отправке в «${c.name}»`}>{c.name}{sortArrow(`wb:${c.name}`)}</th>
                                     ))}
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('ship')} title="Сортировать по сумме отправки">Σ отпр.{sortArrow('ship')}</th>
-                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('calc')} title="Живой расчёт от потребности (need-канал + новинки cold-start с гвардом). Жёлтым — расходится с планом черновика; применяется кнопкой «Пересчитать».">Расчёт{sortArrow('calc')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('boxes')} title="Коробов к отправке">Мест{sortArrow('boxes')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('stays')} title="Сортировать по остатку на ФФ">Остаётся ФФ{sortArrow('stays')}</th>
                                 </tr>
@@ -989,7 +1017,6 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                                         );
                                     })}
                                     <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }} title="Всего штук в черновике (строки + предбронь)">{formatNumber(matrixView.totalShip, 0)} шт</td>
-                                    <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Живой расчёт от потребности, строки + предбронь, ВСЯ матрица (применяется кнопкой «Пересчитать»)">{computing ? '…' : calcAgg.totalShip > 0 ? `${formatNumber(calcAgg.totalShip, 0)} шт` : '·'}</td>
                                     <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего коробов">{formatNumber(matrixView.totalBoxes, 0)} кор</td>
                                     <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Остаётся на хранении ФФ">{formatNumber(matrixViewOnHold, 0)}</td>
                                 </tr>
@@ -1017,6 +1044,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                                                             style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>
                                                             ⚠ посев лежит без продаж
                                                         </span>
+                                                    )}
+                                                    {manualNms.has(nm) && (
+                                                        <button type="button" className="badge"
+                                                            title={`План этого SKU задан вручную — авто-синк его не трогает. Живой расчёт предлагает: ${formatNumber(calcAgg.allocByBc.get(a.barcode) ?? 0, 0)} шт. Клик — вернуть SKU в авто (план заменится расчётом).`}
+                                                            style={{ background: 'rgba(59,130,246,0.12)', color: 'var(--color-accent)', fontSize: 10, padding: '1px 6px', border: 'none', cursor: 'pointer' }}
+                                                            onClick={() => returnToAuto(nm)}>
+                                                            ✋ вручную · ↺
+                                                        </button>
                                                     )}
                                                     {ppb ? <span className="badge badge-secondary" style={{ fontSize: 10, padding: '1px 6px' }}>📦 кратно {formatNumber(ppb, 0)}</span> : <span className="badge" style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>без кратности</span>}
                                                 </div>
@@ -1090,20 +1125,6 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                                                     </td>
                                                 );
                                             })()}
-                                            {(() => {
-                                                const calc = calcAgg.allocByBc.get(a.barcode) ?? 0;
-                                                // При ФФ-срезе ship — доля одного склада, а расчёт полный:
-                                                // сравнение бессмысленно — подсветку гасим.
-                                                const diff = !ffSliceActive && calc !== ship;
-                                                return (
-                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: computing ? 'var(--color-dim)' : diff ? 'var(--color-warning)' : 'var(--color-dim)' }}
-                                                        title={computing ? 'Расчёт идёт…'
-                                                            : ffSliceActive ? `Живой расчёт от потребности (строки + предбронь, ВСЯ матрица): ${formatNumber(calc, 0)} шт — при ФФ-срезе с долей склада не сравнивается`
-                                                            : `Живой расчёт от потребности (строки + предбронь): ${formatNumber(calc, 0)} шт${diff ? ' — расходится с планом черновика' : ' — совпадает с черновиком'}`}>
-                                                        {computing ? '…' : calc > 0 ? formatNumber(calc, 0) : '·'}
-                                                    </td>
-                                                );
-                                            })()}
                                             <td style={{ padding: '6px 8px', textAlign: 'right' }}>{rowBoxes > 0 ? formatNumber(rowBoxes, 0) : '·'}</td>
                                             <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-muted)' }}>{formatNumber(stays, 0)}</td>
                                         </tr>
@@ -1111,7 +1132,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                                 })}
                                 {visibleRows.length === 0 && (
                                     <tr>
-                                        <td colSpan={wbCols.length + 11} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
+                                        <td colSpan={wbCols.length + 10} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
                                             Ничего не найдено по выбранному фильтру
                                         </td>
                                     </tr>
@@ -1125,7 +1146,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                                         <td key={c.name} style={{ padding: '8px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{formatNumber(matrixView.shipByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
                                     <td style={{ padding: '8px 8px', textAlign: 'right' }}>{formatNumber(matrixView.totalShip, 0)}</td>
-                                    <td colSpan={3} />
+                                    <td colSpan={2} />
                                 </tr>
                                 <tr style={{ color: 'var(--color-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>📦 Коробов</td>
@@ -1134,7 +1155,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                                         <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.boxesByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
                                     <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.totalBoxes, 0)}</td>
-                                    <td colSpan={3} />
+                                    <td colSpan={2} />
                                 </tr>
                                 <tr style={{ color: 'var(--color-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>🚚 Паллет</td>
@@ -1143,7 +1164,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                                         <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.palletsByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
                                     <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.totalPallets, 0)}</td>
-                                    <td colSpan={3} />
+                                    <td colSpan={2} />
                                 </tr>
                             </tfoot>
                         </table>

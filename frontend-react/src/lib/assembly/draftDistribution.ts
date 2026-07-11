@@ -234,6 +234,30 @@ export function buildWriteDistribution(
 }
 
 /**
+ * АВТО-СИНК черновика с живым расчётом: план авто-SKU приводится к расчёту
+ * (замена по nm), guarded-новинки вычищаются, а РУЧНЫЕ SKU (`manualNms`,
+ * правленные степпером/✕) не трогаются вовсе — ручное решение священно.
+ * Возвращает null, если синк ничего не меняет (по Σ и составу строк — чтобы
+ * не спамить PUT/историю на каждом заходе). Чистая.
+ */
+export function buildAutoSyncPlan(
+    dist: { rows?: AssemblyDraftRow[] | null; prebook?: AssemblyDraftRow[] | null },
+    calcShipRows: AssemblyDraftRow[],
+    calcPrebook: AssemblyDraftRow[],
+    guardedNms: Set<number>,
+    manualNms: Set<number>,
+): ReturnType<typeof buildWriteDistribution> | null {
+    const autoShip = calcShipRows.filter((r) => !manualNms.has(r.nm_id));
+    const autoPrebook = calcPrebook.filter((r) => !manualNms.has(r.nm_id));
+    const purge = new Set([...guardedNms].filter((nm) => !manualNms.has(nm)));
+    const next = buildWriteDistribution(dist, autoShip, autoPrebook, purge);
+    const sig = (rows: AssemblyDraftRow[]) =>
+        rows.map((r) => `${keyOfDraftRow(r)}|${JSON.stringify(r.tgt)}|${JSON.stringify(r.src)}`).sort().join(';');
+    const same = sig(next.rows) === sig(dist.rows ?? []) && sig(next.prebook) === sig(dist.prebook ?? []);
+    return same ? null : next;
+}
+
+/**
  * Правка ячейки ЧЕРНОВИКА (матрица = редактор черновика): изменить план SKU на
  * складе `wh` на `deltaBoxes` целых коробов. BOX-строки (без as_is) и ВСЯ
  * предбронь этого SKU сливаются в одну строку rows (ручная правка = точный план

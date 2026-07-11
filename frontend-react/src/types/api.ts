@@ -4829,6 +4829,9 @@ export interface AssemblyDraftDistribution {
    *  предброни (Оставить так / Дозабить / авто-консолидация). Только для бейджа на
    *  паллете раскладки; сбрасывается при полном «Заполнить из потребности». */
   prebook_origin?: string[];
+  /** РУЧНЫЕ SKU (nm_id): план правлен в матрице-редакторе (степпер/✕) — авто-синк
+   *  расчёта такие SKU не трогает, пока юзер не вернёт SKU «в авто». */
+  manual_nms?: number[];
 }
 
 /** Ссылка на заявку-юнит черновика (hand-off / revert / commit).
@@ -4873,7 +4876,7 @@ export interface AssemblyDraftCommitResponse {
 
 /** Опциональный маркер для updateAssemblyDraft — логирует событие истории со снапшотом. */
 export interface DraftEventLog {
-  event_type: 'PREBOOK_TOPUP' | 'MATRIX_WRITE' | 'MATRIX_EDIT';
+  event_type: 'PREBOOK_TOPUP' | 'MATRIX_WRITE' | 'MATRIX_EDIT' | 'AUTO_SYNC';
   summary?: string;
 }
 

@@ -2035,7 +2035,6 @@ export default function AssemblyDraftPage() {
                     <DraftMatrixView
                         draftId={draftId}
                         ffNameById={new Map(warehouses.map(w => [w.id, w.name]))}
-                        onWritten={() => { reloadDraft(); setTab('draft'); }}
                         onDraftChanged={(d) => {
                             // Тихая синхронизация из редактора-матрицы (автосейв степпера / ✕):
                             // ручная правка = ТОЧНЫЙ план юзера — пустой heal-scope на эту

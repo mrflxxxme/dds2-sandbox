@@ -2617,6 +2617,26 @@ async def test_remove_rows_clears_prebook_origin_and_logs_event(db_session):
 
 
 @pytest.mark.asyncio
+async def test_manual_nms_persist_through_update_and_remove(db_session):
+    """manual_nms (ручные SKU авто-синка матрицы) персистятся через update_draft
+    и переживают remove_rows_by_nm (модель прогоняется через model_validate)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 4}, tgt={"Электросталь": 4})]
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh_a], ["Электросталь"], rows)
+    )
+    dist = AssemblyDraftDistribution.model_validate(draft.distribution)
+    dist.manual_nms = [111, 222]
+    updated = await assembly_draft_service.update_draft(
+        db_session, PROJECT_ID, draft.id, AssemblyDraftUpdate(distribution=dist)
+    )
+    assert AssemblyDraftDistribution.model_validate(updated.distribution).manual_nms == [111, 222]
+
+    after_remove = await assembly_draft_service.remove_rows_by_nm(db_session, PROJECT_ID, draft.id, [111])
+    assert AssemblyDraftDistribution.model_validate(after_remove.distribution).manual_nms == [111, 222]
+
+
+@pytest.mark.asyncio
 async def test_remove_rows_404(db_session):
     """remove_rows_by_nm на несуществующем черновике → 404."""
     with pytest.raises(HTTPException) as ei:
