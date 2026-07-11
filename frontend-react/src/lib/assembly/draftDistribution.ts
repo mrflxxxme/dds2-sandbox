@@ -198,6 +198,38 @@ export function allocSrcAcrossFf(
     return src;
 }
 
+/** Ключ строки распределения для замены по SKU (nm × баркод × упаковка × as_is) —
+ *  зеркало бэкенд-ключа `_merge_rows`/`_dedupe_rows`. */
+export const keyOfDraftRow = (r: AssemblyDraftRow): string =>
+    `${r.nm_id}::${r.barcode || ''}::${r.package_type || 'BOX'}::${r.as_is ? 1 : 0}`;
+
+/**
+ * Итог «Пересчитать от потребности → в черновик» — ЗАМЕНА по SKU:
+ * строки/предбронь SKU, которыми владеет расчёт (дал отгрузку ИЛИ предбронь),
+ * заменяются его результатом; SKU из `purgeNms` (новинки под гвардом пересорта —
+ * посев лежит на WB без продаж, расчёт им даёт 0) вычищаются ЦЕЛИКОМ, иначе их
+ * старый план (особенно предбронь) висел бы в черновике вечно; прочие SKU не
+ * трогаются. Списки складов пересчитываются из новых строк. Чистая.
+ */
+export function buildWriteDistribution(
+    dist: { rows?: AssemblyDraftRow[] | null; prebook?: AssemblyDraftRow[] | null },
+    shipRows: AssemblyDraftRow[],
+    effPrebook: AssemblyDraftRow[],
+    purgeNms: Set<number> = new Set(),
+): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; source_warehouse_ids: number[]; target_warehouse_names: string[] } {
+    const owned = new Set([...shipRows, ...effPrebook].map(keyOfDraftRow));
+    const keep = (r: AssemblyDraftRow) => !owned.has(keyOfDraftRow(r)) && !purgeNms.has(r.nm_id);
+    const rows = [...(dist.rows ?? []).filter(keep), ...shipRows];
+    const prebook = [...(dist.prebook ?? []).filter(keep), ...effPrebook];
+    const srcIds = new Set<number>();
+    const tgtNames = new Set<string>();
+    for (const r of [...rows, ...prebook]) {
+        for (const ff of Object.keys(r.src || {})) srcIds.add(Number(ff));
+        for (const wb of Object.keys(r.tgt || {})) tgtNames.add(wb);
+    }
+    return { rows, prebook, source_warehouse_ids: [...srcIds], target_warehouse_names: [...tgtNames] };
+}
+
 /**
  * Правка ячейки ЧЕРНОВИКА (матрица = редактор черновика): изменить план SKU на
  * складе `wh` на `deltaBoxes` целых коробов. BOX-строки и ВСЯ предбронь этого

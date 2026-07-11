@@ -3,6 +3,7 @@ import {
     allocSrcAcrossFf,
     applyDraftCellEdit,
     buildDraftSkus,
+    buildWriteDistribution,
     buildPinnedRowsFf,
     buildTopUpRowsFf,
     planBoxTopUpFf,
@@ -212,5 +213,39 @@ describe('applyDraftCellEdit — правка ячейки черновика', 
         expect(box?.tgt).toEqual({ 'Тула': 4 });
         // а ещё +1 короб уже не влезет
         expect(applyDraftCellEdit([mono], [], article('A', 1, { 4: 40 }), 'Тула', 2, 4)).toBeNull();
+    });
+});
+
+
+describe('buildWriteDistribution — запись пересчёта с чисткой guarded-новинок', () => {
+    const row = (nm: number, bc: string, tgt: Record<string, number>, src: Record<string, number> = { '4': 10 }) =>
+        ({ nm_id: nm, barcode: bc, vendor_code: `art-${nm}`, src, tgt });
+
+    it('SKU расчёта заменяется, чужой SKU не тронут', () => {
+        const dist = { rows: [row(1, 'A', { 'Тула': 10 }), row(2, 'B', { 'Казань': 5 })], prebook: [row(1, 'A', { 'Пенза': 3 })] };
+        const out = buildWriteDistribution(dist, [row(1, 'A', { 'Тула': 20 }, { '4': 20 })], [], new Set());
+        expect(out.rows.map((r) => [r.nm_id, r.tgt])).toEqual([[2, { 'Казань': 5 }], [1, { 'Тула': 20 }]]);
+        expect(out.prebook).toEqual([]); // предбронь SKU 1 заменена (расчёт дал пустую)
+    });
+
+    it('guarded-новинка (purge) вычищается целиком: и строки, и предбронь', () => {
+        const dist = { rows: [row(7, 'M', { 'ЕКБ': 24 }), row(2, 'B', { 'Казань': 5 })], prebook: [row(7, 'M', { 'Электросталь': 60 })] };
+        const out = buildWriteDistribution(dist, [], [], new Set([7]));
+        expect(out.rows.map((r) => r.nm_id)).toEqual([2]);
+        expect(out.prebook).toEqual([]);
+    });
+
+    it('списки складов пересчитываются из итоговых строк', () => {
+        const dist = { rows: [row(7, 'M', { 'ЕКБ': 24 }, { '4': 24 })], prebook: [] };
+        const out = buildWriteDistribution(dist, [row(2, 'B', { 'Казань': 8 }, { '5': 8 })], [], new Set([7]));
+        expect(out.source_warehouse_ids).toEqual([5]);
+        expect(out.target_warehouse_names).toEqual(['Казань']);
+    });
+
+    it('без purge и без владения — черновик нетронут', () => {
+        const dist = { rows: [row(1, 'A', { 'Тула': 10 })], prebook: [row(1, 'A', { 'Пенза': 3 })] };
+        const out = buildWriteDistribution(dist, [], [], new Set());
+        expect(out.rows).toHaveLength(1);
+        expect(out.prebook).toHaveLength(1);
     });
 });

@@ -11,6 +11,7 @@ import {
     applyDraftCellEdit,
     buildDraftSkus,
     buildPinnedRowsFf,
+    buildWriteDistribution,
     buildTopUpRowsFf,
     enrichArticles,
     finalizeDraftDistribution,
@@ -57,10 +58,6 @@ const LOC_STATUS_COLOR: Record<string, string> = {
     weak: 'var(--color-warning)',
     critical: 'var(--color-danger)',
 };
-
-/** Ключ строки распределения для замены по SKU (nm × баркод × упаковка × as_is) —
- *  зеркало бэкенд-ключа `_merge_rows`/`_dedupe_rows`. */
-const keyOfRow = (r: AssemblyDraftRow) => `${r.nm_id}::${r.barcode || ''}::${r.package_type || 'BOX'}::${r.as_is ? 1 : 0}`;
 
 interface DistAgg {
     submitRows: { barcode: string; wb_warehouse_name: string; qty: number; package_type: PackageType }[];
@@ -727,37 +724,31 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const handleWrite = useCallback(async () => {
         if ((shipRows.length === 0 && effPrebook.length === 0) || writing) return;
         const ownedNm = new Set([...shipRows, ...effPrebook].map((r) => r.nm_id));
+        // Guarded-новинки (гвард пересорта: посев лежит на WB без продаж) расчёт
+        // не предлагает → при записи их старый план вычищается целиком, иначе он
+        // (особенно предбронь) висит в черновике вечно.
+        const guardedInDraft = new Set<number>();
+        for (const nm of guardByNm.keys()) {
+            const d = draftByNm.get(nm);
+            if (d && d.rows + d.prebook > 0) guardedInDraft.add(nm);
+        }
         if (!window.confirm(
             `Пересчитать от потребности и записать в черновик?\n\n` +
             `Заменится план по ${ownedNm.size} SKU: ${formatNumber(commit.totalShip, 0)} шт строками` +
             (prebookUnits > 0 ? ` + ${formatNumber(prebookUnits, 0)} шт в предбронь` : '') +
-            `.\nРучные правки этих SKU будут перезаписаны; SKU вне расчёта не тронутся.`,
+            `.` +
+            (guardedInDraft.size > 0
+                ? `\nЗаодно будут УБРАНЫ ${guardedInDraft.size} новинок под гвардом пересорта (посев лежит на WB без продаж — расчёт им даёт 0).`
+                : '') +
+            `\nРучные правки этих SKU будут перезаписаны; прочие SKU не тронутся.`,
         )) return;
         setWriting(true);
         try {
             const cur = await api.getAssemblyDraft(draftId);
             const dist = cur.distribution;
-            // «Владение» матрицы = все SKU, по которым она дала отгрузку ИЛИ предбронь.
-            const owned = new Set<string>([...shipRows.map(keyOfRow), ...effPrebook.map(keyOfRow)]);
-            const keptRows = (dist?.rows ?? []).filter((r) => !owned.has(keyOfRow(r)));
-            const keptPrebook = (dist?.prebook ?? []).filter((r) => !owned.has(keyOfRow(r)));
-            const newRows = [...keptRows, ...shipRows];
-            const newPrebook = [...keptPrebook, ...effPrebook];
-            // Пересчёт списков складов из новых строк (иначе останутся stale от cur).
-            const srcIds = new Set<number>();
-            const tgtNames = new Set<string>();
-            for (const r of [...newRows, ...newPrebook]) {
-                for (const ff of Object.keys(r.src)) srcIds.add(Number(ff));
-                for (const wb of Object.keys(r.tgt)) tgtNames.add(wb);
-            }
+            const next = buildWriteDistribution(dist ?? {}, shipRows, effPrebook, guardedInDraft);
             await api.updateAssemblyDraft(draftId, {
-                distribution: {
-                    ...dist,
-                    rows: newRows,
-                    prebook: newPrebook,
-                    source_warehouse_ids: [...srcIds],
-                    target_warehouse_names: [...tgtNames],
-                },
+                distribution: { ...dist, ...next },
                 event: { event_type: 'MATRIX_WRITE', summary: `Ручная раскладка: ${formatNumber(commit.totalShip, 0)} шт` },
             });
             showToast(`Записано в черновик: ${formatNumber(commit.totalShip, 0)} шт (замена по SKU)`, 'success');
@@ -768,7 +759,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         } finally {
             setWriting(false);
         }
-    }, [shipRows, effPrebook, writing, draftId, commit, showToast, onWritten, refreshDraftInfo]);
+    }, [shipRows, effPrebook, writing, draftId, commit, prebookUnits, guardByNm, draftByNm, showToast, onWritten, refreshDraftInfo]);
 
     // ─── States ────────────────────────────────────────────────────────────
     if (loading) {
