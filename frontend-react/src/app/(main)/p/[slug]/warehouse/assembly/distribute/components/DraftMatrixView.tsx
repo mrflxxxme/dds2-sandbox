@@ -1025,6 +1025,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                                         {ship > 0 ? (
                                                             <>
                                                                 {formatNumber(ship, 0)}
+                                                                {pbNm > 0 && (
+                                                                    <span style={{ color: 'var(--color-accent)', fontWeight: 400, fontSize: 11 }}
+                                                                        title={pbNm >= ship
+                                                                            ? 'Весь план SKU — в предброни: заявкой НЕ станет, пока не «Дозабить»/«Отправить как есть» (вкладка 🅿️ Предбронь черновика)'
+                                                                            : `${formatNumber(pbNm, 0)} шт из плана — в предброни (не станут заявками без дозабора)`}>
+                                                                        {' '}{pbNm >= ship ? '🅿️!' : `(${formatNumber(pbNm, 0)}🅿️)`}
+                                                                    </span>
+                                                                )}
                                                                 <button type="button" title="Убрать SKU из черновика (строки + предбронь)" disabled={removingNm === nm}
                                                                     style={{ marginLeft: 6, border: 'none', background: 'transparent', color: 'var(--color-danger)', cursor: 'pointer', fontSize: 12, padding: 0 }}
                                                                     onClick={() => removeFromDraft(nm, label)}>
