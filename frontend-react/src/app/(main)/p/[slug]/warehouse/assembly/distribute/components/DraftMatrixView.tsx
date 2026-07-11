@@ -189,7 +189,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                     // Первичный источник экрана — НЕ глушим (иначе 500 покажет пустое «нечего
                     // отгружать» вместо ошибки). Отказ → reject Promise.all → error-стейт.
                     api.getStockNeed(14, 14, 'actual', true, true, 0) as Promise<StockNeedResponse>,
-                    api.getColdStartTable(14).catch(() => null),
+                    // Параметры новинок — те же, что настроены на экране «Потребность»
+                    // (персистятся в localStorage), иначе два экрана считали бы новинки
+                    // разными настройками (min-pack / % отгрузки / floor).
+                    (() => {
+                        let csp: { minPack?: number; shipPct?: number; floor?: number } = {};
+                        try { csp = JSON.parse(localStorage.getItem('dds.coldStartParams') || '{}'); } catch { /* дефолты */ }
+                        return api.getColdStartTable(14, csp.minPack ?? 5, csp.shipPct ?? 55, csp.floor ?? 50).catch(() => null);
+                    })(),
                     api.getBoxMultiplicity().catch(() => null),
                     api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
                     api.getLocalizationSkus(isoDay(locFrom), isoDay(locTo)).catch(() => [] as LocalizationSkuRow[]),
@@ -363,7 +370,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
             }
             const next = buildWriteDistribution({ rows: [], prebook: [] }, pending.rows, pending.prebook);
             const sent = sumUnits(pending.rows) + sumUnits(pending.prebook);
-            const d = await api.updateAssemblyDraft(draftId, { distribution: { ...base, ...next } });
+            // Событие истории: правка степпером — значимое изменение (снапшот для
+            // отката). Дебаунс+сериализация PUT-ов не дают спама на серию кликов.
+            const d = await api.updateAssemblyDraft(draftId, {
+                distribution: { ...base, ...next },
+                event: { event_type: 'MATRIX_EDIT', summary: `Степпер: план ${formatNumber(sent, 0)} шт` },
+            });
             draftDistRef.current = d.distribution ?? null;
             const got = sumUnits(d.distribution?.rows ?? []) + sumUnits(d.distribution?.prebook ?? []);
             if (got < sent) {
@@ -606,8 +618,16 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
             const qty = availByBc.get(a.barcode) ?? 0;
             if (qty > 0) out.push({ nm_id: a.nm_id, vendor: a.vendor_code || String(a.nm_id), qty });
         }
+        // Draft-only SKU без кратности: их план есть в черновике, но «Мест»/паллеты
+        // для них не считаются — тоже показываем в баннере (иначе потеря молчаливая).
+        for (const [nm, v] of draftByNm) {
+            if ((nmPpb.get(nm) || 0) > 0) continue;
+            if (v.rows + v.prebook <= 0) continue;
+            if (out.some((x) => x.nm_id === nm) || articles.some((a) => a.nm_id === nm)) continue;
+            out.push({ nm_id: nm, vendor: v.vendor, qty: v.rows + v.prebook });
+        }
         return out.sort((x, y) => y.qty - x.qty);
-    }, [articles, nmPpb, availByBc]);
+    }, [articles, nmPpb, availByBc, draftByNm]);
 
     const markFor = useCallback((nm: number, wh: string, shipPkg: PackageType | null): CellMark | null => {
         const flags = acceptanceByNm.get(nm)?.availability?.[wh];
@@ -634,18 +654,27 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
         // ДЕКРЕМЕНТ (кап держит только рост плана).
         const article = articles.find((a) => a.nm_id === nm) ?? draftOnlyArticles.find((a) => a.nm_id === nm);
         if (!article) { showToast('SKU не найден среди остатков и черновика', 'error'); return; }
+        const skuPrebook = draftPrebook.filter((r) => r.nm_id === nm);
         const out = applyDraftCellEdit(
             draftRows.filter((r) => r.nm_id === nm),
-            draftPrebook.filter((r) => r.nm_id === nm),
+            skuPrebook,
             article, wh, delta, ppb,
         );
         if (!out) { if (delta > 0) showToast('Не хватает свободного остатка на ФФ', 'error'); return; }
+        // Моно-предбронь при ручной правке сливается в КОРОБНЫЙ план — если склад
+        // принимает только монопаллеты, приёмка на создании заявки не пропустит.
+        if (skuPrebook.some((r) => r.package_type === 'MONOPALLET')) {
+            const flags = acceptanceByNm.get(nm)?.availability?.[wh];
+            if (flags && !flags.can_box) {
+                showToast(`⚠ «${wh}» по последней проверке принимает только монопаллеты — коробный план может не пройти приёмку`, 'error');
+            }
+        }
         const nextRows = [...draftRows.filter((r) => r.nm_id !== nm), ...out.rows];
         const nextPrebook = [...draftPrebook.filter((r) => r.nm_id !== nm), ...out.prebook];
         setDraftRowsState(nextRows);
         setDraftPrebook(nextPrebook);
         scheduleDraftSave(nextRows, nextPrebook);
-    }, [nmPpb, articles, draftOnlyArticles, handedNms, draftRows, draftPrebook, scheduleDraftSave, showToast]);
+    }, [nmPpb, articles, draftOnlyArticles, handedNms, draftRows, draftPrebook, acceptanceByNm, scheduleDraftSave, showToast]);
 
     // Вход в ручной режим = просто показать степперы поверх авто-раскладки. НЕ сеем пины:
     // нетронутые строки остаются авто, «вручную» помечается лишь та, где юзер кликнул −/+.
@@ -1035,7 +1064,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten, onDraf
                                                 );
                                             })}
                                             {(() => {
-                                                const pbNm = draftByNm.get(nm)?.prebook ?? 0;
+                                                const pbCell = prebookCellByBc.get(a.barcode);
+                                                const pbNm = pbCell ? [...pbCell.values()].reduce((s2, v) => s2 + v, 0) : 0;
                                                 return (
                                                     <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600, whiteSpace: 'nowrap' }}
                                                         title={ship > 0 ? `План черновика: ${formatNumber(ship, 0)} шт${pbNm > 0 ? ` (в т.ч. 🅿️ ${formatNumber(pbNm, 0)} в предброни)` : ''}` : 'В черновике этого SKU нет'}>

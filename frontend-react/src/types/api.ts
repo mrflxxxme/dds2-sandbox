@@ -4873,7 +4873,7 @@ export interface AssemblyDraftCommitResponse {
 
 /** Опциональный маркер для updateAssemblyDraft — логирует событие истории со снапшотом. */
 export interface DraftEventLog {
-  event_type: 'PREBOOK_TOPUP' | 'MATRIX_WRITE';
+  event_type: 'PREBOOK_TOPUP' | 'MATRIX_WRITE' | 'MATRIX_EDIT';
   summary?: string;
 }
 

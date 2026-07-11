@@ -2584,6 +2584,39 @@ async def test_remove_rows_clears_prebook(db_session):
 
 
 @pytest.mark.asyncio
+async def test_remove_rows_clears_prebook_origin_and_logs_event(db_session):
+    """remove_rows_by_nm чистит бейджи prebook_origin (ключ nmId::wb) удаляемых SKU
+    и пишет событие REMOVE_ROWS со снапшотом для отката (аудит 2026-07-11)."""
+    from sqlalchemy import select
+
+    from backend.models.assembly import AssemblyDraftEvent
+
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [AssemblyDraftRow(nm_id=111, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5})]
+    create = AssemblyDraftCreate(
+        name="PO",
+        distribution=AssemblyDraftDistribution(
+            source_warehouse_ids=[wh_a],
+            target_warehouse_names=["Электросталь"],
+            rows=rows,
+            prebook_origin=["111::Электросталь", "222::Казань"],
+        ),
+    )
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, create)
+
+    updated = await assembly_draft_service.remove_rows_by_nm(db_session, PROJECT_ID, draft.id, [111])
+    dist = AssemblyDraftDistribution.model_validate(updated.distribution)
+    assert dist.prebook_origin == ["222::Казань"]  # бейдж удалённого SKU вычищен
+
+    events = (await db_session.execute(
+        select(AssemblyDraftEvent).where(AssemblyDraftEvent.draft_id == draft.id)
+    )).scalars().all()
+    assert any(e.event_type == "REMOVE_ROWS" for e in events)
+    ev = next(e for e in events if e.event_type == "REMOVE_ROWS")
+    assert ev.before_distribution and len(ev.before_distribution.get("rows", [])) == 1  # снапшот для отката
+
+
+@pytest.mark.asyncio
 async def test_remove_rows_404(db_session):
     """remove_rows_by_nm на несуществующем черновике → 404."""
     with pytest.raises(HTTPException) as ei:

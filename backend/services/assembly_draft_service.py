@@ -367,10 +367,17 @@ async def remove_rows_by_nm(
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
 
+    import copy
+
     nm_set = set(nm_ids)
+    before_distribution = copy.deepcopy(draft.distribution)
     distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
     distribution.rows = [r for r in distribution.rows if r.nm_id not in nm_set]
     distribution.prebook = [r for r in distribution.prebook if r.nm_id not in nm_set]
+    # Бейджи «из предброни» (ключ nmId::wb) удаляемых SKU — иначе stale-метка
+    # всплывёт, если SKU вернётся в черновик пересчётом.
+    prefixes = tuple(f"{nm}::" for nm in nm_set)
+    distribution.prebook_origin = [k for k in distribution.prebook_origin if not k.startswith(prefixes)]
     kept_units = []
     for unit in distribution.handed_units:
         unit.items = [it for it in unit.items if it.nm_id not in nm_set]
@@ -381,6 +388,24 @@ async def remove_rows_by_nm(
     draft.distribution = distribution.model_dump(mode="json")
     await db.commit()
     await db.refresh(draft)
+
+    # История: ✕ из матрицы / чистка неликвида — значимое изменение, снапшотим
+    # старый distribution для отката. Best-effort — сбой лога не валит удаление.
+    try:
+        from backend.services.assembly.draft_history import log_draft_event
+
+        await log_draft_event(
+            db,
+            project_id,
+            draft_id,
+            "REMOVE_ROWS",
+            summary=f"Убраны SKU из черновика: {len(nm_set)} шт (nm {', '.join(str(n) for n in sorted(nm_set)[:5])}{'…' if len(nm_set) > 5 else ''})",
+            before_distribution=before_distribution,
+            draft_updated_at=draft.updated_at,
+        )
+        await db.refresh(draft)
+    except Exception:
+        logger.warning("Failed to log REMOVE_ROWS event for draft_id=%s", draft_id, exc_info=True)
     return draft
 
 

@@ -101,11 +101,11 @@ class DraftEventLog(BaseModel):
     """Маркер события истории для логирования при PUT черновика.
 
     Клиент помечает «значимый» PUT (дозабор хвоста предброни / запись раскладки из
-    матрицы), сервер снапшотит СТАРЫЙ distribution в `AssemblyDraftEvent` для отката.
-    Обычный autosave событие НЕ передаёт → не логируется. COMMIT логируется отдельно
-    в `commit_draft` (не через этот путь)."""
+    матрицы / правка степпером в редакторе), сервер снапшотит СТАРЫЙ distribution в
+    `AssemblyDraftEvent` для отката. PUT без события не логируется. COMMIT логируется
+    отдельно в `commit_draft` (не через этот путь)."""
 
-    event_type: Literal["PREBOOK_TOPUP", "MATRIX_WRITE"]
+    event_type: Literal["PREBOOK_TOPUP", "MATRIX_WRITE", "MATRIX_EDIT"]
     summary: str | None = None
 
 
