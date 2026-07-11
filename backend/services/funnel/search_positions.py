@@ -123,7 +123,7 @@ async def _run(project_id: int, nm_id: int, phrases: list[str], max_pages: int) 
     done = 0
     throttled = 0
 
-    async def fetch_one(client: httpx.AsyncClient, phrase: str):
+    async def fetch_one(client: httpx.AsyncClient, phrase: str) -> tuple[str, int | None, int] | None:
         async with sem:
             if _stop.get(key):
                 return None

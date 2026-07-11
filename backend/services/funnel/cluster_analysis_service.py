@@ -384,7 +384,7 @@ async def get_campaign_clusters(
     range_merged = _merge_norm(stats)
     # Полный список кластеров + показы за ВСЮ историю (кэш): «все кластеры вне зависимости от
     # даты» + locked по all-time. WB all-time не отдаёт — тянем от старта кампании до сегодня.
-    since = camp.created_at.date().isoformat() if getattr(camp, "created_at", None) else date_from
+    since = camp.created_at.date().isoformat() if camp.created_at else date_from
     alltime = await _alltime_cluster_index(db, project_id, campaign_id, nm_ids, since)
     all_views = {q: v["views"] for q, v in alltime.items()}
     # Список = объединение (all-time даёт полный набор); метрики — за период (нули, если в

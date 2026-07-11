@@ -84,7 +84,7 @@ async def _refresh_ad_campaigns(project_id: int, date_from: date | None, date_to
 
 async def _refresh_ad_daily(project_id: int, date_from: date | None, date_to: date | None) -> Any:
     """Полный ре-синк рекламной статистики по кампаниям за весь диапазон."""
-    from backend.services.funnel import funnel_service
+    from backend.services import funnel as funnel_service
 
     return await funnel_service.batch_resync_ads(project_id)
 

@@ -8,7 +8,7 @@ Read-only поверх существующих таблиц: wb_ad_campaigns (�
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -114,7 +114,7 @@ async def list_ad_campaigns(
     yest_spend_map = {r.campaign_id: float(r.spend) for r in yest_spend_rows}
 
     # Недобор бюджета за сегодня (до полуночи) по кампаниям с исчерпанным бюджетом
-    gap_map = await _budget_gap_today_map(db, project_id, campaigns, today_map)
+    gap_map = await _budget_gap_today_map(db, project_id, list(campaigns), today_map)
 
     # Карта nm_id → бренд/категория (для фильтров на фронте)
     nm_meta_rows = (
@@ -629,7 +629,7 @@ async def get_campaign_metrics(
                 .group_by(CD.date)
             )
         ).all()
-    ad_by_date = {r.date: r for r in ad_rows}
+    ad_by_date: dict[Any, Any] = {r.date: r for r in ad_rows}
 
     funnel_by_date: dict = {}
     if nm_ids:
@@ -679,7 +679,7 @@ async def get_campaign_metrics(
 
     # Средний СПП кампании за день = среднее spp_rate по её товарам (из финотчёта, per (nm,дата)).
     # «Цена Клиенту» = цена дня × (1 − СПП). Нет карты СПП → 0 (customer_price = сама цена).
-    def _spp_for_day(d) -> float:
+    def _spp_for_day(d: date) -> float:
         if not bdr_rates_map or not nm_ids:
             return 0.0
         rates = [
@@ -834,7 +834,7 @@ async def get_campaign_zone_metrics(
         for k in tot:
             tot[k] += m[k]
 
-    totals = _ad_metric_row("За всё время", tot["views"], tot["clicks"], tot["spend"], tot["atbs"], tot["orders"])
+    totals = _ad_metric_row("За всё время", int(tot["views"]), int(tot["clicks"]), tot["spend"], int(tot["atbs"]), int(tot["orders"]))
 
     return {
         "campaign_id": campaign_id,

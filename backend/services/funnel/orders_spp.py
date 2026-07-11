@@ -10,7 +10,7 @@ get_campaign_metrics вместо финансового СПП (тот же и�
 Нет заказов за день → нет СПП → «Цена Клиенту» = сама цена.
 """
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytz
 from sqlalchemy import func, select
@@ -44,7 +44,7 @@ async def get_orders_spp_map(
         )
     ).all()
 
-    daily: dict[tuple[int, object], BdrRates] = {}
+    daily: dict[tuple[int, date], BdrRates] = {}
     for nm_id, d, spp in rows:
         if nm_id is None or d is None or spp is None:
             continue
