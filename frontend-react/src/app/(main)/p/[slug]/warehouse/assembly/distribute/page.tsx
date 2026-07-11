@@ -1881,8 +1881,8 @@ export default function AssemblyDraftPage() {
                                     return (
                                         <span key={ff} className="badge"
                                             title={noRows
-                                                ? 'ВЕСЬ план этого ФФ — в предброни: заявок нет, в предпросмотре выше склад не виден. Дозабор/отправка — на вкладке Предбронь.'
-                                                : 'Часть плана этого ФФ в предброни (плюс есть заявки в предпросмотре выше).'}
+                                                ? 'ВЕСЬ план этого ФФ — в предброни: заявок нет, в предпросмотре заявок склад не виден. Дозабор/отправка — на вкладке Предбронь.'
+                                                : 'Часть плана этого ФФ в предброни (плюс есть заявки в предпросмотре).'}
                                             style={{ fontSize: 11, padding: '2px 8px', background: noRows ? 'rgba(255,159,10,0.14)' : 'rgba(59,130,246,0.10)', color: noRows ? 'var(--color-warning)' : 'var(--color-text)' }}>
                                             {noRows ? '⚠ ' : ''}{ffName(ff)} · {formatNumber(q, 0)} шт{noRows ? ' — только предбронь, заявок нет' : ''}
                                         </span>
@@ -2036,6 +2036,14 @@ export default function AssemblyDraftPage() {
                         draftId={draftId}
                         ffNameById={new Map(warehouses.map(w => [w.id, w.name]))}
                         onWritten={() => { reloadDraft(); setTab('draft'); }}
+                        onDraftChanged={(d) => {
+                            // Тихая синхронизация из редактора-матрицы (автосейв степпера / ✕):
+                            // ручная правка = ТОЧНЫЙ план юзера — пустой heal-scope на эту
+                            // версию, иначе полный self-heal переупаковал бы её (rows→prebook,
+                            // некратные released) вторым PUT. Вкладку НЕ переключаем.
+                            healScopeRef.current = { ts: d.updated_at, only: new Set() };
+                            applyDraft(d);
+                        }}
                     />
                 ) : (
                     <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>

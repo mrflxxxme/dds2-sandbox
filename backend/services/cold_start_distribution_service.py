@@ -1190,7 +1190,8 @@ async def compute_cold_start_table(
                         total_allocated=0,
                         oversort_guard=True,
                         guard_reason=(
-                            f"на WB лежит {wb_qty_total} шт, продажи за {window_days}д — "
+                            # sales_14d всегда за 14 дней независимо от window_days
+                            f"на WB лежит {wb_qty_total} шт, продажи за 14д — "
                             f"{sales_window} шт (порог {sell_threshold}) — досев остановлен"
                         ),
                     )

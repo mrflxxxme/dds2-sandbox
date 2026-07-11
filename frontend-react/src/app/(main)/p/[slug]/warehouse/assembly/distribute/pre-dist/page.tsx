@@ -136,6 +136,10 @@ export default function PreDistVehiclePage() {
     // Справочники движка (зеркало PreDistributionView / distribute page).
     const [stockNeed, setStockNeed] = useState<StockNeedResponse | null>(null);
     const [newcomerSet, setNewcomerSet] = useState<Set<number>>(new Set());
+    // Гвард пересорта (backend cold-start): посев новинки лежит на WB без продаж →
+    // авто-засев машины её НЕ раздаёт (из newcomerSet НЕ убирать — он также
+    // исключает SKU из need-канала движка; иначе guarded провалился бы в need).
+    const [guardedNms, setGuardedNms] = useState<Set<number>>(new Set());
     const [anchors, setAnchors] = useState<SeedAnchor[]>([]);
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
     const [nmBoxSize, setNmBoxSize] = useState<Map<number, string | null>>(new Map());
@@ -241,6 +245,9 @@ export default function PreDistVehiclePage() {
                     if (nm && pr.is_newcomer) ncs.add(nm);
                 }
                 setNewcomerSet(ncs);
+                const guards = new Set<number>();
+                for (const r of cold?.rows ?? []) if (r.oversort_guard) guards.add(r.nm_id);
+                setGuardedNms(guards);
                 // district — для гарантии СЗФО в seedNewcomerWholeBoxes (≥4 коробов → 1 короб СЗФО).
                 setAnchors((cold?.main_warehouses ?? []).map(w => ({ warehouse: w.warehouse, share_pct: w.share_pct, district: w.district_key })));
 
@@ -429,6 +436,10 @@ export default function PreDistVehiclePage() {
                 for (const pr of poolData.rows) {
                     const nm = pr.article_wb ? Number(pr.article_wb) : 0;
                     if (!nm || !newcomerSet.has(nm)) continue;
+                    // Гвард пересорта: прошлый посев лежит на WB без продаж — машину
+                    // этим SKU не досеиваем (ровно кейс «поставка приехала → опять
+                    // раздали»); ручные правки ячеек гвард не ограничивает.
+                    if (guardedNms.has(nm)) continue;
                     const avail = Math.max(0, Math.floor(Number(pr.available_qty) || 0));
                     const remaining = avail - (shippedByBc.get(pr.barcode) ?? 0);
                     const byWh = enrich.get(nm)?.byWh;
@@ -516,7 +527,7 @@ export default function PreDistVehiclePage() {
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
-    }, [stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, editMode, newcomerSet, anchors, showToast]);
+    }, [stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, editMode, newcomerSet, guardedNms, anchors, showToast]);
 
     useEffect(() => {
         if (!pool || !geomReady) return;

@@ -249,3 +249,43 @@ describe('buildWriteDistribution — запись пересчёта с чист
         expect(out.prebook).toHaveLength(1);
     });
 });
+
+
+describe('applyDraftCellEdit — фиксы аудита 2026-07-11', () => {
+    it('src новой BOX-строки НЕ пере-подписывает ФФ, забронированный kept MONO-строкой', () => {
+        // Кейс аудита: rf {1:36, 2:10}; MONO src={1:36}. +2 короба ppb=5 → src должен уйти на ФФ2.
+        const mono = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '1': 36 }, tgt: { 'Казань': 36 }, package_type: 'MONOPALLET' as const };
+        const out = applyDraftCellEdit([mono], [], article('A', 1, { 1: 36, 2: 10 }), 'Тула', 2, 5);
+        expect(out).not.toBeNull();
+        const box = out!.rows.find((r) => (r.package_type ?? 'BOX') === 'BOX');
+        expect(box?.src).toEqual({ '2': 10 });
+    });
+
+    it('декремент перезаложенного SKU проходит (кап только на рост)', () => {
+        // План 20 при живом остатке 0 (сток ушёл после записи) — уменьшить МОЖНО.
+        const row = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 20 }, tgt: { 'Тула': 20 } };
+        const out = applyDraftCellEdit([row], [], article('A', 1, { 4: 0 }), 'Тула', -1, 4);
+        expect(out).not.toBeNull();
+        expect(out!.rows[0].tgt).toEqual({ 'Тула': 16 });
+        expect(sumRec(out!.rows[0].src)).toBe(16); // Σsrc==Σtgt даже при нулевом живом остатке
+    });
+
+    it('as_is-строка («Оставить так») не мержится и сохраняет флаг', () => {
+        const asIs = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 10 }, tgt: { 'Тула': 10 }, as_is: true };
+        const out = applyDraftCellEdit([asIs], [], article('A', 1, { 4: 50 }), 'Казань', 1, 4);
+        expect(out).not.toBeNull();
+        const keptAsIs = out!.rows.find((r) => r.as_is);
+        expect(keptAsIs?.tgt).toEqual({ 'Тула': 10 });
+        const box = out!.rows.find((r) => !r.as_is);
+        expect(box?.tgt).toEqual({ 'Казань': 4 });
+    });
+});
+
+describe('buildWriteDistribution — владение по nm целиком', () => {
+    it('старая MONO-строка SKU заменяется BOX-результатом расчёта (нет задвоения)', () => {
+        const oldMono = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 36 }, tgt: { 'Казань': 36 }, package_type: 'MONOPALLET' as const };
+        const calcBox = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 20 }, tgt: { 'Казань': 20 }, package_type: 'BOX' as const };
+        const out = buildWriteDistribution({ rows: [oldMono], prebook: [] }, [calcBox], [], new Set());
+        expect(out.rows).toEqual([calcBox]); // MONO того же nm вычищена, суммы не задвоены
+    });
+});
