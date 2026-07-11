@@ -8,13 +8,12 @@ import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constant
 import { Toast } from '@/components';
 import {
     applyAcceptanceSplits,
-    applyCellBoxDelta,
+    applyDraftCellEdit,
     buildDraftSkus,
     buildPinnedRowsFf,
     buildTopUpRowsFf,
     enrichArticles,
     finalizeDraftDistribution,
-    planBoxTopUpFf,
     rowsToPreDistRows,
     sliceRowsByFf,
     splitByKratnost,
@@ -24,13 +23,11 @@ import {
     type EnrichedSku,
     type PinnedPkgOf,
 } from '@/lib/assembly/draftDistribution';
-import { buildPrebookGroups } from '@/lib/assembly/buildPrebookGroups';
 import NeedMatrixCell, { type CellMark } from './NeedMatrixCell';
 import AcceptanceBanner, { type AcceptanceSummary } from './AcceptanceBanner';
-import PrebookView, { type PrebookAcceptanceMark } from './PrebookView';
 import type {
     AcceptanceCheckPerItem,
-    AcceptanceFlags,
+    AssemblyDraft,
     AssemblyDraftRow,
     LocalizationSkuRow,
     PackageType,
@@ -51,7 +48,7 @@ const districtTint = (d: string): string | undefined => {
     return c ? `color-mix(in srgb, ${c} 6%, transparent)` : undefined;
 };
 
-type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'need' | 'revenue' | 'loc' | 'ship' | 'draft' | 'boxes' | 'stays' | `wb:${string}`;
+type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'need' | 'revenue' | 'loc' | 'ship' | 'calc' | 'boxes' | 'stays' | `wb:${string}`;
 
 // Цвет «Лок %» по статусу КТР (excellent/neutral/weak/critical) — как на странице «Локализация».
 const LOC_STATUS_COLOR: Record<string, string> = {
@@ -151,9 +148,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const [geomReady, setGeomReady] = useState(false);
 
     const [distRows, setDistRows] = useState<AssemblyDraftRow[] | null>(null);
-    const [distRowsBox, setDistRowsBox] = useState<AssemblyDraftRow[]>([]);
     const [prebookRows, setPrebookRows] = useState<AssemblyDraftRow[]>([]);
-    const [subTab, setSubTab] = useState<'dist' | 'prebook'>('dist');
     const [promotedDirs, setPromotedDirs] = useState<Set<string>>(new Set());
     const [hiddenDirs, setHiddenDirs] = useState<Set<string>>(new Set());
     const [hiddenSkus, setHiddenSkus] = useState<Set<string>>(new Set());
@@ -161,9 +156,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const [cellEdits, setCellEdits] = useState<CellEdits>(new Map());
     const [editMode, setEditMode] = useState(false);
     const acceptanceCacheRef = useRef<{ sig: string; splitMap: AcceptanceSplitMap | null; summary: AcceptanceSummary | null; accByNm: Map<number, AcceptanceCheckPerItem> } | null>(null);
-    const [prebookOpKey, setPrebookOpKey] = useState<string | null>(null);
     const [acceptanceByNm, setAcceptanceByNm] = useState<Map<number, AcceptanceCheckPerItem>>(new Map());
-    const [preorderWbs, setPreorderWbs] = useState<Set<string>>(new Set());
     const [distComputing, setDistComputing] = useState(false);
     const [acceptanceNote, setAcceptanceNote] = useState<AcceptanceSummary | null>(null);
     const [writing, setWriting] = useState(false);
@@ -197,20 +190,18 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                 const locTo = new Date();
                 const locFrom = new Date(locTo.getTime() - 13 * 86_400_000);
                 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
-                const [need, cold, boxMult, palletOv, preorder, locSkus] = await Promise.all([
+                const [need, cold, boxMult, palletOv, locSkus] = await Promise.all([
                     // Первичный источник экрана — НЕ глушим (иначе 500 покажет пустое «нечего
                     // отгружать» вместо ошибки). Отказ → reject Promise.all → error-стейт.
                     api.getStockNeed(14, 14, 'actual', true, true, 0) as Promise<StockNeedResponse>,
                     api.getColdStartTable(14).catch(() => null),
                     api.getBoxMultiplicity().catch(() => null),
                     api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
-                    api.getPreorderAllowedWarehouses().catch(() => [] as string[]),
                     api.getLocalizationSkus(isoDay(locFrom), isoDay(locTo)).catch(() => [] as LocalizationSkuRow[]),
                 ]);
                 if (controller.signal.aborted) return;
                 setStockNeed(need);
                 setLocByNm(new Map(locSkus.map((r) => [r.nm_id, r])));
-                setPreorderWbs(new Set(preorder));
                 setPromotedDirs(new Set());
                 setHiddenDirs(new Set());
                 setHiddenSkus(new Set());
@@ -282,7 +273,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
 
     // ─── Авто-раскладка: потребность × ФФ-сток → приёмка → коробы/паллеты ────
     const computeDistribution = useCallback(async (signal: AbortSignal) => {
-        if (articles.length === 0 && cellEdits.size === 0) { setDistRows([]); setPrebookRows([]); setDistRowsBox([]); setAcceptanceNote(null); return; }
+        if (articles.length === 0 && cellEdits.size === 0) { setDistRows([]); setPrebookRows([]); setAcceptanceNote(null); return; }
         setDistComputing(true);
         try {
             const distInput: DraftDistInput = { articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc };
@@ -365,32 +356,55 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             const extra = [...topUpRows, ...pinnedRows];
 
             const whole = finalizeDraftDistribution(effective, distInput, true, extra, true);
-            const box = finalizeDraftDistribution(effective, distInput, false, extra, true);
             if (!signal.aborted) {
                 setDistRows(whole.rows);
                 setPrebookRows(whole.prebook);
-                setDistRowsBox(box.rows);
                 setAcceptanceNote(summary);
                 setAcceptanceByNm(accByNm);
             }
         } catch (e) {
-            if (!signal.aborted) { setDistRows([]); setPrebookRows([]); setDistRowsBox([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
+            if (!signal.aborted) { setDistRows([]); setPrebookRows([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
     }, [articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, newcomerSet, newcomerAlloc, showToast]);
 
-    // ─── Черновик: что уже записано (per SKU) + чистка ───────────────────────
+    // ─── Черновик: ИСТОЧНИК таблицы (матрица = редактор черновика) ──────────
+    const draftDistRef = useRef<AssemblyDraft['distribution'] | null>(null);
+    const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const refreshDraftInfo = useCallback(async () => {
         try {
             const d = await api.getAssemblyDraft(draftId);
+            draftDistRef.current = d.distribution ?? null;
             setDraftRowsState(d.distribution?.rows ?? []);
             setDraftPrebook(d.distribution?.prebook ?? []);
         } catch {
-            // Черновик мог быть удалён/пересоздан — колонка остаётся пустой.
+            // Черновик мог быть удалён/пересоздан — таблица остаётся пустой.
         }
     }, [draftId]);
     useEffect(() => { refreshDraftInfo(); }, [refreshDraftInfo]);
+
+    /** Автосейв правок степперов: rows+prebook заменяются в ПОЛНОМ distribution
+     *  (остальные поля — из последнего GET/PUT), дебаунс. Ответ сервера — канон
+     *  (PUT-гейт мог вычесть «уже едущее»). */
+    const scheduleDraftSave = useCallback((rows: AssemblyDraftRow[], prebook: AssemblyDraftRow[]) => {
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = setTimeout(async () => {
+            saveTimerRef.current = null;
+            const base = draftDistRef.current;
+            if (!base) return;
+            try {
+                const d = await api.updateAssemblyDraft(draftId, { distribution: { ...base, rows, prebook } });
+                draftDistRef.current = d.distribution ?? null;
+                setDraftRowsState(d.distribution?.rows ?? []);
+                setDraftPrebook(d.distribution?.prebook ?? []);
+                onWritten?.();
+            } catch (err) {
+                showToast(err instanceof Error ? err.message : 'Не удалось сохранить черновик', 'error');
+            }
+        }, 1200);
+    }, [draftId, onWritten, showToast]);
+    useEffect(() => () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); }, []);
 
     const draftByNm = useMemo(() => {
         const m = new Map<number, { rows: number; prebook: number; vendor: string }>();
@@ -407,7 +421,6 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         acc(draftPrebook, 'prebook');
         return m;
     }, [draftRows, draftPrebook]);
-    const draftTotalUnits = useMemo(() => [...draftByNm.values()].reduce((s, v) => s + v.rows, 0), [draftByNm]);
     /** SKU черновика без свободного остатка на ФФ — их нет среди articles, но видеть и чистить их нужно. */
     const draftOnlyNms = useMemo(() => {
         const inArticles = new Set(articles.map((a) => a.nm_id));
@@ -463,35 +476,55 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const nmByBc = useMemo(() => {
         const m = new Map<string, number>();
         for (const a of articles) m.set(a.barcode, a.nm_id);
+        // Черновик может держать SKU без свободного остатка (их нет в articles) —
+        // их баркоды тоже нужны агрегатам (кратность, коробы).
+        for (const r of [...draftRows, ...draftPrebook]) if (r.barcode && r.nm_id) m.set(r.barcode, r.nm_id);
         return m;
-    }, [articles]);
+    }, [articles, draftRows, draftPrebook]);
     const availByBc = useMemo(() => {
         const m = new Map<string, number>();
         for (const a of articles) m.set(a.barcode, Object.values(a.rf_stocks || {}).reduce((s, st) => s + Math.max(0, Math.floor(Number(st?.available) || 0)), 0));
         return m;
     }, [articles]);
 
+    // Расчёт от потребности (фоновый) — питает кнопку «Пересчитать» и колонку «Расчёт».
     const commit = useMemo(() => buildDistAgg(shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides), [shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
-    const matrix = useMemo(() => buildDistAgg(distRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides), [distRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
     const submitRows = commit.submitRows;
 
+    // ─── ТАБЛИЦА = ЧЕРНОВИК: строки + предбронь единой суммой ────────────────
+    const draftAll = useMemo(() => [...draftRows, ...draftPrebook], [draftRows, draftPrebook]);
+    const draftAgg = useMemo(() => buildDistAgg(draftAll, nmByBc, nmPpb, nmBoxSize, palletOverrides), [draftAll, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+    /** Предбронь-доля per (barcode, wh) — для тултипа «из них 🅿️» (числа единые). */
+    const prebookCellByBc = useMemo(() => {
+        const m = new Map<string, Map<string, number>>();
+        for (const r of draftPrebook) {
+            if (!r.barcode) continue;
+            const cell = m.get(r.barcode) ?? new Map<string, number>();
+            for (const [wh, q] of Object.entries(r.tgt || {})) if ((q || 0) > 0) cell.set(wh, (cell.get(wh) || 0) + (q || 0));
+            m.set(r.barcode, cell);
+        }
+        return m;
+    }, [draftPrebook]);
+    const draftPrebookUnits = useMemo(
+        () => draftPrebook.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0),
+        [draftPrebook],
+    );
+
     // ─── ФФ-срез (лупа «Склад забора»): показываем ДОЛЮ выбранного ФФ ────────
-    // Чистое отображение, раскладку/запись не трогает. Пары ФФ→WB — тот же
-    // `allocatePairs`, что карточки черновика → числа сходятся с карточкой ФФ.
-    // В ручном режиме срез ПРИОСТАНОВЛЕН (степперы правят ПОЛНУЮ раскладку),
-    // но видимость строк держится по срезу — набор строк не прыгает.
+    // Чистое отображение черновика, запись не трогает. В ручном режиме срез
+    // ПРИОСТАНОВЛЕН (степперы правят ПОЛНЫЙ черновик), видимость строк — по срезу.
     const ffFilterId = filterFf ? Number(filterFf) : null;
     const ffSliceActive = ffFilterId != null && !editMode;
-    const slicedRowsBox = useMemo(
-        () => (ffFilterId != null ? sliceRowsByFf(distRowsBox, ffFilterId) : distRowsBox),
-        [ffFilterId, distRowsBox],
+    const slicedDraft = useMemo(
+        () => (ffFilterId != null ? sliceRowsByFf(draftAll, ffFilterId) : draftAll),
+        [ffFilterId, draftAll],
     );
     const sliceAgg = useMemo(
-        () => (ffFilterId != null ? buildDistAgg(slicedRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides) : matrix),
-        [ffFilterId, slicedRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides, matrix],
+        () => (ffFilterId != null ? buildDistAgg(slicedDraft, nmByBc, nmPpb, nmBoxSize, palletOverrides) : draftAgg),
+        [ffFilterId, slicedDraft, nmByBc, nmPpb, nmBoxSize, palletOverrides, draftAgg],
     );
-    /** Агрегат ЗНАЧЕНИЙ таблицы: доля ФФ при активном срезе, иначе полная матрица. */
-    const viewAgg = ffSliceActive ? sliceAgg : matrix;
+    /** Агрегат ЗНАЧЕНИЙ таблицы: доля ФФ при активном срезе, иначе весь черновик. */
+    const viewAgg = ffSliceActive ? sliceAgg : draftAgg;
     /** Наличие строки: остаток ИМЕННО выбранного ФФ при срезе, иначе Σ всех ФФ. */
     const availOf = useCallback((a: StockNeedArticle): number => (
         ffSliceActive
@@ -505,7 +538,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         const distByWh = new Map<string, string>();
         for (const w of stockNeed?.warehouses ?? []) if (w.name) distByWh.set(w.name, w.district_key || 'unknown');
         const names = new Set<string>();
-        for (const r of matrix.submitRows) names.add(r.wb_warehouse_name);
+        for (const r of draftAgg.submitRows) names.add(r.wb_warehouse_name); // черновик
+        for (const r of commit.submitRows) names.add(r.wb_warehouse_name); // расчёт (чтобы правкой можно было добрать)
         for (const e of enrichMap.values()) for (const [wh, c] of Object.entries(e.byWh)) if (c.need > 0) names.add(wh);
         const arr = [...names].map((name) => ({ name, district: distByWh.get(name) || 'unknown' }));
         arr.sort((a, b) => {
@@ -513,7 +547,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             return ra !== rb ? ra - rb : a.name.localeCompare(b.name, 'ru');
         });
         return arr;
-    }, [matrix, enrichMap, stockNeed]);
+    }, [draftAgg, commit, enrichMap, stockNeed]);
 
     const districtGroups = useMemo(() => {
         const groups: { label: string; color: string; count: number }[] = [];
@@ -528,8 +562,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     }, [wbCols]);
 
     const onHoldQty = useMemo(
-        () => articles.reduce((s, a) => s + Math.max(0, (availByBc.get(a.barcode) ?? 0) - (commit.allocByBc.get(a.barcode) ?? 0)), 0),
-        [articles, availByBc, commit],
+        () => articles.reduce((s, a) => s + Math.max(0, (availByBc.get(a.barcode) ?? 0) - (draftAgg.allocByBc.get(a.barcode) ?? 0)), 0),
+        [articles, availByBc, draftAgg],
     );
 
     const noKratnostArticles = useMemo(() => {
@@ -542,77 +576,6 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         return out.sort((x, y) => y.qty - x.qty);
     }, [articles, nmPpb, availByBc]);
 
-    // Предбронь: кандидаты дозабора = свободный ФФ-сток per nm (мульти-склад).
-    const prebookArticles = useMemo(() => {
-        return articles.map((a) => {
-            const rfStocks: Record<number, number> = {};
-            for (const [ff, st] of Object.entries(a.rf_stocks || {})) {
-                const av = Math.max(0, Math.floor(Number(st?.available) || 0));
-                if (av > 0) rfStocks[Number(ff)] = av;
-            }
-            return { nm_id: a.nm_id, vendor_code: a.vendor_code || String(a.nm_id), rfStocks };
-        });
-    }, [articles]);
-
-    const prebookGroups = useMemo(() => {
-        return buildPrebookGroups({
-            prebook: effPrebook,
-            usedRows: shipRows,
-            articles: prebookArticles,
-            ffName: (ff) => ffNameById.get(ff) || `ФФ ${ff}`,
-            ppbOf: (nm) => nmPpb.get(nm) || 0,
-            ppbAt: (nm) => nmPpb.get(nm) || 0,
-            boxSizeOf: (nm) => nmBoxSize.get(nm) ?? null,
-            palletOverrides,
-        });
-    }, [effPrebook, shipRows, prebookArticles, ffNameById, nmPpb, nmBoxSize, palletOverrides]);
-
-    const prebookAcceptanceMarks = useMemo<Map<string, PrebookAcceptanceMark>>(() => {
-        const out = new Map<string, PrebookAcceptanceMark>();
-        if (acceptanceByNm.size === 0) return out;
-        for (const g of prebookGroups) {
-            const key = `${g.pkg}::${g.wb}::${g.ffId}`;
-            let flags: AcceptanceFlags | undefined;
-            for (const it of g.items) { const f = acceptanceByNm.get(it.nm_id)?.availability?.[g.wb]; if (f) { flags = f; break; } }
-            if (!flags) { out.set(key, { checked: false, open: false, closed: false, noLimit: false }); continue; }
-            const closed = !flags.can_box && !flags.can_monopallet && !flags.can_supersafe;
-            const meta = g.pkg === 'MONOPALLET' ? flags.mono_meta : g.pkg === 'SUPERSAFE' ? flags.super_meta : flags.box_meta;
-            const open = g.pkg === 'MONOPALLET' ? !!flags.can_monopallet : g.pkg === 'SUPERSAFE' ? !!flags.can_supersafe : !!flags.can_box;
-            const freeDays = meta?.free_days_14, paidDays = meta?.paid_days_14;
-            const noLimit = open && (freeDays ?? 0) + (paidDays ?? 0) <= 0;
-            out.set(key, { checked: true, open, closed, freeDays, paidDays, noLimit });
-        }
-        return out;
-    }, [prebookGroups, acceptanceByNm]);
-
-    const promoteDir = useCallback((pkg: PackageType, wb: string, ffId: number) => {
-        const k = `${pkg}::${wb}::${ffId}`;
-        setPrebookOpKey(k);
-        setPromotedDirs((s) => new Set(s).add(k));
-        setTimeout(() => setPrebookOpKey(null), 250);
-    }, []);
-    const hideDir = useCallback((pkg: PackageType, wb: string, ffId: number) => {
-        setHiddenDirs((s) => new Set(s).add(`${pkg}::${wb}::${ffId}`));
-    }, []);
-
-    const topUpBox = useCallback((pkg: PackageType, wb: string, ffId: number) => {
-        if (pkg !== 'BOX') { promoteDir(pkg, wb, ffId); return; }
-        const g = prebookGroups.find((x) => x.pkg === 'BOX' && x.wb === wb && x.ffId === ffId);
-        const adds = g?.topUp ? planBoxTopUpFf(g.topUp.candidates, wb, articles, commit.allocByBc, nmPpb) : [];
-        if (adds.length === 0) { showToast('Нет свободного ФФ-остатка, чтобы дозабрать паллету', 'error'); return; }
-        setPrebookOpKey(`${pkg}::${wb}::${ffId}`);
-        setManualTopUp((prev) => {
-            const next = new Map(prev);
-            for (const a of adds) {
-                const wbMap = { ...(next.get(a.barcode) ?? {}) };
-                wbMap[a.wb] = (wbMap[a.wb] ?? 0) + a.units;
-                next.set(a.barcode, wbMap);
-            }
-            return next;
-        });
-        setTimeout(() => setPrebookOpKey(null), 250);
-    }, [prebookGroups, articles, commit, nmPpb, promoteDir, showToast]);
-
     const markFor = useCallback((nm: number, wh: string, shipPkg: PackageType | null): CellMark | null => {
         const flags = acceptanceByNm.get(nm)?.availability?.[wh];
         if (!flags) return null;
@@ -624,28 +587,26 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         return { noLimit: ((meta?.free_days_14 ?? 0) + (meta?.paid_days_14 ?? 0)) <= 0 };
     }, [acceptanceByNm]);
 
-    const editCellBoxes = useCallback((barcode: string, nm: number, wh: string, delta: number) => {
+    // Правка ячейки = правка ЧЕРНОВИКА: BOX-строки и предбронь SKU сливаются в
+    // одну строку, tgt[склада] двигается на ±короб, автосейв дебаунсом. Кап —
+    // свободный ФФ-остаток SKU (превышение = клик игнорируется с тостом).
+    const editDraftCell = useCallback((barcode: string, nm: number, wh: string, delta: number) => {
         const ppb = nmPpb.get(nm) || 0;
         if (ppb <= 0) return;
-        const avail = availByBc.get(barcode) ?? 0;
-        setCellEdits((prev) => {
-            const next = new Map(prev);
-            let rec = next.get(barcode);
-            if (!rec) {
-                // Первая правка строки — замораживаем её ТЕКУЩУЮ авто-раскладку в пины,
-                // чтобы правка одной ячейки не обнулила остальные склады этой строки.
-                rec = {};
-                const cells = matrix.cellByBc.get(barcode);
-                if (cells) for (const [w, c] of cells) { const b = boxesOf(c.qty, ppb); if (b > 0) rec[w] = b; }
-            }
-            next.set(barcode, applyCellBoxDelta(rec, wh, delta, ppb, avail));
-            return next;
-        });
-    }, [nmPpb, availByBc, matrix]);
-    const resetRowEdits = useCallback((barcode: string) => {
-        setCellEdits((prev) => { if (!prev.has(barcode)) return prev; const n = new Map(prev); n.delete(barcode); return n; });
-    }, []);
-    const resetAllEdits = useCallback(() => setCellEdits(new Map()), []);
+        const article = articles.find((a) => a.nm_id === nm);
+        if (!article) { showToast('У этого SKU нет свободного остатка на ФФ — добавить нечего', 'error'); return; }
+        const out = applyDraftCellEdit(
+            draftRows.filter((r) => r.nm_id === nm),
+            draftPrebook.filter((r) => r.nm_id === nm),
+            article, wh, delta, ppb,
+        );
+        if (!out) { if (delta > 0) showToast('Не хватает свободного остатка на ФФ', 'error'); return; }
+        const nextRows = [...draftRows.filter((r) => r.nm_id !== nm), ...out.rows];
+        const nextPrebook = [...draftPrebook.filter((r) => r.nm_id !== nm), ...out.prebook];
+        setDraftRowsState(nextRows);
+        setDraftPrebook(nextPrebook);
+        scheduleDraftSave(nextRows, nextPrebook);
+    }, [nmPpb, articles, draftRows, draftPrebook, scheduleDraftSave, showToast]);
 
     // Вход в ручной режим = просто показать степперы поверх авто-раскладки. НЕ сеем пины:
     // нетронутые строки остаются авто, «вручную» помечается лишь та, где юзер кликнул −/+.
@@ -665,15 +626,37 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             case 'revenue': return Number(a.revenue_30d) || 0;
             case 'loc': return locByNm.has(nm) ? Number(locByNm.get(nm)!.loc_pct) || 0 : -1;
             case 'ship': return ship;
-            case 'draft': { const d = draftByNm.get(nm); return d ? d.rows + d.prebook : 0; }
+            case 'calc': return commit.allocByBc.get(a.barcode) ?? 0;
             case 'boxes': return boxesOf(ship, nmPpb.get(nm));
             case 'stays': return Math.max(0, avail - ship);
             default: return viewAgg.cellByBc.get(a.barcode)?.get(key.slice(3))?.qty ?? 0;
         }
-    }, [enrichMap, viewAgg, availOf, nmPpb, locByNm, draftByNm]);
+    }, [enrichMap, viewAgg, availOf, nmPpb, locByNm, commit]);
+
+    // Draft-only SKU (в черновике, но без свободного остатка на ФФ) — полноценные
+    // строки таблицы: метрики потребности прочерком, план виден, ✕ работает.
+    const draftOnlyArticles = useMemo<StockNeedArticle[]>(() => draftOnlyNms.map(([nm, v]) => {
+        const row = draftAll.find((r) => r.nm_id === nm);
+        return {
+            nm_id: nm,
+            vendor_code: v.vendor,
+            barcode: row?.barcode || '',
+            brand: '',
+            subject: '',
+            total_need: 0,
+            revenue_30d: 0,
+            rf_stocks: {},
+            in_assembly: 0,
+            in_transit: 0,
+            in_transit_date: null,
+            can_send: 0,
+            deficit: 0,
+            stocks_wb: 0,
+        } as StockNeedArticle;
+    }), [draftOnlyNms, draftAll]);
 
     const sortedRows = useMemo(() => {
-        const rows = [...articles];
+        const rows = [...articles, ...draftOnlyArticles];
         const dir = sortDir === 'asc' ? 1 : -1;
         rows.sort((a, b) => {
             const va = sortValue(a, sortKey), vb = sortValue(b, sortKey);
@@ -682,7 +665,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             return (a.vendor_code || a.barcode).localeCompare(b.vendor_code || b.barcode, 'ru');
         });
         return rows;
-    }, [articles, sortKey, sortDir, sortValue]);
+    }, [articles, draftOnlyArticles, sortKey, sortDir, sortValue]);
 
     // ─── Фильтр таблицы: предмет / бренд / скрыть нераспределённые ───────────
     // Лупа по ОТОБРАЖЕНИЮ (не по расчёту) — раскладка/паллеты/KPI считаются по всему
@@ -728,9 +711,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const visibleBarcodes = useMemo(() => new Set(visibleRows.map((a) => a.barcode)), [visibleRows]);
     const matrixView = useMemo(() => {
         if (!isFiltered) return viewAgg;
-        const base = ffSliceActive ? slicedRowsBox : distRowsBox;
+        const base = ffSliceActive ? slicedDraft : draftAll;
         return buildDistAgg(base.filter((r) => visibleBarcodes.has(r.barcode)), nmByBc, nmPpb, nmBoxSize, palletOverrides);
-    }, [isFiltered, viewAgg, ffSliceActive, slicedRowsBox, distRowsBox, visibleBarcodes, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+    }, [isFiltered, viewAgg, ffSliceActive, slicedDraft, draftAll, visibleBarcodes, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
     const matrixViewOnHold = useMemo(
         () => visibleRows.reduce((s, a) => s + Math.max(0, availOf(a) - (matrixView.allocByBc.get(a.barcode) ?? 0)), 0),
         [visibleRows, availOf, matrixView],
@@ -743,6 +726,13 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     // логика черновика (self-heal: целые коробы/паллеты, дозабор хвостов) доводит до ума.
     const handleWrite = useCallback(async () => {
         if ((shipRows.length === 0 && effPrebook.length === 0) || writing) return;
+        const ownedNm = new Set([...shipRows, ...effPrebook].map((r) => r.nm_id));
+        if (!window.confirm(
+            `Пересчитать от потребности и записать в черновик?\n\n` +
+            `Заменится план по ${ownedNm.size} SKU: ${formatNumber(commit.totalShip, 0)} шт строками` +
+            (prebookUnits > 0 ? ` + ${formatNumber(prebookUnits, 0)} шт в предбронь` : '') +
+            `.\nРучные правки этих SKU будут перезаписаны; SKU вне расчёта не тронутся.`,
+        )) return;
         setWriting(true);
         try {
             const cur = await api.getAssemblyDraft(draftId);
@@ -829,84 +819,43 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             )}
 
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'center', fontSize: 14 }}>
-                <span>К отправке: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalShip, 0)}</b> шт</span>
-                <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalBoxes, 0)}</b></span>
-                <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalPallets, 0)}</b></span>
-                <span style={{ color: 'var(--color-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
-                {prebookUnits > 0 && (
-                    <span style={{ color: 'var(--color-muted)' }}>🅿️ Предбронь: <b style={{ color: 'var(--color-text)' }}>{formatNumber(prebookUnits, 0)}</b> шт</span>
-                )}
-                <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
-                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="Матрица «Раскладка» = коробное покрытие потребности. В черновик пишутся только целые паллеты; неполные — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ).">
-                        📦 Матрица — покрытие · 🚚 Черновик — целые паллеты
+                <span>В черновике: <b style={{ fontSize: 18 }}>{formatNumber(draftAgg.totalShip, 0)}</b> шт</span>
+                <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(draftAgg.totalBoxes, 0)}</b></span>
+                <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(draftAgg.totalPallets, 0)}</b></span>
+                {draftPrebookUnits > 0 && (
+                    <span style={{ color: 'var(--color-muted)' }} title="Часть плана черновика, лежащая в предброни (хвосты < паллеты). Входит в общую сумму — здесь всё единым числом.">
+                        в т.ч. 🅿️ {formatNumber(draftPrebookUnits, 0)} шт
                     </span>
-                    <button className="btn btn-primary" onClick={handleWrite} disabled={writing || (shipRows.length === 0 && effPrebook.length === 0)}>
-                        {writing ? 'Запись…' : `Записать в черновик (${formatNumber(commit.totalShip, 0)} шт)`}
+                )}
+                <span style={{ color: 'var(--color-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
+                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="Живой расчёт от потребности (need-канал + новинки cold-start с гвардом пересорта). Кнопка заменяет план по SKU расчёта: целые паллеты → строки черновика, хвосты → предбронь.">
+                        {computing ? 'расчёт от потребности…' : `расчёт предлагает: ${formatNumber(commit.totalShip, 0)} шт`}
+                    </span>
+                    <button className="btn btn-primary" onClick={handleWrite} disabled={writing || computing || (shipRows.length === 0 && effPrebook.length === 0)}>
+                        {writing ? 'Запись…' : `⟳ Пересчитать от потребности (${formatNumber(commit.totalShip, 0)} шт)`}
                     </button>
                 </div>
             </div>
 
-            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                <button className={`btn ${subTab === 'dist' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('dist')}>🚚 Раскладка</button>
-                <button className={`btn ${subTab === 'prebook' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('prebook')}>
-                    🅿️ Предбронь{prebookUnits > 0 ? ` (${formatNumber(prebookUnits, 0)})` : ''}
-                </button>
-            </div>
-
-            {subTab === 'prebook' ? (
-                prebookGroups.length === 0 ? (
-                    <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
-                        Предброни нет — вся раскладка набирается целыми паллетами (или ничего не разложено).
-                    </div>
-                ) : (
-                    <PrebookView
-                        groups={prebookGroups}
-                        toppingUpKey={prebookOpKey}
-                        shipAsIsKey={prebookOpKey}
-                        deletingKey={null}
-                        prebookingKey={prebookOpKey}
-                        tailTopUpKey={prebookOpKey}
-                        trimTailKey={null}
-                        palletOpKey={null}
-                        acceptanceMarks={prebookAcceptanceMarks}
-                        acceptanceLoading={false}
-                        preorderWbs={preorderWbs}
-                        onTopUp={topUpBox}
-                        onShipAsIs={promoteDir}
-                        onDelete={(nm, wb, pkg) => setHiddenSkus((s) => new Set(s).add(`${nm}::${wb}::${pkg}`))}
-                        onDeleteDirection={hideDir}
-                        onCreatePrebooking={promoteDir}
-                        onTopUpPrebook={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
-                        onTrimTail={(wb, ffId) => hideDir('MONOPALLET', wb, ffId)}
-                        onBookPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
-                        onReleasePallets={(wb, ffId) => hideDir('MONOPALLET', wb, ffId)}
-                        onDraftPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
-                    />
-                )
-            ) : (<>
+            {(<>
                 <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
                         <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={editMode ? () => setEditMode(false) : enterManual}>
-                            {editMode ? '✓ Готово с ручной раскладкой' : '✏️ Разложить вручную'}
+                            {editMode ? '✓ Готово с правкой' : '✏️ Править черновик'}
                         </button>
                         {editMode && (
                             <span style={{ fontSize: 12, color: 'var(--color-warning)' }}>
-                                Ручной режим: правь короба (−/+) поверх авто-раскладки. Тронутая строка помечается «вручную», нетронутые остаются авто. Лимит приёмки склада проверяется (⌛ предзаявка · ⛔ закрыт).
+                                Правь короба (−/+) — изменения сразу сохраняются в черновик (строки и предбронь SKU сливаются в точный план). Лимит приёмки склада проверяется (⌛ предзаявка · ⛔ закрыт).
                             </span>
-                        )}
-                        {cellEdits.size > 0 && (
-                            <button className="btn btn-sm btn-secondary" style={{ marginLeft: 'auto' }} onClick={resetAllEdits}>
-                                ↺ Сбросить все правки ({formatNumber(cellEdits.size, 0)})
-                            </button>
                         )}
                     </div>
                     <div style={{ color: 'var(--color-muted)', fontSize: 13 }}>
-                        Матрица показывает <b style={{ color: 'var(--color-text)' }}>коробное покрытие</b> потребности (целые коробы под потребность каждого WB-склада), источник — весь свободный остаток ФФ.
-                        Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · что сдаём коробом.
-                        Метрики SKU за окно 14 дней: <b style={{ color: 'var(--color-text)' }}>Потр. 14д</b> (потребность движка) · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> (выручка) · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (индекс локализации, цвет — статус КТР).
-                        В <b style={{ color: 'var(--color-text)' }}>черновик</b> пишутся только целые паллеты; неполные — в 🅿️ Предбронь. Поэтому числа матрицы и черновика могут расходиться.
-                        Новинки (🆕) раскладываются каналом cold-start (посев закупки по сети); если прошлый посев лежит на WB без продаж — авто-досев останавливает гвард ⚠ (ручные −/+ работают всегда).
-                        Колонка <b style={{ color: 'var(--color-text)' }}>«В черновике»</b> — уже записанное по SKU; ✕ убирает SKU из черновика целиком.
+                        Таблица показывает <b style={{ color: 'var(--color-text)' }}>черновик</b>: строки и 🅿️ предбронь каждого SKU единой суммой (доля предброни — в подсказке ячейки).
+                        Правки степперами сохраняются в черновик сразу; ✕ убирает SKU целиком.
+                        Кнопка <b style={{ color: 'var(--color-text)' }}>«⟳ Пересчитать от потребности»</b> считает свежую раскладку (need-канал + новинки cold-start с гвардом пересорта ⚠) и записывает её: целые паллеты → строки, хвосты → предбронь; SKU вне расчёта не трогаются.
+                        Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность. Метрики SKU за 14 дней: <b style={{ color: 'var(--color-text)' }}>Потр. 14д</b> · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (цвет — статус КТР).
+                        Колонка <b style={{ color: 'var(--color-text)' }}>«Расчёт»</b> — что предлагает живой расчёт (для сравнения с планом).
                     </div>
                     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
                         <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>🔎 Фильтр:</span>
@@ -945,11 +894,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                     </div>
                 </div>
 
-                {computing ? (
-                    <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>Считаю раскладку (потребность · приёмка · коробы · паллеты)…</div>
-                ) : matrix.totalShip === 0 && !editMode ? (
+                {draftAgg.totalShip === 0 && !editMode && sortedRows.length === 0 ? (
                     <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
-                        Нечего разложить: ни у одного артикула нет потребности по WB-складам (или не задана кратность короба).
+                        Черновик пуст и свободного остатка на ФФ нет.
                     </div>
                 ) : (
                     <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
@@ -976,7 +923,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                         <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap', background: districtTint(c.district), ...sortableTh }} onClick={() => toggleSort(`wb:${c.name}`)} title={`Сортировать по отправке в «${c.name}»`}>{c.name}{sortArrow(`wb:${c.name}`)}</th>
                                     ))}
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('ship')} title="Сортировать по сумме отправки">Σ отпр.{sortArrow('ship')}</th>
-                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('draft')} title="Сколько этого SKU уже записано в черновике (строками; +N 🅿️ — предбронь). ⚠ — черновик расходится с текущим расчётом. ✕ — убрать SKU из черновика.">В черновике{sortArrow('draft')}</th>
+                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('calc')} title="Живой расчёт от потребности (need-канал + новинки cold-start с гвардом). Жёлтым — расходится с планом черновика; применяется кнопкой «Пересчитать».">Расчёт{sortArrow('calc')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('boxes')} title="Коробов к отправке">Мест{sortArrow('boxes')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('stays')} title="Сортировать по остатку на ФФ">Остаётся ФФ{sortArrow('stays')}</th>
                                 </tr>
@@ -995,8 +942,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                             </td>
                                         );
                                     })}
-                                    <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }} title="Всего штук к отправке">{formatNumber(matrixView.totalShip, 0)} шт</td>
-                                    <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего штук строками в черновике (без предброни)">{draftTotalUnits > 0 ? `${formatNumber(draftTotalUnits, 0)} шт` : '·'}</td>
+                                    <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }} title="Всего штук в черновике (строки + предбронь)">{formatNumber(matrixView.totalShip, 0)} шт</td>
+                                    <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Живой расчёт от потребности (применяется кнопкой «Пересчитать»)">{computing ? '…' : commit.totalShip > 0 ? `${formatNumber(commit.totalShip, 0)} шт` : '·'}</td>
                                     <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего коробов">{formatNumber(matrixView.totalBoxes, 0)} кор</td>
                                     <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Остаётся на хранении ФФ">{formatNumber(matrixViewOnHold, 0)}</td>
                                 </tr>
@@ -1012,11 +959,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                     const ppb = nmPpb.get(nm);
                                     const label = a.vendor_code || String(nm) || a.barcode;
                                     const rowBoxes = boxesOf(ship, ppb);
-                                    const editRec = cellEdits.get(a.barcode);
                                     const rowEditable = editMode && !!ppb && ppb > 0;
-                                    const rowAtCap = ship + (ppb || 0) > avail;
                                     return (
-                                        <tr key={a.barcode} style={{ borderBottom: '1px solid var(--color-border)', background: editRec ? 'rgba(255,159,10,0.07)' : ship > 0 ? 'rgba(59,130,246,0.04)' : undefined }}>
+                                        <tr key={a.barcode} style={{ borderBottom: '1px solid var(--color-border)', background: ship > 0 ? 'rgba(59,130,246,0.04)' : undefined }}>
                                             <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 1 }}>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                                     <span style={{ fontWeight: 600 }}>{label}</span>
@@ -1028,11 +973,6 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                                         </span>
                                                     )}
                                                     {ppb ? <span className="badge badge-secondary" style={{ fontSize: 10, padding: '1px 6px' }}>📦 кратно {formatNumber(ppb, 0)}</span> : <span className="badge" style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>без кратности</span>}
-                                                    {editRec && (
-                                                        <button type="button" className="badge" title="Сбросить ручные правки строки"
-                                                            style={{ background: 'rgba(255,159,10,0.16)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px', border: 'none', cursor: 'pointer' }}
-                                                            onClick={() => resetRowEdits(a.barcode)}>✏️ вручную · ↺</button>
-                                                    )}
                                                 </div>
                                                 <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>{a.subject ? `${a.subject} · ` : ''}ШК {a.barcode}</div>
                                             </td>
@@ -1059,37 +999,32 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                                 const cell = cells?.get(c.name);
                                                 const ctx = e?.byWh[c.name];
                                                 const ctxBusy = (ctx?.asm ?? 0) + (ctx?.transit ?? 0);
+                                                const pbPart = prebookCellByBc.get(a.barcode)?.get(c.name) ?? 0;
                                                 return (
                                                     <NeedMatrixCell
                                                         key={c.name}
                                                         ship={cell ?? null}
                                                         stock={ctx?.stock ?? 0}
                                                         onWay={ctxBusy}
-                                                        tint={districtTint(c.district)}
+                                                        tint={pbPart > 0 ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : districtTint(c.district)}
                                                         mark={markFor(nm, c.name, cell?.pkg ?? null)}
                                                         edit={rowEditable && ppb ? {
-                                                            boxes: editRec ? (editRec[c.name] ?? 0) : boxesOf(cell?.qty ?? 0, ppb),
+                                                            boxes: boxesOf(cell?.qty ?? 0, ppb),
                                                             ppb,
-                                                            onDelta: (d: number) => editCellBoxes(a.barcode, nm, c.name, d),
-                                                            disableInc: rowAtCap,
+                                                            onDelta: (d: number) => editDraftCell(a.barcode, nm, c.name, d),
+                                                            disableInc: false,
                                                         } : null}
                                                     />
                                                 );
                                             })}
-                                            <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600 }}>{ship > 0 ? formatNumber(ship, 0) : '·'}</td>
                                             {(() => {
-                                                const d = draftByNm.get(nm);
-                                                const total = d ? d.rows + d.prebook : 0;
-                                                const mismatch = total > 0 && ship === 0;
+                                                const pbNm = draftByNm.get(nm)?.prebook ?? 0;
                                                 return (
-                                                    <td style={{ padding: '6px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: mismatch ? 'var(--color-warning)' : total > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}
-                                                        title={d && total > 0
-                                                            ? `В черновике: ${formatNumber(d.rows, 0)} шт строками${d.prebook > 0 ? ` + ${formatNumber(d.prebook, 0)} шт в предброни` : ''}${mismatch ? '. Текущий расчёт этому SKU ничего не предлагает — план в черновике мог устареть.' : ''}`
-                                                            : 'В черновике этого SKU нет'}>
-                                                        {total > 0 ? (
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600, whiteSpace: 'nowrap' }}
+                                                        title={ship > 0 ? `План черновика: ${formatNumber(ship, 0)} шт${pbNm > 0 ? ` (в т.ч. 🅿️ ${formatNumber(pbNm, 0)} в предброни)` : ''}` : 'В черновике этого SKU нет'}>
+                                                        {ship > 0 ? (
                                                             <>
-                                                                {mismatch ? '⚠ ' : ''}{formatNumber(d!.rows, 0)}
-                                                                {d!.prebook > 0 && <span style={{ color: 'var(--color-muted)', fontWeight: 400 }}> +{formatNumber(d!.prebook, 0)}🅿️</span>}
+                                                                {formatNumber(ship, 0)}
                                                                 <button type="button" title="Убрать SKU из черновика (строки + предбронь)" disabled={removingNm === nm}
                                                                     style={{ marginLeft: 6, border: 'none', background: 'transparent', color: 'var(--color-danger)', cursor: 'pointer', fontSize: 12, padding: 0 }}
                                                                     onClick={() => removeFromDraft(nm, label)}>
@@ -1097,6 +1032,16 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                                                 </button>
                                                             </>
                                                         ) : '·'}
+                                                    </td>
+                                                );
+                                            })()}
+                                            {(() => {
+                                                const calc = commit.allocByBc.get(a.barcode) ?? 0;
+                                                const diff = calc !== ship;
+                                                return (
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: computing ? 'var(--color-dim)' : diff ? 'var(--color-warning)' : 'var(--color-dim)' }}
+                                                        title={computing ? 'Расчёт идёт…' : `Живой расчёт от потребности: ${formatNumber(calc, 0)} шт${diff ? ' — расходится с планом черновика' : ' — совпадает с черновиком'}`}>
+                                                        {computing ? '…' : calc > 0 ? formatNumber(calc, 0) : '·'}
                                                     </td>
                                                 );
                                             })()}
@@ -1143,30 +1088,6 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                 </tr>
                             </tfoot>
                         </table>
-                    </div>
-                )}
-                {draftOnlyNms.length > 0 && (
-                    <div className="glass-card" style={{ padding: 12, marginTop: 16 }}>
-                        <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                            📋 В черновике, но без свободного остатка на ФФ ({formatNumber(draftOnlyNms.length, 0)})
-                        </div>
-                        <div style={{ fontSize: 12, color: 'var(--color-muted)', marginBottom: 8 }}>
-                            Эти SKU записаны в черновике, но свободного остатка ФФ у них нет — раскладка их не пересчитывает.
-                            Отправятся как записано, либо убери их отсюда.
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                            {draftOnlyNms.map(([nm, v]) => (
-                                <div key={nm} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
-                                    <span style={{ fontWeight: 600 }}>{v.vendor}</span>
-                                    <span style={{ color: 'var(--color-muted)' }}>
-                                        {formatNumber(v.rows, 0)} шт{v.prebook > 0 ? ` + ${formatNumber(v.prebook, 0)} 🅿️` : ''}
-                                    </span>
-                                    <button className="btn btn-sm btn-secondary" disabled={removingNm === nm} onClick={() => removeFromDraft(nm, v.vendor)}>
-                                        {removingNm === nm ? 'Убираю…' : '✕ из черновика'}
-                                    </button>
-                                </div>
-                            ))}
-                        </div>
                     </div>
                 )}
             </>)}

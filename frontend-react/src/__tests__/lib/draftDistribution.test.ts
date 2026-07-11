@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     allocSrcAcrossFf,
+    applyDraftCellEdit,
     buildDraftSkus,
     buildPinnedRowsFf,
     buildTopUpRowsFf,
@@ -159,5 +160,57 @@ describe('buildDraftSkus — канал новинок (cold-start)', () => {
         const a = article('A', 1, { 4: 0 });
         const { skus } = buildDraftSkus(input([a], new Set([1]), new Map([[1, { 'Тула': 10 }]])));
         expect(skus).toHaveLength(0);
+    });
+});
+
+
+describe('applyDraftCellEdit — правка ячейки черновика', () => {
+    const art = () => article('A', 1, { 4: 300, 5: 20 });
+
+    it('инкремент на пустом черновике создаёт BOX-строку с src по ФФ', () => {
+        const out = applyDraftCellEdit([], [], art(), 'Екатеринбург - Перспективная 14', 2, 4);
+        expect(out).not.toBeNull();
+        expect(out!.rows).toHaveLength(1);
+        expect(out!.rows[0].tgt).toEqual({ 'Екатеринбург - Перспективная 14': 8 });
+        expect(sumRec(out!.rows[0].src)).toBe(8);
+        expect(out!.prebook).toEqual([]);
+    });
+
+    it('строки и предбронь SKU сливаются в одну сумму, правка двигает только склад ячейки', () => {
+        const rows = [{ nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 52 }, tgt: { 'ЕКБ': 52 } }];
+        const prebook = [{ nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 100 }, tgt: { 'Электросталь': 100 } }];
+        const out = applyDraftCellEdit(rows, prebook, art(), 'ЕКБ', -1, 4);
+        expect(out).not.toBeNull();
+        expect(out!.rows).toHaveLength(1);
+        expect(out!.rows[0].tgt).toEqual({ 'ЕКБ': 48, 'Электросталь': 100 });
+        expect(sumRec(out!.rows[0].src)).toBe(148);
+        expect(out!.prebook).toEqual([]); // предбронь поглощена в rows
+    });
+
+    it('превышение свободного ФФ-остатка → null (клик игнорируется)', () => {
+        const out = applyDraftCellEdit([], [], article('A', 1, { 4: 10 }), 'Тула', 3, 4); // 12 > 10
+        expect(out).toBeNull();
+    });
+
+    it('декремент в ноль убирает SKU из плана', () => {
+        const rows = [{ nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 4 }, tgt: { 'Тула': 4 } }];
+        const out = applyDraftCellEdit(rows, [], art(), 'Тула', -1, 4);
+        expect(out).not.toBeNull();
+        expect(out!.rows).toEqual([]);
+        expect(out!.prebook).toEqual([]);
+    });
+
+    it('MONOPALLET-строки SKU не трогаются и учитываются в капе', () => {
+        const mono = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 36 }, tgt: { 'Казань': 36 }, package_type: 'MONOPALLET' as const };
+        const out = applyDraftCellEdit([mono], [], article('A', 1, { 4: 40 }), 'Тула', 1, 4);
+        expect(out).not.toBeNull();
+        expect(out!.rows).toHaveLength(2);
+        const monoKept = out!.rows.find((r) => r.package_type === 'MONOPALLET');
+        expect(monoKept?.tgt).toEqual({ 'Казань': 36 });
+        // BOX-слой: 4 шт при свободных 40−36=4 — впритык проходит
+        const box = out!.rows.find((r) => (r.package_type ?? 'BOX') === 'BOX');
+        expect(box?.tgt).toEqual({ 'Тула': 4 });
+        // а ещё +1 короб уже не влезет
+        expect(applyDraftCellEdit([mono], [], article('A', 1, { 4: 40 }), 'Тула', 2, 4)).toBeNull();
     });
 });
