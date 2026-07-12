@@ -42,6 +42,7 @@ WB_MARKETPLACE_API_BASE = "https://marketplace-api.wildberries.ru"
 WB_SUPPLIERS_API_BASE = "https://supplies-api.wildberries.ru"
 WB_SELLER_ANALYTICS_API_BASE = "https://seller-analytics-api.wildberries.ru"
 WB_PRICES_API_BASE = "https://discounts-prices-api.wildberries.ru"
+WB_FEEDBACKS_API_BASE = "https://feedbacks-api.wildberries.ru"
 
 # Request timeout in seconds
 TIMEOUT = 30
@@ -741,6 +742,52 @@ class WBApiClient:
                 if isinstance(data, list):
                     return data
                 return []
+
+    # ─── Feedbacks / Reviews (Feedbacks API) ────────────────────────────────
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_feedbacks(
+        self,
+        is_answered: bool = False,
+        take: int = 100,
+        skip: int = 0,
+    ) -> dict:
+        """
+        Отзывы покупателей (feedbacks) по товарам продавца.
+        WB Feedbacks API: GET /api/v1/feedbacks?isAnswered=&take=&skip=
+        take ∈ [1..5000], skip ≥ 0. Нужен scope «Вопросы и отзывы».
+
+        Возвращает внутренний data-dict:
+          {countUnanswered, countArchive, feedbacks: [
+             {id, text, pros, cons, productValuation, createdDate, userName,
+              answer, productDetails: {nmId, productName, supplierArticle, brandName}}
+          ]}
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                params = {
+                    "isAnswered": str(is_answered).lower(),
+                    "take": take,
+                    "skip": skip,
+                }
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks"
+                logger.info("wb_api.request", method="GET", path="/api/v1/feedbacks", params=params)
+                response = await client.get(url, headers=self.headers, params=params)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code == 204:
+                    return {"countUnanswered": 0, "countArchive": 0, "feedbacks": []}
+                if response.status_code != 200:
+                    raise ValueError(f"WB Feedbacks API error: HTTP {response.status_code} — {response.text[:200]}")
+
+                data = response.json()
+                inner = data.get("data") if isinstance(data, dict) else None
+                return inner or {"countUnanswered": 0, "countArchive": 0, "feedbacks": []}
 
 
 def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:

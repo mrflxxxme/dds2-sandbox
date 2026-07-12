@@ -5,9 +5,9 @@ Usage:
     docker compose exec backend python -m scripts.seed_demo
 
 Creates:
-    - Demo user (demo / demo1234)
-    - Demo project
-    - Sample bank accounts
+    - Demo user (demo / demo1234, role=admin)
+    - Demo project + membership
+    - Sample accounts
     - Sample transactions (30 days)
     - Default categories
 """
@@ -26,22 +26,11 @@ from backend.database import async_engine
 from backend.utils.time import utcnow
 
 
-DEMO_USER = {
-    "username": "demo",
-    "email": "demo@dds.local",
-    "name": "Demo User",
-    "password_hash": "",  # Will be set below
-}
-
-DEMO_PROJECT = {
-    "name": "Demo Project",
-    "slug": "demo",
-}
-
+# (account_no, bank, account_name, currency)
 DEMO_ACCOUNTS = [
-    ("Тинькофф Бизнес", "Tinkoff"),
-    ("Сбербанк", "Sberbank"),
-    ("Wildberries", "WB"),
+    ("40702810000000000001", "Tinkoff", "Тинькофф Бизнес", "RUB"),
+    ("40702810000000000002", "Sberbank", "Сбербанк", "RUB"),
+    ("40702810000000000003", "WB", "Wildberries", "RUB"),
 ]
 
 # Sample transactions: (days_ago, direction, amount, description, cat_lvl1, cat_lvl2)
@@ -76,10 +65,11 @@ async def seed():
 
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
     password_hash = pwd_context.hash("demo1234")
-    now = utcnow()
+    # transactions.date is `timestamp without time zone` → use naive UTC
+    now = utcnow().replace(tzinfo=None)
 
     async with async_engine.begin() as conn:
-        # Set project_id context
+        # Set project_id context (RLS)
         await conn.execute(text("SET LOCAL app.project_id = '0'"))
 
         # 1. Create demo user (if not exists)
@@ -95,10 +85,18 @@ async def seed():
         else:
             result = await conn.execute(
                 text(
-                    "INSERT INTO users (username, email, name, hashed_password, is_active) "
-                    "VALUES (:u, :e, :n, :h, true) RETURNING id"
+                    "INSERT INTO users "
+                    "(username, email, first_name, last_name, password_hash, is_active, role, created_at) "
+                    "VALUES (:u, :e, :fn, :ln, :h, true, 'admin', :now) RETURNING id"
                 ),
-                {"u": "demo", "e": "demo@dds.local", "n": "Demo User", "h": password_hash},
+                {
+                    "u": "demo",
+                    "e": "demo@dds.local",
+                    "fn": "Demo",
+                    "ln": "User",
+                    "h": password_hash,
+                    "now": now,
+                },
             )
             user_id = result.fetchone()[0]
             print(f"  ✅ Demo user created (id={user_id})")
@@ -116,25 +114,28 @@ async def seed():
         else:
             result = await conn.execute(
                 text(
-                    "INSERT INTO projects (name, slug, owner_id) "
-                    "VALUES (:n, :s, :o) RETURNING id"
+                    "INSERT INTO projects (name, slug, owner_id, created_at) "
+                    "VALUES (:n, :s, :o, :now) RETURNING id"
                 ),
-                {"n": "Demo Project", "s": "demo", "o": user_id},
+                {"n": "Demo Project", "s": "demo", "o": user_id, "now": now},
             )
             project_id = result.fetchone()[0]
-
-            # Link user to project
-            await conn.execute(
-                text(
-                    "INSERT INTO user_projects (user_id, project_id, role) "
-                    "VALUES (:u, :p, 'owner') ON CONFLICT DO NOTHING"
-                ),
-                {"u": user_id, "p": project_id},
-            )
             print(f"  ✅ Demo project created (id={project_id})")
 
-        # Set RLS context for this project
-        await conn.execute(text("SET LOCAL app.project_id = :pid"), {"pid": str(project_id)})
+        # Link user to project (idempotent)
+        await conn.execute(
+            text(
+                "INSERT INTO project_members (project_id, user_id, role) "
+                "VALUES (:p, :u, 'owner') ON CONFLICT DO NOTHING"
+            ),
+            {"u": user_id, "p": project_id},
+        )
+
+        # Set RLS context for this project (SET LOCAL can't bind params → set_config)
+        await conn.execute(
+            text("SELECT set_config('app.project_id', :pid, true)"),
+            {"pid": str(project_id)},
+        )
 
         # 3. Seed default categories
         from backend.seeds.default_categories import seed_default_categories
@@ -142,43 +143,69 @@ async def seed():
         await seed_default_categories(conn, [project_id])
         print("  ✅ Default categories seeded")
 
-        # 4. Create bank accounts
-        for name, bank in DEMO_ACCOUNTS:
+        # 4. Create accounts
+        for account_no, bank, account_name, currency in DEMO_ACCOUNTS:
             await conn.execute(
                 text(
-                    "INSERT INTO bank_accounts (project_id, name, bank_name) "
-                    "VALUES (:p, :n, :b) ON CONFLICT DO NOTHING"
-                ),
-                {"p": project_id, "n": name, "b": bank},
-            )
-        print(f"  ✅ {len(DEMO_ACCOUNTS)} bank accounts created")
-
-        # 5. Get account ID for transactions
-        result = await conn.execute(
-            text("SELECT id FROM bank_accounts WHERE project_id = :p LIMIT 1"),
-            {"p": project_id},
-        )
-        account_id = result.fetchone()[0]
-
-        # 6. Create sample transactions
-        count = 0
-        for days_ago, direction, amount, desc, cat1, cat2 in DEMO_TRANSACTIONS:
-            txn_date = now - timedelta(days=days_ago)
-            await conn.execute(
-                text(
-                    "INSERT INTO transactions "
-                    "(project_id, bank_account_id, date, amount, direction, "
-                    " description, counterparty, cat_lvl1, cat_lvl2, is_categorized) "
-                    "VALUES (:p, :a, :d, :amt, :dir, :desc, :cp, :c1, :c2, true) "
+                    "INSERT INTO accounts "
+                    "(project_id, account, bank, currency, account_name, is_our_account) "
+                    "VALUES (:p, :acc, :bank, :cur, :name, true) ON CONFLICT DO NOTHING"
                 ),
                 {
                     "p": project_id,
-                    "a": account_id,
+                    "acc": account_no,
+                    "bank": bank,
+                    "cur": currency,
+                    "name": account_name,
+                },
+            )
+        print(f"  ✅ {len(DEMO_ACCOUNTS)} accounts created")
+
+        # 5. Pick an account for transactions (account + bank are stored as strings)
+        result = await conn.execute(
+            text(
+                "SELECT account, bank, currency FROM accounts "
+                "WHERE project_id = :p AND is_deleted = false LIMIT 1"
+            ),
+            {"p": project_id},
+        )
+        acc_row = result.fetchone()
+        acc_no, acc_bank, acc_cur = acc_row[0], acc_row[1], acc_row[2]
+
+        # 6. Create sample transactions
+        count = 0
+        for i, (days_ago, direction, amount, desc, cat1, cat2) in enumerate(DEMO_TRANSACTIONS):
+            txn_date = now - timedelta(days=days_ago)
+            amt = Decimal(str(amount))
+            if direction == "income":
+                income, expense, net = amt, Decimal("0"), amt
+            else:
+                income, expense, net = Decimal("0"), amt, -amt
+            counterparty = desc.split("—")[0].strip() if "—" in desc else desc
+            txn_id = f"demo-{i}-{days_ago}-{acc_no}"
+            await conn.execute(
+                text(
+                    "INSERT INTO transactions "
+                    "(project_id, date, bank, account, currency, txn_id, counterparty, purpose, "
+                    " income, expense, net, is_cashflow, event_type, "
+                    " cat_lvl1, cat_lvl2, cat_lvl1_2, cat_lvl2_2) "
+                    "VALUES (:p, :d, :bank, :acc, :cur, :txn, :cp, :purpose, "
+                    " :income, :expense, :net, 1, 'OPER', "
+                    " :c1, :c2, :c1, :c2) "
+                    "ON CONFLICT DO NOTHING"
+                ),
+                {
+                    "p": project_id,
                     "d": txn_date,
-                    "amt": Decimal(str(amount)),
-                    "dir": direction,
-                    "desc": desc,
-                    "cp": desc.split("—")[0].strip() if "—" in desc else desc,
+                    "bank": acc_bank,
+                    "acc": acc_no,
+                    "cur": acc_cur,
+                    "txn": txn_id,
+                    "cp": counterparty,
+                    "purpose": desc,
+                    "income": income,
+                    "expense": expense,
+                    "net": net,
                     "c1": cat1,
                     "c2": cat2,
                 },
@@ -190,9 +217,9 @@ async def seed():
     print("═" * 50)
     print("✅ Demo data seeded!")
     print()
-    print(f"  Login:    demo")
-    print(f"  Password: demo1234")
-    print(f"  Project:  Demo Project (/{DEMO_PROJECT['slug']})")
+    print("  Login:    demo")
+    print("  Password: demo1234")
+    print("  Project:  Demo Project (/demo)")
     print("═" * 50)
 
 

@@ -6032,3 +6032,27 @@ export interface PenaltyArticleSummaryResponse {
   total_reversal: string;
   net: string;
 }
+
+// ─── Отзывы (WB feedbacks) ───────────────────────────────────────────────────
+export interface Review {
+  id: string;
+  text: string;
+  rating: number;
+  created_date: string | null;
+  user_name: string | null;
+  pros: string | null;
+  cons: string | null;
+  nm_id: number | null;
+  product_name: string | null;
+  article: string | null;
+  brand: string | null;
+  is_answered: boolean;
+}
+
+export interface ReviewsListResponse {
+  items: Review[];
+  count_unanswered: number;
+  count_archive: number;
+  average_rating: number | null;
+  has_key: boolean;
+}
