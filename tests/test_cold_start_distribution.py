@@ -561,7 +561,9 @@ class TestColdStartSubtractAssembly:
                     "wb_qty": 80,
                     "wb_by_warehouse": {"A": 80},
                     "asm_qty": 0,
-                    "sales_14d": 0,
+                    # Продажи выше порога гварда пересорта (5% от WB=80 → 4):
+                    # тут проверяем вычет WB-стока, а не гвард (см. TestOversortGuard).
+                    "sales_14d": 10,
                     "revenue_30d": 0.0,
                     "is_newcomer": True,
                 }
@@ -630,7 +632,9 @@ class TestColdStartSubtractAssembly:
                     "wb_qty": 80,
                     "wb_by_warehouse": {"A": 80},
                     "asm_qty": 0,
-                    "sales_14d": 0,
+                    # Продажи выше порога гварда пересорта (5% от WB=80 → 4):
+                    # тут проверяем вычет WB-стока, а не гвард (см. TestOversortGuard).
+                    "sales_14d": 10,
                     "revenue_30d": 0.0,
                     "is_newcomer": True,
                 }
@@ -951,3 +955,135 @@ class TestPickWithPriorityTiebreak:
         assert "Казань" not in volga_order
         # Самара выше Сарапула по priority_score → лидер
         assert volga_order[0] == "Самара (Новосемейкино)"
+
+
+@pytest.mark.unit
+class TestOversortGuard:
+    """Гвард пересорта новинок (2026-07-10, кейс «швабры апл», проект 4).
+
+    Посев новинки уже лежит на WB (521 шт по трём SKU) и почти не продаётся
+    (~2% за 14д), но cold-start после каждой поставки предлагал досеять до
+    benchmark-долей снова — «Распределить» перетаривал склады. Правило: если
+    WB-остаток новинки > 0, а продажи за окно < max(1, ceil(5% от лежащего)) —
+    досев SKU останавливается целиком (allocations пусто, oversort_guard=True,
+    guard_reason объясняет числа). Ручной override (степперы/qty override на UI)
+    гвардом не ограничивается — он действует только на авто-раздачу.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_acceptance_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _empty(*_a: Any, **_kw: Any) -> set[str]:
+            return set()
+
+        monkeypatch.setattr(
+            "backend.services.warehouse_acceptance_service.get_acceptance_blocked_warehouses",
+            _empty,
+        )
+
+    def _patch_world(self, monkeypatch: pytest.MonkeyPatch, segment: list[dict]) -> None:
+        async def fake_excluded(*_a: Any, **_kw: Any) -> list[str]:
+            return []
+
+        async def fake_district_share(*_a: Any, **_kw: Any) -> tuple[dict[str, float], int]:
+            return ({"central": 1.0}, 1000)
+
+        async def fake_traffic(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {"Электросталь": 1000}
+
+        async def fake_segment(*_a: Any, **_kw: Any) -> list[dict]:
+            return segment
+
+        async def fake_active_asm(*_a: Any, **_kw: Any) -> dict[str, int]:
+            return {}
+
+        async def fake_rf_wh(*_a: Any, **_kw: Any) -> list:
+            return []
+
+        def fake_anchors(d: str) -> tuple[tuple[str, int], ...]:
+            return (("Электросталь", 1),) if d == "central" else ()
+
+        monkeypatch.setattr(cs, "get_excluded_warehouses", fake_excluded)
+        monkeypatch.setattr(cs, "fetch_district_share", fake_district_share)
+        monkeypatch.setattr(cs, "fetch_warehouse_traffic", fake_traffic)
+        monkeypatch.setattr(cs, "fetch_cold_start_segment", fake_segment)
+        monkeypatch.setattr(cs, "fetch_active_assemblies_for_sku", fake_active_asm)
+        monkeypatch.setattr(cs, "fetch_rf_warehouses", fake_rf_wh)
+        monkeypatch.setattr(cs, "get_anchors_for_okrug", fake_anchors)
+
+    @staticmethod
+    def _sku(**over: Any) -> dict:
+        base = {
+            "internal_id": 1391,
+            "nm_id": 896057749,
+            "article_seller": "швабра_EP-200",
+            "subject": "Швабры",
+            "brand": "EP",
+            "barcode": "2049757913292",
+            "rf_qty": 328,
+            "wb_qty": 199,
+            "asm_qty": 20,
+            "sales_14d": 2,
+            "revenue_30d": 0.0,
+            "is_newcomer": True,
+        }
+        base.update(over)
+        return base
+
+    async def _table(self, monkeypatch: pytest.MonkeyPatch, segment: list[dict]):
+        self._patch_world(monkeypatch, segment)
+        return await cs.compute_cold_start_table(
+            db=None,  # type: ignore[arg-type]
+            project_id=4,
+            window_days=14,
+            min_pack=5,
+            bench_from_project_id=None,
+            ship_fraction=1.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard_blocks_stale_newcomer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Реальные числа швабры EP-200: WB 199, продажи 2/14д (1%) → досев стоп."""
+        resp = await self._table(monkeypatch, [self._sku()])
+        row = resp.rows[0]
+        assert row.oversort_guard is True
+        assert row.allocations == {}
+        assert row.total_allocated == 0
+        assert row.guard_reason and "199" in row.guard_reason
+
+    @pytest.mark.asyncio
+    async def test_guard_released_by_sales(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Продажи 30/14д (15% от лежащего) → гвард отпускает, раздача идёт."""
+        resp = await self._table(monkeypatch, [self._sku(sales_14d=30)])
+        row = resp.rows[0]
+        assert row.oversort_guard is False
+        assert row.guard_reason is None
+        assert row.total_allocated > 0
+
+    @pytest.mark.asyncio
+    async def test_guard_off_when_wb_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Первый посев (WB пуст) гвардом не трогается."""
+        resp = await self._table(monkeypatch, [self._sku(wb_qty=0, sales_14d=0)])
+        row = resp.rows[0]
+        assert row.oversort_guard is False
+        assert row.total_allocated > 0
+
+    @pytest.mark.asyncio
+    async def test_guard_threshold_boundary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Порог = max(1, ceil(5% WB)): wb=100 → 5; продажи 5 отпускают, 4 — режут."""
+        resp = await self._table(
+            monkeypatch,
+            [self._sku(nm_id=1, sales_14d=5, wb_qty=100), self._sku(nm_id=2, sales_14d=4, wb_qty=100)],
+        )
+        by_nm = {r.nm_id: r for r in resp.rows}
+        assert by_nm[1].oversort_guard is False
+        assert by_nm[1].total_allocated > 0
+        assert by_nm[2].oversort_guard is True
+        assert by_nm[2].total_allocated == 0
+
+    @pytest.mark.asyncio
+    async def test_guard_ignores_non_newcomer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Не-новинка в сегменте (есть история) гвардом не режется."""
+        resp = await self._table(monkeypatch, [self._sku(is_newcomer=False, sales_14d=0)])
+        row = resp.rows[0]
+        assert row.oversort_guard is False
+        assert row.total_allocated > 0

@@ -755,6 +755,10 @@ input[type="number"] {
     animation: fadeIn 0.3s ease-out;
 }
 
+/* Вращение (сбор позиций и т.п.) */
+@keyframes ddsSpin { to { transform: rotate(360deg); } }
+.dds-spin { display: inline-flex; animation: ddsSpin 0.8s linear infinite; }
+
 /* ─── Skeleton (loading placeholders) ───────────────────────────────────────── */
 
 @keyframes pulse {
@@ -2875,3 +2879,34 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .assembly-row-just-created { background: rgba(52, 199, 89, 0.15); transition: background 0.5s ease; }
 /* Строка, отмеченная для массового удаления. */
 .assembly-row-selected { background: rgba(59, 130, 246, 0.10); }
+
+/* ── Тултипы (замена нативного title) ───────────────────────────────────────
+   Нативный title Chrome рисует ПОД курсором и прячет на каждом mousemove —
+   подсказка мигает, а на маленьких кнопках выглядит как дёргающийся курсор.
+   Наш вариант: pointer-events: none (мышь его не видит, hover не срывается),
+   позиция привязана к элементу, а не к курсору. Всплывашка рендерится порталом
+   в body с position: fixed — иначе её режут контейнеры таблиц с overflow. */
+.dds-tip { display: inline-flex; align-items: center; }
+.dds-tip-pop {
+    position: fixed;
+    background: #374151; color: #f3f4f6;
+    font-size: 11px; font-weight: 400; line-height: 1.4;
+    text-transform: none; letter-spacing: normal; text-align: left;
+    white-space: normal; width: max-content; max-width: 240px;
+    padding: 8px 11px; border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+    z-index: 200; pointer-events: none;
+    animation: ddsTipIn .15s ease-out;
+}
+@keyframes ddsTipIn { from { opacity: 0; } to { opacity: 1; } }
+/* Стрелка остаётся над элементом, даже если всплывашку сдвинули от края окна */
+.dds-tip-pop::after { content: ''; position: absolute; left: var(--dds-tip-arrow, 50%); transform: translateX(-50%); border: 5px solid transparent; }
+/* left/top задаёт JS — это точка привязки у края элемента; сдвигаем всплывашку от неё */
+.dds-tip-pop--top { transform: translate(-50%, -100%); }
+.dds-tip-pop--top::after { top: 100%; border-top-color: #374151; }
+.dds-tip-pop--bottom { transform: translate(-50%, 0); }
+.dds-tip-pop--bottom::after { bottom: 100%; border-bottom-color: #374151; }
+/* Заголовок колонки: курсор-подсказка, подпись бледнеет при наведении */
+.dds-tip--label { cursor: default; }
+.dds-tip-label { transition: opacity .15s; }
+.dds-tip--label:hover .dds-tip-label { opacity: .65; }

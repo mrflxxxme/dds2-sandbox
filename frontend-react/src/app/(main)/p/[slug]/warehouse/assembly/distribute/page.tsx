@@ -1860,13 +1860,39 @@ export default function AssemblyDraftPage() {
                             Соберёт черновик заново строго из «Потребность по складам» (с bump). Текущие строки будут заменены.
                         </span>
                     </div>
-                    {prebook.length > 0 && (
-                        <div className="glass-card" style={{ padding: 12, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                            <span style={{ fontWeight: 700 }}>🅿️ Предбронь: {formatNumber(prebook.length, 0)} поз.</span>
-                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>целые коробы, не собравшие паллету — дозабор/удаление на вкладке «Предбронь»</span>
-                            <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setTab('prebook')}>Открыть предбронь →</button>
-                        </div>
-                    )}
+                    {prebook.length > 0 && (() => {
+                        // Разбивка предброни по ФФ. Склады БЕЗ строк-заявок помечаем «⚠ только
+                        // предбронь»: группы предпросмотра строятся из rows, и такой ФФ там
+                        // «исчезает», хотя план в черновике есть (кейс «апл» 2026-07-11 —
+                        // матрица показывает план единой суммой, а в заявках склада нет).
+                        const pbByFf = new Map<number, number>();
+                        for (const r of prebook) for (const [ff, q] of Object.entries(r.src || {})) {
+                            if ((q || 0) > 0) pbByFf.set(Number(ff), (pbByFf.get(Number(ff)) || 0) + (q || 0));
+                        }
+                        const rowsFf = new Set<number>();
+                        for (const r of rows) for (const [ff, q] of Object.entries(r.src || {})) if ((q || 0) > 0) rowsFf.add(Number(ff));
+                        const pbTotal = [...pbByFf.values()].reduce((s, v) => s + v, 0);
+                        const ffName = (id: number) => warehouses.find(w => w.id === id)?.name || `ФФ ${id}`;
+                        return (
+                            <div className="glass-card" style={{ padding: 12, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                                <span style={{ fontWeight: 700 }}>🅿️ Предбронь: {formatNumber(pbTotal, 0)} шт · {formatNumber(prebook.length, 0)} поз.</span>
+                                {[...pbByFf.entries()].sort((a, b) => b[1] - a[1]).map(([ff, q]) => {
+                                    const noRows = !rowsFf.has(ff);
+                                    return (
+                                        <span key={ff} className="badge"
+                                            title={noRows
+                                                ? 'ВЕСЬ план этого ФФ — в предброни: заявок нет, в предпросмотре заявок склад не виден. Дозабор/отправка — на вкладке Предбронь.'
+                                                : 'Часть плана этого ФФ в предброни (плюс есть заявки в предпросмотре).'}
+                                            style={{ fontSize: 11, padding: '2px 8px', background: noRows ? 'rgba(255,159,10,0.14)' : 'rgba(59,130,246,0.10)', color: noRows ? 'var(--color-warning)' : 'var(--color-text)' }}>
+                                            {noRows ? '⚠ ' : ''}{ffName(ff)} · {formatNumber(q, 0)} шт{noRows ? ' — только предбронь, заявок нет' : ''}
+                                        </span>
+                                    );
+                                })}
+                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>хвосты меньше паллеты — дозабор/отправка на вкладке «Предбронь»</span>
+                                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setTab('prebook')}>Открыть предбронь →</button>
+                            </div>
+                        );
+                    })()}
                     {geomState === 'error' && (
                         <div className="glass-card" style={{ padding: 12, marginBottom: 12, borderLeft: '3px solid var(--color-danger)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                             <span style={{ color: 'var(--color-danger)', fontWeight: 700 }}>⛔ Кратности коробов не загрузились</span>
@@ -2009,7 +2035,14 @@ export default function AssemblyDraftPage() {
                     <DraftMatrixView
                         draftId={draftId}
                         ffNameById={new Map(warehouses.map(w => [w.id, w.name]))}
-                        onWritten={() => { reloadDraft(); setTab('draft'); }}
+                        onDraftChanged={(d) => {
+                            // Тихая синхронизация из редактора-матрицы (автосейв степпера / ✕):
+                            // ручная правка = ТОЧНЫЙ план юзера — пустой heal-scope на эту
+                            // версию, иначе полный self-heal переупаковал бы её (rows→prebook,
+                            // некратные released) вторым PUT. Вкладку НЕ переключаем.
+                            healScopeRef.current = { ts: d.updated_at, only: new Set() };
+                            applyDraft(d);
+                        }}
                     />
                 ) : (
                     <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>

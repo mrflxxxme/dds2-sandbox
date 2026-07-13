@@ -447,6 +447,35 @@ async def sync_budgets_all_projects():
                     logger.error(f"Failed to update sync_log {log_id}: {log_err}")
 
 
+# ─── Ad intraday snapshots (every 30 min) ────────────────────────────────────
+
+
+async def snapshot_ad_intraday_all_projects():
+    """Снять накопительные внутридневные счётчики активных кампаний по всем проектам.
+
+    Источник — кабинетная сессия рекламы (wb_portal_session); проекты без сессии функция
+    сама тихо пропускает. Дельты между снимками = интрадей-график показы/клики/CTR."""
+    from backend.services.funnel.ad_campaigns_service import snapshot_ad_intraday
+
+    logger.info("⏰ Scheduler: starting ad intraday snapshot for all projects")
+    project_ids = await get_sync_project_ids()
+    if not project_ids:
+        return
+
+    for pid in project_ids:
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await asyncio.wait_for(snapshot_ad_intraday(db, pid), timeout=120)
+            if result.get("snapshots"):
+                logger.info(f"Ad intraday snapshot: project {pid} — {result['snapshots']} snapshots")
+        except TimeoutError:
+            logger.error(f"Ad intraday snapshot TIMEOUT for project {pid}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Ad intraday snapshot failed for project {pid}: {e}")
+
+
 # ─── Funnel hourly sync (last 2 days) ────────────────────────────────────────
 
 

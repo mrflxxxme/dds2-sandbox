@@ -51,7 +51,7 @@
 - `services/warehouse_speed.py` — speed-карта POSTAVLENO (priority_score, find_priority_warehouse, anchors/stealers).
 - `services/warehouse_need_service.py` — priority-weighted распределение + priority-chain fallback.
 - `services/warehouse_acceptance_service.py` — `get_acceptance_closed_warehouses` для фильтра открытых складов.
-- `services/cold_start_distribution_service.py` — distribute_multi + priority-rank tiebreak.
+- `services/cold_start_distribution_service.py` — distribute_multi + priority-rank tiebreak. Гвард пересорта новинок (`OVERSORT_SELL_THROUGH_PCT=5`): посев лежит на WB, а продажи за окно < max(1, ceil(5% от лежащего)) → авто-досев SKU остановлен (`oversort_guard`/`guard_reason` в `ColdStartTableRow`); ручной override на UI гвард перекрывает. Канал новинок ручной раскладки черновика (`DraftMatrixView` → `newcomerAlloc` в `buildDraftSkus`) питается теми же `allocations`. Сама «Ручная раскладка» — РЕДАКТОР черновика: таблица показывает rows+prebook единой суммой, степперы правят черновик напрямую (автосейв, `applyDraftCellEdit`), «⟳ Пересчитать от потребности» заменяет план по SKU расчёта (паллеты → rows, хвосты → prebook).
 - `services/localization_tariff.py` — KTR_TABLE, KRP-боксы.
 - `scheduler/jobs/wb_orders_sync.py` — sync `wb_orders` 3×/день.
 - `routers/localization.py` — endpoints (`/localization`, `/summary`, `/skus`, `/sync`).

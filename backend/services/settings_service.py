@@ -217,6 +217,37 @@ async def set_forecast_rf_default_days(db: AsyncSession, project_id: int, days: 
     return days
 
 
+# ─── Ad intraday snapshot interval (minutes) ─────────────────────────────────
+
+_ADS_SNAPSHOT_INTERVAL_KEY = "ads_snapshot_interval_min"
+_ADS_SNAPSHOT_INTERVAL_ALLOWED = (10, 20, 30, 60)  # job тикает каждые 10 мин → кратно 10
+_ADS_SNAPSHOT_INTERVAL_DEFAULT = 10
+
+
+async def get_ads_snapshot_interval_min(db: AsyncSession, project_id: int) -> int:
+    """Как часто снимать внутридневную стату кампаний (мин). Дефолт 10."""
+    raw = await get_setting(db, project_id, _ADS_SNAPSHOT_INTERVAL_KEY)
+    if raw is None:
+        return _ADS_SNAPSHOT_INTERVAL_DEFAULT
+    try:
+        v = int(raw)
+        return v if v in _ADS_SNAPSHOT_INTERVAL_ALLOWED else _ADS_SNAPSHOT_INTERVAL_DEFAULT
+    except (TypeError, ValueError):
+        return _ADS_SNAPSHOT_INTERVAL_DEFAULT
+
+
+async def set_ads_snapshot_interval_min(db: AsyncSession, project_id: int, minutes: int) -> int:
+    """Задать интервал снимков. Разрешено только кратное тику job'а (10/20/30/60)."""
+    m = int(minutes)
+    if m not in _ADS_SNAPSHOT_INTERVAL_ALLOWED:
+        raise ValueError(
+            f"Недопустимый интервал {m} мин. Разрешено: {', '.join(map(str, _ADS_SNAPSHOT_INTERVAL_ALLOWED))}."
+        )
+    await set_setting(db, project_id, _ADS_SNAPSHOT_INTERVAL_KEY, str(m))
+    logger.info("Set ads_snapshot_interval_min for project %s: %d", project_id, m)
+    return m
+
+
 # ─── Cost valuation method (lifetime_avg | fifo | moving_avg) ────────────────
 
 

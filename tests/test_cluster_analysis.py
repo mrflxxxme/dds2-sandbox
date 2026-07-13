@@ -140,3 +140,34 @@ def test_enrich_adds_bid_minus_and_lock():
 
     edge = _enrich({"norm_query": "x", "views": 100}, set(), {})
     assert edge["locked"] is False       # ровно 100 — уже не залочен
+
+
+def test_enrich_lock_uses_alltime_views_not_range():
+    """locked считается по показам за ВСЮ историю (all_views), а не за выбранный период.
+
+    Юзер выбрал узкую дату → в периоде мало показов, но исторически ≥100 → НЕ «сбор данных».
+    """
+    from backend.services.funnel.cluster_analysis_service import _enrich
+
+    # За период всего 5 показов, но за всю историю 500 → не залочен
+    r = _enrich({"norm_query": "ковёр", "views": 5}, set(), {}, {"ковёр": 500})
+    assert r["locked"] is False
+    # Обратно: в периоде много, но исторически мало (напр. фраза только появилась) → залочен
+    r2 = _enrich({"norm_query": "новый", "views": 300}, set(), {}, {"новый": 40})
+    assert r2["locked"] is True
+    # Фразы нет в all_views (не крутилась исторически) → фолбэк на показы периода
+    r3 = _enrich({"norm_query": "нет", "views": 5}, set(), {}, {"иное": 500})
+    assert r3["locked"] is True
+
+
+def test_merge_norm_sums_across_pairs():
+    from backend.services.funnel.cluster_analysis_service import _merge_norm
+
+    stats = {
+        (1, 111): [{"norm_query": "ковёр", "views": 100, "clicks": 5, "spend": 50.0}],
+        (1, 222): [{"norm_query": "ковёр", "views": 40, "clicks": 2, "spend": 20.0},
+                   {"norm_query": "палас", "views": 10, "clicks": 1, "spend": 5.0}],
+    }
+    m = _merge_norm(stats)
+    assert m["ковёр"]["views"] == 140 and m["ковёр"]["clicks"] == 7 and m["ковёр"]["spend"] == 70.0
+    assert m["палас"]["views"] == 10

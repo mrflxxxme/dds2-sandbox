@@ -1,6 +1,8 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
-import type { FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsCampaignStateResult, AdsAutopaySaveResult, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZones, ClusterMinusResult, ClusterBidResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
+import type {
+    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, AdsCampaignStateResult, AdsAutopaySaveResult, AdsBudgetGap, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
+    CampaignZonesUpdate, ClusterMinusResult, ClusterBidResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
     return {
@@ -131,12 +133,63 @@ export function addFunnelMethods(api: ApiClient) {
         getAdArticleCatalog() {
             return api.request<{ nm_id: number; vendor_code: string; subject: string; brand: string }[]>('GET', '/api/v1/funnel/ad-article-catalog');
         },
-        getCampaignMetrics(campaignId: number, dateFrom?: string, dateTo?: string, nmId?: number | null) {
+        getCampaignMetrics(campaignId: number, dateFrom?: string, dateTo?: string, nmId?: number | null, zone?: string | null) {
             const q = new URLSearchParams();
             if (dateFrom) q.set('date_from', dateFrom);
             if (dateTo) q.set('date_to', dateTo);
             if (nmId != null) q.set('nm_id', String(nmId));
+            if (zone) q.set('zone', zone);
             return api.request<CampaignMetricsResponse>('GET', `/api/v1/funnel/campaigns/${campaignId}/metrics?${q.toString()}`);
+        },
+        /** Посуточные РК-метрики кампании по зоне показов (total | search | recommendations). */
+        getCampaignZoneMetrics(campaignId: number, dateFrom?: string, dateTo?: string, zone: 'total' | 'search' | 'recommendations' = 'total') {
+            const q = new URLSearchParams();
+            if (dateFrom) q.set('date_from', dateFrom);
+            if (dateTo) q.set('date_to', dateTo);
+            q.set('zone', zone);
+            return api.request<CampaignZoneMetricsResponse>('GET', `/api/v1/funnel/campaigns/${campaignId}/metrics/by-zone?${q.toString()}`);
+        },
+        /** Почасовой расход кампании за день (восстановлен из снимков бюджета). */
+        getCampaignHourly(campaignId: number, date?: string) {
+            const q = new URLSearchParams();
+            if (date) q.set('date', date);
+            const qs = q.toString();
+            return api.request<CampaignHourlySpend>('GET', `/api/v1/funnel/campaigns/${campaignId}/hourly${qs ? `?${qs}` : ''}`);
+        },
+        /** Внутридневные показы/клики/расход по интервалам (снимки campaigns-stats). */
+        getCampaignIntraday(campaignId: number, date?: string) {
+            const q = new URLSearchParams();
+            if (date) q.set('date', date);
+            const qs = q.toString();
+            return api.request<CampaignIntradayMetrics>('GET', `/api/v1/funnel/campaigns/${campaignId}/intraday${qs ? `?${qs}` : ''}`);
+        },
+        /** Частота внутридневных снимков рекламы (проект-глобально): 10/20/30/60 мин. */
+        setAdsSnapshotInterval(intervalMin: number) {
+            return api.request<{ interval_min: number }>('PUT', '/api/v1/funnel/ads/snapshot-interval', { interval_min: intervalMin });
+        },
+        /** Органические позиции товара по фразам (для кластеризатора): {phrase: {position, prev, depth, at}}. */
+        getPositions(nmId: number) {
+            return api.request<PositionsResponse>('GET', `/api/v1/funnel/positions?nm_id=${nmId}`);
+        },
+        /** Прогресс фонового сбора позиций для nm_id. */
+        getPositionsProgress(nmId: number) {
+            return api.request<PositionsProgress>('GET', `/api/v1/funnel/positions/progress?nm_id=${nmId}`);
+        },
+        /** Запустить фоновый сбор органических позиций по фразам из публичного поиска WB (Play). */
+        collectPositions(nmId: number, phrases: string[], maxPages = 5) {
+            return api.request<CollectPositionsResult>('POST', '/api/v1/funnel/positions/collect', { nm_id: nmId, phrases, max_pages: maxPages });
+        },
+        /** Синхронно собрать позицию одной фразы (кнопка-кругляшок в ячейке). */
+        collectPositionOne(nmId: number, phrase: string, maxPages = 5) {
+            return api.request<CollectOneResult>('POST', '/api/v1/funnel/positions/collect-one', { nm_id: nmId, phrase, max_pages: maxPages });
+        },
+        /** Остановить фоновый сбор позиций (Stop). */
+        stopPositions(nmId: number) {
+            return api.request<{ stopping: boolean }>('POST', `/api/v1/funnel/positions/stop?nm_id=${nmId}`, {});
+        },
+        /** Сменить ставку кампании для зоны (Поиск/Рекомендации). Реальные деньги. */
+        setCampaignZoneBid(campaignId: number, zone: 'search' | 'recommendations', bid: number) {
+            return api.request<{ ok: boolean; error: string | null; bid: number | null }>('PUT', `/api/v1/funnel/campaigns/${campaignId}/zone-bid`, { zone, bid });
         },
         /** Ручное пополнение бюджета кампании (реальные деньги). */
         depositCampaignBudget(campaignId: number, amount: number, source = 0) {
@@ -152,6 +205,38 @@ export function addFunnelMethods(api: ApiClient) {
         /** Запустить (active=true) или поставить кампанию на паузу (false) в WB. */
         setCampaignState(campaignId: number, active: boolean) {
             return api.request<AdsCampaignStateResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/state`, { active });
+        },
+        /** Завершить кампанию в WB (необратимо). */
+        stopCampaign(campaignId: number) {
+            return api.request<{ ok: boolean; status?: number; error: string | null }>('POST', `/api/v1/funnel/campaigns/${campaignId}/stop`);
+        },
+        /** Переименовать кампанию в WB. */
+        renameCampaign(campaignId: number, name: string) {
+            return api.request<{ ok: boolean; name?: string; error: string | null }>('POST', `/api/v1/funnel/campaigns/${campaignId}/rename`, { name });
+        },
+        /** Удалить кампанию в WB (только статус «Готова»). */
+        deleteCampaign(campaignId: number) {
+            return api.request<{ ok: boolean; error: string | null }>('DELETE', `/api/v1/funnel/campaigns/${campaignId}`);
+        },
+        /** Добавить/убрать товары кампании в WB. */
+        changeCampaignNms(campaignId: number, body: { add?: number[]; delete?: number[] }) {
+            return api.request<{ ok: boolean; error: string | null }>('PATCH', `/api/v1/funnel/campaigns/${campaignId}/nms`, body);
+        },
+        /** Ставки карточек товаров (по зонам). */
+        setCardBids(campaignId: number, bids: { nm_id: number; bid_rub: number; placement: string }[]) {
+            return api.request<{ ok: boolean; error: string | null }>('PATCH', `/api/v1/funnel/campaigns/${campaignId}/card-bids`, { bids });
+        },
+        /** Предметы, по которым можно создать кампанию. */
+        getAdSubjects() {
+            return api.request<{ subjects: AdSubject[]; error?: string }>('GET', '/api/v1/funnel/ad-subjects');
+        },
+        /** Карточки товаров для кампании по предметам. */
+        getAdNms(subjectIds: number[]) {
+            return api.request<{ nms: AdNmCard[]; error?: string }>('POST', '/api/v1/funnel/ad-nms', { subject_ids: subjectIds });
+        },
+        /** Создать рекламную кампанию в WB. */
+        createCampaign(body: { name: string; nms: number[]; bid_type: string; payment_type: string; placement_types?: string[] | null }) {
+            return api.request<CreateCampaignResult>('POST', '/api/v1/funnel/campaigns/create', body);
         },
         getAutopayLog(campaignId?: number) {
             const q = new URLSearchParams();
@@ -187,6 +272,10 @@ export function addFunnelMethods(api: ApiClient) {
             if (dateTo) q.set('date_to', dateTo);
             if (nmId != null) q.set('nm_id', String(nmId));
             return api.request<CampaignZones>('GET', `/api/v1/funnel/campaigns/${campaignId}/zones?${q.toString()}`);
+        },
+        /** Включить/выключить зоны показов (только CPM с ручной ставкой). Обе зоны — WB заменяет набор целиком. */
+        setCampaignZones(campaignId: number, body: { search: boolean; recommendations: boolean }) {
+            return api.request<CampaignZonesUpdate>('PUT', `/api/v1/funnel/campaigns/${campaignId}/zones`, body);
         },
         getCampaignClusters(campaignId: number, dateFrom: string, dateTo: string, nmId?: number | null) {
             const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
