@@ -36,7 +36,7 @@ pytz==2024.2
 sentry-sdk[fastapi]==2.62.0
 structlog==24.4.0
 pdfplumber==0.11.9
-pillow-heif==0.18.0  # HEIC→JPEG для распознавания фото-счёта (айфон снимает в HEIC; Pillow тянет pdfplumber)
+pillow-heif==1.3.0  # HEIC→JPEG для распознавания фото-счёта (айфон снимает в HEIC; Pillow тянет pdfplumber). 1.3.0: fix PYSEC-2026-2258 (было 0.18.0)
 prometheus-fastapi-instrumentator==7.1.0
 aiogram>=3.4,<4.0
 aiohttp-socks>=0.8.0
