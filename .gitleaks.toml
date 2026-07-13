@@ -25,6 +25,9 @@ regexes = [
 paths = [
   # Claude agent worktree artifacts — not real commits
   ".claude/worktrees",
+  # Test fixtures contain only fake credentials (dummy passwords in auth tests);
+  # the generic-api-key rule flags them as false positives.
+  "tests/",
 ]
 
 # Known findings — allowlisted commits

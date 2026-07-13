@@ -18,6 +18,8 @@ from backend.services.invoice_parser import (
     _account_inn_mismatch,
     _extract_text,
     _finalize,
+    _fmt_cell,
+    _fmt_number,
     _image_media_type,
     _valid_bik,
     _valid_rs,
@@ -200,6 +202,14 @@ def test_purpose_vat_exempt_marker():
     assert r.purpose.endswith("Без НДС")
 
 
+def test_purpose_vat_exempt_1c_wording():
+    """Печатная форма 1С пишет «Без налога (НДС)» — тоже признак счёта без НДС."""
+    text = "Счет на оплату № 178 от 01 июля 2026 г.\nБез налога (НДС) -\nВсего к оплате: 500,00\n"
+    r = extract_requisites_from_text(text)
+    assert r.purpose is not None
+    assert r.purpose.endswith("Без НДС")
+
+
 def test_valid_account_surfaces():
     r = extract_requisites_from_text(_invoice_text(_RS_VALID))
     assert r.payee_account == _RS_VALID
@@ -213,16 +223,18 @@ def test_invalid_account_goes_to_warnings():
     assert any("Расчётный счёт" in w for w in r.warnings)
 
 
-def test_bik_not_in_directory_warns_and_skips_bank():
+def test_bik_not_in_directory_warns_but_keeps_bik():
+    """БИК вне зашитого набора: сам БИК отдаём (структурно валиден), банк — нет.
+    Банк добьёт `enrich_bank_from_db` из справочника ЦБ; до тех пор — предупреждение."""
     text = (
         "ИНН 7707083893\n"
         "Банк получателя Некий Банк\n"
-        "БИК 049999999\n"  # нет в справочнике
+        "БИК 049999999\n"  # нет в зашитом наборе
         "Получатель: ООО «Тест»\n"
         "Всего к оплате: 100,00\n"
     )
     r = extract_requisites_from_text(text)
-    assert r.payee_bik is None
+    assert r.payee_bik == "049999999"
     assert r.payee_bank_name is None
     assert any("049999999" in w for w in r.warnings)
     assert r.payee_inn == "7707083893"  # остальное всё равно распозналось
@@ -300,6 +312,146 @@ def test_extract_text_from_docx():
 
 def test_extract_text_unknown_type_returns_empty():
     assert _extract_text(b"plain text, not pdf or docx", "note.txt") == ""
+
+
+# ─── Excel-счёт (1С печатает счёт на оплату в .xls / .xlsx) ─────────────────────
+
+_RS_IP = "40802810380000100006"  # р/с ИП, проходит контроль-ключ по _BIK (см. test_fixture_rs_is_valid)
+
+
+def _invoice_xlsx(rows: list[list[object]]) -> bytes:
+    """Минимальный .xlsx с переданной сеткой (openpyxl — уже в зависимостях)."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# Сетка печатной формы 1С: якорь и значение — соседние ячейки одной строки.
+_INVOICE_ROWS: list[list[object]] = [
+    ["ПАО Сбербанк г. Москва", "БИК", _BIK],
+    [None, "Сч. №", _CORR],
+    ["Банк получателя"],
+    ["ИНН", "770708389312", "КПП", "Сч. №", _RS_IP],
+    ["ИП Иванов Иван Иванович"],
+    ["Получатель"],
+    ["Счет на оплату № 178 от 01 июля 2026 г."],
+    ["Поставщик\n(Исполнитель):", "ИП Иванов Иван Иванович, ИНН 770708389312"],
+    ["Покупатель\n(Заказчик):", 'ООО "ПЛЮС ВАЙБ", ИНН 1800027275'],
+    ["№", "Товары (работы, услуги)", "Кол-во", "Цена", "Сумма"],
+    [1, "Аренда за июль 2026 г.", 1.0, 63300.0, 63300.0],
+    ["Итого:", 63300.0],
+    ["Без налога (НДС)", "-"],
+    ["Всего к оплате:", 63300.0],
+]
+
+
+def test_extract_text_from_xlsx_grid():
+    """Ячейки строки склеиваются пробелом → якорь и значение оказываются рядом."""
+    text = _extract_text(_invoice_xlsx(_INVOICE_ROWS), "Счет на оплату № 178.xlsx")
+    assert "БИК 044525225" in text
+    assert f"ИНН 770708389312 КПП Сч. № {_RS_IP}" in text
+    assert "Всего к оплате: 63300.00" in text  # float-ячейка → копейки (иначе _TOTAL_RE не матчит)
+
+
+def test_xlsx_invoice_yields_requisites():
+    """Сквозной regex-путь по Excel-счёту: реквизиты ИП вытаскиваются, р/с проходит ключ."""
+    text = _extract_text(_invoice_xlsx(_INVOICE_ROWS), "invoice.xlsx")
+    r = extract_requisites_from_text(text)
+    assert r.payee_inn == "770708389312"
+    assert r.payee_kpp is None          # у ИП (12 цифр) КПП нет — sanity-чистка
+    assert r.payee_bik == _BIK
+    assert r.payee_account == _RS_IP
+    assert r.payee_corr_account == _CORR
+    assert r.amount == Decimal("63300.00")
+    assert r.purpose is not None and "№ 178" in r.purpose
+
+
+def test_fmt_number_keeps_long_codes_but_adds_kopecks():
+    """Деньги → 2 знака; длинное целое (ИНН/счёт числом) → без хвоста «.00»."""
+    assert _fmt_number(63300.0) == "63300.00"
+    assert _fmt_number(1.0) == "1.00"
+    assert _fmt_number(770708389312.0) == "770708389312"
+    assert _fmt_number(float("inf")) == ""
+
+
+def test_fmt_cell_types():
+    import datetime as dt
+
+    assert _fmt_cell(None) == ""
+    assert _fmt_cell(True) == ""  # булев флаг — не текст счёта
+    assert _fmt_cell(dt.date(2026, 7, 1)) == "01.07.2026"
+    assert _fmt_cell("  ООО «Ромашка»  ") == "ООО «Ромашка»"
+
+
+def test_extract_text_html_saved_as_xls():
+    """Выгрузка банка: HTML-таблица под именем .xls (см. utils/file_validation)."""
+    data = f"<html><body><table><tr><td>БИК</td><td>{_BIK}</td></tr>".encode() + b"</table></body></html>"
+    text = _extract_text(data, "statement.xls")
+    assert "БИК" in text
+    assert _BIK in text
+
+
+# ─── Добивка банка из полного справочника ЦБ ───────────────────────────────────
+
+
+class _StubDb:
+    """Заглушка AsyncSession: `resolve_bank_db` дёргает только `db.get(CbrBic, bic)`."""
+
+    def __init__(self, row: object = None) -> None:
+        self.row = row
+
+    async def get(self, _model: object, _pk: object) -> object:
+        return self.row
+
+
+class _StubBic:
+    def __init__(self, name: str, corr_account: str) -> None:
+        self.name = name
+        self.corr_account = corr_account
+
+
+async def test_enrich_bank_from_db_fills_regional_branch():
+    """Филиал вне зашитого набора (Сбербанк Тула) добивается из cbr_bic, warning снимается."""
+    r = extract_requisites_from_text("ИНН 7707083893\nБИК 047003608\nВсего к оплате: 100,00\n")
+    assert r.payee_bik == "047003608" and r.payee_bank_name is None
+    assert any("047003608" in w for w in r.warnings)
+
+    db = _StubDb(_StubBic("ТУЛЬСКОЕ ОТДЕЛЕНИЕ N8604 ПАО СБЕРБАНК", "30101810300000000608"))
+    out = await invoice_parser.enrich_bank_from_db(db, r)  # type: ignore[arg-type]
+    assert out.payee_bank_name == "ТУЛЬСКОЕ ОТДЕЛЕНИЕ N8604 ПАО СБЕРБАНК"
+    assert out.payee_corr_account == "30101810300000000608"
+    assert "payee_bank_name" in out.fields_found
+    assert out.warnings == []  # предупреждение снято — банк опознан
+
+
+async def test_enrich_bank_from_db_keeps_warning_when_directory_empty():
+    """Справочник ЦБ пуст (джоба не отработала) → всё как было, предупреждение остаётся."""
+    r = extract_requisites_from_text("ИНН 7707083893\nБИК 049999999\nВсего к оплате: 100,00\n")
+    out = await invoice_parser.enrich_bank_from_db(_StubDb(None), r)  # type: ignore[arg-type]
+    assert out.payee_bank_name is None
+    assert any("049999999" in w for w in out.warnings)
+
+
+async def test_enrich_bank_from_db_preserves_corr_from_invoice():
+    """К/с, распознанный из текста счёта, приоритетнее справочного — не перетираем."""
+    r = extract_requisites_from_text(
+        f"ИНН 7707083893\nБИК 047003608\nСч. № {_CORR}\nВсего к оплате: 100,00\n"
+    )
+    assert r.payee_corr_account == _CORR
+    db = _StubDb(_StubBic("Банк", "30101810300000000608"))
+    out = await invoice_parser.enrich_bank_from_db(db, r)  # type: ignore[arg-type]
+    assert out.payee_corr_account == _CORR
+
+
+def test_extract_text_doc_not_routed_to_excel():
+    """.doc делит OLE2-магию с .xls — по расширению уходит в Word-ветку, а не в xlrd."""
+    assert _extract_text(invoice_parser._OLE2_MAGIC + b"\x00" * 32, "invoice.doc") == ""
 
 
 # ─── Фото счёта (vision) ──────────────────────────────────────────────────────────

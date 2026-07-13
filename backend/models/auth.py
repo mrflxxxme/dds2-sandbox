@@ -86,6 +86,9 @@ class ProjectInvite(Base):
     pages: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: ["assembly","funnel",...]
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, accepted, expired
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # Invite link stops working after this moment (7 days from creation by default).
+    # NULL = legacy invite with no expiry (pre-dating this column).
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime)
     accepted_by_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"))
 

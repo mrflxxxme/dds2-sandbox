@@ -24,6 +24,7 @@ import { addWarehouseMethods } from './api/warehouse';
 import { addWarehouseSpeedMethods } from './api/warehouse-speed';
 import { addFulfillmentMethods } from './api/fulfillment';
 import { addMonitoringMethods } from './api/monitoring';
+import { addRawDataMethods } from './api/rawData';
 import { addSupplyChainMethods } from './api/supply-chain';
 import { addAiChatMethods } from './api/ai-chat';
 import { addCounterpartyMethods } from './api/counterparty';
@@ -52,6 +53,7 @@ export const api = Object.assign(client, {
     ...addWarehouseSpeedMethods(client),
     ...addFulfillmentMethods(client),
     ...addMonitoringMethods(client),
+    ...addRawDataMethods(client),
     ...addSupplyChainMethods(client),
     ...addAiChatMethods(client),
     ...addCounterpartyMethods(client),

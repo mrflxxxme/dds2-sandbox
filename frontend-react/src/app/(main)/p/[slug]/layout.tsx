@@ -74,6 +74,7 @@ const itemIcons: Record<string, React.ReactNode> = {
     '/ai-chat': <Icon><path d="M12 8V4H8" /><rect width="16" height="12" x="4" y="8" rx="2" /><path d="M2 14h2" /><path d="M20 14h2" /><path d="M15 13v2" /><path d="M9 13v2" /></Icon>,
     // Настройки
     '/monitoring': <Icon><path d="M4 11a9 9 0 0 1 9 9" /><path d="M4 4a16 16 0 0 1 16 16" /><circle cx="5" cy="19" r="1" /></Icon>,
+    '/raw-data': <Icon><ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M3 5v14a9 3 0 0 0 18 0V5" /><path d="M3 12a9 3 0 0 0 18 0" /></Icon>,
     '/settings': <Icon><line x1="21" x2="14" y1="4" y2="4" /><line x1="10" x2="3" y1="4" y2="4" /><line x1="21" x2="12" y1="12" y2="12" /><line x1="8" x2="3" y1="12" y2="12" /><line x1="21" x2="16" y1="20" y2="20" /><line x1="12" x2="3" y1="20" y2="20" /><line x1="14" x2="14" y1="2" y2="6" /><line x1="8" x2="8" y1="10" y2="14" /><line x1="16" x2="16" y1="18" y2="22" /></Icon>,
     '/team': <Icon><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></Icon>,
 };
@@ -158,6 +159,7 @@ const navGroups = [
         section: 'settings',
         items: [
             { href: '/monitoring', label: 'Мониторинг', icon: '📡', pageKey: 'monitoring' },
+            { href: '/raw-data', label: 'Сырые данные', icon: '🗄️', pageKey: 'raw-data' },
             { href: '/settings', label: 'Настройка проекта', icon: '⚙️', pageKey: 'project-settings' },
             { href: '/team', label: 'Команда', icon: '👥', pageKey: 'team' },
         ],

@@ -436,7 +436,7 @@ export default function PaymentsPanel({ embedded = false }: Props) {
 
     // Догрузка/удаление документов доступна, пока заявка активна (не отклонена/отменена).
     const canAttachDocs = detail != null && detail.status !== 'CANCELLED' && detail.status !== 'REJECTED';
-    const DOC_ACCEPT = '.pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,.heic';
+    const DOC_ACCEPT = '.pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp,.heic';
 
     return (
         <div className={embedded ? undefined : 'animate-in'}>

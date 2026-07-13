@@ -139,7 +139,7 @@ export function addPaymentRequestMethods(api: ApiClient) {
             return api.uploadFormData<PaymentRequestDocument>(`/api/v1/payment-requests/${id}/documents`, formData);
         },
 
-        /** POST /api/v1/payment-requests/parse-invoice — распознать реквизиты из PDF/Word счёта */
+        /** POST /api/v1/payment-requests/parse-invoice — распознать реквизиты из счёта (PDF/Word/Excel/фото) */
         parseInvoice(file: File): Promise<InvoiceParseResult> {
             const formData = new FormData();
             formData.append('file', file);
