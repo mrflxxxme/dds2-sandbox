@@ -3539,6 +3539,7 @@ export interface CampaignClustersResponse {
   campaign_id: number;
   name: string | null;
   campaign_type: string | null;
+  bid_mode?: string | null;  // 'unified' (единая) / 'manual' (ручная); при unified WB не даёт управлять кластерами
   nm_ids: number[];
   subject: string | null;
   window: ClusterWindow;
