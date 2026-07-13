@@ -18,12 +18,17 @@ def _parse_wb_created(value: Any) -> datetime | None:
     except (ValueError, TypeError):
         return None
 
+import pytz
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbAdCampaign, WbAdCampaignEvent, WbFunnelDaily
-from backend.models.integrations import WbAdCampaignDaily, WbWarehouseStock
+from backend.models.integrations import (
+    WbAdCampaignDaily,
+    WbAdCampaignSnapshot,
+    WbWarehouseStock,
+)
 from backend.models.wb_finance import WbFinanceRow
 from backend.services.funnel.wb_advertising_api import (
     fetch_ad_campaigns_detailed,
@@ -33,6 +38,8 @@ from backend.services.funnel.wb_api_client import get_wb_key
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.funnel")
+
+MSK = pytz.timezone("Europe/Moscow")
 
 # In-memory progress tracker: {project_id: {status, campaigns_total, budgets_done, budgets_total, error}}
 _sync_progress: dict[int, dict[str, Any]] = {}
@@ -299,6 +306,90 @@ async def sync_ad_budgets_only(db: AsyncSession, project_id: int) -> dict:
     await db.commit()
     logger.info(f"sync_ad_budgets_only: {updated_count}/{len(campaign_ids)} budgets updated for project {project_id}")
     return {"updated": updated_count, "events": len(events)}
+
+
+async def snapshot_ad_intraday(db: AsyncSession, project_id: int) -> dict:
+    """Снимок накопительных ВНУТРИДНЕВНЫХ счётчиков активных кампаний (показы/клики/расход).
+
+    Зовётся планировщиком каждые ~30 мин. Тянет «сегодняшний» (МСК) накопительный счётчик
+    из кабинета рекламы (cmp campaigns-stats, сессия wb_portal_session) и пишет по строке
+    WbAdCampaignSnapshot на кампанию. Дельта между снимками = интрадей-метрики
+    (get_intraday_metrics). WB нативно почасовку не отдаёт — копим сами вперёд.
+
+    Кабинетная сессия ≠ API-ключ: нет сессии → тихий skip (фича опциональна, синк не ломаем).
+    Протухла сессия (401) → mark_wb_portal_expired, UI попросит обновить доступ WB.
+    """
+    from backend.integrations.wb_portal_client import WbPortalError, WbSessionExpired
+    from backend.services.integrations_service import (
+        get_wb_portal_client,
+        mark_wb_portal_expired,
+    )
+    from backend.services.settings_service import get_ads_snapshot_interval_min
+
+    try:
+        client = await get_wb_portal_client(db, project_id)
+    except ValueError:
+        return {"snapshots": 0, "skipped": "no_session"}
+
+    # Гейт частоты: job тикает каждые 10 мин, но проект может хотеть реже (20/30/60).
+    # Пропускаем, если с последнего снимка прошло меньше интервала (grace 5 мин на джиттер тика).
+    interval_min = await get_ads_snapshot_interval_min(db, project_id)
+    last_at = (
+        await db.execute(
+            select(func.max(WbAdCampaignSnapshot.captured_at)).where(
+                WbAdCampaignSnapshot.project_id == project_id
+            )
+        )
+    ).scalar()
+    if last_at is not None and (utcnow() - last_at).total_seconds() / 60 < interval_min - 5:
+        await client.aclose()
+        return {"snapshots": 0, "skipped": "interval"}
+
+    active = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id,
+                WbAdCampaign.status == 9,
+            )
+        )
+    ).scalars().all()
+    if not active:
+        await client.aclose()
+        return {"snapshots": 0}
+    campaign_ids = [c.campaign_id for c in active]
+
+    today_msk = pytz.UTC.localize(utcnow()).astimezone(MSK).date()
+    day_str = today_msk.isoformat()
+    try:
+        stats = await client.fetch_campaigns_stats(campaign_ids, day_str, day_str)
+    except WbSessionExpired:
+        await mark_wb_portal_expired(db, project_id)
+        logger.warning(f"snapshot_ad_intraday: session expired for project {project_id}")
+        return {"snapshots": 0, "error": "session_expired"}
+    except WbPortalError as e:
+        logger.warning(f"snapshot_ad_intraday: WB portal error for project {project_id}: {e}")
+        return {"snapshots": 0, "error": "wb_error"}
+    finally:
+        await client.aclose()
+
+    now = utcnow()
+    rows = [
+        WbAdCampaignSnapshot(
+            project_id=project_id,
+            campaign_id=s["campaign_id"],
+            stat_date=today_msk,
+            captured_at=now,
+            views_cum=s["views"],
+            clicks_cum=s["clicks"],
+            spend_cum=Decimal(str(round(s["spend"], 2))),
+        )
+        for s in stats
+    ]
+    if rows:
+        db.add_all(rows)
+        await db.commit()
+    logger.info(f"snapshot_ad_intraday: {len(rows)} snapshots for project {project_id}")
+    return {"snapshots": len(rows)}
 
 
 def _assign_abc(items: list[dict], value_key: str, abc_key: str) -> None:

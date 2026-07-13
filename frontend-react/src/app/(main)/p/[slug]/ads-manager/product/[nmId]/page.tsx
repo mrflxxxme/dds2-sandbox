@@ -7,6 +7,7 @@ import { formatNumber, exportToExcel } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import ClusterTable, { DailyBudgetBar, drrColor, clNum, clMoney, clMoneyN } from '../../components/ClusterTable';
 import type { ProductClustersResponse, SearchCluster, ProductDailyRow, ProductDailyResponse } from '@/types/api';
+import Tooltip from '../../components/Tooltip';
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const num = (v: unknown) => Number(v) || 0;
@@ -72,7 +73,9 @@ function DailyTab({ daily, loading, error, onExport }: { daily: ProductDailyResp
         <div className="glass-card" style={{ padding: 16 }}>
             <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
                 <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>Дней: {daily.rows.length}</span>
-                <button className="btn btn-secondary btn-sm" style={{ fontSize: 12, marginLeft: 'auto' }} onClick={onExport} title="Выгрузить в Excel">📥 Excel</button>
+                <Tooltip text="Выгрузить в Excel" style={{ marginLeft: 'auto' }}>
+                    <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={onExport}>📥 Excel</button>
+                </Tooltip>
             </div>
             <div style={{ overflowX: 'auto' }}>
                 <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>

@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { formatNumber, exportToExcel } from '@/lib/utils';
 import type { SearchCluster, ClusterDailyPoint } from '@/types/api';
 import { cpmForTargetCpc } from './clusterBid';
-import { useFitViewport } from './useFitViewport';
+import Tooltip from './Tooltip';
 
 // ─── Форматтеры (Decimal-поля бэка приходят строкой → Number() перед formatNumber) ───
 const num = (v: unknown) => Number(v) || 0;
@@ -25,9 +25,13 @@ export function drrColor(drr: number | null, targetDrr: number): string {
 // Минималистичный стиль: тонкие линии, плотные строки, малые капсы в шапке
 // Шапка липнет к верху скролл-контейнера, фильтры — сразу под ней (HEAD_H — её высота)
 const HEAD_H = 21;
-const thStyle: React.CSSProperties = { background: '#fafafa', color: '#6b7280', fontSize: 9.5, fontWeight: 600, letterSpacing: 0.3, textTransform: 'uppercase', textAlign: 'right', borderBottom: '1px solid #ececef', padding: '3px 5px', whiteSpace: 'nowrap', position: 'sticky', top: 0, zIndex: 3 };
+const thStyle: React.CSSProperties = { background: '#f3f4f6', color: '#374151', fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase', textAlign: 'right', borderBottom: '1px solid #d1d5db', padding: '3px 5px', whiteSpace: 'nowrap', position: 'sticky', top: 0, zIndex: 3 };
 const thLeft: React.CSSProperties = { ...thStyle, textAlign: 'left' };
-const tdStyle: React.CSSProperties = { textAlign: 'right', borderBottom: '1px solid #f4f4f5', padding: '2px 5px', fontSize: 10.5, lineHeight: 1.35, whiteSpace: 'nowrap' };
+// Высоту строки задаёт ячейка, а не её содержимое: у фраз со ставкой стоит <input> (≈19px),
+// а у «сбор данных» — обычный текст, из-за чего строки различались на ~6px.
+// height у <td> действует как минимальная, поэтому обе ветки выравниваются по ROW_H.
+const ROW_H = 28;
+const tdStyle: React.CSSProperties = { textAlign: 'right', borderBottom: '1px solid #e8eaed', padding: '2px 5px', fontSize: 10.5, lineHeight: 1.35, whiteSpace: 'nowrap', height: ROW_H, color: '#111827' };
 const tdLeft: React.CSSProperties = { ...tdStyle, textAlign: 'left' };
 // Итоговая строка (tfoot) — тот же кегль, что у данных
 const tfStyle: React.CSSProperties = {
@@ -64,7 +68,7 @@ const DROP_LINE = '#3b82f6';
 // Синяя черта у ставки: фраза набрала ≥100 показов, WB даёт по ней ставку
 const BID_ACTIVE_LINE = '#3b82f6';
 // Тонкая линия-разделитель столбцов — через всю таблицу
-const COL_DIVIDER = '1px solid #eef0f2';
+const COL_DIVIDER = '1px solid #e5e7eb';
 // Подсветка строк: выбранная — синяя, под курсором — светло-серая
 const ROW_SELECTED = '#dbeafe';
 const ROW_HOVER = '#f1f5f9';
@@ -75,11 +79,21 @@ const wbSearchUrl = (q: string) => `https://www.wildberries.ru/catalog/0/search.
 /** Цвет позиции: 1–10 зелёный, 11–30 жёлтый, 31 и дальше красный. */
 const posColor = (pos: number) => (pos <= 0 ? '#d1d5db' : pos <= 10 ? '#10b981' : pos <= 30 ? '#f59e0b' : '#ef4444');
 
-type SortField = 'norm_query' | 'bid' | 'views' | 'clicks' | 'ctr' | 'cpc' | 'cpm' | 'cpl'
+type SortField = 'norm_query' | 'bid' | 'position' | 'prev_pos' | 'views' | 'clicks' | 'ctr' | 'cpc' | 'cpm' | 'cpl'
     | 'orders' | 'cr' | 'cr1' | 'cr2' | 'cpo' | 'drr' | 'share' | 'avg_pos' | 'spend';
 
-/** Кластер + метрики, которых нет в ответе WB (считаем из его же полей). */
-type Row = SearchCluster & { cpl: number | null; cr1: number; cr2: number; share: number };
+/** Кластер + метрики, которых нет в ответе WB (считаем из его же полей), + органическая
+ *  позиция товара по фразе из отдельного сбора (search.wb.ru): position/prev_pos + глубина. */
+type Row = SearchCluster & {
+    cpl: number | null; cr1: number; cr2: number; share: number;
+    position: number | null; prev_pos: number | null; pos_depth: number | null;
+};
+
+/** Данные позиций по фразам (norm_query → снимок). Приходят из отдельного endpoint. */
+export type PositionsMap = Record<string, { position: number | null; prev: number | null; depth: number | null }>;
+
+/** Поля-позиции: у них меньше = лучше, а null (не найден) при сортировке — в конец. */
+const POS_FIELDS = new Set<SortField>(['position', 'prev_pos', 'avg_pos']);
 type SortDir = 'asc' | 'desc';
 type RelFilter = 'all' | 'active' | 'excluded';
 type ColKey = SortField;
@@ -89,6 +103,8 @@ type Range = { min: string; max: string };
 const COL_DEFS: Record<ColKey, { label: string; title?: string; align: 'left' | 'right'; filter: 'text' | 'range' }> = {
     norm_query: { label: 'Ключевая фраза', align: 'left', filter: 'text' },
     bid: { label: 'Ставка', title: 'CPM-ставка кластера, ₽', align: 'right', filter: 'range' },
+    position: { label: 'Позиция', title: 'Органическая позиция товара по фразе (последний сбор). «N+» — не в топ-N.', align: 'right', filter: 'range' },
+    prev_pos: { label: 'Была', title: 'Органическая позиция в предыдущем сборе — для динамики', align: 'right', filter: 'range' },
     views: { label: 'Показы', align: 'right', filter: 'range' },
     clicks: { label: 'Клики', align: 'right', filter: 'range' },
     ctr: { label: 'CTR', align: 'right', filter: 'range' },
@@ -105,7 +121,7 @@ const COL_DEFS: Record<ColKey, { label: string; title?: string; align: 'left' | 
     avg_pos: { label: 'Поз.', title: 'Средняя позиция', align: 'right', filter: 'range' },
     spend: { label: 'Затраты', align: 'right', filter: 'range' },
 };
-const DEFAULT_ORDER: ColKey[] = ['norm_query', 'bid', 'views', 'clicks', 'ctr', 'cpc', 'cpm', 'cpl',
+const DEFAULT_ORDER: ColKey[] = ['norm_query', 'bid', 'position', 'prev_pos', 'views', 'clicks', 'ctr', 'cpc', 'cpm', 'cpl',
     'orders', 'cr', 'cr1', 'cr2', 'cpo', 'drr', 'share', 'avg_pos', 'spend'];
 const RANGE_FIELDS = DEFAULT_ORDER.filter(k => COL_DEFS[k].filter === 'range');
 const ORDER_LS_KEY = 'ads_cluster_col_order';
@@ -139,7 +155,7 @@ function BidCell({ cluster, bids, defaultBid }: { cluster: SearchCluster; bids?:
 
     if (!bids) return <span>{current == null ? '—' : clMoney(current)}</span>;
     if (cluster.locked) {
-        return <span title="<100 показов — WB не даёт ставку" style={{ color: '#9ca3af', fontSize: 10.5, fontStyle: 'italic' }}>сбор данных</span>;
+        return <Tooltip text="<100 показов — WB не даёт ставку"><span style={{ color: '#9ca3af', fontSize: 10.5, fontStyle: 'italic' }}>сбор данных</span></Tooltip>;
     }
     const pending = bids.pending.has(cluster.norm_query);
     const commit = () => {
@@ -160,9 +176,10 @@ function BidCell({ cluster, bids, defaultBid }: { cluster: SearchCluster; bids?:
     return (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }} onClick={e => e.stopPropagation()}>
             {/* ≥100 показов — WB уже управляет ставкой этой фразы */}
-            <span aria-hidden style={{ width: 2, alignSelf: 'stretch', minHeight: 16, borderRadius: 1, background: BID_ACTIVE_LINE }}
-                title="Набрано ≥100 показов — ставка по фразе активна" />
-            {dot && <span title={dot.title} style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, background: dot.color }} />}
+            <Tooltip text="Набрано ≥100 показов — ставка по фразе активна" style={{ alignSelf: 'stretch', minHeight: 16 }}>
+                <span aria-hidden style={{ width: 2, alignSelf: 'stretch', minHeight: 16, borderRadius: 1, background: BID_ACTIVE_LINE }} />
+            </Tooltip>
+            {dot && <Tooltip text={dot.title}><span style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, background: dot.color }} /></Tooltip>}
             <input type="number" min={0} value={val} disabled={pending}
                 onChange={e => setVal(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
@@ -256,7 +273,7 @@ function BidPopover({ targets, onApply, onClose }: {
  * Сортируемая таблица кластеров: сегмент релевантности + пер-колоночные фильтры,
  * перестановка колонок (drag), ячейки выбора + массовые действия.
  */
-export default function ClusterTable({ clusters, targetDrr, exportName, minus, bids, defaultBid, aov = 0 }: {
+export default function ClusterTable({ clusters, targetDrr, exportName, minus, bids, defaultBid, aov = 0, positions, onCollectPositions, onStopPositions, collecting, onCollectOne, collectingOne }: {
     clusters: SearchCluster[];
     targetDrr: number;
     exportName: string;
@@ -264,6 +281,12 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
     bids?: BidControls;
     defaultBid?: number | null;  // ставка кампании для фраз без своей
     aov?: number;                // средний чек — нужен для итогового ДРР
+    positions?: PositionsMap;    // органические позиции по фразам (отдельный сбор)
+    onCollectPositions?: () => void;  // Play: массовый сбор позиций по всем фразам
+    onStopPositions?: () => void;     // Stop: остановить массовый сбор
+    collecting?: { done: number; total: number; throttled?: number } | null;  // прогресс массового сбора
+    onCollectOne?: (phrase: string) => void;  // кругляшок в ячейке: собрать одну фразу
+    collectingOne?: Set<string>;      // фразы, по которым идёт единичный сбор (спиннер)
 }) {
     const [rel, setRel] = useState<RelFilter>('all');
     const [contains, setContains] = useState('');
@@ -280,8 +303,6 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
     const [confirmAsk, setConfirmAsk] = useState<{ text: string; run: () => void } | null>(null);
     // Закрепляем слева только штатную пару колонок (ширины зашиты)
     const freezeCols = order[0] === 'norm_query' && order[1] === 'bid';
-    // Таблица занимает остаток экрана; при выборе фраз оставляем место нижней панели
-    const { ref: fitRef, maxHeight: fitHeight } = useFitViewport(160, selected.size > 0 ? 78 : 12);
 
     // Порядок колонок переживает перезагрузку
     useEffect(() => {
@@ -314,14 +335,20 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
     // Доля — от затрат ВСЕЙ кампании, а не от видимых строк, иначе она «плавала» бы от фильтра.
     const rows: Row[] = useMemo(() => {
         const totalSpend = clusters.reduce((s, c) => s + num(c.spend), 0) || 1;
-        return clusters.map(c => ({
-            ...c,
-            cpl: num(c.atbs) > 0 ? num(c.spend) / num(c.atbs) : null,
-            cr1: num(c.clicks) > 0 ? (num(c.atbs) / num(c.clicks)) * 100 : 0,
-            cr2: num(c.atbs) > 0 ? (num(c.orders) / num(c.atbs)) * 100 : 0,
-            share: (num(c.spend) / totalSpend) * 100,
-        }));
-    }, [clusters]);
+        return clusters.map(c => {
+            const p = positions?.[c.norm_query];
+            return {
+                ...c,
+                cpl: num(c.atbs) > 0 ? num(c.spend) / num(c.atbs) : null,
+                cr1: num(c.clicks) > 0 ? (num(c.atbs) / num(c.clicks)) * 100 : 0,
+                cr2: num(c.atbs) > 0 ? (num(c.orders) / num(c.atbs)) * 100 : 0,
+                share: (num(c.spend) / totalSpend) * 100,
+                position: p ? p.position : null,
+                prev_pos: p ? p.prev : null,
+                pos_depth: p ? p.depth : null,
+            };
+        });
+    }, [clusters, positions]);
 
     const filtered = useMemo(() => {
         const cont = contains.trim().toLowerCase();
@@ -339,10 +366,12 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
             return true;
         });
         const dir = sort.dir === 'asc' ? 1 : -1;
+        // null у полей-позиций — «в конец» (не найден = хуже всех), у прочих — как раньше.
+        const nullVal = POS_FIELDS.has(sort.field) ? Infinity : -Infinity;
         return [...base].sort((a, b) => {
             if (sort.field === 'norm_query') return dir * a.norm_query.localeCompare(b.norm_query, 'ru');
-            const av = a[sort.field] == null ? -Infinity : Number(a[sort.field]);
-            const bv = b[sort.field] == null ? -Infinity : Number(b[sort.field]);
+            const av = a[sort.field] == null ? nullVal : Number(a[sort.field]);
+            const bv = b[sort.field] == null ? nullVal : Number(b[sort.field]);
             return dir * (av - bv);
         });
     }, [rows, rel, contains, notContains, ranges, sort]);
@@ -376,6 +405,7 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
         switch (k) {
             case 'norm_query': return <span style={{ fontWeight: 600 }}>Всего: {clNum(filtered.length)}</span>;
             case 'bid': return defaultBid == null ? '—' : clMoney(defaultBid);
+            case 'position': case 'prev_pos': return '—';
             case 'views': return clNum(totals.views);
             case 'clicks': return clNum(totals.clicks);
             case 'ctr': return clPct(totals.ctr, 2);
@@ -473,11 +503,51 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                     title={`Открыть выдачу WB по запросу «${c.norm_query}»`}
                     style={{
                         display: 'block', maxWidth: '100%', textDecorationLine: c.is_minused ? 'line-through' : 'none',
-                        fontWeight: 600, color: c.is_minused ? '#ef4444' : '#6b7280',
+                        fontWeight: 600, color: c.is_minused ? '#ef4444' : '#1f2937',
                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     }}>{c.norm_query}</a>
             );
             case 'bid': return <BidCell cluster={c} bids={bids} defaultBid={defaultBid} />;
+            // Органическая позиция товара по фразе (последний сбор). null+depth>0 = «N+» (не в топ-N),
+            // null+depth 0 = не собрано. Дельта к «Была»: ↑ зелёная (улучшилась), ↓ красная (упала).
+            case 'position': {
+                const pos = c.position, depth = c.pos_depth;
+                const loadingOne = collectingOne?.has(c.norm_query);
+                const collected = pos != null || (depth != null && depth > 0);
+                // Кругляшок — собрать/обновить позицию именно этой фразы. Не собрано → по центру.
+                const roundBtn = (sz: number) => onCollectOne ? (
+                    <button onClick={e => { e.stopPropagation(); if (!loadingOne) onCollectOne(c.norm_query); }}
+                        disabled={loadingOne} title="Собрать/обновить позицию по этой фразе"
+                        style={{
+                            width: sz, height: sz, borderRadius: '50%', border: '1.5px solid #6b7280',
+                            background: '#fff', cursor: loadingOne ? 'wait' : 'pointer', padding: 0,
+                            fontSize: Math.round(sz * 0.62), color: '#1f2937', flexShrink: 0, fontWeight: 700,
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                        }}>{/* при сборе — тот же кружок, но крутится */}
+                        <span className={loadingOne ? 'dds-spin' : undefined} style={{ display: 'inline-flex', lineHeight: 1 }}>⟳</span>
+                    </button>
+                ) : null;
+                if (!collected) {
+                    // ещё не собрано — только кругляшок по середине ячейки (клик собирает и «Позицию», и «Была»)
+                    return <span style={{ display: 'flex', justifyContent: 'center' }}>{roundBtn(22)}</span>;
+                }
+                let val: React.ReactNode;
+                if (pos == null) {
+                    val = <span style={{ color: '#9ca3af' }} title={`Не в топ-${depth}`}>{depth}+</span>;
+                } else {
+                    const prev = c.prev_pos;
+                    let delta: React.ReactNode = null;
+                    if (prev != null && prev !== pos) {
+                        const better = pos < prev;
+                        delta = <span style={{ fontSize: 9, marginLeft: 3, color: better ? '#10b981' : '#ef4444' }}>{better ? '↑' : '↓'}{Math.abs(prev - pos)}</span>;
+                    }
+                    val = <span style={{ fontWeight: 700, color: posColor(pos) }}>{pos}{delta}</span>;
+                }
+                return <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>{val}{roundBtn(16)}</span>;
+            }
+            case 'prev_pos': return c.prev_pos == null
+                ? <span style={{ color: '#d1d5db' }}>—</span>
+                : <span style={{ color: posColor(c.prev_pos) }}>{c.prev_pos}</span>;
             case 'views': return clNum(c.views);
             case 'clicks': return clNum(c.clicks);
             case 'ctr': return clPct(c.ctr, 2);
@@ -529,8 +599,8 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
     };
 
     return (
-        <div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10, flexShrink: 0 }}>
                 <div style={{ display: 'inline-flex', border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
                     {REL_TABS.map((t, i) => {
                         const active = rel === t.key;
@@ -543,7 +613,22 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                     })}
                 </div>
                 <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>Кластеров: {filtered.length}</span>
-                <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={doExport} disabled={filtered.length === 0} title="Выгрузить в Excel">Excel</button>
+                {onCollectPositions && (collecting ? (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 12, color: '#6b7280' }}>
+                            Сбор {collecting.done}/{collecting.total}
+                            {collecting.throttled ? <span style={{ color: '#f59e0b' }} title="WB ограничивает — часть не собрана"> · ⚠ {collecting.throttled}</span> : null}
+                        </span>
+                        {onStopPositions && (
+                            <Tooltip text="Остановить сбор позиций"><button className="btn btn-danger btn-sm" style={{ fontSize: 12 }} onClick={onStopPositions}>■ Стоп</button></Tooltip>
+                        )}
+                    </span>
+                ) : (
+                    <Tooltip text="Собрать органические позиции по всем фразам (из поиска WB). Заполнит «Позиция»/«Была».">
+                        <button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={onCollectPositions} disabled={clusters.length === 0}>▶ Собрать позиции</button>
+                    </Tooltip>
+                ))}
+                <Tooltip text="Выгрузить в Excel"><button className="btn btn-secondary btn-sm" style={{ fontSize: 12 }} onClick={doExport} disabled={filtered.length === 0}>Excel</button></Tooltip>
             </div>
 
             {minus?.error && <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 8 }}>⚠️ {minus.error}</div>}
@@ -552,8 +637,9 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
             {filtered.length === 0 ? (
                 <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>Нет кластеров по выбранному фильтру</div>
             ) : (
-                // Прокручиваются строки, а не страница: шапка и итоги остаются на виду
-                <div ref={fitRef} style={{ overflow: 'auto', maxHeight: fitHeight }}>
+                // Прокручиваются строки, а не страница: скролл заполняет остаток flex-колонки,
+                // sticky-шапка и tfoot-итоги остаются на виду при любой высоте хедера
+                <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
                     <table className="data-table" style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, backgroundColor: '#fff' }}>
                         <thead>
                             <tr>
@@ -645,10 +731,10 @@ export default function ClusterTable({ clusters, targetDrr, exportName, minus, b
                 </div>
             )}
 
-            {/* Нижняя панель действий — появляется при выборе фраз */}
+            {/* Нижняя панель действий — появляется при выборе фраз; flex-сосед снизу (не перекрывает итог) */}
             {selected.size > 0 && (
                 <div style={{
-                    position: 'sticky', bottom: 0, zIndex: 20, marginTop: 10,
+                    flexShrink: 0, marginTop: 10,
                     display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
                     padding: '10px 12px', background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12,
                     boxShadow: '0 -6px 20px rgba(17,24,39,.08)',

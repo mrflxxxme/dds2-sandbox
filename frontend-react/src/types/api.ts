@@ -3328,18 +3328,29 @@ export interface AdsManagerCampaign {
   cpo: number;  // стоимость одного заказа за период
   drr: number;
   margin: number;
+  spend_per_hour: number;  // средний расход ₽/час за день (расход за период / (дней × 24))
   ad_click_share: number;  // доля рекл. кликов от всех переходов товаров кампании
   cr_cart: number;  // конверсия переход→корзина
   cr_order: number;  // конверсия корзина→заказ
+  rev_yesterday: number;  // сумма заказов товаров кампании ВЧЕРА (для «ДРР план» = rev_yesterday × целевой ДРР%)
+  budget_gap: number;  // недобор бюджета до конца дня, ₽ (0 — бюджет не исчерпан сегодня)
   bid_mode?: string | null;  // для CPM: 'unified' (единая) / 'manual' (ручная); пока не синкается
   updated_at: string | null;
 }
 
+/** Режим автопополнения: to_target — долить до X в заданный час при пороге по обороту (наш);
+ *  low_balance — «как на ВБ»: когда остаток < порога, долить фиксированную сумму (любой час, повторяемо). */
+export type AdsAutopayMode = 'to_target' | 'low_balance';
+
 export interface AdsAutopaySetting {
   enabled: boolean;
-  amount: number;
-  hour: number;  // час пополнения, МСК
-  threshold_pct: number;  // пополнять, только если открут за сутки ≥ порога
+  mode: AdsAutopayMode;
+  amount: number;  // to_target: дневной бюджет X
+  hour: number;  // to_target: час пополнения, МСК
+  threshold_pct: number;  // to_target: пополнять, только если открут за сутки ≥ порога
+  low_balance_threshold: number;  // low_balance: долить, когда остаток < этого, ₽
+  topup_amount: number;  // low_balance: сумма разового долива, ₽
+  daily_cap: number;  // low_balance: не чаще N раз в день (0 = без ограничения)
 }
 
 export interface AdsAutopayLogEntry {
@@ -3498,7 +3509,8 @@ export interface ZoneMetrics {
 export interface CampaignZoneStats {
   search: ZoneMetrics;
   recommendations: ZoneMetrics | null;
-  total: { views: number; clicks: number; spend: number; orders: number } | null;
+  /** У CPC бэкенд total не отдаёт: зона одна, итог кампании равен ей. */
+  total?: { views: number; clicks: number; spend: number; orders: number } | null;
   derived: boolean;
 }
 
@@ -3509,10 +3521,18 @@ export interface CampaignZones {
   bid_mode: string | null;  // unified | manual
   placements: Record<string, boolean>;
   bids: { search: number | null; recommendations: number | null };
-  zones_locked: boolean;  // зоны нельзя включать/выключать
+  zones_locked: boolean;  // зоны нельзя включать/выключать (не CPM-ручная, либо статус не 4/9/11)
+  lock_reason?: string | null;  // почему нельзя — показываем в подсказке у тумблера
   single_bid: boolean;    // ставка одна: на все зоны (CPM-единая) или на все фразы (CPC)
   zone_stats?: CampaignZoneStats | null;  // только для CPC: зона одна, данные прямые
   error?: string;
+}
+
+/** Результат PUT /campaigns/{id}/zones */
+export interface CampaignZonesUpdate {
+  ok: boolean;
+  error: string | null;
+  placements: Record<string, boolean> | null;
 }
 
 export interface CampaignClustersResponse {
@@ -3551,6 +3571,8 @@ export interface CampaignMetricRow {
   cpl: number | null;  // стоимость 1 корзины
   cpo: number | null;  // стоимость 1 заказа
   avg_price: number;
+  customer_price: number;  // цена клиенту с учётом СПП (avg_price × (1 − СПП))
+  spp: number;             // средний СПП за день, %
   drr: number;
 }
 
@@ -3562,6 +3584,88 @@ export interface CampaignMetricsResponse {
   ad_by_nm?: boolean;  // РК-метрики отфильтрованы по товару, а не по всей кампании
   totals: CampaignMetricRow;
   rows: CampaignMetricRow[];
+  error?: string;
+}
+
+/** Точка почасового расхода кампании (hour 0..23, ₽ за час). */
+export interface CampaignHourlyPoint {
+  hour: number;
+  spend: number;
+}
+
+/** Почасовой расход кампании за день (GET /campaigns/{id}/hourly).
+ *  Восстановлен из снимков остатка бюджета (~10 мин). Показы/клики по часам WB не отдаёт. */
+export interface CampaignHourlySpend {
+  campaign_id: number;
+  name: string | null;
+  date: string;
+  total: number;
+  hours: CampaignHourlyPoint[];
+  error?: string;
+}
+
+/** Органическая позиция товара по фразе (последний + предыдущий снимок из search.wb.ru). */
+export interface PositionSnapshot {
+  position: number | null;  // 1-based ранг; null = не найден в пределах depth (или не собрано)
+  prev: number | null;      // позиция в предыдущем сборе («Была»)
+  depth: number | null;     // сколько позиций проверено (для «N+» — не в топ-N)
+  at: string | null;        // ISO момент последнего сбора
+}
+export interface PositionsResponse {
+  nm_id: number;
+  positions: Record<string, PositionSnapshot>;  // norm_query → снимок
+}
+export interface PositionsProgress { status: string; done: number; total: number; throttled: number; error: string | null; }
+export interface CollectPositionsResult { started: boolean; status: string; done: number; total: number; throttled: number; error: string | null; }
+/** Результат сбора ОДНОЙ фразы (кнопка-кругляшок). throttled=true → «слишком частый запрос». */
+export interface CollectOneResult extends PositionSnapshot { phrase: string; throttled: boolean; }
+
+/** Интервал внутридневного графика (дельта между снимками накопительного счётчика). */
+export interface CampaignIntradayPoint {
+  time: string;   // ЧЧ:ММ МСК (момент снимка = конец интервала)
+  views: number;  // показы за интервал
+  clicks: number; // клики за интервал
+  spend: number;  // расход ₽ за интервал
+}
+
+/** Внутридневные показы/клики/расход по кампании (GET /campaigns/{id}/intraday).
+ *  Копятся вперёд из снимков кабинетного campaigns-stats (~30 мин) — WB нативно почасовку
+ *  не отдаёт. CTR и порог «мин показов» считаются на клиенте. */
+export interface CampaignIntradayMetrics {
+  campaign_id: number;
+  name: string | null;
+  date: string;
+  points: CampaignIntradayPoint[];
+  totals: { views: number; clicks: number; spend: number };
+  snapshots: number;
+  interval_min?: number;  // текущая частота снимков проекта (10/20/30/60)
+  error?: string;
+}
+
+/** Строка РК-метрик зоны показов (без воронки — её WB по зонам не делит).
+ *  atbs/orders — корзины/заказы, атрибутированные рекламе. date может быть «За всё время». */
+export interface CampaignZoneMetricRow {
+  date: string;
+  views: number;
+  clicks: number;
+  ctr: number;
+  cpc: number;
+  cpm: number;    // цена 1000 показов зоны
+  spend: number;
+  atbs: number;   // корзины (реклама)
+  orders: number; // заказы (реклама)
+  cpo: number | null;  // стоимость 1 заказа
+}
+
+/** Посуточные РК-метрики кампании по зоне показов (GET /campaigns/{id}/metrics/by-zone).
+ *  zone: total — вся кампания; search — поиск; recommendations — итог минус поиск. */
+export interface CampaignZoneMetricsResponse {
+  campaign_id: number;
+  name: string | null;
+  zone: 'total' | 'search' | 'recommendations';
+  window: ClusterWindow;
+  totals: CampaignZoneMetricRow;
+  rows: CampaignZoneMetricRow[];
   error?: string;
 }
 
@@ -6032,3 +6136,72 @@ export interface PenaltyArticleSummaryResponse {
   total_reversal: string;
   net: string;
 }
+
+// ─── Сырые данные (GET /raw-data/sources) ───────────────────────────────────
+
+/** Прогресс принудительной дозагрузки источника (живёт в памяти бэкенда). */
+export interface RawRefreshProgress {
+  status: 'running' | 'ok' | 'error';
+  started_at: string;
+  finished_at: string | null;
+  error: string | null;
+  result?: Record<string, unknown> | null;
+}
+
+/** Один источник сырых данных: что копим и сколько накопили. */
+export interface RawSource {
+  key: string;
+  title: string;
+  group: string;         // Реклама / Продажи / Склад / Финансы
+  table: string;         // имя таблицы в БД
+  date_field: string;
+  description: string;
+  source: string;        // внешний API, откуда тянем
+  schedule: string;      // как часто тянет планировщик
+  refreshable: boolean;  // доступна ли кнопка дозагрузки
+  refresh_hint: string | null;
+  ranged: boolean;       // дозагрузка принимает период
+  rows: number | null;
+  first_date: string | null;
+  last_date: string | null;
+  progress: RawRefreshProgress | null;
+}
+
+export interface RawSourcesResponse {
+  sources: RawSource[];
+  groups: string[];
+}
+
+export interface RawRefreshStart {
+  status: 'started' | 'already_running' | 'unsupported';
+  error?: string;
+}
+
+/** Колонка таблицы источника — берётся из ORM-модели на бэкенде. */
+export interface RawColumn {
+  key: string;
+  label: string;
+  type: 'id' | 'date' | 'datetime' | 'number' | 'bool' | 'json' | 'string';
+}
+
+/** Содержимое таблицы источника (GET /raw-data/sources/{key}/rows). */
+export interface RawSourceRows {
+  key: string;
+  title: string;
+  table: string;
+  date_field: string;
+  description: string;
+  source: string;
+  columns: RawColumn[];
+  rows: Record<string, unknown>[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** Предмет для создания кампании (GET /funnel/ad-subjects). */
+export interface AdSubject { id: number; name: string; count: number }
+/** Карточка товара для кампании (POST /funnel/ad-nms). */
+export interface AdNmCard { nm: number; title: string; subjectId: number }
+/** Результат создания кампании. */
+export interface CreateCampaignResult { ok: boolean; campaign_id: number | null; error: string | null }
