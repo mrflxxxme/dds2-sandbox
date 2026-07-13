@@ -137,8 +137,10 @@ async def test_active_asm_pd_flag(db_session, project, ff_warehouse):
 
 @pytest.mark.asyncio
 async def test_update_draft_gate_subtracts_in_transit(db_session, project, ff_warehouse):
-    """Server-side гейт PUT: stale-вкладка не может записать план, дублирующий
-    уже едущее (прод-кейс: 7 PUT за 20с возвращали дубль после клиентской очистки)."""
+    """Server-side ДЕЛЬТА-гейт PUT, сценарий stale-возврата: черновик в БД
+    очищен (baseline пустой), stale-вкладка PUT'ит старый план — весь он прирост
+    → транзит вычитается полностью (прод-кейс: 7 PUT за 20с возвращали дубль
+    после клиентской очистки)."""
     from backend.schemas.assembly_draft import (
         AssemblyDraftCreate,
         AssemblyDraftDistribution,
@@ -219,3 +221,161 @@ async def test_update_draft_gate_no_transit_untouched(db_session, project, ff_wa
     dist = Dist.model_validate(updated.distribution)
     assert dist.rows[0].tgt == {"Казань": 10}
     assert dist.rows[0].src == {str(ff_warehouse.id): 10}
+
+
+@pytest.mark.asyncio
+async def test_gate_idempotent_on_resave(db_session, project, ff_warehouse):
+    """Идемпотентность дельта-гейта: PUT того же плана (автосейв матрицы на
+    каждый клик) НИЧЕГО не вычитает — прирост относительно baseline равен 0.
+    До дельта-гейта каждый PUT повторно урезал уже чистый план на транзит,
+    и черновик «таял». Baseline считается по rows И prebook вместе."""
+    from backend.schemas.assembly_draft import (
+        AssemblyDraftCreate,
+        AssemblyDraftDistribution,
+        AssemblyDraftRow,
+        AssemblyDraftUpdate,
+    )
+    from backend.services import assembly_draft_service
+
+    nm_id = 896_500_000 + int(_uid()[:4], 16)
+    nom = await _nom(db_session, project.id, nm_id)
+    # Едет 100 на Казань — больше, чем весь план черновика.
+    await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.IN_PROGRESS, wb_name="Казань", qty=100)
+
+    def _dist() -> AssemblyDraftDistribution:
+        return AssemblyDraftDistribution(
+            source_warehouse_ids=[ff_warehouse.id],
+            target_warehouse_names=["Казань"],
+            rows=[
+                AssemblyDraftRow(nm_id=nm_id, barcode=nom.barcode, vendor_code="x", src={str(ff_warehouse.id): 30}, tgt={"Казань": 30})
+            ],
+            prebook=[
+                AssemblyDraftRow(nm_id=nm_id, barcode=nom.barcode, vendor_code="x", src={str(ff_warehouse.id): 20}, tgt={"Казань": 20})
+            ],
+        )
+
+    # Уже сохранённый ЧИСТЫЙ план (create_draft гейт не гоняет — как план,
+    # прошедший гейт при прошлой записи).
+    draft = await assembly_draft_service.create_draft(
+        db_session, project.id, AssemblyDraftCreate(name="Идемпотентность", distribution=_dist())
+    )
+
+    from backend.schemas.assembly_draft import AssemblyDraftDistribution as Dist
+
+    # Два повторных автосейва того же плана — план не тает.
+    for _ in range(2):
+        updated = await assembly_draft_service.update_draft(
+            db_session, project.id, draft.id, AssemblyDraftUpdate(distribution=_dist())
+        )
+        dist = Dist.model_validate(updated.distribution)
+        assert len(dist.rows) == 1 and dist.rows[0].tgt == {"Казань": 30}
+        assert len(dist.prebook) == 1 and dist.prebook[0].tgt == {"Казань": 20}
+
+
+@pytest.mark.asyncio
+async def test_gate_subtracts_only_increase(db_session, project, ff_warehouse):
+    """Дельта-гейт вычитает транзит только из ПРИРОСТА: в БД план 50 по
+    (nm, Казань) с транзитом 100, PUT приносит 110 → прирост 60, вычет
+    min(100, 60)=60 → сохраняется 50 (а не 10, как при вычете из всего плана)."""
+    from backend.schemas.assembly_draft import (
+        AssemblyDraftCreate,
+        AssemblyDraftDistribution,
+        AssemblyDraftRow,
+        AssemblyDraftUpdate,
+    )
+    from backend.services import assembly_draft_service
+
+    nm_id = 896_600_000 + int(_uid()[:4], 16)
+    nom = await _nom(db_session, project.id, nm_id)
+    await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.IN_PROGRESS, wb_name="Казань", qty=100)
+
+    draft = await assembly_draft_service.create_draft(
+        db_session,
+        project.id,
+        AssemblyDraftCreate(
+            name="Прирост",
+            distribution=AssemblyDraftDistribution(
+                source_warehouse_ids=[ff_warehouse.id],
+                target_warehouse_names=["Казань"],
+                rows=[
+                    AssemblyDraftRow(nm_id=nm_id, barcode=nom.barcode, vendor_code="x", src={str(ff_warehouse.id): 50}, tgt={"Казань": 50})
+                ],
+            ),
+        ),
+    )
+
+    incoming = AssemblyDraftDistribution(
+        source_warehouse_ids=[ff_warehouse.id],
+        target_warehouse_names=["Казань"],
+        rows=[
+            AssemblyDraftRow(nm_id=nm_id, barcode=nom.barcode, vendor_code="x", src={str(ff_warehouse.id): 110}, tgt={"Казань": 110})
+        ],
+    )
+    updated = await assembly_draft_service.update_draft(
+        db_session, project.id, draft.id, AssemblyDraftUpdate(distribution=incoming)
+    )
+
+    from backend.schemas.assembly_draft import AssemblyDraftDistribution as Dist
+
+    dist = Dist.model_validate(updated.distribution)
+    assert len(dist.rows) == 1
+    assert dist.rows[0].tgt == {"Казань": 50}
+    # src ужат до Σtgt (carve): 110 → 50.
+    assert sum(dist.rows[0].src.values()) == 50
+
+
+@pytest.mark.asyncio
+async def test_gate_growth_without_transit_untouched(db_session, project, ff_warehouse):
+    """Прирост на складе БЕЗ транзита не вычитается: транзит только по Казани,
+    PUT добавляет 30 на ЕКБ — ЕКБ сохраняется как есть, Казань без прироста
+    не трогается."""
+    from backend.schemas.assembly_draft import (
+        AssemblyDraftCreate,
+        AssemblyDraftDistribution,
+        AssemblyDraftRow,
+        AssemblyDraftUpdate,
+    )
+    from backend.services import assembly_draft_service
+
+    nm_id = 896_700_000 + int(_uid()[:4], 16)
+    nom = await _nom(db_session, project.id, nm_id)
+    await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.IN_PROGRESS, wb_name="Казань", qty=100)
+
+    draft = await assembly_draft_service.create_draft(
+        db_session,
+        project.id,
+        AssemblyDraftCreate(
+            name="Без транзита",
+            distribution=AssemblyDraftDistribution(
+                source_warehouse_ids=[ff_warehouse.id],
+                target_warehouse_names=["Казань"],
+                rows=[
+                    AssemblyDraftRow(nm_id=nm_id, barcode=nom.barcode, vendor_code="x", src={str(ff_warehouse.id): 50}, tgt={"Казань": 50})
+                ],
+            ),
+        ),
+    )
+
+    incoming = AssemblyDraftDistribution(
+        source_warehouse_ids=[ff_warehouse.id],
+        target_warehouse_names=["Казань", "Екатеринбург - Перспективная 14"],
+        rows=[
+            AssemblyDraftRow(
+                nm_id=nm_id,
+                barcode=nom.barcode,
+                vendor_code="x",
+                src={str(ff_warehouse.id): 80},
+                tgt={"Казань": 50, "Екатеринбург - Перспективная 14": 30},
+            )
+        ],
+    )
+    updated = await assembly_draft_service.update_draft(
+        db_session, project.id, draft.id, AssemblyDraftUpdate(distribution=incoming)
+    )
+
+    from backend.schemas.assembly_draft import AssemblyDraftDistribution as Dist
+
+    dist = Dist.model_validate(updated.distribution)
+    assert len(dist.rows) == 1
+    assert dist.rows[0].tgt == {"Казань": 50, "Екатеринбург - Перспективная 14": 30}
+    assert dist.rows[0].src == {str(ff_warehouse.id): 80}

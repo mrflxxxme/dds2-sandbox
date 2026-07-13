@@ -81,9 +81,13 @@ class AssemblyDraftDistribution(BaseModel):
     # показа — бейдж «из предброни» на паллете раскладки. Нормализатор его не трогает
     # (живёт отдельно от rows). Сбрасывается при полном «Заполнить из потребности».
     prebook_origin: list[str] = Field(default_factory=list)
+    # РУЧНЫЕ SKU (nm_id): план правлен юзером в матрице-редакторе (степпер/✕) —
+    # авто-синк расчёта от потребности такие SKU НЕ трогает (ручное решение
+    # священно), пока юзер не вернёт SKU «в авто». JSONB — миграция не нужна.
+    manual_nms: list[int] = Field(default_factory=list)
 
     @field_validator(
-        "rows", "source_warehouse_ids", "target_warehouse_names", "handed_units", "prebook", "prebook_origin", mode="before"
+        "rows", "source_warehouse_ids", "target_warehouse_names", "handed_units", "prebook", "prebook_origin", "manual_nms", mode="before"
     )
     @classmethod
     def coerce_null_to_empty_list(cls, v: object) -> object:
@@ -101,11 +105,11 @@ class DraftEventLog(BaseModel):
     """Маркер события истории для логирования при PUT черновика.
 
     Клиент помечает «значимый» PUT (дозабор хвоста предброни / запись раскладки из
-    матрицы), сервер снапшотит СТАРЫЙ distribution в `AssemblyDraftEvent` для отката.
-    Обычный autosave событие НЕ передаёт → не логируется. COMMIT логируется отдельно
-    в `commit_draft` (не через этот путь)."""
+    матрицы / правка степпером в редакторе), сервер снапшотит СТАРЫЙ distribution в
+    `AssemblyDraftEvent` для отката. PUT без события не логируется. COMMIT логируется
+    отдельно в `commit_draft` (не через этот путь)."""
 
-    event_type: Literal["PREBOOK_TOPUP", "MATRIX_WRITE"]
+    event_type: Literal["PREBOOK_TOPUP", "MATRIX_WRITE", "MATRIX_EDIT", "AUTO_SYNC"]
     summary: str | None = None
 
 

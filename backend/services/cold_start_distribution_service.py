@@ -960,6 +960,14 @@ async def fetch_cold_start_segment(db: AsyncSession, project_id: int) -> list[di
     return out
 
 
+# Гвард пересорта новинок: если посев уже лежит на WB, а продажи за окно меньше
+# этого процента от лежащего (минимум 1 шт) — авто-досев SKU останавливается
+# целиком. Иначе cold-start после каждой поставки досеивал до benchmark-долей
+# снова (кейс «швабры» 2026-07-10: 521 шт на WB, продажи ~2% → перетаривание).
+# Ручной override на UI (степперы/qty override) гвардом не ограничивается.
+OVERSORT_SELL_THROUGH_PCT = 5
+
+
 async def compute_cold_start_table(
     db: AsyncSession,
     project_id: int,
@@ -1154,7 +1162,43 @@ async def compute_cold_start_table(
             db, project_id, sku["internal_id"], include_pre_distributed=True
         )
 
-        # ФФ-остаток минус уже идущие сборки — иначе размазываем «фантом» по складам где asm под другим именем (Новосемейкино vs Самара).
+        # Гвард пересорта: прошлый посев лежит на WB и не продаётся → авто-досев
+        # SKU стоп (строка отдаётся с пустой раздачей и причиной — UI показывает
+        # бейдж вместо молчаливого нуля). Порог — целочисленный ceil от процента.
+        wb_qty_total = int(sku["wb_qty"] or 0)
+        sales_window = int(sku["sales_14d"] or 0)
+        if sku["is_newcomer"] and wb_qty_total > 0:
+            sell_threshold = max(1, (wb_qty_total * OVERSORT_SELL_THROUGH_PCT + 99) // 100)
+            if sales_window < sell_threshold:
+                rows.append(
+                    ColdStartTableRow(
+                        nm_id=sku["nm_id"],
+                        article_seller=sku["article_seller"],
+                        subject=sku["subject"],
+                        brand=sku["brand"],
+                        barcode=sku.get("barcode") or None,
+                        rf_qty=sku["rf_qty"],
+                        rf_by_warehouse=sku.get("rf_by_warehouse", {}),
+                        wb_qty=sku["wb_qty"],
+                        wb_by_warehouse=sku.get("wb_by_warehouse", {}),
+                        in_assembly_total=sku["asm_qty"],
+                        asm_by_warehouse=active_asm,
+                        sales_14d=sku["sales_14d"],
+                        revenue_30d=sku["revenue_30d"],
+                        is_newcomer=sku["is_newcomer"],
+                        allocations={},
+                        total_allocated=0,
+                        oversort_guard=True,
+                        guard_reason=(
+                            # sales_14d всегда за 14 дней независимо от window_days
+                            f"на WB лежит {wb_qty_total} шт, продажи за 14д — "
+                            f"{sales_window} шт (порог {sell_threshold}) — досев остановлен"
+                        ),
+                    )
+                )
+                continue
+
+        # ФФ-остаток минус уже идущие сборки — иначе размазываем «фантом» по складам где asm под несовпадающим именем (Новосемейкино vs Самара).
         total_qty = max(0, sku["rf_qty"] - sku["asm_qty"])
         if total_qty <= 0:
             rows.append(
