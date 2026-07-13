@@ -132,10 +132,32 @@ const THRESHOLD_KEY = 'dds.prebook.readyThresholdPct';
 const DEFAULT_THRESHOLD = 60;
 
 export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletingKey, prebookingKey, tailTopUpKey, trimTailKey, acceptanceMarks, acceptanceLoading, preorderWbs, onTopUp, onShipAsIs, onDelete, onDeleteDirection, onCreatePrebooking, onTopUpPrebook, onTrimTail, onBookPallets, onReleasePallets, onDraftPallets, palletOpKey }: Props) {
+    // Фильтры направлений: склад сдачи (WB, куда сдаём) и склад забора (ФФ-источник).
+    // Сужают и карточки, и KPI/счётчики упаковок — видна сводка именно по выбранному срезу.
+    const [filterWb, setFilterWb] = useState('');
+    const [filterFf, setFilterFf] = useState('');
+    const wbOptions = useMemo(
+        () => [...new Set(groups.map(g => g.wb))].sort((a, b) => a.localeCompare(b, 'ru')),
+        [groups],
+    );
+    const ffOptions = useMemo(() => {
+        const byId = new Map<number, string>();
+        for (const g of groups) if (!byId.has(g.ffId)) byId.set(g.ffId, g.ff);
+        return [...byId.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    }, [groups]);
+    const filtered = useMemo(
+        () => groups.filter(g => (!filterWb || g.wb === filterWb) && (!filterFf || String(g.ffId) === filterFf)),
+        [groups, filterWb, filterFf],
+    );
+    const isFiltered = !!(filterWb || filterFf);
+    // Сброс залипшего фильтра: выбранный склад исчез из направлений (промоут/удаление/пересчёт) →
+    // контролируемый <select> без соответствующего <option> показал бы пустоту и «пустую предбронь».
+    useEffect(() => { if (filterWb && !wbOptions.includes(filterWb)) setFilterWb(''); }, [wbOptions, filterWb]);
+    useEffect(() => { if (filterFf && !ffOptions.some(f => String(f.id) === filterFf)) setFilterFf(''); }, [ffOptions, filterFf]);
     const pkgsPresent = useMemo(() => {
         const order: PackageType[] = ['BOX', 'MONOPALLET', 'SUPERSAFE'];
-        return order.filter(p => groups.some(g => g.pkg === p));
-    }, [groups]);
+        return order.filter(p => filtered.some(g => g.pkg === p));
+    }, [filtered]);
     const [pkg, setPkg] = useState<PackageType>('BOX');
     const activePkg = pkgsPresent.includes(pkg) ? pkg : (pkgsPresent[0] ?? 'BOX');
 
@@ -153,10 +175,11 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
     };
 
     // Мультивыбор паллет раскладки (моно): ключ `${wb}::${ffId}::${palletNo}`.
-    // Сбрасывается при любом пересчёте groups: раскладка перепаковывается и номера
-    // паллет могут перетасоваться — выбор по старым номерам стал бы враньём.
+    // Сбрасывается при любом пересчёте groups (раскладка перепаковывается и номера
+    // паллет могут перетасоваться — выбор по старым номерам стал бы враньём) и при
+    // смене фильтра (невидимая карточка не должна держать скрытый выбор).
     const [palletSel, setPalletSel] = useState<Set<string>>(new Set());
-    useEffect(() => { setPalletSel(new Set()); }, [groups]);
+    useEffect(() => { setPalletSel(new Set()); }, [filtered]);
     const togglePallet = (k: string) => setPalletSel(prev => {
         const next = new Set(prev);
         if (next.has(k)) next.delete(k); else next.add(k);
@@ -164,8 +187,8 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
     });
 
     const shown = useMemo(
-        () => groups.filter(g => g.pkg === activePkg).sort((a, b) => b.fillPct - a.fillPct),
-        [groups, activePkg],
+        () => filtered.filter(g => g.pkg === activePkg).sort((a, b) => b.fillPct - a.fillPct),
+        [filtered, activePkg],
     );
     // Моно split: «Дозабить» (footprint<1 — неполные, нужно добить) / «Предзаявка»
     // (footprint≥1 — готовые целые ⌛-паллеты, сдаются бронью). Короб/сейф — без split.
@@ -178,7 +201,7 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
     const monoTopup = useMemo(() => shown.filter(g => !isPrebookingByLimit(acceptanceMarks.get(`${g.pkg}::${g.wb}::${g.ffId}`))), [shown, acceptanceMarks]);
     const visible = !isMono ? shown : (monoView === 'prebooking' ? monoReady : monoTopup);
     const totals = useMemo(() => {
-        const g = groups;
+        const g = filtered;
         const canDirs = g.filter(x => x.topUp).length;
         const resultPallets = g.reduce((s, x) => s + (x.topUp?.pallets || 0), 0);
         // «Ниже порога» = направление БЕЗ ни одной целой паллеты, где единственная
@@ -198,7 +221,7 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
             looseUnits: g.reduce((s, x) => s + (x.looseUnits || 0), 0),
             partialDirs: g.filter(x => (x.looseUnits || 0) > 0).length,
         };
-    }, [groups, threshold]);
+    }, [filtered, threshold]);
 
     if (groups.length === 0) {
         return (
@@ -214,6 +237,29 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
 
     return (
         <div>
+            {/* Фильтр направлений: склад сдачи (WB) × склад забора (ФФ). KPI и счётчики ниже — по срезу. */}
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+                <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>🔎 Фильтр:</span>
+                <select className="form-input" style={{ maxWidth: 240 }} value={filterWb} onChange={e => setFilterWb(e.target.value)}
+                    title="Показать направления только на этот WB-склад (куда сдаём)">
+                    <option value="">Все склады сдачи (WB)</option>
+                    {wbOptions.map(w => <option key={w} value={w}>{w}</option>)}
+                </select>
+                <select className="form-input" style={{ maxWidth: 240 }} value={filterFf} onChange={e => setFilterFf(e.target.value)}
+                    title="Показать направления только с этого склада забора (ФФ-источник)">
+                    <option value="">Все склады забора (ФФ)</option>
+                    {ffOptions.map(f => <option key={f.id} value={String(f.id)}>{f.name}</option>)}
+                </select>
+                {isFiltered && (
+                    <>
+                        <button className="btn btn-sm btn-secondary" onClick={() => { setFilterWb(''); setFilterFf(''); }}>Сбросить фильтр</button>
+                        <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                            показано {formatNumber(filtered.length, 0)} из {formatNumber(groups.length, 0)} напр.
+                        </span>
+                    </>
+                )}
+            </div>
+
             {/* KPI */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
                 <div className="glass-card" style={{ padding: '14px 16px' }}>
@@ -245,7 +291,7 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                         <button key={p}
                             className={`btn btn-sm ${p === activePkg ? 'btn-primary' : 'btn-secondary'}`}
                             onClick={() => setPkg(p)}>
-                            {PKG_LABEL[p] || p} · {groups.filter(g => g.pkg === p).length} напр.
+                            {PKG_LABEL[p] || p} · {filtered.filter(g => g.pkg === p).length} напр.
                         </button>
                     ))}
                 </div>
@@ -278,9 +324,11 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
 
             {visible.length === 0 && (
                 <div className="glass-card" style={{ padding: 16, textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>
-                    {isMono && monoView === 'prebooking'
-                        ? 'Нет готовых целых моно-паллет для предзаявки (появятся, когда моно на складе без лимита ⌛ соберётся в целую паллету).'
-                        : isMono ? 'Нет неполных моно-направлений для дозабора.' : 'Нет направлений.'}
+                    {isFiltered && filtered.length === 0
+                        ? 'Нет направлений по выбранному фильтру складов.'
+                        : isMono && monoView === 'prebooking'
+                            ? 'Нет готовых целых моно-паллет для предзаявки (появятся, когда моно на складе без лимита ⌛ соберётся в целую паллету).'
+                            : isMono ? 'Нет неполных моно-направлений для дозабора.' : 'Нет направлений.'}
                 </div>
             )}
 

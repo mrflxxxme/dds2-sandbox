@@ -162,6 +162,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     const [filterSubject, setFilterSubject] = useState('');
     const [filterBrand, setFilterBrand] = useState('');
     const [filterFf, setFilterFf] = useState('');
+    // Тип товара: новинки (cold-start) / обычные. Лупа по отображению, как предмет/бренд.
+    const [filterKind, setFilterKind] = useState<'' | 'new' | 'regular'>('');
     const [hideEmpty, setHideEmpty] = useState(false);
     const toggleSort = useCallback((key: SortKey) => {
         setSortKey((prev) => {
@@ -746,6 +748,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         () => sortedRows.filter((a) => {
             if (filterSubject && a.subject !== filterSubject) return false;
             if (filterBrand && a.brand !== filterBrand) return false;
+            if (filterKind === 'new' && !newcomerSet.has(a.nm_id)) return false;
+            if (filterKind === 'regular' && newcomerSet.has(a.nm_id)) return false;
             if (ffFilterId != null) {
                 // Виден, если на этом ФФ есть остаток ИЛИ раскладка что-то с него забирает
                 // (sliceAgg, не viewAgg — набор строк стабилен при входе в ручной режим).
@@ -756,13 +760,13 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
             if (hideEmpty && (viewAgg.allocByBc.get(a.barcode) ?? 0) <= 0) return false;
             return true;
         }),
-        [sortedRows, filterSubject, filterBrand, ffFilterId, hideEmpty, sliceAgg, viewAgg],
+        [sortedRows, filterSubject, filterBrand, filterKind, newcomerSet, ffFilterId, hideEmpty, sliceAgg, viewAgg],
     );
 
     // Итоги колонок («Сдаём» / футер) — по ВИДИМЫМ строкам, чтобы суммы под складами
     // соответствовали фильтру; при активном ФФ-срезе — по срезанным строкам (доля ФФ).
     // Без фильтра === полная матрица (переиспользуем `viewAgg`).
-    const isFiltered = !!(filterSubject || filterBrand || filterFf || hideEmpty);
+    const isFiltered = !!(filterSubject || filterBrand || filterFf || filterKind || hideEmpty);
     const visibleBarcodes = useMemo(() => new Set(visibleRows.map((a) => a.barcode)), [visibleRows]);
     const matrixView = useMemo(() => {
         if (!isFiltered) return viewAgg;
@@ -946,13 +950,19 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                             <option value="">Все склады ФФ (забор)</option>
                             {ffOptions.map((f) => <option key={f.id} value={String(f.id)}>{f.name}</option>)}
                         </select>
+                        <select className="form-input" style={{ maxWidth: 200 }} value={filterKind} onChange={(e) => setFilterKind(e.target.value as '' | 'new' | 'regular')}
+                            title="Новинки — SKU из cold-start (🆕); обычные — все остальные">
+                            <option value="">Все товары</option>
+                            <option value="new">🆕 Только новинки</option>
+                            <option value="regular">Только обычные</option>
+                        </select>
                         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
                             <input type="checkbox" checked={hideEmpty} onChange={(e) => setHideEmpty(e.target.checked)} />
                             Скрыть нераспределённые
                         </label>
-                        {(filterSubject || filterBrand || filterFf || hideEmpty) && (
+                        {isFiltered && (
                             <>
-                                <button className="btn btn-sm btn-secondary" onClick={() => { setFilterSubject(''); setFilterBrand(''); setFilterFf(''); setHideEmpty(false); }}>Сбросить фильтр</button>
+                                <button className="btn btn-sm btn-secondary" onClick={() => { setFilterSubject(''); setFilterBrand(''); setFilterFf(''); setFilterKind(''); setHideEmpty(false); }}>Сбросить фильтр</button>
                                 <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>показано {formatNumber(visibleRows.length, 0)} из {formatNumber(sortedRows.length, 0)}</span>
                             </>
                         )}
