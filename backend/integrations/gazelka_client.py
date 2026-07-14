@@ -610,12 +610,16 @@ def _parse_create_result(resp: httpx.Response, apply_path: str) -> GazelkaCreate
     """Эвристика успеха: POST save_plan при успехе редиректит из формы в список заявок.
 
     Точного машинного признака у портала нет — поэтому всегда отдаём excerpt
-    ответа, чтобы исход можно было сверить вручную.
+    ответа, чтобы исход можно было сверить вручную. Надёжное подтверждение
+    (появилась ли заявка в «Запланированных») делает слой выше — gazelka_service.
     """
     path = _redirect_path(resp)
     if path and path.startswith(("/customer", "/manager")) and path.rstrip("/") != apply_path.rstrip("/"):
         m = _ORDER_REF_RE.search(path)
         ref = m.group(1) if m else None
+        # /customer/orders/{id} — id КЛИЕНТА (страница списка), не номер заявки
+        if ref and ref == apply_path.rstrip("/").rsplit("/", 1)[-1]:
+            ref = None
         return GazelkaCreateResult(ok=True, ref=ref, message="Заявка отправлена в Газельку", excerpt="")
 
     # Форма вернулась без редиректа — вероятно ошибка валидации. НО заявка могла
