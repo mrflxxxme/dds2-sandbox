@@ -301,7 +301,7 @@ async def refresh_one_campaign(db: AsyncSession, project_id: int, campaign_id: i
     events = []
     if old is not None:
         if campaign_id in budgets:
-            ob, nb = float(old.budget or 0), float(row["budget"] or 0)
+            ob, nb = float(old.budget or 0), float(campaign_budget or 0)
             if abs(ob - nb) >= 1:
                 events.append(WbAdCampaignEvent(
                     project_id=project_id, campaign_id=campaign_id, event_type="budget_change",
