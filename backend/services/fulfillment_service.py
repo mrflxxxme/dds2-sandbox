@@ -39,6 +39,7 @@ from backend.integrations.skladbot_client import (
     ASSEMBLY_WIP_STAGE_CODES,
     ASSEMBLY_WIP_TITLE_MARKERS,
     DELIVERY_REQUEST_TYPE_ID,
+    INBOUND_REQUEST_TYPE_ID,
     INBOUND_TYPE_IDS,
     SkladbotApiError,
     SkladbotClient,
@@ -5848,6 +5849,167 @@ async def _finalize_ff_push(
             "skipped_barcodes": [],
         },
     }
+
+
+# ─── PUSH приёмки: машина «Отправлена» → приёмка у ФФ (skladbot 852) ─────────
+
+
+async def push_ff_inbound(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    qty_by_barcode: dict[str, int],
+    arrival_date: date,
+    *,
+    comment: str | None = None,
+) -> dict | None:
+    """Создать приёмку у ФФ (skladbot 852) и вернуть НОРМАЛИЗОВАННУЮ строку заявки.
+
+    Возвращает created_row (ключи как у `_apply_requests`) при успехе; None — ФФ
+    не подключён к складу ИЛИ провайдер без поддержки создания приёмки
+    (wmscelicom/migfull): тогда вызывающий продолжает перевод статуса без ФФ.
+    Бросает ValueError на любой сбой skladbot (нерезолвленные ШК / сеть / API) —
+    вызывающий блокирует перевод машины в «Отправлена».
+
+    Делает только резолв + POST; зеркало/связь НЕ пишет — это `link_ff_inbound_mirror`
+    под тем же коммитом, что и приёмка машины (атомарность приёмка+связь+статус).
+
+    ⚠️ Коммитит текущую транзакцию перед HTTP (паттерн push: не держать БД-txn на
+    время внешнего вызова). create_request — реальный заказ БЕЗ ретраев: повторный
+    вызов создаст вторую приёмку у ФФ.
+    """
+    key = await get_integration(db, project_id, warehouse_id)
+    if key is None:
+        return None  # ФФ не подключён — приёмку не создаём, переход не блокируем
+    provider = key.service
+    if provider != "skladbot":
+        # wmscelicom/migfull: создание приёмки пока не поддержано — no-op, переход идёт как раньше
+        logger.info(
+            "ff_inbound_push: провайдер %s (склад %s) не поддерживает создание приёмки — пропуск",
+            provider,
+            warehouse_id,
+        )
+        return None
+    customer_id = (key.config or {}).get("customer_id")
+    if not customer_id:
+        raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
+    if not qty_by_barcode:
+        raise ValueError("Нет позиций для создания приёмки у ФФ")
+
+    token = _decrypt(key.encrypted_key)
+    await db.commit()  # закрыть транзакцию до внешних HTTP-вызовов
+    client = SkladbotClient(token, project_id=project_id)
+
+    try:
+        resolved = await client.resolve_products(customer_id, INBOUND_REQUEST_TYPE_ID, list(qty_by_barcode))
+    except CircuitOpenError as e:
+        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+    except RateLimitError as e:
+        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+    except SkladbotApiError as e:
+        raise ValueError(f"skladbot.ru не отдал товары для приёмки (HTTP {e.status_code})") from e
+    except httpx.HTTPError as e:
+        raise ValueError(f"Сетевая ошибка при обращении к skladbot.ru: {e}") from e
+
+    # Приёмка — ПРИХОД, а не расход: остаток у ФФ не важен (counts может быть 0).
+    # Блокируем только если ШК вовсе не резолвится в карточку ФФ (товар не заведён).
+    unresolved = [bc for bc in qty_by_barcode if bc not in resolved]
+    if unresolved:
+        shown = ", ".join(unresolved[:10])
+        more = f" и ещё {len(unresolved) - 10}" if len(unresolved) > 10 else ""
+        raise ValueError(f"Товары не найдены в карточках ФФ (заведите и повторите): {shown}{more}")
+
+    products = [
+        {
+            "product_data_id": resolved[bc]["product_data_id"],
+            "amount": qty,
+            "barcode": bc,
+            "services": [],
+            "packages": [],
+        }
+        for bc, qty in qty_by_barcode.items()
+    ]
+    total_qty = sum(qty_by_barcode.values())
+    create_payload = {
+        "customer_id": customer_id,
+        "request_type_id": INBOUND_REQUEST_TYPE_ID,
+        "products": products,
+        # Единственное обязательное поле формы 852 — примерная дата прихода (Y-m-d).
+        "fields": {"product_arrival_date": {"value": arrival_date.isoformat()}},
+        "comment": comment or "",
+        "notify": False,
+    }
+    try:
+        created = await client.create_request(create_payload)
+    except CircuitOpenError as e:
+        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+    except RateLimitError as e:
+        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+    except SkladbotApiError as e:
+        raise ValueError(f"skladbot.ru отклонил создание приёмки (HTTP {e.status_code}): {e}") from e
+    except httpx.HTTPError as e:
+        raise ValueError(f"Сетевая ошибка при создании приёмки в skladbot.ru: {e}") from e
+
+    external_id = str(created.get("id") or created.get("request_id") or "").strip()
+    if not external_id or external_id == "None":
+        raise ValueError("skladbot.ru не вернул id созданной приёмки — проверьте кабинет ФФ вручную")
+
+    return {
+        "external_id": external_id,
+        "kind": FfRequestKind.INBOUND.value,
+        "number": created.get("delivery_number") or created.get("number"),
+        "type_id": INBOUND_REQUEST_TYPE_ID,
+        "type_name": created.get("type") or "2.1 Приемка без согласование маркировки",
+        "status": created.get("status"),
+        "stage_code": created.get("stage_code"),
+        "stage_title": created.get("stage_title"),
+        "is_completed": bool(created.get("is_completed")),
+        "archived": bool(created.get("archived")),
+        "expired": bool(created.get("expired")),
+        "total_qty": total_qty,
+        "dest_warehouse": None,
+        "external_created_at": _parse_date(created.get("created_at")) or date.today(),
+        "raw": created,
+    }
+
+
+async def link_ff_inbound_mirror(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    inbound_receipt_id: int,
+    created_row: dict,
+) -> int:
+    """Зеркалировать созданную приёмку ФФ и связать с InboundReceipt машины.
+
+    НЕ коммитит — вызывается внутри транзакции перехода машины (приёмка ФФ + связь
+    + статус машины фиксируются одним commit). Сериализуется с конкурентным синком
+    advisory-локом (uq заявок = project_id+provider+external_id). Возвращает id
+    строки-зеркала. ValueError — зеркало не сохранилось (крайне редко).
+    """
+    external_id = created_row["external_id"]
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :project_id)"),
+        {"ns": _FF_SYNC_LOCK_NS, "project_id": project_id},
+    )
+    await _apply_requests(db, project_id, warehouse_id, "skladbot", [created_row])
+    await db.flush()
+    ff_req = (
+        await db.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.provider == "skladbot",
+                FulfillmentRequest.external_id == external_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if ff_req is None:
+        raise ValueError(
+            f"Приёмка создана у ФФ ({created_row.get('number') or external_id}), но зеркало сохранить не удалось "
+            "— проверьте кабинет ФФ и свяжите вручную"
+        )
+    ff_req.inbound_receipt_id = inbound_receipt_id
+    return ff_req.id
 
 
 async def _fetch_push_form_options(client: SkladbotClient, customer_id: int) -> tuple[int, str, list[dict], list[dict]]:
