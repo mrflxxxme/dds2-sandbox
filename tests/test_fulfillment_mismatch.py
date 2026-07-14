@@ -74,7 +74,9 @@ async def _make_assembly(db_session, project_id, warehouse_id, *, items=()):
     return doc
 
 
-async def _make_ff(db_session, project_id, warehouse_id, *, provider, assembly_request_id, raw=None, total_qty=None):
+async def _make_ff(
+    db_session, project_id, warehouse_id, *, provider, assembly_request_id, raw=None, total_qty=None, is_completed=False
+):
     return await _add(
         db_session,
         FulfillmentRequest(
@@ -88,6 +90,7 @@ async def _make_ff(db_session, project_id, warehouse_id, *, provider, assembly_r
             assembly_request_id=assembly_request_id,
             raw=raw,
             total_qty=total_qty,
+            is_completed=is_completed,
         ),
     )
 
@@ -97,14 +100,19 @@ def _wms_raw(items):
     return {"items": [{"barcode": bc, "count": qty} for bc, qty in items]}
 
 
-def _migfull_raw(lines):
-    """planned_lines [(guid, qty)]."""
-    return {
-        "planned_lines": [
-            {"product_guid": guid, "quantity": qty, "product": {"guid": guid, "name": f"Товар {guid}"}}
-            for guid, qty in lines
-        ]
-    }
+def _migfull_lines(rows):
+    return [
+        {"product_guid": guid, "quantity": qty, "product": {"guid": guid, "name": f"Товар {guid}"}}
+        for guid, qty in rows
+    ]
+
+
+def _migfull_raw(lines, *, shipped=None):
+    """planned_lines [(guid, qty)]; shipped — [(guid, qty)] для shipped_lines (факт)."""
+    raw = {"planned_lines": _migfull_lines(lines)}
+    if shipped is not None:
+        raw["shipped_lines"] = _migfull_lines(shipped)
+    return raw
 
 
 async def _seed_migfull_stock(db_session, project_id, warehouse_id, guid, barcode):
@@ -222,6 +230,88 @@ async def test_migfull_combined_n1_match_and_mismatch(db_session, project, wareh
     ff2.raw = _migfull_raw([(guid_b, 3)])  # недодали по второй заявке
     await db_session.commit()
     assert await _verdict(db_session, project.id, doc.id) is True
+
+
+# ─── migfull: закрытая (отгружена) заявка сверяется по ФАКТУ shipped_lines ────
+
+
+@pytest.mark.asyncio
+async def test_closed_migfull_compares_shipped_not_planned(db_session, project, warehouse):
+    """Закрытая (отгружена, is_completed) migfull-заявка сверяется с ФАКТОМ
+    shipped_lines, а НЕ с предварительным планом planned_lines. План закрытой
+    заявки неактуален: ФФ отгрузил не весь план → сверка с планом давала ложное
+    расхождение (прод-кейс PVB-0000306)."""
+    bc1 = f"20{_uid()}"
+    guid_a = _uid()
+    await _seed_migfull_stock(db_session, project.id, warehouse.id, guid_a, bc1)
+    doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(bc1, 5)])
+    ff = await _make_ff(
+        db_session,
+        project.id,
+        warehouse.id,
+        provider="migfull",
+        assembly_request_id=doc.id,
+        raw=_migfull_raw([(guid_a, 3)], shipped=[(guid_a, 5)]),  # план 3, факт 5
+        is_completed=True,
+    )
+    # закрыта → сверка по факту 5 == наш 5 → совпадает (по плану 3≠5 дало бы ⚠️)
+    assert await _verdict(db_session, project.id, doc.id) is False
+    detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id)
+    assert detail["mode"] == "barcode"
+    assert detail["ff_total"] == 5 and detail["our_total"] == 5
+    assert detail["rows"] == []
+
+    # та же заявка ОТКРЫТА → сверка по плану 3 ≠ наш 5 → расхождение
+    ff.is_completed = False
+    await db_session.commit()
+    assert await _verdict(db_session, project.id, doc.id) is True
+
+
+@pytest.mark.asyncio
+async def test_closed_migfull_planned_only_position_dropped(db_session, project, warehouse):
+    """Позиция есть в плане, но НЕ отгружена (нет в shipped_lines) у закрытой
+    заявки → не показывается как расхождение ФФ. Реальный кейс: винтаж был в
+    плане PVB-0000306, отгружено 0 → панель ложно рисовала +25/+10/+10."""
+    bc1, bc2 = f"20{_uid()}", f"20{_uid()}"
+    guid_a, guid_b = _uid(), _uid()
+    await _seed_migfull_stock(db_session, project.id, warehouse.id, guid_a, bc1)
+    await _seed_migfull_stock(db_session, project.id, warehouse.id, guid_b, bc2)
+    doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(bc1, 5)])
+    await _make_ff(
+        db_session,
+        project.id,
+        warehouse.id,
+        provider="migfull",
+        assembly_request_id=doc.id,
+        # план: bc1 5 + bc2 10 (винтаж); факт отгружено: только bc1 5
+        raw=_migfull_raw([(guid_a, 5), (guid_b, 10)], shipped=[(guid_a, 5)]),
+        is_completed=True,
+    )
+    assert await _verdict(db_session, project.id, doc.id) is False  # bc2 не отгружен → не расхождение
+    detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id)
+    assert detail["ff_total"] == 5 and detail["our_total"] == 5
+    assert detail["rows"] == []
+
+
+@pytest.mark.asyncio
+async def test_closed_migfull_empty_shipped_falls_back_to_planned(db_session, project, warehouse):
+    """Закрыта, но shipped_lines пуст (нет данных отгрузки) → фолбэк на план,
+    чтобы не потерять состав целиком."""
+    bc1 = f"20{_uid()}"
+    guid_a = _uid()
+    await _seed_migfull_stock(db_session, project.id, warehouse.id, guid_a, bc1)
+    doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(bc1, 5)])
+    await _make_ff(
+        db_session,
+        project.id,
+        warehouse.id,
+        provider="migfull",
+        assembly_request_id=doc.id,
+        raw=_migfull_raw([(guid_a, 5)], shipped=[]),  # план есть, отгрузки нет
+        is_completed=True,
+    )
+    # пустой shipped → сверяем по плану 5 == наш 5
+    assert await _verdict(db_session, project.id, doc.id) is False
 
 
 # ─── skladbot: фолбэк по суммарному кол-ву ───────────────────────────────────
