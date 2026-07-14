@@ -822,6 +822,22 @@ async def set_campaign_state_endpoint(
     return result
 
 
+@router.post("/campaigns/{campaign_id}/refresh", dependencies=[Depends(rate_limit_write)])
+async def refresh_campaign_ep(
+    campaign_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Точечный догруз ОДНОЙ кампании из WB (деталь + бюджет + свежая дневная стата за 2 дня)
+    и синхронная запись в зеркало. По кнопке «Обновить» на странице кампании."""
+    from backend.services.funnel.ad_campaigns_service import refresh_one_campaign
+
+    result = await refresh_one_campaign(db, project.id, campaign_id)
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось обновить кампанию")
+    return result
+
+
 @router.post("/campaigns/{campaign_id}/stop", dependencies=[Depends(rate_limit_write)])
 async def stop_campaign_ep(
     campaign_id: int,

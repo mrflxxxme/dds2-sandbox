@@ -206,6 +206,10 @@ export function addFunnelMethods(api: ApiClient) {
         setCampaignState(campaignId: number, active: boolean) {
             return api.request<AdsCampaignStateResult>('POST', `/api/v1/funnel/campaigns/${campaignId}/state`, { active });
         },
+        /** Точечный догруз ОДНОЙ кампании из WB (деталь + бюджет + свежая дневная стата) в зеркало. */
+        refreshCampaign(campaignId: number) {
+            return api.request<{ ok: boolean; error: string | null }>('POST', `/api/v1/funnel/campaigns/${campaignId}/refresh`);
+        },
         /** Завершить кампанию в WB (необратимо). */
         stopCampaign(campaignId: number) {
             return api.request<{ ok: boolean; status?: number; error: string | null }>('POST', `/api/v1/funnel/campaigns/${campaignId}/stop`);

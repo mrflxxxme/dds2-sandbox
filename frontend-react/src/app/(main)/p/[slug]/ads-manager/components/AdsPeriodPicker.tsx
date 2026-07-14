@@ -61,11 +61,12 @@ interface Props {
     onApply: (from: string, to: string) => void;  // '' , '' = сброс фильтра
     placeholder?: string;
     minWidth?: number;
+    align?: 'left' | 'right';  // сторона раскрытия попапа (right — когда пикер у правого края)
 }
 
 /** Пикер периода как в референсе: 2 месяца, пресеты справа, ручной ввод дд.мм.гггг, «Сбросить/Готово».
  *  Поддерживает пустое состояние (для фильтра «Дата добавления»). */
-export default function AdsPeriodPicker({ from, to, onApply, placeholder = 'Выберите период', minWidth = 210 }: Props) {
+export default function AdsPeriodPicker({ from, to, onApply, placeholder = 'Выберите период', minWidth = 210, align = 'left' }: Props) {
     const [open, setOpen] = useState(false);
     const wrapRef = useRef<HTMLDivElement>(null);
     const [pending, setPending] = useState<DateRange | undefined>(() => {
@@ -117,7 +118,7 @@ export default function AdsPeriodPicker({ from, to, onApply, placeholder = 'Вы
                 </svg>
             </button>
             {open && (
-                <div className="apk-pop" role="dialog">
+                <div className="apk-pop" role="dialog" style={align === 'right' ? { left: 'auto', right: 0 } : undefined}>
                     <div className="apk-body">
                         <DayPicker mode="range" selected={pending} onSelect={setRange} defaultMonth={defaultMonth}
                             locale={ru} weekStartsOn={1} numberOfMonths={2} />

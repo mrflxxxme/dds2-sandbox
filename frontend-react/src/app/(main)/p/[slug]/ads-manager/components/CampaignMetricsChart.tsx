@@ -152,8 +152,10 @@ export default function CampaignMetricsChart({ rows, selected, onToggle, launchD
     // остальные — линиями. Если объёмных нет — рисуем только линии.
     const barMetric = ordered.find(m => m.bar && !bars[m.key].empty) ?? ordered.find(m => m.bar) ?? null;
     const lineMetrics = ordered.filter(m => m.key !== barMetric?.key);
-    // Единственная метрика-столбец без линий — рисуем плотнее (не бледный фон)
-    const barBase = lineMetrics.length > 0 ? 0.2 : 0.55;
+    // Объёмная метрика рисуется «лоллипопом»: тонкий штырёк от базовой линии + точка-набалдашник
+    // на значении. Без линий — штырёк плотнее, чтобы не выглядел бледным.
+    const stickOp = lineMetrics.length > 0 ? 0.4 : 0.6;
+    const dotR = Math.min(5, Math.max(2.5, geo.barW / 6));
     const hp = hover != null ? points[hover] : null;
     const labelEvery = Math.ceil(points.length / 14);
     const onCellMove = (i: number, e: React.MouseEvent) => {
@@ -199,10 +201,10 @@ export default function CampaignMetricsChart({ rows, selected, onToggle, launchD
                                 return (
                                 // Диапазон «0…N» не показываем: пик каждой метрики виден в подсказке.
                                 // Маркер повторяет отрисовку: столбец — квадрат-плашка, линия — черта с точкой.
-                                <Tooltip key={m.key} text={bars[m.key].empty ? 'Нет данных за период' : `${isBar ? 'Столбцы' : 'Линия'} · пик: ${fmtCompact(bars[m.key].max)}`}>
+                                <Tooltip key={m.key} text={bars[m.key].empty ? 'Нет данных за период' : `${isBar ? 'Точки' : 'Линия'} · пик: ${fmtCompact(bars[m.key].max)}`}>
                                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: FS.legend, color: '#374151' }}>
                                         {isBar
-                                            ? <span style={{ width: 9, height: 9, borderRadius: 2, background: m.color, opacity: 0.55, display: 'inline-block' }} />
+                                            ? <span style={{ width: 9, height: 9, borderRadius: '50%', background: m.color, display: 'inline-block' }} />
                                             : <span style={{ width: 14, height: 2, background: m.color, borderRadius: 2, display: 'inline-block' }} />}
                                         {m.label}
                                         {bars[m.key].empty && <span style={{ color: '#b0b0b0' }}>нет данных</span>}
@@ -231,13 +233,20 @@ export default function CampaignMetricsChart({ rows, selected, onToggle, launchD
                             })}
                             <line x1={PAD_L} x2={W - PAD_R} y1={geo.baseY} y2={geo.baseY} stroke="#dde1e6" strokeWidth={1} />
 
-                            {/* Объёмная метрика — фоновыми столбцами (одна серия, без наложения) */}
+                            {/* Объёмная метрика — «лоллипоп»: тонкий штырёк + точка-набалдашник (вместо массивных столбцов) */}
                             {barMetric && !bars[barMetric.key].empty && (
                                 <g>
-                                    {bars[barMetric.key].rects.map((b, i) => (
-                                        <rect key={i} x={b.x} y={b.y} width={geo.barW} height={Math.max(0, b.h)} rx={2}
-                                            fill={barMetric.color} fillOpacity={hover == null || hover === i ? barBase : barBase * 0.55} />
-                                    ))}
+                                    {bars[barMetric.key].rects.map((b, i) => {
+                                        const cx = geo.cxs[i];
+                                        const dim = hover == null || hover === i ? 1 : 0.4;
+                                        return (
+                                            <g key={i} opacity={dim}>
+                                                <line x1={cx} x2={cx} y1={geo.baseY} y2={b.y} stroke={barMetric.color}
+                                                    strokeWidth={2.5} strokeOpacity={stickOp} strokeLinecap="round" />
+                                                <circle cx={cx} cy={b.y} r={dotR} fill={barMetric.color} stroke="#fff" strokeWidth={1} />
+                                            </g>
+                                        );
+                                    })}
                                 </g>
                             )}
 
