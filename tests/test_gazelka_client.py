@@ -163,9 +163,16 @@ APPLY_PATH = "/customer/apply/4988"
 
 
 def test_create_result_success_on_redirect_away():
+    res = _parse_create_result(_redirect("/customer/orders/313621"), APPLY_PATH)
+    assert res.ok is True
+    assert res.ref == "313621"
+
+
+def test_create_result_drops_customer_id_as_ref():
+    # /customer/orders/{id клиента} — страница СПИСКА заявок; id клиента ≠ номер заявки
     res = _parse_create_result(_redirect("/customer/orders/4988"), APPLY_PATH)
     assert res.ok is True
-    assert res.ref == "4988"
+    assert res.ref is None
 
 
 def test_create_result_uncertain_when_form_returns():

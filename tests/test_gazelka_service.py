@@ -6,20 +6,26 @@ Tests for Gazelka service mapping: options, prefill, payload (no DB, no network)
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.integrations.gazelka_client import ApplyForm, DeliveryPlace, SchedulePlan
+from backend.integrations.gazelka_client import ApplyForm, DeliveryPlace, GazelkaCreateResult, SchedulePlan
+from backend.models import GazelkaOrderStatus
 from backend.schemas.gazelka import GazelkaSendRequest
+from backend.services import gazelka_service
 from backend.services.gazelka_service import (
     GazelkaServiceError,
     _attach_suggestion,
     _clean_date,
     _default_marketplace,
     _extract_wb_numbers,
+    _find_created_plan,
     _match_warehouse,
     _options_from_form,
     _payload_from_request,
+    _plan_ids,
+    _plan_matches_payload,
     _prefill_from_assembly,
     _row_from_plan,
     _status_label,
@@ -458,3 +464,186 @@ def test_attach_suggestion_skipped_when_already_linked():
     row = _row_from_plan(_PLAN, _MKTS, {"313621": (1, "ASM-1", "READY")}, editable=True)
     _attach_suggestion(row, _PLAN, {"40299154": (7, "ASM-700")})
     assert row.suggested_assembly_id is None  # уже связана — подсказку не даём
+
+
+# ─── Подтверждение создания по «Запланированным» ─────────────────────────────
+# У портала нет машинного признака успеха save_plan (в отличие от migfull/«Натали»,
+# где Livewire отдаёт redirect с GUID) — успех подтверждаем новой строкой списка.
+
+
+def _sent_payload(**over: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "supply_id": "40299154",
+        "departure_date": "2026-07-15",
+        "delivery_date": "2026-07-16",
+        "pallets": "3",
+    }
+    base.update(over)
+    return base
+
+
+def _portal_plan(pid: str, **over: object) -> dict[str, object]:
+    plan: dict[str, object] = {
+        "id": pid,
+        "supply_id": "&quot;Казань 40299154&quot; PVB-0000266",
+        "departure_date": "2026-07-15 00:00:00",
+        "delivery_date": "2026-07-16",
+        "pallets": "3",
+    }
+    plan.update(over)
+    return plan
+
+
+def test_plan_ids_collects_ids():
+    assert _plan_ids({"plans": [{"id": 101}, {"id": "102"}, {"x": 1}]}) == {"101", "102"}
+    assert _plan_ids({}) == set()
+
+
+def test_plan_matches_payload_by_our_fields():
+    # supply_id — по вхождению (портал хранит его с обвязкой), даты — по дню
+    assert _plan_matches_payload(_portal_plan("1"), _sent_payload()) is True
+
+
+def test_plan_matches_payload_rejects_foreign_order():
+    assert _plan_matches_payload(_portal_plan("1", supply_id="88888888"), _sent_payload()) is False
+    assert _plan_matches_payload(_portal_plan("1", departure_date="2026-07-14"), _sent_payload()) is False
+    assert _plan_matches_payload(_portal_plan("1", pallets="2"), _sent_payload()) is False
+
+
+def test_plan_matches_payload_skips_unset_fields():
+    # None-поля payload = дефолт формы — не сравниваем, матч по остальным
+    plan = _portal_plan("1", supply_id="")
+    assert _plan_matches_payload(plan, _sent_payload(supply_id=None, delivery_date=None)) is True
+
+
+def test_find_created_plan_returns_new_matching_id():
+    after = {
+        "plans": [
+            _portal_plan("100"),  # была до POST — не считается
+            _portal_plan("101"),  # наша новая
+            _portal_plan("102", supply_id="99", pallets="1"),  # чужая одновременная
+        ]
+    }
+    assert _find_created_plan({"100"}, after, _sent_payload()) == "101"
+
+
+def test_find_created_plan_none_when_nothing_new():
+    after = {"plans": [_portal_plan("100")]}
+    assert _find_created_plan({"100"}, after, _sent_payload()) is None
+
+
+def test_find_created_plan_ignores_foreign_new_order():
+    after = {"plans": [_portal_plan("102", supply_id="99", pallets="1")]}
+    assert _find_created_plan(set(), after, _sent_payload()) is None
+
+
+def test_find_created_plan_picks_latest_of_duplicates():
+    after = {"plans": [_portal_plan("101"), _portal_plan("103")]}
+    assert _find_created_plan(set(), after, _sent_payload()) == "103"
+
+
+# ─── send_order: ложная ошибка редирект-эвристики → подтверждение по списку ──
+
+
+class _FakeGazelkaClient:
+    """Клиент, у которого POST реально создаёт заявку, но портал не редиректит."""
+
+    def __init__(self, before: list[dict], after: list[dict], outcome: object):
+        self._pages = [before, after]
+        self._outcome = outcome  # GazelkaCreateResult | Exception
+
+    async def __aenter__(self) -> "_FakeGazelkaClient":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def authenticate(self) -> None:
+        return None
+
+    async def fetch_apply_form(self) -> ApplyForm:
+        return _form()
+
+    async def fetch_planned(self) -> dict:
+        return {"plans": self._pages.pop(0), "marketplaces": []}
+
+    async def create_order(self, fields: dict, form: ApplyForm | None = None) -> GazelkaCreateResult:
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        assert isinstance(self._outcome, GazelkaCreateResult)
+        return self._outcome
+
+
+def _db_for_send() -> MagicMock:
+    key = SimpleNamespace(warehouse_id=7, config={"login": "user@x"}, project_id=4)
+    assembly = SimpleNamespace(id=55, warehouse_id=7)
+    db = MagicMock()
+    db.execute = AsyncMock(
+        side_effect=[
+            SimpleNamespace(scalar_one_or_none=lambda: key),  # _get_key
+            SimpleNamespace(scalar_one_or_none=lambda: assembly),  # _load_assembly
+        ]
+    )
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    return db
+
+
+def _send_req_confirm() -> GazelkaSendRequest:
+    return _send_req(
+        is_marketplace="no",  # график не валидируем — тест про подтверждение исхода
+        supply_id="40299154",
+        departure_date=date(2026, 7, 15),
+        delivery_date=date(2026, 7, 16),
+        pallets=3,
+        force_resend=True,
+    )
+
+
+async def test_send_order_confirms_by_planned_list_when_no_redirect(monkeypatch):
+    """Портал вернул форму без редиректа (ok=False), но заявка появилась в списке → SENT."""
+    uncertain = GazelkaCreateResult(ok=False, ref=None, message="подтверждение не получено", excerpt="")
+    client = _FakeGazelkaClient(before=[_portal_plan("100")], after=[_portal_plan("100"), _portal_plan("101")], outcome=uncertain)
+    monkeypatch.setattr(gazelka_service, "_client_from_key", lambda key: client)
+
+    db = _db_for_send()
+    result = await gazelka_service.send_order(db, 4, 55, _send_req_confirm(), actor="t@t")
+
+    assert result.ok is True
+    assert result.ref == "101"
+    order = db.add.call_args.args[0]
+    assert order.status == GazelkaOrderStatus.SENT
+    assert order.gazelka_ref == "101"
+
+
+async def test_send_order_failed_when_confirmed_absent(monkeypatch):
+    """Портал вернул форму, заявка в списке НЕ появилась → FAILED (повтор безопасен)."""
+    uncertain = GazelkaCreateResult(ok=False, ref=None, message="подтверждение не получено", excerpt="err")
+    client = _FakeGazelkaClient(before=[_portal_plan("100")], after=[_portal_plan("100")], outcome=uncertain)
+    monkeypatch.setattr(gazelka_service, "_client_from_key", lambda key: client)
+
+    db = _db_for_send()
+    result = await gazelka_service.send_order(db, 4, 55, _send_req_confirm(), actor="t@t")
+
+    assert result.ok is False
+    order = db.add.call_args.args[0]
+    assert order.status == GazelkaOrderStatus.FAILED  # точно не создана, не UNCERTAIN
+
+
+async def test_send_order_confirms_even_when_post_raises(monkeypatch):
+    """POST упал 5xx, но заявка появилась в списке → SENT, дубль не спровоцирован."""
+    client = _FakeGazelkaClient(
+        before=[_portal_plan("100")],
+        after=[_portal_plan("100"), _portal_plan("101")],
+        outcome=ValueError("Gazelka create 500"),
+    )
+    monkeypatch.setattr(gazelka_service, "_client_from_key", lambda key: client)
+
+    db = _db_for_send()
+    result = await gazelka_service.send_order(db, 4, 55, _send_req_confirm(), actor="t@t")
+
+    assert result.ok is True
+    assert result.ref == "101"
+    order = db.add.call_args.args[0]
+    assert order.status == GazelkaOrderStatus.SENT
