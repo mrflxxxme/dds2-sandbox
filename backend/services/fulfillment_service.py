@@ -4234,14 +4234,17 @@ async def get_assembly_ff_mismatch_detail(
     """Разбивка расхождения наполнения сборки с привязанными заявками ФФ (модалка «что не так»).
 
     None — сборка не найдена в проекте. Иначе FfMismatchDetail-shape:
-    - mode="barcode": сверка по ШК (wmscelicom/migfull) — rows только по расходящимся
-      позициям (наш qty vs суммарный qty всех АКТИВНЫХ привязанных заявок ФФ);
-    - mode="total": состав ФФ по позициям недоступен (skladbot / неполный резолв
-      migfull) → только итоги; ФФ-итог migfull считается в ШТУКАХ (`_ff_unit_total`,
-      короба × штук), а не в коробах из `total_qty`.
+    - mode="barcode": сверка по ШК (wmscelicom/migfull; skladbot — только при live)
+      — rows только по расходящимся позициям (наш qty vs суммарный qty всех АКТИВНЫХ
+      привязанных заявок ФФ);
+    - mode="total": состав ФФ по позициям недоступен (неполный резолв migfull;
+      skladbot без live или при ошибке провайдера) → только итоги; ФФ-итог migfull
+      считается в ШТУКАХ (`_ff_unit_total`, короба × штук), а не в коробах из `total_qty`.
     live=True (деталка одной сборки) — дотягиваем неразрезолвленные migfull-guid живой
-    карточкой + ручные ШК (overlay) → состав становится полным → mode="barcode".
-    live=False (батч аномалий, `compute_doc_ff_mismatch`) — только зеркало, без HTTP.
+    карточкой + ручные ШК (overlay), а состав skladbot (в зеркале его НЕТ — списочный
+    API отдаёт только тотал) — живой деталкой `/v1/requests/show` → mode="barcode".
+    live=False (батч аномалий, `compute_doc_ff_mismatch`) — только зеркало, без HTTP
+    (иначе список из N сборок дал бы N запросов к провайдеру).
     """
     asm = (
         await db.execute(
@@ -4335,6 +4338,15 @@ async def get_assembly_ff_mismatch_detail(
                 await _migfull_resolve_detail_barcodes(client, guids, mig_maps[wh_id])
 
     comps = [_mirror_ff_composition(r, mig_maps.get(r.warehouse_id, {})) for r in ff_reqs]
+    # live: у skladbot состава в зеркале НЕТ (списочный API отдаёт только тотал) →
+    # дотягиваем живой деталкой /v1/requests/show. Иначе панель одной сборки вечно
+    # падала бы в mode="total" («состав недоступен»), хотя состав достать можно.
+    # Best-effort: ошибка провайдера → None → фолбэк по количеству (как раньше).
+    # Только live (деталка одной сборки): в батче (список) это дало бы N HTTP.
+    if live:
+        for i, r in enumerate(ff_reqs):
+            if comps[i] is None and r.provider == "skladbot":
+                comps[i] = await _fetch_ff_composition(db, project_id, r.warehouse_id, r)
     base = {
         "assembly_id": assembly_request_id,
         "assembly_number": assembly_number_label,
