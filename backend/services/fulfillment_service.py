@@ -3730,6 +3730,24 @@ def _migfull_line_rows(value: object) -> list[dict]:
     return [r for r in rows if isinstance(r, dict)]
 
 
+def _migfull_composition_lines(req: FulfillmentRequest) -> list[dict]:
+    """Строки состава migfull-отгрузки для сверки со сборкой.
+
+    Закрытая (отгружена, `is_completed`) заявка → ФАКТ `shipped_lines`; открытая
+    (ещё собирается) → предварительный план `planned_lines`. План закрытой заявки
+    уже неактуален: ФФ мог отгрузить не весь план (недовоз, перенос остатка в
+    related_shipment) → сверка сборки с планом даёт ложное расхождение по
+    неотгруженным позициям. Закрыта, но строк отгрузки нет → фолбэк на план,
+    чтобы не потерять состав целиком.
+    """
+    raw = req.raw or {}
+    if req.is_completed:
+        shipped = _migfull_line_rows(raw.get("shipped_lines"))
+        if shipped:
+            return shipped
+    return _migfull_line_rows(raw.get("planned_lines"))
+
+
 def _migfull_products_from_lines(
     base_lines: list[dict],
     fact_lines: list[dict],
@@ -3950,9 +3968,7 @@ def _ff_unit_total(req: FulfillmentRequest, mig_guid_map: dict[str, tuple[str, i
     """
     if req.provider == "migfull" and req.kind == FfRequestKind.ASSEMBLY.value:
         total = 0
-        for p in _migfull_products_from_lines(
-            _migfull_line_rows((req.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
-        ):
+        for p in _migfull_products_from_lines(_migfull_composition_lines(req), [], fact_field="delivery_qty"):
             if p["qty"] > 0:
                 _bc, units = mig_guid_map.get(p["guid"], (None, 1))
                 total += p["qty"] * units
@@ -3986,9 +4002,7 @@ def _mirror_ff_composition(req: FulfillmentRequest, mig_guid_map: dict[str, tupl
         if req.kind != FfRequestKind.ASSEMBLY.value:
             return None
         guid_qty: dict[str, int] = {}
-        for p in _migfull_products_from_lines(
-            _migfull_line_rows((req.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
-        ):
+        for p in _migfull_products_from_lines(_migfull_composition_lines(req), [], fact_field="delivery_qty"):
             if p["qty"] > 0:
                 guid_qty[p["guid"]] = guid_qty.get(p["guid"], 0) + p["qty"]
         if not guid_qty:
@@ -4152,9 +4166,7 @@ async def compute_doc_ff_mismatch(
     mig_guids_by_wh: dict[int, set[str]] = {}
     for r in ff_reqs:
         if r.provider == "migfull" and r.kind == FfRequestKind.ASSEMBLY.value:
-            for p in _migfull_products_from_lines(
-                _migfull_line_rows((r.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
-            ):
+            for p in _migfull_products_from_lines(_migfull_composition_lines(r), [], fact_field="delivery_qty"):
                 if p["qty"] > 0:
                     mig_guids_by_wh.setdefault(r.warehouse_id, set()).add(p["guid"])
     mig_maps: dict[int, dict[str, tuple[str, int]]] = {}
@@ -4299,9 +4311,7 @@ async def get_assembly_ff_mismatch_detail(
     name_by_guid: dict[str, str | None] = {}
     for r in ff_reqs:
         if r.provider == "migfull" and r.kind == FfRequestKind.ASSEMBLY.value:
-            for p in _migfull_products_from_lines(
-                _migfull_line_rows((r.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
-            ):
+            for p in _migfull_products_from_lines(_migfull_composition_lines(r), [], fact_field="delivery_qty"):
                 if p["qty"] > 0:
                     mig_guids_by_wh.setdefault(r.warehouse_id, set()).add(p["guid"])
                     name_by_guid.setdefault(p["guid"], p.get("name"))
