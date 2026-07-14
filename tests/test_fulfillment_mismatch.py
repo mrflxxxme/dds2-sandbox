@@ -563,6 +563,85 @@ async def test_mismatch_detail_live_resolves_migfull_units(db_session, project, 
 
 
 @pytest.mark.asyncio
+async def test_mismatch_detail_live_fetches_skladbot_composition(db_session, project, warehouse, monkeypatch):
+    """skladbot: состава в зеркале НЕТ (списочный API отдаёт только тотал) → без live
+    панель падает в mode="total" («состав недоступен»). С live=True дотягиваем живой
+    деталкой /v1/requests/show → mode="barcode" с разбивкой по ШК."""
+    from backend.integrations.skladbot_client import SkladbotClient
+
+    async def _ok(self):
+        return {"id": 1, "name": "ff"}  # skladbot: test_connection отдаёт кабинет (dict)
+
+    async def _one(self):
+        return 1
+
+    monkeypatch.setattr(SkladbotClient, "test_connection", _ok)
+    monkeypatch.setattr(SkladbotClient, "count_customers", _one)
+    await fulfillment_service.connect(db_session, project.id, warehouse.id, "skladbot", "tok")
+
+    bc1, bc2 = f"20{_uid()}", f"20{_uid()}"
+    doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(bc1, 5), (bc2, 3)])
+    await _make_ff(
+        db_session,
+        project.id,
+        warehouse.id,
+        provider="skladbot",
+        assembly_request_id=doc.id,
+        total_qty=12,  # ФФ всего 12 шт против наших 8
+    )
+
+    # живая деталка ФФ: bc1 5 (сходится) + bc2 7 (у нас 3 → +4)
+    async def _detail(self, external_id):
+        return {"products": [{"barcode": bc1, "amount": 5}, {"barcode": bc2, "amount": 7}]}
+
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", _detail)
+
+    # без live — зеркала нет → только итоги (как раньше)
+    d0 = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id)
+    assert d0["mode"] == "total"
+    assert d0["ff_total"] == 12 and d0["our_total"] == 8
+    assert d0["rows"] == []
+
+    # live — дотянули состав → разбивка по ШК; расходится только bc2 (+4)
+    d1 = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id, live=True)
+    assert d1["mode"] == "barcode"
+    assert d1["our_total"] == 8 and d1["ff_total"] == 12
+    assert [(r["barcode"], r["our_qty"], r["ff_qty"], r["diff"]) for r in d1["rows"]] == [(bc2, 3, 7, 4)]
+
+
+@pytest.mark.asyncio
+async def test_mismatch_detail_skladbot_live_error_falls_back_to_total(db_session, project, warehouse, monkeypatch):
+    """Живая деталка skladbot упала (провайдер недоступен) → НЕ валим эндпоинт,
+    а откатываемся в mode="total" по количеству (best-effort)."""
+    from backend.integrations.skladbot_client import SkladbotClient
+
+    async def _ok(self):
+        return {"id": 1, "name": "ff"}  # skladbot: test_connection отдаёт кабинет (dict)
+
+    async def _one(self):
+        return 1
+
+    monkeypatch.setattr(SkladbotClient, "test_connection", _ok)
+    monkeypatch.setattr(SkladbotClient, "count_customers", _one)
+    await fulfillment_service.connect(db_session, project.id, warehouse.id, "skladbot", "tok")
+
+    bc = f"20{_uid()}"
+    doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(bc, 5)])
+    await _make_ff(
+        db_session, project.id, warehouse.id, provider="skladbot", assembly_request_id=doc.id, total_qty=9
+    )
+
+    async def _boom(self, external_id):
+        raise ValueError("skladbot 500")
+
+    monkeypatch.setattr(SkladbotClient, "fetch_request_detail", _boom)
+
+    d = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id, live=True)
+    assert d["mode"] == "total"  # ошибка провайдера → фолбэк, не 500
+    assert d["ff_total"] == 9 and d["our_total"] == 5
+
+
+@pytest.mark.asyncio
 async def test_mismatch_detail_404_other_project(db_session, project, other_project, warehouse):
     doc = await _make_assembly(db_session, project.id, warehouse.id, items=[("20x", 5)])
     assert await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, other_project.id, doc.id) is None
