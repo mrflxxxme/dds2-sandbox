@@ -26,11 +26,14 @@ export function zoneRuleText(z: CampaignZones): string {
  *  в остальных случаях тумблер виден, отражает реальное состояние, но заблокирован.
  *  Разбивку статистики по зонам даёт отдельная вкладка «По зонам» (не этот блок).
  */
-export default function ZonesPanel({ zones, campaignId, onChanged }: {
+export default function ZonesPanel({ zones, campaignId, onZonesLocal, onBidLocal }: {
     zones: CampaignZones;
     campaignId: number;
-    /** Зоны успешно изменены в WB — перечитать их с сервера */
-    onChanged: () => void;
+    /** WB принял новые зоны — отразить их состояние в UI сразу из ответа (без живого рефетча,
+     *  который из-за read-after-write лага WB мог бы «откатить» тумблер на старое значение). */
+    onZonesLocal: (placements: Record<string, boolean>) => void;
+    /** WB принял ставку зоны — отразить применённую ставку сразу из ответа. */
+    onBidLocal: (zone: ZoneKey, bid: number) => void;
 }) {
     const [busy, setBusy] = useState<ZoneKey | null>(null);
     const [error, setError] = useState('');
@@ -45,14 +48,16 @@ export default function ZonesPanel({ zones, campaignId, onChanged }: {
     const saveBid = async (z: ZoneKey) => {
         const v = Math.round(Number(bidInput.replace(',', '.')));
         if (!v || v <= 0) { setError('Ставка должна быть больше 0'); return; }
-        const label = ZONES.find(x => x.key === z)?.label;
+        // У CPM · единая ставка одна на обе зоны — в подтверждении это и пишем.
+        const unified = zones.payment_type === 'cpm' && (zones.bid_mode || '') === 'unified';
+        const label = unified ? 'Поиск + Рекомендации' : ZONES.find(x => x.key === z)?.label;
         if (!window.confirm(`Изменить ставку зоны «${label}» на ${v} ₽? Это реальные деньги.`)) return;
         setSavingBid(z); setError('');
         try {
             const res = await api.setCampaignZoneBid(campaignId, z, v);
             if (!res.ok) throw new Error(res.error || 'Не удалось изменить ставку');
             setEditZone(null);
-            onChanged();  // перечитать зоны — ставка обновится с сервера
+            onBidLocal(z, res.bid ?? v);  // применённая ставка из ответа — показываем сразу
         } catch (e) {
             setError(e instanceof Error ? e.message : 'Не удалось изменить ставку');
         } finally { setSavingBid(null); }
@@ -69,24 +74,41 @@ export default function ZonesPanel({ zones, campaignId, onChanged }: {
         if (!window.confirm(`${next[key] ? 'Включить' : 'Выключить'} зону «${zoneLabel}» в WB?`)) return;
         setBusy(key); setError('');
         try {
-            await api.setCampaignZones(campaignId, next);
-            onChanged();
+            const res = await api.setCampaignZones(campaignId, next);
+            if (!res.ok) { setError(res.error || 'Не удалось изменить зоны показов'); return; }
+            onZonesLocal(res.placements ?? next);  // авторитетное новое состояние из ответа
         } catch (e) {
             setError(e instanceof Error ? e.message : 'Не удалось изменить зоны показов');
         } finally { setBusy(null); }
     };
 
 
+    // CPM · единая ставка: обе зоны работают вместе одной ставкой (бэкенд шлёт placement='combined'),
+    // поэтому рисуем ОДНУ карточку «Поиск + Рекомендации» с единственной ставкой, а не две одинаковых.
+    const unifiedCpm = zones.payment_type === 'cpm' && (zones.bid_mode || '') === 'unified';
+    // Для единой карточки правки ставки всё равно уходят по зоне 'search' — бэкенд трактует их как combined.
+    const cards: { key: ZoneKey; label: string; on: boolean; bid: number | null }[] = unifiedCpm
+        ? [{
+            key: 'search',
+            label: 'Поиск + Рекомендации',
+            on: (zones.placements.search ?? false) || (zones.placements.recommendations ?? false),
+            bid: zones.bids.search ?? zones.bids.recommendations,
+        }]
+        : ZONES.flatMap(z => {
+            const on = zones.placements[z.key] ?? false;
+            // Зона, которой у кампании нет вовсе (CPC → рекомендации), не рисуется
+            if (!on && zones.bids[z.key] == null && zones.payment_type === 'cpc') return [];
+            return [{ key: z.key, label: z.label, on, bid: zones.bids[z.key] }];
+        });
+
     return (
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid #eef0f2' }}>
             {/* Один блок: метка + тумблеры зон в одну строку. Правило ставки не дублируем — оно в типе рекламы над шапкой. */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 11, fontWeight: 700, color: '#6b7280' }}>ЗОНЫ ПОКАЗОВ</span>
-                {ZONES.map(z => {
-                    const on = zones.placements[z.key] ?? false;
-                    // Зона, которой у кампании нет вовсе (CPC → рекомендации), не рисуется
-                    if (!on && zones.bids[z.key] == null && zones.payment_type === 'cpc') return null;
-                    const bid = zones.bids[z.key];
+                {cards.map(z => {
+                    const on = z.on;
+                    const bid = z.bid;
                     const card = (
                         <div style={{
                             display: 'flex', alignItems: 'center', gap: 9,

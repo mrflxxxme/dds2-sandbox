@@ -344,6 +344,28 @@ def _parse_advert_item(c: dict) -> dict | None:
     }
 
 
+async def fetch_campaign_detail(api_key: str, campaign_id: int) -> dict | None:
+    """Деталь ОДНОЙ кампании из WB — для точечного догруза (имя/тип/статус/nm_ids/bid_mode).
+
+    GET /api/advert/v2/adverts?ids={id} → adverts[0] → _parse_advert_item. Возвращает
+    нормализованный dict той же формы, что элемент fetch_ad_campaigns_detailed, или None,
+    если WB не отдал кампанию. Один запрос — без обхода всего кабинета.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = f"https://advert-api.wildberries.ru/api/advert/v2/adverts?ids={campaign_id}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            logger.warning(f"WB advert detail {resp.status_code} for {campaign_id}: {resp.text[:200]}")
+            return None
+        adverts = (resp.json() or {}).get("adverts") or []
+    except Exception as e:
+        logger.warning(f"WB advert detail failed for {campaign_id}: {e}")
+        return None
+    return _parse_advert_item(adverts[0]) if adverts else None
+
+
 async def fetch_campaign_placements(api_key: str, campaign_id: int) -> dict:
     """Зоны показов кампании и ставки по каждой из них.
 

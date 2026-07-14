@@ -10,6 +10,9 @@ export const iso = (d: Date) => d.toISOString().slice(0, 10);
 // ─── Стили таблиц ───
 export const thStyle: React.CSSProperties = { background: '#f3f4f6', color: '#374151', fontSize: 10.5, fontWeight: 700, textAlign: 'right', borderBottom: '1px solid #d1d5db', padding: '5px 8px', whiteSpace: 'nowrap' };
 export const thLeft: React.CSSProperties = { ...thStyle, textAlign: 'left' };
+// Тёмная шапка таблицы кампаний (тот же вид, что у списка кампаний) — переиспользуем в разделах
+export const cThStyle: React.CSSProperties = { ...thStyle, background: '#374151', color: '#e5e7eb', borderBottom: '1px solid #4b5563', position: 'sticky', top: 0, zIndex: 3 };
+export const cThLeft: React.CSSProperties = { ...cThStyle, textAlign: 'left' };
 export const tdStyle: React.CSSProperties = { textAlign: 'right', borderBottom: '1px solid #e8eaed', padding: '3px 8px', fontSize: 12, whiteSpace: 'nowrap', color: '#111827' };
 export const tdLeft: React.CSSProperties = { ...tdStyle, textAlign: 'left' };
 

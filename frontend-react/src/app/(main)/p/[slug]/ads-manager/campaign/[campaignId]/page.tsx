@@ -6,7 +6,7 @@ import PageGuard from '@/components/PageGuard';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import type { AdsManagerCampaign, AdsAutopaySetting, CampaignClustersResponse, CampaignMetricRow, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionSnapshot, CampaignZones, SearchCluster } from '@/types/api';
-import { IcChart, IcClusters, IcCalendar, IcRefresh, IcPause, IcPlay, IcExternal, IcClock, IcGear, IcHistory } from '../../components/icons';
+import { IcChart, IcClusters, IcCalendar, IcRefresh, IcPause, IcPlay, IcExternal, IcClock, IcGear, IcHistory, IcCopy } from '../../components/icons';
 import ClusterTable from '../../components/ClusterTable';
 import CampaignMetricsTable from '../../components/CampaignMetricsTable';
 import CampaignZoneMetricsTable from '../../components/CampaignZoneMetricsTable';
@@ -46,18 +46,22 @@ export default function CampaignPage() {
     const [autopayModal, setAutopayModal] = useState(false);
     const [autopayLogModal, setAutopayLogModal] = useState(false);
     const [stateBusy, setStateBusy] = useState(false);
+    const [refreshing, setRefreshing] = useState(false);  // живой догруз кампании из WB по «Обновить»
 
-    const loadCampaign = useCallback(async () => {
-        setCampLoading(true); setCampError('');
+    // silent=true — тихая фоновая сверка после оптимистичного апдейта: не гасит шапку
+    // спиннером и не роняет ошибку в UI (значение уже показано из ответа действия).
+    const loadCampaign = useCallback(async (silent = false) => {
+        if (!silent) setCampLoading(true);
+        if (!silent) setCampError('');
         try {
             const [list, ap] = await Promise.all([api.getAdCampaignsList(), api.getCampaignsAutopay().catch(() => ({}))]);
             const found = list.find(c => c.campaign_id === campaignId) ?? null;
             setCampaign(found);
             setAutopay(ap);
-            if (!found) setCampError('Кампания не найдена. Возможно, она ещё не синхронизирована.');
+            if (!found && !silent) setCampError('Кампания не найдена. Возможно, она ещё не синхронизирована.');
         } catch (e) {
-            setCampError(e instanceof Error ? e.message : 'Ошибка загрузки кампании');
-        } finally { setCampLoading(false); }
+            if (!silent) setCampError(e instanceof Error ? e.message : 'Ошибка загрузки кампании');
+        } finally { if (!silent) setCampLoading(false); }
     }, [campaignId]);
 
     useEffect(() => { loadCampaign(); }, [loadCampaign]);
@@ -210,7 +214,9 @@ export default function CampaignPage() {
             if (!res.ok) { toast.error(res.error || 'Не удалось пополнить бюджет'); return; }
             toast.success(`Бюджет пополнен на ${amt.toLocaleString('ru-RU')} ₽`);
             setDepositAmount('');
-            await loadCampaign();
+            // WB возвращает новый остаток (budget_after) — показываем сразу, без тяжёлого рефетча
+            if (res.budget_after != null) setCampaign(prev => prev ? { ...prev, budget: res.budget_after as number } : prev);
+            loadCampaign(true);  // тихая сверка (в т.ч. на случай, когда WB не вернул total)
         } catch (e) {
             setCampError(e instanceof Error ? e.message : 'Ошибка пополнения');
         } finally { setDepositing(false); }
@@ -397,9 +403,12 @@ export default function CampaignPage() {
         setStateBusy(true);
         try {
             const r = await api.setCampaignState(campaign.campaign_id, active);
-            if (r && (r as { ok?: boolean }).ok === false) toast.error((r as { error?: string }).error || 'Не удалось изменить статус');
-            else toast.success(active ? 'Кампания запущена' : 'Кампания приостановлена');
-            await loadCampaign();
+            if (r && (r as { ok?: boolean }).ok === false) { toast.error((r as { error?: string }).error || 'Не удалось изменить статус'); return; }
+            toast.success(active ? 'Кампания запущена' : 'Кампания приостановлена');
+            // Мгновенный флип из эхо-статуса ответа (9 активна / 11 пауза), без ожидания рефетча
+            const newStatus = r.status ?? (active ? 9 : 11);
+            setCampaign(prev => prev ? { ...prev, status: newStatus, status_label: active ? 'Активна' : 'Пауза' } : prev);
+            loadCampaign(true);  // тихая фоновая сверка — не блокирует тумблер
         }
         catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось изменить статус кампании'); }
         finally { setStateBusy(false); }
@@ -407,8 +416,12 @@ export default function CampaignPage() {
 
     const saveAutopay = async (s: AdsAutopaySetting) => {
         const res = await api.setCampaignAutopay(campaignId, s);
-        setAutopay(res.settings);
-        if (s.enabled) loadCampaign();  // включение активирует кампанию — подтянем статус
+        setAutopay(res.settings);  // значение автопея (шестерёнка) — мгновенно из эхо-мапы
+        if (s.enabled) {
+            // включение автопея могло активировать кампанию из паузы — отразим статус сразу
+            if (res.activation?.ok) setCampaign(prev => prev ? { ...prev, status: res.activation!.status ?? 9, status_label: 'Активна' } : prev);
+            loadCampaign(true);  // тихая сверка
+        }
     };
 
     // ─── Управление кампанией (завершить / переименовать / удалить) ───
@@ -418,9 +431,10 @@ export default function CampaignPage() {
         setManageBusy(true); setCampError('');
         try {
             const res = await api.renameCampaign(campaign.campaign_id, name);
-            if (!res.ok) toast.error(res.error || 'Не удалось переименовать кампанию');
-            else toast.success('Кампания переименована');
-            await loadCampaign();
+            if (!res.ok) { toast.error(res.error || 'Не удалось переименовать кампанию'); return; }
+            toast.success('Кампания переименована');
+            setCampaign(prev => prev ? { ...prev, name: res.name ?? name } : prev);
+            loadCampaign(true);
         } catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось переименовать кампанию'); }
         finally { setManageBusy(false); }
     };
@@ -430,9 +444,10 @@ export default function CampaignPage() {
         setManageBusy(true); setCampError('');
         try {
             const res = await api.stopCampaign(campaign.campaign_id);
-            if (!res.ok) toast.error(res.error || 'Не удалось завершить кампанию');
-            else toast.success('Кампания завершена');
-            await loadCampaign();
+            if (!res.ok) { toast.error(res.error || 'Не удалось завершить кампанию'); return; }
+            toast.success('Кампания завершена');
+            setCampaign(prev => prev ? { ...prev, status: res.status ?? 7, status_label: 'Завершена' } : prev);
+            loadCampaign(true);
         } catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось завершить кампанию'); }
         finally { setManageBusy(false); }
     };
@@ -447,6 +462,24 @@ export default function CampaignPage() {
             await loadCampaign();
         } catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось удалить кампанию'); }
         finally { setManageBusy(false); }
+    };
+
+    // «Обновить» = живой догруз этой кампании из WB (деталь+бюджет+свежая стата) → зеркало,
+    // затем перечитать шапку и метрики/график/зоны из уже свежего зеркала.
+    const doRefresh = async () => {
+        setRefreshing(true);
+        try {
+            const res = await api.refreshCampaign(campaignId);
+            if (!res.ok) toast.warning('Не удалось догрузить из WB — показаны последние данные из базы');
+        } catch { toast.warning('Не удалось догрузить из WB — показаны последние данные из базы'); }
+        await loadCampaign(true);      // шапка (остаток/статус) из свежего зеркала, без мигания
+        setReloadKey(k => k + 1);      // метрики/график/зоны — тоже перечитать
+        setRefreshing(false);
+    };
+
+    // Копирование артикула (nm_id) из карточки товара кампании
+    const copyNm = (nmId: number) => {
+        navigator.clipboard?.writeText(String(nmId)).then(() => toast.success(`Артикул ${nmId} скопирован`)).catch(() => { /* clipboard недоступен */ });
     };
 
     const ap = autopay[String(campaignId)];
@@ -633,7 +666,16 @@ export default function CampaignPage() {
                                                     <WbThumb nmId={nmId} size={48} />
                                                     <div style={{ minWidth: 0 }}>
                                                         <div style={{ fontSize: 13, fontWeight: 600, color: active ? '#065f46' : '#111827', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cat?.vendor_code || `#${nmId}`}</div>
-                                                        <div style={{ fontSize: 11, color: active ? '#059669' : '#9ca3af' }}>#{nmId}{cat?.subject ? ` · ${cat.subject}` : ''}</div>
+                                                        <div style={{ fontSize: 11, color: active ? '#059669' : '#9ca3af', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }} title="Артикул товара">
+                                                                <span style={{ fontWeight: 700, color: active ? '#065f46' : '#374151' }}>{nmId}</span>
+                                                                <button onClick={e => { e.preventDefault(); e.stopPropagation(); copyNm(nmId); }} title="Скопировать артикул" aria-label="Скопировать артикул"
+                                                                    style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0, display: 'inline-flex', lineHeight: 1, color: active ? '#059669' : '#9ca3af' }}>
+                                                                    <IcCopy size={11} />
+                                                                </button>
+                                                            </span>
+                                                            {cat?.subject ? <span>· {cat.subject}</span> : null}
+                                                        </div>
                                                     </div>
                                                     <a href={`https://www.wildberries.ru/catalog/${nmId}/detail.aspx`} target="_blank" rel="noreferrer"
                                                         onClick={e => e.stopPropagation()}
@@ -653,7 +695,14 @@ export default function CampaignPage() {
                                 <ZonesPanel
                                     zones={zones}
                                     campaignId={campaignId}
-                                    onChanged={() => setReloadKey(k => k + 1)}
+                                    onZonesLocal={pl => setZones(z => z ? { ...z, placements: pl } : z)}
+                                    onBidLocal={(zone, bid) => setZones(z => {
+                                        if (!z) return z;
+                                        // CPM · единая: одна ставка на обе зоны (редактор идёт через 'search')
+                                        const unified = z.payment_type === 'cpm' && (z.bid_mode || '') === 'unified';
+                                        const bids = unified ? { search: bid, recommendations: bid } : { ...z.bids, [zone]: bid };
+                                        return { ...z, bids };
+                                    })}
                                 />
                             )}
 
@@ -673,7 +722,7 @@ export default function CampaignPage() {
                         {/* Период + обновление */}
                         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
                             <AdsPeriodPicker from={dateFrom} to={dateTo} onApply={(f, t) => { if (f && t) { setDateFrom(f); setDateTo(t); } }} minWidth={230} />
-                            <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }} onClick={() => setReloadKey(k => k + 1)} disabled={loading || metricsLoading}><IcRefresh size={14} />Обновить</button>
+                            <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }} onClick={doRefresh} disabled={loading || metricsLoading || refreshing}><IcRefresh size={14} />{refreshing ? 'Обновление…' : 'Обновить'}</button>
                         </div>
 
                         {/* Вкладки */}

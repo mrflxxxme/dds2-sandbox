@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
@@ -27,6 +27,12 @@ function defaultName(): string {
     return `Кампания от ${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`;
 }
 
+// Каноничное имя кампании по типу: CPM единая → «Авто», CPM ручная → «Поиск + рек», CPC → «Поиск».
+function campaignTypeName(payment: string, bid: string): string {
+    if (payment === 'cpc') return 'Поиск';
+    return bid === 'unified' ? 'Авто' : 'Поиск + рек';
+}
+
 /** Раздел создания рекламной кампании (по кабинету WB Продвижение).
  *  Один вызов save-ad создаёт кампанию; бюджет и автопополнение применяются следом. */
 export default function CreateCampaignPage() {
@@ -52,6 +58,32 @@ export default function CreateCampaignPage() {
     // Товары
     const [pickerOpen, setPickerOpen] = useState(false);
     const [selected, setSelected] = useState<Map<number, string>>(() => new Map());  // nm → title
+
+    // Предзаполнение из URL (клик по товару в разделах «Высокий ДРР» / «Не работает реклама»):
+    // ?nm= — артикул; ?payment=cpm|cpc, ?bid=unified|manual, ?zones=search,recommendations — тип/зоны.
+    // Название товара тянем из каталога; если не нашли — показываем nm_id.
+    useEffect(() => {
+        const p = sp.get('payment'); const b = sp.get('bid');
+        const pay = p === 'cpm' || p === 'cpc' ? p : null;
+        const bd = b === 'unified' || b === 'manual' ? b : null;
+        if (pay) setPayment(pay);
+        if (bd) setBidType(bd);
+        const z = sp.get('zones'); if (z) setZones(new Set(z.split(',').filter(s => s === 'search' || s === 'recommendations')));
+        if (pay) setName(campaignTypeName(pay, bd || 'unified'));  // авто-имя по типу
+        const nmParam = sp.get('nm');
+        if (bulk || !nmParam) return;
+        const nms = nmParam.split(',').map(Number).filter(n => Number.isFinite(n) && n > 0);
+        if (nms.length === 0) return;
+        const fill = (title: (nm: number) => string) => setSelected(prev => {
+            const n = new Map(prev);
+            for (const nm of nms) if (!n.has(nm)) n.set(nm, title(nm));
+            return n;
+        });
+        api.getAdArticleCatalog()
+            .then(rows => { const by = new Map(rows.map(r => [r.nm_id, r.vendor_code])); fill(nm => by.get(nm) || String(nm)); })
+            .catch(() => fill(nm => String(nm)));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');

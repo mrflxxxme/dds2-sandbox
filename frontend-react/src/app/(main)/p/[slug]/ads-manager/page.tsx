@@ -1,12 +1,13 @@
 'use client';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { exportToExcel } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { IcMegaphone, IcRefresh, IcDownload, IcSliders, IcColumns, IcPause, IcPlay, IcClock, IcGear, IcHistory, IcExternal, IcSearch, IcX } from './components/icons';
+import { IcMegaphone, IcRefresh, IcDownload, IcSliders, IcColumns, IcPause, IcPlay, IcClock, IcGear, IcHistory, IcExternal, IcSearch, IcX, IcCopy } from './components/icons';
 import SearchSelect from './components/SearchSelect';
+import AdSections from './components/AdSections';
 import AutopayModal from './components/AutopayModal';
 import AutopayLogModal from './components/AutopayLogModal';
 import WbThumb from './components/WbThumb';
@@ -63,6 +64,27 @@ const CAMP_COLS: { key: string; label: string; sort?: keyof AdsManagerCampaign; 
     { key: 'wb', label: 'WB', align: 'center', w: 44 },
 ];
 const CAMP_TOGGLE_KEYS = CAMP_COLS.filter(c => !c.fixed).map(c => c.key);
+// Разделы экрана: список кампаний (по умолчанию) + вернувшиеся аналитические разделы.
+// Кнопка-дропдаун после «Артикул» переключает основную область между ними.
+const AD_VIEWS = [
+    { key: 'campaigns', label: 'Кампании' },
+    { key: 'high-drr', label: 'Высокий ДРР' },
+    { key: 'no-ads', label: 'Не работает реклама' },
+    { key: 'no-organic', label: 'Нет органики' },
+    { key: 'budget-gap', label: 'Нехватка бюджета' },
+] as const;
+type AdView = typeof AD_VIEWS[number]['key'];
+// Типы кампаний для создания по выбранным товарам без рекламы (селектор в полосе выбора).
+// name — как называется кампания при создании (по канону: CPM единая=Авто, CPM ручная=Поиск+рек, CPC=Поиск).
+const CREATABLE = [
+    { key: 'cpm-auto', label: 'CPM единая · Авто', payment: 'cpm', bid: 'unified', zones: 'search,recommendations' },
+    { key: 'cpm-manual', label: 'CPM ручная · Поиск+рек', payment: 'cpm', bid: 'manual', zones: 'search,recommendations' },
+    { key: 'cpc', label: 'CPC · Поиск', payment: 'cpc', bid: 'manual', zones: 'search' },
+] as const;
+type CreateType = typeof CREATABLE[number]['key'];
+// Фильтры списка переживают уход в кампанию и возврат. sessionStorage: живёт в рамках
+// вкладки (переход/назад/refresh сохраняют), не липнет между сессиями и вкладками.
+const ADS_FILTERS_SS_KEY = 'ads_manager_filters';
 // Тонкая полупрозрачная линия-разделитель блоков
 const BLOCK_DIVIDER = '1px solid rgba(17,24,39,0.08)';
 // Тёмно-серая шапка таблицы кампаний (выделяется на фоне данных)
@@ -96,11 +118,22 @@ export default function AdsManagerPage() {
     // Фильтр по типу кампании: CPM/CPC, а для CPM — режим ставки
     const [campaignType, setCampaignType] = useState<'' | 'cpm' | 'cpc'>('');
     const [bidMode, setBidMode] = useState<'' | 'unified' | 'manual'>('');
+    // Активный раздел экрана (кнопка-дропдаун после «Артикул»)
+    const [view, setView] = useState<AdView>('campaigns');
+    const [sectionsMenuOpen, setSectionsMenuOpen] = useState(false);
+    // Выбор товаров в разделе (nm → есть ли у товара кампания). «Подтвердить»: с кампаниями →
+    // отфильтрованный список кампаний; без кампаний → создание пачкой.
+    const [selectedNms, setSelectedNms] = useState<Map<number, boolean>>(() => new Map());
+    // Подтверждённый фильтр списка кампаний по nm_id выбранных товаров ([] = не активен)
+    const [campNmFilter, setCampNmFilter] = useState<number[]>([]);
+    // Выбранный тип кампании для создания по товарам без рекламы
+    const [createType, setCreateType] = useState<CreateType>('cpm-auto');
 
     // Кампании
     const [campaigns, setCampaigns] = useState<AdsManagerCampaign[]>([]);
     const [campSort, setCampSort] = useState<{ field: keyof AdsManagerCampaign; dir: SortDir } | null>(null);
     const [syncing, setSyncing] = useState(false);
+    const [syncProgress, setSyncProgress] = useState('');  // «N/M» бюджетов во время синка
     const [autopay, setAutopay] = useState<Record<string, AdsAutopaySetting>>({});
     const [autopayModal, setAutopayModal] = useState<AdsManagerCampaign | null>(null);
     const [createMenuOpen, setCreateMenuOpen] = useState(false);
@@ -193,6 +226,41 @@ export default function AdsManagerPage() {
     // Список кампаний — при входе и при смене периода календаря (метрики за выбранный день/диапазон)
     useEffect(() => { loadCampaigns(dateFrom, dateTo); }, [periodFrom, periodTo]);  // eslint-disable-line react-hooks/exhaustive-deps
 
+    // Восстановление фильтров списка после возврата из кампании (sessionStorage).
+    // Гидрируем в эффекте (не ломаем SSR-разметку); клиентские фильтры применяются к уже
+    // загруженному списку, восстановленный период сам триггерит перезагрузку выше.
+    useEffect(() => {
+        try {
+            const raw = sessionStorage.getItem(ADS_FILTERS_SS_KEY);
+            if (!raw) return;
+            const f = JSON.parse(raw);
+            if (typeof f.brand === 'string') setBrand(f.brand);
+            if (typeof f.subject === 'string') setSubject(f.subject);
+            if (typeof f.article === 'string') setArticle(f.article);
+            if (typeof f.search === 'string') setSearch(f.search);
+            if (f.campaignType === '' || f.campaignType === 'cpm' || f.campaignType === 'cpc') setCampaignType(f.campaignType);
+            if (f.bidMode === '' || f.bidMode === 'unified' || f.bidMode === 'manual') setBidMode(f.bidMode);
+            if (typeof f.statusFilter === 'string') setStatusFilter(f.statusFilter);
+            if (typeof f.page === 'number' && f.page >= 1) setPage(f.page);
+            if (typeof f.periodFrom === 'string') setPeriodFrom(f.periodFrom);
+            if (typeof f.periodTo === 'string') setPeriodTo(f.periodTo);
+            if (f.campSort === null || (f.campSort && typeof f.campSort === 'object')) setCampSort(f.campSort);
+            if (AD_VIEWS.some(v => v.key === f.view)) setView(f.view);
+        } catch { /* битый JSON / SSR — игнор */ }
+    }, []);
+
+    // Сохранение фильтров при каждом изменении. skip-first: пропускаем маунт-прогон,
+    // иначе дефолты затёрли бы сохранённое ДО гидрации (эффект выше).
+    const filtersFirstRun = useRef(true);
+    useEffect(() => {
+        if (filtersFirstRun.current) { filtersFirstRun.current = false; return; }
+        try {
+            sessionStorage.setItem(ADS_FILTERS_SS_KEY, JSON.stringify(
+                { brand, subject, article, search, campaignType, bidMode, statusFilter, page, periodFrom, periodTo, campSort, view },
+            ));
+        } catch { /* SSR / quota — игнор */ }
+    }, [brand, subject, article, search, campaignType, bidMode, statusFilter, page, periodFrom, periodTo, campSort, view]);
+
     // Видимость колонок — переживает перезагрузку
     useEffect(() => {
         try {
@@ -235,18 +303,21 @@ export default function AdsManagerPage() {
     });
 
     const handleSync = async () => {
-        setSyncing(true);
+        setSyncing(true); setSyncProgress('');
         try {
             await api.syncAdCampaigns();
-            // Подождать завершения фоновой синхронизации и перезагрузить
-            for (let i = 0; i < 60; i++) {
+            // Наблюдаем прогресс до ФАКТИЧЕСКОГО завершения (бэк тянет бюджеты по 0.5с/кампанию,
+            // TIME_BUDGET ~600с). Раньше цикл обрывался на 120с → loadCampaigns садился на
+            // частично записанное зеркало, часть бюджетов «догоняла» лишь на следующем синке.
+            for (let i = 0; i < 300; i++) {
                 await new Promise(r => setTimeout(r, 2000));
                 const p = await api.getSyncCampaignsProgress();
+                if (p.budgets_total) setSyncProgress(`${p.budgets_done ?? 0}/${p.budgets_total}`);
                 if (p.status === 'done' || p.status === 'error' || p.status === 'idle') break;
             }
             await loadCampaigns();
         } catch (e) { setError(e instanceof Error ? e.message : 'Ошибка синхронизации'); }
-        finally { setSyncing(false); }
+        finally { setSyncing(false); setSyncProgress(''); }
     };
 
     // Поиск по ID / названию кампании / nm_id её товаров
@@ -256,6 +327,45 @@ export default function AdsManagerPage() {
 
     // ─── Каскадные фильтры (предмет ↔ бренд ↔ артикул) по рекламируемым товарам ───
     const advNmSet = useMemo(() => new Set(campaigns.flatMap(c => c.nm_ids)), [campaigns]);
+    // Карта кампания → её первый nm_id (для миниатюр товара в разделе «Нехватка бюджета»,
+    // где у строки-кампании своего nm_id нет — берём из загруженного списка кампаний).
+    const campNm = useMemo(() => {
+        const m: Record<number, number> = {};
+        for (const c of campaigns) if (c.nm_ids[0] != null) m[c.campaign_id] = c.nm_ids[0];
+        return m;
+    }, [campaigns]);
+    // Предметы/бренды товаров кампании — для фильтра «Нехватки бюджета» по предмету/бренду
+    // (её эндпоинт не принимает эти фильтры, поэтому фильтруем на клиенте по данным кампаний).
+    const campMeta = useMemo(() => {
+        const m: Record<number, { subjects: string[]; brands: string[] }> = {};
+        for (const c of campaigns) m[c.campaign_id] = { subjects: c.subjects || [], brands: c.brands || [] };
+        return m;
+    }, [campaigns]);
+
+    // Клик по товару в разделе: всегда копим в выбор (запоминаем, есть ли у товара кампания).
+    const onProductClick = (nmId: number, hasCampaign: boolean) => {
+        setSelectedNms(prev => {
+            const n = new Map(prev);
+            if (n.has(nmId)) n.delete(nmId); else n.set(nmId, hasCampaign);
+            return n;
+        });
+    };
+    // Разбивка выбора: товары с кампаниями (в фильтр кампаний) и без (в создание).
+    const selWithCamp = [...selectedNms].filter(([, has]) => has).map(([nm]) => nm);
+    const selNoCamp = [...selectedNms].filter(([, has]) => !has).map(([nm]) => nm);
+    // «К кампаниям» — фильтруем список кампаний по выбранным товарам с кампаниями.
+    const goToCampaigns = () => {
+        if (selWithCamp.length === 0) return;
+        setCampNmFilter(selWithCamp);
+        setSelectedNms(new Map());
+        setView('campaigns');
+    };
+    // «Создать» — страница создания, предзаполненная выбранными товарами без кампаний + выбранным типом.
+    const goToCreate = () => {
+        if (selNoCamp.length === 0) return;
+        const t = CREATABLE.find(c => c.key === createType) || CREATABLE[0];
+        router.push(`/p/${slug}/ads-manager/create?nm=${selNoCamp.join(',')}&payment=${t.payment}&bid=${t.bid}&zones=${t.zones}`);
+    };
     const advTuples = useMemo(() => catalog.filter(t => advNmSet.has(t.nm_id)), [catalog, advNmSet]);
     const uniqSorted = (arr: string[]) => Array.from(new Set(arr.filter(Boolean))).sort((a, b) => a.localeCompare(b, 'ru'));
     // Опции каждого фильтра сужаются выбором в двух других
@@ -297,6 +407,7 @@ export default function AdsManagerPage() {
         .filter(c => !brand || c.brands.includes(brand))
         .filter(c => !subject || c.subjects.includes(subject))
         .filter(c => !article || c.nm_ids.includes(Number(article)))
+        .filter(c => campNmFilter.length === 0 || c.nm_ids.some(n => campNmFilter.includes(n)))
         .filter(c => !campaignType || (c.campaign_type || '').toLowerCase() === campaignType)
         .filter(c => !bidMode || (c.bid_mode || '') === bidMode)
         .sort((a, b) => {
@@ -333,6 +444,11 @@ export default function AdsManagerPage() {
         'Конв. корзина %': num(c.cr_cart), 'Конв. заказ %': num(c.cr_order), 'Товаров': c.nm_count, 'Бренды': c.brands.join(', '),
     })), `ads-campaigns_${dateFrom}_${dateTo}`);
 
+    // Копирование артикула (nm_id) из ячейки кампании
+    const copyNm = (nmId: number) => {
+        navigator.clipboard?.writeText(String(nmId)).then(() => toast.success(`Артикул ${nmId} скопирован`)).catch(() => { /* clipboard недоступен */ });
+    };
+
     const campaignHref = (c: AdsManagerCampaign) => `/p/${slug}/ads-manager/campaign/${c.campaign_id}`;
     const openCampaign = (c: AdsManagerCampaign) => router.push(campaignHref(c));
 
@@ -360,6 +476,15 @@ export default function AdsManagerPage() {
                     <div style={{ fontSize: 10, color: '#9ca3af', display: 'flex', alignItems: 'center', gap: 5 }}>
                         #{c.campaign_id}
                         {(() => { const b = campaignTypeBadge(c); return <span style={{ padding: '0 5px', borderRadius: 4, background: b.bg, color: b.color, fontWeight: 700, fontSize: 9.5, letterSpacing: 0.2 }}>{b.label}</span>; })()}
+                        {c.nm_ids[0] != null && (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }} title="Артикул товара">
+                                <span style={{ fontWeight: 700, color: '#374151' }}>{c.nm_ids[0]}</span>
+                                <button onClick={e => { e.preventDefault(); e.stopPropagation(); copyNm(c.nm_ids[0]); }} title="Скопировать артикул" aria-label="Скопировать артикул"
+                                    style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0, display: 'inline-flex', lineHeight: 1, color: '#9ca3af' }}>
+                                    <IcCopy size={11} />
+                                </button>
+                            </span>
+                        )}
                     </div>
                 </Link>
             );
@@ -482,21 +607,81 @@ export default function AdsManagerPage() {
                         options={brandOptions.map(b => ({ value: b, label: b }))} />
                     <SearchSelect value={article} onChange={onArticle} placeholder="Артикул: все" maxWidth={280}
                         options={articleOptions.map(t => ({ value: String(t.nm_id), label: t.vendor_code }))} />
-                    {/* Календарь = период метрик по всем кампаниям (день/диапазон). Пусто → последние 30 дней */}
-                    <AdsPeriodPicker from={periodFrom} to={periodTo} placeholder="календарь" minWidth={230}
-                        onApply={(f, t) => { setPeriodFrom(f); setPeriodTo(t); }} />
+                    {/* Разделы: кнопка-дропдаун после «Артикул» — переключает основную область */}
+                    <div style={{ position: 'relative' }}>
+                        <button type="button" onClick={() => setSectionsMenuOpen(o => !o)}
+                            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 160, maxWidth: 240, background: 'var(--color-bg-card)', border: `1px solid ${sectionsMenuOpen ? 'var(--color-accent)' : 'var(--color-border)'}`, borderRadius: 8, padding: '6px 10px', fontSize: 13, color: 'var(--color-text)', cursor: 'pointer' }}>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{view === 'campaigns' ? 'Пресеты' : `Пресеты: ${AD_VIEWS.find(v => v.key === view)?.label}`}</span>
+                            <span style={{ color: 'var(--color-text-dim)', fontSize: 11, flexShrink: 0 }}>⌄</span>
+                        </button>
+                        {sectionsMenuOpen && (<>
+                            <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setSectionsMenuOpen(false)} />
+                            <div style={{ position: 'absolute', left: 0, top: '100%', marginTop: 6, zIndex: 41, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', padding: 8, minWidth: 210 }}>
+                                {AD_VIEWS.map(v => (
+                                    <div key={v.key} onClick={() => { setView(v.key); setSectionsMenuOpen(false); }}
+                                        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px', borderRadius: 8, cursor: 'pointer', fontSize: 13, color: '#111827', background: view === v.key ? '#eff6ff' : undefined }}
+                                        className="menu-row">{v.label}</div>
+                                ))}
+                            </div>
+                        </>)}
+                    </div>
+                    {view === 'campaigns' && campNmFilter.length > 0 && (
+                        <button onClick={() => setCampNmFilter([])} title="Список отфильтрован по выбранным товарам — нажмите, чтобы сбросить"
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, background: '#eff6ff', color: '#1e3a8a', border: '1px solid #bfdbfe', borderRadius: 8, padding: '6px 10px', cursor: 'pointer' }}>
+                            По выбранным товарам: {campNmFilter.length} <IcX size={13} />
+                        </button>
+                    )}
+                    {/* Календарь = период метрик по всем кампаниям (день/диапазон). Пусто → последние 30 дней. Сдвинут вправо. */}
+                    <span style={{ marginLeft: 'auto', display: 'inline-flex' }}>
+                        <AdsPeriodPicker from={periodFrom} to={periodTo} placeholder="календарь" minWidth={230} align="right"
+                            onApply={(f, t) => { setPeriodFrom(f); setPeriodTo(t); }} />
+                    </span>
                     {(brand || subject || article || search || campaignType || bidMode) && (
                         <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12 }} onClick={resetFilters}><IcX size={13} />Сбросить</button>
                     )}
                 </div>
 
-                {error && (
+                {view !== 'campaigns' && selectedNms.size > 0 && (
+                    <div className="glass-card static" style={{ padding: '10px 16px', marginBottom: 12, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: '1px solid var(--color-accent)' }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: '#1e3a8a' }}>Выбрано товаров: {selectedNms.size}</span>
+                        <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
+                            {selWithCamp.length > 0 && `с кампаниями: ${selWithCamp.length}`}{selWithCamp.length > 0 && selNoCamp.length > 0 && ' · '}{selNoCamp.length > 0 && `без кампаний: ${selNoCamp.length}`}
+                        </span>
+                        <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 8 }}>
+                            <button className="btn btn-secondary btn-sm" style={{ fontSize: 13 }} onClick={() => setSelectedNms(new Map())}>Очистить</button>
+                            {selWithCamp.length > 0 && (
+                                <button className="btn btn-primary btn-sm" style={{ fontSize: 13 }} onClick={goToCampaigns}>К кампаниям ({selWithCamp.length})</button>
+                            )}
+                            {selNoCamp.length > 0 && (
+                                <>
+                                    <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>тип:</span>
+                                    <span style={{ display: 'inline-flex', gap: 3, background: '#f3f4f6', borderRadius: 8, padding: 3 }}>
+                                        {CREATABLE.map(t => (
+                                            <button key={t.key} onClick={() => setCreateType(t.key)}
+                                                style={{ fontSize: 12, padding: '4px 10px', borderRadius: 6, border: 'none', cursor: 'pointer', whiteSpace: 'nowrap',
+                                                    background: createType === t.key ? '#fff' : 'transparent',
+                                                    color: createType === t.key ? '#1e3a8a' : '#6b7280',
+                                                    fontWeight: createType === t.key ? 600 : 500,
+                                                    boxShadow: createType === t.key ? '0 1px 2px rgba(0,0,0,.1)' : undefined }}>
+                                                {t.label}
+                                            </button>
+                                        ))}
+                                    </span>
+                                    <button className="btn btn-primary btn-sm" style={{ fontSize: 13 }} onClick={goToCreate}>Создать ({selNoCamp.length})</button>
+                                </>
+                            )}
+                        </span>
+                    </div>
+                )}
+
+                {view === 'campaigns' && error && (
                     <div className="glass-card" style={{ padding: '12px 20px', marginBottom: 12, border: '1px solid var(--color-danger)' }}>
                         <span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {error}</span>
                     </div>
                 )}
 
-                {/* ─── Список кампаний ─── */}
+                {/* ─── Основная область: список кампаний ИЛИ вернувшийся аналитический раздел ─── */}
+                {view === 'campaigns' ? (
                 <div className="glass-card static" style={{ padding: 0, overflow: 'hidden', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
                     <div style={{ padding: '10px 16px', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', borderBottom: '1px solid #e5e7eb', background: '#f9fafb', flexShrink: 0 }}>
                         <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
@@ -521,7 +706,7 @@ export default function AdsManagerPage() {
                             )}
                         </div>
                         <button onClick={handleSync} disabled={syncing} className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
-                            <IcRefresh />{syncing ? 'Синхронизация…' : 'Синхронизировать'}
+                            <IcRefresh />{syncing ? (syncProgress ? `Синхронизация ${syncProgress}` : 'Синхронизация…') : 'Синхронизировать'}
                         </button>
                         <Tooltip text="Выгрузить таблицу в Excel (с учётом фильтров)"><button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }} onClick={exportCampaigns} disabled={visibleCampaigns.length === 0}>
                             <IcDownload />Excel
@@ -647,6 +832,12 @@ export default function AdsManagerPage() {
                         </div>
                     )}
                 </div>
+                ) : (
+                    <div className="glass-card static" style={{ padding: 0, overflow: 'hidden', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                        <AdSections view={view} dateFrom={dateFrom} dateTo={dateTo} brand={brand} subject={subject} campNm={campNm}
+                            selectedNms={selectedNms} onProductClick={onProductClick} campMeta={campMeta} />
+                    </div>
+                )}
 
                 {autopayModal && (
                     <AutopayModal

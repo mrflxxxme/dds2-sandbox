@@ -785,7 +785,8 @@ async def set_cluster_bid(
         return {"ok": False, "error": "campaign_not_found"}
     if nm_id not in [int(n) for n in (camp.nm_ids or [])]:
         return {"ok": False, "error": "nm_not_in_campaign"}
-    if bid_rub is None or bid_rub <= 0:
+    # bid==0 — валидный «сброс к ставке кампании» (WB принимает bid_kopecks=0); отбиваем только отрицательные
+    if bid_rub is None or bid_rub < 0:
         return {"ok": False, "error": "bad_bid"}
     key = await _resolve_key(db, project_id)
     if not key:
@@ -802,7 +803,8 @@ async def set_product_cluster_bid(
     camps = await _campaigns_for_nm(db, project_id, nm_id)
     if not camps:
         return {"ok": False, "error": "no_campaign_for_nm"}
-    if bid_rub is None or bid_rub <= 0:
+    # bid==0 — сброс к ставке кампании (см. set_cluster_bid); отбиваем только отрицательные
+    if bid_rub is None or bid_rub < 0:
         return {"ok": False, "error": "bad_bid"}
     results = [
         await set_cluster_bid(db, project_id, c.campaign_id, nm_id, norm_query, bid_rub)
