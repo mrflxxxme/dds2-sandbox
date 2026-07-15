@@ -5694,8 +5694,10 @@ export interface FfStockRow {
   brand: string | null;
   ff_good: number;
   ff_reserve: number;
-  /** migfull: часть резерва под собранные отгрузки (ready) */
+  /** migfull: часть резерва под активные отгрузки (собрано) */
   ff_reserve_ready: number;
+  /** migfull: часть резерва под свежий приход (позиции в EXPECTED-приёмках) */
+  ff_inbound_locked: number;
   ff_defect: number;
   ff_nominal: number;
   /** из ff_good пришло коробами (в штуках россыпи) */
@@ -5713,8 +5715,10 @@ export interface FfStockRow {
 export interface FfStockTotals {
   ff_good: number;
   ff_reserve: number;
-  /** migfull: резерв под собранные отгрузки (ready) */
+  /** migfull: резерв под активные отгрузки (собрано) */
   ff_reserve_ready: number;
+  /** migfull: резерв под свежий приход (EXPECTED-приёмки) */
+  ff_inbound_locked: number;
   ff_defect: number;
   /** сколько штук годного пришло коробами */
   ff_box_units: number;
