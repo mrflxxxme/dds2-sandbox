@@ -1433,10 +1433,11 @@ function ItemsTable({ items, isForming, vehicleOrderNo, vehicleStatus, totalQty,
                                     boxDetail={item.box_detail}
                                     colSpan={baseCols + costCols}
                                     editable
-                                    onSaveOverride={async ({ box_detail, pcs_per_box }) => {
+                                    onSaveOverride={async ({ box_detail, pcs_per_box, qty }) => {
                                         await api.updateVehicleItem(vehicleOrderNo, item.id, {
                                             box_detail_override: box_detail,
                                             pcs_per_box_override: pcs_per_box,
+                                            ...(qty != null ? { qty } : {}),
                                         });
                                     }}
                                     onSaved={onRemoved}

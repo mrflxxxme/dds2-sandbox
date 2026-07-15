@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { api } from '@/lib/api';
+import { FactoryQtyExceededError } from '@/types/api';
 
 /* ─── Utility functions (exported for reuse) ──────────────────────── */
 
@@ -81,6 +82,8 @@ export default function BoxDetailCell({ qty, pcsPerBox, boxDetail, expanded, onT
 export interface BoxDetailSavePayload {
     box_detail: number[] | null;
     pcs_per_box: number;
+    /** Vehicle mode: пересчитанное количество (коробов × наполнение). */
+    qty?: number;
 }
 
 interface BoxDetailExpandRowProps {
@@ -174,6 +177,10 @@ function BoxDetailEditor({ qty, pcsPerBox, boxDetail, orderId, itemId, onSaveOve
     onClose: () => void;
     onSaved: () => void;
 }) {
+    // Vehicle (per-vehicle override) mode: короба — физический якорь. Смена наполнения
+    // держит ЧИСЛО коробов и пересчитывает штуки (qty = коробов × наполнение). В режиме
+    // фабричного заказа qty фиксирован — наполнение лишь дробит его на короба.
+    const anchor = !!onSaveOverride;
     const [ppb, setPpb] = useState<number>(pcsPerBox || 0);
     const auto = ppb > 0 ? autoBoxDetail(qty, ppb) : [qty];
     const [boxes, setBoxes] = useState<number[]>(boxDetail ?? auto);
@@ -181,14 +188,20 @@ function BoxDetailEditor({ qty, pcsPerBox, boxDetail, orderId, itemId, onSaveOve
     const [error, setError] = useState<string | null>(null);
 
     const total = boxes.reduce((s, v) => s + v, 0);
-    const isValid = total === qty && boxes.every(v => v > 0) && ppb > 0;
+    // В anchor-режиме целевое кол-во = сумма коробов (она и станет новым qty).
+    const targetQty = anchor ? total : qty;
+    const isValid = (anchor ? total > 0 : total === qty) && boxes.every(v => v > 0) && ppb > 0;
 
     const updateBox = (idx: number, val: number) =>
         setBoxes(prev => prev.map((v, i) => i === idx ? val : v));
 
     const handlePpbChange = (val: number) => {
         setPpb(val);
-        if (val > 0) setBoxes(autoBoxDetail(qty, val));
+        if (val > 0) {
+            setBoxes(anchor
+                ? Array(Math.max(boxes.length, 1)).fill(val)
+                : autoBoxDetail(qty, val));
+        }
     };
 
     const handleSave = async () => {
@@ -196,12 +209,13 @@ function BoxDetailEditor({ qty, pcsPerBox, boxDetail, orderId, itemId, onSaveOve
         setSaving(true);
         setError(null);
         try {
-            const freshAuto = ppb > 0 ? autoBoxDetail(qty, ppb) : [qty];
+            const freshAuto = ppb > 0 ? autoBoxDetail(targetQty, ppb) : [targetQty];
             const isAuto = JSON.stringify(boxes) === JSON.stringify(freshAuto);
             if (onSaveOverride) {
                 await onSaveOverride({
                     box_detail: isAuto ? null : boxes,
                     pcs_per_box: ppb,
+                    qty: targetQty,
                 });
             } else if (orderId && itemId) {
                 const payload: { box_detail: number[] | null; pcs_per_box?: number } = {
@@ -212,7 +226,11 @@ function BoxDetailEditor({ qty, pcsPerBox, boxDetail, orderId, itemId, onSaveOve
             }
             onSaved();
         } catch (e: any) {
-            setError(e?.message || 'Ошибка сохранения');
+            setError(
+                e instanceof FactoryQtyExceededError
+                    ? 'Количество превысило план фабрики — уменьшите наполнение или расширьте план заказа'
+                    : (e?.message || 'Ошибка сохранения')
+            );
         } finally {
             setSaving(false);
         }
@@ -223,7 +241,7 @@ function BoxDetailEditor({ qty, pcsPerBox, boxDetail, orderId, itemId, onSaveOve
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
                 <span style={{ fontWeight: 600, fontSize: 13 }}>Разбивка по коробкам</span>
                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                    Всего: {qty} шт
+                    Всего: {targetQty} шт{anchor && targetQty !== qty ? ` (было ${qty})` : ''}
                 </span>
                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                     по
@@ -272,8 +290,8 @@ function BoxDetailEditor({ qty, pcsPerBox, boxDetail, orderId, itemId, onSaveOve
                     fontSize: 12, fontWeight: 600,
                     color: isValid ? 'var(--color-success)' : 'var(--color-danger)',
                 }}>
-                    Сумма: {total} / {qty}
-                    {!isValid && total !== qty && ` (${total > qty ? '+' : ''}${total - qty})`}
+                    Сумма: {total} / {targetQty}
+                    {!isValid && total !== targetQty && ` (${total > targetQty ? '+' : ''}${total - targetQty})`}
                 </span>
                 {error && <span style={{ fontSize: 12, color: 'var(--color-danger)' }}>{error}</span>}
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
