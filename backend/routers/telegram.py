@@ -97,6 +97,21 @@ async def toggle_measurements_notify(
     return {"message": f"Сводка замеров {status}"}
 
 
+@router.patch("/chats/{binding_id}/supply-notify")
+async def toggle_supply_notify(
+    binding_id: int,
+    body: ToggleNotifyRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle supply-discrepancy alerts (дата/паллеты/пропуск, раз в 2ч) for a chat binding."""
+    ok = await telegram_service.toggle_supply_notify(db, binding_id, project.id, body.enabled)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Привязка не найдена")
+    status = "включены" if body.enabled else "выключены"
+    return {"message": f"Алерты расхождений поставок {status}"}
+
+
 @router.patch("/chats/{binding_id}/ff-board")
 async def set_ff_board(
     binding_id: int,

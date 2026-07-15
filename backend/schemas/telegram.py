@@ -16,6 +16,7 @@ class TelegramChatBindingSchema(BaseModel):
     notify_enabled: bool = True
     ff_notify_enabled: bool = False
     measurements_notify_enabled: bool = False
+    supply_notify_enabled: bool = False
     ff_board_enabled: bool = False
     # NULL = табло по всем складам проекта; иначе — заявки только этого склада ФФ.
     ff_board_warehouse_id: int | None = None

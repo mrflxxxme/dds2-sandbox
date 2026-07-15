@@ -73,6 +73,15 @@ export function TelegramBot() {
         }
     };
 
+    const handleToggleSupply = async (id: number, current: boolean) => {
+        try {
+            await api.toggleTelegramSupplyNotify(id, !current);
+            setChats(prev => prev.map(c => c.id === id ? { ...c, supply_notify_enabled: !current } : c));
+        } catch (e: any) {
+            setMsg(e.message);
+        }
+    };
+
     const handleSetBoard = async (id: number, enabled: boolean, warehouseId: number | null) => {
         try {
             await api.setTelegramFfBoard(id, enabled, warehouseId);
@@ -125,6 +134,18 @@ export function TelegramBot() {
                     title="Ежедневная сводка замеров WB в 09:00 МСК (за вчера + сегодня)"
                 >
                     {row.measurements_notify_enabled ? '📐 Вкл' : '📐 Выкл'}
+                </button>
+            ),
+        },
+        {
+            key: 'supply_notify_enabled', label: 'Расхождения поставок',
+            render: (_v: any, row: any) => (
+                <button
+                    className={`btn btn-sm ${row.supply_notify_enabled ? 'btn-success' : 'btn-secondary'}`}
+                    onClick={() => handleToggleSupply(row.id, row.supply_notify_enabled)}
+                    title="Алерт раз в 2ч, если у поставки (машина назначена/в пути) не сходятся дата, паллеты или пропуск"
+                >
+                    {row.supply_notify_enabled ? '🚚 Вкл' : '🚚 Выкл'}
                 </button>
             ),
         },

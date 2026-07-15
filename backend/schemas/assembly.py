@@ -957,6 +957,33 @@ class UnlinkedFfRow(BaseModel):
     external_created_at: str | None  # ISO
 
 
+class SupplyDiscrepancyRow(BaseModel):
+    """Сборка с назначенной машиной / в пути, чья WB-поставка расходится с фактом.
+
+    Три независимых флага (строка попадает в блок, если хотя бы один True):
+      • date_mismatch — наша дата сдачи вне окна ±1 дня от даты брони WB (72ч);
+      • pallet_mismatch — наши паллеты ≠ паллеты в пропуске WB (pass_pallets);
+      • pass_missing — машина назначена/в пути, но пропуск WB не оформлен.
+    """
+
+    assembly_id: int
+    number: str
+    status: str  # VEHICLE_ASSIGNED / SHIPPED
+    source_warehouse_name: str | None  # наш ФФ-склад, откуда забрали товар
+    warehouse_name: str | None  # склад ВБ (город сдачи)
+    delivery_date: str | None  # наша дата сдачи, ISO
+    planned_date: str | None  # дата брони WB, ISO
+    date_diff_days: int | None  # delivery_date − planned_date, дней (знаковая)
+    pallets_count: int  # наши паллеты (AssemblyRequest.pallets_count)
+    pass_pallets: int | None  # паллеты в пропуске WB (None — пропуск не оформлен)
+    wb_supply_id: str | None  # WB-I-xxxx (для показа/drill), если поставка привязана
+    wb_status: str | None  # статус WB-поставки (ON_DELIVERY и т.п.)
+    sync_status: str | None  # стадия реплея пропуска (PASSED = пропуск занесён)
+    date_mismatch: bool
+    pallet_mismatch: bool
+    pass_missing: bool
+
+
 class FboAnomalySupply(BaseModel):
     """Одна аномальная FBO-поставка (для разворота-списка с drill на /warehouse/fbo-supplies)."""
 
@@ -1025,6 +1052,8 @@ class LinkAnomaliesResponse(BaseModel):
     # Расхождение остатков по складам с ФФ-интеграцией. Дефолт — на случай
     # записи в кэше от прошлой версии без этого ключа.
     stock_mismatch: list[StockMismatchWarehouseRow] = []
+    # Расхождение WB-поставок (машина назначена/в пути): дата сдачи / паллеты / пропуск.
+    supply_discrepancies: list[SupplyDiscrepancyRow] = []
 
 
 # ─── Распределение остатков (stock distribution) ───────────────────────────

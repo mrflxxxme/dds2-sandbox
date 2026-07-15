@@ -750,6 +750,8 @@ export interface TelegramChatBinding {
   notify_enabled: boolean;
   ff_notify_enabled: boolean;
   measurements_notify_enabled: boolean;
+  /** Отдельный opt-in под алерты «Расхождение поставок ФФ» (раз в 2ч). */
+  supply_notify_enabled: boolean;
   ff_board_enabled: boolean;
   /** NULL = табло по всем складам; иначе — заявки только этого склада ФФ. */
   ff_board_warehouse_id: number | null;
@@ -2671,6 +2673,35 @@ export interface StockMismatchWarehouseRow {
   rows: StockMismatchSkuRow[];
 }
 
+/** Сборка (машина назначена / в пути), чья WB-поставка расходится по дате / паллетам / пропуску. */
+export interface SupplyDiscrepancyRow {
+  assembly_id: number;
+  number: string;
+  /** VEHICLE_ASSIGNED / SHIPPED */
+  status: string;
+  /** наш ФФ-склад, откуда забрали товар */
+  source_warehouse_name: string | null;
+  /** склад ВБ (город сдачи) */
+  warehouse_name: string | null;
+  /** наша дата сдачи, ISO */
+  delivery_date: string | null;
+  /** дата брони WB, ISO */
+  planned_date: string | null;
+  /** delivery_date − planned_date, дней (знаковая) */
+  date_diff_days: number | null;
+  /** наши паллеты (AssemblyRequest.pallets_count) */
+  pallets_count: number;
+  /** паллеты в пропуске WB (null — пропуск не оформлен) */
+  pass_pallets: number | null;
+  wb_supply_id: string | null;
+  wb_status: string | null;
+  /** стадия реплея пропуска (PASSED = пропуск занесён) */
+  sync_status: string | null;
+  date_mismatch: boolean;
+  pallet_mismatch: boolean;
+  pass_missing: boolean;
+}
+
 export interface LinkAnomaliesResponse {
   ff_composition_mismatch: FfMismatchRow[];
   assemblies_without_ff: UnlinkedAssemblyRow[];
@@ -2678,6 +2709,8 @@ export interface LinkAnomaliesResponse {
   fbo: FboAnomalyRollup;
   /** Расхождение остатков по складам с ФФ-интеграцией. */
   stock_mismatch: StockMismatchWarehouseRow[];
+  /** Расхождение WB-поставок (машина назначена/в пути): дата / паллеты / пропуск. */
+  supply_discrepancies: SupplyDiscrepancyRow[];
 }
 
 /* ─── Распределение остатков сборки (stock distribution) ─── */

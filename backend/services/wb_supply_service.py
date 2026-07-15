@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.cache import invalidate_cache
 from backend.models import AssemblyRequest, AssemblyWbSupply, WbFboSupply, WbSupplySyncStatus
 from backend.schemas.assembly_wb import (
     WbCabinetBox,
@@ -474,6 +475,8 @@ async def save_pass(
     link.pass_car_number = data.get("car_number")
     link.pass_pallets = data.get("pallets")
     await db.commit()
+    # pass_pallets кормит блок «Расхождение поставок ФФ» (pallet_mismatch) — гасим кэш.
+    await invalidate_cache("reports:assembly_link_anomalies")
     return link
 
 
@@ -759,6 +762,9 @@ async def push_pass(db: AsyncSession, project_id: int, assembly_id: int) -> Asse
         link.last_error = None
         link.last_synced_at = utcnow()
         await db.commit()
+        # Пропуск оформлен (sync_status→PASSED) → строка уходит из блока
+        # «Расхождение поставок ФФ» (pass_missing). Гасим кэш вкладки.
+        await invalidate_cache("reports:assembly_link_anomalies")
         return link
 
     return await _run(db, project_id, link, _flow())
