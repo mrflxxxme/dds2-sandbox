@@ -39,8 +39,12 @@ class FakeClient:
         supply_status=None,
         details_expire=False,
         validation_items=None,
+        trn_has_pass=True,
     ):
         self.expire = expire
+        # trn_has_pass=False → в кабинете пропуск ещё не заведён (ШК есть, водитель
+        # пуст): условие для авто-заноса пропуска (try_autopush_pass).
+        self.trn_has_pass = trn_has_pass
         self.portal_error = portal_error
         self.supplies = supplies if supplies is not None else []
         self.box_types = box_types if box_types is not None else [2]
@@ -116,6 +120,9 @@ class FakeClient:
         self.bind_sent = bind
 
     async def trn_details(self, supply_id):
+        if not self.trn_has_pass:
+            # Кабинетный пропуск не заведён: ШК выдан, поля водителя пусты.
+            return {"details": {"trns": [{"barcode": {"barcodeId": 999, "barcodePrefix": "WB-GI-"}}]}}
         return {
             "details": {
                 "trns": [
@@ -1007,3 +1014,118 @@ async def test_create_preorder_goods_banned_on_warehouse(db_session, monkeypatch
     link = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert link.sync_status == WbSupplySyncStatus.DRAFT.value
     assert link.preorder_id is None
+
+
+# ─── авто-занос пропуска в WB (try_autopush_pass, F3+) ────────────────────────
+
+_FULL_PASS = {
+    "driver_first": "Влад",
+    "driver_last": "Вяткин",
+    "driver_phone": "79001112233",
+    "car_number": "В815УН37",
+    "car_model": "Газель",
+    "pallets": 2,
+}
+
+
+async def _book_supply(db_session, monkeypatch, *, trn_has_pass):
+    """create_preorder + sync_supply_id → BOOKED-связь; клиент с нужным состоянием
+    кабинетного пропуска (trn_has_pass). На момент брони пропуск пуст → авто-заноса
+    ещё нет. Возвращает клиент."""
+    client = FakeClient(
+        supplies=[{"supplyId": 40699158, "preorders": [52670743], "statusId": 1, "statusName": "Запланировано"}],
+        supply_status={"statusName": "Запланировано", "statusId": 1},
+        trn_has_pass=trn_has_pass,
+    )
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_autopush_pass_pushes_when_ready(db_session, monkeypatch):
+    # Дата забронирована + пропуск полный + кабинет пуст → авто-занос в WB.
+    client = await _book_supply(db_session, monkeypatch, trn_has_pass=False)
+    await wb_supply_service.save_pass(db_session, PROJECT_ID, ASSEMBLY_ID, _FULL_PASS)
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    pushed = await wb_supply_service.try_autopush_pass(db_session, PROJECT_ID, link, client=client)
+    assert pushed is True
+    assert link.sync_status == WbSupplySyncStatus.PASSED.value
+    assert link.barcode_id == 999
+    assert client.trn_saved["first_name"] == "Влад"
+    assert client.trn_saved["car_number"] == "В815УН37"
+    assert link.wb_pass_present is True
+
+
+@pytest.mark.asyncio
+async def test_autopush_pass_skips_incomplete(db_session, monkeypatch):
+    # Не хватает телефона → занос пропускаем (WB отклонил бы), ждём дозаполнения.
+    client = await _book_supply(db_session, monkeypatch, trn_has_pass=False)
+    await wb_supply_service.save_pass(db_session, PROJECT_ID, ASSEMBLY_ID, {**_FULL_PASS, "driver_phone": ""})
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    pushed = await wb_supply_service.try_autopush_pass(db_session, PROJECT_ID, link, client=client)
+    assert pushed is False
+    assert link.sync_status == WbSupplySyncStatus.BOOKED.value
+    assert client.trn_saved is None
+
+
+@pytest.mark.asyncio
+async def test_autopush_pass_skips_when_cabinet_has_pass(db_session, monkeypatch):
+    # В кабинете пропуск уже есть → не перетираем (расхождение покажет блок сверки).
+    client = await _book_supply(db_session, monkeypatch, trn_has_pass=True)
+    await wb_supply_service.save_pass(db_session, PROJECT_ID, ASSEMBLY_ID, _FULL_PASS)
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+
+    pushed = await wb_supply_service.try_autopush_pass(db_session, PROJECT_ID, link, client=client)
+    assert pushed is False
+    assert client.trn_saved is None
+
+
+@pytest.mark.asyncio
+async def test_autopush_pass_skips_without_supply_id(db_session, monkeypatch):
+    # Дата НЕ забронирована (нет supply_id) → занос физически невозможен.
+    await _patch_client(monkeypatch, FakeClient(trn_has_pass=False))
+    await wb_supply_service.save_pass(db_session, PROJECT_ID, ASSEMBLY_ID, _FULL_PASS)
+    pushed = await wb_supply_service.try_autopush_pass_by_assembly(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert pushed is False
+
+
+@pytest.mark.asyncio
+async def test_autopush_pass_idempotent(db_session, monkeypatch):
+    # Повторный вызов после успешного заноса (sync_status=PASSED) — no-op.
+    client = await _book_supply(db_session, monkeypatch, trn_has_pass=False)
+    await wb_supply_service.save_pass(db_session, PROJECT_ID, ASSEMBLY_ID, _FULL_PASS)
+    link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert await wb_supply_service.try_autopush_pass(db_session, PROJECT_ID, link, client=client) is True
+    client.trn_saved = None
+    assert await wb_supply_service.try_autopush_pass(db_session, PROJECT_ID, link, client=client) is False
+    assert client.trn_saved is None
+
+
+@pytest.mark.asyncio
+async def test_sync_all_states_autopushes_ready_pass(db_session, monkeypatch):
+    # Фоновый добор: booked + полный пропуск + пустой кабинет → занос в sync_all_states.
+    client = await _book_supply(db_session, monkeypatch, trn_has_pass=False)
+    await wb_supply_service.save_pass(db_session, PROJECT_ID, ASSEMBLY_ID, _FULL_PASS)
+
+    res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
+    assert res["autopushed"] == 1
+    assert client.trn_saved["last_name"] == "Вяткин"
+    link = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.sync_status == WbSupplySyncStatus.PASSED.value
+
+
+@pytest.mark.asyncio
+async def test_sync_supply_id_autopushes_when_pass_ready(db_session, monkeypatch):
+    # Пропуск заполнен ДО брони → занос происходит в момент подхвата брони (sync_supply_id).
+    client = FakeClient(supplies=[{"supplyId": 40699158, "preorders": [52670743]}], trn_has_pass=False)
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    await wb_supply_service.save_pass(db_session, PROJECT_ID, ASSEMBLY_ID, _FULL_PASS)
+
+    link = await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.sync_status == WbSupplySyncStatus.PASSED.value
+    assert client.trn_saved is not None
