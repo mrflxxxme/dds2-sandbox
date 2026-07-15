@@ -1079,6 +1079,51 @@ class TestLifecycle:
         assert line["box_qty"] == 2
         assert line["boxes"] == 3  # ceil(5 / 2)
 
+    async def test_list_items_box_qty_falls_back_to_source_machine(self, db_session):
+        """Заявка с меткой ЕДУЩЕЙ машины: кратности в справочнике склада ещё нет
+        (заводится на приёмке), но box_qty/boxes берутся со строк машины-источника
+        (pcs_per_box_override) — «Сборочный лист» показывает коробов до приёмки."""
+        from uuid import uuid4
+
+        from backend.models.cost import CostOrder, CostOrderItem
+        from backend.models.enums import VehicleStatus
+
+        order_no = f"V-PPB-{uuid4().hex[:8].upper()}"
+        vehicle = CostOrder(project_id=PROJECT_ID, order_no=order_no, status=VehicleStatus.DISPATCHED)
+        db_session.add(vehicle)
+        await db_session.flush()
+        # Строки машины несут кратность 4 для нашего ШК (в справочнике склада её НЕТ).
+        db_session.add_all([
+            CostOrderItem(project_id=PROJECT_ID, order_no=order_no, barcode=TEST_BARCODE_1, qty=100, pcs_per_box_override=4),
+            CostOrderItem(project_id=PROJECT_ID, order_no=order_no, barcode=TEST_BARCODE_1, qty=20, pcs_per_box_override=4),
+        ])
+        await db_session.flush()
+
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        req = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                pallets_count=0,
+                pallet_weight_kg=Decimal("0"),
+                wb_warehouse_name_manual="Казань",
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=10)],
+            ),
+            skip_stock_validation=True,
+            status_override=AssemblyStatus.PRE_DISTRIBUTED,
+            source_vehicle_id=vehicle.id,
+            is_pre_distribution=True,
+        )
+
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, source_vehicle_id=vehicle.id, limit=50)
+        maps = await prefetch_list_maps(db_session, PROJECT_ID, items)
+        target = next(r for r in items if r.id == req.id)
+        resp = await _build_response(db_session, target, **maps)
+        line = next(it for it in resp["items"] if it["barcode"] == TEST_BARCODE_1)
+        assert line["box_qty"] == 4          # со строк машины, не из справочника склада
+        assert line["boxes"] == 3            # ceil(10 / 4)
+
     async def test_list_items_boxes_none_without_multiplicity(self, db_session):
         """Без заданной кратности box_qty=None и boxes=None (не 0) — «коробов» в
         листе пусто, а не ложный ноль."""

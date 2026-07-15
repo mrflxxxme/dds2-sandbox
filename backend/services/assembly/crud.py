@@ -294,6 +294,7 @@ async def _build_items_with_stock(
     nom_map: dict[int, Nomenclature] | None = None,
     stock_by_wh_nom: dict[tuple[int, int], int] | None = None,
     box_qty_by_wh_bc: dict[tuple[int, str], int | None] | None = None,
+    machine_box_qty: dict[tuple[int, str], int] | None = None,
 ) -> list[dict]:
     """Build items list with product_name and stock_quantity.
 
@@ -338,7 +339,11 @@ async def _build_items_with_stock(
         # (зеркало compute_boxes_count: хвост < короба — отдельный неполный короб).
         # box_qty_by_wh_bc может отсутствовать (single-row без резолва) или не иметь
         # записи по ШК → box_qty/boxes = None («коробов» в листе пусто, не ложный 0).
+        # Фолбэк для заявок ЕДУЩЕЙ машины: справочника склада ещё нет (заводится на
+        # приёмке) → берём кратность со строк машины-источника (machine_box_qty).
         box_qty = box_qty_by_wh_bc.get((request.warehouse_id, item.barcode)) if box_qty_by_wh_bc else None
+        if not box_qty and machine_box_qty and request.source_vehicle_id is not None:
+            box_qty = machine_box_qty.get((request.source_vehicle_id, item.barcode))
         qty = int(item.quantity or 0)
         boxes = -(-qty // box_qty) if (box_qty and box_qty > 0 and qty > 0) else None
 
@@ -370,6 +375,7 @@ async def _build_response(
     via_gazelka_ids: set[int] | None = None,
     weight_by_barcode: dict[str, Decimal | None] | None = None,
     box_qty_by_wh_bc: dict[tuple[int, str], int | None] | None = None,
+    machine_box_qty: dict[tuple[int, str], int] | None = None,
     box_weight_kg: Decimal | None = None,
 ) -> dict:
     """
@@ -474,6 +480,15 @@ async def _build_response(
             db, request.project_id, {request.warehouse_id: [it.barcode for it in (request.items or [])]}
         )
         box_weight_kg = await get_box_weight_kg(db, request.project_id)
+    # Фолбэк кратности со строк машины-источника (единичный путь; список — из prefetch).
+    if machine_box_qty is None and request.source_vehicle_id is not None:
+        from backend.services.box_multiplicity_service import resolve_source_machine_box_qty
+
+        vehicle = await db.get(CostOrder, request.source_vehicle_id)
+        if vehicle is not None and vehicle.project_id == request.project_id and not vehicle.is_deleted:
+            machine_box_qty = await resolve_source_machine_box_qty(
+                db, request.project_id, {request.source_vehicle_id: vehicle.order_no}
+            )
     boxes_count = compute_boxes_count(request, box_qty_by_wh_bc)
     suggested_total_weight_kg = compute_suggested_total_weight(goods_weight_kg, boxes_count, box_weight_kg)
 
@@ -549,7 +564,7 @@ async def _build_response(
         "items": (
             items := await _build_items_with_stock(
                 db, request, nom_map=nom_map, stock_by_wh_nom=stock_by_wh_nom,
-                box_qty_by_wh_bc=box_qty_by_wh_bc,
+                box_qty_by_wh_bc=box_qty_by_wh_bc, machine_box_qty=machine_box_qty,
             )
         ),
         "brands": ", ".join(sorted({i["brand"] for i in items if i.get("brand")})) or None,
@@ -672,6 +687,24 @@ async def prefetch_list_maps(
     )
     box_weight_kg = await get_box_weight_kg(db, project_id)
 
+    # Фолбэк кратности для заявок ЕДУЩЕЙ машины (справочника склада ещё нет): резолв
+    # со строк машин-источников. Одним батчем на все машины страницы (не N+1).
+    machine_box_qty: dict[tuple[int, str], int] = {}
+    vehicle_ids = {req.source_vehicle_id for req in requests if req.source_vehicle_id is not None}
+    if vehicle_ids:
+        from backend.services.box_multiplicity_service import resolve_source_machine_box_qty
+
+        veh_rows = await db.execute(
+            select(CostOrder.id, CostOrder.order_no).where(
+                CostOrder.project_id == project_id,
+                CostOrder.id.in_(vehicle_ids),
+                CostOrder.is_deleted == False,  # noqa: E712
+            )
+        )
+        vid_to_order = {r.id: r.order_no for r in veh_rows.all()}
+        if vid_to_order:
+            machine_box_qty = await resolve_source_machine_box_qty(db, project_id, vid_to_order)
+
     return {
         "nom_map": nom_map,
         "stock_by_wh_nom": stock_by_wh_nom,
@@ -680,6 +713,7 @@ async def prefetch_list_maps(
         "via_gazelka_ids": via_gazelka_ids,
         "weight_by_barcode": weight_by_barcode,
         "box_qty_by_wh_bc": box_qty_by_wh_bc,
+        "machine_box_qty": machine_box_qty,
         "box_weight_kg": box_weight_kg,
     }
 
