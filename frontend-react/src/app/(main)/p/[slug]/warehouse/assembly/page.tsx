@@ -9,7 +9,7 @@ import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchModal } from '@/components/FfMismatchModal';
 import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
-import type { AssemblyBulkStatus, AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, Warehouse, WbSupplySyncStatus } from '@/types/api';
+import type { AssemblyBulkStatus, AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, SourceVehicleOption, Warehouse, WbSupplySyncStatus } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
 
 // ─── Status config ──────────────────────────────────────────────────────────
@@ -72,6 +72,16 @@ const WB_SYNC_BRIEF: Record<WbSupplySyncStatus, { label: string; className: stri
 function hasWbSupply(wb: AssemblyRequest['wb_supply']): boolean {
     if (!wb) return false;
     return wb.sync_status !== 'NONE' || wb.supply_id != null || wb.preorder_id != null;
+}
+
+// Номер занесённой в кабинет поставки ДО связки с WbFboSupply: бронь → supply_id,
+// предзаказ → preorder_id. Единый источник для render и Excel-экспорта колонки
+// «FBO поставка». Идентификаторы — без formatNumber (разряды в номере не нужны).
+function wbCabinetNo(wb: AssemblyRequest['wb_supply']): string | null {
+    if (!wb) return null;
+    if (wb.supply_id != null) return `Поставка ${wb.supply_id}`;
+    if (wb.preorder_id != null) return `Предзаказ ${wb.preorder_id}`;
+    return null;
 }
 
 // Статусы, в которых расхождение паллет уже имеет смысл: до «Готово» число паллет
@@ -482,6 +492,9 @@ export default function AssemblyListPage() {
     const [brandFilter, setBrandFilter] = useState('');
     const [ffLinkFilter, setFfLinkFilter] = useState<'' | 'none' | 'linked'>('');
     const [jointOnly, setJointOnly] = useState(false);
+    // '' | pre_dist | prebooking | plain | `veh:<CostOrder.id>` (конкретная машина)
+    const [sourceFilter, setSourceFilter] = useState<string>('');
+    const [sourceVehicles, setSourceVehicles] = useState<SourceVehicleOption[]>([]);
     // Монотонный счётчик запросов списка — отбрасываем устаревшие ответы (см. load)
     const loadSeq = useRef(0);
     // Пагинация/сортировка/экспорт — клиентские, через TanStackDataTable: грузим весь
@@ -513,6 +526,9 @@ export default function AssemblyListPage() {
         api.getWbBrands()
             .then(brands => setBrandOptions(brands.sort()))
             .catch(() => {});
+        api.getAssemblySourceVehicles()
+            .then(setSourceVehicles)
+            .catch(() => {});
     }, []);
 
     // ─── Load data ────────────────────────────────────────────────────────
@@ -534,6 +550,11 @@ export default function AssemblyListPage() {
                 brand: brandFilter || undefined,
                 ff_link: ffLinkFilter || undefined,
                 joint_only: jointOnly || undefined,
+                // `veh:<id>` — конкретная машина (точечный source_vehicle_id), иначе — категория source.
+                source: sourceFilter && !sourceFilter.startsWith('veh:')
+                    ? (sourceFilter as 'pre_dist' | 'prebooking' | 'plain')
+                    : undefined,
+                source_vehicle_id: sourceFilter.startsWith('veh:') ? Number(sourceFilter.slice(4)) : undefined,
                 limit: LOAD_LIMIT,
             });
             if (seq !== loadSeq.current) return;
@@ -545,7 +566,7 @@ export default function AssemblyListPage() {
         } finally {
             if (seq === loadSeq.current) setLoading(false);
         }
-    }, [warehouseId, statusFilter, view, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly]);
+    }, [warehouseId, statusFilter, view, search, dateFrom, dateTo, brandFilter, ffLinkFilter, jointOnly, sourceFilter]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -985,17 +1006,23 @@ export default function AssemblyListPage() {
                 // Склад назначения WB известен из заявки (wb_warehouse_name_manual) ещё до
                 // связки с FBO-поставкой → показываем его сразу; после связки добавится номер
                 // поставки (wb_supply_name). effective_wb_warehouse = supply-склад → manual.
+                // До связки у занесённой заявки уже есть номер в кабинете: бронь → supply_id,
+                // предзаказ → preorder_id (номер из assembly_wb_supply, а не FBO-синка).
                 const wbWh = row.effective_wb_warehouse || row.wb_warehouse_name;
+                const cabinetNo = !row.wb_supply_name ? wbCabinetNo(row.wb_supply) : null;
                 return (
                     <span style={{ fontSize: 13 }}>
-                        {row.wb_supply_name || '—'}
+                        {row.wb_supply_name
+                            || (cabinetNo && <span style={{ color: 'var(--color-text-muted)' }}>{cabinetNo}</span>)
+                            || '—'}
                         {wbWh && (
                             <span style={{ display: 'block', fontSize: 12, color: 'var(--color-text-muted)' }}>{wbWh}</span>
                         )}
                     </span>
                 );
             },
-            exportValue: (row: AssemblyRequest) => row.wb_supply_name || row.effective_wb_warehouse || '',
+            exportValue: (row: AssemblyRequest) =>
+                row.wb_supply_name || wbCabinetNo(row.wb_supply) || row.effective_wb_warehouse || '',
         },
         {
             key: 'package_type', label: 'Тип поставки',
@@ -1299,6 +1326,22 @@ export default function AssemblyListPage() {
                         >
                             <option value="">Поставка: все</option>
                             <option value="joint">Только совместные</option>
+                        </select>
+                    </div>
+                    <div className="form-group">
+                        <select
+                            className="form-input"
+                            value={sourceFilter}
+                            onChange={e => { setSourceFilter(e.target.value); }}
+                            title="Происхождение заявки: из предраспределения машины (все или конкретная), из предброни (предзаявка) или обычная"
+                        >
+                            <option value="">Источник: все</option>
+                            <option value="pre_dist">🚚 Из машины (все)</option>
+                            {sourceVehicles.map(v => (
+                                <option key={v.id} value={`veh:${v.id}`}>🚚 {v.order_no}</option>
+                            ))}
+                            <option value="prebooking">🅿️ Предзаявки</option>
+                            <option value="plain">Обычные</option>
                         </select>
                     </div>
                     <div className="form-group">

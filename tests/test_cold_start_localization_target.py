@@ -212,6 +212,45 @@ class TestColdStartTableLocalizationTarget:
         assert row.allocations.get("WH_northwest", 0) > 0, "при target=100 хвост тоже сидируется"
 
     @pytest.mark.asyncio
+    async def test_nw_anchor_keeps_preconcentration_share_in_meta(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Гарантированный СЗФО-якорь в main_warehouses несёт ИСХОДНУЮ долю (до концентрации).
+
+        Фронтовый засев (coldStartSeed.seedNewcomerWholeBoxes — экран «Распределение
+        машины» и коробочные новинки черновика) сеет по share_pct якорей: при 0 его
+        СЗФО-гарантия (фильтр sf>0) физически не может сработать → новинки никогда
+        не заезжали в Питер этими путями, гарантия жила только в бэковом
+        allocations-пути. Прочий хвост БЕЗ гарантии (ural) остаётся с 0 —
+        концентрация для него в силе.
+        """
+        # ДВ мал (< FAR_EAST_MAX_SHARE) — без переброса излишка на Урал, чтобы
+        # хвостовой ural остался чистым контролем «без гарантии → 0».
+        share = {
+            "central": 0.30,
+            "south_caucasus": 0.18,
+            "volga": 0.16,
+            "ural": 0.09,
+            "northwest": 0.05,
+            "far_east_siberia": 0.04,
+        }
+        self._wire(monkeypatch, share, rf_qty=1000)
+
+        resp = await cs.compute_cold_start_table(
+            db=None,  # type: ignore[arg-type]
+            project_id=1,
+            window_days=14,
+            min_pack=5,
+            bench_from_project_id=None,
+            ship_fraction=1.0,
+            localization_target=75,
+        )
+        by_wh = {m["warehouse"]: m for m in resp.main_warehouses}
+        # СЗФО отрезан концентрацией (кум. база central+south+volga ≈ .78 ≥ .75),
+        # но гарантия сохраняет исходную долю в мете: 0.05 → 5%.
+        assert by_wh["WH_northwest"]["share_pct"] == pytest.approx(5.0), by_wh["WH_northwest"]
+        # Урал — хвост без гарантии: как и раньше, 0 (не сидируется фронтом).
+        assert by_wh["WH_ural"]["share_pct"] == 0, by_wh["WH_ural"]
+
+    @pytest.mark.asyncio
     async def test_conservation_seed_le_free_ff(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Σ seed ≤ свободный ФФ (консервация: товар не создаётся из воздуха)."""
         share = {
