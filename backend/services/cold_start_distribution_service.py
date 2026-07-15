@@ -1032,6 +1032,10 @@ async def compute_cold_start_table(
 
     # Гарантия СЗФО — по ИСХОДНОЙ доле (до концентрации), см. NW_GUARANTEE_MIN_PACKS.
     nw_guarantee: set[str] = {NW_DISTRICT_KEY} if bench_share.get(NW_DISTRICT_KEY, 0) > 0 else set()
+    # Снимок долей ДО концентрации: гарантированный ФО обязан сохранить свою долю в
+    # мете якорей (main_warehouses) — фронтовый засев (coldStartSeed) сеет по share_pct,
+    # и при 0 его СЗФО-гарантия (фильтр sf>0) не может сработать вовсе.
+    share_before_concentration = dict(bench_share)
 
     # Концентрация «до target% локализации» (как у обычных SKU): топ-ФО по доле,
     # хвост дальних/мелких округов сверх target НЕ сидируется. Применяем ДО far-east
@@ -1100,6 +1104,12 @@ async def compute_cold_start_table(
         if not warehouses:
             continue
         district_share_val = bench_share.get(d, 0.0)
+        # Гарантированный ФО (СЗФО), отрезанный концентрацией, несёт исходную долю:
+        # иначе экран машины и коробочные новинки черновика видят share_pct=0 и
+        # никогда не сеют в Питер (гарантия жила только в бэковом allocations-пути).
+        # Прочий хвост (без гарантии) остаётся с 0 — концентрация в силе.
+        if district_share_val <= 0 and d in nw_guarantee:
+            district_share_val = share_before_concentration.get(d, 0.0)
         district_traffic_total = sum(t for _, t in warehouses) or 1
         for wh, traffic in warehouses:
             wh_share = (traffic / district_traffic_total) * district_share_val
