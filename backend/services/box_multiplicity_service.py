@@ -116,6 +116,60 @@ def _foi_effective_box_size(foi_box_size: str | None, mix_box_size: str | None, 
     return foi_box_size
 
 
+async def resolve_source_machine_box_qty(
+    db: AsyncSession,
+    project_id: int,
+    vehicle_id_to_order_no: dict[int, str],
+) -> dict[tuple[int, str], int]:
+    """Кратность короба per (vehicle_id, barcode) прямо со строк машины-источника.
+
+    В отличие от ``_resolve_machine_box_qty`` (читает только ACCEPTED-приёмки),
+    берёт кратность с СОБСТВЕННЫХ строк машины (``pcs_per_box_override`` →
+    эффективная кратность связанного FactoryOrderItem) — работает и для ЕДУЩЕЙ
+    (ещё не принятой) машины. Фолбэк «коробов» в списке сборок для заявок
+    предраспределения, чьих ШК ещё нет в справочнике приёмок склада. Батч по всем
+    order_no за один запрос; qty-weighted mode (зеркало ``_vehicle_box_meta_by_barcode``).
+    """
+    if not vehicle_id_to_order_no:
+        return {}
+    order_to_vehicle = {ono: vid for vid, ono in vehicle_id_to_order_no.items()}
+    rows = await db.execute(
+        select(
+            CostOrderItem.order_no,
+            CostOrderItem.barcode,
+            CostOrderItem.qty,
+            CostOrderItem.pcs_per_box_override,
+            FactoryOrderItem.pcs_per_box.label("foi_ppb"),
+            FactoryOrderItem.mix_pcs_per_box.label("foi_mix_ppb"),
+            FactoryOrderItem.mix_group_id.label("foi_mix_group_id"),
+        )
+        .outerjoin(FactoryOrderItem, FactoryOrderItem.id == CostOrderItem.factory_order_item_id)
+        .where(
+            CostOrderItem.project_id == project_id,
+            CostOrderItem.order_no.in_(list(order_to_vehicle.keys())),
+            CostOrderItem.is_deleted == False,  # noqa: E712
+        )
+    )
+    # (vehicle_id, barcode) → {ppb: Σqty} для qty-weighted mode
+    ppb_qty: dict[tuple[int, str], dict[int, int]] = {}
+    for row in rows:
+        vid = order_to_vehicle.get(row.order_no)
+        if vid is None or not row.barcode:
+            continue
+        ppb = row.pcs_per_box_override or _foi_effective_ppb(row.foi_ppb, row.foi_mix_ppb, row.foi_mix_group_id)
+        qty = int(row.qty or 0)
+        if not ppb or ppb <= 0 or qty <= 0:
+            continue
+        key = (vid, row.barcode)
+        ppb_qty.setdefault(key, {})[int(ppb)] = ppb_qty.get(key, {}).get(int(ppb), 0) + qty
+
+    out: dict[tuple[int, str], int] = {}
+    for key, qmap in ppb_qty.items():
+        # mode: ppb с наибольшей Σqty; при ничьей — МЕНЬШИЙ ppb (детерминизм).
+        out[key] = max(qmap.items(), key=lambda x: (x[1], -x[0]))[0]
+    return out
+
+
 async def _resolve_machine_box_qty(
     db: AsyncSession,
     project_id: int,
