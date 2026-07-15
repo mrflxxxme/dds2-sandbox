@@ -338,8 +338,19 @@ async def assign_vehicle(db: AsyncSession, project_id: int, request_id: int, pay
         await _log_status_change(
             db, project_id, s.id, old, AssemblyStatus.VEHICLE_ASSIGNED, comment=payload.vehicle_info
         )
+    target_ids = [s.id for s in targets]
     await db.commit()
     await db.refresh(req)
+    # Пропуск в WB — авто-занос сразу после назначения, если дата уже забронирована
+    # и пропуск заполнен (иначе занос доберётся при подхвате брони / фоновым синком).
+    # После commit и best-effort: сбой заноса не откатывает назначение машины.
+    from backend.services import wb_supply_service
+
+    for aid in target_ids:
+        try:
+            await wb_supply_service.try_autopush_pass_by_assembly(db, project_id, aid)
+        except Exception:  # noqa: BLE001
+            logger.warning("assign_vehicle: try_autopush_pass_by_assembly failed", request_id=aid)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
     await invalidate_cache("reports:warehouse_need")

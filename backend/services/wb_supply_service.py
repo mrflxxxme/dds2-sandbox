@@ -439,6 +439,7 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
 
     updated = 0
     checked = 0
+    autopushed = 0
     for aid, sid, link in work[:_SYNC_SUPPLY_CAP]:
         try:
             meta = await _cabinet_status(client, sid)
@@ -489,10 +490,27 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
                 cab = None
             if cab is not None:
                 _apply_cabinet_pass_snapshot(link, cab)
+                # Фоновый добор авто-заноса пропуска: дата забронирована, пропуск
+                # заполнен, а в кабинете его ещё нет → заносим (страховка на любой
+                # порядок событий назначение↔бронь). `cab` уже разобран — не ходим
+                # в trn_details повторно.
+                if await try_autopush_pass(
+                    db, project_id, link, client=client, cabinet_pass=cab
+                ):
+                    autopushed += 1
         await asyncio.sleep(_SYNC_DELAY)
 
     await db.commit()
-    return {"checked": checked, "updated": updated, "supplies_seen": checked}
+    if autopushed:
+        # Пропуск(и) оформлены (sync_status→PASSED) → строки уходят из блока
+        # «Расхождение поставок ФФ» (pass_missing). Гасим кэш вкладки.
+        await invalidate_cache("reports:assembly_link_anomalies")
+    return {
+        "checked": checked,
+        "updated": updated,
+        "supplies_seen": checked,
+        "autopushed": autopushed,
+    }
 
 
 async def save_boxes(
@@ -734,7 +752,12 @@ async def sync_supply_id(db: AsyncSession, project_id: int, assembly_id: int) ->
         link.sync_status = WbSupplySyncStatus.BOOKED.value
         link.last_error = None
         link.last_synced_at = utcnow()
+        # Дата только что забронирована → сразу пробуем занести пропуск, если он
+        # уже заполнен (например, машину назначили раньше брони).
+        pushed = await try_autopush_pass(db, project_id, link, client=client)
         await db.commit()
+        if pushed:
+            await invalidate_cache("reports:assembly_link_anomalies")
         return link
 
     return await _run(db, project_id, link, _flow())
@@ -833,6 +856,157 @@ async def push_pass(db: AsyncSession, project_id: int, assembly_id: int) -> Asse
         return link
 
     return await _run(db, project_id, link, _flow())
+
+
+# ─── авто-занос пропуска в WB (F3+) ───────────────────────────────────────────
+# Логист назначил машину → пропуск должен уехать в кабинет WB САМ, без ручного
+# клика. Физическое ограничение: занести пропуск можно только после брони даты
+# (нужен supply_id), а бронь — ручной антибот-шаг в портале. Поэтому «занос при
+# назначении» = попытка при КАЖДОМ событии, когда он становится возможен:
+#   1) назначение машины / правка реквизитов (assign_vehicle, update_assembly_request);
+#   2) подхват брони (sync_supply_id);
+#   3) фоновый добор (sync_all_states, шедулер) — страховка на любой порядок событий.
+# Все точки идемпотентны и best-effort: сбой не роняет вызывающего.
+
+
+def _pass_is_complete(link: AssemblyWbSupply) -> bool:
+    """Все поля, которые требует WB (setTRNDetails): ФИО, телефон, госномер,
+    марка, паллеты > 0. Неполный пропуск НЕ заносим — ждём дозаполнения логистом
+    (иначе WB отклонит занос). Зеркалит `missingPass` в панели «Поставка WB»."""
+    return bool(
+        (link.pass_driver_first or "").strip()
+        and (link.pass_driver_last or "").strip()
+        and (link.pass_driver_phone or "").strip()
+        and (link.pass_car_number or "").strip()
+        and (link.pass_car_model or "").strip()
+        and (link.pass_pallets or 0) > 0
+    )
+
+
+async def try_autopush_pass(
+    db: AsyncSession,
+    project_id: int,
+    link: AssemblyWbSupply,
+    *,
+    client: WbPortalClient | None = None,
+    cabinet_pass: "WbCabinetPass | None" = None,
+) -> bool:
+    """Занести пропуск в WB автоматически, если это возможно (best-effort, БЕЗ commit).
+
+    Заносим ТОЛЬКО когда:
+      • есть supply_id (дата забронирована);
+      • пропуск ещё не занесён (sync_status != PASSED);
+      • заполнены все обязательные поля (_pass_is_complete);
+      • в кабинете пропуска ещё нет — не перетираем ручной кабинетный ввод.
+
+    `cabinet_pass` можно передать (уже разобранный в sync_all_states) — тогда не
+    ходим в trn_details повторно. Ошибки НЕ пробрасываем (фоновая операция не
+    должна ронять назначение/синк) — только логируем; commit делает вызывающий.
+    Возвращает True, если занос выполнен.
+    """
+    if not link.supply_id:
+        return False
+    if link.sync_status == WbSupplySyncStatus.PASSED.value:
+        return False
+    if not _pass_is_complete(link):
+        return False
+    supply_id = link.supply_id
+    try:
+        if client is None:
+            client = await _client(db, project_id)
+        if cabinet_pass is None:
+            cabinet_pass = _parse_cabinet_pass(await client.trn_details(supply_id))
+        # В кабинете уже есть пропуск (завели руками/раньше) — не трогаем, расхождение
+        # покажет блок сверки. Занос только в ПУСТОЙ кабинетный пропуск.
+        if cabinet_pass.has_pass:
+            return False
+        barcode_id = cabinet_pass.barcode_id
+        if not barcode_id:
+            return False  # WB ещё не выдал ШК пропуска — попробуем на следующем событии
+        # _pass_is_complete гарантирует непустые значения — `or ""` только сужает
+        # тип для mypy (Optional-колонки), фолбэк фактически не срабатывает.
+        first_name = link.pass_driver_first or ""
+        last_name = link.pass_driver_last or ""
+        car_number = link.pass_car_number or ""
+        car_model = link.pass_car_model or ""
+        phone = link.pass_driver_phone or ""
+        pallets = link.pass_pallets or 0
+        await client.set_trn(
+            barcode_id=int(barcode_id),
+            supply_id=supply_id,
+            first_name=first_name,
+            last_name=last_name,
+            car_model=car_model,
+            car_number=car_number,
+            phone=phone,
+            pallets=pallets,
+        )
+        # Снимок как в push_pass: только что записали пропуск в WB.
+        link.barcode_id = int(barcode_id)
+        link.sync_status = WbSupplySyncStatus.PASSED.value
+        link.wb_pass_present = True
+        link.wb_pass_car_number = car_number
+        link.wb_pass_pallets = pallets
+        link.wb_pass_driver = f"{last_name} {first_name}".strip() or None
+        link.wb_pass_synced_at = utcnow()
+        link.last_error = None
+        link.last_synced_at = utcnow()
+        logger.info(
+            "wb pass auto-pushed",
+            project_id=project_id,
+            assembly_request_id=link.assembly_request_id,
+            supply_id=supply_id,
+        )
+        return True
+    except WbSessionExpired:
+        await integrations_service.mark_wb_portal_expired(db, project_id)
+        logger.warning(
+            "wb pass auto-push: session expired",
+            project_id=project_id,
+            assembly_request_id=link.assembly_request_id,
+        )
+        return False
+    except WbPortalError as e:
+        # WB отклонил занос (напр. формат данных) — не флипаем в ERROR, чтобы
+        # фон не спамил панель; логиста разблокирует ручной «Занести пропуск в WB».
+        logger.warning(
+            "wb pass auto-push: portal rejected",
+            project_id=project_id,
+            assembly_request_id=link.assembly_request_id,
+            error=str(e),
+        )
+        return False
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "wb pass auto-push: unexpected error",
+            project_id=project_id,
+            assembly_request_id=link.assembly_request_id,
+            exc_info=True,
+        )
+        return False
+
+
+async def try_autopush_pass_by_assembly(
+    db: AsyncSession, project_id: int, assembly_id: int
+) -> bool:
+    """Авто-занос пропуска для заявки по id (триггеры назначения машины).
+
+    Грузит заявку с `wb_fbo_supply` (адопция supply_id безопасна — relationship
+    загружен явно), затем `try_autopush_pass`. Коммитит и гасит кэш сверки ТОЛЬКО
+    при успешном заносе. Best-effort: любая ошибка проглатывается.
+    """
+    try:
+        assembly = await _load_assembly(db, project_id, assembly_id)
+    except WbSupplyError:
+        return False
+    link = await _get_or_create_link(
+        db, project_id, assembly_id, adopt_supply_id=_adopted_supply_id(assembly)
+    )
+    pushed = await try_autopush_pass(db, project_id, link)
+    if pushed:
+        await db.commit()
+        await invalidate_cache("reports:assembly_link_anomalies")
+    return pushed
 
 
 async def get_drivers(db: AsyncSession, project_id: int) -> list[dict]:

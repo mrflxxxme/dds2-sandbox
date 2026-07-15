@@ -1524,13 +1524,14 @@ async def update_assembly_request(
 
     # Ручная правка реквизитов машины в шапке заявки тоже тянется в WB-пропуск
     # (как и при assign_vehicle). Best-effort: сбой синка не роняет сохранение.
-    if (
+    vehicle_edited = (
         payload.vehicle_info is not None
         or payload.vehicle_brand is not None
         or payload.driver_phone is not None
         or payload.driver_first_name is not None
         or payload.driver_last_name is not None
-    ):
+    )
+    if vehicle_edited:
         from backend.services import wb_supply_service
 
         try:
@@ -1539,6 +1540,15 @@ async def update_assembly_request(
             logger.warning("sync_pass_from_vehicle failed for request %s", req.id)
 
     await db.commit()
+    # Правка реквизитов могла дозаполнить пропуск → пробуем авто-занос в WB
+    # (если дата забронирована и пропуск полный). После commit, best-effort.
+    if vehicle_edited:
+        from backend.services import wb_supply_service
+
+        try:
+            await wb_supply_service.try_autopush_pass_by_assembly(db, project_id, req.id)
+        except Exception:  # noqa: BLE001
+            logger.warning("try_autopush_pass_by_assembly failed for request %s", req.id)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
     await invalidate_cache("reports:warehouse_need")

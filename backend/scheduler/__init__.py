@@ -315,14 +315,16 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
-    # WB supply live-states sync: every 4h (≈6×/день) — фоновая «Обновить» WB-панели.
-    # Тянет listSupplies + справочник статусов кабинета и обновляет wb_supply_state
-    # локальных связей заявка↔WB-поставка (bulk, один клиент на проект).
+    # WB supply live-states sync: every 30 min — фоновая «Обновить» WB-панели +
+    # добор авто-заноса пропуска (F3+: как только дата забронирована и пропуск
+    # полный — заносим в кабинет сам). Тянет listSupplies + справочник статусов и
+    # обновляет wb_supply_state локальных связей заявка↔WB-поставка (bulk, один
+    # клиент на проект; scope — только активные заявки, звонков немного).
     _scheduler.add_job(
         sync_all_projects_wb_supply_states,
-        trigger=IntervalTrigger(hours=4),
+        trigger=IntervalTrigger(minutes=30),
         id="wb_supply_states_sync",
-        name="WB supply states sync (every 4h)",
+        name="WB supply states sync (every 30 min)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=600,
