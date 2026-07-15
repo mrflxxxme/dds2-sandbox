@@ -595,6 +595,15 @@ async def accept_receipt_ff(
     # висела в «Ожидаемых поставках».
     vehicle_delivered = await _deliver_linked_vehicle(db, project_id, receipt.cost_order_id)
 
+    pre_dist_advanced = 0
+    if receipt.cost_order_id:
+        # Зеркало accept_receipt: PRE_DISTRIBUTED-заявки машины → IN_PROGRESS в той же
+        # транзакции (резерв стал реальным стоком). Без этого приёмка через ФФ-портал
+        # оставляла предраспределение висеть до ручного «В сборку».
+        from backend.services.assembly.pre_distribution import _advance_pre_distribution_assemblies
+
+        pre_dist_advanced = await _advance_pre_distribution_assemblies(db, project_id, receipt.cost_order_id)
+
     await db.commit()
     await db.refresh(receipt, ["items"])
 
@@ -602,4 +611,7 @@ async def accept_receipt_ff(
     await invalidate_cache("reports:assembly_link_anomalies")
     if vehicle_delivered:
         await invalidate_cache(f"supply_chain:supplier_catalog:project_id={project_id}")
+    if pre_dist_advanced:
+        await invalidate_cache("reports:assembly_flow")
+        await invalidate_cache("reports:warehouse_need")
     return receipt

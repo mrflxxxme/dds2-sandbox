@@ -6,9 +6,23 @@ import { formatDate, formatNumber } from '@/lib/utils';
 import { Toast } from '@/components';
 import type { PreDistVehicle } from '@/types/api';
 
-/** Вкладка «🚚 Предраспределение машин в пути» — каталог машин (CostOrder CUSTOMS/DISPATCHED).
- *  «Распределить» открывает отдельный полноэкранный экран (`./pre-dist?vehicle=<id>`),
- *  где идёт авто-раскладка груза машины по WB-складам как в «Потребность по складам». */
+/** Вкладка «🚚 Предраспределение машин в пути» — каталог машин (CostOrder CUSTOMS/DISPATCHED
+ *  + принятые ≤ 3 дн. назад). «Распределить» открывает отдельный полноэкранный экран
+ *  (`./pre-dist?vehicle=<id>`), где идёт авто-раскладка груза машины по WB-складам как в
+ *  «Потребность по складам». Принятая машина: остаток уже на ФФ → заявки обычные. */
+
+const VEHICLE_STATUS_BADGE: Record<string, { label: string; cls: string }> = {
+    CUSTOMS: { label: 'Таможня', cls: 'badge-info' },
+    DISPATCHED: { label: 'Отправлена', cls: 'badge-info' },
+    DELIVERED: { label: '✅ Принята', cls: 'badge-success' },
+};
+
+/** Полных дней с даты (для «Принята N дн. назад»); date-only строка → полночь локали. */
+function daysSince(iso: string): number {
+    const d = new Date(`${iso}T00:00:00`);
+    return Math.max(0, Math.floor((Date.now() - d.getTime()) / 86400000));
+}
+
 export default function PreDistributionView() {
     const params = useParams();
     const router = useRouter();
@@ -86,6 +100,8 @@ export default function PreDistributionView() {
                 экран раскладки груза по WB-складам (как «Потребность по складам»: потребность · приёмка ·
                 целые коробы и паллеты), источник — остатки именно этой машины. Заявки создаются со статусом
                 «Предраспределение» (без фейкового стока); при разгрузке машины станут обычными сборками.
+                Принятые машины остаются в списке ещё 3 дня: их остаток уже оприходован на ФФ, поэтому заявки
+                из них создаются сразу обычными сборками (со списанием остатков) с меткой машины.
             </div>
 
             <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
@@ -108,7 +124,17 @@ export default function PreDistributionView() {
                             return (
                                 <tr key={v.id} style={{ borderBottom: '1px solid var(--color-border)' }}>
                                     <td style={{ padding: '12px 16px', fontWeight: 600 }}>{v.order_no}</td>
-                                    <td style={{ padding: '12px 16px' }}><span className="badge badge-info">{v.status}</span></td>
+                                    <td style={{ padding: '12px 16px' }}>
+                                        <span className={`badge ${VEHICLE_STATUS_BADGE[v.status]?.cls || 'badge-info'}`}>
+                                            {VEHICLE_STATUS_BADGE[v.status]?.label || v.status}
+                                        </span>
+                                        {v.status === 'DELIVERED' && v.accepted_date && (
+                                            <div style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 4 }}>
+                                                {formatDate(v.accepted_date)}
+                                                {daysSince(v.accepted_date) === 0 ? ' · сегодня' : ` · ${formatNumber(daysSince(v.accepted_date), 0)} дн. назад`}
+                                            </div>
+                                        )}
+                                    </td>
                                     <td style={{ padding: '12px 16px', color: v.target_warehouse_name ? 'var(--color-text)' : 'var(--color-muted)' }}>{v.target_warehouse_name || '—'}</td>
                                     <td style={{ padding: '12px 16px', color: 'var(--color-muted)' }}>{v.eta ? formatDate(v.eta) : '—'}</td>
                                     <td style={{ padding: '12px 16px', textAlign: 'right' }}>{formatNumber(v.total_qty, 0)}</td>

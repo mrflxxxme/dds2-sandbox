@@ -9,6 +9,7 @@
 """
 
 import uuid
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -22,6 +23,7 @@ from backend.models.enums import VehicleStatus
 from backend.schemas.assembly import PreDistributionCreate, PreDistRow
 from backend.schemas.assembly import AssemblyItemCreate, AssemblyRequestCreate
 from backend.services.assembly.crud import create_assembly_request
+from backend.services.assembly.pre_distribution import PRE_DIST_DELIVERED_WINDOW_DAYS
 from backend.services.assembly_service import (
     _advance_pre_distribution_assemblies,
     advance_pre_distribution_manual,
@@ -31,7 +33,7 @@ from backend.services.assembly_service import (
     merge_assembly_requests,
 )
 from backend.services.warehouse_crud import create_warehouse
-from backend.services.warehouse_inbound import accept_receipt, create_receipt
+from backend.services.warehouse_inbound import accept_receipt, accept_receipt_ff, create_receipt
 from backend.services.warehouse_stock_engine import _get_reserved_map
 
 WB_A = "Электросталь"
@@ -611,3 +613,233 @@ async def test_merge_rejects_mixing_pre_distributed_with_in_progress(db_session,
     )
     with pytest.raises(ValueError, match="смешивать"):
         await merge_assembly_requests(db_session, env.pid, [a, ip.id])
+
+
+# ─── Принятые машины (окно N дней): распределение остатка ОБЫЧНЫМИ заявками ─
+
+
+async def _accept_vehicle_receipt(db_session: AsyncSession, env: _Env, *, days_ago: int = 0):
+    """Принять машину env: DISPATCHED → приёмка ACCEPTED (весь груз приходуется в
+    WarehouseStock ФФ) → машина DELIVERED. days_ago сдвигает actual_date приёмки назад."""
+    env.vehicle.status = VehicleStatus.DISPATCHED
+    await db_session.commit()
+    receipt = await create_receipt(
+        db_session,
+        env.pid,
+        env.ff_wh_id,
+        {
+            "items": [
+                {"barcode": env.bc1, "expected_qty": 100, "actual_qty": 100},
+                {"barcode": env.bc2, "expected_qty": 50, "actual_qty": 50},
+            ]
+        },
+    )
+    await db_session.execute(
+        text("UPDATE inbound_receipts SET cost_order_id = :cid WHERE id = :rid"),
+        {"cid": env.vehicle.id, "rid": receipt.id},
+    )
+    await db_session.commit()
+    await accept_receipt(db_session, env.pid, receipt.id)
+    if days_ago:
+        await db_session.execute(
+            text("UPDATE inbound_receipts SET actual_date = :d WHERE id = :rid"),
+            {"d": date.today() - timedelta(days=days_ago), "rid": receipt.id},
+        )
+        await db_session.commit()
+    await db_session.refresh(env.vehicle)
+    return receipt
+
+
+@pytest.mark.asyncio
+async def test_list_includes_recently_accepted_vehicle(db_session, env):
+    """Принятая машина остаётся в списке ещё PRE_DIST_DELIVERED_WINDOW_DAYS дней (с датой приёмки)."""
+    await _accept_vehicle_receipt(db_session, env)
+    assert env.vehicle.status == VehicleStatus.DELIVERED
+
+    vehicles = await get_pre_distribution_vehicles(db_session, env.pid)
+    mine = [v for v in vehicles if v.id == env.vehicle.id]
+    assert mine
+    assert mine[0].status == "DELIVERED"
+    assert mine[0].accepted_date == date.today()
+    assert mine[0].can_distribute is True
+    assert mine[0].total_qty == 150
+
+
+@pytest.mark.asyncio
+async def test_list_excludes_vehicle_accepted_beyond_window(db_session, env):
+    """Приёмка старше окна → машины нет в списке, пул и создание закрыты."""
+    await _accept_vehicle_receipt(db_session, env, days_ago=PRE_DIST_DELIVERED_WINDOW_DAYS + 1)
+    vehicles = await get_pre_distribution_vehicles(db_session, env.pid)
+    assert all(v.id != env.vehicle.id for v in vehicles)
+
+    with pytest.raises(ValueError, match="машину в пути"):
+        await get_vehicle_pre_dist_pool(db_session, env.pid, env.vehicle.id)
+    with pytest.raises(ValueError, match="машину в пути"):
+        await create_pre_distribution(
+            db_session,
+            env.pid,
+            PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=10)]),
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_includes_vehicle_on_window_border(db_session, env):
+    """Граница окна включительно: принята ровно N дней назад — ещё видна."""
+    await _accept_vehicle_receipt(db_session, env, days_ago=PRE_DIST_DELIVERED_WINDOW_DAYS)
+    vehicles = await get_pre_distribution_vehicles(db_session, env.pid)
+    assert any(v.id == env.vehicle.id for v in vehicles)
+
+
+@pytest.mark.asyncio
+async def test_create_from_accepted_vehicle_is_regular_request(db_session, env):
+    """Из принятой машины создаётся ОБЫЧНАЯ заявка: IN_PROGRESS, is_pre_distribution=False,
+    метка source_vehicle_id остаётся, резерв реального ФФ-стока появляется сразу."""
+    await _accept_vehicle_receipt(db_session, env)
+    result = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40)]),
+    )
+    assert result.created == 1
+
+    req = (
+        await db_session.execute(
+            select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+        )
+    ).scalar_one()
+    assert req.status == AssemblyStatus.IN_PROGRESS
+    assert req.is_pre_distribution is False
+
+    # Резерв — реальный (обычная заявка), в отличие от PRE_DISTRIBUTED.
+    reserved = await _get_reserved_map(db_session, env.pid, env.ff_wh_id)
+    assert reserved.get(env.nom1, 0) == 40
+
+    # Net-пул машины уменьшился: метка source_vehicle_id учитывается той же математикой.
+    pool = await get_vehicle_pre_dist_pool(db_session, env.pid, env.vehicle.id)
+    by_bc = {r.barcode: r for r in pool.rows}
+    assert by_bc[env.bc1].available_qty == 60
+    assert pool.vehicle.accepted_date == date.today()
+
+
+@pytest.mark.asyncio
+async def test_create_from_accepted_vehicle_validates_ff_stock(db_session, env):
+    """Остаток ФФ уже разобран другими заявками → создание из принятой машины падает целиком."""
+    await _accept_vehicle_receipt(db_session, env)
+    # Обычная заявка без машины съедает 80 из 100 BC1.
+    await create_assembly_request(
+        db_session,
+        env.pid,
+        AssemblyRequestCreate(
+            warehouse_id=env.ff_wh_id,
+            pallets_count=1,
+            pallet_weight_kg=Decimal("0"),
+            wb_warehouse_name_manual=WB_B,
+            package_type="BOX",
+            items=[AssemblyItemCreate(barcode=env.bc1, quantity=80)],
+        ),
+    )
+    with pytest.raises(ValueError, match="Недостаточно"):
+        await create_pre_distribution(
+            db_session,
+            env.pid,
+            PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40)]),
+        )
+    reqs = (
+        await db_session.execute(
+            select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+        )
+    ).scalars().all()
+    assert len(reqs) == 0
+
+
+@pytest.mark.asyncio
+async def test_create_from_accepted_vehicle_folds_same_direction(db_session, env):
+    """Повторное распределение принятой машины на то же направление доливает в ту же заявку."""
+    await _accept_vehicle_receipt(db_session, env)
+    for qty in (20, 10):
+        await create_pre_distribution(
+            db_session,
+            env.pid,
+            PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=qty)]),
+        )
+    reqs = (
+        await db_session.execute(
+            select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+        )
+    ).scalars().all()
+    assert len(reqs) == 1
+    items = (
+        await db_session.execute(
+            select(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == reqs[0].id)
+        )
+    ).scalars().all()
+    assert {it.barcode: it.quantity for it in items}[env.bc1] == 30
+    # Fold-долив тоже под стеклом стока: реальный резерв вырос до 30.
+    reserved = await _get_reserved_map(db_session, env.pid, env.ff_wh_id)
+    assert reserved.get(env.nom1, 0) == 30
+
+
+@pytest.mark.asyncio
+async def test_create_from_accepted_vehicle_fold_validates_ff_stock(db_session, env):
+    """Fold-долив в существующую заявку принятой машины тоже валидирует остаток ФФ."""
+    await _accept_vehicle_receipt(db_session, env)
+    await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=20)]),
+    )
+    # Сток BC1 усох до 30 (инвентаризация/отгрузки): долив 40 должен упасть, 20+40 > 30.
+    await db_session.execute(
+        text(
+            "UPDATE warehouse_stock SET quantity = 30 "
+            "WHERE project_id = :pid AND warehouse_id = :wid AND nomenclature_id = :nid"
+        ),
+        {"pid": env.pid, "wid": env.ff_wh_id, "nid": env.nom1},
+    )
+    await db_session.commit()
+    with pytest.raises(ValueError, match="Недостаточно"):
+        await create_pre_distribution(
+            db_session,
+            env.pid,
+            PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40)]),
+        )
+
+
+@pytest.mark.asyncio
+async def test_accept_receipt_ff_advances_predist(db_session, env):
+    """Приёмка через ФФ-портал тоже переводит PRE_DISTRIBUTED → IN_PROGRESS (зеркало accept_receipt)."""
+    await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(vehicle_id=env.vehicle.id, rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=40)]),
+    )
+    env.vehicle.status = VehicleStatus.DISPATCHED
+    await db_session.commit()
+    receipt = await create_receipt(
+        db_session,
+        env.pid,
+        env.ff_wh_id,
+        {"items": [{"barcode": env.bc1, "expected_qty": 100}]},
+    )
+    await db_session.execute(
+        text("UPDATE inbound_receipts SET cost_order_id = :cid WHERE id = :rid"),
+        {"cid": env.vehicle.id, "rid": receipt.id},
+    )
+    await db_session.commit()
+    await db_session.refresh(receipt, ["items"])
+
+    await accept_receipt_ff(
+        db_session,
+        env.pid,
+        receipt.id,
+        [{"item_id": receipt.items[0].id, "actual_qty": 100, "defect_qty": 0}],
+    )
+
+    req = (
+        await db_session.execute(
+            select(AssemblyRequest).where(AssemblyRequest.source_vehicle_id == env.vehicle.id)
+        )
+    ).scalar_one()
+    assert req.status == AssemblyStatus.IN_PROGRESS
+    await db_session.refresh(env.vehicle)
+    assert env.vehicle.status == VehicleStatus.DELIVERED
