@@ -564,6 +564,19 @@ _SUPPLY_SCOPE_STATUSES: tuple[str, ...] = (
 # расхождение считаем, только если |дата сдачи − дата брони| > 1 дня.
 _SUPPLY_DATE_TOLERANCE_DAYS = 1
 # WB-поставка закрыта — расхождение по дате/паллетам/пропуску уже неактуально.
+# Кириллические буквы госномера → латиница (WB хранит их вперемешку):
+# «В874УА» == «B874YA». Сверка номера машины ДДС↔ВБ идёт по нормализованному виду.
+_PLATE_CYR_TO_LAT = str.maketrans("АВЕКМНОРСТУХ", "ABEKMHOPCTYX")
+
+
+def _norm_plate(s: str | None) -> str:
+    """Госномер к канону: upper, только буквы/цифры, кириллица→латиница."""
+    if not s:
+        return ""
+    up = s.upper().translate(_PLATE_CYR_TO_LAT)
+    return "".join(ch for ch in up if ch.isalnum())
+
+
 _SUPPLY_CLOSED_WB_STATUSES: frozenset[str] = frozenset(
     {WbSupplyStatus.ACCEPTED.value, WbSupplyStatus.CANCELLED.value}
 )
@@ -627,14 +640,29 @@ async def _supply_discrepancies(
         pass_pallets = wb.pass_pallets if wb is not None else None
         pallet_mismatch = pass_pallets is not None and pass_pallets != asm.pallets_count
 
-        # Пропуск оформлен = реплей дошёл до PASSED и паллеты пропуска заданы.
-        pass_missing = (
-            wb is None
-            or wb.sync_status != WbSupplySyncStatus.PASSED.value
-            or wb.pass_pallets is None
+        # Пропуск на ВБ = снимок кабинета говорит, что пропуск заведён.
+        pass_on_wb = wb is not None and wb.wb_pass_present is True
+        # Пропуск не оформлен НИГДЕ: нет на ВБ и наш реплей не дошёл до PASSED.
+        pass_missing = not pass_on_wb and (
+            wb is None or wb.sync_status != WbSupplySyncStatus.PASSED.value
+        )
+        # Пропуск на ВБ есть, а у нас поля пропуска пусты — «нет в ДДС».
+        pass_missing_dds = pass_on_wb and not (wb.pass_car_number or wb.pass_driver_last)
+        # Номер машины у нас ≠ номеру в кабинете WB (нормализованное сравнение).
+        car_number_mismatch = (
+            pass_on_wb
+            and bool(wb.pass_car_number)
+            and bool(wb.wb_pass_car_number)
+            and _norm_plate(wb.pass_car_number) != _norm_plate(wb.wb_pass_car_number)
         )
 
-        if not (date_mismatch or pallet_mismatch or pass_missing):
+        if not (
+            date_mismatch
+            or pallet_mismatch
+            or pass_missing
+            or pass_missing_dds
+            or car_number_mismatch
+        ):
             continue
 
         rows.append(
@@ -655,6 +683,11 @@ async def _supply_discrepancies(
                 "date_mismatch": date_mismatch,
                 "pallet_mismatch": pallet_mismatch,
                 "pass_missing": pass_missing,
+                "pass_on_wb": pass_on_wb,
+                "pass_missing_dds": pass_missing_dds,
+                "car_number_mismatch": car_number_mismatch,
+                "wb_car_number": wb.wb_pass_car_number if wb is not None else None,
+                "wb_pass_pallets": wb.wb_pass_pallets if wb is not None else None,
             }
         )
 

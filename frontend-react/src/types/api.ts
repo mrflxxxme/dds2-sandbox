@@ -2737,9 +2737,20 @@ export interface SupplyDiscrepancyRow {
   wb_status: string | null;
   /** стадия реплея пропуска (PASSED = пропуск занесён) */
   sync_status: string | null;
+  /** номер машины в пропуске кабинета WB (снимок) */
+  wb_car_number: string | null;
+  /** паллеты в пропуске кабинета WB (снимок) */
+  wb_pass_pallets: number | null;
   date_mismatch: boolean;
   pallet_mismatch: boolean;
+  /** пропуск не оформлен нигде (ни ВБ, ни наш PASSED) */
   pass_missing: boolean;
+  /** пропуск заведён в кабинете WB */
+  pass_on_wb: boolean;
+  /** пропуск есть на ВБ, а у нас поля пусты */
+  pass_missing_dds: boolean;
+  /** номер машины ДДС ≠ ВБ */
+  car_number_mismatch: boolean;
 }
 
 export interface LinkAnomaliesResponse {

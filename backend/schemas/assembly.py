@@ -979,9 +979,14 @@ class SupplyDiscrepancyRow(BaseModel):
     wb_supply_id: str | None  # WB-I-xxxx (для показа/drill), если поставка привязана
     wb_status: str | None  # статус WB-поставки (ON_DELIVERY и т.п.)
     sync_status: str | None  # стадия реплея пропуска (PASSED = пропуск занесён)
+    wb_car_number: str | None  # номер машины в пропуске кабинета WB (снимок)
+    wb_pass_pallets: int | None  # паллеты в пропуске кабинета WB (снимок)
     date_mismatch: bool
     pallet_mismatch: bool
-    pass_missing: bool
+    pass_missing: bool  # пропуск не оформлен нигде (ни ВБ, ни наш PASSED)
+    pass_on_wb: bool  # пропуск заведён в кабинете WB
+    pass_missing_dds: bool  # пропуск есть на ВБ, а у нас поля пусты
+    car_number_mismatch: bool  # номер машины ДДС ≠ ВБ
 
 
 class FboAnomalySupply(BaseModel):

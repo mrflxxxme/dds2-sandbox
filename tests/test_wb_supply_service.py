@@ -788,3 +788,53 @@ async def test_get_state_reject_reason_empty_string_is_none(db_session, monkeypa
     st = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert st.reject_reason is None
     assert st.supply_date is None
+
+
+# ─── _apply_cabinet_pass_snapshot: снимок WB + заполнение пустых полей ДДС ─────
+
+
+def test_apply_cabinet_pass_snapshot_fills_empty_and_keeps_snapshot():
+    """Пустые поля ДДС заполняются из кабинета; снимок wb_pass_* сохраняется."""
+    from backend.models.assembly_wb import AssemblyWbSupply
+    from backend.schemas.assembly_wb import WbCabinetPass
+
+    link = AssemblyWbSupply(project_id=1, assembly_request_id=1)
+    cab = WbCabinetPass(
+        has_pass=True, driver_first="Александр", driver_last="Рыболов",
+        driver_phone="8-927-701-90-27", car_model="ГАЗЕЛЬ", car_number="В874УА37", pallets=5,
+    )
+    wb_supply_service._apply_cabinet_pass_snapshot(link, cab)
+    # снимок
+    assert link.wb_pass_present is True
+    assert link.wb_pass_car_number == "В874УА37"
+    assert link.wb_pass_pallets == 5
+    assert link.wb_pass_driver == "Рыболов Александр"
+    # заполнены пустые поля ДДС (телефон нормализован)
+    assert link.pass_driver_first == "Александр"
+    assert link.pass_driver_last == "Рыболов"
+    assert link.pass_car_number == "В874УА37"
+    assert link.pass_driver_phone == "79277019027"
+    assert link.pass_pallets == 5
+
+
+def test_apply_cabinet_pass_snapshot_does_not_overwrite_nonempty():
+    """Непустые поля ДДС НЕ перетираются данными кабинета — только снимок."""
+    from backend.models.assembly_wb import AssemblyWbSupply
+    from backend.schemas.assembly_wb import WbCabinetPass
+
+    link = AssemblyWbSupply(
+        project_id=1, assembly_request_id=1,
+        pass_driver_first="Андрей", pass_driver_last="Андрей",
+        pass_car_number="Р750ОТ164", pass_pallets=2,
+    )
+    cab = WbCabinetPass(
+        has_pass=True, driver_first="Андрей", driver_last="Жиров",
+        car_number="Р750ОТ164", pallets=2,
+    )
+    wb_supply_service._apply_cabinet_pass_snapshot(link, cab)
+    # ДДС не тронут
+    assert link.pass_driver_last == "Андрей"
+    assert link.pass_pallets == 2
+    # снимок отражает кабинет (для сверки — видно расхождение по фамилии)
+    assert link.wb_pass_driver == "Жиров Андрей"
+    assert link.wb_pass_present is True
