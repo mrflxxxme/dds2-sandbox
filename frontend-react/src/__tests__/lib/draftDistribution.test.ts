@@ -11,7 +11,10 @@ import {
     type CellEdits,
     type PinnedPkgOf,
     type DraftDistInput,
+    type AcceptanceSplitMap,
 } from '@/lib/assembly/draftDistribution';
+import { applyAcceptanceSplits } from '@/lib/assembly/buildAssemblyDistribution';
+import { buildDraftRows, type DraftSkuInput } from '@/lib/assembly/buildDraftRows';
 import type { PackageType, StockNeedArticle } from '@/types/api';
 
 /** Артикул потребности (минимальный фабричный хелпер). rf = { ffId: available }. */
@@ -318,5 +321,47 @@ describe('buildAutoSyncPlan — авто-синк черновика с расч
         const calcRow = row(1, 'A', { 'Тула': 20 }, { '4': 20 });
         const dist = { rows: [calcRow], prebook: [] };
         expect(buildAutoSyncPlan(dist, [calcRow], [], new Set(), new Set())).toBeNull();
+    });
+});
+
+describe('applyAcceptanceSplits — сплит приёмки BOX+MONO (прод-кейс 150х200_серый)', () => {
+    const splitInput = () => {
+        const base: DraftSkuInput = {
+            nm_id: 42, barcode: 'bc42', vendor_code: '150х200_серый',
+            target: { 'Екатеринбург': 154, 'Тула': 64, 'Казань': 9 },
+            ffStock: { 3: 1928 },
+            ppb: 13, box_size: '60x40x40', packageType: 'BOX',
+        };
+        const splitMap: AcceptanceSplitMap = new Map<string, { package_type: PackageType; distribution: Record<string, number> }[]>([['42::bc42', [
+            { package_type: 'BOX', distribution: { 'Екатеринбург': 154, 'Тула': 64 } },
+            { package_type: 'MONOPALLET', distribution: { 'Казань': 9 } },
+        ]]]);
+        return { base, splitMap };
+    };
+
+    it('BOX-часть НЕ теряется (был last-wins по nm::barcode в buildDraftRows)', () => {
+        const { base, splitMap } = splitInput();
+        const effective = applyAcceptanceSplits([base], splitMap);
+        const rows = buildDraftRows({ skus: effective });
+        const boxQty = rows.filter(r => r.package_type === 'BOX')
+            .reduce((s, r) => s + sumRec(r.tgt), 0);
+        const monoQty = rows.filter(r => r.package_type === 'MONOPALLET')
+            .reduce((s, r) => s + sumRec(r.tgt), 0);
+        expect(boxQty).toBeGreaterThan(0);   // до фикса: 0 (перетёрт моно-сплитом)
+        expect(monoQty).toBeGreaterThan(0);  // моно-часть тоже жива
+        // BOX едет целыми коробами по своим складам.
+        const boxTgt = Object.assign({}, ...rows.filter(r => r.package_type === 'BOX').map(r => r.tgt));
+        expect(boxTgt['Екатеринбург'] % 13).toBe(0);
+        expect(boxTgt['Екатеринбург']).toBeGreaterThan(0);
+    });
+
+    it('сплиты сорсят ОБЩИЙ ФФ-сток, а не каждый свой (нет двойного счёта)', () => {
+        const { base, splitMap } = splitInput();
+        // Стока хватает только на BOX-часть: моно должно конкурировать, а не удвоить пул.
+        base.ffStock = { 3: 200 };
+        const effective = applyAcceptanceSplits([base], splitMap);
+        const rows = buildDraftRows({ skus: effective });
+        const totalSrc = rows.reduce((s, r) => s + sumRec(r.src as Record<string, number>), 0);
+        expect(totalSrc).toBeLessThanOrEqual(200);
     });
 });

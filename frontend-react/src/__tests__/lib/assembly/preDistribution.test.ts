@@ -149,8 +149,12 @@ describe('applyAcceptanceSplits · приёмка (closed→open + тип упа
             ]],
         ]);
         const out = applyAcceptanceSplits([sku], splitMap);
-        expect(out).toHaveLength(2);
-        expect(out.find(s => s.packageType === 'MONOPALLET')?.target).toEqual({ 'Казань': 50 });
+        // Сплиты склеиваются в ОДИН sku (упаковка — картой packageByWh): дубли по
+        // nm::barcode перетирали друг друга в buildDraftRows и двоили ФФ-сток
+        // (прод-кейс 150х200_серый 2026-07-15: BOX-часть исчезала целиком).
+        expect(out).toHaveLength(1);
+        expect(out[0].target).toEqual({ 'Коледино': 100, 'Казань': 50 });
+        expect(out[0].packageByWh).toEqual({ 'Коледино': 'BOX', 'Казань': 'MONOPALLET' });
     });
 
     it('нет сплита → SKU как есть', () => {

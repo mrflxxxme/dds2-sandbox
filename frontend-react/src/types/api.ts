@@ -1422,6 +1422,46 @@ export interface WbStocksResponse {
   last_synced_at: string | null;
 }
 
+// ─── Stock Analytics (GET /reports/stock_analytics — «Аналитика остатков») ─────
+
+export interface StockAnalyticsArticle {
+  nm_id: number;
+  vendor_code: string;
+  subject: string;
+  brand: string;
+  orders_30d: number;
+  trend_pct: number;
+  avg_daily: number;
+  stocks_wb: number;
+  /** Запас в днях по остатку выбранного mode (wb / wb_rf / wb_rf_transit / wb_assembly_transit). */
+  days_left: number;
+  traffic_light: string;
+  forecast: number[];
+  /** Свободный остаток на ФФ-складах (mode ≠ wb). */
+  stocks_rf?: number;
+  in_assembly?: number;
+  in_transit?: number;
+  wb_buyout_pct?: number;
+  /** Реализация БДР за trend_days, ₽. */
+  revenue_bdr?: number;
+  margin_pct?: number | null;
+  rf_avg_days?: number | null;
+  first_sale_date?: string | null;
+}
+
+export interface StockAnalyticsResponse {
+  articles: StockAnalyticsArticle[];
+  dates: string[];
+  total_articles: number;
+  orders_30d: number;
+  avg_daily: number;
+  data_date: string;
+  most_critical: { article: string; days_left: number } | null;
+  traffic_light: { red: number; orange: number; yellow: number; green: number };
+  subjects: string[];
+  brands: string[];
+}
+
 export interface WbArticleWarehouse {
   name: string;
   quantity: number;

@@ -603,10 +603,13 @@ export default function DraftPreview({
                             const pb = palletBadge(palletsForCell(items, wb));
                             // Манифест физических паллет: тот же box/mono-ceil, что и бейдж выше,
                             // потому Σ pallets.length === pb.pallets (реконсиляция по построению).
+                            // Кратность — короб ЕЁ ФФ (ppbForLine), как у бейджа и среза: глобальный
+                            // min раздувал fill и рисовал фантомную частичную паллету на физически
+                            // целом направлении (СПБ Шушары 3 паллеты → «4-я на 22%», 2026-07-15).
                             const manifest = buildPalletManifest(
                                 items.map(l => ({
                                     nmId: l.nmId, vendorCode: l.vendor, units: l.qty,
-                                    boxSize: nmBoxSize.get(l.nmId) ?? null, ppb: nmPpb.get(l.nmId) ?? null,
+                                    boxSize: nmBoxSize.get(l.nmId) ?? null, ppb: ppbForLine(l),
                                 })),
                                 { mode: pkg === 'BOX' ? 'box' : 'mono', maxHeightCm: maxPalletHeightCm(wb), overrides: palletOverrides },
                             );

@@ -3,7 +3,7 @@ import { ApiClient } from './client';
 import type {
     DdsMonthRow, Transaction, DDSPnLResponse, CostHistoryResponse,
     WbStocksResponse, WbStocksArticlesResponse, WbStockHistoryResponse,
-    CostDnaResponse,
+    CostDnaResponse, StockAnalyticsResponse,
     CounterpartyTurnoversResponse, CounterpartyType,
     ColdStartTableResponse,
 } from '@/types/api';
@@ -157,7 +157,7 @@ export function addReportMethods(api: ApiClient) {
             if (brand) q.set('brand', brand);
             if (article) q.set('article', article);
             if (mode) q.set('mode', mode);
-            return api.request<any>('GET', `/api/v1/reports/stock_analytics?${q.toString()}`);
+            return api.request<StockAnalyticsResponse>('GET', `/api/v1/reports/stock_analytics?${q.toString()}`);
         },
         syncWarehouseStocks() {
             return api.request<{ synced: number }>('POST', '/api/v1/reports/stock_warehouses/sync');

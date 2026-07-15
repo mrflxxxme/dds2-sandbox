@@ -7,6 +7,7 @@ import { allocatePairs } from '@/lib/utils/assemblyPreview';
 import { allocateWholeBoxes, buildLeftoverWeights } from '@/lib/assembly/leftoverAlloc';
 import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constants/localization';
 import { Toast } from '@/components';
+import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams';
 import {
     applyAcceptanceSplits,
     applyDraftCellEdit,
@@ -196,7 +197,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                 const [need, cold, boxMult, palletOv, locSkus] = await Promise.all([
                     // Первичный источник экрана — НЕ глушим (иначе 500 покажет пустое «нечего
                     // отгружать» вместо ошибки). Отказ → reject Promise.all → error-стейт.
-                    api.getStockNeed(14, 14, 'actual', true, true, 0) as Promise<StockNeedResponse>,
+                    api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, true, 0) as Promise<StockNeedResponse>,
                     // Параметры новинок — те же, что настроены на экране «Потребность»
                     // (персистятся в localStorage), иначе два экрана считали бы новинки
                     // разными настройками (min-pack / % отгрузки / floor).
@@ -1078,7 +1079,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                         Таблица показывает <b style={{ color: 'var(--color-text)' }}>черновик</b>: строки и 🅿️ предбронь каждого SKU единой суммой (ячейки с предбронью подсвечены, доля — в подсказке «Σ отпр.»).
                         Правки степперами сохраняются в черновик сразу; ✕ убирает SKU целиком.
                         План <b style={{ color: 'var(--color-text)' }}>сам синхронизируется</b> с живым расчётом при заходе (need-канал + новинки cold-start с гвардом пересорта ⚠): целые паллеты → строки, хвосты → предбронь. SKU, правленный руками, помечается ✋ и авто-синком не трогается (↺ на строке возвращает в авто); «⟳ Обновить сейчас» — форс-синк без перезахода.
-                        Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность. Метрики SKU: <b style={{ color: 'var(--color-text)' }}>Хватит, дн</b> (на сколько дней остатка WB при текущей скорости; 🔴 меньше плеча доставки) · <b style={{ color: 'var(--color-text)' }}>Потр. 14д</b> (growth-aware: скорость = max из среднего за 14д/7д/3д, ⚡ — растущий SKU) · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (цвет — статус КТР).
+                        Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность. Метрики SKU: <b style={{ color: 'var(--color-text)' }}>Хватит, дн</b> (на сколько дней остатка WB при текущей скорости; 🔴 меньше плеча доставки) · <b style={{ color: 'var(--color-text)' }}>Потр. {NEED_SUPPLY_DAYS}д</b> (growth-aware: скорость = max из среднего за 14д/7д/3д, ⚡ — растущий SKU) · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (цвет — статус КТР).
                         Колонка <b style={{ color: 'var(--color-text)' }}>«Расчёт»</b> — что предлагает живой расчёт (для сравнения с планом).
                     </div>
                     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
@@ -1149,7 +1150,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('inAssembly')} title="Уже в сборке на WB">В сборке{sortArrow('inAssembly')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('stocksWb')} title="Остаток на Wildberries">На WB{sortArrow('stocksWb')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('days')} title="На сколько дней хватит остатка на WB при текущей скорости (growth-aware: max из среднего за 14д / 7д / 3д). Красный — меньше плеча доставки (сборка+дорога+приёмка): разрыв стока до приезда новой поставки">Хватит, дн{sortArrow('days')}</th>
-                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('need')} title="Раскладочная потребность: Σ локальных дефицитов складов на горизонте 14 дней + плечо (growth-aware скорость = max из среднего за 14д/7д/3д). Нетто к закупке — в подсказке ячейки. ФФ-фильтр не влияет">Потр. 14д{sortArrow('need')}</th>
+                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('need')} title={`Раскладочная потребность: Σ локальных дефицитов складов на горизонте ${NEED_SUPPLY_DAYS} дней + плечо (growth-aware скорость = max из среднего за 14д/7д/3д). Нетто к закупке — в подсказке ячейки. ФФ-фильтр не влияет`}>Потр. {NEED_SUPPLY_DAYS}д{sortArrow('need')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('revenue')} title="Выручка за 14 дней (продажи − возвраты, окно тренда движка потребности)">₽ 14д{sortArrow('revenue')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('loc')} title="Индекс локализации артикула за 14 дней (доля локальных заказов; цвет — статус КТР)">Лок %{sortArrow('loc')}</th>
                                     {wbCols.map((c) => (
