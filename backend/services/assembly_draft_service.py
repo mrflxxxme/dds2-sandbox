@@ -1257,15 +1257,20 @@ async def _subtract_in_transit(
 
     Семантика: повторный автосейв неизменного плана → прирост 0 → вычет 0
     (идемпотентность); stale-вкладка вернула старый план поверх очищенного
-    черновика → baseline меньше → прирост есть → вычет как раньше; ручная
-    правка добавила N шт на склад с транзитом → вычтется ровно прирост.
+    черновика → baseline меньше → прирост есть → вычет как раньше.
     `baseline=None` ≡ пустой черновик (весь входящий план — прирост).
+
+    ✋ SKU из `distribution.manual_nms` гейт НЕ трогает: степпер матрицы правится
+    при видимой колонке «В сборке» — прирост поверх транзита там осознанный
+    добор, а не stale-дубль (прод-кейс 2026-07-15: +4 короба в Электросталь
+    молча резались до нуля → «правка не сохраняется»).
     """
     from backend.services.cold_start_distribution_service import fetch_in_transit_by_nm
 
+    manual = set(distribution.manual_nms or [])
     nm_ids = sorted(
-        {r.nm_id for r in (distribution.rows or []) if r.nm_id}
-        | {r.nm_id for r in (distribution.prebook or []) if r.nm_id}
+        {r.nm_id for r in (distribution.rows or []) if r.nm_id and r.nm_id not in manual}
+        | {r.nm_id for r in (distribution.prebook or []) if r.nm_id and r.nm_id not in manual}
     )
     if not nm_ids:
         return 0

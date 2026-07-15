@@ -34,6 +34,10 @@ from backend.schemas.assembly_wb import (
     WbSupplyState,
 )
 from backend.services import integrations_service
+from backend.services.warehouse_acceptance_service import (
+    _is_spec_acceptance_wh,
+    _normalize_acceptance_wh,
+)
 from backend.integrations.wb_portal_client import (
     WbPortalClient,
     WbPortalError,
@@ -221,16 +225,39 @@ def _build_goods(assembly: AssemblyRequest) -> list[dict]:
 
 
 async def _resolve_warehouse_id(client: WbPortalClient, name: str) -> int:
-    """Имя направления → числовой warehouseID портала. Точный матч по имени."""
+    """Имя направления → числовой warehouseID портала.
+
+    Направление заявки — КАНОНИЧЕСКОЕ имя (ACCEPTANCE_TO_STOCK_NAME: «Краснодар»,
+    «Самара (Новосемейкино)»), а фильтр портала отдаёт СЫРЫЕ кабинетные имена
+    («Краснодар (Тихорецкая)», «Новосемейкино») — точного совпадения может не
+    быть в принципе (ASM-689/693). Порядок матча: точный → casefold → канон
+    обеих сторон (спец-двойники СГТ/Питание/СЦ исключаются, иначе id спец-склада
+    перетирает реальный — см. learnings про last-wins).
+    """
     items = await client.get_warehouse_filter_items()
     by_name = {w["warehouseName"]: w["warehouseID"] for w in items if w.get("warehouseName")}
     if name in by_name:
         return int(by_name[name])
-    # Фолбэк: сравнение без учёта регистра/пробелов.
+    # Фолбэк 1: сравнение без учёта регистра/пробелов.
     norm = name.strip().casefold()
     for wname, wid in by_name.items():
         if wname.strip().casefold() == norm:
             return int(wid)
+    # Фолбэк 2: канонический матч (только реальные склады, без спец-двойников).
+    target = _normalize_acceptance_wh(name)
+    candidates: dict[int, str] = {}
+    for wname, wid in by_name.items():
+        if _is_spec_acceptance_wh(wname):
+            continue
+        if _normalize_acceptance_wh(wname) == target:
+            candidates[int(wid)] = wname
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if len(candidates) > 1:
+        raise WbSupplyError(
+            f"WB-склад «{name}» неоднозначен в кабинете: "
+            f"{', '.join(sorted(candidates.values()))} — выберите склад вручную."
+        )
     raise WbSupplyError(
         f"WB-склад «{name}» не распознан в кабинете. Выберите склад вручную."
     )
@@ -627,6 +654,14 @@ async def create_preorder(
         await db.commit()
         await client.draft_update_goods(draft_id, goods)
         validation = await client.validate_warehouse_goods(draft_id, warehouse_id)
+        goods_errors = _extract_goods_errors(validation)
+        if goods_errors:
+            shown = "; ".join(goods_errors[:8])
+            more = f" (и ещё {len(goods_errors) - 8})" if len(goods_errors) > 8 else ""
+            raise WbSupplyError(
+                f"WB не принимает часть товаров на складе «{name}»: {shown}{more}. "
+                "Уберите эти товары из заявки или выберите другой склад."
+            )
         box_type_id = _choose_box_type(desired_box_type, _extract_box_types(validation), pkg, name)
         preorder_id = await client.supply_create(draft_id, warehouse_id, box_type_id)
 
@@ -974,6 +1009,31 @@ def _extract_box_types(validation: dict) -> list[int]:
         if types:
             return [int(t) for t in types]
     return []
+
+
+def _extract_goods_errors(validation: dict) -> list[str]:
+    """Пер-товарные ошибки validateWarehouseGoodsV2 → человекочитаемые строки.
+
+    WB отдаёт items[].hasError + errors[{field, error}] (снято живьём на ASM-701:
+    «Запрет завоза предмета на склад» — категория запрещена на складе). Если
+    такие товары не отсеять, supply/create падает с -32003 и ПУСТЫМ innerMsg
+    («есть ошибки в товарах поставки») — причину пользователь не видит.
+    """
+    out: list[str] = []
+    for it in validation.get("items") or []:
+        if not it.get("hasError"):
+            continue
+        label = it.get("sa") or it.get("nmSa") or str(it.get("nmId") or "?")
+        msgs = sorted(
+            {
+                e["error"]
+                for e in (it.get("errors") or [])
+                if isinstance(e, dict) and e.get("error")
+            }
+        )
+        text = ", ".join(msgs) if msgs else "ошибка без описания"
+        out.append(f"{label} ({it.get('barcode', '?')}) — {text}")
+    return out
 
 
 def _choose_box_type(desired: int, available: list[int], pkg: str, warehouse: str) -> int:

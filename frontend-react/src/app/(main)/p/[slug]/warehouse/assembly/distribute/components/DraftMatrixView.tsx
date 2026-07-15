@@ -712,6 +712,18 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     // Вход в ручной режим = просто показать степперы поверх авто-раскладки. НЕ сеем пины:
     // нетронутые строки остаются авто, «вручную» помечается лишь та, где юзер кликнул −/+.
     const enterManual = useCallback(() => setEditMode(true), []);
+    // «Готово с правкой» дожимает незаписанный дебаунс СЕЙЧАС: после «Готово»
+    // пользователь обычно сразу уходит в черновик, а fire-and-forget на анмаунте
+    // гонялся бы с загрузкой той страницы (она успевала прочитать черновик без
+    // последней правки). Заодно тост «сервер вычел…» рендерится на живом компоненте.
+    const finishManual = useCallback(() => {
+        setEditMode(false);
+        if (saveTimerRef.current) {
+            clearTimeout(saveTimerRef.current);
+            saveTimerRef.current = null;
+        }
+        if (pendingSaveRef.current) void flushDraftSave();
+    }, [flushDraftSave]);
 
     // Раздача остатка ОДНОГО SKU целыми коробами (спрос → присутствие,
     // buildLeftoverWeights; ⛔ скип) поверх переданных rows/prebook. Возвращает
@@ -1062,7 +1074,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
             {(<>
                 <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
-                        <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={editMode ? () => setEditMode(false) : enterManual}>
+                        <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={editMode ? finishManual : enterManual}>
                             {editMode ? '✓ Готово с правкой' : '✏️ Править черновик'}
                         </button>
                         <button className="btn btn-sm btn-secondary" onClick={distributeAllLeftovers} disabled={writing || computing}
@@ -1132,7 +1144,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                         Черновик пуст и свободного остатка на ФФ нет.
                     </div>
                 ) : (
-                    <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
+                    <div className="glass-card asm-matrix-wrap" style={{ padding: 0 }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                             <thead>
                                 <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
