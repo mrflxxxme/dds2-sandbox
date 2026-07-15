@@ -39,6 +39,7 @@ from backend.integrations.wb_portal_client import (
     WbPortalError,
     WbSessionExpired,
 )
+from backend.utils.phone import normalize_ru_phone
 from backend.utils.time import utcnow
 
 logger = structlog.get_logger("dds.wb_supply")
@@ -470,7 +471,9 @@ async def save_pass(
     )
     link.pass_driver_first = data.get("driver_first")
     link.pass_driver_last = data.get("driver_last")
-    link.pass_driver_phone = data.get("driver_phone")
+    # Телефон сразу в формат WB-пропуска (79XXXXXXXXX) — иначе setTRNDetails
+    # отбивает «8-…»/«+7…» как «Номер телефона не валиден».
+    link.pass_driver_phone = normalize_ru_phone(data.get("driver_phone")) or None
     link.pass_car_model = data.get("car_model")
     link.pass_car_number = data.get("car_number")
     link.pass_pallets = data.get("pallets")
@@ -546,7 +549,7 @@ async def sync_pass_from_vehicle(
     if veh_brand:
         link.pass_car_model = veh_brand
     if veh_phone:
-        link.pass_driver_phone = veh_phone
+        link.pass_driver_phone = normalize_ru_phone(veh_phone) or None
 
     # ФИО: явные поля заявки — источник истины. Их нет только у старых заявок →
     # тогда best-effort парсинг из свободной строки, и только в пустой пропуск.
