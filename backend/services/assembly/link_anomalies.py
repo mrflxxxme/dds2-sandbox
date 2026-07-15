@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
+from backend.models.assembly_wb import AssemblyWbSupply, WbSupplySyncStatus
 from backend.models.auth import Project
 from backend.models.cost import Nomenclature
 from backend.models.fulfillment import FfRequestKind, FulfillmentRequest, FulfillmentStock
@@ -554,6 +555,132 @@ async def _fbo_rollup(db: AsyncSession, project_id: int) -> dict:
     }
 
 
+# Наша сборка «в дороге»: машина назначена либо уже отгружена (в пути).
+_SUPPLY_SCOPE_STATUSES: tuple[str, ...] = (
+    AssemblyStatus.VEHICLE_ASSIGNED.value,
+    AssemblyStatus.SHIPPED.value,
+)
+# Окно приёмки WB: сдать можно за сутки до и сутки после брони (72ч суммарно) —
+# расхождение считаем, только если |дата сдачи − дата брони| > 1 дня.
+_SUPPLY_DATE_TOLERANCE_DAYS = 1
+# WB-поставка закрыта — расхождение по дате/паллетам/пропуску уже неактуально.
+_SUPPLY_CLOSED_WB_STATUSES: frozenset[str] = frozenset(
+    {WbSupplyStatus.ACCEPTED.value, WbSupplyStatus.CANCELLED.value}
+)
+
+
+async def _supply_discrepancies(
+    db: AsyncSession, project_id: int, warehouse_ids: list[int] | None
+) -> list[dict]:
+    """Блок 6: сборки с назначенной машиной / в пути, чья WB-поставка расходится с фактом.
+
+    Три независимых флага (строка попадает в блок, если хотя бы один True):
+      • date_mismatch — наша дата сдачи вне окна ±1 дня от даты брони WB;
+      • pallet_mismatch — наши паллеты ≠ паллеты в пропуске WB (pass_pallets);
+      • pass_missing — машина назначена/в пути, но пропуск WB ещё не оформлен.
+
+    Всё по локальному зеркалу (без HTTP): AssemblyRequest + связанная WB-поставка
+    (planned_date/статус) + реплей пропуска (pass_pallets/sync_status). Закрытые
+    WB-поставки (ACCEPTED/CANCELLED) исключаем — расхождение для них неактуально.
+    """
+    asm_filters = [
+        AssemblyRequest.project_id == project_id,
+        AssemblyRequest.is_deleted == False,  # noqa: E712
+        AssemblyRequest.status.in_(_SUPPLY_SCOPE_STATUSES),
+    ]
+    if warehouse_ids:
+        asm_filters.append(AssemblyRequest.warehouse_id.in_(warehouse_ids))
+
+    result = await db.execute(
+        select(AssemblyRequest, WbFboSupply, AssemblyWbSupply)
+        .outerjoin(
+            WbFboSupply,
+            (AssemblyRequest.wb_fbo_supply_id == WbFboSupply.id)
+            & (WbFboSupply.project_id == project_id),
+        )
+        .outerjoin(
+            AssemblyWbSupply,
+            (AssemblyWbSupply.assembly_request_id == AssemblyRequest.id)
+            & (AssemblyWbSupply.project_id == project_id),
+        )
+        .where(*asm_filters)
+    )
+    triples = result.all()
+    if not triples:
+        return []
+
+    # Наши ФФ-склады — источник (откуда забрали товар).
+    wh_names = await _warehouse_names(db, project_id, {t[0].warehouse_id for t in triples})
+
+    rows: list[dict] = []
+    for asm, supply, wb in triples:
+        if supply is not None and supply.wb_status in _SUPPLY_CLOSED_WB_STATUSES:
+            continue
+
+        planned_date = supply.planned_date if supply is not None else None
+        date_diff_days: int | None = None
+        date_mismatch = False
+        if asm.delivery_date is not None and planned_date is not None:
+            date_diff_days = (asm.delivery_date - planned_date).days
+            date_mismatch = abs(date_diff_days) > _SUPPLY_DATE_TOLERANCE_DAYS
+
+        pass_pallets = wb.pass_pallets if wb is not None else None
+        pallet_mismatch = pass_pallets is not None and pass_pallets != asm.pallets_count
+
+        # Пропуск оформлен = реплей дошёл до PASSED и паллеты пропуска заданы.
+        pass_missing = (
+            wb is None
+            or wb.sync_status != WbSupplySyncStatus.PASSED.value
+            or wb.pass_pallets is None
+        )
+
+        if not (date_mismatch or pallet_mismatch or pass_missing):
+            continue
+
+        rows.append(
+            {
+                "assembly_id": asm.id,
+                "number": asm.number,
+                "status": asm.status,
+                "source_warehouse_name": wh_names.get(asm.warehouse_id),
+                "warehouse_name": supply.warehouse_name if supply is not None else None,
+                "delivery_date": asm.delivery_date.isoformat() if asm.delivery_date else None,
+                "planned_date": planned_date.isoformat() if planned_date else None,
+                "date_diff_days": date_diff_days,
+                "pallets_count": asm.pallets_count,
+                "pass_pallets": pass_pallets,
+                "wb_supply_id": supply.wb_supply_id if supply is not None else None,
+                "wb_status": supply.wb_status if supply is not None else None,
+                "sync_status": wb.sync_status if wb is not None else None,
+                "date_mismatch": date_mismatch,
+                "pallet_mismatch": pallet_mismatch,
+                "pass_missing": pass_missing,
+            }
+        )
+
+    # Сначала непроставленный пропуск, затем расхождение дат, затем по |Δ дней|.
+    rows.sort(
+        key=lambda r: (
+            not r["pass_missing"],
+            not r["date_mismatch"],
+            -abs(r["date_diff_days"] or 0),
+            r["assembly_id"],
+        )
+    )
+    return rows
+
+
+async def get_supply_discrepancies(
+    db: AsyncSession, project_id: int, *, warehouse_ids: list[int] | None = None
+) -> list[dict]:
+    """Публичная (некэшированная) обёртка над _supply_discrepancies.
+
+    Для планировщика TG-уведомлений: данные должны быть свежими на каждом прогоне,
+    поэтому кэш вкладки здесь не задействован.
+    """
+    return await _supply_discrepancies(db, project_id, warehouse_ids)
+
+
 @cached(prefix="reports:assembly_link_anomalies", ttl=300)
 async def get_link_anomalies(
     db: AsyncSession,
@@ -567,6 +694,7 @@ async def get_link_anomalies(
         "assemblies_without_ff": await _assemblies_without_ff(db, project_id, warehouse_ids),
         "ff_without_assembly": await _ff_without_assembly(db, project_id, warehouse_ids),
         "stock_mismatch": await _stock_mismatch(db, project_id, warehouse_ids),
+        "supply_discrepancies": await _supply_discrepancies(db, project_id, warehouse_ids),
         # FBO привязан к имени склада ВБ (не к нашему складу) → warehouse_ids не применяем.
         "fbo": await _fbo_rollup(db, project_id),
     }

@@ -43,6 +43,71 @@ def _ff_request_url(slug: str | None, warehouse_id: int | None, ff_id: object) -
     return f"{_APP_BASE_URL}/p/{slug}/warehouse/{warehouse_id}/ff-request/{ff_id}"
 
 
+# ─── Расхождение WB-поставок (машина назначена / в пути) ─────────────────────
+
+# Больше N расхождений в одном сообщении не показываем (лимит Telegram 4096) —
+# остальное сворачиваем в «… и ещё M».
+_SUPPLY_DISCREPANCY_CAP = 15
+_SUPPLY_STATUS_RU = {"VEHICLE_ASSIGNED": "машина назначена", "SHIPPED": "в пути"}
+
+
+def _fmt_ddmm(iso: object) -> str:
+    """ISO-дата `2026-07-20` → `20.07`; иначе — как есть / «—»."""
+    s = str(iso or "")
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return f"{s[8:10]}.{s[5:7]}"
+    return s or "—"
+
+
+def build_supply_discrepancy_message(slug: str | None, rows: list[dict]) -> str | None:
+    """HTML-сводка расхождений WB-поставок для TG. None — расхождений нет.
+
+    Строка `rows` — из link_anomalies.get_supply_discrepancies (флаги date_mismatch
+    / pallet_mismatch / pass_missing). На каждый флаг — своя строка-пояснение.
+    """
+    active = [
+        r for r in rows if r.get("date_mismatch") or r.get("pallet_mismatch") or r.get("pass_missing")
+    ]
+    if not active:
+        return None
+    e = html.escape
+    lines = [
+        f"⚠️ <b>Расхождение по поставкам ФФ</b> ({len(active)})",
+        "",
+        "Машина назначена или в пути, но данные WB не сходятся — проверьте до сдачи:",
+    ]
+    for r in active[:_SUPPLY_DISCREPANCY_CAP]:
+        head = f"\n🚚 <b>{e(str(r.get('number') or '—'))}</b> · {e(str(r.get('source_warehouse_name') or '—'))}"
+        dest = r.get("warehouse_name")
+        if dest:
+            head += f" → {e(str(dest))}"
+        st = _SUPPLY_STATUS_RU.get(str(r.get("status")))
+        if st:
+            head += f" ({st})"
+        lines.append(head)
+        if r.get("date_mismatch"):
+            d = r.get("date_diff_days")
+            sign = f"+{d}" if isinstance(d, int) and d > 0 else str(d)
+            lines.append(
+                f"   🗓 сдача {_fmt_ddmm(r.get('delivery_date'))} ≠ бронь WB "
+                f"{_fmt_ddmm(r.get('planned_date'))} ({sign} дн)"
+            )
+        if r.get("pallet_mismatch"):
+            lines.append(
+                f"   🧱 паллеты: у нас <b>{e(str(r.get('pallets_count')))}</b>, "
+                f"в пропуске <b>{e(str(r.get('pass_pallets')))}</b>"
+            )
+        if r.get("pass_missing"):
+            lines.append("   🪪 пропуск WB не оформлен")
+    extra = len(active) - _SUPPLY_DISCREPANCY_CAP
+    if extra > 0:
+        lines.append(f"\n… и ещё {extra}")
+    if slug:
+        url = f"{_APP_BASE_URL}/p/{e(str(slug))}/warehouse/assembly/analytics"
+        lines.append(f'\n🔗 <a href="{url}">Открыть «Анализ сборки»</a>')
+    return "\n".join(lines)
+
+
 def build_ready_item(
     slug: str | None,
     warehouse_id: int | None,
