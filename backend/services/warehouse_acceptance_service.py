@@ -615,11 +615,17 @@ def redistribute_blocked_qty(
     for src, qty in closed:
         district = warehouse_to_district(src)
         if mode == "consolidate_to_center":
-            # Все закрытые → в крупнейший открытый склад ЦФО (Электросталь).
-            # Если ЦФО закрыт — fallback на open_globally.
-            if central_open:
+            # DISTRICT-FIRST (аудит 2026-07-14, решение юзера «у каждого ФО свой
+            # спрос»): qty закрытого склада сперва — в открытый склад ЕГО ЖЕ ФО
+            # (спрос региона остаётся локальным), и только если весь ФО закрыт —
+            # консолидация в центр (WB повезёт из Москвы), затем open_globally.
+            district_open = [w for w in open_by_district.get(district, []) if w != src]
+            if district_open:
+                dest = _pick_destination(district_open, district, new_dist, priority=priority)
+                reason = "closed_in_district"
+            elif central_open:
                 dest = _pick_destination(central_open, "central", new_dist, priority=priority)
-                reason = "consolidated_to_center" if district != "central" else "closed_in_district"
+                reason = "consolidated_to_center"
             elif open_globally:
                 dest = _pick_destination(open_globally, district, new_dist, priority=priority)
                 reason = "closed_no_central_open"
@@ -859,6 +865,19 @@ async def get_acceptance_closed_warehouses(project_id: int) -> set[str]:
     for wh, metas in by_wh.items():
         if all(m["free_days_14"] == 0 and m["paid_days_14"] == 0 for m in metas):
             closed.add(wh)
+
+    # Склад, известный WB (есть в справочнике складов), но ПОЛНОСТЬЮ
+    # отсутствующий в календаре коэффициентов — реальный «не в календаре»
+    # (типично свежеоткрытый склад): сдать туда нельзя, но by_wh его не видел
+    # → need-service продолжал назначать ему спрос, а split ронял qty на
+    # создании заявки (аудит 2026-07-14). Дозакрываем — зеркало split-семантики
+    # (meta=None при загруженном календаре = closed). Спец-склады не трогаем.
+    for _wid, _raw_name in wh_map.items():
+        if _is_spec_acceptance_wh(_raw_name):
+            continue
+        _canon = _normalize_acceptance_wh(_raw_name)
+        if _canon and _canon not in by_wh:
+            closed.add(_canon)
     return closed
 
 

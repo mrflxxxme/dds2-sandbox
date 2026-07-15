@@ -49,10 +49,16 @@ export type AvailabilityOf = (nm_id: number, barcode: string) => Record<number, 
 export interface DistributionGeom {
     /** Кратность короба (шт/короб) per nm_id. null/0 — россыпь. */
     ppbOf: (nm_id: number) => number | null | undefined;
+    /** Кратность короба КОНКРЕТНОГО ФФ (может отличаться по складам) — паритет
+     *  нормализации со страницей черновика (она re-нормализует с ppbAt). */
+    ppbAt?: (nm_id: number, ffId: number) => number | null | undefined;
     /** Габариты короба «ДxШxВ» per nm_id. null — не палетизируется. */
     boxSizeOf: (nm_id: number) => string | null | undefined;
     /** Override «коробов на паллету» по канон-размеру короба. */
     palletOverrides: Record<string, number>;
+    /** Вес приоритета WB-склада (серверная «схема воришек») — порядок среза при
+     *  дефиците источника (паритет с greedy черновика). */
+    priorityOf?: (wh: string) => number;
 }
 
 /** Применённый результат приёмки: per (nm_id::barcode) → набор сплитов (тип упаковки × распределение). */
@@ -173,7 +179,7 @@ export function finalizeDistribution(
     if (effectiveSkus.length === 0 && extraRows.length === 0) return { rows: [], prebook: [] };
     const { ppbOf, boxSizeOf, palletOverrides } = geom;
 
-    let rows = buildDraftRows({ skus: effectiveSkus, palletOverrides, minOneBoxPerWh });
+    let rows = buildDraftRows({ skus: effectiveSkus, palletOverrides, minOneBoxPerWh, priorityOf: geom.priorityOf });
 
     // Свободный источник per nm = доступно − уже засорсенное (для добивки/паллет).
     const freeAfter = (current: AssemblyDraftRow[]): Record<number, Record<number, number>> => {
@@ -196,7 +202,7 @@ export function finalizeDistribution(
     };
 
     // Добить неполные коробы из ОСТАВШЕГОСЯ источника (как в AddFromNeedPanel/finalizePoolRows).
-    rows = roundDraftRowsToWholeBoxes(rows, (nm) => ppbOf(nm), freeAfter(rows), () => false).rows;
+    rows = roundDraftRowsToWholeBoxes(rows, (nm) => ppbOf(nm), freeAfter(rows), () => false, geom.ppbAt).rows;
 
     // Пред-построенные целые коробы (засев/дозабор) вливаем в набор ДО нормализации.
     const merged = extraRows.length ? [...rows, ...extraRows] : rows;
@@ -208,6 +214,7 @@ export function finalizeDistribution(
     // Побочный выход `dropped` = под-паллетные хвосты целых коробов → предбронь.
     const ctx: NormalizeDraftCtx = {
         ppbOf: (nm) => ppbOf(nm),
+        ppbAt: geom.ppbAt,
         boxSizeOf: (nm) => boxSizeOf(nm) ?? null,
         overrides: palletOverrides,
         freeByNm: freeAfter(merged),

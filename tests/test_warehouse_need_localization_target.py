@@ -212,9 +212,9 @@ async def test_high1_no_silent_unit_loss(db_session, project, monkeypatch):
         if cell:
             distributed += cell["need"]
     # Σ raw per-cell need (pre-cap) — reconstruct from orders since WB stock is 0.
-    # avg_daily*supply_days rounded per cell.
-    # Anchor: 7/14*14 = 7 ; Thief: 200/14*14 = 200 → 207.
-    raw_need_sum = 207
+    # Клетки считают горизонт supply+lead (Тула/Коледино central: 1+2+1=4):
+    # Anchor: round(7/14,2)=0.5 → int(0.5*18+0.5)=9 ; Thief: 14.29*18 → 257 → 266.
+    raw_need_sum = 266
 
     # No silent loss: everything that can be shipped within the округ headroom is.
     expected = min(can_send, raw_need_sum)
@@ -250,8 +250,10 @@ async def test_target_75_caps_localization(db_session, project, monkeypatch):
     by_wh = {w["name"]: w for w in res["warehouses"]}
     anchor_need = by_wh.get(ANCHOR_WH, {}).get("articles", {}).get(nm_id, {}).get("need", 0)
 
-    gross_demand = 140  # 10/day * 14 days, single округ
-    # 75% target → about 105 covered, not the full 140. Allow rounding slack.
+    # 10/day × (supply 14 + lead 4) — база покрытия greedy теперь включает
+    # плечо (как клетки и глобальный кап), иначе рационирование.
+    gross_demand = 180
+    # 75% target → about 135 covered, not the full 180. Allow rounding slack.
     assert anchor_need > 0
     assert anchor_need < gross_demand, f"anchor_need={anchor_need} should be < {gross_demand} (75% cap)"
     assert anchor_need <= round(0.75 * gross_demand) + 2
@@ -291,10 +293,14 @@ async def test_high2_unmapped_demand_counted_globally_not_in_cells(db_session, p
     assert res["summary"]["unmapped_demand_qty"] == UNMAPPED_QTY
 
     # Global total_need includes the unmapped demand:
-    # avg_daily = 28/14 = 2/day; gross = 2 * 14 = 28; no WB stock → total_need 28.
+    # avg_daily = 28/14 = 2/day. Плечо взвешивается по СЫРОМУ складу отгрузки
+    # (mode-инвариантно): у 'ignored-in-loc-mode' district unknown → фолбэк
+    # 1 (сборка) + 7 (транспорт unknown) + 1 (приёмка) = 9 дн.
+    # total_need = round(2 × (14 + 9)) = 46; no WB stock.
     art = next((a for a in res["articles"] if a["nm_id"] == nm_id), None)
     assert art is not None, "unmapped-only SKU must still appear in articles"
-    assert art["total_need"] == UNMAPPED_QTY
+    assert art["total_need"] == round(UNMAPPED_QTY / 14 * (14 + 9))
+    assert art["lead_days"] == 9.0
 
     # NOT in any per-cell WB matrix (cannot be localized).
     for w in res["warehouses"]:
@@ -384,7 +390,9 @@ async def test_covered_okrug_warehouse_not_overstocked(db_session, project, monk
     can_send = art["can_send"]
 
     # Достигнутая локализация = Σ_ФО min(спрос_ФО, сток_ФО + выделено_ФО) / Σспрос.
-    gross = {ANCHOR_WH: 50.0, THIEF_WH: 30.0, KAZAN: 200.0}
+    # Спрос — на горизонте supply+lead, как в движке: ЦФО lead 4 (×18/14),
+    # Казань volga lead 7 (×21/14).
+    gross = {ANCHOR_WH: 50.0 * 18 / 14, THIEF_WH: 30.0 * 18 / 14, KAZAN: 200.0 * 21 / 14}
     total_demand = sum(gross.values())
     dem_by_d: dict[str, float] = {}
     cov_by_d: dict[str, float] = {}
@@ -447,3 +455,55 @@ async def test_bump_skips_covered_okrug(db_session, project, monkeypatch):
     el_need = by_wh.get(EL, {}).get("articles", {}).get(nm_id, {}).get("need", 0)
     # ЦФО покрыт Тулой (сток 100 ≥ спрос 60) → главный Электросталь НЕ бампится коробкой.
     assert el_need == 0, f"Электросталь забамплена на {el_need} в уже покрытый ЦФО"
+
+
+# ── MEDIUM regression: горизонт СНГ-спроса в знаменателе цели локализации ──────
+async def test_target_denominator_unmapped_horizon_consistent(db_session, project, monkeypatch):
+    """Знаменатель локализации (total_demand) взвешивает unmapped (СНГ) спрос на
+    том же горизонте supply+lead, что и mapped gross_wh.
+
+    Регресс: unmapped_gross считался на supply-only горизонте, а mapped gross_wh —
+    на supply+lead → СНГ-доля недовзвешена → target_pct×total_demand занижен →
+    greedy останавливался раньше и недоливал якорь (эффект только при target<100).
+
+    Сетап: mapped 10 шт/день → Тула (lead 4), unmapped 4 шт/день (СНГ), target 75:
+      * supply-only СНГ: target = 0.75×(180+56) = 177 < 180 → якорь недолит (177);
+      * supply+lead СНГ: target = 0.75×(180+72) = 189 ≥ 180 → якорь долит (180).
+    """
+    pid = project.id
+    nm_id = 705100 + (uuid.uuid4().int % 1000)
+    bc = f"BC{nm_id}"
+    nom_id = await _seed_nomenclature(db_session, pid, nm_id, bc)
+    ff_id = await _seed_ff_warehouse(db_session, pid, "FF-Central6")
+    await _seed_rf_stock(db_session, pid, ff_id, nom_id, bc, 10_000)
+    await _seed_wb_stock(db_session, pid, nm_id, ANCHOR_WH, 0)
+    await db_session.commit()
+
+    # Mapped: регион «Тульская область» → nearest = Тула (координаты региона
+    # совпадают со складом). Unmapped: незнакомый регион без srid/city → СНГ.
+    # Сырой warehouseName у ВСЕХ заказов Тула → lead_by_nm = 4 = lead клетки
+    # (горизонты mapped и unmapped сопоставимы один-в-один).
+    orders = [
+        {"nmId": nm_id, "quantity": 10, "warehouseName": ANCHOR_WH,
+         "regionName": "Тульская область", "supplierArticle": "A"},
+    ] * 14
+    orders += [
+        {"nmId": nm_id, "quantity": 4, "warehouseName": ANCHOR_WH,
+         "regionName": "Зимбабве Хараре", "srid": "no-such-srid", "supplierArticle": "A"},
+    ] * 14
+    _patch_api(monkeypatch, orders)
+
+    res = await _call(
+        db_session, pid, supply_days=14, analysis_days=14,
+        localization_optimized=True, only_available=True, localization_target=75,
+    )
+
+    assert res["summary"]["unmapped_demand_qty"] == 56
+    by_wh = {w["name"]: w for w in res["warehouses"]}
+    anchor_need = by_wh.get(ANCHOR_WH, {}).get("articles", {}).get(nm_id, {}).get("need", 0)
+    # Полный mapped gross = 10/день × (supply 14 + lead 4) = 180. С supply-only
+    # СНГ-горизонтом цель была 177 → регресс = недолив якоря.
+    assert anchor_need == 180, (
+        f"anchor_need={anchor_need}, ожидали 180 — недолив = СНГ-спрос в знаменателе "
+        "цели взвешен на другом горизонте"
+    )

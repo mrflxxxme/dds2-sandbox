@@ -4,6 +4,7 @@ import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { parseBoxSize, palletsForLines, maxPalletHeightCm, type PalletLine } from '@/lib/utils/boxPallet';
 import { allocatePairs } from '@/lib/utils/assemblyPreview';
+import { allocateWholeBoxes, buildLeftoverWeights } from '@/lib/assembly/leftoverAlloc';
 import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constants/localization';
 import { Toast } from '@/components';
 import {
@@ -46,7 +47,7 @@ const districtTint = (d: string): string | undefined => {
     return c ? `color-mix(in srgb, ${c} 6%, transparent)` : undefined;
 };
 
-type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'need' | 'revenue' | 'loc' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
+type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'days' | 'need' | 'revenue' | 'loc' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
 
 // Цвет «Лок %» по статусу КТР (excellent/neutral/weak/critical) — как на странице «Локализация».
 const LOC_STATUS_COLOR: Record<string, string> = {
@@ -144,6 +145,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     // авто-синк с расчётом их не трогает, пока юзер не вернёт SKU «в авто» (↺).
     const [manualNms, setManualNms] = useState<Set<number>>(new Set());
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
+    // Кратность конкретного ФФ (может отличаться по складам) — паритет нормализации
+    // со страницей черновика (она re-нормализует с ppbAt).
+    const [nmPpbByWh, setNmPpbByWh] = useState<Map<number, Record<number, number>>>(new Map());
     const [nmBoxSize, setNmBoxSize] = useState<Map<number, string | null>>(new Map());
     const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
     const [geomReady, setGeomReady] = useState(false);
@@ -164,11 +168,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     const [filterFf, setFilterFf] = useState('');
     // Тип товара: новинки (cold-start) / обычные. Лупа по отображению, как предмет/бренд.
     const [filterKind, setFilterKind] = useState<'' | 'new' | 'regular'>('');
+    const [filterQuery, setFilterQuery] = useState('');
     const [hideEmpty, setHideEmpty] = useState(false);
     const toggleSort = useCallback((key: SortKey) => {
         setSortKey((prev) => {
             if (prev === key) { setSortDir((d) => (d === 'asc' ? 'desc' : 'asc')); return prev; }
-            setSortDir(key === 'label' ? 'asc' : 'desc');
+            setSortDir(key === 'label' || key === 'days' ? 'asc' : 'desc');
             return key;
         });
     }, []);
@@ -227,17 +232,24 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                 setGuardByNm(guards);
 
                 const ppbMap = new Map<number, number | null>();
+                const ppbWhMap = new Map<number, Record<number, number>>();
                 const sizeMap = new Map<number, string | null>();
                 for (const r of boxMult?.items ?? []) {
                     let ppb: number | null = null;
                     if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
                         ppb = r.box_qty_override;
+                        // override глобальный — per-ФФ карта не нужна (везде одинаково).
                     } else {
                         let best = 0;
+                        let perWh: Record<number, number> | null = null;
                         for (const p of r.per_warehouse) {
-                            if (p.box_qty && p.box_qty > 0 && p.use_box_multiplicity && (best === 0 || p.box_qty < best)) best = p.box_qty;
+                            if (p.box_qty && p.box_qty > 0 && p.use_box_multiplicity) {
+                                if (best === 0 || p.box_qty < best) best = p.box_qty;
+                                (perWh ??= {})[p.warehouse_id] = p.box_qty;
+                            }
                         }
                         ppb = best > 0 ? best : null;
+                        if (perWh) ppbWhMap.set(r.nm_id, perWh);
                     }
                     let boxSize: string | null = null;
                     let bestStock = -1;
@@ -249,6 +261,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                     sizeMap.set(r.nm_id, boxSize);
                 }
                 setNmPpb(ppbMap);
+                setNmPpbByWh(ppbWhMap);
                 setNmBoxSize(sizeMap);
                 setPalletOverrides(palletOv || {});
                 setGeomReady(true);
@@ -276,7 +289,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         if (articles.length === 0) { setDistRows([]); setPrebookRows([]); setAcceptanceNote(null); return; }
         setDistComputing(true);
         try {
-            const distInput: DraftDistInput = { articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc };
+            // Паритет с сервером/машиной: per-ФФ кратность и веса «схемы воришек».
+            const priorityByWh: Record<string, number> = {};
+            for (const w of stockNeed?.warehouses ?? []) if (w.priority_weight != null) priorityByWh[w.name] = Number(w.priority_weight) || 0;
+            const distInput: DraftDistInput = {
+                articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc,
+                ppbAt: (nm, ffId) => nmPpbByWh.get(nm)?.[ffId] ?? null,
+                priorityByWh,
+            };
             const { skus: allSkus } = buildDraftSkus(distInput);
             const { shippable: autoSkus } = splitByKratnost(allSkus, (nm) => nmPpb.get(nm));
             const accSig = JSON.stringify(autoSkus.map((s) => [s.nm_id, s.barcode, s.target]));
@@ -325,7 +345,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
-    }, [articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc, showToast]);
+    }, [articles, stockNeed, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc, showToast]);
 
     // ─── Черновик: ИСТОЧНИК таблицы (матрица = редактор черновика) ──────────
     const draftDistRef = useRef<AssemblyDraft['distribution'] | null>(null);
@@ -692,6 +712,116 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     // нетронутые строки остаются авто, «вручную» помечается лишь та, где юзер кликнул −/+.
     const enterManual = useCallback(() => setEditMode(true), []);
 
+    // Раздача остатка ОДНОГО SKU целыми коробами (спрос → присутствие,
+    // buildLeftoverWeights; ⛔ скип) поверх переданных rows/prebook. Возвращает
+    // новое состояние либо причину скипа. Общее ядро для строки и «всех остатков».
+    const allocSkuLeftover = useCallback((
+        a: StockNeedArticle,
+        rows0: AssemblyDraftRow[],
+        prebook0: AssemblyDraftRow[],
+    ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; boxes: number; ppb: number; skip?: 'handed' | 'noPpb' | 'guard' | 'nothing' | 'noTarget' | 'cap' | 'monoPrebook' } => {
+        const nm = a.nm_id;
+        const none = { rows: rows0, prebook: prebook0, boxes: 0, ppb: 0 };
+        if (handedNms.has(nm)) return { ...none, skip: 'handed' }; // заморожено юнитами склада
+        const ppb = nmPpb.get(nm) || 0;
+        if (ppb <= 0) return { ...none, skip: 'noPpb' };
+        // Гвард пересорта: посев лежит без продаж — не досеваем (степпер работает).
+        if (guardByNm.has(nm)) return { ...none, skip: 'guard' };
+        // Новинка вне cold-start-справочника (rf==0 на момент выборки) гвардом не
+        // помечена — локальная проверка: лежит на WB без продаж → не досыпаем.
+        if (newcomerSet.has(nm) && (Number(a.eff_avg_daily) || 0) === 0 && (Number(a.stocks_wb) || 0) > 0) {
+            return { ...none, skip: 'guard' };
+        }
+        // applyDraftCellEdit сливает ВСЮ предбронь SKU в единую BOX-строку —
+        // моно-предбронь (предзаявка) молча стала бы коробной и не прошла бы
+        // приёмку. Машина такие строки не переупаковывает (pinnedPkgOf) —
+        // паритет: скипаем, решает человек на вкладке 🅿️.
+        if (prebook0.some((r) => r.nm_id === nm && (r.package_type ?? 'BOX') !== 'BOX')) {
+            return { ...none, skip: 'monoPrebook' };
+        }
+        const avail = availByBc.get(a.barcode) ?? 0;
+        // Текущий план SKU — из ПЕРЕДАННЫХ rows/prebook (не из мемо-агрегата).
+        const shipNow = [...rows0, ...prebook0]
+            .filter((r) => r.nm_id === nm)
+            .reduce((s, r) => s + Object.values(r.tgt || {}).reduce((x, v) => x + (v || 0), 0), 0);
+        const boxes = Math.floor((avail - shipNow) / ppb);
+        if (boxes <= 0) return { ...none, skip: 'nothing' };
+        const weights = buildLeftoverWeights(enrichMap.get(nm)?.byWh, (wh) => {
+            // Открыт для раздачи остатков = не ⛔ И не ⌛ (без лимита приёмки —
+            // заявка не пройдёт без предзаявки; раздача их плодить не должна).
+            const m = markFor(nm, wh, null);
+            return !m || (!m.closed && !m.noLimit);
+        });
+        const alloc = allocateWholeBoxes(boxes, weights);
+        if (alloc.size === 0) return { ...none, skip: 'noTarget' };
+        let rows = rows0, prebook = prebook0, applied = 0;
+        for (const [wh, b] of alloc) {
+            const out = applyDraftCellEdit(
+                rows.filter((r) => r.nm_id === nm),
+                prebook.filter((r) => r.nm_id === nm),
+                a, wh, b, ppb,
+            );
+            if (!out) return { rows, prebook, boxes: applied, ppb, skip: applied > 0 ? undefined : 'cap' };
+            rows = [...rows.filter((r) => r.nm_id !== nm), ...out.rows];
+            prebook = [...prebook.filter((r) => r.nm_id !== nm), ...out.prebook];
+            applied += b;
+        }
+        return { rows, prebook, boxes: applied, ppb };
+    }, [handedNms, nmPpb, guardByNm, newcomerSet, availByBc, enrichMap, markFor]);
+
+    // «Распределить все остатки»: один проход по локальному стейту (editDraftCell в
+    // цикле терял бы правки на stale-замыкании) → один автосейв; SKU становятся ✋.
+    const distributeAllLeftovers = useCallback(() => {
+        const totalFree = articles.reduce((s, a) => s + Math.max(0, (availByBc.get(a.barcode) ?? 0) - (draftAgg.allocByBc.get(a.barcode) ?? 0)), 0);
+        if (totalFree > 0 && !window.confirm(`Распределить весь свободный остаток ФФ (~${formatNumber(totalFree, 0)} шт) целыми коробами по складам спроса? Тронутые SKU станут ✋ ручными.`)) return;
+        let rows = draftRows, prebook = draftPrebook;
+        const manual = new Set(manualNms);
+        let addedUnits = 0, addedBoxes = 0, touched = 0, skipNoPpb = 0, skipNoTarget = 0, skipGuard = 0, skipCap = 0, skipMono = 0;
+        for (const a of articles) {
+            const res = allocSkuLeftover(a, rows, prebook);
+            if (res.skip === 'noPpb') skipNoPpb++;
+            else if (res.skip === 'noTarget') skipNoTarget++;
+            else if (res.skip === 'guard') skipGuard++;
+            else if (res.skip === 'cap') skipCap++;
+            else if (res.skip === 'monoPrebook') skipMono++;
+            if (res.boxes <= 0) continue;
+            rows = res.rows; prebook = res.prebook;
+            manual.add(a.nm_id);
+            touched++; addedBoxes += res.boxes; addedUnits += res.boxes * res.ppb;
+        }
+        if (touched === 0) {
+            showToast(`Нечего распределять: свободный ФФ уже в плане${skipNoPpb ? ` · без кратности: ${skipNoPpb} SKU` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget} SKU` : ''}${skipGuard ? ` · гвард пересорта: ${skipGuard} SKU` : ''}`, 'error');
+            return;
+        }
+        setDraftRowsState(rows);
+        setDraftPrebook(prebook);
+        setManualNms(manual);
+        scheduleDraftSave(rows, prebook, [...manual]);
+        showToast(`Распределено ${formatNumber(addedUnits, 0)} шт (${formatNumber(addedBoxes, 0)} кор) по ${formatNumber(touched, 0)} SKU — помечены ✋${skipNoPpb ? ` · без кратности: ${skipNoPpb}` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget}` : ''}${skipGuard ? ` · гвард: ${skipGuard}` : ''}${skipCap ? ` · кап ФФ: ${skipCap}` : ''}${skipMono ? ` · моно-предбронь: ${skipMono}` : ''}`, 'success');
+    }, [articles, availByBc, draftAgg, draftRows, draftPrebook, manualNms, allocSkuLeftover, scheduleDraftSave, showToast]);
+
+    // Раздача остатка ОДНОЙ строки (кнопка в «Остаётся ФФ»).
+    const distributeRowLeftovers = useCallback((a: StockNeedArticle) => {
+        const res = allocSkuLeftover(a, draftRows, draftPrebook);
+        if (res.boxes <= 0) {
+            const msg = res.skip === 'handed' ? 'SKU заморожен юнитами на странице склада — правь там'
+                : res.skip === 'noPpb' ? 'Не задана кратность короба'
+                : res.skip === 'guard' ? `Гвард пересорта: ${guardByNm.get(a.nm_id) || 'посев лежит без продаж'} — только вручную степпером`
+                : res.skip === 'noTarget' ? 'Некуда: нет ни потребности, ни присутствия на открытых складах'
+                : res.skip === 'cap' ? 'Не хватает свободного остатка на ФФ'
+                : res.skip === 'monoPrebook' ? 'У SKU моно-предбронь (предзаявка) — раздача сделала бы её коробной; реши на вкладке 🅿️ Предбронь'
+                : 'Остаток меньше короба — распределять нечего';
+            showToast(msg, 'error');
+            return;
+        }
+        const manual = manualNms.has(a.nm_id) ? manualNms : new Set([...manualNms, a.nm_id]);
+        setDraftRowsState(res.rows);
+        setDraftPrebook(res.prebook);
+        setManualNms(manual);
+        scheduleDraftSave(res.rows, res.prebook, [...manual]);
+        showToast(`${a.vendor_code || a.barcode}: распределено ${formatNumber(res.boxes * res.ppb, 0)} шт (${formatNumber(res.boxes, 0)} кор) — SKU помечен ✋`, 'success');
+    }, [allocSkuLeftover, draftRows, draftPrebook, manualNms, guardByNm, scheduleDraftSave, showToast]);
+
     const sortValue = useCallback((a: StockNeedArticle, key: SortKey): number | string => {
         const nm = a.nm_id;
         const e = enrichMap.get(nm);
@@ -702,7 +832,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
             case 'avail': return avail;
             case 'inAssembly': return e?.inAssembly ?? 0;
             case 'stocksWb': return e?.stocksWb ?? 0;
-            case 'need': return Number(a.total_need) || 0;
+            // null (нет продаж) — в конец при сортировке «кому хуже всех» (asc).
+            case 'days': return a.wb_days_left == null ? Number.POSITIVE_INFINITY : Number(a.wb_days_left);
+            case 'need': return Number(a.ship_need ?? a.total_need) || 0;
             case 'revenue': return Number(a.revenue_30d) || 0;
             case 'loc': return locByNm.has(nm) ? Number(locByNm.get(nm)!.loc_pct) || 0 : -1;
             case 'ship': return ship;
@@ -745,7 +877,10 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         return [...ids].map((id) => ({ id, name: ffNameById.get(id) || `ФФ ${id}` })).sort((x, y) => x.name.localeCompare(y.name, 'ru'));
     }, [articles, ffNameById]);
     const visibleRows = useMemo(
-        () => sortedRows.filter((a) => {
+        () => {
+        const q = filterQuery.trim().toLowerCase();
+        return sortedRows.filter((a) => {
+            if (q && !`${a.vendor_code || ''} ${a.barcode || ''} ${a.nm_id}`.toLowerCase().includes(q)) return false;
             if (filterSubject && a.subject !== filterSubject) return false;
             if (filterBrand && a.brand !== filterBrand) return false;
             if (filterKind === 'new' && !newcomerSet.has(a.nm_id)) return false;
@@ -759,14 +894,15 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
             }
             if (hideEmpty && (viewAgg.allocByBc.get(a.barcode) ?? 0) <= 0) return false;
             return true;
-        }),
-        [sortedRows, filterSubject, filterBrand, filterKind, newcomerSet, ffFilterId, hideEmpty, sliceAgg, viewAgg],
+        });
+        },
+        [sortedRows, filterQuery, filterSubject, filterBrand, filterKind, newcomerSet, ffFilterId, hideEmpty, sliceAgg, viewAgg],
     );
 
     // Итоги колонок («Сдаём» / футер) — по ВИДИМЫМ строкам, чтобы суммы под складами
     // соответствовали фильтру; при активном ФФ-срезе — по срезанным строкам (доля ФФ).
     // Без фильтра === полная матрица (переиспользуем `viewAgg`).
-    const isFiltered = !!(filterSubject || filterBrand || filterFf || filterKind || hideEmpty);
+    const isFiltered = !!(filterQuery.trim() || filterSubject || filterBrand || filterFf || filterKind || hideEmpty);
     const visibleBarcodes = useMemo(() => new Set(visibleRows.map((a) => a.barcode)), [visibleRows]);
     const matrixView = useMemo(() => {
         if (!isFiltered) return viewAgg;
@@ -831,9 +967,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     const autoSyncDoneRef = useRef(false);
     useEffect(() => {
         if (autoSyncDoneRef.current || distRows === null || draftDistRef.current === null) return;
+        // Последняя линия обороны от двойного fail-open: если серверный blocked-set
+        // был пуст (холодный Redis) И живая проверка приёмки УПАЛА (WB 429/сеть) —
+        // авто-синк персистил бы непроверенный план на закрытые склады. Ручной
+        // «⟳ Обновить сейчас» остаётся доступен (осознанное действие).
+        if (acceptanceNote?.failed) return;
         autoSyncDoneRef.current = true;
         void runAutoSync('auto');
-    }, [distRows, draftRows, runAutoSync]);
+    }, [distRows, draftRows, runAutoSync, acceptanceNote]);
 
     /** ↺ Вернуть SKU в авто: снять ✋ и сразу синкануть его к расчёту. */
     const returnToAuto = useCallback(async (nm: number) => {
@@ -923,6 +1064,10 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                         <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={editMode ? () => setEditMode(false) : enterManual}>
                             {editMode ? '✓ Готово с правкой' : '✏️ Править черновик'}
                         </button>
+                        <button className="btn btn-sm btn-secondary" onClick={distributeAllLeftovers} disabled={writing || computing}
+                            title="Раздать весь свободный остаток ФФ сверх плана целыми коробами: по складам с потребностью, иначе — куда товар уже лежит/едет; закрытые по приёмке и гвард-новинки пропускаются. Тронутые SKU становятся ✋ ручными.">
+                            📦 Распределить все остатки
+                        </button>
                         {editMode && (
                             <span style={{ fontSize: 12, color: 'var(--color-warning)' }}>
                                 Правь короба (−/+) — изменения сразу сохраняются в черновик (строки и предбронь SKU сливаются в точный план). Метки приёмки (⛔ закрыт и др.) — из последнего расчёта потребности.
@@ -933,11 +1078,13 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                         Таблица показывает <b style={{ color: 'var(--color-text)' }}>черновик</b>: строки и 🅿️ предбронь каждого SKU единой суммой (ячейки с предбронью подсвечены, доля — в подсказке «Σ отпр.»).
                         Правки степперами сохраняются в черновик сразу; ✕ убирает SKU целиком.
                         План <b style={{ color: 'var(--color-text)' }}>сам синхронизируется</b> с живым расчётом при заходе (need-канал + новинки cold-start с гвардом пересорта ⚠): целые паллеты → строки, хвосты → предбронь. SKU, правленный руками, помечается ✋ и авто-синком не трогается (↺ на строке возвращает в авто); «⟳ Обновить сейчас» — форс-синк без перезахода.
-                        Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность. Метрики SKU за 14 дней: <b style={{ color: 'var(--color-text)' }}>Потр. 14д</b> · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (цвет — статус КТР).
+                        Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность. Метрики SKU: <b style={{ color: 'var(--color-text)' }}>Хватит, дн</b> (на сколько дней остатка WB при текущей скорости; 🔴 меньше плеча доставки) · <b style={{ color: 'var(--color-text)' }}>Потр. 14д</b> (growth-aware: скорость = max из среднего за 14д/7д/3д, ⚡ — растущий SKU) · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (цвет — статус КТР).
                         Колонка <b style={{ color: 'var(--color-text)' }}>«Расчёт»</b> — что предлагает живой расчёт (для сравнения с планом).
                     </div>
                     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
                         <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>🔎 Фильтр:</span>
+                        <input className="form-input" style={{ maxWidth: 220 }} type="search" value={filterQuery}
+                            onChange={(e) => setFilterQuery(e.target.value)} placeholder="Артикул / ШК / nm" />
                         <select className="form-input" style={{ maxWidth: 240 }} value={filterSubject} onChange={(e) => setFilterSubject(e.target.value)}>
                             <option value="">Все предметы</option>
                             {subjectOptions.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -962,7 +1109,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                         </label>
                         {isFiltered && (
                             <>
-                                <button className="btn btn-sm btn-secondary" onClick={() => { setFilterSubject(''); setFilterBrand(''); setFilterFf(''); setFilterKind(''); setHideEmpty(false); }}>Сбросить фильтр</button>
+                                <button className="btn btn-sm btn-secondary" onClick={() => { setFilterQuery(''); setFilterSubject(''); setFilterBrand(''); setFilterFf(''); setFilterKind(''); setHideEmpty(false); }}>Сбросить фильтр</button>
                                 <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>показано {formatNumber(visibleRows.length, 0)} из {formatNumber(sortedRows.length, 0)}</span>
                             </>
                         )}
@@ -988,7 +1135,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                             <thead>
                                 <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                    <th colSpan={7} style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }} />
+                                    <th colSpan={8} style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }} />
                                     {districtGroups.map((g, i) => (
                                         <th key={i} colSpan={g.count} style={{ padding: '6px 8px', textAlign: 'center', color: '#fff', background: g.color, fontSize: 11, letterSpacing: 0.4, textTransform: 'uppercase' }}>
                                             {g.label}
@@ -1001,7 +1148,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('avail')} title="Сортировать по остатку на ФФ">На ФФ{sortArrow('avail')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('inAssembly')} title="Уже в сборке на WB">В сборке{sortArrow('inAssembly')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('stocksWb')} title="Остаток на Wildberries">На WB{sortArrow('stocksWb')}</th>
-                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('need')} title="Потребность на горизонт 14 дней (движок раскладки: скорость заказов за 14 дней; глобальная метрика SKU — ФФ-фильтр не влияет)">Потр. 14д{sortArrow('need')}</th>
+                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('days')} title="На сколько дней хватит остатка на WB при текущей скорости (growth-aware: max из среднего за 14д / 7д / 3д). Красный — меньше плеча доставки (сборка+дорога+приёмка): разрыв стока до приезда новой поставки">Хватит, дн{sortArrow('days')}</th>
+                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('need')} title="Раскладочная потребность: Σ локальных дефицитов складов на горизонте 14 дней + плечо (growth-aware скорость = max из среднего за 14д/7д/3д). Нетто к закупке — в подсказке ячейки. ФФ-фильтр не влияет">Потр. 14д{sortArrow('need')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('revenue')} title="Выручка за 14 дней (продажи − возвраты, окно тренда движка потребности)">₽ 14д{sortArrow('revenue')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('loc')} title="Индекс локализации артикула за 14 дней (доля локальных заказов; цвет — статус КТР)">Лок %{sortArrow('loc')}</th>
                                     {wbCols.map((c) => (
@@ -1015,7 +1163,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                                     <td style={{ padding: '6px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }}>
                                         Сдаём <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--color-muted)' }}>шт · кор</span>
                                     </td>
-                                    <td colSpan={6} />
+                                    <td colSpan={7} />
                                     {wbCols.map((c) => {
                                         const u = matrixView.shipByWh.get(c.name) ?? 0;
                                         const bx = matrixView.boxesByWh.get(c.name) ?? 0;
@@ -1071,13 +1219,42 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                                             <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.inAssembly > 0 ? formatNumber(e.inAssembly, 0) : '·'}</td>
                                             <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.stocksWb > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.stocksWb > 0 ? formatNumber(e.stocksWb, 0) : '·'}</td>
                                             {(() => {
-                                                const needQty = Number(a.total_need) || 0;
+                                                const days = a.wb_days_left == null ? null : Number(a.wb_days_left);
+                                                const leadDays = Number(a.lead_days) || 0;
+                                                const effDaily = Number(a.eff_avg_daily) || 0;
+                                                const growth = Number(a.growth_ratio) || 1;
+                                                const daysInbound = a.wb_days_left_inbound == null ? null : Number(a.wb_days_left_inbound);
+                                                // Красный: остатка меньше, чем едет поставка → разрыв стока
+                                                // неизбежен без немедленной отгрузки. Янтарный: впритык.
+                                                const daysColor = days == null ? 'var(--color-dim)'
+                                                    : days < leadDays ? 'var(--color-danger)'
+                                                    : days < leadDays + 7 ? 'var(--color-warning)'
+                                                    : 'var(--color-muted)';
+                                                return (
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: daysColor, fontWeight: days != null && days < leadDays ? 700 : 400, whiteSpace: 'nowrap' }}
+                                                        title={days == null
+                                                            ? 'Нет заказов за окно — скорость 0, дни не считаются'
+                                                            : `Остатка WB ${formatNumber(e?.stocksWb ?? 0, 0)} шт хватит на ~${formatNumber(days, 1)} дн при скорости ${formatNumber(effDaily, 1)} шт/д${growth >= 1.05 ? ` (рост ×${formatNumber(growth, 1)} к среднему за окно)` : ''} · с учётом сборки и в пути — ~${daysInbound != null ? formatNumber(daysInbound, 1) : '—'} дн · плечо доставки ~${formatNumber(leadDays, 0)} дн`}>
+                                                        {days == null ? '·' : formatNumber(days, days < 10 ? 1 : 0)}
+                                                    </td>
+                                                );
+                                            })()}
+                                            {(() => {
+                                                const needQty = Number(a.ship_need ?? a.total_need) || 0;
+                                                const netNeed = Number(a.total_need) || 0;
                                                 const rev = Number(a.revenue_30d) || 0;
+                                                const growth = Number(a.growth_ratio) || 1;
                                                 const loc = locByNm.get(nm);
                                                 const locPct = loc ? Number(loc.loc_pct) || 0 : null;
                                                 return (
                                                     <>
-                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: needQty > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{needQty > 0 ? formatNumber(needQty, 0) : '·'}</td>
+                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: needQty > 0 ? 'var(--color-text)' : 'var(--color-dim)', whiteSpace: 'nowrap' }}
+                                                            title={`Раскладочная потребность: Σ локальных дефицитов складов (излишек чужого ФО спрос региона не закрывает). Нетто по сети (к закупке): ${formatNumber(netNeed, 0)} шт`}>
+                                                            {needQty > 0 ? formatNumber(needQty, 0) : '·'}
+                                                            {growth >= 1.3 && (
+                                                                <span style={{ fontSize: 10, color: 'var(--color-warning)' }} title={`Растущий SKU: скорость последних дней ×${formatNumber(growth, 1)} к среднему за окно — потребность посчитана по ускоренному темпу`}> ⚡×{formatNumber(growth, 1)}</span>
+                                                            )}
+                                                        </td>
                                                         <td style={{ padding: '6px 8px', textAlign: 'right', color: rev > 0 ? 'var(--color-muted)' : 'var(--color-dim)' }}>{rev > 0 ? formatNumber(rev, 0) : '·'}</td>
                                                         <td style={{ padding: '6px 8px', textAlign: 'right', color: locPct != null ? (LOC_STATUS_COLOR[loc!.status] || 'var(--color-text)') : 'var(--color-dim)' }}
                                                             title={loc ? `Заказов 14д: ${formatNumber(loc.total, 0)} · локальных: ${formatNumber(loc.local, 0)} · КТР ${formatNumber(Number(loc.ktr), 2)}` : 'Нет данных локализации за окно 14 дней'}>
@@ -1136,13 +1313,22 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                                                 );
                                             })()}
                                             <td style={{ padding: '6px 8px', textAlign: 'right' }}>{rowBoxes > 0 ? formatNumber(rowBoxes, 0) : '·'}</td>
-                                            <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-muted)' }}>{formatNumber(stays, 0)}</td>
+                                            <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
+                                                {formatNumber(stays, 0)}
+                                                {!!ppb && ppb > 0 && stays >= ppb && (
+                                                    <button type="button" className="badge"
+                                                        title={`Распределить остаток этого SKU (${formatNumber(Math.floor(stays / ppb), 0)} кор) целыми коробами: по складам с потребностью, иначе — куда уже лежит/едет; SKU станет ✋ ручным`}
+                                                        style={{ marginLeft: 6, background: 'rgba(59,130,246,0.12)', color: 'var(--color-accent)', fontSize: 10, padding: '1px 6px', border: 'none', cursor: 'pointer' }}
+                                                        disabled={writing || computing}
+                                                        onClick={() => distributeRowLeftovers(a)}>📦→</button>
+                                                )}
+                                            </td>
                                         </tr>
                                     );
                                 })}
                                 {visibleRows.length === 0 && (
                                     <tr>
-                                        <td colSpan={wbCols.length + 10} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
+                                        <td colSpan={wbCols.length + 11} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
                                             Ничего не найдено по выбранному фильтру
                                         </td>
                                     </tr>
@@ -1151,7 +1337,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                             <tfoot>
                                 <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600 }}>
                                     <td style={{ padding: '8px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>Отправить, шт</td>
-                                    <td colSpan={6} />
+                                    <td colSpan={7} />
                                     {wbCols.map((c) => (
                                         <td key={c.name} style={{ padding: '8px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{formatNumber(matrixView.shipByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
@@ -1160,7 +1346,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                                 </tr>
                                 <tr style={{ color: 'var(--color-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>📦 Коробов</td>
-                                    <td colSpan={6} />
+                                    <td colSpan={7} />
                                     {wbCols.map((c) => (
                                         <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.boxesByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
@@ -1169,7 +1355,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                                 </tr>
                                 <tr style={{ color: 'var(--color-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>🚚 Паллет</td>
-                                    <td colSpan={6} />
+                                    <td colSpan={7} />
                                     {wbCols.map((c) => (
                                         <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.palletsByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}

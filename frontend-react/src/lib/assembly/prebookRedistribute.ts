@@ -15,6 +15,13 @@
  *    (бэк-редистрибуция qty сохраняет; carve NWC расходует пул ровно).
  *  - Идемпотентность: уже-корректная предбронь (open-лимит / whitelist) даёт те
  *    же splits → canon не меняется → эффект не PUT-ит.
+ *
+ * Режим `dropUnplaced` (засев новинок на машине, pre-dist): качество «не потерять
+ * план» здесь НЕ нужно — строки ещё не план юзера, а свежий авто-засев. Полный
+ * дроп приёмки (splits пусты: НИ ОДНОГО открытого склада, moves to=null) означает
+ * «сдать некуда» → группу НЕ сеем вовсе (товар остаётся в остатке машины), как
+ * черновик в том же кейсе оставляет новинку на ФФ (`applyAcceptanceSplits`).
+ * Иначе засев уезжал бы заявкой на закрытый по приёмке склад-якорь.
  */
 import type { AssemblyDraftRow, AcceptanceCheckPerItem, PackageType } from '@/types/api';
 
@@ -63,7 +70,13 @@ function carve(
 export function applyAcceptanceRedistToPrebook(
     prebook: AssemblyDraftRow[],
     respByKey: Map<string, AcceptanceCheckPerItem>,
+    opts?: {
+        /** Засев (pre-dist): полностью недоставляемую группу (splits пусты /
+         *  cellTotal=0) НЕ сеять вовсе, вместо «оставить как есть». */
+        dropUnplaced?: boolean;
+    },
 ): { rows: AssemblyDraftRow[]; changed: boolean } {
+    const dropUnplaced = opts?.dropUnplaced === true;
     const passthrough: AssemblyDraftRow[] = [];
     const byKey = new Map<string, AssemblyDraftRow[]>();
     for (const r of prebook) {
@@ -77,7 +90,15 @@ export function applyAcceptanceRedistToPrebook(
     let changed = false;
     for (const [k, group] of byKey) {
         const item = respByKey.get(k);
-        if (!item || !item.splits?.length) { out.push(...group); continue; }
+        if (!item) { out.push(...group); continue; }   // нет ответа по баркоду — fail-open
+        if (!item.splits?.length) {
+            // Пустые splits = ПОЛНЫЙ дроп приёмки (moves to=null: ни одного открытого
+            // склада). Предбронь: не трогаем (план юзера не теряем). Засев: не сеем —
+            // товар остаётся в остатке машины (паритет с черновиком).
+            if (dropUnplaced) { changed = true; continue; }
+            out.push(...group);
+            continue;
+        }
         // Суммарный источник ФФ по группе (товар физически на этих ФФ — не меняется).
         const srcPool: Record<string, number> = {};
         for (const r of group) for (const [ff, q] of Object.entries(r.src)) srcPool[ff] = (srcPool[ff] || 0) + (q || 0);
@@ -90,9 +111,17 @@ export function applyAcceptanceRedistToPrebook(
         }
         const srcTotal = Object.values(srcPool).reduce((a, v) => a + (v || 0), 0);
         const cellTotal = cells.reduce((a, c) => a + c.qty, 0);
-        // Защита консервации: если бэк вернул иную сумму (дроп в to=null / рассинхрон) —
-        // НЕ трогаем группу (лучше оставить как есть, чем потерять/задвоить товар).
-        if (cellTotal !== srcTotal || cellTotal === 0) { out.push(...group); continue; }
+        // Защита консервации: бэк вернул иную сумму (дроп to=null / рассинхрон).
+        // Предбронь: НЕ трогаем группу (лучше оставить как есть, чем потерять/
+        // задвоить товар). Засев (dropUnplaced): недоставляемый хвост НЕ сеем
+        // (carve сам остановится на cellTotal); перебор сверх наличия
+        // (cellTotal > srcTotal) не сеем никогда.
+        if (dropUnplaced ? cellTotal > srcTotal : cellTotal !== srcTotal) { out.push(...group); continue; }
+        if (cellTotal === 0) {
+            if (dropUnplaced) { changed = true; continue; }   // всё вычеркнуто — не сеем
+            out.push(...group);
+            continue;
+        }
         const rebuilt = carve(group[0].nm_id, group[0].barcode, group[0].vendor_code, srcPool, cells);
         if (groupCanon(rebuilt) !== groupCanon(group)) changed = true;
         out.push(...rebuilt);

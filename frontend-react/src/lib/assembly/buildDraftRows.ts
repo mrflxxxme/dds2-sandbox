@@ -59,6 +59,9 @@ export interface BuildDraftRowsInput {
     /** «Не менее 1 короба на нуждающийся склад» (перебор над потребностью, кап стоком) —
      *  для pre-dist-матрицы: каждый склад с потребностью получает ≥1 целый короб. */
     minOneBoxPerWh?: boolean;
+    /** Вес приоритета WB-склада (серверная «схема воришек») — порядок среза при
+     *  дефиците источника (паритет с greedy черновика). */
+    priorityOf?: (wh: string) => number;
 }
 
 /** Сумма значений `Record<*, number>`. */
@@ -128,7 +131,7 @@ export function buildDraftRows(input: BuildDraftRowsInput): AssemblyDraftRow[] {
         if (qty0 > 0 && whNeeds.length > 0) {
             if (boxMode && qty0 >= ppb) {
                 // Палет-режим — СТРОГАЯ кратность (хвост < короба остаётся на ФФ).
-                tgt = distributeByBoxMultiple(whNeeds, qty0, ppb, !palletizable, minOneBox);
+                tgt = distributeByBoxMultiple(whNeeds, qty0, ppb, !palletizable, minOneBox, input.priorityOf);
             } else {
                 let rem = qty0;
                 for (const w of whNeeds) {
