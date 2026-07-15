@@ -2117,7 +2117,10 @@ export interface FfMismatchDetail {
   our_total: number;
   ff_total: number;
   ff_request_numbers: string[];
+  /** Расхождение по НАШИМ ШК (наш qty ≠ qty ФФ, включая «мы отправили, а в заявке нет») */
   rows: FfMismatchDetailRow[];
+  /** ШК только у ФФ (мы их не отправляли) — инфо, расхождением не считается */
+  extra_rows?: FfMismatchDetailRow[];
 }
 
 // ─── Предраспределение машины в пути ─────────────────────────────────────────

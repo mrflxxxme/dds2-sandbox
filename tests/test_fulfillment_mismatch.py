@@ -158,7 +158,11 @@ async def test_wmscelicom_match_and_mismatch(db_session, project, warehouse):
 
 
 @pytest.mark.asyncio
-async def test_wmscelicom_extra_barcode_is_mismatch(db_session, project, warehouse):
+async def test_wmscelicom_extra_ff_barcode_not_mismatch(db_session, project, warehouse):
+    """Лишний ШК у ФФ, которого НЕТ в нашей сборке, — НЕ расхождение (сверяем по
+    нашим ШК). Показывается как инфо (extra_rows), но бейдж не зажигает.
+    Прод-кейс: ФФ приписал к заявке строки соседних отгрузок (WH-R-204669: наш
+    состав 258 == все наши ШК, а ФФ-API отдал 360 с 6 чужими SKU)."""
     bc1, bc2 = f"20{_uid()}", f"20{_uid()}"
     doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(bc1, 5)])
     await _make_ff(
@@ -167,9 +171,14 @@ async def test_wmscelicom_extra_barcode_is_mismatch(db_session, project, warehou
         warehouse.id,
         provider="wmscelicom",
         assembly_request_id=doc.id,
-        raw=_wms_raw([(bc1, 5), (bc2, 1)]),  # лишний ШК у ФФ
+        raw=_wms_raw([(bc1, 5), (bc2, 1)]),  # bc2 — лишний ШК у ФФ (не в нашей сборке)
     )
-    assert await _verdict(db_session, project.id, doc.id) is True
+    assert await _verdict(db_session, project.id, doc.id) is False  # по нашему bc1 всё сходится
+    detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id)
+    assert detail["mode"] == "barcode"
+    assert detail["rows"] == []  # расхождений по нашим ШК нет
+    # bc2 — инфо-строка «есть у ФФ, но не у нас»
+    assert [(r["barcode"], r["our_qty"], r["ff_qty"]) for r in detail["extra_rows"]] == [(bc2, 0, 1)]
 
 
 @pytest.mark.asyncio
@@ -349,6 +358,38 @@ async def test_skladbot_unknown_total_is_none(db_session, project, warehouse):
         total_qty=None,
     )
     assert await _verdict(db_session, project.id, doc.id) is None  # определить нельзя
+
+
+@pytest.mark.asyncio
+async def test_skladbot_composition_compares_our_barcodes(db_session, project, warehouse):
+    """skladbot: состав по ШК из живой деталки лежит в raw (_ff_composition) → сверка
+    по НАШИМ ШК, а не по суммарному total_qty. Прод WH-R-204669: total_qty 360 (с 6
+    чужими SKU у ФФ), но по нашим 18 ШК всё сходится → расхождения быть НЕ должно."""
+    bc1, bc2, bc_extra = f"20{_uid()}", f"20{_uid()}", f"20{_uid()}"
+    doc = await _make_assembly(db_session, project.id, warehouse.id, items=[(bc1, 14), (bc2, 20)])
+    ff = await _make_ff(
+        db_session,
+        project.id,
+        warehouse.id,
+        provider="skladbot",
+        assembly_request_id=doc.id,
+        # наши bc1/bc2 сходятся + чужой bc_extra (приписка ФФ); total_qty > нашего итога
+        raw={fulfillment_service._FF_COMPOSITION_KEY: {bc1: 14, bc2: 20, bc_extra: 102}},
+        total_qty=136,
+    )
+    assert await _verdict(db_session, project.id, doc.id) is False  # extra не считается расхождением
+    detail = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id)
+    assert detail["mode"] == "barcode"  # состав по ШК есть → не фолбэк на total (360 vs 258)
+    assert detail["our_total"] == 34 and detail["ff_total"] == 136
+    assert detail["rows"] == []
+    assert [(r["barcode"], r["our_qty"], r["ff_qty"]) for r in detail["extra_rows"]] == [(bc_extra, 0, 102)]
+
+    # реальное расхождение по НАШЕМУ ШК (ФФ заявил меньше) → True
+    ff.raw = {fulfillment_service._FF_COMPOSITION_KEY: {bc1: 10, bc2: 20, bc_extra: 102}}
+    await db_session.commit()
+    assert await _verdict(db_session, project.id, doc.id) is True
+    detail2 = await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, project.id, doc.id)
+    assert [(r["barcode"], r["our_qty"], r["ff_qty"], r["diff"]) for r in detail2["rows"]] == [(bc1, 14, 10, -4)]
 
 
 # ─── surfacing: list_requests + map ──────────────────────────────────────────
@@ -645,3 +686,30 @@ async def test_mismatch_detail_skladbot_live_error_falls_back_to_total(db_sessio
 async def test_mismatch_detail_404_other_project(db_session, project, other_project, warehouse):
     doc = await _make_assembly(db_session, project.id, warehouse.id, items=[("20x", 5)])
     assert await fulfillment_service.get_assembly_ff_mismatch_detail(db_session, other_project.id, doc.id) is None
+
+
+# ─── деталка ФФ-заявки: _build_match тоже сверяет по нашим ШК ─────────────────
+
+
+def test_build_match_ignores_ff_only_extra_barcode():
+    """_build_match (деталка ФФ-заявки, FfRequestMatch): лишний ШК только у ФФ
+    (our_qty==0) НЕ делает matched=False — согласовано с бейджем сборки. Тоталы
+    остаются честными (весь состав ФФ). Реальный дифф по нашему ШК → matched False."""
+    products = [
+        {"barcode": "b1", "qty": 5, "name": "n1"},
+        {"barcode": "b_extra", "qty": 9, "name": "nx"},  # нет в нашем документе
+    ]
+    m = fulfillment_service._build_match(products, {"b1": 5}, {})
+    assert m["matched"] is True
+    assert m["mismatches"] == []
+    assert m["ff_total"] == 14 and m["our_total"] == 5  # тоталы честные (весь состав ФФ)
+
+    # расхождение по НАШЕМУ ШК (мы 5, ФФ 3) → matched False, строка одна
+    m2 = fulfillment_service._build_match([{"barcode": "b1", "qty": 3, "name": "n1"}], {"b1": 5}, {})
+    assert m2["matched"] is False
+    assert [(r["barcode"], r["our_qty"], r["ff_qty"], r["diff"]) for r in m2["mismatches"]] == [("b1", 5, 3, -2)]
+
+    # мы отправили ШК, которого нет в заявке ФФ (our_qty>0, ff 0) → тоже расхождение
+    m3 = fulfillment_service._build_match([], {"b1": 5}, {})
+    assert m3["matched"] is False
+    assert [(r["barcode"], r["our_qty"], r["ff_qty"]) for r in m3["mismatches"]] == [("b1", 5, 0)]

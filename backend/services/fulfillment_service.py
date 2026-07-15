@@ -102,6 +102,12 @@ _MIGFULL_SERVICE_ITEM_MARKER = "фф грузовое место"
 _MIGFULL_BOX_UNITS_RE = re.compile(r"короб\s+(\d+)\s*шт", re.IGNORECASE)
 _QTY_MAX = 2**31 - 1  # Integer-колонка: мусорная сумма провайдера не должна валить flush
 _DEST_WAREHOUSE_MAX = 300  # String(300): значение длиннее уронит транзакцию синка
+# Состав ФФ-заявки по ШК {barcode: qty>0}, вложенный в raw-зеркало. skladbot не
+# отдаёт состав в списочном методе — кладём его сюда из живой деталки при синке
+# (_enrich_skladbot_requests), чтобы сверять расхождение ПО НАШИМ ШК в бейдже/
+# списке без повторного HTTP. Отдельной колонки нет намеренно (derived, само-
+# восстанавливается каждым синком). Приватный ключ (префикс `_`) — не поле провайдера.
+_FF_COMPOSITION_KEY = "_ff_composition"
 
 
 def _safe_int(value: object) -> int:
@@ -1578,6 +1584,20 @@ async def _enrich_skladbot_requests(
         total = min(sum(_safe_int(p.get("amount")) for p in products if isinstance(p, dict)), _QTY_MAX)
         # 0/пусто = «нет данных»: при дрейфе формы ответа не затираем прежнее значение нулём
         row["total_qty"] = total or None
+        # Состав по ШК из деталки → в raw-зеркало (см. _FF_COMPOSITION_KEY). Нужен
+        # для сверки расхождения по НАШИМ ШК без повторного HTTP: бейдж/список
+        # игнорируют строки ФФ, которых нет в нашей сборке. Пусто (дрейф формы) —
+        # ключ не пишем, старое значение остаётся, вердикт уходит в фолбэк по кол-ву.
+        comp: dict[str, int] = {}
+        for p in products:
+            if not isinstance(p, dict):
+                continue
+            bc = str(p.get("barcode") or "").strip()
+            if bc:
+                comp[bc] = comp.get(bc, 0) + _safe_int(p.get("amount"))
+        comp = {bc: q for bc, q in comp.items() if q > 0}
+        if comp:
+            row["raw"] = {**(row.get("raw") or {}), _FF_COMPOSITION_KEY: comp}
         dest = next(
             (
                 f.get("value")
@@ -4041,8 +4061,12 @@ def _build_match(
 ) -> dict:
     """Сверка состава ФФ-заявки с нашим документом (FfRequestMatch shape).
 
-    Обе стороны по barcode: qty отличается / есть только у ФФ / есть только
-    у нас. Позиции ФФ без barcode сверке не подлежат и в тоталы не входят.
+    Расхождение считаем ТОЛЬКО по НАШИМ ШК: qty отличается по ШК из нашего
+    документа (включая «мы отправили, а в заявке ФФ нет»). Лишние ШК только у ФФ,
+    которых мы не отправляли (our_qty==0), расхождением НЕ считаются (частый мусор
+    провайдера — приписки строк соседних заявок) — они видны в общей таблице
+    состава (колонка «В нашей заявке» = 0). Согласовано с compute_doc_ff_mismatch.
+    Позиции ФФ без barcode сверке не подлежат и в тоталы не входят.
     """
     ff_by_barcode: dict[str, int] = {}
     name_by_barcode: dict[str, str | None] = {}
@@ -4057,8 +4081,8 @@ def _build_match(
     for barcode in set(ff_by_barcode) | set(our_by_barcode):
         ff_qty = ff_by_barcode.get(barcode, 0)
         our_qty = our_by_barcode.get(barcode, 0)
-        if ff_qty == our_qty:
-            continue
+        if ff_qty == our_qty or our_qty == 0:
+            continue  # our_qty==0 → лишний ШК у ФФ, не наше расхождение
         _nom_id, article = nom_by_barcode.get(barcode, (None, None))
         row = {
             "barcode": barcode,
@@ -4140,7 +4164,15 @@ def _mirror_ff_composition(req: FulfillmentRequest, mig_guid_map: dict[str, tupl
             comp[bc] = comp.get(bc, 0) + qty * units
         return comp or None
 
-    return None  # skladbot — состав только в живой деталке
+    # skladbot: состав по ШК кладётся в raw живой деталкой при синке (см.
+    # _FF_COMPOSITION_KEY / _enrich_skladbot_requests). Нет ключа (заявка ещё не
+    # обогащалась / дрейф формы) → None → фолбэк на сверку по суммарному кол-ву.
+    if req.provider == "skladbot":
+        raw_comp = (req.raw or {}).get(_FF_COMPOSITION_KEY)
+        if isinstance(raw_comp, dict):
+            out = {str(bc): _safe_int(q) for bc, q in raw_comp.items() if _safe_int(q) > 0}
+            return out or None
+    return None
 
 
 async def _joint_members_for_assemblies(
@@ -4309,7 +4341,12 @@ async def compute_doc_ff_mismatch(
             for c in comps:
                 for bc, q in c.items():  # type: ignore[union-attr]
                     combined[bc] = combined.get(bc, 0) + q
-            return combined != our_comp
+            # Сверяем ТОЛЬКО по нашим ШК: расхождение = ФФ заявил иное кол-во по ШК
+            # ИЗ НАШЕЙ сборки (или не заявил его вовсе). Лишние ШК у ФФ, которых мы
+            # не отправляли, — не наше наполнение (частый мусор провайдера: заявка
+            # с приписанными строками соседних заявок) → в вердикт НЕ идут, панель
+            # покажет их как инфо (extra_rows). Согласовано с get_assembly_ff_mismatch_detail.
+            return any(combined.get(bc, 0) != q for bc, q in our_comp.items())
         # фолбэк по суммарному кол-ву В ШТУКАХ (migfull-отгрузка: короба × штук в
         # коробе, а не total_qty=коробá → иначе ложное расхождение vs наш итог в штуках)
         if any(r.total_qty is None for r in reqs):
@@ -4481,7 +4518,11 @@ async def get_assembly_ff_mismatch_detail(
             for bc, q in c.items():  # type: ignore[union-attr]
                 combined[bc] = combined.get(bc, 0) + q
         noms = await _resolve_noms(db, project_id, set(our_comp) | set(combined))
+        # rows — расхождение по НАШИМ ШК (our_qty>0 и не совпало); extra_rows — ШК,
+        # которые есть только у ФФ (our_qty==0), показываем как инфо, но расхождением
+        # НЕ считаем (согласовано с вердиктом compute_doc_ff_mismatch).
         sortable: list[tuple[int, str, dict]] = []
+        extra_sortable: list[tuple[int, str, dict]] = []
         for bc in set(our_comp) | set(combined):
             our_qty = our_comp.get(bc, 0)
             ff_qty = combined.get(bc, 0)
@@ -4490,13 +4531,14 @@ async def get_assembly_ff_mismatch_detail(
             _nid, article = noms.get(bc, (None, None))
             diff = ff_qty - our_qty
             row = {"barcode": bc, "article_seller": article, "our_qty": our_qty, "ff_qty": ff_qty, "diff": diff}
-            sortable.append((-abs(diff), bc, row))
+            (sortable if our_qty > 0 else extra_sortable).append((-abs(diff), bc, row))
         rows = [row for _, _, row in sorted(sortable, key=lambda t: (t[0], t[1]))]
-        return {**base, "mode": "barcode", "ff_total": sum(combined.values()), "rows": rows}
+        extra_rows = [row for _, _, row in sorted(extra_sortable, key=lambda t: (t[0], t[1]))]
+        return {**base, "mode": "barcode", "ff_total": sum(combined.values()), "rows": rows, "extra_rows": extra_rows}
 
     # фолбэк: состав ФФ по позициям недоступен → только итоги (migfull — в штуках, не коробах)
     ff_total = sum(_ff_unit_total(r, mig_maps.get(r.warehouse_id, {})) for r in ff_reqs)
-    return {**base, "mode": "total", "ff_total": ff_total, "rows": []}
+    return {**base, "mode": "total", "ff_total": ff_total, "rows": [], "extra_rows": []}
 
 
 async def get_ff_link_for_assembly(db: AsyncSession, project_id: int, assembly_request_id: int) -> dict | None:

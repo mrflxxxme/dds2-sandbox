@@ -1560,7 +1560,10 @@ async def test_request_detail_match_full(db_session, project, warehouse, connect
 async def test_request_detail_match_mismatches_both_directions(
     db_session, project, warehouse, connected_key, monkeypatch
 ):
-    """Расхождения в обе стороны: qty отличается, есть только у ФФ, есть только у нас."""
+    """Сверка ТОЛЬКО по нашим ШК: расходится qty (bc_qty) и есть только у нас
+    (bc_our_only, мы отправили — ФФ не заявил). Лишний ШК только у ФФ (bc_ff_only),
+    которого нет в нашей сборке, расхождением НЕ считается — он виден в общей
+    таблице состава с «В нашей заявке» = 0. Тоталы — по всему составу ФФ."""
     bc_qty, bc_ff_only, bc_our_only = f"20{_uid()}", f"21{_uid()}", f"22{_uid()}"
     nom_qty = await _make_nomenclature(db_session, project.id, bc_qty, article="ART-QTY")
     nom_our = await _make_nomenclature(db_session, project.id, bc_our_only, article="ART-OUR")
@@ -1579,13 +1582,13 @@ async def test_request_detail_match_mismatches_both_directions(
     assert match["ff_total"] == 14 and match["our_total"] == 9
     assert match["ff_positions"] == 2 and match["our_positions"] == 2
     by_bc = {m["barcode"]: m for m in match["mismatches"]}
-    assert set(by_bc) == {bc_qty, bc_ff_only, bc_our_only}
+    # bc_ff_only (лишний у ФФ, our_qty==0) НЕ в mismatches — сверяем по нашим ШК
+    assert set(by_bc) == {bc_qty, bc_our_only}
     assert by_bc[bc_qty]["ff_qty"] == 10 and by_bc[bc_qty]["our_qty"] == 7 and by_bc[bc_qty]["diff"] == 3
-    assert by_bc[bc_ff_only]["ff_qty"] == 4 and by_bc[bc_ff_only]["our_qty"] == 0
     assert by_bc[bc_our_only]["ff_qty"] == 0 and by_bc[bc_our_only]["our_qty"] == 2
     assert by_bc[bc_our_only]["article_seller"] == "ART-OUR"  # номенклатура и для our-only строк
     products = {p["barcode"]: p for p in row["products"]}
-    assert products[bc_ff_only]["our_qty"] == 0  # связь есть, в нашей заявке нет
+    assert products[bc_ff_only]["our_qty"] == 0  # лишний ШК ФФ виден в общей таблице состава
     assert products[bc_qty]["our_qty"] == 7
 
 
