@@ -441,6 +441,34 @@ async def test_sync_all_states_includes_shipped(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sync_all_states_bare_link_adopts_fbo_no_duplicate(db_session, monkeypatch):
+    # «Голая» строка пропуска (без supply_id, напр. из sync_pass_from_vehicle) +
+    # адопция FBO → синк адоптирует supply_id в неё, НЕ создаёт дубль по unique-индексу.
+    from backend.models.assembly_wb import AssemblyWbSupply
+
+    await _attach_fbo(db_session, "40503730", "IN_PROGRESS")
+    db_session.add(
+        AssemblyWbSupply(
+            project_id=PROJECT_ID,
+            assembly_request_id=ASSEMBLY_ID,
+            sync_status=WbSupplySyncStatus.NONE.value,
+            boxes=[],
+        )
+    )
+    await db_session.commit()
+    client = FakeClient(
+        supplies=[{"supplyId": 40503730, "statusId": 1, "statusName": "Запланировано"}],
+        supply_status={"statusName": "Запланировано", "statusId": 1},
+    )
+    await _patch_client(monkeypatch, client)
+
+    res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)  # НЕ падает
+    assert res["checked"] == 1
+    link = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.supply_id == 40503730  # адоптирован в существующую строку, дубля нет
+
+
+@pytest.mark.asyncio
 async def test_sync_all_states_creates_row_for_adopted_fbo(db_session, monkeypatch):
     # Заявка с забронированной FBO-поставкой без реплей-строки → sync создаёт
     # строку с кабинетным статусом (listSupplies матч по supplyId).
