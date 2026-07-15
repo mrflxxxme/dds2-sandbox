@@ -371,17 +371,62 @@ def get_refresh_progress(project_id: int) -> dict[str, dict[str, Any]]:
     return {k[1]: v for k, v in _REFRESH.items() if k[0] == project_id}
 
 
+# Технические сообщения адаптеров/WB → человекочитаемые для UI дозагрузки
+_KEY_MISSING_MARKERS = ("no wb api key", "api key not found", "api ключ wb не найден", "no_api_key")
+
+
+def _humanize_refresh_error(msg: str) -> str:
+    if any(m in msg.lower() for m in _KEY_MISSING_MARKERS):
+        return "Нет активного WB-ключа с нужным доступом (напр. «Статистика») — проверьте интеграции проекта"
+    return msg
+
+
+def _adapter_error(result: Any) -> str | None:
+    """Ошибка, которую адаптер вернул СЛОВАРЁМ (без исключения). None — успех.
+
+    Адаптеры сигналят по-разному: часть кладёт status='error' (+errors[]/error),
+    sync_ad_campaigns — error='no_api_key', заказы — errors[] без status.
+    ВАЖНО: при status='ok' непустой errors[] = частичные сбои (напр. funnel
+    отдаёт errors[:5]) — весь refresh НЕ роняем. Без status: errors[] считаем
+    провалом только если ничего не залито и не получено.
+    """
+    if not isinstance(result, dict):
+        return None
+    status = result.get("status")
+    if status == "error":
+        errs = result.get("errors") or []
+        raw = result.get("error") or (errs[0] if errs else None) or "источник вернул ошибку"
+        return _humanize_refresh_error(str(raw))
+    if status == "ok":
+        return None
+    if result.get("error"):
+        return _humanize_refresh_error(str(result["error"]))
+    errs = result.get("errors")
+    if errs:
+        touched = (result.get("inserted") or 0) + (result.get("updated") or 0) + (result.get("rows") or 0)
+        if not touched and not result.get("total_fetched"):
+            return _humanize_refresh_error(str(errs[0]))
+    return None
+
+
 async def _run_refresh(project_id: int, key: str, date_from: date | None, date_to: date | None) -> None:
     pk = _progress_key(project_id, key)
     _REFRESH[pk] = {"status": "running", "started_at": utcnow().isoformat(), "finished_at": None, "error": None}
     try:
         result = await REFRESH_ADAPTERS[key](project_id, date_from, date_to)
+        # Адаптер мог не бросить исключение, но вернуть ошибку словарём (напр. нет
+        # WB-ключа с нужным scope) — иначе UI показывал бы «загружено» при пустой заливке
+        adapter_err = _adapter_error(result)
         _REFRESH[pk] = {
-            "status": "ok", "started_at": _REFRESH[pk]["started_at"],
-            "finished_at": utcnow().isoformat(), "error": None,
+            "status": "error" if adapter_err else "ok",
+            "started_at": _REFRESH[pk]["started_at"],
+            "finished_at": utcnow().isoformat(), "error": adapter_err,
             "result": result if isinstance(result, dict) else None,
         }
-        logger.info("Raw refresh %s done for project %s", key, project_id)
+        if adapter_err:
+            logger.warning("Raw refresh %s for project %s returned error: %s", key, project_id, adapter_err)
+        else:
+            logger.info("Raw refresh %s done for project %s", key, project_id)
     except asyncio.CancelledError:
         _REFRESH[pk] = {**_REFRESH[pk], "status": "error", "finished_at": utcnow().isoformat(), "error": "Отменено"}
         raise
