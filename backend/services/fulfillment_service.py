@@ -2365,21 +2365,22 @@ def _parse_date(value: object) -> date | None:
 
 
 async def _migfull_assembled_by_guid(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[str, int]:
-    """Σ planned-строк СОБРАННЫХ отгрузок migfull (`ready`) по product_guid.
+    """Σ planned-строк АКТИВНЫХ отгрузок migfull по product_guid = «Собрано».
 
-    Берётся из заявок-отгрузок, которые мы синкаем (`planned_lines`). У migfull
-    сток блокируется (`stock_locked`) только когда заявку СОБРАЛИ (→ `ready`);
-    заявки в статусе `uploaded` («Загружен», ещё в работе) сток НЕ держат —
-    проверено живьём. Поэтому `stock_locked = собрано (ready) + брак`, и в
-    `list_stocks`: «Собрано» = min(это, qty_reserve), «Брак» = остаток. Единицы —
-    как у qty_reserve (короб-guid → в коробах, россыпь-guid → в россыпи)."""
+    Берётся из заявок-отгрузок, которые мы синкаем (`planned_lines`). migfull
+    держит резерв (`stock_locked`) под отгрузку не только в статусе `ready`
+    («Собран»), но и в `uploaded`/`new` («Загружен»/«Новый», ещё в работе) —
+    проверено живьём (locked > собранного-ready). Считаем «собранным» ВСЕ
+    активные (не закрытые/не отменённые) отгрузки, иначе заявки-в-работе ложно
+    падают в «Брак». Перепланирование гасится `min(это, qty_reserve)` в
+    `list_stocks`. Единицы — как у qty_reserve (короб-guid → коробах, россыпь → россыпи)."""
     result = await db.execute(
         select(FulfillmentRequest.raw).where(
             FulfillmentRequest.project_id == project_id,
             FulfillmentRequest.warehouse_id == warehouse_id,
             FulfillmentRequest.provider == "migfull",
             FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
-            FulfillmentRequest.stage_code == "ready",
+            FulfillmentRequest.stage_code.in_(_MIGFULL_ACTIVE_SHIPMENT_STAGES),
         )
     )
     assembled: dict[str, int] = {}
@@ -2389,6 +2390,35 @@ async def _migfull_assembled_by_guid(db: AsyncSession, project_id: int, warehous
             if guid:
                 assembled[guid] = assembled.get(guid, 0) + _safe_int(line.get("quantity"))
     return assembled
+
+
+# Активные (не закрытые/не отменённые) статусы отгрузки migfull — держат резерв.
+_MIGFULL_ACTIVE_SHIPMENT_STAGES = ("ready", "uploaded", "new")
+
+
+async def _migfull_inbound_locked_by_barcode(
+    db: AsyncSession, project_id: int, warehouse_id: int
+) -> dict[str, int]:
+    """Σ ожидаемого по EXPECTED-приёмкам migfull, ключ = россыпь-ШК номенклатуры.
+
+    migfull лочит свежий приход (`stock_locked`) на время оприходования — товар
+    физически на складе, но не «собран» ни в одну отгрузку, поэтому без поправки
+    он падает в «Брак» (поймано на Алмазной мозаике машины V-0032: резерв=весь
+    остаток, заявок 0, а это приход). Позиции в наших EXPECTED-приёмках = входящий
+    залоченный товар — выносим его из «Брака» в бакет «В приёмке»."""
+    result = await db.execute(
+        select(Nomenclature.barcode, func.sum(InboundReceiptItem.expected_qty))
+        .join(InboundReceiptItem, InboundReceiptItem.nomenclature_id == Nomenclature.id)
+        .join(InboundReceipt, InboundReceipt.id == InboundReceiptItem.receipt_id)
+        .where(
+            InboundReceipt.project_id == project_id,
+            InboundReceipt.warehouse_id == warehouse_id,
+            InboundReceipt.status == "EXPECTED",
+            Nomenclature.project_id == project_id,
+        )
+        .group_by(Nomenclature.barcode)
+    )
+    return {bc: int(q or 0) for bc, q in result.all() if bc}
 
 
 # Сборка ещё «наша» (сток у нас на складе, ship_request не списал) — пред-отгрузочные
@@ -2467,6 +2497,9 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     assembled_by_guid = (
         await _migfull_assembled_by_guid(db, project_id, warehouse_id) if is_migfull else {}
     )
+    inbound_locked_by_bc = (
+        await _migfull_inbound_locked_by_barcode(db, project_id, warehouse_id) if is_migfull else {}
+    )
 
     ws_result = await db.execute(
         select(WarehouseStock)
@@ -2517,7 +2550,8 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
             "brand": brand,
             "ff_good": 0,
             "ff_reserve": 0,
-            "ff_reserve_ready": 0,  # migfull: часть резерва под собранные отгрузки (ready)
+            "ff_reserve_ready": 0,  # migfull: часть резерва под активные отгрузки (собрано)
+            "ff_inbound_locked": 0,  # migfull: часть резерва под свежий приход (позиции в EXPECTED-приёмках)
             "ff_defect": 0,
             "ff_nominal": 0,
             "ff_box_units": 0,  # из них пришло коробами (в штуках россыпи)
@@ -2541,10 +2575,10 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         row["ff_good"] += r.qty_good * units
         row["ff_reserve"] += r.qty_reserve * units
         if is_migfull:
-            # Резерв (stock_locked) = собрано (ready) + брак. «Собрано» капуем под
-            # резерв (заявка планирует больше, чем реально заблокировано — короб
-            # собирается из россыпи), остаток резерва = брак. Так части всегда ≥0 и
-            # в сумме = qty_reserve. Единицы — как у qty_reserve → ×units к россыпи.
+            # Резерв (stock_locked) = собрано (активные отгрузки) + В приёмке + брак.
+            # «Собрано» капуем под резерв (заявка планирует больше, чем заблокировано),
+            # остаток — предварительный брак; «В приёмке» (свежий приход) вынимается
+            # из брака ниже. Единицы — как у qty_reserve → ×units к россыпи.
             ready_cap = min(assembled_by_guid.get(r.external_product_id or "", 0), r.qty_reserve)
             row["ff_reserve_ready"] += ready_cap * units
             row["ff_defect"] += (r.qty_reserve - ready_cap) * units
@@ -2590,6 +2624,19 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         lrow["ff_logistics"] += qty
         lrow["ff_good"] += qty
 
+    # migfull: вынести «В приёмке» (свежий приход, залоченный migfull) из «Брака».
+    # Резерв под входящий товар (позиции в EXPECTED-приёмках) не «собран» ни в одну
+    # отгрузку → иначе он ложно = брак. Забираем из предварительного ff_defect.
+    if is_migfull:
+        for barcode, locked in inbound_locked_by_bc.items():
+            irow = rows.get(barcode)
+            if irow is None:
+                continue
+            take = min(locked, irow["ff_defect"])
+            if take > 0:
+                irow["ff_inbound_locked"] += take
+                irow["ff_defect"] -= take
+
     for row in rows.values():
         if is_migfull:
             # ff_good (stock_actual) включает брак → сравниваем с нашим ИТОГОМ,
@@ -2603,6 +2650,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         "ff_good": sum(r["ff_good"] for r in out_rows),
         "ff_reserve": sum(r["ff_reserve"] for r in out_rows),
         "ff_reserve_ready": sum(r["ff_reserve_ready"] for r in out_rows),
+        "ff_inbound_locked": sum(r["ff_inbound_locked"] for r in out_rows),
         "ff_defect": sum(r["ff_defect"] for r in out_rows),
         "ff_box_units": sum(r["ff_box_units"] for r in out_rows),
         "ff_logistics": sum(r["ff_logistics"] for r in out_rows),

@@ -51,8 +51,9 @@ class FfStockRow(BaseModel):
     brand: str | None = None  # бренд из номенклатуры (если сматчен)
     ff_good: int = 0
     ff_reserve: int = 0
-    ff_reserve_ready: int = 0  # migfull: часть резерва под собранные отгрузки (ready)
-    ff_defect: int = 0  # migfull: расч. = ff_reserve − собрано; прочие — из API
+    ff_reserve_ready: int = 0  # migfull: часть резерва под активные отгрузки (собрано)
+    ff_inbound_locked: int = 0  # migfull: часть резерва под свежий приход (EXPECTED-приёмки)
+    ff_defect: int = 0  # migfull: расч. = ff_reserve − собрано − В приёмке; прочие — из API
     ff_nominal: int = 0
     ff_box_units: int = 0  # из ff_good пришло коробами (в штуках россыпи)
     ff_box_count: int = 0  # сколько коробов годного сведено в этот товар
@@ -65,7 +66,8 @@ class FfStockRow(BaseModel):
 class FfStockTotals(BaseModel):
     ff_good: int = 0
     ff_reserve: int = 0
-    ff_reserve_ready: int = 0  # migfull: резерв под собранные отгрузки (ready)
+    ff_reserve_ready: int = 0  # migfull: резерв под активные отгрузки (собрано)
+    ff_inbound_locked: int = 0  # migfull: резерв под свежий приход (EXPECTED-приёмки)
     ff_defect: int = 0
     ff_box_units: int = 0  # сколько штук годного пришло коробами
     ff_logistics: int = 0  # досчитано к ff_good: товар в стадии списания логистики ФФ

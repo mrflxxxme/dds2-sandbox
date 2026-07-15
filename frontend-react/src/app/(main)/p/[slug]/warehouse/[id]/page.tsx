@@ -1881,11 +1881,12 @@ function FfStocksTab({ warehouseId, provider }: { warehouseId: number; provider:
             exportValue: (row: FfStockRow) => row.ff_good,
         },
         { key: 'ff_reserve', label: 'ФФ резерв', align: 'right', format: 'number' },
-        // migfull: из резерва выделяем «Собрано» (ready) — то, что физически заблокировано
-        // под собранные отгрузки; остаток резерва = брак. «В работе» (uploaded) сток не
-        // блокирует (резерв занимается на сборке), потому в таблице его не показываем.
+        // migfull: резерв (stock_locked) = «Собрано» (под активные отгрузки) + «В приёмке»
+        // (свежий приход, залоченный при оприходовании) + «Брак» (остаток). Без этого
+        // разбиения заявки-в-работе и приход ложно падали бы в брак.
         ...(isMigfull ? ([
             { key: 'ff_reserve_ready', label: 'Собрано', align: 'right', format: 'number' },
+            { key: 'ff_inbound_locked', label: 'В приёмке', align: 'right', format: 'number' },
         ] as Column[]) : []),
         {
             key: 'ff_defect', label: 'ФФ брак', align: 'right',
@@ -1912,6 +1913,7 @@ function FfStocksTab({ warehouseId, provider }: { warehouseId: number; provider:
         { label: 'Резерв', value: totals.ff_reserve },
         ...(isMigfull ? [
             { label: 'Собрано', value: totals.ff_reserve_ready, color: 'var(--color-accent)' },
+            ...(totals.ff_inbound_locked > 0 ? [{ label: 'В приёмке', value: totals.ff_inbound_locked, color: 'var(--color-accent)' }] : []),
         ] : []),
         { label: 'Брак ФФ', value: totals.ff_defect, color: totals.ff_defect > 0 ? 'var(--color-warning)' : undefined },
         ...(totals.ff_box_units > 0 ? [{ label: 'В коробах', value: totals.ff_box_units, color: 'var(--color-accent)' }] : []),

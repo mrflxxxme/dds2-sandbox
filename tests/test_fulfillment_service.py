@@ -622,8 +622,8 @@ async def test_list_stocks_union_and_diff(db_session, project, warehouse, connec
 
 @pytest.mark.asyncio
 async def test_list_stocks_migfull_splits_reserve_into_ready_and_defect(db_session, project, warehouse):
-    """migfull: резерв (stock_locked) = Собрано (ready, capped) + Брак (остаток).
-    Заявки `uploaded` («в работе») сток не блокируют → игнорируются. diff =
+    """migfull: резерв (stock_locked) = Собрано (активные отгрузки, capped) + Брак.
+    Активные = ready+uploaded+new (все держат резерв); closed/canceled — нет. diff =
     ff_good − (наш годный + наш брак), т.к. stock_actual включает брак."""
     bc_pure = f"BC-{_uid()}"  # резерв = весь брак (нет собранных отгрузок)
     bc_mixed = f"BC-{_uid()}"  # резерв = собрано + брак
@@ -686,7 +686,7 @@ async def test_list_stocks_migfull_splits_reserve_into_ready_and_defect(db_sessi
                 qty_defect=0,
                 qty_nominal=42,
             ),
-            # g-mixed: 10 собрано (ready); uploaded 7 и closed 999 — игнорируются
+            # g-mixed: 10 (ready) + 7 (uploaded) собрано; closed 999 — игнор
             FulfillmentRequest(
                 project_id=project.id,
                 warehouse_id=warehouse.id,
@@ -735,27 +735,83 @@ async def test_list_stocks_migfull_splits_reserve_into_ready_and_defect(db_sessi
     data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
     rows = {r["barcode"]: r for r in data["rows"]}
 
-    # bc_pure: нет собранных отгрузок → весь резерв (87) = брак ФФ
+    # bc_pure: нет собранных отгрузок и приёмок → весь резерв (87) = брак ФФ
     assert rows[bc_pure]["ff_reserve_ready"] == 0
+    assert rows[bc_pure]["ff_inbound_locked"] == 0
     assert rows[bc_pure]["ff_defect"] == 87
     assert rows[bc_pure]["diff"] == 479 - (392 + 87)  # 0 — реальный дрейф
 
-    # bc_mixed: 30 = 10 собрано + 20 брак (uploaded 7 и closed 999 НЕ учтены)
+    # bc_mixed: 30 = 17 собрано (10 ready + 7 uploaded) + 13 брак (closed 999 НЕ учтён)
     m = rows[bc_mixed]
-    assert m["ff_reserve_ready"] == 10
-    assert m["ff_defect"] == 20
-    assert m["ff_reserve_ready"] + m["ff_defect"] == m["ff_reserve"]  # сходится с резервом
+    assert m["ff_reserve_ready"] == 17
+    assert m["ff_defect"] == 13
+    assert m["ff_reserve_ready"] + m["ff_inbound_locked"] + m["ff_defect"] == m["ff_reserve"]
     assert m["diff"] == 90 - (70 + 20)  # 0
 
-    # bc_over: locked 8 < собрано 20 → кап: собрано=min(20,8)=8, брак=0; uploaded 3 игнор
+    # bc_over: locked 8 < собрано (ready 20 + uploaded 3 = 23) → кап: собрано=min(23,8)=8, брак=0
     o = rows[bc_over]
     assert o["ff_reserve_ready"] == 8
     assert o["ff_defect"] == 0
-    assert o["ff_reserve_ready"] + o["ff_defect"] == o["ff_reserve"]
+    assert o["ff_reserve_ready"] + o["ff_inbound_locked"] + o["ff_defect"] == o["ff_reserve"]
 
     totals = data["totals"]
-    assert totals["ff_reserve_ready"] == 10 + 8
-    assert totals["ff_defect"] == 87 + 20
+    assert totals["ff_reserve_ready"] == 17 + 8
+    assert totals["ff_defect"] == 87 + 13
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_migfull_inbound_locked_out_of_defect(db_session, project, warehouse):
+    """migfull: свежий приход, залоченный migfull (позиции в EXPECTED-приёмке) и не
+    «собранный» в отгрузку, выносится из «Брака» в бакет «В приёмке» (кейс мозаики)."""
+    bc_full = f"BC-{_uid()}"  # приёмка ≥ резерва → весь резерв в «В приёмке»
+    bc_part = f"BC-{_uid()}"  # приёмка < резерва → часть в приёмке, часть брак
+    nom_full = await _make_nomenclature(db_session, project.id, bc_full, article="MOSAIC")
+    nom_part = await _make_nomenclature(db_session, project.id, bc_part, article="PART")
+    db_session.add_all(
+        [
+            FulfillmentStock(
+                project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+                barcode=bc_full, external_product_id="g-full", nomenclature_id=nom_full.id,
+                qty_good=345, qty_reserve=345, qty_defect=0, qty_nominal=0,
+            ),
+            FulfillmentStock(
+                project_id=project.id, warehouse_id=warehouse.id, provider="migfull",
+                barcode=bc_part, external_product_id="g-part", nomenclature_id=nom_part.id,
+                qty_good=100, qty_reserve=100, qty_defect=0, qty_nominal=0,
+            ),
+        ]
+    )
+    receipt = InboundReceipt(
+        project_id=project.id, warehouse_id=warehouse.id, number=f"IN-{_uid()[:6]}", status="EXPECTED"
+    )
+    db_session.add(receipt)
+    await db_session.commit()
+    await db_session.refresh(receipt)
+    db_session.add_all(
+        [
+            InboundReceiptItem(project_id=project.id, receipt_id=receipt.id, nomenclature_id=nom_full.id, barcode=bc_full, expected_qty=414),
+            InboundReceiptItem(project_id=project.id, receipt_id=receipt.id, nomenclature_id=nom_part.id, barcode=bc_part, expected_qty=30),
+        ]
+    )
+    await db_session.commit()
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    rows = {r["barcode"]: r for r in data["rows"]}
+
+    # bc_full: весь резерв 345 = «В приёмке» (приёмка 414 ≥ 345), брак 0
+    f = rows[bc_full]
+    assert f["ff_reserve_ready"] == 0
+    assert f["ff_inbound_locked"] == 345
+    assert f["ff_defect"] == 0
+    assert f["ff_reserve_ready"] + f["ff_inbound_locked"] + f["ff_defect"] == f["ff_reserve"]
+
+    # bc_part: приёмка 30 → «В приёмке» 30, брак 70
+    p = rows[bc_part]
+    assert p["ff_inbound_locked"] == 30
+    assert p["ff_defect"] == 70
+    assert p["ff_reserve_ready"] + p["ff_inbound_locked"] + p["ff_defect"] == p["ff_reserve"]
+
+    assert data["totals"]["ff_inbound_locked"] == 345 + 30
 
 
 # ─── migfull короб → россыпь (box → loose) ──────────────────────────────────
