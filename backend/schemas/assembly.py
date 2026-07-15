@@ -416,11 +416,11 @@ class ApplyGoodsWeightBulkResult(BaseModel):
 
 
 class PreDistVehicle(BaseModel):
-    """Машина в пути, доступная (или нет) для предраспределения."""
+    """Машина в пути (или недавно принятая), доступная (или нет) для распределения."""
 
     id: int
     order_no: str
-    status: str  # CUSTOMS | DISPATCHED
+    status: str  # CUSTOMS | DISPATCHED | DELIVERED (принята ≤ окна, см. accepted_date)
     target_warehouse_id: int | None = None  # ФФ-склад разгрузки (источник будущих сборок)
     target_warehouse_name: str | None = None
     eta: date | None = None  # estimated_arrival_date
@@ -429,6 +429,10 @@ class PreDistVehicle(BaseModel):
     distributed_qty: int = 0  # уже разнесено в заявки этой машины (не CANCELLED)
     can_distribute: bool = True  # target_warehouse_id задан и это FULFILLMENT-склад
     block_reason: str | None = None  # почему нельзя (если can_distribute=False)
+    # Дата последней ПРИНЯТОЙ приёмки машины (InboundReceipt.actual_date). Заполнена только
+    # для DELIVERED: такая машина остаётся в предраспределении ещё PRE_DIST_DELIVERED_WINDOW_DAYS
+    # дней, но заявки из неё создаются ОБЫЧНЫМИ (остаток уже оприходован на ФФ).
+    accepted_date: date | None = None
 
 
 class PreDistPoolRow(BaseModel):

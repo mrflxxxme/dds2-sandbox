@@ -886,7 +886,7 @@ export default function AssemblyListPage() {
             render: (_v, row: AssemblyRequest) => (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 500 }}>{row.number}</span>
-                    {row.is_pre_distribution && (
+                    {row.is_pre_distribution ? (
                         <span
                             className="badge badge-info"
                             style={{ fontSize: 11 }}
@@ -894,7 +894,15 @@ export default function AssemblyListPage() {
                         >
                             🚚 Предраспределение{row.source_vehicle_order_no ? ` машины ${row.source_vehicle_order_no}` : ''}
                         </span>
-                    )}
+                    ) : row.source_vehicle_order_no ? (
+                        <span
+                            className="badge badge-info"
+                            style={{ fontSize: 11 }}
+                            title="Обычная заявка, созданная распределением уже принятой машины (остатки списаны как у обычной сборки)"
+                        >
+                            🚚 Из машины {row.source_vehicle_order_no}
+                        </span>
+                    ) : null}
                     {row.is_prebooking && (
                         <span
                             className="badge badge-warning"

@@ -2128,6 +2128,7 @@ export interface FfMismatchDetail {
 export interface PreDistVehicle {
   id: number;
   order_no: string;
+  /** CUSTOMS | DISPATCHED — в пути; DELIVERED — принята ≤ 3 дн. назад (см. accepted_date). */
   status: string;
   target_warehouse_id: number | null;
   target_warehouse_name: string | null;
@@ -2137,6 +2138,9 @@ export interface PreDistVehicle {
   distributed_qty: number;
   can_distribute: boolean;
   block_reason: string | null;
+  /** Дата приёмки (только для DELIVERED): остаток уже на ФФ, заявки из машины
+   *  создаются ОБЫЧНЫМИ сборками (со списанием остатков), метка машины остаётся. */
+  accepted_date: string | null;
 }
 
 /** Строка пула машины: товар и его доступный для раздачи остаток (gross − уже разнесённое). */

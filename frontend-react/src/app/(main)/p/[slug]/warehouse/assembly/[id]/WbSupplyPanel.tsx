@@ -53,6 +53,14 @@ const normalizePlate = (s: string): string =>
     s.toUpperCase().split('').map((c) => PLATE_HOMOGLYPH[c] ?? c).join('').replace(/[^A-Z0-9]/g, '');
 const extractPlate = (s: string): string => s.match(PLATE_RE)?.[0] ?? s.trim();
 const onlyDigits = (s: string): string => s.replace(/\D/g, '');
+/** Телефон РФ к канону 79XXXXXXXXX (8→7, +7→7) — как нормализует бэк для WB.
+ *  Иначе сравнение пропуск↔машина по сырым цифрам даёт ложное «79…» ≠ «89…». */
+const normalizeRuPhone = (s: string): string => {
+    const d = onlyDigits(s);
+    if (d.length === 11 && d[0] === '8') return `7${d.slice(1)}`;
+    if (d.length === 10) return `7${d}`;
+    return d;
+};
 
 /** Звёздочка «поле обязательно» — WB не примет пропуск без всех полей. */
 const Req = () => <span style={{ color: 'var(--color-danger)', marginLeft: 2 }}>*</span>;
@@ -275,9 +283,11 @@ export default function WbSupplyPanel({ assemblyId, items, defaultPackageType }:
         !!carNumber.trim() && !!vehInfo.trim()
         && normalizePlate(carNumber) !== normalizePlate(extractPlate(vehInfo));
     const carModelMismatch = mismatch(carModel, vehBrand);
-    // Телефон — по цифрам (игнорируем +/пробелы/скобки).
+    // Телефон — по нормализованному канону (8/+7 → 7), иначе нормализованный
+    // пропуск «79…» ложно расходится с сырым «8-…» из машины заявки.
     const driverPhoneMismatch =
-        !!driverPhone.trim() && !!vehPhone.trim() && onlyDigits(driverPhone) !== onlyDigits(vehPhone);
+        !!driverPhone.trim() && !!vehPhone.trim()
+        && normalizeRuPhone(driverPhone) !== normalizeRuPhone(vehPhone);
     // Паллеты пропуска ≠ паллетам заявки (F2): оба заданы и различаются.
     const asmPallets = st?.assembly_pallets_count ?? null;
     const palletsMismatch = pallets !== '' && asmPallets != null && Number(pallets) !== asmPallets;

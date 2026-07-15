@@ -1080,10 +1080,14 @@ export default function PreDistVehiclePage() {
             </h1>
             {vehicle && (
                 <>
-                    <span className="badge badge-info">{vehicle.status}</span>
+                    <span className={`badge ${vehicle.status === 'DELIVERED' ? 'badge-success' : 'badge-info'}`}>
+                        {vehicle.status === 'DELIVERED' ? '✅ Принята' : vehicle.status}
+                    </span>
                     <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>
                         Склад: <b style={{ color: 'var(--color-text)' }}>{vehicle.target_warehouse_name || '—'}</b>
-                        {vehicle.eta ? ` · ETA ${formatDate(vehicle.eta)}` : ''}
+                        {vehicle.status === 'DELIVERED' && vehicle.accepted_date
+                            ? ` · Принята ${formatDate(vehicle.accepted_date)}`
+                            : vehicle.eta ? ` · ETA ${formatDate(vehicle.eta)}` : ''}
                     </span>
                 </>
             )}
@@ -1134,6 +1138,14 @@ export default function PreDistVehiclePage() {
         <div className="animate-in">
             {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
             {header}
+
+            {vehicle?.status === 'DELIVERED' && (
+                <div className="glass-card" style={{ padding: 12, marginBottom: 16, fontSize: 13, color: 'var(--color-muted)' }}>
+                    ✅ Машина уже принята на ФФ — её остаток оприходован на склад. Заявки создадутся{' '}
+                    <b style={{ color: 'var(--color-text)' }}>обычными сборками</b> (со списанием остатков ФФ,
+                    сразу «В сборке») с меткой машины {vehicle.order_no}.
+                </div>
+            )}
 
             <AcceptanceBanner summary={acceptanceNote} />
 
