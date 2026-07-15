@@ -44,7 +44,7 @@ export default function BulkCreate({ slug }: { slug: string }) {
         // Имя по умолчанию — название товара; сохраняем правки, добавляем новым
         setNames(prev => {
             const next = new Map(prev);
-            for (const [nm, title] of sel) if (!next.has(nm)) next.set(nm, title.slice(0, 100));
+            for (const [nm, title] of sel) if (!next.has(nm)) next.set(nm, title.slice(0, 50));
             for (const nm of [...next.keys()]) if (!sel.has(nm)) next.delete(nm);
             return next;
         });
@@ -67,7 +67,7 @@ export default function BulkCreate({ slug }: { slug: string }) {
             setProgress(`Создаём ${i + 1} из ${entries.length}…`);
             try {
                 const res = await api.createCampaign({
-                    name: (names.get(nm) || title).trim().slice(0, 128),
+                    name: (names.get(nm) || title).trim().slice(0, 50),
                     nms: [nm],
                     bid_type: payment === 'cpc' ? 'manual' : bidType,
                     payment_type: payment,
@@ -178,7 +178,7 @@ export default function BulkCreate({ slug }: { slug: string }) {
                                     <tr key={nm} style={{ borderTop: '1px solid #f4f4f5' }}>
                                         <td style={{ padding: '8px' }}><WbThumb nmId={nm} size={40} /></td>
                                         <td style={{ padding: '8px' }}>
-                                            <input value={names.get(nm) ?? title} maxLength={128}
+                                            <input value={names.get(nm) ?? title} maxLength={50}
                                                 onChange={e => setNames(prev => new Map(prev).set(nm, e.target.value))}
                                                 style={{ width: '100%', fontSize: 13, padding: '6px 9px', borderRadius: 8, border: '1px solid #e5e7eb' }} />
                                             {res && !res.ok && <div style={{ fontSize: 11, color: '#ef4444', marginTop: 3 }}>{res.error}</div>}

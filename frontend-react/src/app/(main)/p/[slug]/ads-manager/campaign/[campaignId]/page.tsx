@@ -347,19 +347,35 @@ export default function CampaignPage() {
         // Подтверждение уже получено в нижней панели кластеризатора
         setMinusError(null);
         setPending(prev => { const n = new Set(prev); items.forEach(c => n.add(c.norm_query)); return n; });
+        let okCount = 0;
+        const failed: string[] = [];
+        let lastError: string | null = null;
         for (const c of items) {
             try {
                 const res = await api.toggleClusterMinus(campaignId, { nm_id: nmId, norm_query: c.norm_query, action });
                 if (res.ok) {
+                    okCount += 1;
                     setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => x.norm_query === c.norm_query ? { ...x, is_minused: action === 'add' } : x) } : prev);
                 } else {
-                    setMinusError(res.error || `WB отклонил «${c.norm_query}»`);
+                    failed.push(c.norm_query);
+                    lastError = res.error || 'WB отклонил операцию';
                 }
             } catch (e) {
-                setMinusError(e instanceof Error ? e.message : 'Ошибка обращения к WB');
+                failed.push(c.norm_query);
+                lastError = e instanceof Error ? e.message : 'Ошибка обращения к WB';
             } finally {
                 setPending(prev => { const n = new Set(prev); n.delete(c.norm_query); return n; });
             }
+        }
+        const verb = action === 'add' ? 'отключено' : 'включено';
+        if (failed.length === 0) {
+            toast.success(`${verb === 'отключено' ? 'Отключено' : 'Включено'} фраз: ${okCount}`);
+        } else {
+            const list = failed.slice(0, 3).join('», «');
+            const more = failed.length > 3 ? ` и ещё ${failed.length - 3}` : '';
+            const msg = `Не ${verb} ${failed.length} из ${items.length}: «${list}»${more} — ${lastError}`;
+            setMinusError(msg);
+            toast.error(msg);
         }
     };
 
@@ -488,7 +504,9 @@ export default function CampaignPage() {
 
     // Копирование артикула (nm_id) из карточки товара кампании
     const copyNm = (nmId: number) => {
-        navigator.clipboard?.writeText(String(nmId)).then(() => toast.success(`Артикул ${nmId} скопирован`)).catch(() => { /* clipboard недоступен */ });
+        navigator.clipboard?.writeText(String(nmId))
+            .then(() => toast.success(`Артикул ${nmId} скопирован`))
+            .catch(() => toast.error('Не удалось скопировать — буфер обмена недоступен'));
     };
 
     const ap = autopay[String(campaignId)];

@@ -92,8 +92,9 @@ export default function CreateCampaignPage() {
     const zonesEditable = payment === 'cpm' && bidType === 'manual';
 
     const budgetNum = Math.round(Number(budget) || 0);
+    // Бюджет 0/пусто = черновик без пополнения (деньги не списываются); иначе — минимум WB
     const canSubmit = name.trim() && selected.size > 0 && !busy
-        && (!zonesEditable || zones.size > 0) && budgetNum >= MIN_BUDGET;
+        && (!zonesEditable || zones.size > 0) && (budgetNum === 0 || budgetNum >= MIN_BUDGET);
 
     const submit = async () => {
         setBusy(true); setError('');
@@ -109,9 +110,10 @@ export default function CreateCampaignPage() {
             if (!created.ok || !created.campaign_id) { toast.error(created.error || 'Не удалось создать кампанию'); return; }
             const id = created.campaign_id;
 
-            // 2. Бюджет (реальные деньги) — не критично для существования кампании
+            // 2–4: кампания уже существует — провалы шагов не критичны, но о них НАДО сказать
+            const stepErrors: string[] = [];
             try { if (budgetNum >= MIN_BUDGET) await api.depositCampaignBudget(id, budgetNum, 0); }
-            catch { /* кампания создана, бюджет добавит пользователь */ }
+            catch { stepErrors.push(`пополнение на ${budgetNum} ₽ не прошло`); }
 
             // 3. Ставки по зонам (ручная CPM) — применяем к каждой карточке товара
             try {
@@ -124,13 +126,14 @@ export default function CreateCampaignPage() {
                     ]);
                     if (bids.length) await api.setCardBids(id, bids);
                 }
-            } catch { /* ставки настроит пользователь на странице кампании */ }
+            } catch { stepErrors.push('ставки зон не применились'); }
 
             // 4. Автопополнение
             try { if (autopay?.enabled) await api.setCampaignAutopay(id, autopay); }
-            catch { /* не критично */ }
+            catch { stepErrors.push('автопополнение не настроилось'); }
 
-            toast.success('Кампания создана');
+            if (stepErrors.length) toast.warning(`Кампания создана, но: ${stepErrors.join('; ')}. Донастройте на странице кампании.`);
+            else toast.success('Кампания создана');
             router.push(`/p/${slug}/ads-manager/campaign/${id}`);
         } catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось создать кампанию'); }
         finally { setBusy(false); }
@@ -171,9 +174,9 @@ export default function CreateCampaignPage() {
                     <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                         <div>
                             <label style={{ fontSize: 12, color: '#6b7280', display: 'block', marginBottom: 4 }}>Бюджет кампании, ₽</label>
-                            <input type="number" min={MIN_BUDGET} step={100} value={budget} onChange={e => setBudget(e.target.value)}
+                            <input type="number" min={0} step={100} value={budget} onChange={e => setBudget(e.target.value)}
                                 style={{ fontSize: 15, padding: '9px 12px', borderRadius: 10, border: `1px solid ${budgetNum < MIN_BUDGET ? '#ef4444' : '#d1d5db'}`, width: 240 }} />
-                            <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>Минимальный бюджет — {MIN_BUDGET} ₽</div>
+                            <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>Минимальный бюджет — {MIN_BUDGET} ₽ · 0 или пусто — создать черновик без пополнения</div>
                         </div>
                         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 9, marginTop: 22 }}>
                             {/* Тумблер переключает: выкл (сброс настройки) ↔ вкл (через модалку). Текст всегда открывает модалку. */}

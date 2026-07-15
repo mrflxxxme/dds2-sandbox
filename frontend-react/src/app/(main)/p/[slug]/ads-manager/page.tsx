@@ -169,6 +169,10 @@ export default function AdsManagerPage() {
         try { localStorage.setItem('ads_drr_plan_pct_overrides', JSON.stringify(next)); } catch { /* SSR */ }
         return next;
     });
+    // Черновик набора в полях ДРР-плана: пока поле редактируется, показываем сырую строку —
+    // иначе контролируемый input, чей value = String(number), съедал точку («8.» → «8»,
+    // и набрать 8.5 с клавиатуры было невозможно). Ключ: 'header' либо String(campaign_id).
+    const [drrDraft, setDrrDraft] = useState<{ key: string; text: string } | null>(null);
     const [openMenu, setOpenMenu] = useState<'filter' | 'cols' | null>(null);
     const [page, setPage] = useState(1);
     const [pageInput, setPageInput] = useState('');
@@ -315,7 +319,9 @@ export default function AdsManagerPage() {
                 if (p.budgets_total) setSyncProgress(`${p.budgets_done ?? 0}/${p.budgets_total}`);
                 if (p.status === 'done' || p.status === 'error' || p.status === 'idle') break;
             }
-            await loadCampaigns();
+            // Перечитываем С ТЕКУЩИМ периодом календаря: вызов без дат садил список
+            // на бэкенд-дефолт (7 дней), а календарь продолжал показывать выбранный диапазон
+            await loadCampaigns(dateFrom, dateTo);
         } catch (e) { setError(e instanceof Error ? e.message : 'Ошибка синхронизации'); }
         finally { setSyncing(false); setSyncProgress(''); }
     };
@@ -340,6 +346,15 @@ export default function AdsManagerPage() {
         const m: Record<number, { subjects: string[]; brands: string[] }> = {};
         for (const c of campaigns) m[c.campaign_id] = { subjects: c.subjects || [], brands: c.brands || [] };
         return m;
+    }, [campaigns]);
+
+    // Все nm с хоть одной НЕзавершённой кампанией — честный hasCampaign для кликов в разделах
+    // (раньше «Не работает реклама» всегда слала false → «Создать» плодил дубли кампаний,
+    // а «Нет органики» всегда true → «К кампаниям» мог открыть пустой список).
+    const nmsWithCampaigns = useMemo(() => {
+        const s = new Set<number>();
+        for (const c of campaigns) if (c.status !== 7) for (const nm of c.nm_ids) s.add(nm);
+        return s;
     }, [campaigns]);
 
     // Клик по товару в разделе: всегда копим в выбор (запоминаем, есть ли у товара кампания).
@@ -446,7 +461,9 @@ export default function AdsManagerPage() {
 
     // Копирование артикула (nm_id) из ячейки кампании
     const copyNm = (nmId: number) => {
-        navigator.clipboard?.writeText(String(nmId)).then(() => toast.success(`Артикул ${nmId} скопирован`)).catch(() => { /* clipboard недоступен */ });
+        navigator.clipboard?.writeText(String(nmId))
+            .then(() => toast.success(`Артикул ${nmId} скопирован`))
+            .catch(() => toast.error('Не удалось скопировать — буфер обмена недоступен'));
     };
 
     const campaignHref = (c: AdsManagerCampaign) => `/p/${slug}/ads-manager/campaign/${c.campaign_id}`;
@@ -545,9 +562,11 @@ export default function AdsManagerPage() {
                         )}
                         <span style={{ fontWeight: 600, color: '#3b82f6', minWidth: 40, textAlign: 'right' }}>{sum > 0 ? fmt(sum) : '—'}</span>
                         <input type="text" inputMode="decimal" aria-label="ДРР% кампании"
-                            value={effPct > 0 ? String(effPct) : ''} placeholder={String(targetDrr || '')}
+                            value={drrDraft?.key === String(c.campaign_id) ? drrDraft.text : (effPct > 0 ? String(effPct) : '')}
+                            placeholder={String(targetDrr || '')}
                             onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}
-                            onChange={e => setCampDrrPct(c.campaign_id, e.target.value)}
+                            onChange={e => { setDrrDraft({ key: String(c.campaign_id), text: e.target.value }); setCampDrrPct(c.campaign_id, e.target.value); }}
+                            onBlur={() => setDrrDraft(null)}
                             style={{
                                 width: 34, padding: '1px 3px', fontSize: 12, textAlign: 'right', borderRadius: 4,
                                 fontWeight: isOv ? 700 : 500, color: isOv ? '#7c3aed' : '#6b7280',
@@ -778,9 +797,11 @@ export default function AdsManagerPage() {
                                                     {col.key === 'drr_plan' ? (
                                                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, justifyContent: base.textAlign === 'left' ? 'flex-start' : 'flex-end' }}>
                                                             <InfoTip text={col.title!}>ДРР план</InfoTip>
-                                                            <input type="text" inputMode="decimal" value={targetDrr || ''}
+                                                            <input type="text" inputMode="decimal"
+                                                                value={drrDraft?.key === 'header' ? drrDraft.text : (targetDrr || '')}
                                                                 onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}
-                                                                onChange={e => onTargetDrrChange(e.target.value)} aria-label="Целевой ДРР, %"
+                                                                onChange={e => { setDrrDraft({ key: 'header', text: e.target.value }); onTargetDrrChange(e.target.value); }}
+                                                                onBlur={() => setDrrDraft(null)} aria-label="Целевой ДРР, %"
                                                                 style={{ width: 32, padding: '1px 3px', fontSize: 11, fontWeight: 600, border: '1px solid #9ca3af', borderRadius: 4, textAlign: 'center', background: '#fff', color: '#111827' }} />
                                                             <span>%</span>
                                                         </span>
@@ -835,7 +856,8 @@ export default function AdsManagerPage() {
                 ) : (
                     <div className="glass-card static" style={{ padding: 0, overflow: 'hidden', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
                         <AdSections view={view} dateFrom={dateFrom} dateTo={dateTo} brand={brand} subject={subject} campNm={campNm}
-                            selectedNms={selectedNms} onProductClick={onProductClick} campMeta={campMeta} />
+                            selectedNms={selectedNms} onProductClick={onProductClick} campMeta={campMeta}
+                            nmsWithCampaigns={nmsWithCampaigns} />
                     </div>
                 )}
 
