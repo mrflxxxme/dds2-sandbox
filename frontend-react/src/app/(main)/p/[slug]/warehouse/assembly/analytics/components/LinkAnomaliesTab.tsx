@@ -300,7 +300,13 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
         const rows = data?.supply_discrepancies ?? [];
         if (rows.length === 0) return;
         const problems = (r: SupplyDiscrepancyRow) =>
-            [r.date_mismatch && 'Дата', r.pallet_mismatch && 'Паллеты', r.pass_missing && 'Пропуск']
+            [
+                r.date_mismatch && 'Дата',
+                r.pallet_mismatch && 'Паллеты',
+                r.car_number_mismatch && 'Номер≠ВБ',
+                r.pass_missing && 'Нет на ВБ',
+                r.pass_missing_dds && 'Нет в ДДС',
+            ]
                 .filter(Boolean)
                 .join(', ');
         exportToExcel(
@@ -314,6 +320,7 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                 date_diff: r.date_diff_days ?? '',
                 pallets_count: r.pallets_count,
                 pass_pallets: r.pass_pallets ?? '',
+                wb_car_number: r.wb_car_number || '',
                 problems: problems(r),
             })),
             'assembly_supply_discrepancies',
@@ -327,6 +334,7 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                 { key: 'date_diff', label: 'Δ дней' },
                 { key: 'pallets_count', label: 'Наши паллеты' },
                 { key: 'pass_pallets', label: 'Паллеты пропуска' },
+                { key: 'wb_car_number', label: 'Номер машины ВБ' },
                 { key: 'problems', label: 'Проблемы' },
             ],
         );
@@ -790,7 +798,7 @@ function SupplyDiscrepancyBlock({
                 count={rows.length}
                 color="var(--color-danger)"
                 onExport={onExport}
-                note="Машина назначена или в пути, но WB-поставка расходится: дата сдачи вне окна брони (±1 день), паллеты не совпадают либо пропуск не оформлен."
+                note="Машина назначена или в пути, но что-то расходится: дата сдачи вне окна брони (±1 день), паллеты не совпадают, номер машины ≠ кабинету WB, либо пропуск не оформлен (нет на ВБ / нет в ДДС)."
             />
             {rows.length === 0 ? (
                 <BlockEmpty text="Поставки сходятся — всё чисто" />
@@ -808,6 +816,7 @@ function SupplyDiscrepancyBlock({
                                 <th style={{ textAlign: 'right' }}>Δ дней</th>
                                 <th style={{ textAlign: 'right' }}>Наши пал.</th>
                                 <th style={{ textAlign: 'right' }}>Пал. пропуска</th>
+                                <th>Номер ВБ</th>
                                 <th>Проблемы</th>
                             </tr>
                         </thead>
@@ -838,10 +847,15 @@ function SupplyDiscrepancyBlock({
                                     <td style={{ textAlign: 'right', color: row.pallet_mismatch ? 'var(--color-danger)' : 'var(--color-text-muted)', fontWeight: row.pallet_mismatch ? 700 : 400 }}>
                                         {row.pass_pallets == null ? '—' : formatNumber(row.pass_pallets, 0)}
                                     </td>
+                                    <td style={{ color: row.car_number_mismatch ? 'var(--color-danger)' : 'var(--color-text-muted)', fontWeight: row.car_number_mismatch ? 700 : 400 }}>
+                                        {row.wb_car_number || '—'}
+                                    </td>
                                     <td style={{ whiteSpace: 'nowrap' }}>
                                         {row.date_mismatch && <span className="badge badge-danger" style={{ fontSize: 11, marginRight: 4 }}>Дата</span>}
                                         {row.pallet_mismatch && <span className="badge badge-warning" style={{ fontSize: 11, marginRight: 4 }}>Паллеты</span>}
-                                        {row.pass_missing && <span className="badge badge-secondary" style={{ fontSize: 11 }}>Пропуск</span>}
+                                        {row.car_number_mismatch && <span className="badge badge-danger" style={{ fontSize: 11, marginRight: 4 }}>Номер ≠ ВБ</span>}
+                                        {row.pass_missing && <span className="badge badge-secondary" style={{ fontSize: 11, marginRight: 4 }}>Нет на ВБ</span>}
+                                        {row.pass_missing_dds && <span className="badge badge-warning" style={{ fontSize: 11 }}>Нет в ДДС</span>}
                                     </td>
                                 </tr>
                             ))}

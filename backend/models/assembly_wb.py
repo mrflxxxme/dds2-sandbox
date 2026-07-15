@@ -114,6 +114,15 @@ class AssemblyWbSupply(Base, TimestampMixin):
     pass_car_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
     pass_pallets: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Снимок ФАКТИЧЕСКОГО пропуска из кабинета WB (trn_details), синкается
+    # sync_all_states. Нужен для сверки нашего пропуска (pass_*) с кабинетным без
+    # построчного HTTP. None у wb_pass_present = ещё не синкали.
+    wb_pass_present: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    wb_pass_car_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    wb_pass_pallets: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    wb_pass_driver: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    wb_pass_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     assembly_request: Mapped["AssemblyRequest"] = relationship()
 
     __table_args__ = (
