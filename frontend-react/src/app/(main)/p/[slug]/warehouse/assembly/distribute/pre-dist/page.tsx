@@ -701,6 +701,9 @@ export default function PreDistVehiclePage() {
 
     // Колонки WB-складов матрицы (куда шлём ИЛИ где есть потребность) + округа.
     // Источник — plan (заявки + предбронь), чтобы направления предброни были колонками.
+    // В ручном режиме — плюс склады с присутствием SKU машины (остаток/в сборке/в пути):
+    // когда всё уже отправлено, потребность обнуляется, и без этого фолбэка холст
+    // оставался бы без единой колонки — остаток машины некуда дораздать (кейс V-0033).
     const wbCols = useMemo(() => {
         const distByWh = new Map<string, string>();
         for (const w of stockNeed?.warehouses ?? []) if (w.name) distByWh.set(w.name, w.district_key || 'unknown');
@@ -709,13 +712,20 @@ export default function PreDistVehiclePage() {
         for (const e of enrichMap.values()) {
             for (const [wh, c] of Object.entries(e.byWh)) if (c.need > 0) names.add(wh);
         }
+        if (editMode) {
+            for (const e of enrichMap.values()) {
+                for (const [wh, c] of Object.entries(e.byWh)) if (c.stock > 0 || c.asm > 0 || c.transit > 0) names.add(wh);
+            }
+            // Совсем нет присутствия (свежий кабинет) — полный справочник складов.
+            if (names.size === 0) for (const name of distByWh.keys()) names.add(name);
+        }
         const arr = [...names].map(name => ({ name, district: distByWh.get(name) || 'unknown' }));
         arr.sort((a, b) => {
             const ra = districtRank(a.district), rb = districtRank(b.district);
             return ra !== rb ? ra - rb : a.name.localeCompare(b.name, 'ru');
         });
         return arr;
-    }, [plan, enrichMap, stockNeed]);
+    }, [plan, enrichMap, stockNeed, editMode]);
 
     const districtGroups = useMemo(() => {
         const groups: { label: string; color: string; count: number }[] = [];
@@ -1262,14 +1272,22 @@ export default function PreDistVehiclePage() {
 
             {computing ? (
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>Считаю раскладку (потребность · приёмка · коробы · паллеты)…</div>
-            ) : plan.totalShip === 0 && !editMode ? (
+            ) : plan.totalShip === 0 && !editMode && onHoldQty === 0 ? (
                 // В ручном режиме матрица стартует пустой (0 распределено) — таблицу ВСЕГДА
-                // показываем как чистый холст со степперами; заглушка только для авто-режима.
+                // показываем как чистый холст со степперами; заглушка только для авто-режима
+                // И только когда на машине вообще нет нераспределённого остатка — иначе
+                // остаток «пропадает с экрана» и его нельзя дораздать (кейс V-0033).
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
                     Нечего разложить: ни у одного артикула машины нет потребности по WB-складам (или не задана кратность короба).
                 </div>
             ) : (
                 <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
+                    {plan.totalShip === 0 && !editMode && (
+                        <div style={{ padding: '10px 16px', fontSize: 13, color: 'var(--color-warning)', borderBottom: '1px solid var(--color-border)' }}>
+                            Потребности по складам нет (весь спрос закрыт), но на машине остаётся {formatNumber(onHoldQty, 0)} шт вне плана — см. колонку «Остаётся ФФ».
+                            Нажми «✏️ Разложить вручную», чтобы дораздать их степперами в склады, где товар уже лежит или едет, — доливка сложится в существующие заявки направлений.
+                        </div>
+                    )}
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                         <thead>
                             {/* Шапка округов */}
