@@ -671,7 +671,8 @@ async def test_sync_pass_from_vehicle_uses_explicit_names(db_session):
     link = await wb_supply_service._get_or_create_link(db_session, PROJECT_ID, ASSEMBLY_ID)
     assert link.pass_car_number == "В874УА37"
     assert link.pass_car_model == "ГАЗ-330"
-    assert link.pass_driver_phone == "+7 915 849 17 78"
+    # Телефон нормализуется к формату WB-пропуска (79XXXXXXXXX), а не хранится raw.
+    assert link.pass_driver_phone == "79158491778"
     assert link.pass_driver_last == "Крапива"
     assert link.pass_driver_first == "Дмитрий"
     # pallets_count заявки = 2 (фикстура) → проставился в пустой пропуск.
