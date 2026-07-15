@@ -485,6 +485,128 @@ class TestListAssemblyRequests:
         ]
         assert req.id in explicit_ids
 
+    async def test_list_source_filter(self, db_session):
+        """source: 'pre_dist' — заявки с меткой машины (предраспределение/долив);
+        'prebooking' — 🅿️ предзаявки; 'plain' — без того и другого; None — все."""
+        from uuid import uuid4
+
+        from backend.models.cost import CostOrder
+        from backend.models.enums import VehicleStatus
+
+        plain = await _create_test_request(db_session)
+
+        vehicle = CostOrder(
+            project_id=PROJECT_ID,
+            order_no=f"V-SRC-{uuid4().hex[:8].upper()}",
+            status=VehicleStatus.DISPATCHED,
+        )
+        db_session.add(vehicle)
+        await db_session.flush()
+
+        wh_id = await _get_fulfillment_wh_id(db_session)
+
+        def _manual_payload() -> AssemblyRequestCreate:
+            return AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                pallets_count=0,
+                pallet_weight_kg=Decimal("0"),
+                wb_warehouse_name_manual="Казань",
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=1)],
+            )
+
+        pre_dist = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            _manual_payload(),
+            skip_stock_validation=True,
+            status_override=AssemblyStatus.PRE_DISTRIBUTED,
+            source_vehicle_id=vehicle.id,
+            is_pre_distribution=True,
+        )
+        prebook = await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            _manual_payload(),
+            skip_stock_validation=True,
+            is_prebooking=True,
+        )
+
+        async def _ids(source: str | None) -> set[int]:
+            items, _ = await list_assembly_requests(db_session, PROJECT_ID, source=source, limit=100)
+            return {r.id for r in items}
+
+        pd_ids = await _ids("pre_dist")
+        assert pre_dist.id in pd_ids and plain.id not in pd_ids and prebook.id not in pd_ids
+
+        pb_ids = await _ids("prebooking")
+        assert prebook.id in pb_ids and pre_dist.id not in pb_ids and plain.id not in pb_ids
+
+        plain_ids = await _ids("plain")
+        assert plain.id in plain_ids and pre_dist.id not in plain_ids and prebook.id not in plain_ids
+
+        all_ids = await _ids(None)
+        assert {plain.id, pre_dist.id, prebook.id} <= all_ids
+
+    async def test_list_source_vehicle_id_filter_and_options(self, db_session):
+        """source_vehicle_id — точечный фильтр по машине; list_source_vehicles —
+        справочник машин с заявками (для дропдауна «Источник»)."""
+        from uuid import uuid4
+
+        from backend.models.cost import CostOrder
+        from backend.models.enums import VehicleStatus
+        from backend.services.assembly.crud import list_source_vehicles
+
+        v1 = CostOrder(
+            project_id=PROJECT_ID,
+            order_no=f"V-SRC1-{uuid4().hex[:8].upper()}",
+            status=VehicleStatus.DISPATCHED,
+        )
+        v2 = CostOrder(
+            project_id=PROJECT_ID,
+            order_no=f"V-SRC2-{uuid4().hex[:8].upper()}",
+            status=VehicleStatus.DISPATCHED,
+        )
+        db_session.add_all([v1, v2])
+        await db_session.flush()
+
+        wh_id = await _get_fulfillment_wh_id(db_session)
+
+        async def _mk(vehicle_id: int) -> AssemblyRequest:
+            return await create_assembly_request(
+                db_session,
+                PROJECT_ID,
+                AssemblyRequestCreate(
+                    warehouse_id=wh_id,
+                    pallets_count=0,
+                    pallet_weight_kg=Decimal("0"),
+                    wb_warehouse_name_manual="Тула",
+                    items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=1)],
+                ),
+                skip_stock_validation=True,
+                status_override=AssemblyStatus.PRE_DISTRIBUTED,
+                source_vehicle_id=vehicle_id,
+                is_pre_distribution=True,
+            )
+
+        r1 = await _mk(v1.id)
+        r2 = await _mk(v2.id)
+
+        items, total = await list_assembly_requests(
+            db_session, PROJECT_ID, source_vehicle_id=v1.id, limit=100
+        )
+        ids = {r.id for r in items}
+        assert r1.id in ids and r2.id not in ids
+        assert all(r.source_vehicle_id == v1.id for r in items)
+
+        # Справочник машин: обе машины с заявками, project-scoped, с order_no.
+        options = await list_source_vehicles(db_session, PROJECT_ID)
+        by_id = {o["id"]: o["order_no"] for o in options}
+        assert by_id.get(v1.id) == v1.order_no
+        assert by_id.get(v2.id) == v2.order_no
+
+        other = await list_source_vehicles(db_session, OTHER_PROJECT_ID)
+        assert v1.id not in {o["id"] for o in other}
+
 
 @pytest.mark.asyncio
 class TestUpdateAssemblyRequest:

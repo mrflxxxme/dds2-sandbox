@@ -368,6 +368,10 @@ export function addWarehouseMethods(api: ApiClient) {
             /** active — скрыть Принято ВБ/Закрыта/Отменена; archived — только их; all — все */
             view?: 'active' | 'archived' | 'all';
             joint_only?: boolean;
+            /** Происхождение: pre_dist — из машины (🚚), prebooking — предзаявки (🅿️), plain — обычные */
+            source?: 'pre_dist' | 'prebooking' | 'plain';
+            /** Только заявки конкретной машины (CostOrder.id) */
+            source_vehicle_id?: number;
             limit?: number; offset?: number;
         }) {
             const query = new URLSearchParams();
@@ -378,6 +382,10 @@ export function addWarehouseMethods(api: ApiClient) {
             }
             const qs = query.toString();
             return api.request<AssemblyListResponse>('GET', `/api/v1/warehouse/assembly${qs ? `?${qs}` : ''}`);
+        },
+        /** Машины с заявками сборки — опции фильтра «Источник» (свежие сверху). */
+        getAssemblySourceVehicles() {
+            return api.request<import('@/types/api').SourceVehicleOption[]>('GET', '/api/v1/warehouse/assembly/source-vehicles');
         },
         createAssemblyRequest(data: AssemblyRequestCreate) {
             return api.request<AssemblyRequest>('POST', '/api/v1/warehouse/assembly', data);

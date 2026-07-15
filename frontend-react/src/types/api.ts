@@ -1905,6 +1905,12 @@ export interface WbSupplyStateBrief {
 }
 
 // Итог bulk-синка WB-состояний заявок проекта (F1).
+/** Машина с заявками сборки — опция фильтра «Источник» в списке сборок. */
+export interface SourceVehicleOption {
+  id: number;
+  order_no: string;
+}
+
 export interface WbBulkSyncResult {
   checked: number;
   updated: number;

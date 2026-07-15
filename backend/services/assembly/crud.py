@@ -22,7 +22,7 @@ from backend.models.assembly import (
     AssemblyRequestItem,
     AssemblyStatus,
 )
-from backend.models.cost import Nomenclature
+from backend.models.cost import CostOrder, Nomenclature
 from backend.models.counterparty import Counterparty
 from backend.models.fulfillment import FulfillmentRequest
 from backend.models.gazelka import GazelkaOrder, GazelkaOrderStatus
@@ -718,6 +718,34 @@ async def list_wb_warehouses(
     return sorted(names)
 
 
+async def list_source_vehicles(
+    db: AsyncSession,
+    project_id: int,
+) -> list[dict[str, Any]]:
+    """Машины (CostOrder), у которых есть не удалённые заявки сборки, — опции
+    дропдауна «Источник» в списке сборок. Свежие сверху (по max id заявки)."""
+    rows = (
+        await db.execute(
+            select(
+                CostOrder.id,
+                CostOrder.order_no,
+                func.max(AssemblyRequest.id).label("last_req_id"),
+            )
+            .join(AssemblyRequest, AssemblyRequest.source_vehicle_id == CostOrder.id)
+            .where(
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.is_deleted == False,  # noqa: E712
+                CostOrder.project_id == project_id,
+                CostOrder.is_deleted == False,  # noqa: E712
+            )
+            .group_by(CostOrder.id, CostOrder.order_no)
+            .order_by(func.max(AssemblyRequest.id).desc())
+            .limit(100)
+        )
+    ).all()
+    return [{"id": r.id, "order_no": r.order_no} for r in rows]
+
+
 # --- CRUD -------------------------------------------------------------------
 
 
@@ -747,6 +775,8 @@ async def list_assembly_requests(
     brand: str | None = None,
     ff_link: str | None = None,
     joint_only: bool = False,
+    source: str | None = None,
+    source_vehicle_id: int | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[AssemblyRequest], int]:
@@ -765,6 +795,14 @@ async def list_assembly_requests(
     joint_only: True — только «совместные» сборки (делят WB FBO-поставку с ≥1
     другой активной сборкой, т.е. ≥2 сборок на одну поставку под тем же
     предикатом, что у partial-unique индекса: не удалена, не CANCELLED).
+
+    source: происхождение заявки. "pre_dist" — с меткой машины
+    (source_vehicle_id, предраспределение И долив принятой машины);
+    "prebooking" — 🅿️ предзаявки (is_prebooking); "plain" — без того и
+    другого; None — без фильтра.
+
+    source_vehicle_id: точечный фильтр «заявки ЭТОЙ машины» (уточняет
+    source="pre_dist"; сам по себе тоже работает).
     """
     base = select(AssemblyRequest).where(
         AssemblyRequest.project_id == project_id,
@@ -820,6 +858,18 @@ async def list_assembly_requests(
             .distinct()
         )
         base = base.where(AssemblyRequest.id.in_(brand_requests))
+
+    if source_vehicle_id is not None:
+        base = base.where(AssemblyRequest.source_vehicle_id == source_vehicle_id)
+    if source == "pre_dist":
+        base = base.where(AssemblyRequest.source_vehicle_id.is_not(None))
+    elif source == "prebooking":
+        base = base.where(AssemblyRequest.is_prebooking == True)  # noqa: E712
+    elif source == "plain":
+        base = base.where(
+            AssemblyRequest.source_vehicle_id.is_(None),
+            AssemblyRequest.is_prebooking == False,  # noqa: E712
+        )
 
     if ff_link in ("none", "linked"):
         ff_exists = (

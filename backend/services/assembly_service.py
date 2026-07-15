@@ -43,6 +43,7 @@ from backend.services.assembly import (  # noqa: F401
     get_pre_distribution_vehicles,
     get_vehicle_pre_dist_pool,
     list_assembly_requests,
+    list_source_vehicles,
     list_wb_warehouses,
     mark_ready,
     merge_assembly_requests,
