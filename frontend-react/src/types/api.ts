@@ -3534,7 +3534,8 @@ export interface AdTabProduct {
   ctr: number;
   cpc: number;
   cpm: number;
-  drr: number;
+  /** null = расход есть, заказов нет (ДРР бесконечен) — хуже любого порога */
+  drr: number | null;
   abc_revenue: string;
   abc_profit: string;
   bdr_revenue: number;
@@ -6300,6 +6301,8 @@ export interface RawSource {
   rows: number | null;
   first_date: string | null;
   last_date: string | null;
+  /** когда данные обновлялись у нас (MAX(freshness_field)); null → считать по last_date */
+  fresh_at?: string | null;
   progress: RawRefreshProgress | null;
 }
 

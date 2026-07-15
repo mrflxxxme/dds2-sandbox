@@ -25,13 +25,14 @@ const adShare = (r: FunnelSkuRow) => {
 
 const wbUrl = (nmId: number) => `https://www.wildberries.ru/catalog/${nmId}/detail.aspx`;
 
-export default function AdSections({ view, dateFrom, dateTo, brand, subject, campNm, selectedNms, onProductClick, campMeta }: {
+export default function AdSections({ view, dateFrom, dateTo, brand, subject, campNm, selectedNms, onProductClick, campMeta, nmsWithCampaigns }: {
     view: View;
     dateFrom: string; dateTo: string; brand: string; subject: string;
     campNm?: Record<number, number>;  // campaign_id → nm_id (миниатюра товара в «Нехватке бюджета»)
     selectedNms?: Map<number, boolean>;  // выбранные товары (nm → есть ли кампания) — подсветка строк
     onProductClick?: (nmId: number, hasCampaign: boolean) => void;  // клик по товару (создать / в выбор)
     campMeta?: Record<number, { subjects: string[]; brands: string[] }>;  // предмет/бренд кампании — фильтр «Нехватки бюджета»
+    nmsWithCampaigns?: Set<number>;  // nm с незавершённой кампанией — честный hasCampaign при клике
 }) {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
@@ -50,7 +51,9 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
     // Копирование артикула (nm_id) из ячейки товара — единый тост, как в списке кампаний
     const toast = useToast();
     const copyNm = (nmId: number) => {
-        navigator.clipboard?.writeText(String(nmId)).then(() => toast.success(`Артикул ${nmId} скопирован`)).catch(() => { /* clipboard недоступен */ });
+        navigator.clipboard?.writeText(String(nmId))
+            .then(() => toast.success(`Артикул ${nmId} скопирован`))
+            .catch(() => toast.error('Не удалось скопировать — буфер обмена недоступен'));
     };
 
     // Загрузка данных нужного раздела. AbortController — защита от двойного монтирования StrictMode.
@@ -91,11 +94,14 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
     // ─── Клиентские фильтры/сортировки (как в старом коде) ───
 
     // Высокий ДРР: ДРР выше N% + сортировка по клику на заголовок
+    // drr === null — расход без заказов (ДРР = ∞): всегда «выше порога» и сортируется поверх любых чисел
+    const drrVal = (r: AdTabProduct, field: keyof AdTabProduct) =>
+        field === 'drr' && r.drr === null ? Infinity : num(r[field]);
     const highDrr = drrRows
-        .filter(r => num(r.drr) > drrThreshold)
+        .filter(r => (r.drr === null ? num(r.adv_sum) > 0 : num(r.drr) > drrThreshold))
         .sort((a, b) => {
-            const av = num(a[drrSort.field]);
-            const bv = num(b[drrSort.field]);
+            const av = drrVal(a, drrSort.field);
+            const bv = drrVal(b, drrSort.field);
             return drrSort.dir === 'asc' ? av - bv : bv - av;
         });
     const toggleDrrSort = (field: keyof AdTabProduct) =>
@@ -124,7 +130,7 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
     // ─── Excel-экспорт (то, что видно — с учётом фильтров и сортировки) ───
     const exportHighDrr = () => exportToExcel(highDrr.map(r => ({
         'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Бренд': r.brand || '', 'Категория': r.subject || '',
-        'ДРР %': num(r.drr), 'Расход ₽': num(r.adv_sum), 'Заказы ₽': num(r.orders_sum_rub),
+        'ДРР %': r.drr === null ? '∞ (заказов нет)' : num(r.drr), 'Расход ₽': num(r.adv_sum), 'Заказы ₽': num(r.orders_sum_rub),
         'CTR %': num(r.ctr), 'CPC ₽': num(r.cpc), 'Кампаний': num(r.active_campaigns),
     })), `ads-high-drr_${dateFrom}_${dateTo}`);
     const exportNoAds = () => exportToExcel(noAds.map(r => ({
@@ -222,7 +228,7 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
                 </>
             )}
             {view === 'budget-gap' && excelBtn(exportGaps, gaps.length === 0)}
-            <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>Показано: {shownCount}</span>
+            {!loading && <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>Показано: {shownCount}</span>}
         </div>
     );
 
@@ -261,7 +267,9 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
                                                 title={onProductClick ? (hasCamp ? 'Клик — добавить/убрать товар из выбора, затем «Подтвердить выбор»' : 'Нет кампании — клик откроет создание кампании по этому товару') : undefined}
                                                 style={{ cursor: onProductClick ? 'pointer' : undefined, background: sel ? '#dbeafe' : undefined }}>
                                                 {productCell(r)}
-                                                <td style={{ ...tdStyle, fontWeight: 700, color: num(r.drr) > 30 ? '#ef4444' : '#f59e0b' }}>{pct(r.drr)}</td>
+                                                <td style={{ ...tdStyle, fontWeight: 700, color: r.drr === null || num(r.drr) > 30 ? '#ef4444' : '#f59e0b' }}
+                                                    title={r.drr === null ? 'Расход есть, заказов нет — ДРР бесконечен' : undefined}>
+                                                    {r.drr === null ? '∞' : pct(r.drr)}</td>
                                                 <td style={{ ...tdStyle, color: '#f97316' }}>{money(r.adv_sum)}</td>
                                                 <td style={tdStyle}>{money(r.orders_sum_rub)}</td>
                                                 <td style={tdStyle}>{pct(r.ctr)}</td>
@@ -294,7 +302,7 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
                                         {noAds.map(r => {
                                             const sel = selectedNms?.has(r.nm_id);
                                             return (
-                                            <tr key={r.nm_id} onClick={onProductClick ? () => onProductClick(r.nm_id, false) : undefined}
+                                            <tr key={r.nm_id} onClick={onProductClick ? () => onProductClick(r.nm_id, nmsWithCampaigns?.has(r.nm_id) ?? false) : undefined}
                                                 title={onProductClick ? 'Клик — добавить/убрать товар из выбора, затем выбрать тип и создать сверху' : undefined}
                                                 style={{ cursor: onProductClick ? 'pointer' : undefined, background: sel ? '#dbeafe' : undefined }}>
                                                 {productCell(r)}
@@ -331,7 +339,7 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
                                             const share = adShare(r);
                                             const sel = selectedNms?.has(r.nm_id);
                                             return (
-                                                <tr key={r.nm_id} onClick={onProductClick ? () => onProductClick(r.nm_id, true) : undefined}
+                                                <tr key={r.nm_id} onClick={onProductClick ? () => onProductClick(r.nm_id, nmsWithCampaigns?.has(r.nm_id) ?? true) : undefined}
                                                     title={onProductClick ? 'Клик — добавить/убрать товар из выбора, затем «Подтвердить выбор»' : undefined}
                                                     style={{ cursor: onProductClick ? 'pointer' : undefined, background: sel ? '#dbeafe' : undefined }}>
                                                     {productCell(r)}

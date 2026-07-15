@@ -6,6 +6,9 @@ import type { AdTabProduct, AdTabGroupRow, UnifiedSyncProgress } from '@/types/a
 
 const fmt = (n: number) => n?.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) ?? '0';
 const fmtPct = (n: number) => (n || 0).toFixed(2) + '%';
+// drr === null — расход без заказов (ДРР = ∞): красим красным и показываем «∞»
+const drrColor = (drr: number | null) => (drr === null || drr > 30 ? '#ef4444' : drr > 15 ? '#f59e0b' : '#22c55e');
+const drrLabel = (drr: number | null) => (drr === null ? '∞' : fmtPct(drr));
 
 const STATUS_MAP: Record<number, { label: string; color: string }> = {
     9: { label: 'Активна', color: '#22c55e' },
@@ -205,7 +208,7 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
             'CTR %': p.ctr,
             'CPC ₽': p.cpc,
             'CPM ₽': p.cpm,
-            'ДРР %': p.drr,
+            'ДРР %': p.drr === null ? '∞ (заказов нет)' : p.drr,
             'Заказы': p.orders_count,
             'Сумма заказов ₽': p.orders_sum_rub,
             'Бюджет ₽': p.campaigns.reduce((s, c) => s + (c.budget || 0), 0),
@@ -335,7 +338,7 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                         ctr: views ? (clicks / views * 100) : 0,
                         cpc: clicks ? (advSum / clicks) : 0,
                         cpm: views ? (advSum / views * 1000) : 0,
-                        drr: ordersSum ? (advSum / ordersSum * 100) : 0,
+                        drr: ordersSum ? (advSum / ordersSum * 100) : (advSum > 0 ? null : 0),
                     };
                 });
                 const ABC_COLORS: Record<string, string> = { A: '#22c55e', B: '#f59e0b', C: '#ef4444' };
@@ -378,7 +381,7 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                                 <td style={tdNum}>{fmtPct(g.ctr)}</td>
                                                 <td style={tdNum}>{fmt(g.cpc)}</td>
                                                 <td style={tdNum}>{fmt(g.cpm)}</td>
-                                                <td style={{ ...tdNum, color: g.drr > 30 ? '#ef4444' : g.drr > 15 ? '#f59e0b' : '#22c55e', fontWeight: 600 }}>{fmtPct(g.drr)}</td>
+                                                <td style={{ ...tdNum, color: drrColor(g.drr), fontWeight: 600 }}>{drrLabel(g.drr)}</td>
                                                 <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6', color: g.activeCamp > 0 ? '#22c55e' : '#9ca3af', fontWeight: g.activeCamp > 0 ? 600 : 400 }}>{g.activeCamp}</td>
                                             </tr>
                                             {isExp && g.items.map((p, pi) => {
@@ -400,7 +403,7 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                                             <td style={tdNum}>{fmtPct(p.ctr)}</td>
                                                             <td style={tdNum}>{fmt(p.cpc)}</td>
                                                             <td style={tdNum}>{fmt(p.cpm)}</td>
-                                                            <td style={{ ...tdNum, color: p.drr > 30 ? '#ef4444' : p.drr > 15 ? '#f59e0b' : '#22c55e' }}>{fmtPct(p.drr)}</td>
+                                                            <td style={{ ...tdNum, color: drrColor(p.drr) }}>{drrLabel(p.drr)}</td>
                                                             <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6', color: p.active_campaigns > 0 ? '#22c55e' : '#9ca3af' }}>{p.active_campaigns || 0}</td>
                                                         </tr>
                                                         {isNmExp && p.campaigns.map(c => {
@@ -489,8 +492,8 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                             <td style={tdNum}>{fmtPct(p.ctr)}</td>
                                             <td style={tdNum}>{fmt(p.cpc)}</td>
                                             <td style={tdNum}>{fmt(p.cpm)}</td>
-                                            <td style={{ ...tdNum, color: p.drr > 30 ? '#ef4444' : p.drr > 15 ? '#f59e0b' : '#22c55e', fontWeight: 600 }}>
-                                                {fmtPct(p.drr)}
+                                            <td style={{ ...tdNum, color: drrColor(p.drr), fontWeight: 600 }}>
+                                                {drrLabel(p.drr)}
                                             </td>
                                             <td style={{ ...tdStyle, textAlign: 'center', borderLeft: '1px solid #f3f4f6' }}>{abcBadge(p.abc_revenue)}</td>
                                             <td style={{ ...tdStyle, textAlign: 'center' }}>{abcBadge(p.abc_profit)}</td>
@@ -624,7 +627,7 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                             <td style={tdNum}>{fmtPct(g.ctr)}</td>
                                             <td style={tdNum}>{fmt(g.cpc)}</td>
                                             <td style={tdNum}>{fmt(g.cpm)}</td>
-                                            <td style={{ ...tdNum, color: g.drr > 30 ? '#ef4444' : g.drr > 15 ? '#f59e0b' : '#22c55e', fontWeight: 600 }}>{fmtPct(g.drr)}</td>
+                                            <td style={{ ...tdNum, color: drrColor(g.drr), fontWeight: 600 }}>{drrLabel(g.drr)}</td>
                                             <td style={{ ...tdStyle, textAlign: 'center', borderLeft: '1px solid #f3f4f6' }}>{abcBadge(g.abc_revenue)}</td>
                                             <td style={{ ...tdStyle, textAlign: 'center' }}>{abcBadge(g.abc_profit)}</td>
                                             <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6', color: g.active_campaigns > 0 ? '#22c55e' : '#9ca3af', fontWeight: g.active_campaigns > 0 ? 600 : 400 }}>{g.active_campaigns || 0}</td>
@@ -650,7 +653,7 @@ export function AdsTab({ dateFrom, dateTo, brand, subject }: AdsTabProps) {
                                                         <td style={tdNum}>{fmtPct(p.ctr)}</td>
                                                         <td style={tdNum}>{fmt(p.cpc)}</td>
                                                         <td style={tdNum}>{fmt(p.cpm)}</td>
-                                                        <td style={{ ...tdNum, color: p.drr > 30 ? '#ef4444' : p.drr > 15 ? '#f59e0b' : '#22c55e' }}>{fmtPct(p.drr)}</td>
+                                                        <td style={{ ...tdNum, color: drrColor(p.drr) }}>{drrLabel(p.drr)}</td>
                                                         <td style={{ ...tdStyle, textAlign: 'center', borderLeft: '1px solid #f3f4f6' }}>{abcBadge(p.abc_revenue)}</td>
                                                         <td style={{ ...tdStyle, textAlign: 'center' }}>{abcBadge(p.abc_profit)}</td>
                                                         <td style={{ ...tdNum, borderLeft: '1px solid #f3f4f6', color: p.active_campaigns > 0 ? '#22c55e' : '#9ca3af', fontWeight: p.active_campaigns > 0 ? 600 : 400 }}>{p.active_campaigns || 0}</td>

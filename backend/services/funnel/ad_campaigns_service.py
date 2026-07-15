@@ -714,7 +714,9 @@ async def get_ad_tab_data(
         ctr = (clicks / views * 100) if views else 0
         cpc = (adv_sum / clicks) if clicks else 0
         cpm = (adv_sum / views * 1000) if views else 0
-        drr = (adv_sum / orders_sum * 100) if orders_sum else 0
+        # Расход есть, заказов нет → ДРР бесконечен: отдаём None (JSON null), а не 0 —
+        # иначе худшие товары выпадали из «Высокого ДРР» (фильтр drr > порога)
+        drr = (adv_sum / orders_sum * 100) if orders_sum else (None if adv_sum > 0 else 0)
 
         product_campaigns = nm_campaigns.get(r.nm_id, [])
 
@@ -738,7 +740,7 @@ async def get_ad_tab_data(
                 "ctr": round(ctr, 2),
                 "cpc": round(cpc, 2),
                 "cpm": round(cpm, 2),
-                "drr": round(drr, 2),
+                "drr": round(drr, 2) if drr is not None else None,
                 "bdr_revenue": round(bdr["revenue"], 2),
                 "bdr_profit": round(bdr["profit"], 2),
                 "stock_qty": stock_qty,
