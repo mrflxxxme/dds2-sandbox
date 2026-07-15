@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
+import { NEED_SUPPLY_DAYS } from '@/lib/assembly/needParams';
 import { formatNumber, exportToExcel } from '@/lib/utils';
 import { distributeByBoxMultiple } from '@/lib/utils/boxDistribution';
 import { parseBoxSize, maxPalletHeightCm, consolidateDistrictPallets, canonBoxSize, effectiveBoxesPerPallet, consolidateMixedDistrictPallets } from '@/lib/utils/boxPallet';
@@ -266,7 +267,7 @@ export function WarehouseNeedView({
      *  Используется для столбца «% лок» в обеих таблицах. */
     const [locMap, setLocMap] = useState<Map<number, number>>(new Map());
     const [creatingAssembly, setCreatingAssembly] = useState(false);
-    const [supplyDays, setSupplyDays] = useState(14);
+    const [supplyDays, setSupplyDays] = useState(NEED_SUPPLY_DAYS);
     const [analysisDays, setAnalysisDays] = useState(14);
     const [mode, setMode] = useState<'actual' | 'hypothetical'>('actual');
     /** Идеальная локализация: распределяем потребность по ближайшим доступным
@@ -2698,7 +2699,7 @@ export function WarehouseNeedView({
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     <span style={{ fontSize: 11, opacity: 0.6, whiteSpace: 'nowrap' }}>Запас:</span>
-                    {[7, 14, 30, 60].map(d => (
+                    {[7, 14, 21, 30, 60].map(d => (
                         <button key={d} className={`btn btn-sm ${supplyDays === d ? 'btn-primary' : 'btn-secondary'}`}
                             onClick={() => setSupplyDays(d)}>{d}д</button>
                     ))}

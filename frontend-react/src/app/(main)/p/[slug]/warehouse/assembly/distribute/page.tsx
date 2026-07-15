@@ -12,6 +12,7 @@ import { allocatePairs } from '@/lib/utils/assemblyPreview';
 import { scopedNormalizeDraft, mergeDraftRows, directionKey } from '@/lib/utils/scopedNormalizeDraft';
 import { palletFootprint, planTopUpBoxes, type TopUpCandidate } from '@/lib/assembly/prebookFootprint';
 import { buildPrebookGroups } from '@/lib/assembly/buildPrebookGroups';
+import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams';
 import { applyAcceptanceRedistToPrebook } from '@/lib/assembly/prebookRedistribute';
 import { Toast } from '@/components';
 import TabLayout from '@/components/TabLayout';
@@ -200,7 +201,7 @@ export default function AssemblyDraftPage() {
                     // (greedy-cap до целевой локализации с весами воришек). Иначе панель
                     // «Добавить из потребности» строила target по сырому bench без всей
                     // механики распределения (аудит 2026-07-09).
-                    api.getStockNeed(14, 14, 'actual', true, true, 0).catch(() => null) as Promise<StockNeedResponse | null>,
+                    api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, true, 0).catch(() => null) as Promise<StockNeedResponse | null>,
                 ]);
                 if (cancelled) return;
                 applyDraft(draftResp);

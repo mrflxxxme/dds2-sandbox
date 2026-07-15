@@ -133,7 +133,14 @@ export function buildDistributionSkus(
     return out;
 }
 
-/** Применить сплиты приёмки к базовым скусам (closed→open + тип упаковки per WB-склад). */
+/** Применить сплиты приёмки к базовым скусам (closed→open + тип упаковки per WB-склад).
+ *
+ *  ВАЖНО: сплиты одного SKU склеиваются в ОДИН вход (`target` = объединение,
+ *  упаковка — картой `packageByWh`), а НЕ дублируются отдельными скусами.
+ *  Дубли ломали конвейер дважды: `buildDraftRows` кладёт планы в Map по
+ *  `${nm_id}::${barcode}` — второй сплит молча перетирал первый (прод-кейс
+ *  150х200_серый 2026-07-15: BOX-часть 360 шт исчезала, ехало 13 шт моно), а
+ *  выживи оба — каждый сорсил бы ФФ-сток независимо (двойной счёт источника). */
 export function applyAcceptanceSplits(
     skus: DraftSkuInput[],
     splitMap: AcceptanceSplitMap | null,
@@ -146,13 +153,19 @@ export function applyAcceptanceSplits(
             out.push(s);
             continue;
         }
+        const target: Record<string, number> = {};
+        const packageByWh: Record<string, PackageType> = {};
         for (const sp of splits) {
-            const target = Object.fromEntries(
-                Object.entries(sp.distribution || {}).filter(([, q]) => (q || 0) > 0),
-            );
-            if (Object.keys(target).length === 0) continue;
-            out.push({ ...s, target, packageType: sp.package_type });
+            for (const [wh, q] of Object.entries(sp.distribution || {})) {
+                if ((q || 0) <= 0) continue;
+                // Один склад в двух сплитах не встречается (сплит — по складам);
+                // на всякий случай суммируем qty, упаковка — последнего сплита.
+                target[wh] = (target[wh] || 0) + (q || 0);
+                packageByWh[wh] = sp.package_type;
+            }
         }
+        if (Object.keys(target).length === 0) continue;
+        out.push({ ...s, target, packageByWh: { ...(s.packageByWh || {}), ...packageByWh } });
     }
     return out;
 }
