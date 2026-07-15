@@ -414,6 +414,7 @@ async def get_campaign_clusters(
         "campaign_id": campaign_id,
         "name": camp.name,
         "campaign_type": camp.campaign_type,
+        "bid_mode": camp.bid_mode,  # unified | manual — при unified WB не даёт управлять кластерами
         "nm_ids": nm_ids,
         "subject": subject,
         "window": {"from": date_from, "to": date_to},
@@ -429,6 +430,17 @@ async def get_campaign_clusters(
     }
 
 
+# WB не даёт управлять кластерами по отдельности (минус-фразы/ставки) у кампаний с
+# ЕДИНОЙ ставкой CPM — только у кампаний с ручной ставкой (по зонам). На set-minus/
+# set-bids единой кампании WB отвечает 400. Ловим режим ДО вызова WB и объясняем причину
+# (зеркало _zones_lock: зоны тоже переключаются только у ручной ставки).
+UNIFIED_CLUSTER_LOCK = (
+    "У кампании единая ставка CPM — WB не позволяет управлять кластерами по отдельности "
+    "(исключать или менять ставки). Переключите кампанию на ручные ставки (по зонам) "
+    "в кабинете WB, затем повторите."
+)
+
+
 async def toggle_cluster_minus(
     db: AsyncSession,
     project_id: int,
@@ -441,6 +453,8 @@ async def toggle_cluster_minus(
     camp = await _campaign_row(db, project_id, campaign_id)
     if camp is None:
         return {"ok": False, "error": "campaign_not_found"}
+    if (camp.bid_mode or "") == "unified":
+        return {"ok": False, "error": UNIFIED_CLUSTER_LOCK}
     nm_ids = [int(n) for n in (camp.nm_ids or [])]
     if nm_id not in nm_ids:
         return {"ok": False, "error": "nm_not_in_campaign"}
@@ -783,6 +797,8 @@ async def set_cluster_bid(
     camp = await _campaign_row(db, project_id, campaign_id)
     if camp is None:
         return {"ok": False, "error": "campaign_not_found"}
+    if (camp.bid_mode or "") == "unified":
+        return {"ok": False, "error": UNIFIED_CLUSTER_LOCK}
     if nm_id not in [int(n) for n in (camp.nm_ids or [])]:
         return {"ok": False, "error": "nm_not_in_campaign"}
     # bid==0 — валидный «сброс к ставке кампании» (WB принимает bid_kopecks=0); отбиваем только отрицательные

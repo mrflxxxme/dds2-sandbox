@@ -310,7 +310,13 @@ export default function CampaignPage() {
         }
     }, [posNm, toast]);
 
+    // Единая ставка CPM: WB не даёт управлять кластерами по отдельности (400 на set-minus/set-bids),
+    // только у кампаний с ручной ставкой (по зонам). Гасим действия и объясняем причину.
+    const clusterUnified = ((data?.bid_mode ?? campaign?.bid_mode) || '') === 'unified';
+    const CLUSTER_UNIFIED_MSG = 'Единая ставка CPM: WB не даёт управлять кластерами по отдельности (исключать или менять ставки). Переключите кампанию на ручные ставки (по зонам) в кабинете WB.';
+
     const handleToggleMinus = async (c: SearchCluster) => {
+        if (clusterUnified) { setMinusError(CLUSTER_UNIFIED_MSG); return; }
         const action: 'add' | 'remove' = c.is_minused ? 'remove' : 'add';
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setMinusError('Не удалось определить товар (nm_id) кампании'); return; }
@@ -333,6 +339,7 @@ export default function CampaignPage() {
 
     // Массовое добавление/возврат минус-фраз: одно подтверждение, затем последовательно по WB.
     const handleBulkMinus = async (list: SearchCluster[], action: 'add' | 'remove') => {
+        if (clusterUnified) { setMinusError(CLUSTER_UNIFIED_MSG); return; }
         const items = list.filter(c => !c.locked);
         if (items.length === 0) return;
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
@@ -357,6 +364,7 @@ export default function CampaignPage() {
     };
 
     const handleSetBid = async (c: SearchCluster, bid: number) => {
+        if (clusterUnified) { setBidError(CLUSTER_UNIFIED_MSG); return; }
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setBidError('Не удалось определить товар (nm_id) кампании'); return; }
         if (!window.confirm(`Поставить ставку ${formatNumber(bid, 0)} ₽ на кластер «${c.norm_query}» в кабинете WB?`)) return;
@@ -375,6 +383,7 @@ export default function CampaignPage() {
 
     // Массовая ставка: одно подтверждение, затем последовательно по WB. bid=0 — сброс к ставке кампании.
     const handleBulkBid = async (items: { cluster: SearchCluster; bid: number }[], label: string) => {
+        if (clusterUnified) { setBidError(CLUSTER_UNIFIED_MSG); return; }
         if (items.length === 0) return;
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setBidError('Не удалось определить товар (nm_id) кампании'); return; }
@@ -835,6 +844,7 @@ export default function CampaignPage() {
                                             aov={data.aov}
                                             defaultBid={data.default_bid}
                                             exportName={`clusters_${campaignId}_${dateFrom}_${dateTo}`}
+                                            clusterLock={clusterUnified ? CLUSTER_UNIFIED_MSG : null}
                                             minus={{ pending, onToggle: handleToggleMinus, onBulk: handleBulkMinus, error: minusError }}
                                             bids={{ pending: bidPending, onSetBid: handleSetBid, onBulkBid: handleBulkBid, error: bidError }}
                                             positions={positions}
