@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
+import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams';
 import { formatDate, formatNumber } from '@/lib/utils';
 import { parseBoxSize, palletsForLines, maxPalletHeightCm, type PalletLine } from '@/lib/utils/boxPallet';
 import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constants/localization';
@@ -246,7 +247,7 @@ export default function PreDistVehiclePage() {
                     // кап применяется клиентски в buildDraftRows (min(pool, need)). См. план, часть A.
                     // bootstrapShape=true: bump-бутстрап пустых ФО и в сырой форме машины
                     // (кап клиентский по пулу) — паритет с черновиком.
-                    (api.getStockNeed(14, 14, 'actual', true, false, 0, 100, true) as Promise<StockNeedResponse | null>).catch(() => null),
+                    (api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, false, 0, 100, true) as Promise<StockNeedResponse | null>).catch(() => null),
                     // Параметры новинок — те же, что настроены на экране «Потребность»
                     // (персистятся в localStorage): иначе машина считала бы новинки
                     // другими настройками (min-pack / % отгрузки / floor), чем матрица

@@ -42,6 +42,8 @@ import json
 import httpx
 import structlog
 
+from backend.utils.phone import normalize_ru_phone
+
 logger = structlog.get_logger("dds.wb_portal")
 
 SUPPLY_BASE = "https://seller-supply.wildberries.ru"
@@ -588,7 +590,7 @@ class WbPortalClient:
                 "number": pallets,
                 "boxTypeName": "pallets",
                 "supplierAssignUUID": None,
-                "phone": phone,
+                "phone": normalize_ru_phone(phone),
             },
             SUPPLY_BASE,
             "/ns/sm/supply-manager/api/v1/barcode/setTRNDetails",
