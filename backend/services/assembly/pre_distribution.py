@@ -533,6 +533,12 @@ async def create_pre_distribution(
         )
         created.append(req)
 
+    # Fold-путь меняет данные только flush'ем, а get_db за сервис не коммитит: без
+    # явного commit чисто-fold запрос (все направления уже существуют) молча
+    # откатывался при закрытии сессии — 200 OK, но БД без изменений (кейс V-0033).
+    # Create-путь коммитит внутри create_assembly_request — повторный commit no-op.
+    await db.commit()
+
     # create_assembly_request инвалидирует reports:* на каждом вызове — отдельно не нужно.
     # Перечитываем через get_assembly_request (selectinload) — релейшены загружены,
     # иначе _build_response ловит lazy-load (MissingGreenlet) на свежесозданном объекте.
