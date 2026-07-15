@@ -38,6 +38,7 @@ x-wb-captcha-token (антибот-челлендж ADD_OR_UPDATE_SUPPLY, finger
 import asyncio
 import itertools
 import json
+import re
 
 import httpx
 import structlog
@@ -62,6 +63,26 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 )
 SEC_CH_UA = '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"'
+
+
+_PHONE_DIGITS_RE = re.compile(r"\D+")
+
+
+def _normalize_ru_phone(phone: str) -> str:
+    """Телефон в формат WB-пропуска `79XXXXXXXXX` (11 цифр, ведущая 7).
+
+    WB `setTRNDetails` отбивает всё, кроме чистых 11 цифр с ведущей 7:
+    «8-918-882-98-32», «+79057026248», пробелы → «Номер телефона не валиден».
+    Приводим: оставляем только цифры; ведущая 8 при 11 цифрах → 7; 10 цифр →
+    префикс 7. Нераспознанный формат возвращаем как очищенные цифры (пусть WB
+    решает — лучше отдать что-то, чем гарантированный отказ на дефисах/плюсе).
+    """
+    digits = _PHONE_DIGITS_RE.sub("", phone or "")
+    if len(digits) == 11 and digits[0] == "8":
+        digits = "7" + digits[1:]
+    elif len(digits) == 10:
+        digits = "7" + digits
+    return digits
 
 
 class WbPortalError(Exception):
@@ -588,7 +609,7 @@ class WbPortalClient:
                 "number": pallets,
                 "boxTypeName": "pallets",
                 "supplierAssignUUID": None,
-                "phone": phone,
+                "phone": _normalize_ru_phone(phone),
             },
             SUPPLY_BASE,
             "/ns/sm/supply-manager/api/v1/barcode/setTRNDetails",
