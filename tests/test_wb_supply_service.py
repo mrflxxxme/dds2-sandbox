@@ -422,6 +422,25 @@ async def test_sync_all_states_writes_cabinet_status(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sync_all_states_includes_shipped(db_session, monkeypatch):
+    # SHIPPED («в пути») входит в scope синка — иначе снимок кабинетного пропуска
+    # и блок «Расхождение поставок ФФ» не покрыли бы отгруженные поставки.
+    client = FakeClient(
+        supplies=[{"supplyId": 40699158, "preorders": [52670743], "statusId": 3, "statusName": "Отгрузка разрешена"}],
+        supply_status={"statusName": "Отгрузка разрешена", "statusId": 3},
+    )
+    await _patch_client(monkeypatch, client)
+    await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    await wb_supply_service.sync_supply_id(db_session, PROJECT_ID, ASSEMBLY_ID)
+    asm = await _reload_assembly(db_session)
+    asm.status = "SHIPPED"
+    await db_session.commit()
+
+    res = await wb_supply_service.sync_all_states(db_session, PROJECT_ID)
+    assert res["checked"] == 1  # отгруженная поставка синкается
+
+
+@pytest.mark.asyncio
 async def test_sync_all_states_creates_row_for_adopted_fbo(db_session, monkeypatch):
     # Заявка с забронированной FBO-поставкой без реплей-строки → sync создаёт
     # строку с кабинетным статусом (listSupplies матч по supplyId).
