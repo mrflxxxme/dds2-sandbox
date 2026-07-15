@@ -8,7 +8,7 @@ Read-only поверх существующих таблиц: wb_ad_campaigns (�
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -25,7 +25,7 @@ logger = logging.getLogger("dds.funnel")
 
 MSK = pytz.timezone("Europe/Moscow")
 
-CAMPAIGN_STATUS_LABELS = {7: "Завершена", 9: "Активна", 11: "Пауза"}
+CAMPAIGN_STATUS_LABELS = {4: "Готова", 7: "Завершена", 9: "Активна", 11: "Пауза", -1: "Удаляется"}
 
 AUTOPAY_SETTINGS_KEY = "ads_autopay"
 
@@ -1252,13 +1252,15 @@ async def create_campaign(
     res = await wb_create(api_key, name, nms, bid_type, payment_type, placement_types)
     if not res["ok"]:
         return res
-    # Подтянем новую кампанию в наш список (не критично, если не успеет)
+    # Подтянем ТОЛЬКО новую кампанию (3 узких запроса WB, ~1–2с). Полный
+    # sync_ad_campaigns здесь отвечал минутами (1300+ budget-запросов с
+    # 429-паузами) → таймаут прокси и дубли при повторном сабмите.
     try:
-        from backend.services.funnel.ad_campaigns_service import sync_ad_campaigns
+        from backend.services.funnel.ad_campaigns_service import refresh_one_campaign
 
-        await sync_ad_campaigns(db, project_id)
+        await refresh_one_campaign(db, project_id, int(res["campaign_id"]))
     except Exception as e:
-        logger.warning("create_campaign: sync после создания не удался: %s", e)
+        logger.warning("create_campaign: точечный догруз после создания не удался: %s", e)
     return res
 
 
@@ -1398,6 +1400,34 @@ def compute_autopay_decision(
     return {"action": "deposit", "sum": _round_up_50(max(MIN_TOPUP_RUB, gap)), "reason": "ok"}
 
 
+def _autopay_journal_day_stats(log: list[dict], day_msk: date) -> tuple[dict[int, int], set[int]]:
+    """Счётчики журнала за календарный день МСК: {campaign_id: успешных пополнений} и unknown-кампании.
+
+    ts в журнале — naive UTC (`utcnow().isoformat()`), поэтому naive-метки трактуем
+    как UTC и переводим в МСК. Сравнение по «сырой» UTC-дате в 00:00–02:59 МСК
+    относило сегодняшние записи ко вчера — идемпотентность to_target, daily_cap
+    low_balance и защита от unknown-статусов молча отключались (риск повторных
+    реальных списаний).
+    """
+    topped: dict[int, int] = {}
+    unknown: set[int] = set()
+    for e in log:
+        try:
+            ts = datetime.fromisoformat(e.get("ts", ""))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if ts.astimezone(MSK).date() != day_msk:
+            continue
+        cid = int(e.get("campaign_id") or 0)
+        if e.get("status") == "ok":
+            topped[cid] = topped.get(cid, 0) + 1
+        elif e.get("status") == "unknown":
+            unknown.add(cid)
+    return topped, unknown
+
+
 async def run_autopay_tick(db: AsyncSession, project_id: int, api_key: str) -> dict:
     """Один проход автопополнения проекта: решения + реальные списания + журнал.
 
@@ -1432,21 +1462,7 @@ async def run_autopay_tick(db: AsyncSession, project_id: int, api_key: str) -> d
         return {"deposits": 0, "checked": 0}
 
     log = await get_autopay_log(db, project_id)
-    topped_count_today: dict[int, int] = {}  # успешных пополнений сегодня на кампанию (для daily_cap)
-    unknown_today: set[int] = set()
-    for e in log:
-        try:
-            ts = datetime.fromisoformat(e.get("ts", ""))
-            e_date = ts.astimezone(MSK).date() if ts.tzinfo else ts.date()
-        except (TypeError, ValueError):
-            continue
-        if e_date != today_msk:
-            continue
-        cid = int(e.get("campaign_id") or 0)
-        if e.get("status") == "ok":
-            topped_count_today[cid] = topped_count_today.get(cid, 0) + 1
-        elif e.get("status") == "unknown":
-            unknown_today.add(cid)
+    topped_count_today, unknown_today = _autopay_journal_day_stats(log, today_msk)
 
     # Открут за последние сутки (вчера МСК — полные сутки)
     CD = WbAdCampaignDaily

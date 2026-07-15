@@ -682,3 +682,104 @@ async def test_campaign_metrics_customer_price_zero_without_spp_map():
 
     res = await get_campaign_metrics(db, PROJECT_ID, 999, date_from="2026-07-10", date_to="2026-07-10")
     assert res["rows"][0]["customer_price"] == 1000.0  # СПП нет → цена как есть
+
+
+# ─── _autopay_journal_day_stats: naive-UTC ts vs день МСК ────────────────────
+
+
+def test_autopay_journal_night_window_counts_as_today_msk():
+    """Запись 00:30 МСК = 21:30 UTC вчера (naive) обязана считаться «сегодня» по МСК.
+
+    Регресс: naive-UTC ts сравнивался по ts.date() (UTC-дата) с датой МСК —
+    в 00:00–02:59 МСК идемпотентность и защита unknown молча отключались.
+    """
+    from datetime import date
+
+    from backend.services.funnel.ads_manager import _autopay_journal_day_stats
+
+    today_msk = date(2026, 7, 15)
+    log = [
+        # 00:30 МСК 15.07 = 21:30 UTC 14.07 — journal пишет utcnow() (naive UTC)
+        {"ts": "2026-07-14T21:30:00", "campaign_id": 111, "status": "ok"},
+        {"ts": "2026-07-14T21:40:00", "campaign_id": 222, "status": "unknown"},
+        # 23:50 UTC 14.07 = 02:50 МСК 15.07 — тоже «сегодня»
+        {"ts": "2026-07-14T23:50:00", "campaign_id": 111, "status": "ok"},
+        # 20:59 UTC 14.07 = 23:59 МСК 14.07 — «вчера», не считается
+        {"ts": "2026-07-14T20:59:00", "campaign_id": 111, "status": "ok"},
+    ]
+    topped, unknown = _autopay_journal_day_stats(log, today_msk)
+    assert topped == {111: 2}
+    assert unknown == {222}
+
+
+def test_autopay_journal_aware_ts_and_garbage():
+    """Aware-метки конвертируются честно; мусорные ts пропускаются молча."""
+    from datetime import date
+
+    from backend.services.funnel.ads_manager import _autopay_journal_day_stats
+
+    today_msk = date(2026, 7, 15)
+    log = [
+        {"ts": "2026-07-15T09:00:00+03:00", "campaign_id": 5, "status": "ok"},
+        {"ts": "not-a-date", "campaign_id": 6, "status": "ok"},
+        {"ts": "", "campaign_id": 7, "status": "unknown"},
+    ]
+    topped, unknown = _autopay_journal_day_stats(log, today_msk)
+    assert topped == {5: 1}
+    assert unknown == set()
+
+
+# ─── create_campaign: точечный догруз вместо полного синка ───────────────────
+
+
+async def test_create_campaign_uses_targeted_refresh_not_full_sync(monkeypatch):
+    """После save-ad подтягивается ОДНА кампания, а не весь кабинет.
+
+    Регресс: полный sync_ad_campaigns внутри HTTP-запроса отвечал 613 секунд
+    (1300+ budget-запросов к WB с 429-паузами) — таймаут прокси и дубли кампаний.
+    """
+    from unittest.mock import AsyncMock
+
+    from backend.services.funnel import ads_manager as m
+
+    monkeypatch.setattr(m, "_get_advert_api_key", AsyncMock(return_value="key"))
+    monkeypatch.setattr(
+        "backend.services.funnel.wb_advertising_api.create_campaign",
+        AsyncMock(return_value={"ok": True, "campaign_id": 777, "error": None}),
+    )
+    refresh = AsyncMock(return_value={"ok": True, "error": None})
+    full_sync = AsyncMock()
+    monkeypatch.setattr(
+        "backend.services.funnel.ad_campaigns_service.refresh_one_campaign", refresh
+    )
+    monkeypatch.setattr(
+        "backend.services.funnel.ad_campaigns_service.sync_ad_campaigns", full_sync
+    )
+
+    db = AsyncMock()
+    res = await m.create_campaign(db, 1, "тест", [111], "unified", "cpm", None)
+
+    assert res["ok"] is True and res["campaign_id"] == 777
+    refresh.assert_awaited_once_with(db, 1, 777)
+    full_sync.assert_not_awaited()
+
+
+async def test_create_campaign_refresh_failure_not_fatal(monkeypatch):
+    """Провал точечного догруза не роняет ответ — кампания уже создана в WB."""
+    from unittest.mock import AsyncMock
+
+    from backend.services.funnel import ads_manager as m
+
+    monkeypatch.setattr(m, "_get_advert_api_key", AsyncMock(return_value="key"))
+    monkeypatch.setattr(
+        "backend.services.funnel.wb_advertising_api.create_campaign",
+        AsyncMock(return_value={"ok": True, "campaign_id": 778, "error": None}),
+    )
+    monkeypatch.setattr(
+        "backend.services.funnel.ad_campaigns_service.refresh_one_campaign",
+        AsyncMock(side_effect=RuntimeError("WB недоступен")),
+    )
+
+    db = AsyncMock()
+    res = await m.create_campaign(db, 1, "тест", [111], "unified", "cpm", None)
+    assert res["ok"] is True and res["campaign_id"] == 778
