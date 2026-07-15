@@ -1225,3 +1225,41 @@ async def set_normquery_bid(
         if resp.status_code == 400 and ("100" in text or "views" in text.lower()):
             return False, "Кластер в стадии сбора данных (<100 показов) — WB не принимает ставку."
         return False, f"WB вернул {resp.status_code}"
+
+
+async def fetch_ad_stats_today_nm(api_key: str, campaign_id: int, nm_id: int, day: str) -> dict | None:
+    """Накопительная статистика одного товара в одной кампании за один день (обычно «сегодня» МСК).
+
+    Лёгкий точечный запрос для АБ-тестов фото: дельты между такими снимками = метрики
+    круга ротации (стиль get_intraday_metrics). None — не удалось получить (429/5xx/сеть):
+    вызывающий пропускает тик, НЕ считая это нулевой статистикой.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = f"https://advert-api.wildberries.ru/adv/v3/fullstats?ids={campaign_id}&beginDate={day}&endDate={day}"
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(url, headers=headers)
+    except httpx.HTTPError as e:
+        logger.warning(f"AB fullstats: network error campaign={campaign_id}: {e}")
+        return None
+    if resp.status_code != 200:
+        logger.warning(f"AB fullstats: HTTP {resp.status_code} campaign={campaign_id}: {resp.text[:150]}")
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    out = {"views": 0, "clicks": 0, "atbs": 0, "orders": 0, "spend": 0.0, "orders_sum": 0.0}
+    for campaign in data if isinstance(data, list) else []:
+        for d in (campaign or {}).get("days") or []:
+            for app in d.get("apps") or []:
+                for nm in app.get("nm") or []:
+                    if nm.get("nmId") != nm_id:
+                        continue
+                    out["views"] += int(nm.get("views") or 0)
+                    out["clicks"] += int(nm.get("clicks") or 0)
+                    out["atbs"] += int(nm.get("atbs") or 0)
+                    out["orders"] += int(nm.get("orders") or 0)
+                    out["spend"] += float(nm.get("sum") or 0)
+                    out["orders_sum"] += float(nm.get("sum_price") or 0)
+    return out
