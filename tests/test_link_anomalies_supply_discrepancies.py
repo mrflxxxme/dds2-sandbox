@@ -98,6 +98,11 @@ async def _make_pass(
     *,
     sync_status=WbSupplySyncStatus.PASSED,
     pass_pallets=2,
+    pass_car_number=None,
+    pass_driver_last=None,
+    wb_pass_present=None,
+    wb_pass_car_number=None,
+    wb_pass_pallets=None,
 ):
     return await _add(
         db_session,
@@ -106,6 +111,11 @@ async def _make_pass(
             assembly_request_id=assembly_request_id,
             sync_status=sync_status.value,
             pass_pallets=pass_pallets,
+            pass_car_number=pass_car_number,
+            pass_driver_last=pass_driver_last,
+            wb_pass_present=wb_pass_present,
+            wb_pass_car_number=wb_pass_car_number,
+            wb_pass_pallets=wb_pass_pallets,
         ),
     )
 
@@ -337,3 +347,89 @@ async def test_wb_warehouse_none_when_no_wb_name(db_session, project, warehouse)
     assert len(rows) == 1
     assert rows[0]["warehouse_name"] is None
     assert rows[0]["source_warehouse_name"] == warehouse.name
+
+
+# ─── Сверка пропуска ДДС↔ВБ (снимок кабинета) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_pass_on_wb_matching_not_flagged(db_session, project, warehouse):
+    """Пропуск заведён в кабинете WB, номер совпадает → строки нет."""
+    supply = await _make_supply(db_session, project.id, planned_date=date(2026, 7, 15))
+    doc = await _make_assembly(
+        db_session, project.id, warehouse.id, pallets_count=2, delivery_date=date(2026, 7, 15), wb_fbo_supply_id=supply.id
+    )
+    await _make_pass(
+        db_session, project.id, doc.id,
+        sync_status=WbSupplySyncStatus.BOOKED,  # наш реплей НЕ дошёл до PASSED,
+        pass_pallets=2, pass_car_number="Р750ОТ164", pass_driver_last="Жиров",
+        wb_pass_present=True, wb_pass_car_number="Р750ОТ164", wb_pass_pallets=2,  # но на ВБ пропуск есть
+    )
+    res = await _raw(db_session, project.id)
+    assert _rows(res, doc.id) == []  # пропуск на ВБ = оформлен, ничего не расходится
+
+
+@pytest.mark.asyncio
+async def test_car_number_mismatch_cyrillic_latin(db_session, project, warehouse):
+    """Номер ДДС «Р750ОТ164» (кириллица) vs ВБ «P750OT164» (латиница) — это одно и то же, НЕ флаг."""
+    supply = await _make_supply(db_session, project.id, planned_date=date(2026, 7, 15))
+    doc = await _make_assembly(
+        db_session, project.id, warehouse.id, pallets_count=2, delivery_date=date(2026, 7, 15), wb_fbo_supply_id=supply.id
+    )
+    await _make_pass(
+        db_session, project.id, doc.id, sync_status=WbSupplySyncStatus.BOOKED, pass_pallets=2,
+        pass_car_number="Р750ОТ164", pass_driver_last="Жиров",
+        wb_pass_present=True, wb_pass_car_number="P750OT164", wb_pass_pallets=2,
+    )
+    res = await _raw(db_session, project.id)
+    assert _rows(res, doc.id) == []  # кириллица==латиница после нормализации
+
+
+@pytest.mark.asyncio
+async def test_car_number_mismatch_flagged(db_session, project, warehouse):
+    """Реально разный номер машины ДДС vs ВБ → car_number_mismatch."""
+    supply = await _make_supply(db_session, project.id, planned_date=date(2026, 7, 15))
+    doc = await _make_assembly(
+        db_session, project.id, warehouse.id, pallets_count=2, delivery_date=date(2026, 7, 15), wb_fbo_supply_id=supply.id
+    )
+    await _make_pass(
+        db_session, project.id, doc.id, sync_status=WbSupplySyncStatus.BOOKED, pass_pallets=2,
+        pass_car_number="А111АА77", pass_driver_last="Иванов",
+        wb_pass_present=True, wb_pass_car_number="В874УА37", wb_pass_pallets=2,
+    )
+    res = await _raw(db_session, project.id)
+    rows = _rows(res, doc.id)
+    assert len(rows) == 1
+    assert rows[0]["car_number_mismatch"] is True
+    assert rows[0]["pass_on_wb"] is True
+    assert rows[0]["pass_missing"] is False
+    assert rows[0]["wb_car_number"] == "В874УА37"
+
+
+@pytest.mark.asyncio
+async def test_pass_on_wb_but_empty_in_dds(db_session, project, warehouse):
+    """Пропуск на ВБ есть, а у нас поля пусты → pass_missing_dds."""
+    supply = await _make_supply(db_session, project.id, planned_date=date(2026, 7, 15))
+    doc = await _make_assembly(
+        db_session, project.id, warehouse.id, pallets_count=5, delivery_date=date(2026, 7, 15), wb_fbo_supply_id=supply.id
+    )
+    await _make_pass(
+        db_session, project.id, doc.id, sync_status=WbSupplySyncStatus.BOOKED, pass_pallets=None,
+        pass_car_number=None, pass_driver_last=None,
+        wb_pass_present=True, wb_pass_car_number="В874УА37", wb_pass_pallets=5,
+    )
+    res = await _raw(db_session, project.id)
+    rows = _rows(res, doc.id)
+    assert len(rows) == 1
+    assert rows[0]["pass_missing_dds"] is True
+    assert rows[0]["pass_missing"] is False  # на ВБ-то есть
+    assert rows[0]["pass_on_wb"] is True
+
+
+def test_norm_plate_cyrillic_equals_latin():
+    from backend.services.assembly.link_anomalies import _norm_plate
+
+    assert _norm_plate("Р750ОТ164") == _norm_plate("P750OT164")
+    assert _norm_plate("в874уа 37") == _norm_plate("B874YA37")
+    assert _norm_plate(None) == ""
+    assert _norm_plate("А111АА77") != _norm_plate("В874УА37")

@@ -442,6 +442,19 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
             link.supply_date = meta.supply_date
             link.reject_reason = meta.reject_reason
             link.wb_state_synced_at = utcnow()
+            # Снимок кабинетного пропуска (для сверки ДДС↔ВБ) — best-effort:
+            # сбой пропуска не роняет синк статуса; сессия истекла — пробрасываем.
+            try:
+                cab = _parse_cabinet_pass(await client.trn_details(sid))
+            except WbSessionExpired as e:
+                await integrations_service.mark_wb_portal_expired(db, project_id)
+                raise WbSupplyError(
+                    "Сессия WB-кабинета истекла. Обновите доступ WB в настройках."
+                ) from e
+            except WbPortalError:
+                cab = None
+            if cab is not None:
+                _apply_cabinet_pass_snapshot(link, cab)
         await asyncio.sleep(_SYNC_DELAY)
 
     await db.commit()
@@ -883,6 +896,11 @@ async def get_cabinet_pass(
     except WbPortalError as e:
         raise WbSupplyError(f"WB отклонил операцию: {e}") from e
 
+    return _parse_cabinet_pass(details)
+
+
+def _parse_cabinet_pass(details: dict) -> WbCabinetPass:
+    """trn_details WB → WbCabinetPass (водитель/авто/паллеты/ШК пропуска)."""
     trns = ((details.get("details") or {}).get("trns")) or []
     if not trns:
         return WbCabinetPass(has_pass=False)
@@ -902,6 +920,34 @@ async def get_cabinet_pass(
         date_from=t.get("dateFrom"),
         date_to=t.get("dateTo"),
     )
+
+
+def _apply_cabinet_pass_snapshot(link: AssemblyWbSupply, cab: WbCabinetPass) -> None:
+    """Снимок кабинетного пропуска в link + заполнение ТОЛЬКО пустых полей ДДС.
+
+    Снимок (`wb_pass_*`) — для сверки нашего пропуска с кабинетным. Пустые поля
+    нашего пропуска (`pass_*`) подтягиваем из кабинета (пропуск завели прямо в WB);
+    непустые НЕ трогаем — расхождение показывается в блоке (см. link_anomalies).
+    """
+    link.wb_pass_present = cab.has_pass
+    link.wb_pass_car_number = cab.car_number
+    link.wb_pass_pallets = cab.pallets
+    link.wb_pass_driver = " ".join(x for x in (cab.driver_last, cab.driver_first) if x) or None
+    link.wb_pass_synced_at = utcnow()
+    if not cab.has_pass:
+        return
+    if not link.pass_driver_first and cab.driver_first:
+        link.pass_driver_first = cab.driver_first
+    if not link.pass_driver_last and cab.driver_last:
+        link.pass_driver_last = cab.driver_last
+    if not link.pass_car_model and cab.car_model:
+        link.pass_car_model = cab.car_model
+    if not link.pass_car_number and cab.car_number:
+        link.pass_car_number = cab.car_number
+    if not link.pass_driver_phone and cab.driver_phone:
+        link.pass_driver_phone = normalize_ru_phone(cab.driver_phone) or None
+    if link.pass_pallets is None and cab.pallets is not None:
+        link.pass_pallets = cab.pallets
 
 
 # ─── парсеры ответов WB ──────────────────────────────────────────────────────
