@@ -1130,7 +1130,10 @@ async def set_normquery_minus(
     отсутствующие фразы удаляются. Возвращает (ok, error) — error читаемый для UI.
     """
     headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
-    body = {"items": [{"advert_id": advert_id, "nm_id": nm_id, "norm_queries": norm_queries}]}
+    # ВАЖНО: в отличие от get-minus (батч items[]), set-minus принимает поля на
+    # ВЕРХНЕМ уровне. Обёртка items[] давала 400 «invalid advert id» — WB не
+    # находил advert_id в корне тела (проверено на живом токене 2026-07-14).
+    body = {"advert_id": advert_id, "nm_id": nm_id, "norm_queries": norm_queries}
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             resp = await client.post(f"{_NQ_BASE}/set-minus", json=body, headers=headers)
@@ -1148,6 +1151,9 @@ async def set_normquery_minus(
                 "«Продвижение» и правом записи (без «Только на чтение») — тогда минус-фразы "
                 "будут применяться в кабинете."
             )
+        if resp.status_code == 400 and "is not valid for nm" in text:
+            # WB принимает в минус только фразы из известной ему истории кластеров товара
+            return False, "WB отклонил фразу: она не входит в известные кластеры этого товара"
         return False, f"WB вернул {resp.status_code}"
 
 

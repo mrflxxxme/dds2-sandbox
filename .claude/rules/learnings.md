@@ -34,6 +34,8 @@ paths:
 - PHP-API внешних провайдеров: вместо null приходят `false`/`""`/`"0000-00-00 00:00:00"`, пустой `data`-dict сериализуется как `[]`, в массивах бывают null-элементы (`Barcodes:[null]`) — коэрсить `or None`, `next((x for x in arr if x), default)`, парсер контейнера принимает и dict, и list (подтверждено живым wmscelicom)
 - User-supplied base_url для server-side запросов = SSRF-вектор: allowlist-суффикс хоста + только https + запрет порта/пути/userinfo (`normalize_base_url` в wmscelicom_client); httpx по умолчанию НЕ следует редиректам — не включать follow_redirects у таких клиентов
 - UPSERT batch: дедуп ключей в Python ДО executemany (CardinalityViolation)
+- Multi-VALUES INSERT: asyncpg-лимит 32767 параметров на statement (строки × колонки) — батчи >~3к строк чанковать (`_insert_chunks`, поймано на wb_ad_upd: 15к списаний × 10 колонок роняли дозагрузку)
+- WB normquery API несимметричен: get-minus принимает батч `{"items":[{advert_id,nm_id}]}`, а set-minus — ТОЛЬКО одиночное верхнеуровневое `{advert_id,nm_id,norm_queries}` (обёртка items[] → 400 «invalid advert id»); фразы валидируются по известным WB кластерам товара («is not valid for nm»)
 - `func.greatest(excluded.x, Model.x)` при partial-sync UPSERT — не затирать нулями
 - `CREATE INDEX CONCURRENTLY` + `AUTOCOMMIT` для partial index в Alembic
 - Denormalized FK на child → синхронизировать при update parent.fk (state-guard)

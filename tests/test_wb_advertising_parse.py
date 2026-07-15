@@ -62,3 +62,51 @@ class TestParseAdvertItem:
         r = _parse_advert_item({"id": 2, "params": [{"nms": [111, 222]}], "settings": {"payment_type": "cpc"}})
         assert r["nm_ids"] == [111, 222]
         assert r["bid_mode"] is None
+
+
+# ─── set_normquery_minus: контракт тела ───────────────────────────────────────
+
+
+async def test_set_minus_body_is_toplevel_not_items(monkeypatch):
+    """set-minus принимает {advert_id, nm_id, norm_queries} на ВЕРХНЕМ уровне.
+
+    Регресс: обёртка {"items": [...]} (как у get-minus) давала 400
+    «invalid advert id» — минусация не работала вовсе (поймано на живом
+    токене 2026-07-14; контракт сверен с форумом dev.wildberries.ru).
+    """
+    import httpx
+
+    from backend.services.funnel.wb_advertising_api import set_normquery_minus
+
+    captured = {}
+
+    async def fake_post(self, url, json=None, headers=None):
+        captured["url"] = url
+        captured["json"] = json
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    ok, err = await set_normquery_minus("key", 36019399, 893149026, ["фраза"])
+
+    assert ok is True and err is None
+    assert captured["json"] == {"advert_id": 36019399, "nm_id": 893149026, "norm_queries": ["фраза"]}
+    assert "items" not in captured["json"]
+
+
+async def test_set_minus_unknown_phrase_readable_error(monkeypatch):
+    """400 «is not valid for nm» → человеческое сообщение, не «WB вернул 400»."""
+    import httpx
+
+    from backend.services.funnel.wb_advertising_api import set_normquery_minus
+
+    async def fake_post(self, url, json=None, headers=None):
+        return httpx.Response(
+            400,
+            text='{"detail":"norm_query \'x\' is not valid for nm 1","title":"failed to set norm query minus"}',
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    ok, err = await set_normquery_minus("key", 1, 2, ["x"])
+    assert ok is False
+    assert "кластеры" in err
