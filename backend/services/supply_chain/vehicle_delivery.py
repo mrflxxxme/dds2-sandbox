@@ -1215,6 +1215,26 @@ async def update_vehicle_item(
     if not cost_item:
         raise ValueError(f"Item {item_id} not found in vehicle {order_no}")
 
+    # Root fix: смена наполнения короба → пересчёт qty с сохранением ЧИСЛА КОРОБОВ.
+    # Физический якорь — коробов, поэтому qty = коробов × наполнение. Раньше qty
+    # залипал на старом значении (108@9 оставалось 108 после правки наполнения на 5)
+    # → фантомный сток на ФФ. Пересчитываем только когда:
+    #   - явно меняем наполнение и НЕ передан явный qty (тот берёт верх);
+    #   - не задана ручная поразрядка коробов (box_detail — источник истины qty);
+    #   - старый qty кратен старому наполнению (число коробов однозначно).
+    if (
+        set_pcs_per_box_override
+        and pcs_per_box_override
+        and new_qty is None
+        and not box_detail_override
+        and not cost_item.box_detail_override
+    ):
+        old_ppb = cost_item.pcs_per_box_override
+        if old_ppb and old_ppb > 0 and cost_item.qty and cost_item.qty % old_ppb == 0:
+            recomputed = (cost_item.qty // old_ppb) * pcs_per_box_override
+            if recomputed != cost_item.qty:
+                new_qty = recomputed
+
     qty_changed = new_qty is not None and new_qty != cost_item.qty
     any_override_set = set_box_size_override or set_pcs_per_box_override or set_box_detail_override
 
