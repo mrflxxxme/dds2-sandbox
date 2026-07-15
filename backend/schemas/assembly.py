@@ -248,6 +248,8 @@ class AssemblyItemResponse(BaseModel):
     article: str | None = None
     brand: str | None = None
     stock_quantity: int = 0
+    box_qty: int | None = None  # кратность короба (склад+ШК); None — не задана
+    boxes: int | None = None    # коробов на позицию = ⌈штук/кратность⌉; None без кратности
 
 
 class FfProposedItem(BaseModel):

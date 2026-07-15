@@ -1055,6 +1055,42 @@ class TestLifecycle:
         req = await assign_vehicle(db_session, PROJECT_ID, req.id, payload)
         assert req.status == AssemblyStatus.VEHICLE_ASSIGNED
 
+    async def test_list_items_expose_box_qty_and_boxes(self, db_session):
+        """Позиции списка несут box_qty (кратность короба) и boxes (⌈штук/кратность⌉)
+        — для «Сборочного листа» Excel. Кратность из BoxQtyPerWarehouse (склад+ШК)."""
+        from backend.models.cost import BoxQtyPerWarehouse
+
+        req = await _create_test_request(db_session)  # TEST_BARCODE_1 = 5, ФФ-склад
+        db_session.add(
+            BoxQtyPerWarehouse(
+                project_id=PROJECT_ID,
+                barcode=TEST_BARCODE_1,
+                warehouse_id=req.warehouse_id,
+                box_qty=2,
+            )
+        )
+        await db_session.commit()
+
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=50)
+        maps = await prefetch_list_maps(db_session, PROJECT_ID, items)
+        target = next(r for r in items if r.id == req.id)
+        resp = await _build_response(db_session, target, **maps)
+        line = next(it for it in resp["items"] if it["barcode"] == TEST_BARCODE_1)
+        assert line["box_qty"] == 2
+        assert line["boxes"] == 3  # ceil(5 / 2)
+
+    async def test_list_items_boxes_none_without_multiplicity(self, db_session):
+        """Без заданной кратности box_qty=None и boxes=None (не 0) — «коробов» в
+        листе пусто, а не ложный ноль."""
+        req = await _create_test_request(db_session)
+        items, _ = await list_assembly_requests(db_session, PROJECT_ID, limit=50)
+        maps = await prefetch_list_maps(db_session, PROJECT_ID, items)
+        target = next(r for r in items if r.id == req.id)
+        resp = await _build_response(db_session, target, **maps)
+        line = next(it for it in resp["items"] if it["barcode"] == TEST_BARCODE_1)
+        assert line["box_qty"] is None
+        assert line["boxes"] is None
+
     async def test_list_exposes_via_gazelka_flag(self, db_session):
         """Список логистики отдаёт via_gazelka=True для заявки с активной отправкой
         в Газельку (для дизейбла кнопки на фронте, батчем без N+1)."""
