@@ -5,42 +5,13 @@ import { formatNumber, exportToExcel } from '@/lib/utils';
 import { computeProductStatus } from '@/lib/utils/productStatus';
 import { WarehouseNeedView } from './WarehouseNeedView';
 import { WarehouseExclusionSettings } from './WarehouseExclusionSettings';
+import type { StockAnalyticsArticle, StockAnalyticsResponse } from '@/types/api';
 
 /* ─── Types ──────────────────────────────────────────────── */
-interface Article {
-    nm_id: number;
-    vendor_code: string;
-    subject: string;
-    brand: string;
-    orders_30d: number;
-    trend_pct: number;
-    avg_daily: number;
-    stocks_wb: number;
-    days_left: number;
-    traffic_light: string;
-    forecast: number[];
-    stocks_rf?: number;
-    in_assembly?: number;
-    in_transit?: number;
-    wb_buyout_pct?: number;
-    revenue_bdr?: number;
-    margin_pct?: number | null;
-    rf_avg_days?: number | null;
-    first_sale_date?: string | null;
-}
-
-interface StockData {
-    articles: Article[];
-    dates: string[];
-    total_articles: number;
-    orders_30d: number;
-    avg_daily: number;
-    data_date: string;
-    most_critical: { article: string; days_left: number } | null;
-    traffic_light: { red: number; orange: number; yellow: number; green: number };
-    subjects: string[];
-    brands: string[];
-}
+// Формы ответа /reports/stock_analytics — общие типы в types/api.ts
+// (их же использует блок «Срочно к отправке» на черновике сборки).
+type Article = StockAnalyticsArticle;
+type StockData = StockAnalyticsResponse;
 
 /* ─── Helpers ────────────────────────────────────────────── */
 const shortDate = (d: string) => {

@@ -16,7 +16,7 @@ import { applyAcceptanceRedistToPrebook } from '@/lib/assembly/prebookRedistribu
 import { Toast } from '@/components';
 import TabLayout from '@/components/TabLayout';
 import DraftPreview from './components/DraftPreview';
-import AddFromNeedPanel from './components/AddFromNeedPanel';
+import UrgentShipPanel from './components/UrgentShipPanel';
 import { WarehouseNeedView } from '../../analytics/components/WarehouseNeedView';
 import { BoxMultiplicityView } from '../../box-multiplicity/BoxMultiplicityView';
 import { PalletSizesView } from '../../pallet-sizes/PalletSizesView';
@@ -521,52 +521,6 @@ export default function AssemblyDraftPage() {
             finally { selfHealBusyRef.current = false; }
         })();
     }, [draftId, draft, geomState, loading, normalizeAndSave, applyDraft, showToast]);
-
-    // Дозалив строк из панелей A/B: флашим локальные правки, merge на бэке (возвращает
-    // обновлённый черновик), нормализуем к целым коробам+паллетам и применяем результат
-    // (без лишних reload-GET). Бросает — панель ловит и тостит.
-    const handleAddRows = useCallback(async (newRows: AssemblyDraftRow[]) => {
-        // ЖЁСТКИЙ ГЕЙТ (зеркало handleFillAllRows): без геометрии не добавляем — сырые
-        // некратные строки молча легли бы в черновик.
-        if (geomState !== 'ready') throw new Error('Кратности коробов не загружены — обновите страницу и дождитесь загрузки');
-        // БЕЗ КРАТНОСТИ — НЕ УЧАСТВУЮТ (правило юзера):
-        // SKU без «шт/короб» не добавляется — укажите кратность (вкладка «Кратность»).
-        const usable = newRows.filter(r => (nmPpb.get(r.nm_id) || 0) > 0);
-        const skippedNoPpb = newRows.length - usable.length;
-        if (usable.length === 0) throw new Error('У выбранных артикулов нет кратности короба — заполните вкладку «Кратность»');
-        newRows = usable;
-        if (skippedNoPpb > 0) showToast(`⚠️ ${formatNumber(skippedNoPpb, 0)} арт. без кратности короба пропущены — укажите кратность (вкладка «Кратность»)`, 'error');
-        // Гарантируем id черновика. Если state ещё не прогрузил draft (ремоунт/гонка
-        // StrictMode — в логах виден шквал POST /current), тянем синглтон. Иначе add
-        // молча возвращался (`return`), а панель ЛОЖНО рапортовала «Добавлено» — POST
-        // не уходил, ничего не сохранялось (баг «новинки не добавляются»).
-        let id = draftId;
-        if (!id) {
-            const cur = await api.getOrCreateCurrentDraft();
-            applyDraft(cur);
-            id = cur.id;
-        } else {
-            // Флашим локальные правки редактора перед merge (иначе reload их затрёт).
-            const ok = await ensureSaved();
-            if (!ok) throw new Error('Не удалось сохранить текущие правки перед добавлением');
-        }
-        // merge возвращает обновлённый черновик → передаём его в нормализатор (без лишнего GET).
-        const merged = await api.addAssemblyDraftRows(id, newRows);
-        // Инвариант: приводим ВЕСЬ черновик к целым коробам + целым паллетам (короб —
-        // смешанные паллеты; моно — ≤3 артикула). Идемпотентно. Best-effort: сбой не блокирует.
-        try {
-            const norm = await normalizeAndSave(id, merged);
-            if (norm === null) {
-                // geom ещё не загружена → нормализация пропущена (не молча): предупреждаем.
-                showToast('Геометрия коробок ещё грузится — нажмите «Пересчитать», чтобы привести к целым коробам и паллетам', 'error');
-                applyDraft(merged);
-            } else {
-                applyDraft(norm.draft);
-            }
-        } catch {
-            applyDraft(merged); // нормализация упала — показываем хотя бы добавленное
-        }
-    }, [draftId, geomState, nmPpb, ensureSaved, normalizeAndSave, applyDraft, showToast]);
 
     // Долив строк из встроенной вкладки «Потребность» → перезагрузить черновик и
     // переключиться на вкладку 'draft', чтобы пользователь увидел добавленное.
@@ -1763,21 +1717,6 @@ export default function AssemblyDraftPage() {
         }
     }, [draftId, draft, name, showToast]);
 
-    // WB-склад → ключ округа (для кросс-SKU палет-консолидации в панелях добавления).
-    const districtRecord = useMemo(() => {
-        const m: Record<string, string> = {};
-        for (const w of stockNeed?.warehouses ?? []) if (w.district_key) m[w.name] = w.district_key;
-        return m;
-    }, [stockNeed]);
-
-    // nm_id уже в черновике (строки + переданные на ФФ юниты) — вычитаем из кандидатов.
-    const existingNmIds = useMemo(() => {
-        const s = new Set<number>();
-        for (const r of rows) s.add(r.nm_id);
-        for (const h of handedUnits) for (const it of h.items) s.add(it.nm_id);
-        return s;
-    }, [rows, handedUnits]);
-
     // nm_id строк черновика — скрыть из таблицы потребности во встроенной вкладке.
     const draftNmIds = useMemo(() => {
         const s = new Set<number>();
@@ -1974,16 +1913,7 @@ export default function AssemblyDraftPage() {
                             </div>
                         </div>
                     )}
-                    <AddFromNeedPanel
-                        stockNeed={stockNeed}
-                        existingNmIds={existingNmIds}
-                        nmPpb={nmPpb}
-                        nmBoxSize={nmBoxSize}
-                        palletOverrides={palletOverrides}
-                        districtMap={districtRecord}
-                        onAddRows={handleAddRows}
-                        onToast={showToast}
-                    />
+                    <UrgentShipPanel slug={slug} rows={rows} stockNeed={stockNeed} />
                     <DraftPreview
                         slug={slug}
                         draftId={draft.id}
