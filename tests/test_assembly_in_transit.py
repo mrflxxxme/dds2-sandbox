@@ -379,3 +379,88 @@ async def test_gate_growth_without_transit_untouched(db_session, project, ff_war
     assert len(dist.rows) == 1
     assert dist.rows[0].tgt == {"Казань": 50, "Екатеринбург - Перспективная 14": 30}
     assert dist.rows[0].src == {str(ff_warehouse.id): 80}
+
+
+@pytest.mark.asyncio
+async def test_gate_respects_manual_nms(db_session, project, ff_warehouse):
+    """✋ Ручной SKU (manual_nms) гейт НЕ режет: человек добирает ПОВЕРХ уже
+    едущего осознанно — колонка «В сборке» видна в матрице. Прод-кейс
+    2026-07-15: +4 короба 150х200 в Электросталь (транзит есть) молча
+    вырезались до нуля → правка «не сохранялась»."""
+    from backend.schemas.assembly_draft import (
+        AssemblyDraftCreate,
+        AssemblyDraftDistribution,
+        AssemblyDraftRow,
+        AssemblyDraftUpdate,
+    )
+    from backend.services import assembly_draft_service
+
+    nm_id = 896_800_000 + int(_uid()[:4], 16)
+    nom = await _nom(db_session, project.id, nm_id)
+    # Уже едет 26 в Электросталь.
+    await _make_request(db_session, project.id, ff_warehouse.id, nom, status=AssemblyStatus.IN_PROGRESS, wb_name="Электросталь", qty=26)
+
+    draft = await assembly_draft_service.create_draft(
+        db_session, project.id, AssemblyDraftCreate(name="Ручной", distribution=AssemblyDraftDistribution())
+    )
+    incoming = AssemblyDraftDistribution(
+        source_warehouse_ids=[ff_warehouse.id],
+        target_warehouse_names=["Электросталь"],
+        rows=[
+            AssemblyDraftRow(nm_id=nm_id, barcode=nom.barcode, vendor_code="x", src={str(ff_warehouse.id): 52}, tgt={"Электросталь": 52})
+        ],
+        manual_nms=[nm_id],
+    )
+    updated = await assembly_draft_service.update_draft(
+        db_session, project.id, draft.id, AssemblyDraftUpdate(distribution=incoming)
+    )
+    from backend.schemas.assembly_draft import AssemblyDraftDistribution as Dist
+
+    dist = Dist.model_validate(updated.distribution)
+    assert len(dist.rows) == 1
+    assert dist.rows[0].tgt == {"Электросталь": 52}
+    assert dist.rows[0].src == {str(ff_warehouse.id): 52}
+
+
+@pytest.mark.asyncio
+async def test_gate_manual_exemption_is_per_nm(db_session, project, ff_warehouse):
+    """Изъятие из гейта — точечное, per nm: ручной SKU не режется, соседний
+    НЕручной с тем же складом режется как раньше (stale-защита жива)."""
+    from backend.schemas.assembly_draft import (
+        AssemblyDraftCreate,
+        AssemblyDraftDistribution,
+        AssemblyDraftRow,
+        AssemblyDraftUpdate,
+    )
+    from backend.services import assembly_draft_service
+
+    nm_manual = 896_900_000 + int(_uid()[:4], 16)
+    nm_auto = nm_manual + 1
+    nom_m = await _nom(db_session, project.id, nm_manual)
+    nom_a = await _nom(db_session, project.id, nm_auto)
+    await _make_request(db_session, project.id, ff_warehouse.id, nom_m, status=AssemblyStatus.IN_PROGRESS, wb_name="Электросталь", qty=26)
+    await _make_request(db_session, project.id, ff_warehouse.id, nom_a, status=AssemblyStatus.IN_PROGRESS, wb_name="Электросталь", qty=26)
+
+    draft = await assembly_draft_service.create_draft(
+        db_session, project.id, AssemblyDraftCreate(name="Смешанный", distribution=AssemblyDraftDistribution())
+    )
+    incoming = AssemblyDraftDistribution(
+        source_warehouse_ids=[ff_warehouse.id],
+        target_warehouse_names=["Электросталь"],
+        rows=[
+            AssemblyDraftRow(nm_id=nm_manual, barcode=nom_m.barcode, vendor_code="m", src={str(ff_warehouse.id): 52}, tgt={"Электросталь": 52}),
+            AssemblyDraftRow(nm_id=nm_auto, barcode=nom_a.barcode, vendor_code="a", src={str(ff_warehouse.id): 52}, tgt={"Электросталь": 52}),
+        ],
+        manual_nms=[nm_manual],
+    )
+    updated = await assembly_draft_service.update_draft(
+        db_session, project.id, draft.id, AssemblyDraftUpdate(distribution=incoming)
+    )
+    from backend.schemas.assembly_draft import AssemblyDraftDistribution as Dist
+
+    dist = Dist.model_validate(updated.distribution)
+    by_nm = {r.nm_id: r for r in dist.rows}
+    # ручной — цел
+    assert by_nm[nm_manual].tgt == {"Электросталь": 52}
+    # обычный — урезан на транзит 26
+    assert by_nm[nm_auto].tgt == {"Электросталь": 26}
