@@ -1,5 +1,5 @@
 # ruff: noqa: RUF001, RUF002, RUF003
-"""_normalize_ru_phone — телефон в формат WB-пропуска 79XXXXXXXXX.
+"""normalize_ru_phone — телефон в формат WB-пропуска 79XXXXXXXXX.
 
 Регресс прод-бага: setTRNDetails отбивал «8-918-…»/«+7…» как «Номер телефона
 не валиден», проходил только чистый 79XXXXXXXXX (см. заносы ASM-316/581/582…).
@@ -7,7 +7,7 @@
 
 import pytest
 
-from backend.integrations.wb_portal_client import _normalize_ru_phone
+from backend.utils.phone import normalize_ru_phone
 
 
 @pytest.mark.parametrize(
@@ -23,14 +23,14 @@ from backend.integrations.wb_portal_client import _normalize_ru_phone
     ],
 )
 def test_normalizes_to_wb_format(raw, expected):
-    assert _normalize_ru_phone(raw) == expected
+    assert normalize_ru_phone(raw) == expected
 
 
 def test_empty_and_none_safe():
-    assert _normalize_ru_phone("") == ""
-    assert _normalize_ru_phone(None) == ""  # type: ignore[arg-type]
+    assert normalize_ru_phone("") == ""
+    assert normalize_ru_phone(None) == ""
 
 
 def test_unrecognized_returns_digits():
     # Нераспознанная длина — отдаём очищенные цифры (не роняем занос на дефисах).
-    assert _normalize_ru_phone("12-34") == "1234"
+    assert normalize_ru_phone("12-34") == "1234"
