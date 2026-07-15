@@ -342,7 +342,10 @@ async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> WbSu
 # Статусы заявки, для которых WB-поставка ещё «живая» (её статус меняется и
 # интересен). Терминальные (SHIPPED/DELIVERED/CLOSED/CANCELLED/RETURNED) не синкаем —
 # их сотни в истории, а статус уже финальный → лишние вызовы и рейт-лимит.
-_SYNC_ACTIVE_STATUSES = ("IN_PROGRESS", "READY", "VEHICLE_ASSIGNED")
+# SHIPPED («в пути») тоже синкаем: поставка ещё не принята (→DELIVERED после
+# приёмки WB), а блок «Расхождение поставок ФФ» и снимок кабинетного пропуска
+# нужны именно для назначенных/в пути. Терминальные (DELIVERED/CLOSED/архив) — нет.
+_SYNC_ACTIVE_STATUSES = ("IN_PROGRESS", "READY", "VEHICLE_ASSIGNED", "SHIPPED")
 _SYNC_SUPPLY_CAP = 200      # предохранитель от лавины вызовов
 _SYNC_DELAY = 0.25         # пауза между supplyDetails (щадим анти-бот)
 
