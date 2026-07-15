@@ -26,6 +26,7 @@ from backend.scheduler.jobs.fbo_supplies import (
     refresh_all_projects_assemblies_from_fbo,
     sync_all_projects_fbo_supplies,
 )
+from backend.scheduler.jobs.ab_tests import ab_tests_tick_all_projects
 from backend.scheduler.jobs.fulfillment_sync import sync_all_fulfillment_warehouses
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
@@ -166,6 +167,18 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,
+    )
+
+    # АБ-тесты главного фото: тик каждые 5 мин — дельты счётчиков, ротация по границе
+    # круга (по времени round_minutes, досрочно по показам), финиш с возвратом исходного.
+    _scheduler.add_job(
+        ab_tests_tick_all_projects,
+        trigger=IntervalTrigger(minutes=5),
+        id="ab_tests_tick",
+        name="WB AB photo tests tick (every 5min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=120,
     )
 
     # РК-статистика по товарам: раз в сутки ночью. Первый проход после релиза

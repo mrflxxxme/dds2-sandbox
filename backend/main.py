@@ -22,6 +22,7 @@ from backend.config import settings
 from backend.database import AsyncSessionLocal, async_engine
 from backend.routers import (
     ai_chat,
+    ab_tests,
     assembly,
     assembly_drafts,
     assembly_wb,
@@ -600,6 +601,12 @@ app.include_router(
     measurements.router,
     prefix="/api/v1",
     tags=["Measurements"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    ab_tests.router,
+    prefix="/api/v1",
+    tags=["AB Tests"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

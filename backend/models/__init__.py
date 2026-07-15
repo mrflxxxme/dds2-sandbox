@@ -6,6 +6,13 @@ All models are re-exported here for backward compatibility:
     from backend.models import User, Transaction, Order  # still works
 """
 
+# AB Photo Tests
+from backend.models.ab_tests import (
+    AbPhotoRound,
+    AbPhotoTest,
+    AbPhotoVariant,
+)
+
 # AI Chat
 from backend.models.ai_chat import (
     AiConversation,
@@ -436,6 +443,10 @@ __all__ = [
     "SupplyProject",
     "VehicleDocument",
     "VehicleStatusHistory",
+    # AB Photo Tests
+    "AbPhotoRound",
+    "AbPhotoTest",
+    "AbPhotoVariant",
     # AI Chat
     "AiConversation",
     "AiMessage",

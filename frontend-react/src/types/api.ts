@@ -6330,3 +6330,98 @@ export interface AdSubject { id: number; name: string; count: number }
 export interface AdNmCard { nm: number; title: string; subjectId: number }
 /** Результат создания кампании. */
 export interface CreateCampaignResult { ok: boolean; campaign_id: number | null; error: string | null }
+
+// ── АБ-тесты главного фото ───────────────────────────────────────────────────
+export type AbTestStatus = 'draft' | 'running' | 'paused' | 'finished' | 'error';
+
+export interface AbTestListItem {
+  id: number;
+  nm_id: number;
+  campaign_id: number;
+  name: string;
+  status: AbTestStatus;
+  pause_reason: string | null;
+  title: string;
+  vendor_code: string;
+  variants_count: number;
+  progress_pct: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface AbTestInfo {
+  id: number;
+  nm_id: number;
+  campaign_id: number;
+  name: string;
+  comment: string | null;
+  status: AbTestStatus;
+  pause_reason: string | null;
+  views_per_round: number;
+  round_minutes: number;
+  target_views: number;
+  max_days: number;
+  title: string;
+  vendor_code: string;
+  started_at: string | null;
+  finished_at: string | null;
+  winner_variant_id: number | null;
+  winner_applied_at: string | null;
+}
+
+export interface AbTestVariantStats {
+  id: number;
+  position: number;
+  is_control: boolean;
+  excluded: boolean;
+  is_active: boolean;
+  is_winner: boolean;
+  rounds: number;
+  views: number;
+  clicks: number;
+  ctr: number;
+  atbs: number;
+  orders: number;
+  spend: number;
+  orders_sum: number;
+  organic_open: number;
+  organic_cart: number;
+  organic_orders: number;
+  round_wins: number;
+  progress_pct: number;
+  enough_data: boolean;
+  ctr_gap: number | null;
+}
+
+export interface AbTestRoundRow {
+  round_no: number;
+  variant_id: number;
+  started_at: string;
+  ended_at: string | null;
+  views: number;
+  clicks: number;
+  ctr: number;
+  atbs: number;
+  orders: number;
+  organic_open: number;
+  organic_cart: number;
+  flags: Record<string, unknown>;
+}
+
+export interface AbTestResults {
+  test: AbTestInfo;
+  variants: AbTestVariantStats[];
+  rounds: AbTestRoundRow[];
+}
+
+export interface AbTestCreatePayload {
+  nm_id: number;
+  campaign_id: number;
+  name?: string;
+  comment?: string | null;
+  views_per_round?: number;
+  round_minutes?: number;
+  target_views?: number;
+  max_days?: number;
+}

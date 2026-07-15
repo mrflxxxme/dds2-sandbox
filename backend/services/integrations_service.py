@@ -67,8 +67,8 @@ async def add_key(
     Returns dict with key info.
     Raises ValueError on validation failure.
     """
-    if service not in ("wb", "wb_advert", "ozon"):
-        raise ValueError(f"Unsupported service: {service}. Use 'wb', 'wb_advert' or 'ozon'.")
+    if service not in ("wb", "wb_advert", "wb_content", "ozon"):
+        raise ValueError(f"Unsupported service: {service}. Use 'wb', 'wb_advert', 'wb_content' or 'ozon'.")
 
     # Test connection before saving — different scope, different endpoint.
     if service == "wb":
@@ -89,6 +89,16 @@ async def add_key(
             raise ValueError(
                 "Рекламный ключ без доступа «Продвижение». "
                 "Проверьте, что токен выпущен с категорией «Продвижение»."
+            )
+    elif service == "wb_content":
+        from backend.integrations.wb_content_api import check_content_scope
+
+        # Та же семантика, что у check_advert_scope: "unknown" не блокирует сохранение.
+        scope = await check_content_scope(api_key)
+        if scope == "no_scope":
+            raise ValueError(
+                "Ключ без доступа «Контент». "
+                "Проверьте, что токен выпущен с категорией «Контент» и правом записи."
             )
 
     encrypted = _encrypt(api_key)
