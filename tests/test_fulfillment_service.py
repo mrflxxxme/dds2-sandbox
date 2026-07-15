@@ -4438,3 +4438,112 @@ async def test_unlinked_assemblies_project_isolation(db_session, project, wareho
 
     rows = await fulfillment_service.list_unlinked_assemblies(db_session, other_project.id, other_warehouse.id)
     assert rows == []
+
+
+# ─── list_stocks: досчёт логистики ФФ (баг «Указание вида работ логистики») ──
+
+
+async def _make_ff_stock_row(db_session, project, warehouse, barcode, nom_id, qty_good):
+    """Строка зеркала остатка ФФ (россыпь, skladbot)."""
+    row = FulfillmentStock(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        provider="skladbot",
+        barcode=barcode,
+        nomenclature_id=nom_id,
+        qty_good=qty_good,
+        qty_reserve=0,
+        qty_defect=0,
+        qty_nominal=0,
+        units_per_box=1,
+        synced_at=utcnow(),
+    )
+    db_session.add(row)
+    await db_session.commit()
+    return row
+
+
+async def _make_logistics_ff_request(db_session, project, warehouse, assembly_id, is_completed=False):
+    req = FulfillmentRequest(
+        project_id=project.id,
+        warehouse_id=warehouse.id,
+        provider="skladbot",
+        external_id=f"FF-{_uid()}",
+        kind="assembly",
+        status="logistics",
+        stage_code="logistics_works",
+        stage_title="Указание виды работ логистики",
+        is_completed=is_completed,
+        archived=False,
+        expired=False,
+        assembly_request_id=assembly_id,
+        synced_at=utcnow(),
+    )
+    db_session.add(req)
+    await db_session.commit()
+    return req
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_counts_logistics_writeoff_on_ff_side(db_session, project, warehouse):
+    """ФФ списал сток на стадии logistics_works, но груз на складе и сборка не
+    отгружена → состав досчитывается к ff_good, расхождение = 0."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-LOGI", subject="Ковры", brand="НУ-НУ")
+    await _make_ff_stock_row(db_session, project, warehouse, bc, nom.id, qty_good=396)  # зеркало уже списало 330
+    db_session.add(
+        WarehouseStock(
+            project_id=project.id, warehouse_id=warehouse.id,
+            nomenclature_id=nom.id, barcode=bc, quantity=726,  # наш сток держит полный
+        )
+    )
+    await db_session.commit()
+    asm = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 330)], status=AssemblyStatus.READY.value
+    )
+    await _make_logistics_ff_request(db_session, project, warehouse, asm.id)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = {r["barcode"]: r for r in data["rows"]}[bc]
+    assert row["ff_logistics"] == 330
+    assert row["ff_good"] == 726  # 396 зеркало + 330 логистика
+    assert row["our_quantity"] == 726
+    assert row["diff"] == 0
+    assert data["totals"]["ff_logistics"] == 330
+    assert data["totals"]["diff"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_logistics_not_counted_when_shipped(db_session, project, warehouse):
+    """Сборка SHIPPED (наш сток уже списан ship_request) → логистику НЕ досчитываем,
+    иначе ложный излишек."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-SHIP")
+    await _make_ff_stock_row(db_session, project, warehouse, bc, nom.id, qty_good=100)
+    asm = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 50)], status=AssemblyStatus.SHIPPED.value
+    )
+    await _make_logistics_ff_request(db_session, project, warehouse, asm.id)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = {r["barcode"]: r for r in data["rows"]}[bc]
+    assert row["ff_logistics"] == 0
+    assert row["ff_good"] == 100
+    assert row["diff"] == 100
+
+
+@pytest.mark.asyncio
+async def test_list_stocks_logistics_not_counted_when_completed(db_session, project, warehouse):
+    """ФФ-заявка is_completed=True (груз уехал) → логистику НЕ досчитываем."""
+    bc = f"BC-{_uid()}"
+    nom = await _make_nomenclature(db_session, project.id, bc, article="ART-DONE")
+    await _make_ff_stock_row(db_session, project, warehouse, bc, nom.id, qty_good=100)
+    asm = await _make_assembly_with_items(
+        db_session, project, warehouse, [(bc, nom.id, 50)], status=AssemblyStatus.VEHICLE_ASSIGNED.value
+    )
+    await _make_logistics_ff_request(db_session, project, warehouse, asm.id, is_completed=True)
+
+    data = await fulfillment_service.list_stocks(db_session, project.id, warehouse.id)
+    row = {r["barcode"]: r for r in data["rows"]}[bc]
+    assert row["ff_logistics"] == 0
+    assert row["diff"] == 100
