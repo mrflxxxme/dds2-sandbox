@@ -1812,6 +1812,10 @@ export interface AssemblyRequestItem {
   article?: string | null;
   brand?: string;
   stock_quantity: number;
+  /** Кратность короба (склад заявки + ШК); null — не задана. */
+  box_qty?: number | null;
+  /** Коробов на позицию = ⌈штук/кратность⌉; null без кратности. */
+  boxes?: number | null;
 }
 
 /** Содержимое одного SKU внутри паллеты: целые короба + хвост-россыпь. */
