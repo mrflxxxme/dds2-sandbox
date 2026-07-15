@@ -284,3 +284,101 @@ class TestNoApiKey:
         assert result["inserted"] == 0
         assert result["updated"] == 0
         assert "no WB API key" in result["errors"][0]
+
+
+# ─── fetch_supplier_orders: пагинация (WB отдаёт максимум ~80k на запрос) ─────
+
+
+class _FakeResp:
+    def __init__(self, data, status=200):
+        self._data = data
+        self.status_code = status
+        self.headers: dict[str, str] = {}
+        self.text = ""
+
+    def json(self):
+        return self._data
+
+
+@pytest.mark.asyncio
+async def test_fetch_orders_paginates_by_last_change(monkeypatch):
+    """Полная страница (== cap) → продолжаем с курсором = max(lastChangeDate).
+
+    Регресс: один запрос при широком окне терял НОВЕЙШИЕ заказы — WB отдаёт
+    первые ~80k, отсортированные по lastChangeDate ↑, хвост (свежие дни) обрезался.
+    """
+    from backend.services.funnel import wb_supplier_api as api
+
+    monkeypatch.setattr(api, "_ORDERS_PAGE_CAP", 3)
+    page1 = [
+        {"srid": "a1", "lastChangeDate": "2026-07-10T00:00:00"},
+        {"srid": "a2", "lastChangeDate": "2026-07-11T00:00:00"},
+        {"srid": "boundary", "lastChangeDate": "2026-07-13T12:00:00"},
+    ]
+    page2 = [{"srid": "x1", "lastChangeDate": "2026-07-14T09:00:00"}]  # неполная → стоп
+    calls: list[str] = []
+
+    async def fake_get(self, url, headers=None, params=None):
+        calls.append(params["dateFrom"])
+        return _FakeResp(page1 if params["dateFrom"] == "2026-07-08" else page2)
+
+    monkeypatch.setattr(api.httpx.AsyncClient, "get", fake_get)
+    out = await api.fetch_supplier_orders("key", "2026-07-08")
+
+    assert len(out) == 4, "хвостовая страница потеряна"
+    assert calls == ["2026-07-08", "2026-07-13T12:00:00"], "курсор != max(lastChangeDate)"
+    assert out[-1]["srid"] == "x1"
+
+
+@pytest.mark.asyncio
+async def test_fetch_orders_single_page_no_extra_call(monkeypatch):
+    """Неполная первая страница → ровно один запрос."""
+    from backend.services.funnel import wb_supplier_api as api
+
+    monkeypatch.setattr(api, "_ORDERS_PAGE_CAP", 100)
+    calls: list[str] = []
+
+    async def fake_get(self, url, headers=None, params=None):
+        calls.append(params["dateFrom"])
+        return _FakeResp([{"srid": "a1", "lastChangeDate": "2026-07-14T00:00:00"}])
+
+    monkeypatch.setattr(api.httpx.AsyncClient, "get", fake_get)
+    out = await api.fetch_supplier_orders("key", "2026-07-08")
+    assert len(out) == 1
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_orders_cursor_stuck_breaks(monkeypatch):
+    """Вся полная страница в одну lastChangeDate → курсор не двигается → стоп (не вечный цикл)."""
+    from backend.services.funnel import wb_supplier_api as api
+
+    monkeypatch.setattr(api, "_ORDERS_PAGE_CAP", 2)
+    same = [
+        {"srid": "a1", "lastChangeDate": "2026-07-10T00:00:00"},
+        {"srid": "a2", "lastChangeDate": "2026-07-10T00:00:00"},
+    ]
+    calls: list[str] = []
+
+    async def fake_get(self, url, headers=None, params=None):
+        calls.append(params["dateFrom"])
+        return _FakeResp(same)
+
+    monkeypatch.setattr(api.httpx.AsyncClient, "get", fake_get)
+    out = await api.fetch_supplier_orders("key", "2026-07-10T00:00:00")
+    # первый запрос дал полную страницу с курсором == исходному → второго не делаем
+    assert len(calls) == 1
+    assert len(out) == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_orders_error_returns_partial(monkeypatch):
+    """Ошибка на 1-й странице → [], как раньше (не роняем весь синк)."""
+    from backend.services.funnel import wb_supplier_api as api
+
+    async def fake_get(self, url, headers=None, params=None):
+        return _FakeResp("boom", status=401)
+
+    monkeypatch.setattr(api.httpx.AsyncClient, "get", fake_get)
+    out = await api.fetch_supplier_orders("key", "2026-07-08")
+    assert out == []
