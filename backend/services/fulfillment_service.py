@@ -41,6 +41,7 @@ from backend.integrations.skladbot_client import (
     DELIVERY_REQUEST_TYPE_ID,
     INBOUND_REQUEST_TYPE_ID,
     INBOUND_TYPE_IDS,
+    LOGISTICS_WRITEOFF_STAGE_CODES,
     SkladbotApiError,
     SkladbotClient,
     decode_jwt_exp,
@@ -2390,6 +2391,58 @@ async def _migfull_assembled_by_guid(db: AsyncSession, project_id: int, warehous
     return assembled
 
 
+# Сборка ещё «наша» (сток у нас на складе, ship_request не списал) — пред-отгрузочные
+# статусы. SHIPPED и далее (наш сток уже списан) сюда не входят.
+_PRESHIP_ASSEMBLY_STATUSES = (
+    AssemblyStatus.PENDING.value,
+    AssemblyStatus.IN_PROGRESS.value,
+    AssemblyStatus.READY.value,
+    AssemblyStatus.VEHICLE_ASSIGNED.value,
+)
+
+
+async def _logistics_in_transit_by_barcode(
+    db: AsyncSession, project_id: int, warehouse_id: int
+) -> dict[str, tuple[int, int | None]]:
+    """Состав сборок, чья ФФ-заявка на стадии списания логистики, но груз ещё на складе.
+
+    skladbot списывает stock_actual (=ff_good зеркало) уже на стадии «Указание
+    вида работ логистики» (`LOGISTICS_WRITEOFF_STAGE_CODES`), хотя товар физически
+    на складе ФФ, а мы сборку ещё не отгрузили и на ФБО не сдали — `ship_request`
+    списывает наш сток только по `is_completed`. Пока ФФ-заявка не завершена и
+    сборка в пред-отгрузочном статусе, её состав досчитываем к остатку ФФ в
+    расхождении (иначе ложная недостача). Возвращает {barcode: (qty, nomenclature_id)}.
+    """
+    result = await db.execute(
+        select(
+            AssemblyRequestItem.barcode,
+            AssemblyRequestItem.nomenclature_id,
+            func.sum(AssemblyRequestItem.quantity),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .join(FulfillmentRequest, FulfillmentRequest.assembly_request_id == AssemblyRequest.id)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+            FulfillmentRequest.stage_code.in_(LOGISTICS_WRITEOFF_STAGE_CODES),
+            FulfillmentRequest.is_completed == False,  # noqa: E712
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+            AssemblyRequest.status.in_(_PRESHIP_ASSEMBLY_STATUSES),
+        )
+        .group_by(AssemblyRequestItem.barcode, AssemblyRequestItem.nomenclature_id)
+    )
+    out: dict[str, tuple[int, int | None]] = {}
+    for barcode, nom_id, qty in result.all():
+        if not barcode:
+            continue
+        prev = out.get(barcode)
+        add = int(qty or 0)
+        out[barcode] = (prev[0] + add, prev[1] or nom_id) if prev else (add, nom_id)
+    return out
+
+
 async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> dict:
     """UNION остатков ФФ и нашего склада по barcode (FfStocksResponse shape).
 
@@ -2426,9 +2479,14 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     )
     our_rows = list(ws_result.scalars().all())
 
+    # Товар в стадии списания логистики ФФ (skladbot списал из stock_actual, но
+    # груз ещё на складе и сборка не отгружена) — досчитаем к ff_good ниже.
+    logistics_in_transit = await _logistics_in_transit_by_barcode(db, project_id, warehouse_id)
+
     # article_seller / subject / brand одним запросом для всех номенклатур (без N+1)
     nom_ids = {r.nomenclature_id for r in ff_rows if r.nomenclature_id}
     nom_ids |= {r.nomenclature_id for r in our_rows if r.nomenclature_id}
+    nom_ids |= {nid for _, nid in logistics_in_transit.values() if nid}
     nom_by_id: dict[int, tuple[str | None, str | None, str | None]] = {}
     if nom_ids:
         nom_result = await db.execute(
@@ -2464,6 +2522,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
             "ff_nominal": 0,
             "ff_box_units": 0,  # из них пришло коробами (в штуках россыпи)
             "ff_box_count": 0,  # сколько коробов годного
+            "ff_logistics": 0,  # досчитано к ff_good: товар в стадии списания логистики, ещё на складе ФФ
             "our_quantity": 0,
             "our_defect": 0,
             "diff": 0,
@@ -2517,6 +2576,20 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         ws_row["our_quantity"] = wr.quantity
         ws_row["our_defect"] = wr.defect_quantity
 
+    # Досчёт логистики к ff_good: товар списан у ФФ на стадии «Указание вида работ
+    # логистики», но физически на складе, а сборка ещё не отгружена (наш сток его
+    # держит) → без досчёта расхождение показывает ложную недостачу. Состав сборки
+    # — в россыпи (ключ = barcode, без короб-фолда).
+    for barcode, (qty, nom_id) in logistics_in_transit.items():
+        lrow = rows.get(barcode)
+        if lrow is None:
+            lrow = rows[barcode] = _new_row(barcode, nom_id)
+        elif lrow["nomenclature_id"] is None and nom_id is not None:
+            lrow["nomenclature_id"] = nom_id
+            lrow["article_seller"], lrow["subject"], lrow["brand"] = _nom_fields(nom_id)
+        lrow["ff_logistics"] += qty
+        lrow["ff_good"] += qty
+
     for row in rows.values():
         if is_migfull:
             # ff_good (stock_actual) включает брак → сравниваем с нашим ИТОГОМ,
@@ -2532,6 +2605,7 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         "ff_reserve_ready": sum(r["ff_reserve_ready"] for r in out_rows),
         "ff_defect": sum(r["ff_defect"] for r in out_rows),
         "ff_box_units": sum(r["ff_box_units"] for r in out_rows),
+        "ff_logistics": sum(r["ff_logistics"] for r in out_rows),
         "our_quantity": sum(r["our_quantity"] for r in out_rows),
         "diff": sum(r["diff"] for r in out_rows),
         "unmatched": sum(1 for k in ff_keys if rows[k]["nomenclature_id"] is None),
@@ -4826,6 +4900,9 @@ async def link_request(
         inbound_map = {inb_doc.id: (inb_doc.number, inb_doc.status)}
 
     await db.commit()
+    # Связь всегда меняет блоки «без нашей сборки» / «расхождение поставок» — гасим кэш
+    # вкладки «Связи и расхождения» (иначе строка не уходит из блока до 5 мин).
+    await invalidate_cache("reports:assembly_link_anomalies")
     if marked_ready:
         await invalidate_cache("reports:assembly_flow")
         if ready_notify is not None:
@@ -4881,6 +4958,7 @@ async def unlink_request(
     req.assembly_request_id = None
     req.inbound_receipt_id = None
     await db.commit()
+    await invalidate_cache("reports:assembly_link_anomalies")
     return _request_to_dict(req)
 
 
@@ -4922,6 +5000,9 @@ async def archive_request(
         req.local_archived = True
         req.local_archived_at = utcnow()
         await db.commit()
+        # Блок «Заявки ФФ без нашей сборки» кэширован — иначе архив «не срабатывает»
+        # (строка возвращается из старого кэша до 5 мин).
+        await invalidate_cache("reports:assembly_link_anomalies")
     return _request_to_dict(req)
 
 
@@ -4939,6 +5020,7 @@ async def unarchive_request(
         req.local_archived = False
         req.local_archived_at = None
         await db.commit()
+        await invalidate_cache("reports:assembly_link_anomalies")
     return _request_to_dict(req)
 
 
@@ -5401,6 +5483,7 @@ async def create_assembly_from_ff(
         marked_ready = True
         ready_notify = _ready_notify_payload(doc, req)
     await db.commit()
+    await invalidate_cache("reports:assembly_link_anomalies")
     if marked_ready:
         await invalidate_cache("reports:assembly_flow")
         if ready_notify is not None:

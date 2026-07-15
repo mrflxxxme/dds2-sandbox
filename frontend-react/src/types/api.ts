@@ -5629,9 +5629,11 @@ export interface FfStockRow {
   ff_box_units: number;
   /** сколько коробов годного сведено в этот товар */
   ff_box_count: number;
+  /** досчитано к ff_good: товар в стадии списания логистики ФФ, физически ещё на складе */
+  ff_logistics: number;
   our_quantity: number;
   our_defect: number;
-  /** ff_good - our_quantity */
+  /** ff_good - our_quantity (ff_good уже включает ff_logistics) */
   diff: number;
 }
 
@@ -5643,6 +5645,8 @@ export interface FfStockTotals {
   ff_defect: number;
   /** сколько штук годного пришло коробами */
   ff_box_units: number;
+  /** досчитано к ff_good: товар в стадии списания логистики ФФ */
+  ff_logistics: number;
   our_quantity: number;
   diff: number;
   /** строк ФФ без нашей номенклатуры */
