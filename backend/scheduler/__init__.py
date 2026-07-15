@@ -43,6 +43,7 @@ from backend.scheduler.jobs.health_check import health_monitor
 from backend.scheduler.jobs.heartbeat import heartbeat_ping
 from backend.scheduler.jobs.prewarm import prewarm_all_reports, prewarm_project  # noqa: F401
 from backend.scheduler.jobs.stock_distribution_snapshot import snapshot_all_projects_stock_distribution
+from backend.scheduler.jobs.supply_discrepancy import check_all_projects_supply_discrepancies
 from backend.scheduler.jobs.wb_finance import (
     sync_all_projects_wb_finance,
     sync_all_projects_wb_finance_daily,
@@ -309,6 +310,18 @@ def start_scheduler():
         trigger=IntervalTrigger(hours=4),
         id="wb_supply_states_sync",
         name="WB supply states sync (every 4h)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
+    )
+
+    # Расхождение WB-поставок → TG: every 2 hours (машина назначена/в пути,
+    # дата/паллеты/пропуск не сходятся; повтор пока проблема не исправлена).
+    _scheduler.add_job(
+        check_all_projects_supply_discrepancies,
+        trigger=IntervalTrigger(hours=2),
+        id="supply_discrepancy_notify",
+        name="Supply discrepancy notify (every 2h)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=600,

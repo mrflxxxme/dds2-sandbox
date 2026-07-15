@@ -104,3 +104,16 @@ describe('telegram.toggleTelegramFfNotify', () => {
         expect(body.enabled).toBe(false);
     });
 });
+
+describe('telegram.toggleTelegramSupplyNotify', () => {
+    it('PATCHes supply-notify setting to enabled=true', async () => {
+        const spy = mockFetch({ message: 'ok' });
+        const api = makeApi();
+        await api.toggleTelegramSupplyNotify(7, true);
+        const [url, init] = spy.mock.calls[0];
+        expect(url).toContain('/api/v1/telegram/chats/7/supply-notify');
+        expect((init as RequestInit).method).toBe('PATCH');
+        const body = JSON.parse((init as RequestInit).body as string);
+        expect(body.enabled).toBe(true);
+    });
+});
