@@ -508,6 +508,52 @@ async def test_create_pre_distribution_dedup_folds_second_call_same_direction(db
     assert qty_by_bc[env.bc2] == 5
 
 
+@pytest.mark.asyncio
+async def test_create_pre_distribution_fold_survives_rollback(db_session, env):
+    """Чистый fold-путь (все направления уже существуют) обязан коммитить сам: get_db
+    за сервис не коммитит, и без commit'а доливка молча откатывается при закрытии
+    сессии — 200 OK и «Создано 1 заявок», но БД не изменилась (прод-кейс V-0033)."""
+    r1 = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=30)],
+            pallets_by_group={f"{WB_A}::BOX": 2},
+        ),
+    )
+    first_id = r1.requests[0].id
+
+    # Второй заход целиком в существующее направление → ни одного create_assembly_request,
+    # который коммитил бы «попутно», — судьба доливки зависит только от самого сервиса.
+    r2 = await create_pre_distribution(
+        db_session,
+        env.pid,
+        PreDistributionCreate(
+            vehicle_id=env.vehicle.id,
+            rows=[PreDistRow(barcode=env.bc1, wb_warehouse_name=WB_A, qty=10)],
+            pallets_by_group={f"{WB_A}::BOX": 1},
+        ),
+    )
+    assert r2.created == 1 and r2.requests[0].id == first_id
+
+    # Конец HTTP-запроса: get_db закрывает сессию без commit → всё незакоммиченное гибнет.
+    await db_session.rollback()
+
+    items = (
+        (
+            await db_session.execute(
+                select(AssemblyRequestItem).where(AssemblyRequestItem.assembly_request_id == first_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {it.barcode: it.quantity for it in items} == {env.bc1: 40}  # 30 + 10 пережили rollback
+    req = (await db_session.execute(select(AssemblyRequest).where(AssemblyRequest.id == first_id))).scalar_one()
+    assert req.pallets_count == 3  # 2 + 1 тоже закоммичено
+
+
 async def _mk_pre_dist_request(db_session, env, wb: str, bc: str, qty: int) -> int:
     """Создать одну PRE_DISTRIBUTED сборку напрямую (в обход дедупа) — для тестов мёрджа."""
     req = await create_assembly_request(
