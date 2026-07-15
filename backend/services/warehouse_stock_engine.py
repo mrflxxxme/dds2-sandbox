@@ -557,6 +557,7 @@ async def _compute_period_metrics(
         select(
             WbFunnelDaily.nm_id,
             func.coalesce(func.sum(WbFunnelDaily.adv_sum), Decimal("0")).label("adv_sum"),
+            func.coalesce(func.sum(WbFunnelDaily.orders_count), 0).label("orders_count"),
         )
         .where(
             WbFunnelDaily.project_id == project_id,
@@ -566,7 +567,19 @@ async def _compute_period_metrics(
         .group_by(WbFunnelDaily.nm_id)
         .limit(10000)
     )
-    adv_map: dict[int, Decimal] = {r.nm_id: Decimal(str(r.adv_sum or 0)) for r in adv_result.all()}
+    adv_map: dict[int, Decimal] = {}
+    # «Тренд шт/д» («средние заказы») is driven by ORDERS (orders_count from the
+    # WB funnel), NOT by finance buy-outs (Продажа − Возврат). The two differ by
+    # the buy-out rate — e.g. for the «Диваны бескаркасные» category 383 orders
+    # vs 227 buy-outs over 7 days (~59%). The user reads this column as «сколько
+    # штук в день заказывают», so it must track demand, not realized sales.
+    # Orders are aggregated per nomenclature_id (many nm_id → one nom_id).
+    orders_by_nom: dict[int, int] = {}
+    for r in adv_result.all():
+        adv_map[r.nm_id] = Decimal(str(r.adv_sum or 0))
+        nom_id = nm_id_to_nom_id.get(r.nm_id)
+        if nom_id is not None:
+            orders_by_nom[nom_id] = orders_by_nom.get(nom_id, 0) + int(r.orders_count or 0)
 
     period_map: dict[int, dict] = {}
     for row in finance_rows:
@@ -615,9 +628,28 @@ async def _compute_period_metrics(
             "total_profit": total_profit,
             "sale_qty_raw": sale_qty_raw,
             "sale_qty": sale_qty,
+            "orders_qty": orders_by_nom.get(nom_id, 0),
             "days_count": days,
             "avg_price": float(round(realization / sale_qty, 2)),
             "avg_profit": float(round(total_profit / sale_qty, 2)),
+        }
+
+    # Items ordered in the window but with no finance rows yet (cold-start:
+    # ordered, not yet bought out) must still contribute to «тренд шт/д», else
+    # the category average silently undercounts new SKUs. They carry zero
+    # realization/profit — only the order-driven velocity is populated.
+    for nom_id, orders_qty in orders_by_nom.items():
+        if orders_qty <= 0 or nom_id in period_map:
+            continue
+        period_map[nom_id] = {
+            "realization": Decimal("0"),
+            "total_profit": Decimal("0"),
+            "sale_qty_raw": 0,
+            "sale_qty": 1,
+            "orders_qty": orders_qty,
+            "days_count": 1,
+            "avg_price": 0.0,
+            "avg_profit": 0.0,
         }
     return period_map
 
@@ -643,6 +675,43 @@ def _compute_trend_cutoffs(today_date: date) -> tuple[date, date, date, date]:
         anchor - timedelta(days=13),  # 14 days inclusive
         anchor - timedelta(days=6),  # 7 days inclusive
     )
+
+
+def _build_trend_payload(p: dict | None, period_from: date, period_to: date) -> dict:
+    """Build one trend period payload (7/14/30 day window).
+
+    ``avg_daily_qty`` («тренд шт/д», средние заказы за период) is the number of
+    ORDERED units (``orders_qty`` from the WB funnel) divided by the **full
+    calendar length of the window** (7/14/30 days). Two prior bugs are fixed
+    here:
+
+    1. Source: it used to divide finance buy-outs (Продажа − Возврат), so the
+       column labelled «средние заказы» actually showed realized sales — lower
+       than real demand by the buy-out rate (e.g. «Диваны бескаркасные»: 383
+       orders vs 227 buy-outs over 7 days). It now tracks orders.
+    2. Divisor: it used to divide by the count of days that had finance rows,
+       not the window length, inflating intermittent sellers and making the
+       7↔14↔30 switch nearly inert. It now divides by 7/14/30.
+
+    ``revenue``/``profit`` stay finance-based (realized money, matching БДР) —
+    only the quantity trend reflects demand. Stock-days-of-cover on the UI
+    derives from ``avg_daily_qty``, so it is now demand-based (more conservative).
+    """
+    base = {
+        "date_from": period_from.isoformat(),
+        "date_to": period_to.isoformat(),
+    }
+    if not p:
+        return {**base, "avg_daily_qty": 0.0, "sale_qty": 0.0, "revenue": 0.0, "profit": 0.0}
+    period_days = (period_to - period_from).days + 1  # inclusive window: 7 / 14 / 30
+    orders_qty = int(p.get("orders_qty", 0))
+    return {
+        **base,
+        "avg_daily_qty": float(round(orders_qty / period_days, 2)),
+        "sale_qty": float(orders_qty),
+        "revenue": float(round(p["realization"], 2)),
+        "profit": float(round(p["total_profit"], 2)),
+    }
 
 
 async def _load_bdr_metrics(
@@ -676,21 +745,6 @@ async def _load_bdr_metrics(
     period_14 = await _compute_period_metrics(db, project_id, cutoff_14, anchor, nm_id_to_nom_id, cost_map, tax_info_14)
     period_7 = await _compute_period_metrics(db, project_id, cutoff_7, anchor, nm_id_to_nom_id, cost_map, tax_info_7)
 
-    def _trend(p: dict | None, period_from: date, period_to: date) -> dict:
-        base = {
-            "date_from": period_from.isoformat(),
-            "date_to": period_to.isoformat(),
-        }
-        if not p:
-            return {**base, "avg_daily_qty": 0.0, "sale_qty": 0.0, "revenue": 0.0, "profit": 0.0}
-        return {
-            **base,
-            "avg_daily_qty": float(round(p["sale_qty_raw"] / p["days_count"], 2)),
-            "sale_qty": float(p["sale_qty_raw"]),
-            "revenue": float(round(p["realization"], 2)),
-            "profit": float(round(p["total_profit"], 2)),
-        }
-
     bdr_map: dict[int, dict] = {}
     all_nom_ids = set(period_30.keys()) | set(period_14.keys()) | set(period_7.keys())
     for nom_id in all_nom_ids:
@@ -709,9 +763,9 @@ async def _load_bdr_metrics(
             "avg_daily_profit": float(round(legacy["total_profit"] / legacy["days_count"], 2)),
             "avg_price": legacy["avg_price"],
             "avg_profit": legacy["avg_profit"],
-            "trend_7": _trend(p7, cutoff_7, anchor),
-            "trend_14": _trend(p14, cutoff_14, anchor),
-            "trend_30": _trend(p30, cutoff_30, anchor),
+            "trend_7": _build_trend_payload(p7, cutoff_7, anchor),
+            "trend_14": _build_trend_payload(p14, cutoff_14, anchor),
+            "trend_30": _build_trend_payload(p30, cutoff_30, anchor),
         }
     return bdr_map
 
