@@ -38,11 +38,13 @@ class FakeClient:
         list_expire=False,
         supply_status=None,
         details_expire=False,
+        validation_items=None,
     ):
         self.expire = expire
         self.portal_error = portal_error
         self.supplies = supplies if supplies is not None else []
         self.box_types = box_types if box_types is not None else [2]
+        self.validation_items = validation_items  # кастомный ответ validateWarehouseGoodsV2
         self.goods_error = goods_error
         self.statuses = statuses if statuses is not None else []
         self.list_expire = list_expire  # WbSessionExpired на list_statuses (bulk-синк)
@@ -68,6 +70,8 @@ class FakeClient:
         self.goods_sent = barcodes
 
     async def validate_warehouse_goods(self, draft_id, warehouse_id):
+        if self.validation_items is not None:
+            return {"items": self.validation_items}
         return {"items": [{"availableBoxTypes": self.box_types}]}
 
     async def supply_create(self, draft_id, warehouse_id, box_type_id, **kw):
@@ -885,3 +889,121 @@ def test_apply_cabinet_pass_snapshot_does_not_overwrite_nonempty():
     # снимок отражает кабинет (для сверки — видно расхождение по фамилии)
     assert link.wb_pass_driver == "Жиров Андрей"
     assert link.wb_pass_present is True
+
+
+# ─── _resolve_warehouse_id: канонические имена vs сырые имена портала ─────────
+
+
+class _WhClient:
+    """Мини-мок: только список складов фильтра портала."""
+
+    def __init__(self, items):
+        self._items = items
+
+    async def get_warehouse_filter_items(self):
+        return self._items
+
+
+@pytest.mark.asyncio
+async def test_resolve_warehouse_canonical_krasnodar():
+    """Наше канон-имя «Краснодар» находит портальный «Краснодар (Тихорецкая)»,
+    спец-двойники (СГТ/Питание) не подмешиваются (ASM-689)."""
+    client = _WhClient([
+        {"warehouseID": 130744, "warehouseName": "Краснодар (Тихорецкая)"},
+        {"warehouseID": 999001, "warehouseName": "Краснодар СГТ"},
+        {"warehouseID": 999002, "warehouseName": "Краснодар (Тихорецкая): Питание"},
+    ])
+    wid = await wb_supply_service._resolve_warehouse_id(client, "Краснодар")
+    assert wid == 130744
+
+
+@pytest.mark.asyncio
+async def test_resolve_warehouse_canonical_samara():
+    """«Самара (Новосемейкино)» матчится с портальным «Новосемейкино» (ASM-693)."""
+    client = _WhClient([
+        {"warehouseID": 210001, "warehouseName": "Новосемейкино"},
+        {"warehouseID": 301983, "warehouseName": "Волгоград"},
+    ])
+    wid = await wb_supply_service._resolve_warehouse_id(client, "Самара (Новосемейкино)")
+    assert wid == 210001
+
+
+@pytest.mark.asyncio
+async def test_resolve_warehouse_exact_match_wins():
+    """Точное сырое имя приоритетнее канонического фолбэка."""
+    client = _WhClient([
+        {"warehouseID": 1, "warehouseName": "Коледино"},
+        {"warehouseID": 2, "warehouseName": "Коледино: Горючее"},
+    ])
+    wid = await wb_supply_service._resolve_warehouse_id(client, "Коледино")
+    assert wid == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_warehouse_ambiguous_raises():
+    """Два реальных склада под одним каноном (Астана/Астана 2) → понятная ошибка."""
+    client = _WhClient([
+        {"warehouseID": 204939, "warehouseName": "Астана"},
+        {"warehouseID": 324108, "warehouseName": "Астана 2"},
+    ])
+    with pytest.raises(WbSupplyError, match="неоднозначен"):
+        await wb_supply_service._resolve_warehouse_id(client, "Астана Карагандинское шоссе")
+
+
+@pytest.mark.asyncio
+async def test_resolve_warehouse_unknown_still_raises():
+    """Совсем неизвестное имя — прежняя понятная ошибка."""
+    client = _WhClient([{"warehouseID": 301983, "warehouseName": "Волгоград"}])
+    with pytest.raises(WbSupplyError, match="не распознан"):
+        await wb_supply_service._resolve_warehouse_id(client, "Луна-Сити")
+
+
+@pytest.mark.asyncio
+async def test_resolve_warehouse_canonical_vladimir_and_shushary():
+    """«Владимир» ↔ «Владимир Воршинское», «СПБ Шушары» ↔ «Склад Шушары»
+    (прод-репорты 2026-07-15, вторая волна)."""
+    client = _WhClient([
+        {"warehouseID": 111111, "warehouseName": "Владимир Воршинское"},
+        {"warehouseID": 222222, "warehouseName": "Склад Шушары"},
+        {"warehouseID": 222333, "warehouseName": "Склад Шушары СГТ"},
+    ])
+    assert await wb_supply_service._resolve_warehouse_id(client, "Владимир") == 111111
+    assert await wb_supply_service._resolve_warehouse_id(client, "СПБ Шушары") == 222222
+
+
+# ─── create_preorder: пер-товарные ошибки валидации (ASM-700/701) ─────────────
+
+
+@pytest.mark.asyncio
+async def test_create_preorder_goods_banned_on_warehouse(db_session, monkeypatch):
+    """Товары с hasError в validateWarehouseGoodsV2 (напр. «Запрет завоза
+    предмета на склад») → понятная ошибка со списком ДО supply/create.
+    Прод-кейс ASM-701: supply/create падал с пустым innerMsg («есть ошибки в
+    товарах поставки»), причина была только в игнорируемом ответе валидации."""
+    client = FakeClient(validation_items=[
+        {
+            "barcode": "2049909453218", "sa": "200х300_радуга_серый",
+            "quantity": 5, "hasError": False, "errors": [], "availableBoxTypes": [2],
+        },
+        {
+            "barcode": "2050236871309", "sa": "50х80_40х50_полоска_серый",
+            "quantity": 27, "hasError": True,
+            "errors": [{"field": "warehouse", "error": "Запрет завоза предмета на склад"}],
+            "availableBoxTypes": [2],
+        },
+    ])
+    await _patch_client(monkeypatch, client)
+
+    with pytest.raises(WbSupplyError) as ei:
+        await wb_supply_service.create_preorder(db_session, PROJECT_ID, ASSEMBLY_ID)
+    msg = str(ei.value)
+    assert "Запрет завоза предмета на склад" in msg
+    assert "50х80_40х50_полоска_серый" in msg
+    assert "2050236871309" in msg
+    # чистый товар в списке ошибок не фигурирует
+    assert "200х300_радуга_серый" not in msg
+
+    # преордер НЕ создан: статус остался DRAFT (draft_id зафиксирован до валидации)
+    link = await wb_supply_service.get_state(db_session, PROJECT_ID, ASSEMBLY_ID)
+    assert link.sync_status == WbSupplySyncStatus.DRAFT.value
+    assert link.preorder_id is None
