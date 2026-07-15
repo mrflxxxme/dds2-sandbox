@@ -362,13 +362,14 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
     Для адоптированных из FBO без строки — строка создаётся. supplyDetails также
     используется в панели (get_state). Возврат: {checked, updated, supplies_seen}.
     """
-    # 1. Связи с supply_id у АКТИВНЫХ незаархивированных заявок.
+    # 1. ВСЕ строки связи АКТИВНЫХ незаархивированных заявок — в т.ч. «голые»
+    #    (без supply_id): иначе адопция FBO ниже создала бы ДУБЛЬ по unique-индексу
+    #    ix_assembly_wb_supply_assembly_request_id (напр. локальный пропуск без брони).
     links_res = await db.execute(
         select(AssemblyWbSupply)
         .join(AssemblyRequest, AssemblyWbSupply.assembly_request_id == AssemblyRequest.id)
         .where(
             AssemblyWbSupply.project_id == project_id,
-            AssemblyWbSupply.supply_id.isnot(None),
             AssemblyRequest.status.in_(_SYNC_ACTIVE_STATUSES),
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.is_archived.is_(False),
@@ -438,6 +439,9 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
                     boxes=[],
                 )
                 db.add(link)
+            elif link.supply_id is None:
+                # «Голая» строка (пропуск без брони) адоптирует supply_id из FBO.
+                link.supply_id = sid
             if link.wb_supply_state != meta.name or link.wb_supply_state_id != meta.state_id:
                 link.wb_supply_state = meta.name
                 link.wb_supply_state_id = meta.state_id
