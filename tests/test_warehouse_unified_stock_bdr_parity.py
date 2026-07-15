@@ -25,6 +25,7 @@ from sqlalchemy.dialects import postgresql
 
 from backend.services.warehouse_stock_engine import (
     _build_finance_query,
+    _build_trend_payload,
     _compute_trend_cutoffs,
 )
 
@@ -67,6 +68,69 @@ class TestTrendCutoffs:
         assert c30 == date(2026, 3, 16)
         assert c14 == date(2026, 4, 1)
         assert c7 == date(2026, 4, 8)
+
+
+# ─── Test 0b: trend velocity divides by window length, not active days ────────
+
+
+class TestTrendVelocity:
+    """«Тренд шт/д» (средние заказы за период) must be the number of ORDERED
+    units (funnel orders_count) divided by the FULL window length (7/14/30
+    days) — NOT finance buy-outs, and NOT divided by active-days-only.
+
+    Two invariants locked here:
+    * source = orders_qty (demand), not sale_qty_raw (realized buy-outs);
+    * divisor = window length (7/14/30), not days_count.
+    """
+
+    def _payload(self, orders_qty: int, period_from: date, period_to: date) -> dict:
+        p = {
+            "orders_qty": orders_qty,
+            # sale_qty_raw / days_count are what the OLD code divided by — set to
+            # misleading values so a regression to the old formula fails loudly.
+            "sale_qty_raw": orders_qty * 100,
+            "realization": Decimal("0"),
+            "total_profit": Decimal("0"),
+            "days_count": 2,
+        }
+        return _build_trend_payload(p, period_from, period_to)
+
+    def test_uses_orders_not_buyouts(self):
+        # orders=383 over 7 days → 383/7 = 54.71; buy-outs (sale_qty_raw) ignored.
+        out = self._payload(383, date(2026, 4, 8), date(2026, 4, 14))
+        assert out["avg_daily_qty"] == round(383 / 7, 2) == 54.71
+
+    def test_30d_divides_by_30(self):
+        out = self._payload(20, date(2026, 3, 16), date(2026, 4, 14))
+        assert out["avg_daily_qty"] == round(20 / 30, 2) == 0.67
+
+    def test_14d_divides_by_14(self):
+        # orders=542 over 14 days → 542/14 = 38.71 (the user's «Диваны» case).
+        out = self._payload(542, date(2026, 4, 1), date(2026, 4, 14))
+        assert out["avg_daily_qty"] == round(542 / 14, 2) == 38.71
+
+    def test_7d_divides_by_7(self):
+        out = self._payload(14, date(2026, 4, 8), date(2026, 4, 14))
+        assert out["avg_daily_qty"] == round(14 / 7, 2) == 2.0
+
+    def test_switching_period_changes_velocity(self):
+        """Same orders over shorter window → higher шт/д (the switch must bite)."""
+        anchor = date(2026, 4, 14)
+        v30 = self._payload(30, date(2026, 3, 16), anchor)["avg_daily_qty"]
+        v7 = self._payload(30, date(2026, 4, 8), anchor)["avg_daily_qty"]
+        assert v7 > v30
+
+    def test_missing_orders_qty_is_zero(self):
+        """Payload without orders_qty (finance-only nm, no funnel) → 0 шт/д."""
+        p = {"sale_qty_raw": 50, "realization": Decimal("0"), "total_profit": Decimal("0"), "days_count": 3}
+        out = _build_trend_payload(p, date(2026, 4, 8), date(2026, 4, 14))
+        assert out["avg_daily_qty"] == 0.0
+
+    def test_empty_payload_is_zero(self):
+        out = _build_trend_payload(None, date(2026, 4, 8), date(2026, 4, 14))
+        assert out["avg_daily_qty"] == 0.0
+        assert out["date_from"] == "2026-04-08"
+        assert out["date_to"] == "2026-04-14"
 
 
 # ─── Test 1: SQL compilation contract (pure-function, no DB) ──────────────────
