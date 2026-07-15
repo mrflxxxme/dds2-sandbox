@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams';
-import { formatDate, formatNumber } from '@/lib/utils';
+import { exportToExcel, formatDate, formatNumber } from '@/lib/utils';
 import { parseBoxSize, palletsForLines, maxPalletHeightCm, type PalletLine } from '@/lib/utils/boxPallet';
 import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constants/localization';
 import { Toast } from '@/components';
@@ -1051,6 +1051,50 @@ export default function PreDistVehiclePage() {
             `${r.article_seller || ''} ${r.barcode || ''} ${r.article_wb || ''} ${r.name || ''}`.toLowerCase().includes(q));
     }, [sortedRows, searchQuery]);
 
+    // Экспорт матрицы в Excel — WYSIWYG: те же строки (поиск/сортировка), KPI-колонки,
+    // склады из wbCols и итоговая строка «Сдаём, шт», что на экране.
+    const handleExportExcel = useCallback(() => {
+        const data: Record<string, string | number>[] = visibleRows.map(row => {
+            const nm = nmByBc.get(row.barcode) ?? 0;
+            const e = enrichMap.get(nm);
+            const na = needArtByNm.get(nm);
+            const an = analyticsByNm.get(nm);
+            const loc = locByNm.get(nm);
+            const avail = Number(row.available_qty) || 0;
+            const ship = plan.allocByBc.get(row.barcode) ?? 0;
+            const cells = plan.cellByBc.get(row.barcode);
+            const ppb = nmPpb.get(nm) || 0;
+            const out: Record<string, string | number> = {
+                'Товар': row.article_seller || row.article_wb || row.barcode,
+                'Название': row.name || '',
+                'ШК': row.barcode,
+                'nm': nm || '',
+                'Новинка': e?.isNew ? 'да' : '',
+                'Кратность': ppb || '',
+                'На машине': avail,
+                'В сборке': e?.inAssembly ?? 0,
+                'На WB': e?.stocksWb ?? 0,
+                'Хватит, дн': na?.wb_days_left == null ? '' : Number(na.wb_days_left),
+                '₽ 14д': Number(an?.revenue_bdr) || 0,
+                'Маржа %': an?.margin_pct == null ? '' : Number(an.margin_pct),
+                'Лок %': loc ? Number(loc.loc_pct) || 0 : '',
+                'Тренд %': an?.trend_pct == null ? '' : Number(an.trend_pct),
+            };
+            for (const c of wbCols) out[c.name] = cells?.get(c.name)?.qty ?? 0;
+            out['Σ отпр.'] = ship;
+            out['Мест'] = boxesOf(ship, ppb);
+            out['Остаётся ФФ'] = Math.max(0, avail - ship);
+            return out;
+        });
+        const totals: Record<string, string | number> = { 'Товар': 'Сдаём, шт' };
+        for (const c of wbCols) totals[c.name] = plan.shipByWh.get(c.name) ?? 0;
+        totals['Σ отпр.'] = plan.totalShip;
+        totals['Мест'] = plan.totalBoxes;
+        totals['Остаётся ФФ'] = onHoldQty;
+        data.push(totals);
+        exportToExcel(data, `predist_${pool?.vehicle.order_no || vehicleId || 'vehicle'}`);
+    }, [visibleRows, nmByBc, enrichMap, needArtByNm, analyticsByNm, locByNm, plan, nmPpb, wbCols, onHoldQty, pool, vehicleId]);
+
     const handleSubmit = useCallback(async () => {
         if (!vehicleId || submitRows.length === 0 || submitting) return;
         setSubmitting(true);
@@ -1261,6 +1305,10 @@ export default function PreDistVehiclePage() {
                     </button>
                     <input className="form-input" style={{ maxWidth: 220 }} type="search" value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)} placeholder="🔎 Артикул / ШК / nm" />
+                    <button className="btn btn-sm btn-secondary" onClick={handleExportExcel} disabled={computing || visibleRows.length === 0}
+                        title="Выгрузить матрицу в Excel как на экране: KPI-колонки, склады WB, Σ отпр. / Мест / Остаётся ФФ + итоговая строка «Сдаём, шт»">
+                        📥 Excel
+                    </button>
                     {searchQuery.trim() && (
                         <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>показано {formatNumber(visibleRows.length, 0)} из {formatNumber(sortedRows.length, 0)}</span>
                     )}
