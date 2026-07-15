@@ -5171,6 +5171,21 @@ export interface StockNeedArticle {
   can_send: number;
   deficit: number;
   stocks_wb: number;
+  /** Плоское среднее заказов за analysis_days, шт/день. */
+  avg_daily_base?: number;
+  /** Рабочая growth-aware скорость: max(окно, 7д, 3д), шт/день. */
+  eff_avg_daily?: number;
+  /** Коэффициент роста eff/base (≥1; ⚡ растущий SKU при ≥1.3). */
+  growth_ratio?: number;
+  /** Спрос-взвешенное плечо доставки (сборка+дорога+приёмка), дни. */
+  lead_days?: number;
+  /** На сколько дней хватит остатка на WB при eff-скорости (null — нет продаж). */
+  wb_days_left?: number | null;
+  /** То же, но с учётом «в сборке» и «в пути». */
+  wb_days_left_inbound?: number | null;
+  /** Раскладочная потребность: Σ локальных дефицитов складов (то, что реально
+   *  хотим дослать). total_need — нетто по сети (KPI «сколько докупить»). */
+  ship_need?: number;
   /** Per-WB-склад: сколько уже в сборке на этот склад (не учтено в need). */
   asm_by_warehouse?: Record<string, number>;
   /** Per-WB-склад: сколько уже едет на этот склад транзитом. */
@@ -5180,10 +5195,15 @@ export interface StockNeedArticle {
 export interface StockNeedWbWarehouse {
   name: string;
   total_need: number;
-  articles: Record<number, { need: number; stock: number; avg_daily: number }>;
+  /** need_raw — остаточный дефицит клетки ДО greedy-налива (only_available);
+   *  веса «Распределить все остатки» и паритет с сырыми клетками машины. */
+  articles: Record<number, { need: number; stock: number; avg_daily: number; need_raw?: number }>;
   /** Ключ ФО (central|south_caucasus|volga|ural|far_east_siberia|northwest|abroad|unknown).
    *  Backend заполняет через `warehouse_to_district`. UI рендерит label под названием. */
   district_key?: string;
+  /** Вес «схемы воришек» (якорь↑/воришка↓) — порядок среза при дефиците источника
+   *  (паритет клиентского движка машины с серверным greedy черновика). */
+  priority_weight?: number;
 }
 
 export interface StockNeedSummary {

@@ -135,6 +135,54 @@ def test_greedy_zero_cap_or_zero_demand() -> None:
                                      {"volga": 5}, {}, 0, 75.0) == {"A": 0}
 
 
+def test_greedy_fractional_okrug_demand_not_starved() -> None:
+    """Дробный спрос ФО (<1 шт на горизонте) НЕ зануляет long-tail SKU.
+
+    Регресс floor(headroom): 6 ФО × спрос 0.9, клетки need=1, can_send=5 →
+    раньше allocated={все 0} (floor(0.9)=0), 5 шт терялись при target=100.
+    Теперь ceil добивает дробный запас до целой штуки: раздаём все 5.
+    """
+    whs = [f"w{i}" for i in range(6)]
+    alloc = greedy_allocate_to_target(
+        5,
+        {w: 1 for w in whs},
+        {w: 1.0 for w in whs},
+        {w: f"fo{i}" for i, w in enumerate(whs)},
+        {f"fo{i}": 0.9 for i in range(6)},
+        {},
+        5.4,
+        target_pct=100.0,
+    )
+    assert sum(alloc.values()) == 5  # весь can_send роздан
+    assert all(v <= 1 for v in alloc.values())  # не больше клетки
+
+    # Дробный хвост >1: 3 ФО × 3.6, клетки 4, cap 12 → раньше 3+3+3=9 (терялись 3).
+    alloc2 = greedy_allocate_to_target(
+        12,
+        {"a": 4, "b": 4, "c": 4},
+        {"a": 1.0, "b": 1.0, "c": 1.0},
+        {"a": "f1", "b": "f2", "c": "f3"},
+        {"f1": 3.6, "f2": 3.6, "f3": 3.6},
+        {},
+        10.8,
+        target_pct=100.0,
+    )
+    assert alloc2 == {"a": 4, "b": 4, "c": 4}
+
+    # Перелив ограничен дробной частью: второй склад того же ФО не доливает.
+    alloc3 = greedy_allocate_to_target(
+        10,
+        {"a1": 5, "a2": 5},
+        {"a1": 2.0, "a2": 1.0},
+        {"a1": "f1", "a2": "f1"},
+        {"f1": 3.6},
+        {},
+        3.6,
+        target_pct=100.0,
+    )
+    assert alloc3 == {"a1": 4, "a2": 0}  # ceil(3.6)=4 в якорь, ФО насыщен
+
+
 def test_fuzz_conservation_and_bounds() -> None:
     """Фаззинг: Σalloc ≤ cap, alloc[wh] ≤ demand[wh], покрытие округа ≤ спрос округа."""
     rng = random.Random(20260629)

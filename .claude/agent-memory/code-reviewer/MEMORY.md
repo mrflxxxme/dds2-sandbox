@@ -1,2 +1,4 @@
 - [Pre-dist over-commit invariant](pre-dist-overcommit-invariant.md) — pre-distribution guard is vehicle-pool-based (gross−reserved), not WarehouseStock; why IN_PROGRESS-fold is safe
 - [Assembly-draft loose-ban canon](assembly-draft-loose-ban-canon.md) — россыпь запрещена всем (2026-07-08); trim's newcomer-whole-box branch is unwired end-to-end (only tests pass boxOf+newcomers)
+- [Warehouse-need invariants](warehouse-need-invariants.md) — get_warehouse_need: total_need mode-invariance (HIGH-2), eff-maps vs raw-maps rule, three demand horizons + gross_wh comment/code drift
+- [Distribute-all-leftovers invariants](distribute-all-leftovers-invariants.md) — where the real over-commit/idempotency guards live for "Распределить все остатки" (buildPinnedRows cap / applyDraftCellEdit availForBox / idempotent-by-replacement)

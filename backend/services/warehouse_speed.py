@@ -55,6 +55,15 @@ _MAX_PRIORITY_SLOTS = 6
 # СПБ Шушары получал штраф 0.6 за слоты #4/#6 у Читы и Алматы (аудит 2026-07-09).
 _STEALER_MAX_DEPTH = 2
 
+# Склады-«близнецы» одного города, открытые ПОЗЖЕ выгрузки speed-карты
+# (v2026-05-14): их нет ни в одной priority-цепочке из 97 городов → спрос на
+# них не мапится никогда. Твин наследует слот БАЗОВОГО склада цепочки, только
+# если база excluded/закрыта (приоритет базы не трогаем). Ключи и значения —
+# в stock-каноне WAREHOUSE_COORDS. При обновлении speed-карты — пересмотреть.
+_CHAIN_TWINS: dict[str, tuple[str, ...]] = {
+    "СПБ Шушары": ("Санкт-Петербург Уткина Заводь",),
+}
+
 WarningKind = Literal["anchor_missing", "stealer_without_anchor", "low_ceiling"]
 Severity = Literal["info", "warning", "error"]
 
@@ -211,12 +220,33 @@ def find_priority_warehouse(
     """
     open_set = set(open_warehouses)
 
+    # Цепочки городов канонизированы в speed-канон (_all_cities →
+    # canonical_warehouse_name: «Тула» → «Алексин (Тула)»), а open_warehouses
+    # приходит в stock-каноне (ключи WAREHOUSE_COORDS: «Тула»). Сравнение
+    # `wh in open_set` без канонизации входа никогда не матчило Тулу —
+    # top-1 у 11 городов ЦФО был недостижим через chain-walk, спрос уезжал
+    # в Коледино/Электросталь/Воронеж (аудит 2026-07-14). Канонизируем обе
+    # стороны, возвращаем ОРИГИНАЛЬНОЕ имя caller'а: downstream
+    # (warehouse_need_service, матрица) живёт в stock-каноне.
+    open_by_canon: dict[str, str] = {}
+    for w in sorted(open_set):  # sorted: детерминизм при коллизии канонов
+        cw = canonical_warehouse_name(w)
+        if cw and cw not in open_by_canon:
+            open_by_canon[cw] = w
+
     if city:
         for c in _all_cities():
             if c.city == city:
                 for wh in c.warehouses:
-                    if wh in open_set:
-                        return wh
+                    if wh in open_by_canon:
+                        return open_by_canon[wh]
+                    # Твин наследует слот базы, когда база excluded/закрыта:
+                    # склады, открытые ПОЗЖЕ выгрузки speed-карты, не входят
+                    # ни в одну цепочку и были недостижимы (Уткина Заводь).
+                    for _twin in _CHAIN_TWINS.get(wh, ()):
+                        _tc = canonical_warehouse_name(_twin)
+                        if _tc in open_by_canon:
+                            return open_by_canon[_tc]
                 # Город найден, но все приоритеты excluded — пробуем okrug
                 # ниже как fallback (а не сразу haversine — он точно хуже).
                 if not okrug:
@@ -230,7 +260,12 @@ def find_priority_warehouse(
             if score > 0:
                 scored.append((wh, score))
         if scored:
-            scored.sort(key=lambda kv: (-kv[1], kv[0]))
+            # Сначала склады СВОЕГО ФО: агрегатный score чужого хаба (Электросталь
+            # для northwest ≈1.47) обгонял родные Шушары (0.75) — немапленные
+            # города/пригороды СЗФО (Мурино, Гатчина…) утекали в ЦФО и рушили
+            # локализацию округа (аудит 2026-07-09/14). Чужой хаб — только если
+            # в своём ФО нет ни одного склада с ненулевым скором.
+            scored.sort(key=lambda kv: (warehouse_to_district(kv[0]) != okrug, -kv[1], kv[0]))
             return scored[0][0]
 
     return None

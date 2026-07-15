@@ -239,6 +239,27 @@ def test_find_priority_warehouse_unknown_okrug_returns_none():
     assert find_priority_warehouse(None, open_set, okrug="unknown") is None
 
 
+def test_find_priority_warehouse_stock_canon_open_matches_chain_canon():
+    """Вход в stock-каноне («Тула» из WAREHOUSE_COORDS) обязан матчить
+    цепочку, канонизированную в speed-канон («Алексин (Тула)»).
+
+    Рассинхрон канон-пространств (аудит 2026-07-14): open_warehouses в
+    warehouse_need_service = ключи WAREHOUSE_COORDS («Тула»), а chain-walk
+    сравнивал их с speed-каноном цепочек → «Тула» (top-1 у 11 городов ЦФО)
+    была недостижима через priority-chain, спрос уезжал в Коледино.
+    """
+    from backend.services.warehouse_speed import find_priority_warehouse
+
+    # Город Тула: chain = [Алексин (Тула), Подольск, Коледино, ...].
+    # Открыта «Тула» (stock-канон) → top-1 матчится, возвращаем ОРИГИНАЛЬНОЕ
+    # имя caller'а («Тула»), не speed-канон — downstream живёт в stock-каноне.
+    assert find_priority_warehouse("Тула", {"Тула", "Коледино"}) == "Тула"
+    # Склад Тула закрыт → следующий open слот цепочки (Коледино, slot 3).
+    assert find_priority_warehouse("Тула", {"Коледино", "Казань"}) == "Коледино"
+    # Speed-канон на входе тоже матчится (обратная сторона той же монеты).
+    assert find_priority_warehouse("Тула", {"Алексин (Тула)"}) == "Алексин (Тула)"
+
+
 # ─── Depth-aware воришки + локализуемый знаменатель (аудит 2026-07-09) ──────
 
 
@@ -329,11 +350,14 @@ class TestLocalizableDenominator:
 
         assert get_priority_score("Екатеринбург - Перспективная 14", "ural") == pytest.approx(1.0)
 
-    def test_okrug_fallback_ordering_preserved(self):
-        """Знаменатель константен внутри ФО → порядок argmax в
-        find_priority_warehouse не меняется (Электросталь всё ещё
-        обслуживает немапленные города СЗФО — фикс этого в пакете 3)."""
+    def test_okrug_fallback_prefers_own_district(self):
+        """Okrug-fallback: немапленный город СЗФО идёт в склад СВОЕГО ФО
+        (Шушары), а не в чужой хаб с большим агрегатным скором
+        (Электросталь ≈1.47 > Шушары 0.75 — дефект аудита 2026-07-09/14).
+        Чужой хаб — только когда в своём ФО нет складов с ненулевым скором."""
         from backend.services.warehouse_speed import find_priority_warehouse
 
         open_set = {"Электросталь", "СПБ Шушары", "Казань"}
-        assert find_priority_warehouse("несуществующий-город", open_set, okrug="northwest") == "Электросталь"
+        assert find_priority_warehouse("несуществующий-город", open_set, okrug="northwest") == "СПБ Шушары"
+        # Свой ФО закрыт целиком → фолбэк на чужой хаб по скору.
+        assert find_priority_warehouse("несуществующий-город", {"Электросталь", "Казань"}, okrug="northwest") == "Электросталь"

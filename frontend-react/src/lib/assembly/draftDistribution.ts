@@ -65,14 +65,22 @@ export interface DraftDistInput {
      *  приходит с пустым alloc → новинка остаётся с нулями, причина — в guard_reason
      *  строки cold-start). Не задан → новинки без авто-раскладки (как раньше). */
     newcomerAlloc?: Map<number, Record<string, number>>;
+    /** Кратность короба конкретного ФФ (per-склад, machine-first) — паритет
+     *  нормализации со страницей черновика. */
+    ppbAt?: (nm_id: number, ffId: number) => number | null | undefined;
+    /** Вес приоритета WB-склада (stockNeed.warehouses[].priority_weight). */
+    priorityByWh?: Record<string, number>;
 }
 
 /** Геометрия движка из DraftDistInput (кратность/габарит per nm + паллет-override). */
 function draftGeom(input: DraftDistInput): DistributionGeom {
+    const pw = input.priorityByWh;
     return {
         ppbOf: (nm) => input.nmPpb.get(nm),
+        ppbAt: input.ppbAt,
         boxSizeOf: (nm) => input.nmBoxSize.get(nm) ?? null,
         palletOverrides: input.palletOverrides,
+        priorityOf: pw ? (wh) => Number(pw[wh] ?? 0) : undefined,
     };
 }
 
@@ -482,12 +490,12 @@ export function enrichArticles(
     coldStartSet: Set<number>,
 ): Map<number, EnrichedSku> {
     // per-WB-склад потребность+остаток из warehouses[].articles[nm].
-    const whCells = new Map<number, Record<string, { need: number; stock: number }>>();
+    const whCells = new Map<number, Record<string, { need: number; needRaw?: number; stock: number }>>();
     for (const w of stockNeed?.warehouses ?? []) {
         for (const [nmStr, cell] of Object.entries(w.articles ?? {})) {
             const nm = Number(nmStr);
             const m = whCells.get(nm) ?? {};
-            m[w.name] = { need: Number(cell?.need) || 0, stock: Number(cell?.stock) || 0 };
+            m[w.name] = { need: Number(cell?.need) || 0, needRaw: cell?.need_raw == null ? undefined : Number(cell.need_raw) || 0, stock: Number(cell?.stock) || 0 };
             whCells.set(nm, m);
         }
     }
@@ -501,10 +509,11 @@ export function enrichArticles(
             ...Object.keys(a.asm_by_warehouse ?? {}),
             ...Object.keys(a.transit_by_warehouse ?? {}),
         ]);
-        const byWh: Record<string, { need: number; stock: number; asm: number; transit: number }> = {};
+        const byWh: Record<string, { need: number; needRaw?: number; stock: number; asm: number; transit: number }> = {};
         for (const name of names) {
             byWh[name] = {
                 need: cells[name]?.need ?? 0,
+                needRaw: cells[name]?.needRaw,
                 stock: cells[name]?.stock ?? 0,
                 asm: Number(a.asm_by_warehouse?.[name]) || 0,
                 transit: Number(a.transit_by_warehouse?.[name]) || 0,

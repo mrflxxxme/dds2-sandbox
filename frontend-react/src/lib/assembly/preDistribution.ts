@@ -50,6 +50,10 @@ export interface PoolDistInput {
     nmBoxSize: Map<number, string | null>;
     /** Override «коробок на паллету» по канон-размеру короба. */
     palletOverrides: Record<string, number>;
+    /** Кратность короба конкретного ФФ (per-склад) — паритет нормализации. */
+    ppbAt?: (nm_id: number, ffId: number) => number | null | undefined;
+    /** Вес приоритета WB-склада (stockNeed.warehouses[].priority_weight). */
+    priorityByWh?: Record<string, number>;
 }
 
 /** Одна WB-целевая позиция к проверке приёмки. */
@@ -61,10 +65,13 @@ export interface PoolAcceptanceItem {
 
 /** Геометрия движка из PoolDistInput (кратность/габарит per nm + паллет-override). */
 function poolGeom(input: PoolDistInput): DistributionGeom {
+    const pw = input.priorityByWh;
     return {
         ppbOf: (nm) => input.nmPpb.get(nm),
+        ppbAt: input.ppbAt,
         boxSizeOf: (nm) => input.nmBoxSize.get(nm) ?? null,
         palletOverrides: input.palletOverrides,
+        priorityOf: pw ? (wh) => Number(pw[wh] ?? 0) : undefined,
     };
 }
 
@@ -346,7 +353,7 @@ export interface EnrichedSku {
     /** Новинка (cold-start) — из ColdStart-таблицы. */
     isNew: boolean;
     /** per WB-склад name → срезы: потребность / остаток WB / в сборке / в пути. */
-    byWh: Record<string, { need: number; stock: number; asm: number; transit: number }>;
+    byWh: Record<string, { need: number; needRaw?: number; stock: number; asm: number; transit: number }>;
 }
 
 export function enrichPoolRows(
@@ -359,12 +366,12 @@ export function enrichPoolRows(
     for (const a of stockNeed?.articles ?? []) artByNm.set(a.nm_id, a);
 
     // per-WB-склад потребность+остаток из warehouses[].articles[nm].
-    const whCells = new Map<number, Record<string, { need: number; stock: number }>>();
+    const whCells = new Map<number, Record<string, { need: number; needRaw?: number; stock: number }>>();
     for (const w of stockNeed?.warehouses ?? []) {
         for (const [nmStr, cell] of Object.entries(w.articles ?? {})) {
             const nm = Number(nmStr);
             const m = whCells.get(nm) ?? {};
-            m[w.name] = { need: Number(cell?.need) || 0, stock: Number(cell?.stock) || 0 };
+            m[w.name] = { need: Number(cell?.need) || 0, needRaw: cell?.need_raw == null ? undefined : Number(cell.need_raw) || 0, stock: Number(cell?.stock) || 0 };
             whCells.set(nm, m);
         }
     }
@@ -380,10 +387,11 @@ export function enrichPoolRows(
             ...Object.keys(a?.asm_by_warehouse ?? {}),
             ...Object.keys(a?.transit_by_warehouse ?? {}),
         ]);
-        const byWh: Record<string, { need: number; stock: number; asm: number; transit: number }> = {};
+        const byWh: Record<string, { need: number; needRaw?: number; stock: number; asm: number; transit: number }> = {};
         for (const name of names) {
             byWh[name] = {
                 need: cells[name]?.need ?? 0,
+                needRaw: cells[name]?.needRaw,
                 stock: cells[name]?.stock ?? 0,
                 asm: Number(a?.asm_by_warehouse?.[name]) || 0,
                 transit: Number(a?.transit_by_warehouse?.[name]) || 0,

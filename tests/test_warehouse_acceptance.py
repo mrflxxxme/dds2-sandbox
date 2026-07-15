@@ -114,13 +114,10 @@ class TestRedistributeBlockedQty:
         assert new_dist == dist
         assert moves == []
 
-    def test_consolidate_to_center_default(self):
-        """Default mode: закрытые склады → крупнейший открытый ЦФО.
-
-        Краснодар закрыт, Невинномысск открыт в Юге, но qty всё равно уходит
-        в Электросталь (центр), потому что заказы недоступного региона WB
-        фактически повезёт из Москвы.
-        """
+    def test_consolidate_to_center_district_first(self):
+        """Default mode стал DISTRICT-FIRST (решение юзера 2026-07-14 «у каждого
+        ФО свой спрос»): qty закрытого Краснодара идёт в открытый Невинномысск
+        (тот же Юг), а НЕ в Электросталь. Центр — только когда весь ФО закрыт."""
         dist = {"Электросталь": 5, "Краснодар": 7}
         avail = {
             "Электросталь": {"can_box": False, "can_monopallet": True},
@@ -128,7 +125,18 @@ class TestRedistributeBlockedQty:
             "Невинномысск": {"can_box": False, "can_monopallet": True},  # open в Юге
         }
         new_dist, moves = redistribute_blocked_qty(dist, avail, "MONOPALLET")
-        # Default — Электросталь забирает Краснодар, не Невинномысск
+        assert new_dist == {"Электросталь": 5, "Невинномысск": 7}
+        assert moves[0]["to_warehouse"] == "Невинномысск"
+        assert moves[0]["reason"] == "closed_in_district"
+
+    def test_consolidate_to_center_when_district_closed(self):
+        """Весь ФО закрыт → консолидация в центр (WB повезёт из Москвы)."""
+        dist = {"Электросталь": 5, "Краснодар": 7}
+        avail = {
+            "Электросталь": {"can_box": False, "can_monopallet": True},
+            "Краснодар": {"can_box": False, "can_monopallet": False},
+        }
+        new_dist, moves = redistribute_blocked_qty(dist, avail, "MONOPALLET")
         assert new_dist == {"Электросталь": 12}
         assert moves[0]["to_warehouse"] == "Электросталь"
         assert moves[0]["reason"] == "consolidated_to_center"

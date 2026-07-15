@@ -66,6 +66,50 @@ DISTRICT_PREFERRED_WH_OVERRIDE: dict[str, str] = {
 }
 
 
+# Growth-aware скорость заказов: плоское среднее за analysis_days запаздывает
+# на растущих SKU (реальный кейс 2026-07-14, ШК 2043788816553: среднее 14д
+# ≈10 шт/д при темпе последних дней ≈20 шт/д → недогруз ×2 и разрыв стока на WB
+# ещё до приезда поставки). Скорость = max(среднее за окно, среднее за 7 и за 3
+# ПОЛНЫХ дня — сегодняшний неполный день в короткие окна не входит). Затухающий
+# SKU остаётся на среднем за окно (не режем вниз — культура «дозагруз до
+# локализации», перезаклад безопаснее разрыва).
+GROWTH_RECENT_WINDOWS: tuple[int, ...] = (7, 3)
+
+
+def _bump_order_day(
+    acc: dict[int, dict[str, int]], nm_id: int, order_date: str | None, qty: int
+) -> None:
+    """Копит заказы по дням per nm (только те, что вошли в спрос)."""
+    day = (order_date or "")[:10]
+    if not day:
+        return
+    per = acc.setdefault(nm_id, {})
+    per[day] = per.get(day, 0) + qty
+
+
+def _growth_factor(
+    day_counts: dict[str, int], total_qty: int, actual_days: int, today: date
+) -> float:
+    """Множитель роста g ≥ 1: eff_скорость / плоское среднее за окно.
+
+    eff = max(total/actual_days, Σ(последние w полных дней)/w for w in GROWTH_RECENT_WINDOWS).
+    У заказов без даты нет вклада в короткие окна → g консервативно остаётся 1.
+    """
+    avg_full = total_qty / max(actual_days, 1)
+    if avg_full <= 0:
+        return 1.0
+    today_iso = today.isoformat()
+    best = avg_full
+    for w in GROWTH_RECENT_WINDOWS:
+        w_eff = min(w, actual_days)
+        if w_eff <= 0:
+            continue
+        start_iso = (today - timedelta(days=w_eff)).isoformat()
+        recent = sum(q for d, q in day_counts.items() if start_iso <= d < today_iso)
+        best = max(best, recent / w_eff)
+    return best / avg_full
+
+
 def _bump_target_for_sku(sku_ppb: int | None, min_stock_per_main_warehouse: int) -> int:
     """Целевой минимум на главном складе ФО для bump-логики.
 
@@ -171,9 +215,16 @@ async def get_warehouse_need(
     localization_optimized: bool = False,
     only_available: bool = False,
     min_stock_per_main_warehouse: int = 0,
-    localization_target: int = 75,
+    localization_target: int = 100,
+    bootstrap_shape: bool = False,
 ) -> dict:
     """Compute restocking need per warehouse per article.
+
+    Скорость заказов — growth-aware: max(среднее за analysis_days, среднее за
+    последние 7 и 3 ПОЛНЫХ дня) per SKU (см. GROWTH_RECENT_WINDOWS) — плоское
+    среднее занижало потребность растущих SKU до 2×. Глобальный горизонт
+    total_need/can_send = supply_days + спрос-взвешенное плечо доставки
+    (клетки всегда считали supply+lead — кап без плеча их рационировал).
 
     Args:
         supply_days: target stock level in days
@@ -195,7 +246,10 @@ async def get_warehouse_need(
             can_send по WB-складам (шаг 4.6, only_available). cap концентрируется
             на anchor-складах до достижения target по ФО (с учётом сток+сборка+
             транзит); остаток can_send НЕ размазывается на дальние склады.
-            Дефолт 75% (порог КТР «excellent»).
+            Дефолт 100% (решение юзера 2026-07-14: покрывать ПОЛНУЮ потребность,
+            когда can_send позволяет; 75% раньше рационировал жирные SKU —
+            кейс DIVANDEK: потребность 1286, раздавалось 863). Приоритет
+            якорей greedy сохраняется — меняется только точка остановки.
     """
     from backend.models.assembly import (
         AssemblyRequest,
@@ -236,6 +290,14 @@ async def get_warehouse_need(
     # но в глобальный total_need попадают → KPI инвариантен к режиму, а СНГ
     # естественно становится «не-локальным» спросом.
     unmapped_demand: dict[int, int] = {}
+    # Заказы по дням per nm (для growth-aware скорости). Копятся ТОЛЬКО для
+    # заказов, вошедших в спрос (mapped или unmapped) — окно/фильтры не меняются.
+    orders_per_day: dict[int, dict[str, int]] = {}
+    # Сырые склады отгрузки WB per (wh, nm) — веса для спрос-взвешенного плеча.
+    # Именно СЫРОЙ warehouseName (физический склад, обслуживший заказ), а не
+    # mode-зависимая привязка: total_need обязан оставаться mode-инвариантным
+    # (HIGH-2), поэтому и плечо не может зависеть от режима.
+    raw_wh_orders_for_lead: dict[tuple[str, int], int] = {}
     vendor_map: dict[int, str] = {}
     brand_map: dict[int, str] = {}
     subject_map: dict[int, str] = {}
@@ -267,12 +329,14 @@ async def get_warehouse_need(
     # без лимита блокируется (вырезается из расчёта), кроме явно разрешённых под
     # предзаявку. См. get_acceptance_blocked_warehouses.
     acceptance_closed = await get_acceptance_blocked_warehouses(db, project_id)
-    # Объединяем с excluded_set: на все последующие фильтры (haversine,
-    # priority-chain, stock_lookup, Hamilton) распространяется единый запрет.
+    # НЕ вливаем в excluded_set: закрытый по приёмке склад — не ЦЕЛЬ отгрузки
+    # (вырезан из open_warehouses → спрос ремапится, greedy не наливает), но его
+    # WB-СТОК реален и обязан оставаться в покрытии (wb_stock_total, existing ФО,
+    # district-pooling) — иначе временное закрытие квоты WB «испаряет» сток и
+    # движок предлагает двойную отгрузку/перекуп (аудит 2026-07-14, HIGH).
     if acceptance_closed:
         before = len(open_warehouses)
         open_warehouses = [w for w in open_warehouses if w not in acceptance_closed]
-        excluded_set = excluded_set | acceptance_closed
         logger.info(
             "Acceptance-closed warehouses for project %s: %s (open: %d → %d)",
             project_id,
@@ -303,6 +367,12 @@ async def get_warehouse_need(
             qty = order.get("quantity", 1)
             if not nm_id:
                 continue
+
+            # Вес плеча — по физическому складу отгрузки (mode-инвариантно).
+            _raw_wh = _normalize_wb_warehouse(order.get("warehouseName"))
+            if _raw_wh and qty > 0:
+                _raw_key = (_raw_wh, nm_id)
+                raw_wh_orders_for_lead[_raw_key] = raw_wh_orders_for_lead.get(_raw_key, 0) + qty
 
             if localization_optimized:
                 # Игнорируем фактический warehouseName — берём ближайший
@@ -345,6 +415,7 @@ async def get_warehouse_need(
                 # такой спрос не попадает — его нельзя локализовать.
                 if not wh_name:
                     unmapped_demand[nm_id] = unmapped_demand.get(nm_id, 0) + qty
+                    _bump_order_day(orders_per_day, nm_id, order.get("date"), qty)
                     continue
             elif mode == "hypothetical":
                 srid = _normalize_srid(order.get("srid"))
@@ -363,17 +434,40 @@ async def get_warehouse_need(
                 wh_name = order.get("warehouseName", "")
 
             wh_name = _normalize_wb_warehouse(wh_name)
-            if not wh_name or wh_name in excluded_set:
+            # acceptance_closed отдельно: закрытый по приёмке склад — не цель
+            # спроса (как раньше), хотя его сток теперь остаётся в покрытии.
+            if not wh_name or wh_name in excluded_set or wh_name in acceptance_closed:
                 continue
 
             key = (wh_name, nm_id)
             wh_orders_map[key] = wh_orders_map.get(key, 0) + qty
+            _bump_order_day(orders_per_day, nm_id, order.get("date"), qty)
             if nm_id not in vendor_map:
                 vendor_map[nm_id] = order.get("supplierArticle", f"#{nm_id}")
             if nm_id not in brand_map and order.get("brand"):
                 brand_map[nm_id] = order["brand"]
             if nm_id not in subject_map and order.get("subject"):
                 subject_map[nm_id] = order["subject"]
+
+    # ── Growth-aware скорость: g per nm и «эффективный» спрос ────────────────
+    # Все места, где спрос выводится из заказов (клетки, district-pooling,
+    # greedy 4.6, глобальный total_need), считают от eff-карт (raw × g).
+    # Сырые карты остаются для отчётных полей (avg_daily_base) и весов плеча.
+    raw_total_by_nm: dict[int, int] = {}
+    for (_wh, _nm), _q in wh_orders_map.items():
+        raw_total_by_nm[_nm] = raw_total_by_nm.get(_nm, 0) + _q
+    for _nm, _q in unmapped_demand.items():
+        raw_total_by_nm[_nm] = raw_total_by_nm.get(_nm, 0) + _q
+    growth_by_nm: dict[int, float] = {
+        nm: _growth_factor(orders_per_day.get(nm, {}), total, actual_days, today)
+        for nm, total in raw_total_by_nm.items()
+    }
+    wh_orders_eff: dict[tuple[str, int], float] = {
+        k: q * growth_by_nm.get(k[1], 1.0) for k, q in wh_orders_map.items()
+    }
+    unmapped_eff: dict[int, float] = {
+        nm: q * growth_by_nm.get(nm, 1.0) for nm, q in unmapped_demand.items()
+    }
 
     # Also get vendor codes from WbFunnelDaily for completeness
     funnel_result = await db.execute(
@@ -522,7 +616,13 @@ async def get_warehouse_need(
 
         from backend.services.warehouse_district import warehouse_to_district
 
-        for wh_name in wh_names_to_show:
+        # Универсум ключей — mode-инвариантный: wh_names_to_show зависит от режима
+        # (actual = только сток-склады), а веса плеча идут по СЫРЫМ складам
+        # отгрузки. Без объединения безсток-склад давал бы плечо в loc-режиме и
+        # 0 в actual → total_need становился бы mode-вариантным (HIGH-2).
+        # Лишние ключи безвредны: клетки/greedy ищут только wh_names_to_show.
+        _lead_universe = set(wh_names_to_show) | {wh for (wh, _n) in raw_wh_orders_for_lead}
+        for wh_name in _lead_universe:
             district = warehouse_to_district(wh_name)
             fallback_transport = FALLBACK_TRANSPORT_DAYS_PER_DISTRICT.get(district, 7)
             candidates: list[int] = []
@@ -536,6 +636,26 @@ async def get_warehouse_need(
                 lead_time_per_wb[wh_name] = min(candidates)
             else:
                 lead_time_per_wb[wh_name] = 3 + fallback_transport + 2
+
+    # ── Спрос-взвешенное плечо доставки per nm ──────────────────────────────
+    # Пер-складские клетки давно считают горизонт supply+lead, а глобальный кап
+    # (can_send/total_need) — только supply → структурное рационирование: к
+    # приезду поставки часть покрытия уже съедена (дефект из аудита 2026-07-09).
+    # Глобальный горизонт = supply_days + Σ(orders_wh × lead_wh)/Σorders_wh.
+    # Веса — по СЫРОМУ складу отгрузки WB (raw_wh_orders_for_lead), а не по
+    # mode-зависимой привязке: total_need mode-инвариантен (HIGH-2). Склады без
+    # lead-записи (СЦ/зарубеж/не в матрице) веса не дают; совсем без весов → 0.
+    _lead_num: dict[int, float] = {}
+    _lead_den: dict[int, int] = {}
+    for (_wh, _nm), _q in raw_wh_orders_for_lead.items():
+        _lt = lead_time_per_wb.get(_wh)
+        if _lt is None or _q <= 0:
+            continue
+        _lead_num[_nm] = _lead_num.get(_nm, 0.0) + _q * _lt
+        _lead_den[_nm] = _lead_den.get(_nm, 0) + _q
+    lead_by_nm: dict[int, float] = {
+        nm: _lead_num[nm] / _lead_den[nm] for nm in _lead_num if _lead_den.get(nm)
+    }
 
     # -- One representative barcode per nm_id (for prefilled assembly form) --
     # Primary: nomenclature. Fallback: WbFboSupplyItem — covers nm_ids that
@@ -706,7 +826,8 @@ async def get_warehouse_need(
 
         for nm_id in all_nm_ids:
             stock = stock_lookup.get((wh_name, nm_id), 0)
-            total_orders_at_wh = wh_orders_map.get((wh_name, nm_id), 0)
+            # Эффективный спрос (raw × g роста) — скорость для расчёта потребности.
+            total_orders_at_wh = wh_orders_eff.get((wh_name, nm_id), 0.0)
 
             if total_orders_at_wh == 0 and stock == 0:
                 continue
@@ -796,13 +917,25 @@ async def get_warehouse_need(
         for wh_name in list(wh_data.keys()):
             wh_data[wh_name]["total_need"] = sum(a["need"] for a in wh_data[wh_name]["articles"].values())
 
-    # 4.6. Only-available: жадный cap по can_send артикула (= min(rf_avail,
-    # total_need_global)). Если total_need_global=0 (профицит покрыт другими
-    # складами) — все клетки артикула обнуляются. Если total_need=N>0 —
-    # распределяем N шт между WB-складами в порядке убывания их per-cell need.
+    # 4.6. Only-available: жадный cap по can_send артикула. КАП РАСКЛАДКИ =
+    # min(rf_avail, Σ ЛОКАЛЬНЫХ дефицитов клеток), а не нетто по сети
+    # (avg×горизонт − ВЕСЬ WB-сток − сборка − транзит): излишек, лежащий в
+    # чужом ФО, «компенсировал» дефицит Урала и раскладка рационировалась
+    # (аудит 2026-07-14: 99 из 141 SKU резались; 120х160_серый — Σ локальных
+    # дефицитов 237 при нетто-капе 94, потому что 533 шт стока лежат не там).
+    # Канон юзера: у каждого ФО свой спрос — закрывать, если ФФ позволяет;
+    # излишек чужого склада спрос ФО не обслуживает. Нетто-величина остаётся
+    # ТОЛЬКО отчётным KPI «сколько докупить» (total_need, HIGH-2
+    # mode-инвариантен). Бонус: кап и клетки теперь на ОДНОМ базисе (per-склад
+    # lead, loc-привязка) → при достатке ФФ greedy наливает клетки полностью и
+    # форма черновика == сырым клеткам машины (паритет двух экранов).
     if only_available:
-        # Считаем can_send_per_nm = min(rf_avail, total_need_global)
+        # can_send_per_nm = min(rf_avail, Σ need клеток nm)
         can_send_per_nm: dict[int, int] = {}
+        cells_need_by_nm: dict[int, int] = {}
+        for wh_name in list(wh_data.keys()):
+            for _nm_c, _art_c in wh_data[wh_name]["articles"].items():
+                cells_need_by_nm[_nm_c] = cells_need_by_nm.get(_nm_c, 0) + int(_art_c["need"] or 0)
         for nm_id in all_nm_ids:
             total_rf_stock_local = 0
             for wh in rf_warehouses:  # type: ignore[assignment]
@@ -810,19 +943,7 @@ async def get_warehouse_need(
                 total_rf_stock_local += stock_qty
             in_asm_total_local = in_assembly_map.get(nm_id, 0)
             rf_avail_local = max(0, total_rf_stock_local - in_asm_total_local)
-
-            total_orders_local = sum(qty for (wh, nm), qty in wh_orders_map.items() if nm == nm_id)
-            # HIGH-2: добавляем непривязанный (СНГ) спрос в знаменатель global_need
-            # → total_need инвариантен к режиму (локализуемый + незалокализуемый).
-            total_orders_local += unmapped_demand.get(nm_id, 0)
-            avg_d_local = total_orders_local / max(actual_days, 1)
-            total_wb_stock_local = wb_stock_total.get(nm_id, 0)
-            transit_local = in_transit_map.get(nm_id, {"qty": 0}).get("qty", 0)
-            global_need = max(
-                0,
-                round(avg_d_local * supply_days - total_wb_stock_local - in_asm_total_local - transit_local),
-            )
-            can_send_per_nm[nm_id] = min(rf_avail_local, global_need)
+            can_send_per_nm[nm_id] = min(rf_avail_local, cells_need_by_nm.get(nm_id, 0))
 
         # Greedy «до целевой локализации» (по умолчанию 75%, kwarg
         # localization_target). Заменяет старый proportional-Hamilton (он
@@ -845,8 +966,13 @@ async def get_warehouse_need(
             wbs = []
             for wh_name in list(wh_data.keys()):
                 arts = wh_data[wh_name]["articles"]
-                if nm_id in arts and arts[nm_id]["need"] > 0:
-                    wbs.append(wh_name)
+                if nm_id in arts:
+                    # Сырой (до greedy) остаточный дефицит клетки: веса для
+                    # «Распределить все остатки» и паритет с сырыми клетками
+                    # машины (need после greedy = налитое, не дефицит).
+                    arts[nm_id]["need_raw"] = arts[nm_id]["need"]
+                    if arts[nm_id]["need"] > 0:
+                        wbs.append(wh_name)
             if not wbs or cap_total <= 0:
                 for wh_name in list(wh_data.keys()):
                     arts = wh_data[wh_name]["articles"]
@@ -859,12 +985,15 @@ async def get_warehouse_need(
             #  wh_weight   — priority_weight (anchor↑, воришка↓) = «схема воришек».
             #  wh_okrug    — склад → канон-ключ ФО.
             #  demand_by_okrug   — валовый спрос ФО (база покрытия): сумма gross_wh.
-            #                      gross_wh = avg_daily_склада × supply_days, единый
-            #                      горизонт supply_days (без lead_time — это база
-            #                      локализации, а не план поставки).
+            #                      gross_wh = avg_daily_склада × (supply + lead_wh) —
+            #                      тот же горизонт, что у клеток и глобального капа.
             #  existing_by_okrug — уже есть/едет на ФО: WB-сток + в-сборке + в-пути.
             #  total_demand      — весь спрос nm (Σ gross_wh + unmapped_gross), вкл.
             #                      незалокализуемый СНГ → знаменатель локализации.
+            #                      Горизонт unmapped = supply + lead_by_nm (то же
+            #                      взвешенное плечо, что в глобальном капе и
+            #                      total_need) — иначе СНГ-доля недовзвешена и
+            #                      target_pct×total_demand занижает цель.
             wh_demand: dict[str, int] = {}
             wh_weight: dict[str, float] = {}
             wh_okrug: dict[str, str] = {}
@@ -881,7 +1010,12 @@ async def get_warehouse_need(
                 if nm_id not in arts:
                     continue
                 okrug = _wh_to_d(wh_name)
-                gross_wh = (wh_orders_map.get((wh_name, nm_id), 0) / max(actual_days, 1)) * supply_days
+                # Горизонт = supply+lead, как у клеток и глобального капа: база
+                # покрытия без плеча рационировала greedy (клетки хотят больше,
+                # чем «спрос ФО» позволяет налить).
+                gross_wh = (wh_orders_eff.get((wh_name, nm_id), 0.0) / max(actual_days, 1)) * (
+                    supply_days + lead_time_per_wb.get(wh_name, 0)
+                )
                 existing_wh = (
                     stock_lookup.get((wh_name, nm_id), 0)
                     + assembly_target_map.get(nm_id, {}).get(wh_name, 0)
@@ -898,7 +1032,22 @@ async def get_warehouse_need(
                     wh_weight[wh_name] = _hamilton_priority_weight(wh_name)
                     wh_okrug[wh_name] = okrug
 
-            unmapped_gross = (unmapped_demand.get(nm_id, 0) / max(actual_days, 1)) * supply_days
+            # Сборка/транзит, направленные на склад БЕЗ клетки nm (сток 0 и
+            # заказов 0 — типично сразу после коммита на пустой склад), тоже
+            # покрывают свой ФО — иначе округ выглядит недо-покрытым и greedy
+            # доливает поверх уже едущего (двойная отгрузка).
+            for _src_map in (assembly_target_map.get(nm_id, {}), transit_target_map.get(nm_id, {})):
+                for _twh, _tq in _src_map.items():
+                    if (_tq or 0) <= 0:
+                        continue
+                    if nm_id in (wh_data.get(_twh) or {}).get("articles", {}):
+                        continue  # у склада есть клетка — уже учтён выше
+                    _tok = _wh_to_d(_twh)
+                    existing_by_okrug[_tok] = existing_by_okrug.get(_tok, 0.0) + _tq
+
+            unmapped_gross = (unmapped_eff.get(nm_id, 0.0) / max(actual_days, 1)) * (
+                supply_days + lead_by_nm.get(nm_id, 0.0)
+            )
             total_demand = total_gross + unmapped_gross
 
             allocated = greedy_allocate_to_target(
@@ -928,8 +1077,11 @@ async def get_warehouse_need(
     # переопределяет min_stock per SKU: целевой минимум = одна коробка вместо N шт.
     # Bump-секция активируется если задан min_stock_per_main_warehouse > 0 ИЛИ есть
     # хотя бы один SKU с эффективной кратностью.
+    # bootstrap_shape: включить bump и в СЫРУЮ форму (машина: only_available=false,
+    # кап у неё клиентский по пулу) — иначе бутстрап пустых ФО есть только в
+    # черновике и формы экранов расходятся (аудит паритета 2026-07-14).
     sku_ppb_map: dict[int, int] = {}
-    if only_available and all_nm_ids:
+    if (only_available or bootstrap_shape) and all_nm_ids:
         ppb_result = await db.execute(
             select(Nomenclature.article_wb, Nomenclature.box_qty_override).where(
                 Nomenclature.project_id == project_id,
@@ -942,7 +1094,7 @@ async def get_warehouse_need(
         for row in ppb_result:  # type: ignore[assignment]
             sku_ppb_map[row.article_wb] = int(row.box_qty_override)
 
-    if (min_stock_per_main_warehouse > 0 or sku_ppb_map) and only_available:
+    if (min_stock_per_main_warehouse > 0 or sku_ppb_map) and (only_available or bootstrap_shape):
         from collections import defaultdict
 
         from backend.services.warehouse_district import warehouse_to_district
@@ -962,7 +1114,13 @@ async def get_warehouse_need(
             for wh, _ in sorted(whs, key=lambda x: -x[1]):
                 main_per_district[d] = wh
                 break
-        main_wh_set = set(main_per_district.values())
+        # Детерминированный порядок обхода: при нехватке remaining_budget «кто
+        # получит коробку» решал hash-порядок set. Приоритет — вес якоря
+        # (воришки последними), тай-брейк по имени.
+        main_whs = sorted(
+            set(main_per_district.values()),
+            key=lambda w: (-_hamilton_priority_weight(w), w),
+        )
 
         # Apply bump per SKU per main warehouse
         for nm_id in all_nm_ids:
@@ -975,8 +1133,13 @@ async def get_warehouse_need(
             )
             in_asm_total_local = in_assembly_map.get(nm_id, 0)
             rf_avail_local = max(0, total_rf_stock_local - in_asm_total_local)
-            already_allocated = can_send_per_nm.get(nm_id, 0)
-            remaining_budget = max(0, rf_avail_local - already_allocated)
+            if only_available:
+                already_allocated = can_send_per_nm.get(nm_id, 0)
+                remaining_budget = max(0, rf_avail_local - already_allocated)
+            else:
+                # bootstrap_shape (машина): источник — пул машины, ФФ-бюджет не
+                # применим (товар не на ФФ); кап наложит клиент min(pool, need).
+                remaining_budget = 10**9
             if remaining_budget <= 0:
                 continue
 
@@ -1000,7 +1163,7 @@ async def get_warehouse_need(
                 if _c:
                     okrug_demand[_d] = okrug_demand.get(_d, 0.0) + (_c.get("avg_daily", 0) or 0) * supply_days
 
-            for wh_name in main_wh_set:
+            for wh_name in main_whs:
                 if wh_name not in wh_data:
                     continue
                 _md = warehouse_to_district(wh_name)
@@ -1042,8 +1205,12 @@ async def get_warehouse_need(
     warehouses: list[dict] = sorted(wh_data.values(), key=lambda w: w["total_need"], reverse=True)
     # Аннотируем округом для UI — фронт показывает label под названием склада
     # (как в индексе локализации). 'unknown' для складов вне справочника.
+    # priority_weight — вес «схемы воришек» (якорь↑/воришка↓): клиентский движок
+    # машины режет дефицит пула в ТОМ ЖЕ порядке, что серверный greedy черновика
+    # режет дефицит ФФ (паритет экранов, аудит 2026-07-14).
     for wh_entry in warehouses:
         wh_entry["district_key"] = warehouse_to_district(wh_entry["name"])
+        wh_entry["priority_weight"] = round(_hamilton_priority_weight(wh_entry["name"]), 4)
 
     # -- Revenue for analysis_days from wb_finance_rows (sales - returns) --
     from backend.models.wb_finance import WbFinanceRow
@@ -1096,6 +1263,19 @@ async def get_warehouse_need(
     # raw_need_per_article использовался только в старой формуле и больше
     # не нужен на этом уровне.
 
+    # Раскладочная потребность per nm = Σ ЛОКАЛЬНЫХ дефицитов клеток (до greedy;
+    # в only_available клетки перезаписаны налитым — берём need_raw). Она кормит
+    # can_send/deficit и колонку «Потр. 14д» матрицы; нетто-величина (total_need)
+    # остаётся KPI «сколько докупить» (HIGH-2 mode-инвариантен).
+    ship_need_by_nm: dict[int, int] = {}
+    for _wh_sn in wh_data.values():
+        for _nm_sn, _art_sn in _wh_sn["articles"].items():
+            # max(need, need_raw): при дефиците ФФ greedy наливает МЕНЬШЕ raw —
+            # потребность остаётся raw; bump 4.7 поднимает need ВЫШЕ raw
+            # (бутстрап-короб) — эти штуки тоже потребность.
+            _raw_sn = max(int(_art_sn["need"] or 0), int(_art_sn.get("need_raw", 0) or 0))
+            ship_need_by_nm[_nm_sn] = ship_need_by_nm.get(_nm_sn, 0) + _raw_sn
+
     # Summary accumulators
     sum_total_need = 0
     sum_total_can_send = 0
@@ -1123,24 +1303,40 @@ async def get_warehouse_need(
         in_transit_qty = transit_info["qty"]
         in_transit_date = transit_info["date"]
 
-        # total_need = ОБЩАЯ потребность артикула на supply_days вперёд минус
-        # ВСЕ доступные источники (любой WB-склад, сборка, транзит). Это
+        # total_need = ОБЩАЯ потребность артикула на (supply_days + плечо) вперёд
+        # минус ВСЕ доступные источники (любой WB-склад, сборка, транзит). Это
         # отличается от sum(per-WB needs) тем, что профицит на одном WB-складе
         # компенсирует дефицит на другом — для KPI «сколько ещё закупить».
         # Per-cell needs в матрице остаются per-WB-локализованными (показ
         # идеальной раскладки независимо от общего профицита).
-        total_orders_for_nm = sum(qty for (wh, nm), qty in wh_orders_map.items() if nm == nm_id)
+        # Скорость — growth-aware (raw × g): среднее за окно занижает потребность
+        # растущих SKU; горизонт включает плечо — пока товар едет, сток съедается.
+        raw_orders_for_nm = raw_total_by_nm.get(nm_id, 0)
         # HIGH-2: непривязанный (СНГ) спрос — часть общей потребности артикула
-        # (procurement-KPI считает все заказы, а не только локализуемые).
-        total_orders_for_nm += unmapped_demand.get(nm_id, 0)
-        total_avg_daily = total_orders_for_nm / max(actual_days, 1)
+        # (procurement-KPI считает все заказы, а не только локализуемые);
+        # raw_total_by_nm уже включает unmapped.
+        growth = growth_by_nm.get(nm_id, 1.0)
+        avg_daily_base = raw_orders_for_nm / max(actual_days, 1)
+        total_avg_daily = avg_daily_base * growth
+        lead_days = lead_by_nm.get(nm_id, 0.0)
         total_wb_stock = wb_stock_total.get(nm_id, 0)
-        gross_demand = total_avg_daily * supply_days
+        gross_demand = total_avg_daily * (supply_days + lead_days)
         total_need = max(0, round(gross_demand - total_wb_stock - in_asm_total - in_transit_qty))
-        can_send = min(total_rf_available, total_need)
-        deficit = max(0, total_need - can_send)
+        # «Могу отправить» — по РАСКЛАДОЧНОЙ потребности (Σ локальных дефицитов
+        # клеток), консистентно с капом greedy 4.6; нетто total_need — KPI закупки.
+        ship_need = ship_need_by_nm.get(nm_id, 0)
+        can_send = min(total_rf_available, ship_need)
+        deficit = max(0, ship_need - can_send)
 
         stocks_wb = wb_stock_total.get(nm_id, 0)
+        # «На сколько дней хватит остатка на WB» при рабочей (growth-aware)
+        # скорости; incl_inbound — вместе со сборкой и уже едущим.
+        wb_days_left = round(stocks_wb / total_avg_daily, 1) if total_avg_daily > 0 else None
+        wb_days_left_inbound = (
+            round((stocks_wb + in_asm_total + in_transit_qty) / total_avg_daily, 1)
+            if total_avg_daily > 0
+            else None
+        )
 
         enriched_articles.append(
             {
@@ -1150,6 +1346,10 @@ async def get_warehouse_need(
                 "brand": brand_map.get(nm_id, ""),
                 "subject": subject_map.get(nm_id, ""),
                 "total_need": total_need,
+                # Раскладочная потребность: Σ локальных дефицитов складов (без
+                # нетто-компенсации чужими излишками и без СНГ) — колонка
+                # «Потр. 14д» матрицы и база can_send/deficit.
+                "ship_need": ship_need,
                 "revenue_30d": revenue_map.get(nm_id, 0),
                 "rf_stocks": rf_stocks_for_nm,
                 "in_assembly": in_asm_total,
@@ -1158,11 +1358,32 @@ async def get_warehouse_need(
                 "can_send": can_send,
                 "deficit": deficit,
                 "stocks_wb": stocks_wb,
+                # Growth-aware скорость: base — плоское среднее за окно, eff —
+                # рабочая (max из окна/7д/3д), growth_ratio = eff/base.
+                "avg_daily_base": round(avg_daily_base, 2),
+                "eff_avg_daily": round(total_avg_daily, 2),
+                "growth_ratio": round(growth, 2),
+                # Спрос-взвешенное плечо доставки (сборка+дорога+приёмка), дни.
+                "lead_days": round(lead_days, 1),
+                # Остатка на WB хватит на N дней (по eff-скорости); inbound — с
+                # учётом «в сборке» и «в пути».
+                "wb_days_left": wb_days_left,
+                "wb_days_left_inbound": wb_days_left_inbound,
                 # Per-(nm, wh) asm/transit нужны фронту для client-side bump
                 # («Дораспределить»): чтобы не дополнять склад на 5шт если туда
                 # уже едет 5шт транзитом — иначе двойной bump.
-                "asm_by_warehouse": dict(assembly_target_map.get(nm_id, {})),
-                "transit_by_warehouse": dict(transit_target_map.get(nm_id, {})),
+                # Закрытые/исключённые склады из карт вырезаем: фронт весит по
+                # ним «Распределить все остатки» (presence-фолбэк) — остаток
+                # уезжал бы на склад, куда приёмка заявку не пропустит. Для
+                # ПОКРЫТИЯ ФО (greedy 4.6) карты выше используются полными.
+                "asm_by_warehouse": {
+                    wh: q for wh, q in assembly_target_map.get(nm_id, {}).items()
+                    if wh not in excluded_set and wh not in acceptance_closed
+                },
+                "transit_by_warehouse": {
+                    wh: q for wh, q in transit_target_map.get(nm_id, {}).items()
+                    if wh not in excluded_set and wh not in acceptance_closed
+                },
             }
         )
 

@@ -81,4 +81,63 @@ describe('applyAcceptanceRedistToPrebook', () => {
         expect(changed).toBe(false);
         expect(rows[0].tgt).toEqual({ 'Воронеж': 20 });
     });
+
+    it('дефолт: полный дроп (splits пусты) → группа не трогается (предбронь не теряем)', () => {
+        const prebook: AssemblyDraftRow[] = [
+            { nm_id: 4, barcode: 'BC4', vendor_code: 'v4', src: { '5': 30 }, tgt: { 'Коледино': 30 }, package_type: 'BOX' },
+        ];
+        const resp = new Map([[key(4, 'BC4'), item(4, 'BC4', [])]]);
+        const { rows, changed } = applyAcceptanceRedistToPrebook(prebook, resp);
+        expect(changed).toBe(false);
+        expect(rows[0].tgt).toEqual({ 'Коледино': 30 });
+    });
+
+    describe('dropUnplaced (засев новинок на машине)', () => {
+        it('полный дроп (splits пусты: сдать некуда) → группа НЕ сеется вовсе', () => {
+            // Якорь закрыт по приёмке, открытых складов нет НИГДЕ → бэк вычеркнул всё
+            // (moves to=null, splits=[]). Черновик в этом кейсе оставляет новинку на ФФ —
+            // засев обязан вести себя так же, а не везти заявку на закрытый якорь.
+            const seeded: AssemblyDraftRow[] = [
+                { nm_id: 5, barcode: 'BC5', vendor_code: 'v5', src: { '12': 40 }, tgt: { 'Санкт-Петербург Уткина Заводь': 40 }, package_type: 'BOX' },
+            ];
+            const resp = new Map([[key(5, 'BC5'), item(5, 'BC5', [])]]);
+            const { rows, changed } = applyAcceptanceRedistToPrebook(seeded, resp, { dropUnplaced: true });
+            expect(changed).toBe(true);
+            expect(rows).toHaveLength(0);
+        });
+
+        it('частичная сумма (cellTotal < srcTotal) → сеем только доставляемое, хвост не сеем', () => {
+            const seeded: AssemblyDraftRow[] = [
+                { nm_id: 6, barcode: 'BC6', vendor_code: 'v6', src: { '12': 20 }, tgt: { 'Воронеж': 20 }, package_type: 'BOX' },
+            ];
+            const resp = new Map([[key(6, 'BC6'), item(6, 'BC6', [{ package_type: 'BOX', distribution: { 'Электросталь': 15 } }])]]);
+            const { rows, changed } = applyAcceptanceRedistToPrebook(seeded, resp, { dropUnplaced: true });
+            expect(changed).toBe(true);
+            expect(rows).toHaveLength(1);
+            expect(rows[0].tgt).toEqual({ 'Электросталь': 15 });
+            expect(rows[0].src).toEqual({ '12': 15 });   // хвост 5 шт остаётся в остатке машины
+        });
+
+        it('перебор (cellTotal > srcTotal, рассинхрон) → группа не трогается (не задваиваем)', () => {
+            const seeded: AssemblyDraftRow[] = [
+                { nm_id: 7, barcode: 'BC7', vendor_code: 'v7', src: { '12': 10 }, tgt: { 'Воронеж': 10 }, package_type: 'BOX' },
+            ];
+            const resp = new Map([[key(7, 'BC7'), item(7, 'BC7', [{ package_type: 'BOX', distribution: { 'Электросталь': 25 } }])]]);
+            const { rows, changed } = applyAcceptanceRedistToPrebook(seeded, resp, { dropUnplaced: true });
+            expect(changed).toBe(false);
+            expect(rows[0].tgt).toEqual({ 'Воронеж': 10 });
+        });
+
+        it('перенос с консервацией суммы работает как в дефолте', () => {
+            const seeded: AssemblyDraftRow[] = [
+                { nm_id: 8, barcode: 'BC8', vendor_code: 'v8', src: { '12': 16 }, tgt: { 'Воронеж': 16 }, package_type: 'BOX' },
+            ];
+            const resp = new Map([[key(8, 'BC8'), item(8, 'BC8', [{ package_type: 'BOX', distribution: { 'Электросталь': 16 } }])]]);
+            const { rows, changed } = applyAcceptanceRedistToPrebook(seeded, resp, { dropUnplaced: true });
+            expect(changed).toBe(true);
+            expect(rows).toHaveLength(1);
+            expect(rows[0].tgt).toEqual({ 'Электросталь': 16 });
+            expect(rows[0].src).toEqual({ '12': 16 });
+        });
+    });
 });

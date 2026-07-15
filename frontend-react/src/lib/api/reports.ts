@@ -183,7 +183,11 @@ export function addReportMethods(api: ApiClient) {
             localizationOptimized: boolean = false,
             onlyAvailable: boolean = false,
             minStockPerMainWarehouse: number = 0,
-            localizationTarget: number = 75,
+            // Дефолт 100 (= бэкенд): доливать до полной потребности, когда can_send
+            // позволяет; 75 (порог КТР) рационировал жирные SKU (кейс DIVANDEK).
+            localizationTarget: number = 100,
+            // Машина: включить bump-бутстрап пустых ФО в СЫРУЮ форму (кап клиентский).
+            bootstrapShape: boolean = false,
         ) {
             const q = new URLSearchParams();
             q.set('supply_days', String(supplyDays));
@@ -192,7 +196,8 @@ export function addReportMethods(api: ApiClient) {
             if (localizationOptimized) q.set('localization_optimized', 'true');
             if (onlyAvailable) q.set('only_available', 'true');
             if (minStockPerMainWarehouse > 0) q.set('min_stock_per_main_warehouse', String(minStockPerMainWarehouse));
-            if (localizationTarget !== 75) q.set('localization_target', String(localizationTarget));
+            q.set('localization_target', String(localizationTarget));
+            if (bootstrapShape) q.set('bootstrap_shape', 'true');
             return api.request<any>('GET', `/api/v1/reports/stock_need?${q.toString()}`);
         },
         getOrderCitiesStatus() {

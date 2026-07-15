@@ -210,14 +210,23 @@ async def get_stock_need(
         ),
     ),
     localization_target: int = Query(
-        75,
+        100,
         ge=1,
         le=100,
         description=(
             "Целевая локализация (%), до которой распределяется сток (only_available). "
             "Распределение концентрируется на anchor-складах до достижения цели по ФО "
-            "и не размазывает остаток на дальние склады («не перетаривать»). 75 = "
-            "порог КТР «excellent». 100 = покрывать спрос полностью (старое поведение)."
+            "и не размазывает остаток на дальние склады («не перетаривать»). "
+            "Дефолт 100 = покрывать полную потребность, когда can_send позволяет "
+            "(решение 2026-07-14; 75 = порог КТР «excellent» рационировал жирные SKU)."
+        ),
+    ),
+    bootstrap_shape: bool = Query(
+        False,
+        description=(
+            "Включить bump-бутстрап пустых ФО (шаг 4.7) в СЫРУЮ форму спроса без "
+            "only_available-капа — для экрана машины (кап у неё клиентский по пулу); "
+            "иначе бутстрап есть только в черновике и формы экранов расходятся."
         ),
     ),
     project: Project = Depends(get_current_project),
@@ -239,6 +248,7 @@ async def get_stock_need(
         only_available=only_available,
         min_stock_per_main_warehouse=min_stock_per_main_warehouse,
         localization_target=localization_target,
+        bootstrap_shape=bootstrap_shape,
     )
 
 
