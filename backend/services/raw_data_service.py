@@ -59,6 +59,10 @@ class RawSource:
     refresh: str | None = None      # ключ адаптера дозагрузки (None — только по расписанию)
     refresh_hint: str | None = None  # чего ждать от кнопки
     ranged: bool = False            # адаптер принимает период
+    # Колонка «когда данные обновлялись у нас» для индикатора свежести, если отличается от
+    # date_field (пример: у кампаний date_field=created_at — дата ПОСЛЕДНЕЙ СОЗДАННОЙ кампании,
+    # а не последнего синка → свежесть краснела при живом синке)
+    freshness_field: str | None = None
     # Человеческие названия колонок для просмотра содержимого; чего нет — назовём автоматически
     labels: dict[str, str] = dc_field(default_factory=dict)
 
@@ -205,6 +209,7 @@ RAW_SOURCES: list[RawSource] = [
     RawSource(
         key="ad_campaigns", title="Рекламные кампании", group="Реклама",
         table="wb_ad_campaigns", model=WbAdCampaign, date_field="created_at",
+        freshness_field="updated_at",
         description="Метаданные кампаний: название, тип, статус, остаток бюджета, товары.",
         source="advert-api · /api/advert/v2/adverts, /adv/v1/budget",
         schedule="Каждые 30 минут (бюджеты — каждые 10)",
@@ -307,6 +312,18 @@ RAW_SOURCES: list[RawSource] = [
         source="statistics-api · /api/v1/supplier/orders",
         schedule="3 раза в сутки",
         refresh="orders", refresh_hint="Перечитать заказы за период", ranged=True,
+        labels={
+            "srid": "ID заказа (srid)", "g_number": "Номер заказа", "sticker": "Стикер",
+            "income_id": "Поставка", "order_date": "Дата заказа", "last_change_date": "Изменён",
+            "nm_id": "Артикул WB", "barcode": "Баркод", "vendor_code": "Артикул продавца",
+            "subject": "Предмет", "brand": "Бренд", "category": "Категория", "tech_size": "Размер",
+            "warehouse_name": "Склад", "warehouse_type": "Тип склада",
+            "country_name": "Страна", "oblast_okrug_name": "Округ", "region_name": "Регион",
+            "total_price": "Цена до скидок, ₽", "discount_percent": "Скидка, %", "spp": "СПП, %",
+            "finished_price": "Цена покупателя, ₽", "price_with_disc": "Цена со скидкой, ₽",
+            "is_cancel": "Отменён", "cancel_date": "Дата отмены",
+            "is_supply": "Догрузка", "is_realization": "Реализация", "synced_at": "Синк у нас",
+        },
     ),
     RawSource(
         key="prices", title="Цены витрины", group="Продажи",
@@ -395,16 +412,20 @@ async def start_refresh(project_id: int, key: str, date_from: date | None, date_
 async def _source_stats(db: AsyncSession, project_id: int, src: RawSource) -> dict[str, Any]:
     """Сколько строк накоплено и за какой период."""
     col = getattr(src.model, src.date_field)
+    fresh_col = getattr(src.model, src.freshness_field) if src.freshness_field else None
+    selects = [func.count(), func.min(col), func.max(col)]
+    if fresh_col is not None:
+        selects.append(func.max(fresh_col))
     row = (
-        await db.execute(
-            select(func.count(), func.min(col), func.max(col)).where(src.model.project_id == project_id)
-        )
+        await db.execute(select(*selects).where(src.model.project_id == project_id))
     ).one()
     rows, first, last = int(row[0]), row[1], row[2]
+    fresh = row[3] if fresh_col is not None else last
     return {
         "rows": rows,
         "first_date": first.isoformat() if isinstance(first, (date, datetime)) else None,
         "last_date": last.isoformat() if isinstance(last, (date, datetime)) else None,
+        "fresh_at": fresh.isoformat() if isinstance(fresh, (date, datetime)) else None,
     }
 
 
@@ -515,7 +536,7 @@ async def get_sources_overview(db: AsyncSession, project_id: int) -> dict:
             stats = await _source_stats(db, project_id, src)
         except Exception as e:  # таблица есть, но что-то не так — не роняем всю страницу
             logger.warning("Raw stats failed for %s: %s", src.key, e)
-            stats = {"rows": None, "first_date": None, "last_date": None}
+            stats = {"rows": None, "first_date": None, "last_date": None, "fresh_at": None}
         sources.append({
             "key": src.key, "title": src.title, "group": src.group, "table": src.table,
             "date_field": src.date_field, "description": src.description,

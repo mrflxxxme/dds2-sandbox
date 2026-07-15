@@ -14,6 +14,7 @@ const RANGES: { days: number; label: string }[] = [
     { days: 7, label: '7 дней' },
     { days: 30, label: '30 дней' },
     { days: 90, label: '90 дней' },
+    { days: 365, label: 'Год' },
 ];
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
@@ -26,8 +27,9 @@ function lastDateLabel(src: RawSource): string {
 
 /** «Свежесть»: сколько дней прошло с последнего факта. */
 function freshness(src: RawSource): { color: string; text: string } {
-    if (!src.last_date) return { color: '#9ca3af', text: 'нет данных' };
-    const days = Math.floor((Date.now() - new Date(src.last_date).getTime()) / 86400_000);
+    const freshAt = src.fresh_at ?? src.last_date;  // у кампаний last_date = дата создания последней кампании, не синк
+    if (!freshAt) return { color: '#9ca3af', text: 'нет данных' };
+    const days = Math.floor((Date.now() - new Date(freshAt).getTime()) / 86400_000);
     if (days <= 1) return { color: '#10b981', text: days === 0 ? 'сегодня' : 'вчера' };
     if (days <= 3) return { color: '#f59e0b', text: `${days} дн. назад` };
     return { color: '#ef4444', text: `${days} дн. назад` };
@@ -55,7 +57,7 @@ function SourceRow({ src, progress, onRefresh, busy, slug }: {
     busy: boolean;
     slug: string;
 }) {
-    const [days, setDays] = useState(30);
+    const [days, setDays] = useState(src.key === 'ad_payments' ? 365 : 30);
     const f = freshness(src);
     const running = progress?.status === 'running';
 

@@ -38,7 +38,9 @@ export default function RawSourcePage() {
     const [from, setFrom] = useState('');
     const [to, setTo] = useState('');
 
-    const load = useCallback(async () => {
+    // signal — защита от гонки устаревших ответов (быстрая смена фильтра/периода во время
+    // загрузки: медленный старый ответ перетирал свежий) и от двойного маунта StrictMode.
+    const load = useCallback(async (signal?: AbortSignal) => {
         setLoading(true); setError('');
         try {
             const res = await api.getRawSourceRows(key, {
@@ -46,13 +48,21 @@ export default function RawSourcePage() {
                 date_from: from || undefined, date_to: to || undefined,
                 sort_by: sort?.by, sort_dir: sort?.dir,
             });
+            if (signal?.aborted) return;
             setData(res);
         } catch (e) {
+            if (signal?.aborted) return;
             setError(e instanceof Error ? e.message : 'Ошибка загрузки');
-        } finally { setLoading(false); }
+        } finally {
+            if (!signal?.aborted) setLoading(false);
+        }
     }, [key, page, from, to, sort]);
 
-    useEffect(() => { load(); }, [load]);
+    useEffect(() => {
+        const controller = new AbortController();
+        load(controller.signal);
+        return () => controller.abort();
+    }, [load]);
 
     // Смена фильтра/сортировки возвращает на первую страницу (иначе можно застрять за концом
     // выборки). Сбрасываем прямо в обработчиках: отдельный useEffect дал бы лишний запрос.

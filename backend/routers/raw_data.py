@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models import Project
 from backend.project_context import get_current_project
+from backend.rbac import require_role
 from backend.services import raw_data_service
 from backend.utils.rate_limit import rate_limit_write
 
@@ -22,7 +23,7 @@ logger = logging.getLogger("dds.raw_data")
 router = APIRouter(prefix="/raw-data")
 
 
-@router.get("/sources")
+@router.get("/sources", dependencies=[Depends(require_role("viewer", page="raw-data"))])
 async def list_sources(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
@@ -31,7 +32,7 @@ async def list_sources(
     return await raw_data_service.get_sources_overview(db, project.id)
 
 
-@router.get("/sources/{key}/rows")
+@router.get("/sources/{key}/rows", dependencies=[Depends(require_role("viewer", page="raw-data"))])
 async def source_rows(
     key: str,
     limit: int = Query(50, ge=1, le=raw_data_service.MAX_ROWS_PER_PAGE),
@@ -53,7 +54,7 @@ async def source_rows(
         raise HTTPException(404, str(e)) from e
 
 
-@router.get("/refresh-progress")
+@router.get("/refresh-progress", dependencies=[Depends(require_role("viewer", page="raw-data"))])
 async def refresh_progress(project: Project = Depends(get_current_project)):
     """Прогресс запущенных дозагрузок этого проекта."""
     return {"progress": raw_data_service.get_refresh_progress(project.id)}
@@ -64,7 +65,7 @@ class RefreshRequest(BaseModel):
     date_to: date | None = None
 
 
-@router.post("/sources/{key}/refresh", dependencies=[Depends(rate_limit_write)])
+@router.post("/sources/{key}/refresh", dependencies=[Depends(rate_limit_write), Depends(require_role("editor", page="raw-data"))])
 async def refresh_source(
     key: str,
     body: RefreshRequest | None = None,
