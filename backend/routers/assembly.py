@@ -58,6 +58,7 @@ from backend.schemas.assembly import (
     PrebookingCreate,
     PrebookingCreateResult,
     RefreshFromFboResponse,
+    SourceVehicleOption,
     ReturnToWarehouse,
     ShipBulk,
     StatusBulk,
@@ -108,6 +109,10 @@ async def list_assembly_requests(
     brand: str | None = Query(None),
     ff_link: str | None = Query(None, description='Фильтр привязки ФФ: "none" | "linked"'),
     joint_only: bool = Query(False, description="Только совместные сборки (≥2 на одну WB-поставку)"),
+    source: str | None = Query(
+        None, description='Происхождение: "pre_dist" (из машины) | "prebooking" (🅿️ предзаявки) | "plain"'
+    ),
+    source_vehicle_id: int | None = Query(None, description="Только заявки этой машины (CostOrder.id)"),
     limit: int = Query(50, le=500),
     offset: int = Query(0, ge=0),
     project: Project = Depends(get_current_project),
@@ -128,6 +133,8 @@ async def list_assembly_requests(
         brand=brand,
         ff_link=ff_link,
         joint_only=joint_only,
+        source=source,
+        source_vehicle_id=source_vehicle_id,
         limit=limit,
         offset=offset,
     )
@@ -457,6 +464,15 @@ async def list_wb_warehouses(
 ):
     """Get distinct WB warehouse names from assembly history and FBO supplies."""
     return await assembly_service.list_wb_warehouses(db, project.id)
+
+
+@router.get("/source-vehicles", response_model=list[SourceVehicleOption])
+async def list_source_vehicles(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Машины с заявками сборки — опции фильтра «Источник» (свежие сверху)."""
+    return await assembly_service.list_source_vehicles(db, project.id)
 
 
 @router.get("/in-transit", response_model=InTransitResponse)

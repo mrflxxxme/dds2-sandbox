@@ -551,6 +551,13 @@ class CreatedGroupResponse(BaseModel):
     requests: list[CreatedRequestBrief]
 
 
+class SourceVehicleOption(BaseModel):
+    """Машина с заявками сборки — опция фильтра «Источник» в списке."""
+
+    id: int
+    order_no: str
+
+
 class RefreshFromFboResponse(BaseModel):
     added: int
     removed: int
