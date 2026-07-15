@@ -782,6 +782,13 @@ async def push_pass(db: AsyncSession, project_id: int, assembly_id: int) -> Asse
         )
         link.barcode_id = barcode_id
         link.sync_status = WbSupplySyncStatus.PASSED.value
+        # Только что записали пропуск в WB — кабинетный снимок = отправленное.
+        # Обновляем сразу, иначе «Номер ВБ» в блоке ждёт следующего синка состояний.
+        link.wb_pass_present = True
+        link.wb_pass_car_number = car_number
+        link.wb_pass_pallets = pallets
+        link.wb_pass_driver = f"{last_name} {first_name}".strip() or None
+        link.wb_pass_synced_at = utcnow()
         link.last_error = None
         link.last_synced_at = utcnow()
         await db.commit()
