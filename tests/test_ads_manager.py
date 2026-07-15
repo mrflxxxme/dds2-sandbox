@@ -783,3 +783,23 @@ async def test_create_campaign_refresh_failure_not_fatal(monkeypatch):
     db = AsyncMock()
     res = await m.create_campaign(db, 1, "тест", [111], "unified", "cpm", None)
     assert res["ok"] is True and res["campaign_id"] == 778
+
+
+# ─── msk_today: мёртвая МСК-ветка utcnow().tzinfo ────────────────────────────
+
+
+def test_msk_today_is_msk_calendar_day(monkeypatch):
+    """23:30 UTC = 02:30 МСК следующего дня → msk_today() обязан отдать следующий день.
+
+    Регресс: «utcnow().astimezone(MSK).date() if utcnow().tzinfo else utcnow().date()» —
+    tzinfo у naive utcnow() всегда None → всегда бралась сырая UTC-дата (вчера по МСК).
+    """
+    from datetime import date, datetime
+
+    from backend.utils import time as time_utils
+
+    monkeypatch.setattr(time_utils, "utcnow", lambda: datetime(2026, 7, 14, 23, 30, 0))
+    assert time_utils.msk_today() == date(2026, 7, 15)
+
+    monkeypatch.setattr(time_utils, "utcnow", lambda: datetime(2026, 7, 14, 12, 0, 0))
+    assert time_utils.msk_today() == date(2026, 7, 14)

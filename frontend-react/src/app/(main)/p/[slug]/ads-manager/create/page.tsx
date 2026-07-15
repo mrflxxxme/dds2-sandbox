@@ -113,7 +113,7 @@ export default function CreateCampaignPage() {
             // 2–4: кампания уже существует — провалы шагов не критичны, но о них НАДО сказать
             const stepErrors: string[] = [];
             try { if (budgetNum >= MIN_BUDGET) await api.depositCampaignBudget(id, budgetNum, 0); }
-            catch { stepErrors.push(`пополнение на ${budgetNum} ₽ не прошло`); }
+            catch { stepErrors.push(`пополнение на ${formatNumber(budgetNum, 0)} ₽ не прошло`); }
 
             // 3. Ставки по зонам (ручная CPM) — применяем к каждой карточке товара
             try {
@@ -175,7 +175,7 @@ export default function CreateCampaignPage() {
                         <div>
                             <label style={{ fontSize: 12, color: '#6b7280', display: 'block', marginBottom: 4 }}>Бюджет кампании, ₽</label>
                             <input type="number" min={0} step={100} value={budget} onChange={e => setBudget(e.target.value)}
-                                style={{ fontSize: 15, padding: '9px 12px', borderRadius: 10, border: `1px solid ${budgetNum < MIN_BUDGET ? '#ef4444' : '#d1d5db'}`, width: 240 }} />
+                                style={{ fontSize: 15, padding: '9px 12px', borderRadius: 10, border: `1px solid ${budgetNum !== 0 && budgetNum < MIN_BUDGET ? '#ef4444' : '#d1d5db'}`, width: 240 }} />
                             <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>Минимальный бюджет — {MIN_BUDGET} ₽ · 0 или пусто — создать черновик без пополнения</div>
                         </div>
                         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 9, marginTop: 22 }}>

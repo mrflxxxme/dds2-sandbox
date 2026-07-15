@@ -847,7 +847,7 @@ async def get_ad_tab_grouped(
                 "ctr": round((clicks / views * 100) if views else 0, 2),
                 "cpc": round((adv_sum / clicks) if clicks else 0, 2),
                 "cpm": round((adv_sum / views * 1000) if views else 0, 2),
-                "drr": round((adv_sum / orders_sum * 100) if orders_sum else 0, 2),
+                "drr": round(adv_sum / orders_sum * 100, 2) if orders_sum else (None if adv_sum > 0 else 0),
                 "bdr_revenue": round(bdr_revenue, 2),
                 "bdr_profit": round(bdr_profit, 2),
                 "stock_qty": stock_qty,

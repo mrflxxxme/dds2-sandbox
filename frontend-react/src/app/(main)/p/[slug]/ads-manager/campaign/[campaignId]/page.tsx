@@ -347,14 +347,12 @@ export default function CampaignPage() {
         // Подтверждение уже получено в нижней панели кластеризатора
         setMinusError(null);
         setPending(prev => { const n = new Set(prev); items.forEach(c => n.add(c.norm_query)); return n; });
-        let okCount = 0;
         const failed: string[] = [];
         let lastError: string | null = null;
         for (const c of items) {
             try {
                 const res = await api.toggleClusterMinus(campaignId, { nm_id: nmId, norm_query: c.norm_query, action });
                 if (res.ok) {
-                    okCount += 1;
                     setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => x.norm_query === c.norm_query ? { ...x, is_minused: action === 'add' } : x) } : prev);
                 } else {
                     failed.push(c.norm_query);
@@ -367,16 +365,22 @@ export default function CampaignPage() {
                 setPending(prev => { const n = new Set(prev); n.delete(c.norm_query); return n; });
             }
         }
-        const verb = action === 'add' ? 'отключено' : 'включено';
+        const verbCap = action === 'add' ? 'Отключено' : 'Включено';
+        reportBulkOutcome(`${verbCap} фраз: ${items.length}`, verbCap, items.length, failed, lastError, setMinusError);
+    };
+
+    // Единый итог массовой операции кластеризатора: success-тост либо список отбитых фраз
+    // (раньше каждая ошибка перетирала предыдущую — был виден только последний отказ).
+    const reportBulkOutcome = (okMsg: string, failVerb: string, total: number, failed: string[], lastError: string | null, setErr: (m: string) => void) => {
         if (failed.length === 0) {
-            toast.success(`${verb === 'отключено' ? 'Отключено' : 'Включено'} фраз: ${okCount}`);
-        } else {
-            const list = failed.slice(0, 3).join('», «');
-            const more = failed.length > 3 ? ` и ещё ${failed.length - 3}` : '';
-            const msg = `Не ${verb} ${failed.length} из ${items.length}: «${list}»${more} — ${lastError}`;
-            setMinusError(msg);
-            toast.error(msg);
+            toast.success(okMsg);
+            return;
         }
+        const list = failed.slice(0, 3).join('», «');
+        const more = failed.length > 3 ? ` и ещё ${failed.length - 3}` : '';
+        const msg = `${failVerb} ${total - failed.length} из ${total}; отбито: «${list}»${more} — ${lastError}`;
+        setErr(msg);
+        toast.error(msg);
     };
 
     const handleSetBid = async (c: SearchCluster, bid: number) => {
@@ -406,20 +410,25 @@ export default function CampaignPage() {
         // Подтверждение уже получено в нижней панели кластеризатора
         setBidError(null);
         setBidPending(prev => { const n = new Set(prev); items.forEach(i => n.add(i.cluster.norm_query)); return n; });
+        const failed: string[] = [];
+        let lastError: string | null = null;
         for (const { cluster, bid } of items) {
             try {
                 const res = await api.setCampaignClusterBid(campaignId, { nm_id: nmId, norm_query: cluster.norm_query, bid });
                 if (res.ok) {
                     setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => x.norm_query === cluster.norm_query ? { ...x, bid: bid > 0 ? (res.bid ?? bid) : null } : x) } : prev);
                 } else {
-                    setBidError(res.error || `WB отклонил «${cluster.norm_query}»`);
+                    failed.push(cluster.norm_query);
+                    lastError = res.error || 'WB отклонил ставку';
                 }
             } catch (e) {
-                setBidError(e instanceof Error ? e.message : 'Ошибка обращения к WB');
+                failed.push(cluster.norm_query);
+                lastError = e instanceof Error ? e.message : 'Ошибка обращения к WB';
             } finally {
                 setBidPending(prev => { const n = new Set(prev); n.delete(cluster.norm_query); return n; });
             }
         }
+        reportBulkOutcome(`Готово: ${label} — фраз: ${items.length}`, 'Применено', items.length, failed, lastError, setBidError);
     };
 
     const toggleState = async () => {

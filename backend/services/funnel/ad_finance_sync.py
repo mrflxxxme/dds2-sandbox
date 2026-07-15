@@ -16,14 +16,9 @@ from backend.models.integrations import WbAdPayment, WbAdUpd
 logger = logging.getLogger(__name__)
 
 
-# asyncpg не принимает >32767 параметров на statement; у wb_ad_upd 10 колонок →
-# потолок ~3276 строк. 2000 — с запасом и для payments (8 колонок).
-_INSERT_CHUNK = 2000
-
-
-def _insert_chunks(rows: list[dict], size: int = _INSERT_CHUNK):
-    for i in range(0, len(rows), size):
-        yield rows[i : i + size]
+# asyncpg не принимает >32767 параметров на statement — вставляем чанками (общий хелпер)
+from backend.utils.batching import INSERT_CHUNK as _INSERT_CHUNK
+from backend.utils.batching import chunked as _insert_chunks
 
 
 def _parse_dt(value: str | None) -> datetime | None:

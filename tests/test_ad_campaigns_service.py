@@ -697,3 +697,25 @@ class TestAdTabDrrInfinite:
         db = self._db_for_rows([self._row(1, 2500, 50000)])
         result = await get_ad_tab_data(db, PROJECT_ID, "2024-01-01", "2024-01-31")
         assert result[0]["drr"] == 5.0
+
+
+class TestAdTabGroupedDrrInfinite:
+    """Групповой ДРР: расход без заказов → None (∞), как и на уровне товара."""
+
+    @pytest.mark.asyncio
+    async def test_group_spend_without_orders_gives_none(self, monkeypatch):
+        from backend.services.funnel import ad_campaigns_service as m
+
+        base = TestAdTabDrrInfinite._row(1, 5000, 0)
+        monkeypatch.setattr(m, "get_ad_tab_data", AsyncMock(return_value=[{
+            "nm_id": 1, "vendor_code": "A", "subject": "S", "brand": "B",
+            "adv_views": 100, "adv_clicks": 10, "adv_sum": 5000.0,
+            "orders_sum_rub": 0.0, "orders_count": 0, "ctr": 10.0, "cpc": 500.0,
+            "cpm": 50000.0, "drr": None, "bdr_revenue": 0, "bdr_profit": 0,
+            "stock_qty": 0, "active_campaigns": 0, "campaigns": [],
+            "abc_revenue": "C", "abc_profit": "C",
+        }]))
+        db = AsyncMock()
+        rows = await m.get_ad_tab_grouped(db, PROJECT_ID, "2024-01-01", "2024-01-31", group_by="brand")
+        assert rows, "нет групп"
+        assert rows[0]["drr"] is None

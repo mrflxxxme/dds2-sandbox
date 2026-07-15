@@ -11,7 +11,7 @@ RULE: All new code MUST use `from backend.utils.time import utcnow`
       instead of datetime.utcnow() or datetime.now(timezone.utc).
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 
 def utcnow() -> datetime:
@@ -33,3 +33,23 @@ def utcnow() -> datetime:
         created_at = mapped_column(DateTime, default=utcnow)
     """
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def msk_now() -> datetime:
+    """Текущий момент в МСК (aware).
+
+    ЕДИНСТВЕННЫЙ правильный способ получить «сейчас по Москве» от naive-UTC utcnow().
+    Ловушки, которые уже стреляли:
+    - naive.astimezone(MSK) трактует naive как ЛОКАЛЬНОЕ время машины (совпадает с UTC,
+      только пока TZ контейнера = UTC);
+    - «utcnow().astimezone(MSK) if utcnow().tzinfo else utcnow()» — tzinfo у utcnow()
+      всегда None, МСК-ветка мертва → бралась сырая UTC-дата (в 00:00–02:59 МСК — вчера).
+    """
+    import pytz
+
+    return utcnow().replace(tzinfo=timezone.utc).astimezone(pytz.timezone("Europe/Moscow"))
+
+
+def msk_today() -> date:
+    """Сегодняшняя календарная дата в МСК."""
+    return msk_now().date()

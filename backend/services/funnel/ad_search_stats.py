@@ -61,17 +61,20 @@ async def sync_ad_search_daily(
         for (nm_id, day), v in agg.items() if day
     ]
     if rows:
-        stmt = pg_insert(WbAdSearchDaily).values(rows)
-        await db.execute(
-            stmt.on_conflict_do_update(
-                constraint="uq_ad_search_daily",
-                set_={
-                    "views": stmt.excluded.views, "clicks": stmt.excluded.clicks,
-                    "spend": stmt.excluded.spend, "atbs": stmt.excluded.atbs,
-                    "orders": stmt.excluded.orders, "shks": stmt.excluded.shks,
-                },
+        from backend.utils.batching import chunked
+
+        for chunk in chunked(rows):
+            stmt = pg_insert(WbAdSearchDaily).values(chunk)
+            await db.execute(
+                stmt.on_conflict_do_update(
+                    constraint="uq_ad_search_daily",
+                    set_={
+                        "views": stmt.excluded.views, "clicks": stmt.excluded.clicks,
+                        "spend": stmt.excluded.spend, "atbs": stmt.excluded.atbs,
+                        "orders": stmt.excluded.orders, "shks": stmt.excluded.shks,
+                    },
+                )
             )
-        )
         await db.commit()
     logger.info("Ad search-daily sync: campaign %s, %s..%s — %s строк", campaign_id, date_from, date_to, len(rows))
     return {"status": "ok", "rows": len(rows)}

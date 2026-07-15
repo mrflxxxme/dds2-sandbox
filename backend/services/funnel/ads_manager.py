@@ -8,6 +8,7 @@ Read-only поверх существующих таблиц: wb_ad_campaigns (�
 
 import json
 import logging
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -19,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models import WbAdCampaign, WbAdCampaignEvent, WbFunnelDaily
 from backend.models.integrations import WbAdCampaignDaily, WbAdNmDaily, WbAdCampaignSnapshot
 from backend.services.funnel.bdr_rates import BdrRatesLookup
-from backend.utils.time import utcnow
+from backend.utils.time import msk_now, msk_today, utcnow
 
 logger = logging.getLogger("dds.funnel")
 
@@ -59,7 +60,7 @@ async def list_ad_campaigns(
     if not campaigns:
         return []
 
-    today_msk = utcnow().astimezone(MSK).date() if utcnow().tzinfo else utcnow().date()
+    today_msk = msk_today()  # НЕ utcnow().date(): в 00:00–02:59 МСК это вчера
     period_to = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else today_msk
     period_from = datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else period_to - timedelta(days=6)
     period_days = (period_to - period_from).days + 1  # дней в периоде — для «затраты в час»
@@ -233,7 +234,7 @@ async def get_campaign_history(
         return []
     nm_ids = camp.nm_ids or []
 
-    today_msk = utcnow().astimezone(MSK).date() if utcnow().tzinfo else utcnow().date()
+    today_msk = msk_today()  # НЕ utcnow().date(): в 00:00–02:59 МСК это вчера
     period_to = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else today_msk
     period_from = (
         datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else period_to - timedelta(days=days - 1)
@@ -588,7 +589,7 @@ async def get_campaign_metrics(
     if nm_id is not None:
         nm_ids = [nm_id]
 
-    today_msk = utcnow().astimezone(MSK).date() if utcnow().tzinfo else utcnow().date()
+    today_msk = msk_today()  # НЕ utcnow().date(): в 00:00–02:59 МСК это вчера
     period_to = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else today_msk
     period_from = (
         datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else period_to - timedelta(days=days - 1)
@@ -769,7 +770,7 @@ async def get_campaign_zone_metrics(
     if camp is None:
         return {"error": "campaign_not_found"}
 
-    today_msk = utcnow().astimezone(MSK).date() if utcnow().tzinfo else utcnow().date()
+    today_msk = msk_today()  # НЕ utcnow().date(): в 00:00–02:59 МСК это вчера
     period_to = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else today_msk
     period_from = (
         datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else period_to - timedelta(days=days - 1)
@@ -1258,7 +1259,11 @@ async def create_campaign(
     try:
         from backend.services.funnel.ad_campaigns_service import refresh_one_campaign
 
-        await refresh_one_campaign(db, project_id, int(res["campaign_id"]))
+        refreshed = await refresh_one_campaign(db, project_id, int(res["campaign_id"]))
+        if not refreshed.get("ok"):
+            # WB может отдать деталь новой кампании не мгновенно — одна повторная попытка
+            await asyncio.sleep(2)
+            await refresh_one_campaign(db, project_id, int(res["campaign_id"]))
     except Exception as e:
         logger.warning("create_campaign: точечный догруз после создания не удался: %s", e)
     return res
@@ -1451,7 +1456,7 @@ async def run_autopay_tick(db: AsyncSession, project_id: int, api_key: str) -> d
     if not enabled:
         return {"deposits": 0, "checked": 0}
 
-    now_msk = utcnow().astimezone(MSK)
+    now_msk = msk_now()
     today_msk = now_msk.date()
     # to_target срабатывает только в свой час МСК; low_balance проверяется каждый проход (по остатку)
     due_ids = [

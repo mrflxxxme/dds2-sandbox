@@ -54,7 +54,9 @@ async def source_rows(
         raise HTTPException(404, str(e)) from e
 
 
-@router.get("/refresh-progress", dependencies=[Depends(require_role("viewer", page="raw-data"))])
+# Без require_role: фронт поллит каждые ~3с, page-проверка = 2 лишних SELECT на тик;
+# отдаёт только статусы загрузок (низкочувствительно), членство в проекте проверяется
+@router.get("/refresh-progress")
 async def refresh_progress(project: Project = Depends(get_current_project)):
     """Прогресс запущенных дозагрузок этого проекта."""
     return {"progress": raw_data_service.get_refresh_progress(project.id)}
