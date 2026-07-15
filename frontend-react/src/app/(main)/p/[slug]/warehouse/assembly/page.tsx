@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
-import { formatDate, formatNumber, pluralRu } from '@/lib/utils';
+import { formatDate, formatNumber, pluralRu, exportToExcel } from '@/lib/utils';
 import { Toast } from '@/components';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import { FfMismatchModal } from '@/components/FfMismatchModal';
@@ -31,6 +31,8 @@ function ffLinksOf(row: AssemblyRequest): FfLinkInfo[] {
 
 // Подпись типа поставки WB для колонки «Тип поставки».
 const PKG_TYPE_LABEL: Record<string, string> = { BOX: '📦 Короб', MONOPALLET: '📐 Моно', SUPERSAFE: '🔒 Сейф' };
+// Плоские метки упаковки для Excel-выгрузки «Сборочного листа» (без эмодзи).
+const PKG_PLAIN: Record<string, string> = { BOX: 'Короб', MONOPALLET: 'Моно', SUPERSAFE: 'Сейф' };
 
 // Подпись-тултип бейджа «Совместная»: другие сборки той же WB-поставки.
 function jointTitle(row: AssemblyRequest): string {
@@ -758,6 +760,42 @@ export default function AssemblyListPage() {
         setSelectedIds(new Set(items.filter(i => isBulkDeletable(i.status)).map(i => i.id)));
     }, [items]);
 
+    // Экспорт «Сборочный лист»: одна строка = один товар в заявке (по всему
+    // отфильтрованному набору, а не по выбору галочками). Для машины V-…: видно,
+    // что и сколько (коробов + штук) едет на каждый WB-склад. Коробов из бэка
+    // (⌈штук/кратность⌉); пусто, если кратность не задана. + строка ИТОГО.
+    const exportPickList = useCallback(() => {
+        const rows = items.flatMap(r =>
+            (r.items ?? []).map(it => ({
+                number: r.number,
+                wb: r.effective_wb_warehouse || r.wb_warehouse_name || '',
+                supply: r.wb_supply_name || wbCabinetNo(r.wb_supply) || '',
+                pkg: PKG_PLAIN[r.package_type || 'BOX'] || r.package_type || '',
+                article: it.article || it.product_name || '',
+                barcode: it.barcode,
+                boxes: it.boxes ?? '',
+                qty: it.quantity,
+            })),
+        );
+        if (rows.length === 0) {
+            setToast({ message: 'Нет позиций для выгрузки', type: 'error' });
+            return;
+        }
+        const totalBoxes = items.reduce((s, r) => s + (r.items ?? []).reduce((a, it) => a + (it.boxes ?? 0), 0), 0);
+        const totalQty = items.reduce((s, r) => s + (r.items ?? []).reduce((a, it) => a + (it.quantity || 0), 0), 0);
+        rows.push({ number: 'ИТОГО', wb: '', supply: '', pkg: '', article: '', barcode: '', boxes: totalBoxes, qty: totalQty });
+        exportToExcel(rows, 'assembly_picklist', [
+            { key: 'number', label: '№ заявки' },
+            { key: 'wb', label: 'WB-склад' },
+            { key: 'supply', label: 'FBO поставка' },
+            { key: 'pkg', label: 'Тип' },
+            { key: 'article', label: 'Артикул' },
+            { key: 'barcode', label: 'Баркод' },
+            { key: 'boxes', label: 'Коробов' },
+            { key: 'qty', label: 'Штук' },
+        ]);
+    }, [items]);
+
     const handleBulkDelete = useCallback(async () => {
         const ids = [...selectedIds];
         if (ids.length === 0) return;
@@ -1407,6 +1445,15 @@ export default function AssemblyListPage() {
                     exportName="assembly_requests"
                     actions={
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            {items.length > 0 && (
+                                <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={exportPickList}
+                                    title="Excel по позициям: № заявки · WB-склад · предзаказ · артикул · баркод · коробов · штук (по текущему фильтру)"
+                                >
+                                    📋 Сборочный лист
+                                </button>
+                            )}
                             {selectedIds.size > 0 ? (
                                 <>
                                     <span style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Выбрано: {formatNumber(selectedIds.size, 0)}</span>

@@ -293,6 +293,7 @@ async def _build_items_with_stock(
     *,
     nom_map: dict[int, Nomenclature] | None = None,
     stock_by_wh_nom: dict[tuple[int, int], int] | None = None,
+    box_qty_by_wh_bc: dict[tuple[int, str], int | None] | None = None,
 ) -> list[dict]:
     """Build items list with product_name and stock_quantity.
 
@@ -333,6 +334,14 @@ async def _build_items_with_stock(
         nom = nom_map.get(item.nomenclature_id)
         product_name = (nom.subject or nom.article_seller or item.barcode) if nom else item.barcode
 
+        # Кратность короба (склад заявки + ШК) → коробов на позицию = ⌈штук/кратность⌉
+        # (зеркало compute_boxes_count: хвост < короба — отдельный неполный короб).
+        # box_qty_by_wh_bc может отсутствовать (single-row без резолва) или не иметь
+        # записи по ШК → box_qty/boxes = None («коробов» в листе пусто, не ложный 0).
+        box_qty = box_qty_by_wh_bc.get((request.warehouse_id, item.barcode)) if box_qty_by_wh_bc else None
+        qty = int(item.quantity or 0)
+        boxes = -(-qty // box_qty) if (box_qty and box_qty > 0 and qty > 0) else None
+
         items_out.append(
             {
                 "id": item.id,
@@ -343,6 +352,8 @@ async def _build_items_with_stock(
                 "article": (nom.article_seller if nom else None),
                 "brand": nom.brand if nom else None,
                 "stock_quantity": stock_map.get(item.nomenclature_id, 0),
+                "box_qty": box_qty,
+                "boxes": boxes,
             }
         )
     return items_out
@@ -537,7 +548,8 @@ async def _build_response(
         "carrier_name": carrier_name,
         "items": (
             items := await _build_items_with_stock(
-                db, request, nom_map=nom_map, stock_by_wh_nom=stock_by_wh_nom
+                db, request, nom_map=nom_map, stock_by_wh_nom=stock_by_wh_nom,
+                box_qty_by_wh_bc=box_qty_by_wh_bc,
             )
         ),
         "brands": ", ".join(sorted({i["brand"] for i in items if i.get("brand")})) or None,
