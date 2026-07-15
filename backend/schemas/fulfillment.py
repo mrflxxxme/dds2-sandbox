@@ -234,7 +234,11 @@ class FfMismatchDetail(BaseModel):
     our_total: int = 0
     ff_total: int = 0
     ff_request_numbers: list[str] = Field(default_factory=list)
+    # rows — расхождение по НАШИМ ШК (наш qty ≠ qty у ФФ, включая «мы отправили, а в
+    # заявке нет»). extra_rows — ШК, которые есть только у ФФ (мы их не отправляли):
+    # инфо-строки, расхождением не считаются (не зажигают ⚠ и бейдж «расхождение»).
     rows: list[FfMismatchDetailRow] = Field(default_factory=list)
+    extra_rows: list[FfMismatchDetailRow] = Field(default_factory=list)
 
 
 class FfRequestStageLog(BaseModel):

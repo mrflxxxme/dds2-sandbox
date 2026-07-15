@@ -102,6 +102,36 @@ export function FfMismatchView({ data }: { data: FfMismatchDetail }) {
                 </div>
                 </>
             )}
+
+            {data.extra_rows && data.extra_rows.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                    <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+                        Есть у ФФ, но не в нашей сборке — <b style={{ color: 'var(--color-text)' }}>не считается расхождением</b>
+                        {' '}({formatNumber(data.extra_rows.reduce((s, r) => s + r.ff_qty, 0), 0)} шт в {data.extra_rows.length} SKU).
+                        {' '}Обычно это строки, которые ФФ приписал к заявке от соседних отгрузок.
+                    </p>
+                    <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, opacity: 0.75 }}>
+                            <thead>
+                                <tr style={{ textAlign: 'left', color: 'var(--color-text-muted)', borderBottom: '1px solid var(--color-border)' }}>
+                                    <th style={{ padding: '8px 12px' }}>ШК</th>
+                                    <th style={{ padding: '8px 12px' }}>Артикул</th>
+                                    <th style={{ padding: '8px 12px', textAlign: 'right' }}>ФФ</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {data.extra_rows.map(r => (
+                                    <tr key={r.barcode} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                        <td style={{ padding: '8px 12px', fontFamily: 'monospace' }}>{r.barcode}</td>
+                                        <td style={{ padding: '8px 12px' }}>{r.article_seller || '—'}</td>
+                                        <td style={{ padding: '8px 12px', textAlign: 'right' }}>{formatNumber(r.ff_qty, 0)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
         </>
     );
 }
