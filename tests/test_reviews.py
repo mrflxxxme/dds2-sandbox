@@ -85,6 +85,16 @@ async def test_list_reviews_filters_and_aggregates(db_session, project):
     assert {i.id for i in answered.items} == {"f2"}
 
 
+async def test_list_reviews_by_nm_id(db_session, project):
+    """nm_id → все отзывы товара (и отвеченные, и нет), текстовые сверху."""
+    await _seed(db_session, project.id)
+    # nm 111 → f1(текст, без ответа) и f2(без текста, отвечен)
+    res = await reviews_service.list_reviews(db_session, project.id, nm_id=111)
+    assert {i.id for i in res.items} == {"f1", "f2"}  # оба, несмотря на разный is_answered
+    assert res.total == 2
+    assert res.items[0].id == "f1"  # текстовый отзыв идёт первым
+
+
 async def test_list_reviews_pagination_total(db_session, project):
     """total = размер среза (по фильтру); take/skip пагинируют без пересечений."""
     await _seed(db_session, project.id)

@@ -5,7 +5,7 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { NewcomerGroup, NewcomerReview, NewcomersResponse } from '@/types/api';
+import type { NewcomerGroup, NewcomerReview, NewcomersResponse, Review } from '@/types/api';
 
 const DAYS_OPTIONS = [
     { key: 14, label: '2 недели' },
@@ -64,6 +64,64 @@ function subBreakdown(products: NewcomerReview[], dim: SubDim): SubRow[] {
             return { name, products: n, avg };
         })
         .sort((a, b) => b.products - a.products);
+}
+
+/** Звёзды рейтинга. */
+function Stars({ rating }: { rating: number }) {
+    const r = Math.max(0, Math.min(5, rating));
+    return (
+        <span style={{ color: 'var(--color-warning)', letterSpacing: 1 }} title={`${r} / 5`}>
+            {'★'.repeat(r)}<span style={{ color: 'var(--color-border)' }}>{'★'.repeat(5 - r)}</span>
+        </span>
+    );
+}
+
+/** Отзывы конкретного товара (ленивая подгрузка при раскрытии строки). Текст под каждым отзывом. */
+function ProductReviews({ nmId }: { nmId: number }) {
+    const [revs, setRevs] = useState<Review[] | null>(null);
+    const [busy, setBusy] = useState(true);
+    const [err, setErr] = useState('');
+
+    useEffect(() => {
+        let cancelled = false;
+        setBusy(true); setErr('');
+        api.getReviews({ nmId, take: 50 })
+            .then(r => { if (!cancelled) setRevs(r.items); })
+            .catch(e => { if (!cancelled) setErr(e instanceof Error ? e.message : 'Не удалось загрузить отзывы'); })
+            .finally(() => { if (!cancelled) setBusy(false); });
+        return () => { cancelled = true; };
+    }, [nmId]);
+
+    if (busy) return <div style={{ padding: 12, color: 'var(--color-text-dim)', fontSize: 13 }}>Загрузка отзывов…</div>;
+    if (err) return <div style={{ padding: 12, color: 'var(--color-danger)', fontSize: 13 }}>{err}</div>;
+    if (!revs || revs.length === 0) return <div style={{ padding: 12, color: 'var(--color-text-dim)', fontSize: 13 }}>Отзывов нет</div>;
+
+    return (
+        <div style={{ padding: '8px 12px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {revs.map(r => (
+                <div key={r.id} style={{ borderLeft: '3px solid var(--color-border)', paddingLeft: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 13 }}>
+                        {r.rating > 0 && <Stars rating={r.rating} />}
+                        {r.user_name && <span style={{ fontWeight: 600 }}>{r.user_name}</span>}
+                        {r.is_answered
+                            ? <span className="badge badge-success">Отвечен</span>
+                            : <span className="badge badge-warning">Без ответа</span>}
+                        <span style={{ marginLeft: 'auto', color: 'var(--color-text-dim)' }}>{r.created_date ? formatDate(r.created_date) : ''}</span>
+                    </div>
+                    {r.text && <p style={{ margin: '4px 0 0', fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{r.text}</p>}
+                    {(r.pros || r.cons) && (
+                        <div style={{ marginTop: 4, fontSize: 13, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            {r.pros && <div><span style={{ color: 'var(--color-success)', fontWeight: 600 }}>+ </span>{r.pros}</div>}
+                            {r.cons && <div><span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>− </span>{r.cons}</div>}
+                        </div>
+                    )}
+                    {!r.text && !r.pros && !r.cons && (
+                        <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--color-text-dim)' }}>Без текста (только оценка)</p>
+                    )}
+                </div>
+            ))}
+        </div>
+    );
 }
 
 /**
@@ -392,12 +450,17 @@ export default function ReviewsNewcomersTab() {
                             </span>
                         )}
                     </div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 6 }}>
+                        Нажмите ▸ слева от товара, чтобы прочитать его отзывы.
+                    </div>
                     <TanStackDataTable
                         columns={columns}
                         data={shown}
                         exportName="problem_newcomers"
                         enableSorting
                         enablePagination={shown.length > 50}
+                        getRowId={(row: NewcomerReview) => String(row.nm_id)}
+                        renderSubRow={(row: NewcomerReview) => <ProductReviews nmId={row.nm_id} />}
                     />
                 </>
             )}

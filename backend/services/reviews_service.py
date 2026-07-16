@@ -151,21 +151,31 @@ async def list_reviews(
     is_answered: bool = False,
     take: int = 100,
     skip: int = 0,
+    nm_id: int | None = None,
 ) -> ReviewsListResponse:
-    """Список отзывов покупателей WB из зеркала БД (фильтр по ответу продавца)."""
+    """
+    Список отзывов покупателей WB из зеркала БД.
+
+    По умолчанию — фильтр по ответу продавца (`is_answered`). Если задан `nm_id` —
+    ВСЕ отзывы конкретного товара (без деления по ответу), текстовые сверху —
+    для чтения отзывов проблемной новинки.
+    """
     take = max(1, min(take, _LIST_MAX))
     skip = max(0, skip)
 
-    stmt = (
-        select(WBFeedback)
-        .where(
-            WBFeedback.project_id == project_id,
-            WBFeedback.is_answered == is_answered,
-        )
-        .order_by(WBFeedback.created_date.desc().nullslast())
-        .limit(take)
-        .offset(skip)
-    )
+    conds: list = [WBFeedback.project_id == project_id]
+    if nm_id is not None:
+        conds.append(WBFeedback.nm_id == nm_id)
+    else:
+        conds.append(WBFeedback.is_answered == is_answered)
+
+    stmt = select(WBFeedback).where(*conds)
+    if nm_id is not None:
+        # сначала отзывы с текстом (их читают), затем свежие
+        stmt = stmt.order_by(WBFeedback.has_text.desc(), WBFeedback.created_date.desc().nullslast())
+    else:
+        stmt = stmt.order_by(WBFeedback.created_date.desc().nullslast())
+    stmt = stmt.limit(take).offset(skip)
     rows = (await db.execute(stmt)).scalars().all()
 
     agg = (
@@ -174,11 +184,12 @@ async def list_reviews(
                 func.count(WBFeedback.id),
                 func.count(WBFeedback.id).filter(~WBFeedback.is_answered),
                 func.avg(WBFeedback.rating).filter(WBFeedback.rating > 0),
-                func.count(WBFeedback.id).filter(WBFeedback.is_answered == is_answered),
             ).where(WBFeedback.project_id == project_id)
         )
     ).one()
-    total_all, unanswered, avg, total_filtered = agg
+    total_all, unanswered, avg = agg
+    # total текущего среза (по фильтру) — для пагинации
+    total_filtered = await db.scalar(select(func.count(WBFeedback.id)).where(*conds))
 
     has_key = bool(total_all) or await _has_wb_key(db, project_id)
 

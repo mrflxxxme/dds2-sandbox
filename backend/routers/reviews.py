@@ -32,12 +32,13 @@ async def list_reviews(
     is_answered: bool = Query(False, description="Только отвеченные (true) / неотвеченные (false)"),
     take: int = Query(100, ge=1, le=5000),
     skip: int = Query(0, ge=0),
+    nm_id: int | None = Query(None, description="Все отзывы конкретного товара (игнорирует is_answered)"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ) -> ReviewsListResponse:
-    """Список отзывов покупателей WB для текущего проекта (из зеркала БД)."""
+    """Список отзывов покупателей WB для текущего проекта (из зеркала БД). Опц. по товару (nm_id)."""
     return await reviews_service.list_reviews(
-        db, project.id, is_answered=is_answered, take=take, skip=skip
+        db, project.id, is_answered=is_answered, take=take, skip=skip, nm_id=nm_id
     )
 
 
