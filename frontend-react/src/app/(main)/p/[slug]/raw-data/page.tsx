@@ -1,11 +1,12 @@
 'use client';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import type { RawSource, RawRefreshProgress } from '@/types/api';
+import { reconcileProgress, type ProgressMap } from '@/lib/rawDataProgress';
 
 // Пока идёт дозагрузка — опрашиваем прогресс; в покое поллинга нет
 const POLL_MS = 3000;
@@ -116,48 +117,67 @@ export default function RawDataPage() {
     const routeParams = useParams();
     const slug = typeof routeParams?.slug === 'string' ? routeParams.slug : Array.isArray(routeParams?.slug) ? routeParams.slug[0] : '';
     const [sources, setSources] = useState<RawSource[]>([]);
-    const [progress, setProgress] = useState<Record<string, RawRefreshProgress>>({});
+    const [progress, setProgress] = useState<ProgressMap>({});
     const [loading, setLoading] = useState(true);
-    const [error, setError] = useState('');
+    const [error, setError] = useState('');          // ошибка ПЕРВИЧНОЙ загрузки списка (блокирует)
+    const [actionError, setActionError] = useState(''); // ошибка дозагрузки/фона (баннер, список не прячем)
     const [busy, setBusy] = useState(false);
 
     const load = useCallback(async () => {
-        setError('');
         try {
             const res = await api.getRawSources();
             setSources(res.sources);
-            setProgress(Object.fromEntries(res.sources.filter(s => s.progress).map(s => [s.key, s.progress!])));
+            setProgress(prev => reconcileProgress(
+                prev,
+                Object.fromEntries(res.sources.filter(s => s.progress).map(s => [s.key, s.progress!])),
+            ));
+            setError('');
         } catch (e) {
-            setError(e instanceof Error ? e.message : 'Ошибка загрузки');
+            // Фон/ретрай не должен стирать уже показанный список — блокирующую
+            // ошибку ставим только когда показывать нечего (первичная загрузка).
+            setSources(prev => {
+                const msg = e instanceof Error ? e.message : 'Ошибка загрузки';
+                if (prev.length === 0) setError(msg); else setActionError(msg);
+                return prev;
+            });
         } finally { setLoading(false); }
     }, []);
 
     useEffect(() => { load(); }, [load]);
 
-    // Поллим, только пока что-то грузится. Когда всё завершилось — перечитываем объёмы.
     const anyRunning = Object.values(progress).some(p => p.status === 'running');
+
+    // Поллим прогресс, только пока что-то грузится.
     useEffect(() => {
         if (!anyRunning) return;
         const t = setInterval(async () => {
             try {
                 const res = await api.getRawRefreshProgress();
-                setProgress(res.progress);
-                if (!Object.values(res.progress).some(p => p.status === 'running')) load();
+                setProgress(prev => reconcileProgress(prev, res.progress));
             } catch { /* прогресс не критичен */ }
         }, POLL_MS);
         return () => clearInterval(t);
+    }, [anyRunning]);
+
+    // Когда дозагрузки завершились (running → покой) — перечитываем объёмы/свежесть.
+    const prevRunningRef = useRef(false);
+    useEffect(() => {
+        if (prevRunningRef.current && !anyRunning) load();
+        prevRunningRef.current = anyRunning;
     }, [anyRunning, load]);
 
     const onRefresh = async (key: string, days: number | null) => {
-        setBusy(true); setError('');
+        setBusy(true); setActionError('');
         try {
             const body = days ? { date_from: iso(new Date(Date.now() - (days - 1) * 86400_000)), date_to: iso(new Date()) } : undefined;
             const res = await api.refreshRawSource(key, body);
             if (res.status === 'already_running' || res.status === 'started') {
                 setProgress(p => ({ ...p, [key]: { status: 'running', started_at: new Date().toISOString(), finished_at: null, error: null } }));
+            } else if (res.status === 'unsupported') {
+                setActionError(res.error || 'Дозагрузка недоступна для этого источника');
             }
         } catch (e) {
-            setError(e instanceof Error ? e.message : 'Не удалось запустить дозагрузку');
+            setActionError(e instanceof Error ? e.message : 'Не удалось запустить дозагрузку');
         } finally { setBusy(false); }
     };
 
@@ -182,9 +202,18 @@ export default function RawDataPage() {
 
                 {loading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка…</div>}
 
-                {!loading && error && (
+                {/* Блокирующая ошибка — только когда показывать нечего (первичная загрузка) */}
+                {!loading && error && sources.length === 0 && (
                     <div className="glass-card" style={{ padding: '16px 20px', border: '1px solid var(--color-danger)', background: '#fef2f2' }}>
                         <span style={{ fontSize: 13, color: 'var(--color-danger)' }}>{error}</span>
+                    </div>
+                )}
+
+                {/* Ошибка дозагрузки/фонового обновления — баннер поверх списка, список не прячем */}
+                {actionError && (
+                    <div className="glass-card" style={{ padding: '10px 14px', marginBottom: 12, border: '1px solid var(--color-danger)', background: '#fef2f2', display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'space-between' }}>
+                        <span style={{ fontSize: 12.5, color: 'var(--color-danger)' }}>{actionError}</span>
+                        <button className="btn btn-secondary btn-sm" style={{ fontSize: 11 }} onClick={() => setActionError('')}>✕</button>
                     </div>
                 )}
 
@@ -194,7 +223,7 @@ export default function RawDataPage() {
                     </div>
                 )}
 
-                {!loading && !error && sources.length > 0 && (
+                {!loading && sources.length > 0 && (
                     <>
                         <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 12 }}>
                             Всего накоплено: <b style={{ color: '#111827' }}>{formatNumber(totalRows, 0)}</b> строк в {sources.length} источниках

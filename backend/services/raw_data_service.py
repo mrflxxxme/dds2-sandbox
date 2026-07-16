@@ -138,25 +138,25 @@ async def _refresh_finance(project_id: int, date_from: date | None, date_to: dat
 
 
 async def _refresh_ad_search(project_id: int, date_from: date | None, date_to: date | None) -> Any:
-    """Догрузить посуточную статистику зоны Поиск по всем CPM-кампаниям проекта."""
+    """Догрузить посуточную статистику зоны Поиск по всем CPM-кампаниям проекта.
+
+    Батч: все (advertId,nmId) пары идут в normquery/stats пачками по 100 —
+    запросов ~десяток вместо «кампания-на-запрос», обходим rate-limit WB.
+    """
     from sqlalchemy import select as _select
 
     from backend.models.integrations import WbAdCampaign
-    from backend.services.funnel.ad_search_stats import sync_ad_search_daily
+    from backend.services.funnel.ad_search_stats import sync_ad_search_daily_bulk
 
     d_to = date_to or utcnow().date()
     d_from = date_from or (d_to - timedelta(days=29))
-    total = 0
     async with AsyncSessionLocal() as db:
-        camps = (await db.execute(
+        cids = (await db.execute(
             _select(WbAdCampaign.campaign_id).where(
                 WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_type == "cpm",
             ).limit(2000)
         )).scalars().all()
-        for cid in camps:
-            r = await sync_ad_search_daily(db, project_id, cid, d_from.isoformat(), d_to.isoformat())
-            total += r.get("rows", 0)
-    return {"rows": total, "campaigns": len(camps)}
+        return await sync_ad_search_daily_bulk(db, project_id, list(cids), d_from.isoformat(), d_to.isoformat())
 
 
 async def _refresh_ad_upd(project_id: int, date_from: date | None, date_to: date | None) -> Any:
@@ -252,7 +252,7 @@ RAW_SOURCES: list[RawSource] = [
         table="wb_ad_search_daily", model=WbAdSearchDaily, date_field="date",
         description="Посуточная статистика зоны «Поиск» (сумма поисковых кластеров). Нужна для разбивки метрик кампании по зонам показов.",
         source="advert-api · /adv/v1/normquery/stats",
-        schedule="Только по кнопке",
+        schedule="Раз в сутки, 04:35 (+ по кнопке)",
         refresh="ad_search", refresh_hint="Загрузить статистику поиска по CPM-кампаниям за период", ranged=True,
         labels={
             "campaign_id": "ID кампании", "nm_id": "Номенклатура", "date": "Дата",
@@ -265,7 +265,7 @@ RAW_SOURCES: list[RawSource] = [
         table="wb_ad_upd", model=WbAdUpd, date_field="upd_time",
         description="Первичные списания за рекламу: сколько и когда WB списал по каждой кампании, каким типом оплаты.",
         source="advert-api · /adv/v1/upd",
-        schedule="Только по кнопке",
+        schedule="Раз в сутки, 04:25 (+ по кнопке)",
         refresh="ad_upd", refresh_hint="Загрузить историю затрат за период", ranged=True,
         labels={
             "advert_id": "ID кампании", "camp_name": "Кампания", "upd_time": "Время списания",
@@ -278,7 +278,7 @@ RAW_SOURCES: list[RawSource] = [
         table="wb_ad_payments", model=WbAdPayment, date_field="paid_at",
         description="История пополнений счёта WB Продвижение: когда, на сколько и каким способом.",
         source="advert-api · /adv/v1/payments",
-        schedule="Только по кнопке",
+        schedule="Раз в сутки, 04:45 (+ по кнопке)",
         refresh="ad_payments", refresh_hint="Загрузить историю пополнений за период", ranged=True,
         labels={
             "wb_id": "ID пополнения", "paid_at": "Дата", "amount": "Сумма, ₽",
@@ -308,6 +308,7 @@ RAW_SOURCES: list[RawSource] = [
     RawSource(
         key="orders", title="Заказы", group="Продажи",
         table="wb_orders", model=WbOrder, date_field="order_date",
+        freshness_field="synced_at",  # заказы всегда «по вчера» (cutoff) — свежесть по времени синка
         description="Заказы поштучно, с городом и складом. Основа индекса локализации.",
         source="statistics-api · /api/v1/supplier/orders",
         schedule="3 раза в сутки",
@@ -336,6 +337,7 @@ RAW_SOURCES: list[RawSource] = [
     RawSource(
         key="returns", title="Возвраты", group="Продажи",
         table="wb_goods_returns", model=WbGoodsReturn, date_field="order_dt",
+        freshness_field="synced_at",  # дата возврата отстаёт от синка — свежесть по времени синка
         description="Возвраты покупателей на ПВЗ.",
         source="seller-analytics-api · /api/v1/analytics/goods-return",
         schedule="Дважды в сутки",

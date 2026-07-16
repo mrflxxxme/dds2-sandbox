@@ -20,6 +20,30 @@ from backend.models.integrations import WbAdCampaign, WbAdSearchDaily
 logger = logging.getLogger(__name__)
 
 
+async def _upsert_search_daily(db: AsyncSession, rows: list[dict]) -> None:
+    """UPSERT строк зоны «Поиск» в wb_ad_search_daily (идемпотентно, чанками).
+
+    Кластеры и их суммы WB пересчитывает задним числом → ON CONFLICT DO UPDATE.
+    """
+    if not rows:
+        return
+    from backend.utils.batching import chunked
+
+    for chunk in chunked(rows):
+        stmt = pg_insert(WbAdSearchDaily).values(chunk)
+        await db.execute(
+            stmt.on_conflict_do_update(
+                constraint="uq_ad_search_daily",
+                set_={
+                    "views": stmt.excluded.views, "clicks": stmt.excluded.clicks,
+                    "spend": stmt.excluded.spend, "atbs": stmt.excluded.atbs,
+                    "orders": stmt.excluded.orders, "shks": stmt.excluded.shks,
+                },
+            )
+        )
+    await db.commit()
+
+
 async def sync_ad_search_daily(
     db: AsyncSession, project_id: int, campaign_id: int, date_from: str, date_to: str,
 ) -> dict:
@@ -60,24 +84,60 @@ async def sync_ad_search_daily(
         }
         for (nm_id, day), v in agg.items() if day
     ]
-    if rows:
-        from backend.utils.batching import chunked
-
-        for chunk in chunked(rows):
-            stmt = pg_insert(WbAdSearchDaily).values(chunk)
-            await db.execute(
-                stmt.on_conflict_do_update(
-                    constraint="uq_ad_search_daily",
-                    set_={
-                        "views": stmt.excluded.views, "clicks": stmt.excluded.clicks,
-                        "spend": stmt.excluded.spend, "atbs": stmt.excluded.atbs,
-                        "orders": stmt.excluded.orders, "shks": stmt.excluded.shks,
-                    },
-                )
-            )
-        await db.commit()
+    await _upsert_search_daily(db, rows)
     logger.info("Ad search-daily sync: campaign %s, %s..%s — %s строк", campaign_id, date_from, date_to, len(rows))
     return {"status": "ok", "rows": len(rows)}
+
+
+async def sync_ad_search_daily_bulk(
+    db: AsyncSession, project_id: int, campaign_ids: list[int], date_from: str, date_to: str,
+) -> dict:
+    """Батч-загрузка зоны «Поиск» по многим CPM-кампаниям одним махом.
+
+    Собирает (advert_id, nm_id) пары из указанных CPM-кампаний и тянет их
+    батчами (fetch_search_daily_batch, ≤100 пар/запрос) — так запросов на
+    порядок меньше, чем «кампания-на-запрос», и обходим per-seller rate-limit WB.
+    UPSERT в wb_ad_search_daily. Для утреннего cron и кнопки «Дозагрузить».
+    """
+    from backend.services.funnel.ads_manager import _get_advert_api_key
+    from backend.services.funnel.wb_advertising_api import fetch_search_daily_batch
+
+    if not campaign_ids:
+        return {"status": "ok", "rows": 0, "campaigns": 0}
+
+    camps = (
+        await db.execute(
+            select(WbAdCampaign.campaign_id, WbAdCampaign.nm_ids).where(
+                WbAdCampaign.project_id == project_id,
+                WbAdCampaign.campaign_id.in_(campaign_ids),
+                WbAdCampaign.campaign_type == "cpm",
+            )
+        )
+    ).all()
+    pairs = [(int(cid), int(nm)) for cid, nms in camps for nm in (nms or [])]
+    if not pairs:
+        return {"status": "ok", "rows": 0, "campaigns": 0}
+
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return {"status": "error", "error": "Не настроен API-ключ «Продвижение»", "rows": 0}
+
+    agg = await fetch_search_daily_batch(api_key, pairs, date_from, date_to)
+    rows = [
+        {
+            "project_id": project_id, "campaign_id": advert_id, "nm_id": nm_id,
+            "date": datetime.strptime(day, "%Y-%m-%d").date(),
+            "views": v["views"], "clicks": v["clicks"], "spend": v["spend"],
+            "atbs": v["atbs"], "orders": v["orders"], "shks": v["shks"],
+        }
+        for (advert_id, nm_id, day), v in agg.items() if day
+    ]
+    await _upsert_search_daily(db, rows)
+    logger.info(
+        "Ad search-daily BULK: project %s, %d кампаний, %s..%s — %d строк",
+        project_id, len(camps), date_from, date_to, len(rows),
+    )
+    return {"status": "ok", "rows": len(rows), "campaigns": len(camps)}
 
 
 async def get_search_daily(

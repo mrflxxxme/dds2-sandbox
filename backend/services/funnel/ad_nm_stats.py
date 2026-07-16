@@ -135,8 +135,13 @@ def get_backfill_progress(project_id: int) -> dict:
     return _backfill_progress.get(project_id) or {"status": "idle"}
 
 
-async def run_ad_nm_backfill_bg(project_id: int, date_from: date | None = None, date_to: date | None = None) -> None:
-    """Фоновая обёртка: своя сессия (сессия запроса к этому моменту уже закрыта)."""
+async def run_ad_nm_backfill_bg(project_id: int, date_from: date | None = None, date_to: date | None = None) -> dict:
+    """Фоновая обёртка: своя сессия (сессия запроса к этому моменту уже закрыта).
+
+    Возвращает honest-результат вызывающему (адаптеру дозагрузки «Сырые данные»):
+    `status` ∈ {ok, error}. Раньше отдавала None → раздел показывал «загружено»
+    даже при провале бэкфилла (нет ключа/429/пустой чанк).
+    """
     from backend.database import AsyncSessionLocal
 
     _backfill_progress[project_id] = {"status": "running"}
@@ -144,12 +149,14 @@ async def run_ad_nm_backfill_bg(project_id: int, date_from: date | None = None, 
         async with AsyncSessionLocal() as db:
             res = await backfill_ad_nm_daily(db, project_id, date_from, date_to)
         _backfill_progress[project_id] = {"status": "done" if res.get("ok") else "error", **res}
+        return {**res, "status": "ok" if res.get("ok") else "error"}
     except asyncio.CancelledError:
         _backfill_progress[project_id] = {"status": "cancelled"}
         raise
     except Exception as e:
         logger.error(f"Ad nm backfill failed for project {project_id}: {e}")
         _backfill_progress[project_id] = {"status": "error", "error": str(e)}
+        return {"status": "error", "error": str(e), "rows": 0}
 
 
 async def _earliest_known_date(db: AsyncSession, project_id: int) -> date | None:
