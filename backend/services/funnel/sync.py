@@ -12,7 +12,7 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func as sa_func
+from sqlalchemy import func as sa_func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -130,6 +130,32 @@ async def run_funnel_sync(
     _funnel_sync_progress[pid]["detail"] = "Загрузка списка кампаний..."
     campaign_ids = await fetch_ad_campaigns(adv_key, include_completed=include_completed_campaigns)
     _funnel_sync_progress[pid]["detail"] = f"Найдено {len(campaign_ids)} кампаний, загрузка статистики..."
+
+    # Кампании активных АБ-тестов фото — в голову очереди: fetch_ad_stats работает с
+    # TIME_BUDGET и на больших кабинетах скипает хвост чанков — строка wb_ad_nm_daily
+    # тестовой кампании часами не обновлялась, тест слеп (прод, 16.07).
+    try:
+        from backend.models import AbPhotoTest
+
+        ab_campaigns = set(
+            (
+                await db.execute(
+                    select(AbPhotoTest.campaign_id).where(
+                        AbPhotoTest.project_id == pid,
+                        AbPhotoTest.status == "running",
+                        AbPhotoTest.is_deleted == False,  # noqa: E712
+                    ).limit(100)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if ab_campaigns:
+            campaign_ids = [c for c in campaign_ids if c in ab_campaigns] + [
+                c for c in campaign_ids if c not in ab_campaigns
+            ]
+    except Exception as e:  # noqa: BLE001 — приоритизация не должна ронять синк
+        logger.warning(f"AB-test campaign priority skipped: {e}")
 
     # Fetch ad stats for the whole range
     ad_stats = {}
