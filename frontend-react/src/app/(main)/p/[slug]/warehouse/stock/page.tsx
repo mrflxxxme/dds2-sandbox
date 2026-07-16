@@ -47,6 +47,7 @@ function SummaryTab({
         cols.push({
             key: `wh_${wh.id}`,
             label: wh.name,
+            headerTitle: `Товар физически на складе «${wh.name}». После «/» жёлтым — резерв под активные заявки`,
             align: 'right',
             getValue: (row: StockSummaryRow) => row.warehouses[wh.id] || 0,
             exportValue: (row: StockSummaryRow) => row.warehouses[wh.id] || 0,
@@ -62,6 +63,7 @@ function SummaryTab({
         {
             key: 'total_defect',
             label: 'Брак',
+            headerTitle: 'Бракованный товар — в «Итого» не входит',
             align: 'right',
             render: (v: number) => v > 0
                 ? <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>{formatNumber(v, 0)}</span>
@@ -70,12 +72,14 @@ function SummaryTab({
         {
             key: 'total_in_transit',
             label: 'В пути',
+            headerTitle: 'Перемещения между нашими складами — отправлено, но ещё не принято',
             align: 'right',
             render: (v: number) => v > 0 ? formatNumber(v) : '\u2014',
         },
         {
             key: 'total',
             label: 'Итого',
+            headerTitle: 'Итого по всем нашим складам. При резерве: доступно / резерв',
             align: 'right',
             render: (_: unknown, row: StockSummaryRow) => {
                 const res = row.total_reserved || 0;
@@ -603,6 +607,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'trend_daily',
             label: 'Тренд шт/д',
+            headerTitle: 'Средние заказы в день за выбранный период (7/14/30 дн) по данным WB',
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => getTrendData(row).avg_daily_qty,
@@ -615,6 +620,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'bdr_revenue',
             label: 'Реализ. БДР',
+            headerTitle: 'Реализация за выбранный период — сходится с отчётом БДР',
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => getTrendData(row).revenue,
@@ -630,6 +636,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'margin_pct',
             label: 'Маржа %',
+            headerTitle: 'Прибыль ÷ реализация за выбранный период',
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => {
@@ -649,6 +656,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'total_defect',
             label: 'Брак',
+            headerTitle: 'Бракованный товар на наших складах. В «Итого» не входит',
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => getSortVal(row.total_defect || 0, row),
@@ -662,6 +670,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'stock_days',
             label: 'Запас дн',
+            headerTitle: 'На сколько дней хватит остатка при текущем темпе заказов (Итого ÷ тренд шт/д)',
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => {
@@ -680,6 +689,11 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'total',
             label: 'Итого',
+            headerTitle: variant === 1
+                ? 'Всё у WB: на складах + в пути до получателей + возвраты'
+                : variant === 2
+                    ? 'Наши склады + всё у WB + наши отгрузки в пути'
+                    : 'Наши склады + всё у WB + наши отгрузки + на фабрике + в машинах',
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => getSortVal(getVariantTotal(row), row),
@@ -700,6 +714,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 c.push({
                     key: `own_${wh}`,
                     label: `${wh}`,
+                    headerTitle: `Товар физически на складе «${wh}» (наш/фулфилмент), включая резерв под заявки`,
                     align: 'right',
                     getValue: (row: UnifiedStockRow) => getSortVal(row.warehouses[wh] || 0, row),
                     render: (_: unknown, row: UnifiedStockRow) => fmtVal(row.warehouses[wh] || 0, row),
@@ -711,6 +726,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'total_wb',
             label: 'WB склады',
+            headerTitle: 'Физически на складах WB — как «Всего находится на складах» в кабинете (включая приёмку и транзит между складами WB). Клик по цифре — разбивка по складам',
             align: 'right',
             getValue: (row: UnifiedStockRow) => getSortVal(row.total_wb || 0, row),
             render: (_: unknown, row: UnifiedStockRow) => {
@@ -735,6 +751,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'wb_in_way_to_client',
             label: 'В пути до получателей',
+            headerTitle: 'Заказы едут от склада WB к покупателям. Невыкупленное вернётся на склад WB',
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => getSortVal(row.wb_in_way_to_client || 0, row),
@@ -743,6 +760,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'wb_in_way_from_client',
             label: 'Возвраты на склад WB',
+            headerTitle: 'Возвраты от покупателей — едут обратно на склад WB',
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => getSortVal(row.wb_in_way_from_client || 0, row),
@@ -753,6 +771,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         c.push({
             key: 'in_transit',
             label: 'В пути',
+            headerTitle: 'Наши отгрузки на WB: заявка отгружена со склада, WB ещё не принял поставку',
             align: 'right',
             getValue: (row: UnifiedStockRow) => getSortVal(row.in_transit || 0, row),
             render: (_: unknown, row: UnifiedStockRow) => fmtVal(row.in_transit || 0, row),
@@ -763,6 +782,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             c.push({
                 key: 'factory_qty',
                 label: 'На фабрике',
+                headerTitle: 'Заказано у фабрики и ещё не распределено по машинам (заказ не закрыт)',
                 align: 'right',
                 sortable: true,
                 getValue: (row: UnifiedStockRow) => {
@@ -790,6 +810,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             c.push({
                 key: 'vehicle_forming_qty',
                 label: 'Маш. (форм.)',
+                headerTitle: 'Распределено в машину, машина ещё формируется — не выехала с фабрики',
                 align: 'right',
                 sortable: true,
                 getValue: (row: UnifiedStockRow) => getSortVal(row.vehicle_forming_qty || 0, row),
@@ -798,6 +819,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             c.push({
                 key: 'vehicle_transit_qty',
                 label: 'Маш. (в пути)',
+                headerTitle: 'Машина едет на склад: отгружена с фабрики / таможня / отправлена на склад',
                 align: 'right',
                 sortable: true,
                 getValue: (row: UnifiedStockRow) => getSortVal(row.vehicle_transit_qty || 0, row),
@@ -914,19 +936,19 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             <th>Группа</th>
                             <th style={{ textAlign: 'right' }}>Товаров</th>
                             {groupBy === 'abc' && <th>ABC</th>}
-                            <th style={{ textAlign: 'right' }}>Тренд шт/д</th>
-                            <th style={{ textAlign: 'right' }}>Реализ.</th>
-                            <th style={{ textAlign: 'right' }}>Маржа %</th>
-                            <th style={{ textAlign: 'right' }}>Запас дн</th>
-                            <th style={{ textAlign: 'right' }}>Итого</th>
-                            {showOwn && <th style={{ textAlign: 'right' }}>Свои</th>}
-                            <th style={{ textAlign: 'right' }}>WB</th>
-                            <th style={{ textAlign: 'right' }}>В пути до получателей</th>
-                            <th style={{ textAlign: 'right' }}>Возвраты на склад WB</th>
-                            <th style={{ textAlign: 'right' }}>В пути</th>
-                            {showFactory && <th style={{ textAlign: 'right' }}>На фабрике</th>}
-                            {showVehicles && <th style={{ textAlign: 'right' }}>Маш. (форм.)</th>}
-                            {showVehicles && <th style={{ textAlign: 'right' }}>Маш. (в пути)</th>}
+                            <th title="Средние заказы в день за выбранный период (7/14/30 дн) по данным WB" style={{ textAlign: 'right' }}>Тренд шт/д</th>
+                            <th title="Реализация за выбранный период — сходится с отчётом БДР" style={{ textAlign: 'right' }}>Реализ.</th>
+                            <th title="Прибыль ÷ реализация за выбранный период" style={{ textAlign: 'right' }}>Маржа %</th>
+                            <th title="На сколько дней хватит остатка при текущем темпе заказов (Итого ÷ тренд шт/д)" style={{ textAlign: 'right' }}>Запас дн</th>
+                            <th title="Суммарный остаток по выбранному виду" style={{ textAlign: 'right' }}>Итого</th>
+                            {showOwn && <th title="Товар физически на наших/фулфилмент складах" style={{ textAlign: 'right' }}>Свои</th>}
+                            <th title="Физически на складах WB — как «Всего находится на складах» в кабинете" style={{ textAlign: 'right' }}>WB</th>
+                            <th title="Заказы едут от склада WB к покупателям. Невыкупленное вернётся на склад WB" style={{ textAlign: 'right' }}>В пути до получателей</th>
+                            <th title="Возвраты от покупателей — едут обратно на склад WB" style={{ textAlign: 'right' }}>Возвраты на склад WB</th>
+                            <th title="Наши отгрузки на WB: заявка отгружена со склада, WB ещё не принял поставку" style={{ textAlign: 'right' }}>В пути</th>
+                            {showFactory && <th title="Заказано у фабрики и ещё не распределено по машинам (заказ не закрыт)" style={{ textAlign: 'right' }}>На фабрике</th>}
+                            {showVehicles && <th title="Распределено в машину, машина ещё формируется — не выехала с фабрики" style={{ textAlign: 'right' }}>Маш. (форм.)</th>}
+                            {showVehicles && <th title="Машина едет на склад: отгружена с фабрики / таможня / отправлена на склад" style={{ textAlign: 'right' }}>Маш. (в пути)</th>}
                         </tr>
                     </thead>
                     <tbody>
@@ -1159,11 +1181,11 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
                 {mode === 'qty' ? (
                     <>
-                        <span style={{ fontSize: 14, fontWeight: 500 }}>Свои: {formatNumber(totals.ownTotal)}</span>
-                        <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--color-accent)' }}>WB: {formatNumber(totals.wbTotal)}</span>
-                        {totals.wbToClient > 0 && <span style={{ fontSize: 14, fontWeight: 500 }}>До получателей: {formatNumber(totals.wbToClient)}</span>}
-                        {totals.wbFromClient > 0 && <span style={{ fontSize: 14, fontWeight: 500 }}>Возвраты на WB: {formatNumber(totals.wbFromClient)}</span>}
-                        {totals.inTransit > 0 && <span style={{ fontSize: 14, fontWeight: 500 }}>В пути: {formatNumber(totals.inTransit)}</span>}
+                        <span title="Товар физически на наших/фулфилмент складах" style={{ fontSize: 14, fontWeight: 500 }}>Свои: {formatNumber(totals.ownTotal)}</span>
+                        <span title="Физически на складах WB — как в кабинете" style={{ fontSize: 14, fontWeight: 500, color: 'var(--color-accent)' }}>WB: {formatNumber(totals.wbTotal)}</span>
+                        {totals.wbToClient > 0 && <span title="Заказы едут от склада WB к покупателям" style={{ fontSize: 14, fontWeight: 500 }}>До получателей: {formatNumber(totals.wbToClient)}</span>}
+                        {totals.wbFromClient > 0 && <span title="Возвраты от покупателей — едут обратно на склад WB" style={{ fontSize: 14, fontWeight: 500 }}>Возвраты на WB: {formatNumber(totals.wbFromClient)}</span>}
+                        {totals.inTransit > 0 && <span title="Наши отгрузки на WB: отгружено, WB ещё не принял" style={{ fontSize: 14, fontWeight: 500 }}>В пути: {formatNumber(totals.inTransit)}</span>}
                         {variant === 3 && totals.factoryTotal > 0 && (
                             <span style={{ fontSize: 14, fontWeight: 500 }}>На фабрике: {formatNumber(totals.factoryTotal)}</span>
                         )}

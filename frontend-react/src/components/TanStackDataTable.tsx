@@ -98,7 +98,7 @@ function adaptColumns(cols: Column[]): ColumnDef<any, any>[] {
                 if (col.render) return col.render(value, row, index);
                 return formatCell(value, col.format);
             },
-            meta: { align: col.align || 'left' },
+            meta: { align: col.align || 'left', headerTitle: col.headerTitle },
         };
         if (col.getValue) {
             (def as any).accessorFn = col.getValue;
@@ -218,6 +218,7 @@ export default function TanStackDataTable({
                                             return (
                                                 <th
                                                     key={header.id}
+                                                    title={meta?.headerTitle || undefined}
                                                     style={{
                                                         textAlign: meta?.align || 'left',
                                                         cursor: canSort ? 'pointer' : undefined,
