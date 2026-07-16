@@ -403,4 +403,93 @@ describe('ApiClient.uploadFormData', () => {
             client.uploadFormData('/api/v1/upload', formData)
         ).rejects.toThrow('body.file: field required');
     });
+
+    it('attaches HTTP status to the thrown error (for caller classification)', async () => {
+        vi.spyOn(global, 'fetch').mockResolvedValue({
+            ok: false,
+            status: 413,
+            json: async () => ({ detail: 'Файл слишком большой' }),
+        } as Response);
+
+        const formData = new FormData();
+        await client
+            .uploadFormData('/api/v1/upload', formData)
+            .then(() => { throw new Error('should have thrown'); })
+            .catch((e: Error & { status?: number }) => {
+                expect(e.message).toBe('Файл слишком большой');
+                expect(e.status).toBe(413);
+            });
+    });
+
+    it('does NOT retry by default — one attempt on 5xx', async () => {
+        const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+            ok: false,
+            status: 500,
+            json: async () => ({}),
+        } as Response);
+
+        const formData = new FormData();
+        await expect(
+            client.uploadFormData('/api/v1/upload', formData)
+        ).rejects.toThrow();
+        expect(fetchSpy).toHaveBeenCalledOnce();
+    });
+
+    it('retries transient 5xx and succeeds on a later attempt', async () => {
+        const fetchSpy = vi.spyOn(global, 'fetch')
+            .mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({}) } as Response)
+            .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) } as Response)
+            .mockResolvedValueOnce({ ok: true, status: 201, json: async () => ({ id: 7 }) } as Response);
+
+        const formData = new FormData();
+        const result = await client.uploadFormData<{ id: number }>(
+            '/api/v1/upload', formData, { retries: 3, retryDelayMs: 0 },
+        );
+        expect(result).toEqual({ id: 7 });
+        expect(fetchSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it('retries a network-level fetch rejection (connection reset during deploy)', async () => {
+        const fetchSpy = vi.spyOn(global, 'fetch')
+            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockResolvedValueOnce({ ok: true, status: 201, json: async () => ({ id: 9 }) } as Response);
+
+        const formData = new FormData();
+        const result = await client.uploadFormData<{ id: number }>(
+            '/api/v1/upload', formData, { retries: 2, retryDelayMs: 0 },
+        );
+        expect(result).toEqual({ id: 9 });
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('does NOT retry a 4xx — client error is not transient', async () => {
+        const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+            ok: false,
+            status: 415,
+            json: async () => ({ detail: 'Unsupported' }),
+        } as Response);
+
+        const formData = new FormData();
+        await expect(
+            client.uploadFormData('/api/v1/upload', formData, { retries: 3, retryDelayMs: 0 })
+        ).rejects.toThrow('Unsupported');
+        expect(fetchSpy).toHaveBeenCalledOnce();
+    });
+
+    it('gives up after exhausting retries and throws with status', async () => {
+        const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+            ok: false,
+            status: 500,
+            json: async () => ({}),
+        } as Response);
+
+        const formData = new FormData();
+        await client
+            .uploadFormData('/api/v1/upload', formData, { retries: 2, retryDelayMs: 0 })
+            .then(() => { throw new Error('should have thrown'); })
+            .catch((e: Error & { status?: number }) => {
+                expect(e.status).toBe(500);
+            });
+        expect(fetchSpy).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
+    });
 });
