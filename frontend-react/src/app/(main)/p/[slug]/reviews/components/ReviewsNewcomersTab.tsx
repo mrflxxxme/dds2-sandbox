@@ -5,7 +5,7 @@ import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
 import type { Column } from '@/components/DataTable';
-import type { NewcomerReview, NewcomersResponse } from '@/types/api';
+import type { NewcomerGroup, NewcomerReview, NewcomersResponse } from '@/types/api';
 
 const DAYS_OPTIONS = [
     { key: 14, label: '2 недели' },
@@ -14,6 +14,7 @@ const DAYS_OPTIONS = [
     { key: 90, label: 'Квартал' },
 ];
 const MAX_RATING = 4.6;
+const RATING_COLORS: Record<number, string> = { 1: '#ff3b30', 2: '#ff9f0a', 3: '#ffd60a', 4: '#7dd957', 5: '#34c759' };
 
 /** Цвет средней оценки по значению (красный → жёлтый → зелёный). */
 function avgColor(v: number | null): string {
@@ -23,9 +24,49 @@ function avgColor(v: number | null): string {
     return '#ff3b30';
 }
 
+type GroupMode = 'category' | 'brand' | 'tag';
+
+/** Карточка разреза: имя, число новинок + отзывов, средняя, распределение 5→1. */
+function GroupCard({ g }: { g: NewcomerGroup }) {
+    const color = avgColor(g.avg_rating);
+    const counts: Record<number, number> = { 1: g.r1, 2: g.r2, 3: g.r3, 4: g.r4, 5: g.r5 };
+    return (
+        <div className="glass-card" style={{ padding: 16, borderTop: `3px solid ${color}` }}>
+            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={g.name}>
+                {g.name}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 2 }}>
+                <span style={{ fontSize: 26, fontWeight: 700, color }}>{g.avg_rating != null ? formatNumber(Number(g.avg_rating), 2) : '—'}</span>
+                <span style={{ color, fontSize: 15 }}>★</span>
+            </div>
+            <div style={{ color: 'var(--color-text-dim)', fontSize: 12, marginBottom: 12 }}>
+                Новинок: {formatNumber(g.products, 0)} · Отзывов: {formatNumber(g.count, 0)}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                {[5, 4, 3, 2, 1].map(n => {
+                    const cnt = counts[n];
+                    const rated = g.r1 + g.r2 + g.r3 + g.r4 + g.r5;
+                    const pct = rated ? (cnt / rated) * 100 : 0;
+                    return (
+                        <div key={n} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                            <span style={{ width: 10, color: 'var(--color-text-dim)' }}>{n}</span>
+                            <div style={{ flex: 1, height: 6, background: 'var(--color-border)', borderRadius: 3, overflow: 'hidden' }}>
+                                <div style={{ width: `${pct}%`, height: '100%', background: RATING_COLORS[n], borderRadius: 3 }} />
+                            </div>
+                            <span style={{ width: 54, textAlign: 'right' }}>{formatNumber(cnt, 0)}</span>
+                            <span style={{ width: 44, textAlign: 'right', color: 'var(--color-text-dim)' }}>{formatNumber(pct, 1)}%</span>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
 export default function ReviewsNewcomersTab() {
     const [data, setData] = useState<NewcomersResponse | null>(null);
     const [days, setDays] = useState(30);
+    const [groupMode, setGroupMode] = useState<GroupMode>('category');
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -45,6 +86,11 @@ export default function ReviewsNewcomersTab() {
     useEffect(() => { load(days); }, [days, load]);
 
     const items = data?.items ?? [];
+    const groups: NewcomerGroup[] = groupMode === 'category'
+        ? (data?.by_category ?? [])
+        : groupMode === 'brand'
+            ? (data?.by_brand ?? [])
+            : (data?.by_tag ?? []);
 
     const columns: Column[] = useMemo(() => [
         {
@@ -157,6 +203,23 @@ export default function ReviewsNewcomersTab() {
                         enableSorting
                         enablePagination={items.length > 50}
                     />
+
+                    {/* Распределение проблемных новинок по разрезам */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '24px 0 12px', flexWrap: 'wrap' }}>
+                        <h3 style={{ margin: 0, fontSize: 16 }}>Распределение</h3>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                            <button className={`btn btn-sm ${groupMode === 'category' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setGroupMode('category')}>По предмету</button>
+                            <button className={`btn btn-sm ${groupMode === 'brand' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setGroupMode('brand')}>По бренду</button>
+                            <button className={`btn btn-sm ${groupMode === 'tag' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setGroupMode('tag')}>По ярлыку</button>
+                        </div>
+                    </div>
+                    {groups.length === 0 ? (
+                        <div className="glass-card" style={{ padding: 20, color: 'var(--color-text-dim)', fontSize: 14 }}>Нет данных</div>
+                    ) : (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+                            {groups.map(g => <GroupCard key={g.name} g={g} />)}
+                        </div>
+                    )}
                 </>
             )}
         </div>

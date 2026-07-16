@@ -102,10 +102,28 @@ class NewcomerReview(BaseModel):
     r5: int = 0
 
 
+class NewcomerGroup(BaseModel):
+    """Разрез проблемных новинок по категории / бренду / ярлыку."""
+
+    name: str
+    products: int = 0  # число проблемных новинок в группе
+    avg_rating: float | None = None  # средняя по их отзывам (rating>0)
+    count: int = 0  # всего отзывов по этим новинкам
+    r1: int = 0
+    r2: int = 0
+    r3: int = 0
+    r4: int = 0
+    r5: int = 0
+
+
 class NewcomersResponse(BaseModel):
     """Раздел «Проблемные новинки»: новинки с рейтингом ниже порога."""
 
     items: list[NewcomerReview] = []
+    # Распределение проблемных новинок по разрезам (для карточек)
+    by_category: list[NewcomerGroup] = []
+    by_brand: list[NewcomerGroup] = []
+    by_tag: list[NewcomerGroup] = []
     days: int = 30  # окно «новинки» (дней на продаже)
     max_rating: float = 4.6  # порог «плохого» рейтинга
     # False → у проекта не настроен активный WB-ключ (фронт покажет подсказку)

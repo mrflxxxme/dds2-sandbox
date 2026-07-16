@@ -16,7 +16,7 @@ has_key: у проекта есть активный WB-ключ ИЛИ уже �
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import case, func, select
@@ -35,6 +35,7 @@ _LIST_MAX = 5000
 _GROUP_LIMIT = 100  # топ категорий/брендов в сводке
 _NO_CATEGORY = "Без категории"
 _NO_BRAND = "Без бренда"
+_NO_TAG = "Без ярлыка"
 
 # Диапазоны сводки: ключ → глубина в днях (None = всё время). Дефолт — год.
 _PERIOD_DAYS: dict[str, int | None] = {
@@ -476,5 +477,64 @@ async def get_new_low_rated(
     items.sort(key=lambda it: (it["avg_rating"] if it["avg_rating"] is not None else 5.0, -it["count"]))
     items = items[:_NEWCOMERS_LIMIT]
 
+    nm_to_tags = await _newcomer_tag_map(db, project_id, [it["nm_id"] for it in items])
     has_key = bool(items) or await has_any_feedback(db, project_id) or await _has_wb_key(db, project_id)
-    return {"items": items, "days": days, "max_rating": max_rating, "has_key": has_key}
+    return {
+        "items": items,
+        "by_category": _group_newcomers(items, lambda it: [it["subject"]]),
+        "by_brand": _group_newcomers(items, lambda it: [it["brand"]]),
+        "by_tag": _group_newcomers(items, lambda it: nm_to_tags.get(it["nm_id"]) or [_NO_TAG]),
+        "days": days,
+        "max_rating": max_rating,
+        "has_key": has_key,
+    }
+
+
+async def _newcomer_tag_map(db: AsyncSession, project_id: int, nm_ids: list[int]) -> dict[int, list[str]]:
+    """nm_id → список имён активных ярлыков (для разреза новинок по ярлыку)."""
+    if not nm_ids:
+        return {}
+    rows = await db.execute(
+        select(ProductTagMap.nm_id, ProductTag.name)
+        .join(ProductTag, ProductTag.id == ProductTagMap.tag_id)
+        .where(
+            ProductTagMap.project_id == project_id,
+            ProductTag.is_deleted == False,  # noqa: E712
+            ProductTagMap.nm_id.in_(set(nm_ids)),
+        )
+    )
+    out: dict[int, list[str]] = {}
+    for nm_id, name in rows:
+        out.setdefault(nm_id, []).append(name)
+    return out
+
+
+def _group_newcomers(
+    items: list[dict], keys_of: Callable[[dict], list[str]]
+) -> list[dict]:
+    """
+    Сгруппировать проблемные новинки по ключам (категория/бренд/ярлык).
+
+    Товар с несколькими ярлыками попадает в каждый. avg считается ТОЧНО из
+    суммарного распределения r1..r5 (рейтинг>0), а не усреднением округлённых.
+    """
+    buckets: dict[str, list[dict]] = {}
+    for it in items:
+        for key in keys_of(it):
+            buckets.setdefault(key, []).append(it)
+
+    groups: list[dict] = []
+    for name, grp in buckets.items():
+        rr = [sum(it[f"r{n}"] for it in grp) for n in range(1, 6)]
+        rated = sum(rr)
+        avg = sum((i + 1) * rr[i] for i in range(5)) / rated if rated else None
+        groups.append({
+            "name": name,
+            "products": len(grp),
+            "avg_rating": _round(avg),
+            "count": sum(it["count"] for it in grp),
+            "r1": rr[0], "r2": rr[1], "r3": rr[2], "r4": rr[3], "r5": rr[4],
+        })
+    # больше всего проблемных новинок — первыми
+    groups.sort(key=lambda g: (-g["products"], g["avg_rating"] if g["avg_rating"] is not None else 5.0))
+    return groups

@@ -268,6 +268,37 @@ async def test_new_low_rated_first_sale_date_precedence(db_session, project):
     assert item["days_on_sale"] == 10
 
 
+async def test_new_low_rated_breakdowns(db_session, project):
+    """Разрезы новинок по категории/бренду/ярлыку: агрегат по проблемным новинкам."""
+    now = utcnow().replace(tzinfo=None)
+    # две новинки категории «Носки» (nm 601, 602), одна «Кружки» (nm 603) — все плохие
+    await _add_feedback(db_session, project.id, "b1", 2, 601, created=now - timedelta(days=3))
+    await _add_feedback(db_session, project.id, "b2", 3, 602, created=now - timedelta(days=3))
+    await _add_feedback(db_session, project.id, "b3", 1, 603, created=now - timedelta(days=3))
+    db_session.add(Nomenclature(project_id=project.id, barcode="bc601", article_wb=601, subject="Носки", brand="БрендA"))
+    db_session.add(Nomenclature(project_id=project.id, barcode="bc602", article_wb=602, subject="Носки", brand="БрендB"))
+    db_session.add(Nomenclature(project_id=project.id, barcode="bc603", article_wb=603, subject="Кружки", brand="БрендA"))
+    tag = ProductTag(project_id=project.id, name="Хит")
+    db_session.add(tag)
+    await db_session.flush()
+    db_session.add(ProductTagMap(project_id=project.id, tag_id=tag.id, nm_id=601))
+    await db_session.commit()
+
+    res = await reviews_service.get_new_low_rated(db_session, project.id, days=30, max_rating=4.6)
+
+    cats = {g["name"]: g for g in res["by_category"]}
+    assert cats["Носки"]["products"] == 2  # 601 + 602
+    assert cats["Кружки"]["products"] == 1
+
+    brands = {g["name"]: g for g in res["by_brand"]}
+    assert brands["БрендA"]["products"] == 2  # 601 + 603
+    assert brands["БрендB"]["products"] == 1
+
+    tags = {g["name"]: g for g in res["by_tag"]}
+    assert tags["Хит"]["products"] == 1  # только 601 с ярлыком
+    assert tags["Без ярлыка"]["products"] == 2  # 602 + 603 без ярлыка
+
+
 async def test_summary_old_reviews_keep_data_ui(db_session, project):
     """Все отзывы старше окна и ключа нет → окно пустое, но has_key=True (data-UI,
     не экран «настройте ключ») — фронт покажет «за период пусто»."""

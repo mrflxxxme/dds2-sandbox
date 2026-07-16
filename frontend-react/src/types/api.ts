@@ -6392,8 +6392,24 @@ export interface NewcomerReview {
   r5: number;
 }
 
+/** Разрез проблемных новинок по категории / бренду / ярлыку. */
+export interface NewcomerGroup {
+  name: string;
+  products: number;
+  avg_rating: number | null;
+  count: number;
+  r1: number;
+  r2: number;
+  r3: number;
+  r4: number;
+  r5: number;
+}
+
 export interface NewcomersResponse {
   items: NewcomerReview[];
+  by_category: NewcomerGroup[];
+  by_brand: NewcomerGroup[];
+  by_tag: NewcomerGroup[];
   days: number;
   max_rating: number;
   has_key: boolean;
