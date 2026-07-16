@@ -5,15 +5,99 @@ Covers compute_budget_gap (чистый расчёт доливки до пол�
 get_budget_gaps / list_ad_campaigns на мокнутой БД.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytz
 
-from backend.services.funnel.ads_manager import compute_budget_gap
+from backend.services.funnel.ads_manager import (
+    _campaign_potential,
+    _chronic_stats,
+    _extrapolate_full_day,
+    _median,
+    _runout_by_day,
+    compute_budget_gap,
+)
 
 PROJECT_ID = 1
+MSK = pytz.timezone("Europe/Moscow")
+
+
+def _utc_from_msk(y: int, mo: int, d: int, h: int, mi: int = 0) -> datetime:
+    """naive-UTC момент по времени МСК (как хранит WbAdCampaignEvent.created_at)."""
+    return MSK.localize(datetime(y, mo, d, h, mi)).astimezone(pytz.UTC).replace(tzinfo=None)
+
+
+def _event(campaign_id: int, new_value: str | None, created_at: datetime) -> MagicMock:
+    ev = MagicMock()
+    ev.campaign_id = campaign_id
+    ev.new_value = new_value
+    ev.created_at = created_at
+    return ev
+
+
+# ─── экстраполяция полного дня / потенциал / медиана ─────────────────────────
+
+
+def test_extrapolate_full_day_runout_scales_to_midnight():
+    """Остановка в 08:00 при расходе 2000 → скорость 250 ₽/ч → полный день 6000, недобор 4000."""
+    pot, short = _extrapolate_full_day(2000.0, 8.0)
+    assert pot == 6000.0
+    assert short == 4000.0
+
+
+def test_extrapolate_full_day_no_runout_is_full():
+    """День без остановки — потенциал = факт, недобора нет."""
+    assert _extrapolate_full_day(1500.0, None) == (1500.0, 0.0)
+    assert _extrapolate_full_day(0.0, 8.0) == (0.0, 0.0)
+
+
+def test_median_even_and_odd():
+    assert _median([3.0, 1.0, 2.0]) == 2.0
+    assert _median([1.0, 2.0, 3.0, 4.0]) == 2.5
+    assert _median([]) is None
+
+
+def test_campaign_potential_median_of_runout_days():
+    """Потенциал = медиана экстраполированных дней-остановок (устойчива к раннему выбросу)."""
+    spend = {date(2026, 7, 1): 1000.0, date(2026, 7, 2): 1200.0, date(2026, 7, 3): 2000.0}
+    stops = {date(2026, 7, 1): 10.0, date(2026, 7, 2): 12.0, date(2026, 7, 3): 4.0}
+    # потенциалы: 2400, 2400, 12000 → медиана 2400 (выброс 12000 не перетягивает)
+    pot, n = _campaign_potential(spend, stops, recent_days=7)
+    assert pot == 2400.0
+    assert n == 3
+
+
+def test_campaign_potential_fallback_to_full_days():
+    """Если дней-остановок нет — потенциал = среднее расхода по полным дням."""
+    spend = {date(2026, 7, 1): 1000.0, date(2026, 7, 2): 1200.0}
+    pot, n = _campaign_potential(spend, {}, recent_days=7)
+    assert pot == 1100.0
+    assert n == 2
+
+
+def test_runout_by_day_last_zero_wins_per_day():
+    """В пределах дня последний переход бюджета →0 выигрывает; разные дни независимы."""
+    evs = [
+        _event(10, "0", _utc_from_msk(2026, 7, 1, 12)),
+        _event(10, "0", _utc_from_msk(2026, 7, 1, 15)),  # позже — этот час остановки
+        _event(10, "0", _utc_from_msk(2026, 7, 2, 9)),
+    ]
+    out = _runout_by_day(evs)
+    assert out[10][date(2026, 7, 1)] == _utc_from_msk(2026, 7, 1, 15)
+    assert out[10][date(2026, 7, 2)] == _utc_from_msk(2026, 7, 2, 9)
+
+
+def test_runout_by_day_topup_after_zero_clears_day():
+    """Пополнение (>0) после →0 в тот же день снимает день из остановленных."""
+    evs = [
+        _event(10, "0", _utc_from_msk(2026, 7, 1, 12)),
+        _event(10, "3000", _utc_from_msk(2026, 7, 1, 13)),  # долили — день не «кончился»
+    ]
+    out = _runout_by_day(evs)
+    assert date(2026, 7, 1) not in out.get(10, {})
 
 
 # ─── compute_budget_gap ──────────────────────────────────────────────────────
@@ -105,6 +189,16 @@ def _rows_result(rows: list) -> MagicMock:
     return m
 
 
+def _win_ev_row(campaign_id: int, msk_day: date, new_value: str | None, created_at: datetime) -> MagicMock:
+    """Строка «последнее событие бюджета за МСК-день» (DISTINCT ON из _budget_window_history)."""
+    r = MagicMock()
+    r.campaign_id = campaign_id
+    r.msk_day = msk_day
+    r.new_value = new_value
+    r.created_at = created_at
+    return r
+
+
 @pytest.mark.asyncio
 async def test_budget_gaps_uses_last_zero_event():
     """Кампания с событием бюджет→0 попадает в список с часом остановки."""
@@ -114,8 +208,16 @@ async def test_budget_gaps_uses_last_zero_event():
     spend_row = MagicMock(campaign_id=101, spend=Decimal("800"))
     # событие в 09:00 UTC = 12:00 МСК
     ev = _event(101, "0", datetime(2026, 7, 3, 9, 0, 0))
+    # окно полных дней (потенциал) — два дня по 1000/1200 ₽, событий-остановок нет
+    win_daily = [
+        MagicMock(campaign_id=101, date=date(2026, 7, 1), spend=Decimal("1000")),
+        MagicMock(campaign_id=101, date=date(2026, 7, 2), spend=Decimal("1200")),
+    ]
     nm_meta = MagicMock(nm_id=111, brand="НУ-НУ", subject="Ковры")
-    db = _db_seq(_scalars_result([camp]), _rows_result([spend_row]), _scalars_result([ev]), _rows_result([nm_meta]))
+    db = _db_seq(
+        _scalars_result([camp]), _rows_result([spend_row]), _scalars_result([ev]),
+        _rows_result(win_daily), _rows_result([]), _rows_result([nm_meta]),
+    )
 
     rows = await get_budget_gaps(db, PROJECT_ID)
 
@@ -126,6 +228,11 @@ async def test_budget_gaps_uses_last_zero_event():
     assert "needed_till_midnight" in rows[0]
     assert rows[0]["brands"] == ["НУ-НУ"]
     assert rows[0]["subjects"] == ["Ковры"]
+    # потенциал полного дня = (1000+1200)/2 = 1100; недобор = 1100 − 800 = 300
+    assert rows[0]["potential_daily"] == 1100.0
+    assert rows[0]["full_days"] == 2
+    assert rows[0]["needed_potential"] == 1000.0  # raw 300 < минимума WB 1000 → 1000
+    assert rows[0]["raw_needed_potential"] == 300.0
 
 
 @pytest.mark.asyncio
@@ -140,13 +247,19 @@ async def test_budget_gaps_topup_after_zero_excludes():
         _event(102, "1000", datetime(2026, 7, 3, 7, 0, 0)),
     ]
     nm_meta = MagicMock(nm_id=111, brand="НУ-НУ", subject="Ковры")
-    db = _db_seq(_scalars_result([camp]), _rows_result([spend_row]), _scalars_result(events), _rows_result([nm_meta]))
+    db = _db_seq(
+        _scalars_result([camp]), _rows_result([spend_row]), _scalars_result(events),
+        _rows_result([]), _rows_result([]), _rows_result([nm_meta]),
+    )
 
     rows = await get_budget_gaps(db, PROJECT_ID)
 
     # бюджет сейчас 0 (модель), но события говорят «пополнена после нуля» → час неизвестен (None), строка остаётся
     assert len(rows) == 1
     assert rows[0]["ran_out_at"] is None
+    # окно пустое → потенциал неизвестен, недобор падает на линейный фолбэк
+    assert rows[0]["potential_daily"] is None
+    assert rows[0]["full_days"] == 0
 
 
 @pytest.mark.asyncio
@@ -160,6 +273,96 @@ async def test_budget_gaps_no_spend_today_excluded():
 
     rows = await get_budget_gaps(db, PROJECT_ID)
     assert rows == []
+
+
+def test_chronic_stats_counts_active_and_median_hour():
+    """Дни-с-расходом vs дни-остановки; типичный час — медиана, дни без расхода отброшены."""
+    day_spend = {date(2026, 7, 1): 900.0, date(2026, 7, 2): 800.0, date(2026, 7, 3): 0.0, date(2026, 7, 4): 700.0}
+    # 7/3 есть событие остановки, но расхода нет → в счёт не идёт
+    stop_hours = {date(2026, 7, 1): 15.0, date(2026, 7, 2): 13.0, date(2026, 7, 3): 10.0}
+    runout_days, active_days, typical = _chronic_stats(day_spend, stop_hours)
+    assert active_days == 3       # 7/1, 7/2, 7/4 (7/3 spend=0)
+    assert runout_days == 2       # 7/1, 7/2 (день без расхода исключён)
+    assert typical == 14.0        # median([15, 13])
+
+
+@pytest.mark.asyncio
+async def test_budget_gaps_chronic_predicted_when_budget_alive():
+    """Живая кампания (бюджет>0), что регулярно кончалась за окно → строка-прогноз."""
+    from backend.services.funnel.ads_manager import get_budget_gaps
+
+    camp = _campaign(701, budget=500, status=9)  # бюджет есть → факта нет, только прогноз
+    spend_row = MagicMock(campaign_id=701, spend=Decimal("300"))  # частичный расход сегодня
+    days = [date(2026, 7, d) for d in (1, 2, 3, 4, 5)]
+    win_daily = [MagicMock(campaign_id=701, date=d, spend=Decimal("900")) for d in days]
+    # последнее событие дня → 0 в 15:00 МСК на 4 из 5 дней
+    win_ev = [_win_ev_row(701, date(2026, 7, d), "0", _utc_from_msk(2026, 7, d, 15, 0)) for d in (1, 2, 3, 4)]
+    nm_meta = MagicMock(nm_id=111, brand="НУ-НУ", subject="Ковры")
+    # ran_ids пуст (бюджет>0) → запрос сегодняшних событий не идёт
+    db = _db_seq(
+        _scalars_result([camp]), _rows_result([spend_row]),
+        _rows_result(win_daily), _rows_result(win_ev), _rows_result([nm_meta]),
+    )
+
+    rows = await get_budget_gaps(db, PROJECT_ID)
+
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["campaign_id"] == 701
+    assert r["predicted"] is True
+    assert r["ran_out_at"] is None
+    assert r["typical_stop_hour"] == 15.0
+    assert r["runout_days"] == 4 and r["active_days"] == 5
+    assert r["potential_daily"] == 1440.0   # 900/15×24, медиана 4 дней
+    assert r["needed_potential"] == 1140     # 1440 − 300 потрачено сегодня
+    assert r["brands"] == ["НУ-НУ"]
+
+
+@pytest.mark.asyncio
+async def test_budget_gaps_alive_not_chronic_excluded():
+    """Живая кампания с одиночной остановкой (< порога дней) — не хроник, в список не идёт."""
+    from backend.services.funnel.ads_manager import get_budget_gaps
+
+    camp = _campaign(702, budget=500, status=9)
+    spend_row = MagicMock(campaign_id=702, spend=Decimal("300"))
+    days = [date(2026, 7, d) for d in (1, 2, 3, 4, 5)]
+    win_daily = [MagicMock(campaign_id=702, date=d, spend=Decimal("900")) for d in days]
+    win_ev = [_win_ev_row(702, date(2026, 7, 1), "0", _utc_from_msk(2026, 7, 1, 15, 0))]  # всего 1 день-остановка < 3
+    # result пуст → запрос nm_meta не идёт
+    db = _db_seq(
+        _scalars_result([camp]), _rows_result([spend_row]),
+        _rows_result(win_daily), _rows_result(win_ev),
+    )
+
+    rows = await get_budget_gaps(db, PROJECT_ID)
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_budget_gaps_fact_before_prediction():
+    """Факт (кончился сегодня) идёт впереди прогноза (хроник с живым бюджетом)."""
+    from backend.services.funnel.ads_manager import get_budget_gaps
+
+    fact = _campaign(801, budget=0, status=9)     # кончился сегодня
+    pred = _campaign(802, budget=500, status=9)   # живой, но хроник
+    fact.nm_ids = [111]
+    pred.nm_ids = [222]
+    spend_rows = [MagicMock(campaign_id=801, spend=Decimal("1000")), MagicMock(campaign_id=802, spend=Decimal("200"))]
+    today_ev = [_event(801, "0", _utc_from_msk(2026, 7, 16, 14, 0))]  # факт остановки сегодня
+    days = [date(2026, 7, d) for d in (1, 2, 3, 4, 5)]
+    win_daily = [MagicMock(campaign_id=802, date=d, spend=Decimal("900")) for d in days]
+    win_ev = [_win_ev_row(802, date(2026, 7, d), "0", _utc_from_msk(2026, 7, d, 15, 0)) for d in (1, 2, 3, 4)]
+    nm_meta = [MagicMock(nm_id=111, brand="A", subject="X"), MagicMock(nm_id=222, brand="B", subject="Y")]
+    db = _db_seq(
+        _scalars_result([fact, pred]), _rows_result(spend_rows), _scalars_result(today_ev),
+        _rows_result(win_daily), _rows_result(win_ev), _rows_result(nm_meta),
+    )
+
+    rows = await get_budget_gaps(db, PROJECT_ID)
+
+    assert [r["campaign_id"] for r in rows] == [801, 802]  # факт → прогноз
+    assert rows[0]["predicted"] is False and rows[0]["ran_out_at"] is not None
+    assert rows[1]["predicted"] is True
 
 
 @pytest.mark.asyncio

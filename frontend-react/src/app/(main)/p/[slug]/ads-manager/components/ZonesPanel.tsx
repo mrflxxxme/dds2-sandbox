@@ -4,6 +4,7 @@ import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import Tooltip from './Tooltip';
 import Switch from './Switch';
+import { humanizeAdsError } from './adsShared';
 import type { CampaignZones } from '@/types/api';
 
 export type ZoneKey = 'search' | 'recommendations';
@@ -24,7 +25,7 @@ export function zoneRuleText(z: CampaignZones): string {
  *
  *  Переключение WB разрешает только у CPM с ручной ставкой (см. `zones_locked`/`lock_reason`);
  *  в остальных случаях тумблер виден, отражает реальное состояние, но заблокирован.
- *  Разбивку статистики по зонам даёт отдельная вкладка «По зонам» (не этот блок).
+ *  Разбивку статистики по зонам даёт селектор зоны внутри «По дням» (не этот блок).
  */
 export default function ZonesPanel({ zones, campaignId, onZonesLocal, onBidLocal }: {
     zones: CampaignZones;
@@ -37,6 +38,7 @@ export default function ZonesPanel({ zones, campaignId, onZonesLocal, onBidLocal
 }) {
     const [busy, setBusy] = useState<ZoneKey | null>(null);
     const [error, setError] = useState('');
+    const [note, setNote] = useState('');  // нейтральная заметка (напр. «WB поднял до минимума»)
     // Инлайн-редактирование ставки зоны (реальные деньги)
     const [editZone, setEditZone] = useState<ZoneKey | null>(null);
     const [bidInput, setBidInput] = useState('');
@@ -46,20 +48,24 @@ export default function ZonesPanel({ zones, campaignId, onZonesLocal, onBidLocal
 
     const startEdit = (z: ZoneKey, cur: number | null) => { setEditZone(z); setBidInput(cur != null ? String(cur) : ''); setError(''); };
     const saveBid = async (z: ZoneKey) => {
-        const v = Math.round(Number(bidInput.replace(',', '.')));
-        if (!v || v <= 0) { setError('Ставка должна быть больше 0'); return; }
-        // У CPM · единая ставка одна на обе зоны — в подтверждении это и пишем.
-        const unified = zones.payment_type === 'cpm' && (zones.bid_mode || '') === 'unified';
-        const label = unified ? 'Поиск + Рекомендации' : ZONES.find(x => x.key === z)?.label;
-        if (!window.confirm(`Изменить ставку зоны «${label}» на ${v} ₽? Это реальные деньги.`)) return;
-        setSavingBid(z); setError('');
+        const raw = Math.round(Number(bidInput.replace(',', '.')));
+        if (!raw || raw <= 0) { setError('Ставка должна быть больше 0'); return; }
+        // Кламп к РЕАЛЬНОМУ полу зоны (живой пробник min_bids): ниже WB всё равно не примет.
+        // WB продублирует кламп на записи (res.adjusted) — это подстраховка + мгновенный фидбек.
+        const floor = zones.min_bids?.[z] ?? null;
+        const v = floor != null ? Math.max(raw, floor) : raw;
+        // Подтверждение — это сама кнопка OK инлайн-редактора (не блокирующий window.confirm).
+        setSavingBid(z); setError(''); setNote('');
         try {
             const res = await api.setCampaignZoneBid(campaignId, z, v);
             if (!res.ok) throw new Error(res.error || 'Не удалось изменить ставку');
             setEditZone(null);
-            onBidLocal(z, res.bid ?? v);  // применённая ставка из ответа — показываем сразу
+            const applied = res.bid ?? v;
+            onBidLocal(z, applied);  // применённая ставка из ответа — показываем сразу
+            if (res.adjusted) setNote(`Ниже минимума WB — поставлен минимум ${applied} ₽`);
+            else if (floor != null && raw < floor) setNote(`Подтянуто к минимуму зоны — ${v} ₽`);
         } catch (e) {
-            setError(e instanceof Error ? e.message : 'Не удалось изменить ставку');
+            setError(humanizeAdsError(e, 'Не удалось изменить ставку'));
         } finally { setSavingBid(null); }
     };
 
@@ -75,10 +81,10 @@ export default function ZonesPanel({ zones, campaignId, onZonesLocal, onBidLocal
         setBusy(key); setError('');
         try {
             const res = await api.setCampaignZones(campaignId, next);
-            if (!res.ok) { setError(res.error || 'Не удалось изменить зоны показов'); return; }
+            if (!res.ok) { setError(humanizeAdsError(res.error, 'Не удалось изменить зоны показов')); return; }
             onZonesLocal(res.placements ?? next);  // авторитетное новое состояние из ответа
         } catch (e) {
-            setError(e instanceof Error ? e.message : 'Не удалось изменить зоны показов');
+            setError(humanizeAdsError(e, 'Не удалось изменить зоны показов'));
         } finally { setBusy(null); }
     };
 
@@ -143,7 +149,21 @@ export default function ZonesPanel({ zones, campaignId, onZonesLocal, onBidLocal
                     return <React.Fragment key={z.key}>{locked && zones.lock_reason ? <Tooltip text={zones.lock_reason}>{card}</Tooltip> : card}</React.Fragment>;
                 })}
                 {error && <span style={{ fontSize: 11, color: '#ef4444' }}>{error}</span>}
+                {note && <span style={{ fontSize: 11, color: '#d97706' }}>{note}</span>}
             </div>
+            {/* Минимальная ставка WB (аукционный пол) ПО КАЖДОЙ ЗОНЕ — справочно, нередактируемо, полупрозрачно.
+                У WB пол разный на кампанию и на зону, поэтому подписываем по каждой видимой зоне. */}
+            {(() => {
+                const parts = cards
+                    .map(z => { const m = zones.min_bids?.[z.key]; return m != null ? `${z.label} ${formatNumber(m, 0)} ₽` : null; })
+                    .filter((s): s is string => s != null);
+                if (parts.length === 0) return null;
+                return (
+                    <div style={{ marginTop: 6, fontSize: 11, color: '#4b5563', opacity: 0.55, userSelect: 'none' }}>
+                        Минимальная ставка WB — {parts.join(' · ')}
+                    </div>
+                );
+            })()}
         </div>
     );
 }

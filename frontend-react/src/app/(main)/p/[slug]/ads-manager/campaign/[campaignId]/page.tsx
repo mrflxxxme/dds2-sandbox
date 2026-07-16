@@ -21,7 +21,7 @@ import Tooltip from '../../components/Tooltip';
 import EditableName from '../../components/EditableName';
 import { useToast } from '../../components/Toasts';
 import ZonesPanel, { ZONES, zoneRuleText } from '../../components/ZonesPanel';
-import { fmt, iso, STATUS_BADGE, adTypeLabel, wbCampaignUrl, autopayLabel } from '../../components/adsShared';
+import { fmt, iso, STATUS_BADGE, adTypeLabel, wbCampaignUrl, autopayLabel, humanizeAdsError } from '../../components/adsShared';
 
 type CatalogEntry = { vendor_code: string; subject: string; brand: string };
 
@@ -77,10 +77,26 @@ export default function CampaignPage() {
     }, []);
 
     const isCpm = (campaign?.campaign_type || '').toLowerCase() === 'cpm';
+    const isCpc = (campaign?.campaign_type || '').toLowerCase() === 'cpc';
     const [tab, setTab] = useState<CampTab>('metrics');
-    // При заходе в кампанию метрики показываем графиком; «По дням» — та же таблица;
-    // «По зонам» — отдельная таблица РК-метрик с селектором зоны (только CPM)
-    const [metricsView, setMetricsView] = useState<'chart' | 'table' | 'zones'>('chart');
+    // При заходе в кампанию метрики показываем графиком; «По дням» — таблица с селектором
+    // зоны показов (только CPM): «Всего» = воронка продаж, «Поиск»/«Рекомендации» = РК-метрики по зоне
+    const [metricsView, setMetricsView] = useState<'chart' | 'table'>('chart');
+    // Активная вкладка/подвкладка переживают перезагрузку страницы — не сбрасываются на «Метрики».
+    // Восстанавливаем ПОСЛЕ первого рендера (localStorage недоступен на SSR); недоступную вкладку
+    // «Кластеризатор» отобьёт эффект clustersAvailable ниже.
+    const tabRestored = useRef(false);
+    useEffect(() => {
+        try {
+            const t = localStorage.getItem('ads_camp_tab');
+            if (t === 'metrics' || t === 'clusters' || t === 'hourly' || t === 'intraday') setTab(t);
+            const mv = localStorage.getItem('ads_camp_metrics_view');
+            if (mv === 'chart' || mv === 'table') setMetricsView(mv);
+        } catch { /* SSR / приватный режим */ }
+        tabRestored.current = true;
+    }, []);
+    useEffect(() => { if (tabRestored.current) try { localStorage.setItem('ads_camp_tab', tab); } catch { /* noop */ } }, [tab]);
+    useEffect(() => { if (tabRestored.current) try { localStorage.setItem('ads_camp_metrics_view', metricsView); } catch { /* noop */ } }, [metricsView]);
     // Выбор метрик графика живёт здесь: при смене товара/периода метрики перезагружаются
     // и график размонтируется — своё состояние он бы потерял.
     const [chartMetrics, setChartMetrics] = useState<Set<MetricKey>>(() => new Set(DEFAULT_CHART_METRICS));
@@ -91,12 +107,16 @@ export default function CampaignPage() {
     }), []);
     // Выбранный товар: показывать воронку только по нему (клик по карточке товара)
     const [selectedNm, setSelectedNm] = useState<number | null>(null);
-    // Кластеризатор (поисковые фразы) есть только у CPM. Разбивка статистики по зонам
-    // живёт на отдельной вкладке «По зонам»; блок «ЗОНЫ ПОКАЗОВ» — лишь вкл/выкл зон.
-    const clustersAvailable = isCpm;
-    // Вкладка кластеров исчезла под ногами (выбрали «Рекомендации») — уводим на метрики,
+    // Кластеризатор (поисковые фразы) есть у CPM (с редактированием ставок/минус-фраз) и
+    // у CPC — там только просмотр статистики по фразам (ставка единая, минус-фраз нет),
+    // поэтому таблица идёт read-only. Разбивка статистики по зонам живёт селектором внутри
+    // «По дням»; блок «ЗОНЫ ПОКАЗОВ» — лишь вкл/выкл зон.
+    const clustersAvailable = isCpm || isCpc;
+    // Вкладка кластеров исчезла под ногами (не CPM/CPC) — уводим на метрики,
     // иначе на экране не осталось бы ни одной вкладки с содержимым.
-    useEffect(() => { if (!clustersAvailable) setTab(t => (t === 'clusters' ? 'metrics' : t)); }, [clustersAvailable]);
+    // Отбиваем с кластеров только когда кампания УЖЕ загружена и она не поддерживает кластеры —
+    // иначе на маунте (campaign ещё null → clustersAvailable=false) сбросили бы восстановленную вкладку.
+    useEffect(() => { if (campaign && !clustersAvailable) setTab(t => (t === 'clusters' ? 'metrics' : t)); }, [campaign, clustersAvailable]);
     // Ручное пополнение бюджета
     const [depositAmount, setDepositAmount] = useState('');
     const [depositSource, setDepositSource] = useState(0);  // 0 = счёт кабинета Продвижения, 1 = баланс взаиморасчёта
@@ -118,16 +138,16 @@ export default function CampaignPage() {
         return () => controller.abort();
     }, [campaignId, dateFrom, dateTo, reloadKey, selectedNm]);
 
-    // ─── Метрики по зонам показов (только CPM): своя таблица РК-метрик + селектор зоны ───
+    // ─── Метрики по зонам показов (только CPM): РК-метрики по выбранной зоне (селектор внутри «По дням»/«График») ───
     const [zoneMetricsZone, setZoneMetricsZone] = useState<'total' | 'search' | 'recommendations'>('total');
     const [zoneMetrics, setZoneMetrics] = useState<CampaignZoneMetricsResponse | null>(null);
     const [zoneMetricsLoading, setZoneMetricsLoading] = useState(false);
     const [zoneMetricsError, setZoneMetricsError] = useState('');
-    // Не CPM — вкладки «По зонам» нет; если вдруг активна, уводим на график
-    useEffect(() => { if (!isCpm) setMetricsView(v => (v === 'zones' ? 'chart' : v)); }, [isCpm]);
+    // Не CPM — зон нет; селектор скрыт, поэтому держим зону на «Всего»
+    useEffect(() => { if (!isCpm) setZoneMetricsZone('total'); }, [isCpm]);
     useEffect(() => {
-        // Зонные данные нужны и таблице «По зонам», и графику при выбранной зоне (кроме «Всего»)
-        const needZone = tab === 'metrics' && (metricsView === 'zones' || (metricsView === 'chart' && zoneMetricsZone !== 'total'));
+        // Зонные данные нужны и таблице «По дням», и графику при выбранной зоне (кроме «Всего»)
+        const needZone = tab === 'metrics' && zoneMetricsZone !== 'total';
         if (!Number.isFinite(campaignId) || !needZone) return;
         const controller = new AbortController();
         setZoneMetricsLoading(true); setZoneMetricsError(''); setZoneMetrics(null);
@@ -136,7 +156,7 @@ export default function CampaignPage() {
             .catch(e => { if (!controller.signal.aborted) setZoneMetricsError(e instanceof Error ? e.message : 'Ошибка загрузки метрик по зонам'); })
             .finally(() => { if (!controller.signal.aborted) setZoneMetricsLoading(false); });
         return () => controller.abort();
-    }, [campaignId, dateFrom, dateTo, reloadKey, zoneMetricsZone, tab, metricsView]);
+    }, [campaignId, dateFrom, dateTo, reloadKey, zoneMetricsZone, tab]);
 
     // ─── Расход по часам (вкладка «По часам»): восстановлен из снимков остатка бюджета ───
     const [hourly, setHourly] = useState<CampaignHourlySpend | null>(null);
@@ -176,7 +196,7 @@ export default function CampaignPage() {
         open_card: 0, cr1: 0, cr2: 0, orders_sum: 0, cpl: null, avg_price: 0, customer_price: 0, spp: 0, drr: 0,
     })), [zoneMetrics]);
 
-    // Селектор зоны показов — общий для «Графика» и таблицы «По зонам»
+    // Селектор зоны показов — общий для «Графика» и таблицы «По дням»
     const zoneSelectorBar = (
         <div style={{ padding: '10px 12px', borderBottom: '1px solid #eef0f2', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <span style={{ fontSize: 12, color: '#6b7280' }}>Зона показов:</span>
@@ -194,11 +214,15 @@ export default function CampaignPage() {
 
     // Зоны показов и правила ставки (работает и для CPC, где кластеров нет)
     const [zones, setZones] = useState<CampaignZones | null>(null);
+    const [zonesLoading, setZonesLoading] = useState(false);
+    const [zonesError, setZonesError] = useState(false);
     useEffect(() => {
         if (!Number.isFinite(campaignId)) return;
+        setZonesLoading(true); setZonesError(false);
         api.getCampaignZones(campaignId, dateFrom, dateTo, selectedNm)
-            .then(z => setZones(z.error ? null : z))
-            .catch(() => { /* зоны не критичны */ });
+            .then(z => { if (z.error) { setZones(null); setZonesError(true); } else setZones(z); })
+            .catch(() => { setZones(null); setZonesError(true); })
+            .finally(() => setZonesLoading(false));
     }, [campaignId, dateFrom, dateTo, selectedNm, reloadKey]);
 
 
@@ -211,14 +235,14 @@ export default function CampaignPage() {
         setDepositing(true); setCampError('');
         try {
             const res = await api.depositCampaignBudget(campaign.campaign_id, amt, depositSource);
-            if (!res.ok) { toast.error(res.error || 'Не удалось пополнить бюджет'); return; }
+            if (!res.ok) { toast.error(humanizeAdsError(res.error, 'Не удалось пополнить бюджет')); return; }
             toast.success(`Бюджет пополнен на ${amt.toLocaleString('ru-RU')} ₽`);
             setDepositAmount('');
             // WB возвращает новый остаток (budget_after) — показываем сразу, без тяжёлого рефетча
             if (res.budget_after != null) setCampaign(prev => prev ? { ...prev, budget: res.budget_after as number } : prev);
             loadCampaign(true);  // тихая сверка (в т.ч. на случай, когда WB не вернул total)
         } catch (e) {
-            setCampError(e instanceof Error ? e.message : 'Ошибка пополнения');
+            setCampError(humanizeAdsError(e, 'Ошибка пополнения'));
         } finally { setDepositing(false); }
     };
 
@@ -349,7 +373,8 @@ export default function CampaignPage() {
         setPending(prev => { const n = new Set(prev); items.forEach(c => n.add(c.norm_query)); return n; });
         const failed: string[] = [];
         let lastError: string | null = null;
-        for (const c of items) {
+        for (let idx = 0; idx < items.length; idx++) {
+            const c = items[idx];
             try {
                 const res = await api.toggleClusterMinus(campaignId, { nm_id: nmId, norm_query: c.norm_query, action });
                 if (res.ok) {
@@ -364,6 +389,8 @@ export default function CampaignPage() {
             } finally {
                 setPending(prev => { const n = new Set(prev); n.delete(c.norm_query); return n; });
             }
+            // WB ограничивает частоту — пауза между фразами, чтобы пачка не ловила 429
+            if (idx < items.length - 1) await new Promise(r => setTimeout(r, 600));
         }
         const verbCap = action === 'add' ? 'Отключено' : 'Включено';
         reportBulkOutcome(`${verbCap} фраз: ${items.length}`, verbCap, items.length, failed, lastError, setMinusError);
@@ -383,17 +410,47 @@ export default function CampaignPage() {
         toast.error(msg);
     };
 
-    const handleSetBid = async (c: SearchCluster, bid: number) => {
+    // Тихая сверка кластеров с WB (после массовой правки ставок): подтягивает реальные ставки
+    // из get-bids, не гася основной спиннер и не роняя ошибку в UI.
+    const refetchClusters = useCallback(async () => {
+        try {
+            const res = await api.getCampaignClusters(campaignId, dateFrom, dateTo, selectedNm);
+            if (!res.error) setData(res);
+        } catch { /* фоновая сверка — молча */ }
+    }, [campaignId, dateFrom, dateTo, selectedNm]);
+
+    // meta — «паспорт» применения (колонка «Стоит»): источник + точка отсчёта ДРР/CPM/цель.
+    const handleSetBid = async (c: SearchCluster, bid: number, meta?: { source?: string; targetDrr?: number | null }) => {
         if (clusterUnified) { setBidError(CLUSTER_UNIFIED_MSG); return; }
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setBidError('Не удалось определить товар (nm_id) кампании'); return; }
-        if (!window.confirm(`Поставить ставку ${formatNumber(bid, 0)} ₽ на кластер «${c.norm_query}» в кабинете WB?`)) return;
+        // Подтверждение — встроенная кнопка ✓ в ячейке ставки (не блокирующий window.confirm)
         setBidError(null);
         setBidPending(prev => new Set(prev).add(c.norm_query));
+        const basisDrr = c.drr == null ? null : Number(c.drr);
+        const basisCpm = c.cpm == null ? null : Number(c.cpm);
         try {
-            const res = await api.setCampaignClusterBid(campaignId, { nm_id: nmId, norm_query: c.norm_query, bid });
-            if (!res.ok) { setBidError(res.error || 'WB отклонил ставку'); return; }
-            setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => x.norm_query === c.norm_query ? { ...x, bid: res.bid ?? bid } : x) } : prev);
+            // verify:false — пишем оптимистично (как ставка зоны/списка). Немедленное перечитывание
+            // ненадёжно из-за read-after-write лага WB и давало ложное «ставка не подтвердилась».
+            // Заведомо неподдерживаемые случаи (единая ставка/CPC) отбивает гейт → res.unsupported.
+            const res = await api.setCampaignClusterBid(campaignId, {
+                nm_id: nmId, norm_query: c.norm_query, bid, verify: false,
+                source: meta?.source, basis_drr: basisDrr, basis_cpm: basisCpm, target_drr: meta?.targetDrr ?? null,
+            });
+            if (!res.ok) {
+                const msg = res.error || 'WB отклонил ставку';
+                setBidError(msg);
+                if (res.unsupported) toast.error(msg);  // гейт по типу кампании — показываем заметно
+                return;
+            }
+            const applied = res.bid ?? bid;
+            // Оптимистичный паспорт: ставка > 0 → «стоит с сегодня» (0 дн); сброс → паспорт снимаем.
+            // Бэкенд не сбрасывает таймер при ТОЙ ЖЕ ставке — редкий случай выправит следующий refetch.
+            const passport = applied > 0
+                ? { bid_set_at: new Date().toISOString(), bid_days: 0, bid_source: meta?.source ?? 'manual', bid_basis_drr: basisDrr, bid_basis_cpm: basisCpm }
+                : { bid_set_at: null, bid_days: null, bid_source: null, bid_basis_drr: null, bid_basis_cpm: null };
+            setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => x.norm_query === c.norm_query ? { ...x, bid: applied, ...passport } : x) } : prev);
+            if (res.adjusted) toast.warning(`Ниже минимума WB — поставлен минимум ${formatNumber(applied, 0)} ₽`);
         } catch (e) {
             setBidError(e instanceof Error ? e.message : 'Ошибка обращения к WB');
         } finally {
@@ -401,34 +458,50 @@ export default function CampaignPage() {
         }
     };
 
-    // Массовая ставка: одно подтверждение, затем последовательно по WB. bid=0 — сброс к ставке кампании.
-    const handleBulkBid = async (items: { cluster: SearchCluster; bid: number }[], label: string) => {
+    // Массовая ставка ОДНИМ запросом (WB normquery/bids батчевый — как Mkeeper): мгновенно, без
+    // rate-limit 429, в отличие от прежнего N-поштучного цикла. bid=0 — сброс к ставке кампании.
+    const handleBulkBid = async (items: { cluster: SearchCluster; bid: number }[], label: string, meta?: { source?: string; targetDrr?: number | null }) => {
         if (clusterUnified) { setBidError(CLUSTER_UNIFIED_MSG); return; }
         if (items.length === 0) return;
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setBidError('Не удалось определить товар (nm_id) кампании'); return; }
         // Подтверждение уже получено в нижней панели кластеризатора
         setBidError(null);
-        setBidPending(prev => { const n = new Set(prev); items.forEach(i => n.add(i.cluster.norm_query)); return n; });
-        const failed: string[] = [];
-        let lastError: string | null = null;
-        for (const { cluster, bid } of items) {
-            try {
-                const res = await api.setCampaignClusterBid(campaignId, { nm_id: nmId, norm_query: cluster.norm_query, bid });
-                if (res.ok) {
-                    setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => x.norm_query === cluster.norm_query ? { ...x, bid: bid > 0 ? (res.bid ?? bid) : null } : x) } : prev);
-                } else {
-                    failed.push(cluster.norm_query);
-                    lastError = res.error || 'WB отклонил ставку';
-                }
-            } catch (e) {
-                failed.push(cluster.norm_query);
-                lastError = e instanceof Error ? e.message : 'Ошибка обращения к WB';
-            } finally {
-                setBidPending(prev => { const n = new Set(prev); n.delete(cluster.norm_query); return n; });
+        const qs = items.map(i => i.cluster.norm_query);
+        setBidPending(prev => { const n = new Set(prev); qs.forEach(q => n.add(q)); return n; });
+        try {
+            // basis_* — точка отсчёта на момент применения (ДРР/CPM фразы + цель); паспорт подтянется refetch'ем
+            const res = await api.setCampaignClusterBidsBulk(campaignId, items.map(i => ({
+                nm_id: nmId, norm_query: i.cluster.norm_query, bid: i.bid,
+                source: meta?.source, basis_drr: i.cluster.drr == null ? null : Number(i.cluster.drr),
+                basis_cpm: i.cluster.cpm == null ? null : Number(i.cluster.cpm), target_drr: meta?.targetDrr ?? null,
+            })));
+            // Общий отказ (нет кампании/ключа или гейт по типу) — результатов нет
+            if (!res.results) {
+                const msg = humanizeAdsError(res.error, 'WB отклонил массовую ставку');
+                setBidError(msg);
+                toast.error(msg);
+                return;
             }
+            const okSet = new Set(res.results.filter(r => r.ok).map(r => r.norm_query));
+            const appliedBid = new Map(res.results.filter(r => r.ok).map(r => [r.norm_query, r.bid] as const));
+            const sentBid = new Map(items.map(i => [i.cluster.norm_query, i.bid] as const));
+            // Оптимистично применяем успешные (bid из ответа = факт, может быть минимумом WB)
+            setData(prev => prev ? { ...prev, clusters: prev.clusters.map(x => {
+                if (!okSet.has(x.norm_query)) return x;
+                const sent = sentBid.get(x.norm_query) ?? 0;
+                return { ...x, bid: sent > 0 ? (appliedBid.get(x.norm_query) ?? sent) : null };
+            }) } : prev);
+            const failed = res.results.filter(r => !r.ok).map(r => r.norm_query);
+            const lastError = res.results.filter(r => !r.ok).map(r => r.error).filter(Boolean).pop() || null;
+            reportBulkOutcome(`Готово: ${label} — фраз: ${items.length}`, 'Применено', items.length, failed, lastError, setBidError);
+            // Сверка с WB: перечитываем кластеры — реальные ставки заменят оптимистичные
+            if (failed.length < items.length) await refetchClusters();
+        } catch (e) {
+            setBidError(e instanceof Error ? e.message : 'Ошибка обращения к WB');
+        } finally {
+            setBidPending(prev => { const n = new Set(prev); qs.forEach(q => n.delete(q)); return n; });
         }
-        reportBulkOutcome(`Готово: ${label} — фраз: ${items.length}`, 'Применено', items.length, failed, lastError, setBidError);
     };
 
     const toggleState = async () => {
@@ -437,14 +510,14 @@ export default function CampaignPage() {
         setStateBusy(true);
         try {
             const r = await api.setCampaignState(campaign.campaign_id, active);
-            if (r && (r as { ok?: boolean }).ok === false) { toast.error((r as { error?: string }).error || 'Не удалось изменить статус'); return; }
+            if (r && (r as { ok?: boolean }).ok === false) { toast.error(humanizeAdsError((r as { error?: string }).error, 'Не удалось изменить статус')); return; }
             toast.success(active ? 'Кампания запущена' : 'Кампания приостановлена');
             // Мгновенный флип из эхо-статуса ответа (9 активна / 11 пауза), без ожидания рефетча
             const newStatus = r.status ?? (active ? 9 : 11);
             setCampaign(prev => prev ? { ...prev, status: newStatus, status_label: active ? 'Активна' : 'Пауза' } : prev);
             loadCampaign(true);  // тихая фоновая сверка — не блокирует тумблер
         }
-        catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось изменить статус кампании'); }
+        catch (e) { toast.error(humanizeAdsError(e, 'Не удалось изменить статус кампании')); }
         finally { setStateBusy(false); }
     };
 
@@ -465,11 +538,11 @@ export default function CampaignPage() {
         setManageBusy(true); setCampError('');
         try {
             const res = await api.renameCampaign(campaign.campaign_id, name);
-            if (!res.ok) { toast.error(res.error || 'Не удалось переименовать кампанию'); return; }
+            if (!res.ok) { toast.error(humanizeAdsError(res.error, 'Не удалось переименовать кампанию')); return; }
             toast.success('Кампания переименована');
             setCampaign(prev => prev ? { ...prev, name: res.name ?? name } : prev);
             loadCampaign(true);
-        } catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось переименовать кампанию'); }
+        } catch (e) { toast.error(humanizeAdsError(e, 'Не удалось переименовать кампанию')); }
         finally { setManageBusy(false); }
     };
 
@@ -478,11 +551,11 @@ export default function CampaignPage() {
         setManageBusy(true); setCampError('');
         try {
             const res = await api.stopCampaign(campaign.campaign_id);
-            if (!res.ok) { toast.error(res.error || 'Не удалось завершить кампанию'); return; }
+            if (!res.ok) { toast.error(humanizeAdsError(res.error, 'Не удалось завершить кампанию')); return; }
             toast.success('Кампания завершена');
             setCampaign(prev => prev ? { ...prev, status: res.status ?? 7, status_label: 'Завершена' } : prev);
             loadCampaign(true);
-        } catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось завершить кампанию'); }
+        } catch (e) { toast.error(humanizeAdsError(e, 'Не удалось завершить кампанию')); }
         finally { setManageBusy(false); }
     };
 
@@ -491,25 +564,37 @@ export default function CampaignPage() {
         setManageBusy(true); setCampError('');
         try {
             const res = await api.deleteCampaign(campaign.campaign_id);
-            if (!res.ok) toast.error(res.error || 'Не удалось удалить кампанию');
+            if (!res.ok) toast.error(humanizeAdsError(res.error, 'Не удалось удалить кампанию'));
             else toast.success('Кампания удалена');
             await loadCampaign();
-        } catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось удалить кампанию'); }
+        } catch (e) { toast.error(humanizeAdsError(e, 'Не удалось удалить кампанию')); }
         finally { setManageBusy(false); }
     };
 
     // «Обновить» = живой догруз этой кампании из WB (деталь+бюджет+свежая стата) → зеркало,
     // затем перечитать шапку и метрики/график/зоны из уже свежего зеркала.
-    const doRefresh = async () => {
+    // auto=true — тихий догруз при заходе на страницу: не роняет warning-тост, если WB
+    // недоступен (в шапке уже показаны последние данные из зеркала из loadCampaign()).
+    const doRefresh = useCallback(async (auto = false) => {
         setRefreshing(true);
         try {
             const res = await api.refreshCampaign(campaignId);
-            if (!res.ok) toast.warning('Не удалось догрузить из WB — показаны последние данные из базы');
-        } catch { toast.warning('Не удалось догрузить из WB — показаны последние данные из базы'); }
+            if (!res.ok && !auto) toast.warning('Не удалось догрузить из WB — показаны последние данные из базы');
+        } catch { if (!auto) toast.warning('Не удалось догрузить из WB — показаны последние данные из базы'); }
         await loadCampaign(true);      // шапка (остаток/статус) из свежего зеркала, без мигания
         setReloadKey(k => k + 1);      // метрики/график/зоны — тоже перечитать
         setRefreshing(false);
-    };
+    }, [campaignId, loadCampaign, toast]);
+
+    // При заходе в кампанию сразу подтягиваем актуальные данные из WB (остаток/статус/расход/
+    // метрики), а не только зеркало списка. Один раз на каждую кампанию: сначала быстрый показ
+    // из зеркала (loadCampaign выше), затем тихий живой догруз поверх.
+    const autoRefreshedFor = useRef<number | null>(null);
+    useEffect(() => {
+        if (!Number.isFinite(campaignId) || autoRefreshedFor.current === campaignId) return;
+        autoRefreshedFor.current = campaignId;
+        doRefresh(true);
+    }, [campaignId, doRefresh]);
 
     // Копирование артикула (nm_id) из карточки товара кампании
     const copyNm = (nmId: number) => {
@@ -659,7 +744,7 @@ export default function CampaignPage() {
                                             {ap?.enabled ? <><IcClock size={14} />{autopayLabel(ap)}</> : <><IcGear size={14} />Настроить</>}
                                         </button>
                                         <button onClick={() => setAutopayLogModal(true)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#3b82f6', fontSize: 12.5, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, marginTop: 'auto' }}>
-                                            <IcHistory size={13} />История пополнений
+                                            <IcHistory size={13} />История бюджета
                                         </button>
                                     </div>
                                     <div style={{ minWidth: 210, padding: '10px 14px', border: '1px solid #d1d5db', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -726,7 +811,7 @@ export default function CampaignPage() {
                                 </div>
                             )}
 
-                            {/* Зоны показов: тумблеры вкл/выкл (где WB разрешает). Разбивка статистики по зонам — на вкладке «По зонам». */}
+                            {/* Зоны показов: тумблеры вкл/выкл (где WB разрешает). Разбивка статистики по зонам — селектором внутри «По дням». */}
                             {zones && Object.keys(zones.placements).length > 0 && (
                                 <ZonesPanel
                                     zones={zones}
@@ -740,6 +825,20 @@ export default function CampaignPage() {
                                         return { ...z, bids };
                                     })}
                                 />
+                            )}
+                            {/* Редактор ставки зон не должен исчезать молча при ошибке/загрузке живого WB-вызова */}
+                            {!zones && (zonesLoading || zonesError) && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', fontSize: 12 }}>
+                                    <span style={{ fontWeight: 700, letterSpacing: 0.3, color: 'var(--color-muted)' }}>ЗОНЫ ПОКАЗОВ</span>
+                                    {zonesLoading ? (
+                                        <span style={{ color: 'var(--color-muted)' }}>ставки зон загружаются…</span>
+                                    ) : (
+                                        <>
+                                            <span style={{ color: 'var(--color-danger)' }}>⚠️ WB не ответил — ставки зон не загрузились</span>
+                                            <button onClick={() => setReloadKey(k => k + 1)} className="btn btn-secondary btn-sm" style={{ fontSize: 11 }}>Обновить</button>
+                                        </>
+                                    )}
+                                </div>
                             )}
 
                             {/* Свернуть — освободить экран под график и таблицу */}
@@ -758,7 +857,7 @@ export default function CampaignPage() {
                         {/* Период + обновление */}
                         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
                             <AdsPeriodPicker from={dateFrom} to={dateTo} onApply={(f, t) => { if (f && t) { setDateFrom(f); setDateTo(t); } }} minWidth={230} />
-                            <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }} onClick={doRefresh} disabled={loading || metricsLoading || refreshing}><IcRefresh size={14} />{refreshing ? 'Обновление…' : 'Обновить'}</button>
+                            <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }} onClick={() => doRefresh()} disabled={loading || metricsLoading || refreshing}><IcRefresh size={14} />{refreshing ? 'Обновление…' : 'Обновить'}</button>
                         </div>
 
                         {/* Вкладки */}
@@ -769,7 +868,7 @@ export default function CampaignPage() {
                                 <IcCalendar />Метрики
                                 {tab === 'metrics' && (
                                     <span style={{ display: 'inline-flex', borderRadius: 6, overflow: 'hidden', border: '1px solid rgba(255,255,255,.55)' }}>
-                                        {(([['table', 'По дням'], ['chart', 'График'], ...(isCpm ? [['zones', 'По зонам']] : [])]) as [typeof metricsView, string][]).map(([v, label]) => (
+                                        {(([['table', 'По дням'], ['chart', 'График']]) as [typeof metricsView, string][]).map(([v, label]) => (
                                             <button key={v} onClick={e => { e.stopPropagation(); setMetricsView(v); }}
                                                 style={{ padding: '3px 10px', fontSize: 12, fontWeight: 500, border: 'none', cursor: 'pointer', background: metricsView === v ? '#fff' : 'transparent', color: metricsView === v ? '#1d4ed8' : '#fff' }}>
                                                 {label}
@@ -809,16 +908,7 @@ export default function CampaignPage() {
                         {/* ─── Метрики: по дням / график / по зонам ─── */}
                         {tab === 'metrics' && (
                             <div className="glass-card static" style={{ padding: 0, overflow: 'hidden', flex: 1, minHeight: 0 }}>
-                                {metricsView === 'zones' ? (
-                                    <>
-                                        {zoneSelectorBar}
-                                        {zoneMetricsLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка метрик…</div>}
-                                        {!zoneMetricsLoading && zoneMetricsError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {zoneMetricsError === 'campaign_not_found' ? 'Кампания не найдена' : zoneMetricsError}</span></div>}
-                                        {!zoneMetricsLoading && !zoneMetricsError && zoneMetrics && (zoneMetrics.rows.length === 0
-                                            ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период нет данных по зоне</div>
-                                            : <CampaignZoneMetricsTable resp={zoneMetrics} />)}
-                                    </>
-                                ) : metricsView === 'chart' ? (
+                                {metricsView === 'chart' ? (
                                     <>
                                         {zoneSelectorBar}
                                         {zoneMetricsZone === 'total' ? (
@@ -840,12 +930,26 @@ export default function CampaignPage() {
                                         )}
                                     </>
                                 ) : (
+                                    // «По дням»: зона «Всего» — полная воронка; зона Поиск/Рекомендации — РК-метрики по зоне (воронка не делится)
                                     <>
-                                        {metricsLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка метрик…</div>}
-                                        {!metricsLoading && metricsError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {metricsError === 'campaign_not_found' ? 'Кампания не найдена' : metricsError}</span></div>}
-                                        {!metricsLoading && !metricsError && metrics && (metrics.rows.length === 0
-                                            ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период нет данных по кампании</div>
-                                            : <CampaignMetricsTable resp={metrics} />)}
+                                        {isCpm && zoneSelectorBar}
+                                        {zoneMetricsZone === 'total' ? (
+                                            <>
+                                                {metricsLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка метрик…</div>}
+                                                {!metricsLoading && metricsError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {metricsError === 'campaign_not_found' ? 'Кампания не найдена' : metricsError}</span></div>}
+                                                {!metricsLoading && !metricsError && metrics && (metrics.rows.length === 0
+                                                    ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период нет данных по кампании</div>
+                                                    : <CampaignMetricsTable resp={metrics} />)}
+                                            </>
+                                        ) : (
+                                            <>
+                                                {zoneMetricsLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка метрик…</div>}
+                                                {!zoneMetricsLoading && zoneMetricsError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {zoneMetricsError === 'campaign_not_found' ? 'Кампания не найдена' : zoneMetricsError}</span></div>}
+                                                {!zoneMetricsLoading && !zoneMetricsError && zoneMetrics && (zoneMetrics.rows.length === 0
+                                                    ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период нет данных по зоне</div>
+                                                    : <CampaignZoneMetricsTable resp={zoneMetrics} />)}
+                                            </>
+                                        )}
                                     </>
                                 )}
                             </div>
@@ -864,16 +968,26 @@ export default function CampaignPage() {
                                     data.clusters.length === 0 ? (
                                         <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период у кампании нет данных по кластерам</div>
                                     ) : (
-                                        // Сводка по кампании — в итоговой строке внизу таблицы, не в крупных карточках
+                                        // Сводка по кампании — в итоговой строке внизу таблицы, не в крупных карточках.
+                                        // CPC: только просмотр статистики — ставка единая, минус-фраз нет, поэтому редакторы
+                                        // ставок/минус-фраз не передаём (ClusterTable без minus/bids идёт read-only).
+                                        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+                                        {isCpc && (
+                                            <div style={{ flexShrink: 0, marginBottom: 10, padding: '8px 12px', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 12, fontSize: 12, color: '#1e3a8a' }}>
+                                                Статистика по фразам — только просмотр. У CPC ставка единая на все фразы, а минус-фраз нет: менять ставки и исключать запросы отсюда нельзя.
+                                            </div>
+                                        )}
+                                        <div style={{ flex: 1, minHeight: 0 }}>
                                         <ClusterTable
                                             clusters={data.clusters}
                                             targetDrr={data.target_drr}
                                             aov={data.aov}
                                             defaultBid={data.default_bid}
+                                            minBid={zones?.min_bids?.search ?? null}
                                             exportName={`clusters_${campaignId}_${dateFrom}_${dateTo}`}
                                             clusterLock={clusterUnified ? CLUSTER_UNIFIED_MSG : null}
-                                            minus={{ pending, onToggle: handleToggleMinus, onBulk: handleBulkMinus, error: minusError }}
-                                            bids={{ pending: bidPending, onSetBid: handleSetBid, onBulkBid: handleBulkBid, error: bidError }}
+                                            minus={isCpm ? { pending, onToggle: handleToggleMinus, onBulk: handleBulkMinus, error: minusError } : undefined}
+                                            bids={isCpm ? { pending: bidPending, onSetBid: handleSetBid, onBulkBid: handleBulkBid, error: bidError } : undefined}
                                             positions={positions}
                                             onCollectPositions={handleCollectPositions}
                                             onStopPositions={handleStopPositions}
@@ -881,6 +995,8 @@ export default function CampaignPage() {
                                             onCollectOne={handleCollectOne}
                                             collectingOne={collectingOne}
                                         />
+                                        </div>
+                                        </div>
                                     )
                                 )}
                             </div>

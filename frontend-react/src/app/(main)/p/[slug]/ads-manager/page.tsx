@@ -15,7 +15,7 @@ import AdsPeriodPicker from './components/AdsPeriodPicker';
 import InfoTip from './components/InfoTip';
 import Tooltip from './components/Tooltip';
 import { useToast } from './components/Toasts';
-import { fmt, num, fmtPct, iso, STATUS_BADGE, thStyle, thLeft, tdStyle, tdLeft, wbCampaignUrl, campaignTypeBadge, autopayLabel } from './components/adsShared';
+import { fmt, num, fmtPct, iso, STATUS_BADGE, thStyle, thLeft, tdStyle, tdLeft, wbCampaignUrl, campaignTypeBadge, autopayLabel, humanizeAdsError } from './components/adsShared';
 import type { AdsManagerCampaign, AdsAutopaySetting } from '@/types/api';
 
 type SortDir = 'asc' | 'desc';
@@ -49,6 +49,7 @@ const CAMP_COLS: { key: string; label: string; sort?: keyof AdsManagerCampaign; 
     { key: 'photo', label: 'Товар', align: 'center', fixed: true, w: 44 },
     { key: 'budget', label: 'Остаток бюджета ₽', sort: 'budget', blockStart: true, title: 'Сверху — текущий остаток, снизу — бюджет за сегодня (остаток + расход)', w: 84 },
     { key: 'spend', label: 'Расход ₽', sort: 'spend_period', title: 'Сверху — расход за сегодня, снизу — за выбранный период (по умолчанию — вчера)', w: 84 },
+    { key: 'bid', label: 'Ставка ₽', sort: 'default_bid', title: 'Ставка кампании по активной зоне (Поиск). Клик — редактировать, запись сразу в WB. Реальные деньги. Только для готовых/активных/приостановленных.', w: 72 },
     { key: 'clicks_period', label: 'Клики', sort: 'clicks_period', blockStart: true, title: 'Клики по рекламе кампании за период', w: 58 },
     { key: 'ctr', label: 'CTR', sort: 'ctr', title: 'Конверсия из показа в клик', w: 50 },
     { key: 'cpc', label: 'CPC ₽', sort: 'cpc', title: 'Стоимость 1 клика: расход кампании / клики за период', w: 50 },
@@ -139,6 +140,9 @@ export default function AdsManagerPage() {
     const [createMenuOpen, setCreateMenuOpen] = useState(false);
     const [autopayLogModal, setAutopayLogModal] = useState<AdsManagerCampaign | null>(null);
     const [stateBusy, setStateBusy] = useState<number | null>(null);  // кампания в процессе смены статуса
+    const [bidBusy, setBidBusy] = useState<number | null>(null);  // кампания в процессе записи ставки в WB
+    const [bidDraft, setBidDraft] = useState<{ key: string; text: string } | null>(null);  // текст редактируемой ячейки ставки
+    const [bidPending, setBidPending] = useState<{ cid: number; value: number } | null>(null);  // ставка ждёт встроенного подтверждения
     // Тулбар списка: фильтр статуса (завершённые скрыты), видимость колонок, открытое меню
     const [statusFilter, setStatusFilter] = useState('not_completed');
     const [visibleCols, setVisibleCols] = useState<Set<string>>(() => new Set(CAMP_TOGGLE_KEYS));
@@ -213,9 +217,43 @@ export default function AdsManagerPage() {
             toast.success(active ? `Кампания «${c.name || c.campaign_id}» запущена` : `Кампания «${c.name || c.campaign_id}» приостановлена`);
             await loadCampaigns(dateFrom, dateTo);
         } catch (e) {
-            toast.error(e instanceof Error ? e.message : 'Не удалось изменить статус кампании');
+            toast.error(humanizeAdsError(e, 'Не удалось изменить статус кампании'));
         } finally { setStateBusy(null); }
     }, [loadCampaigns, dateFrom, dateTo, toast]);
+
+    // Оптимистично проставить ставку кампании в таблице (без ре-синка).
+    const patchBid = useCallback((cid: number, bid: number) => {
+        setCampaigns(prev => prev.map(x => x.campaign_id === cid ? { ...x, default_bid: bid } : x));
+    }, []);
+
+    // Шаг 1: «взвести» изменённую ставку — показать встроенное подтверждение (не пишем сразу).
+    const armBid = useCallback((c: AdsManagerCampaign, text: string) => {
+        setBidDraft(null);
+        const v = Math.round(parseFloat(text.replace(',', '.')));
+        const cur = c.default_bid ?? null;
+        if (!isFinite(v) || v <= 0) { setBidPending(null); return; }        // пусто/мусор — отмена
+        if (cur != null && v === Math.round(cur)) { setBidPending(null); return; }  // без изменений
+        setBidPending({ cid: c.campaign_id, value: v });
+    }, []);
+
+    // Шаг 2: запись в WB после клика ✓. Можно ввести любую ставку — если она ниже
+    // аукционного минимума WB, бэкенд сам поднимает до минимума (res.adjusted).
+    const applyBid = useCallback(async (c: AdsManagerCampaign, value: number) => {
+        setBidPending(null);
+        setBidBusy(c.campaign_id);
+        try {
+            const res = await api.setCampaignBid(c.campaign_id, value);
+            if (res.ok && res.bid != null) {
+                patchBid(c.campaign_id, res.bid);
+                if (res.adjusted) toast.warning(`Ниже минимума WB — поставлен минимум ${res.bid} ₽`);
+                else toast.success(`Ставка «${c.name || c.campaign_id}» → ${res.bid} ₽`);
+            } else {
+                toast.error(humanizeAdsError(res.error, 'Не удалось изменить ставку'));
+            }
+        } catch (e) {
+            toast.error(humanizeAdsError(e, 'Не удалось изменить ставку'));
+        } finally { setBidBusy(null); }
+    }, [patchBid, toast]);
 
     // Каталог артикулов для каскадных фильтров (nm_id → предмет/бренд/название).
     const loadCatalog = useCallback(async () => {
@@ -292,6 +330,12 @@ export default function AdsManagerPage() {
                     localStorage.setItem('ads_camp_cols_spendhr', '1');
                     localStorage.setItem('ads_camp_cols', JSON.stringify([...set]));
                 }
+                // «Ставка» (инлайн-правка) — показать один раз
+                if (!localStorage.getItem('ads_camp_cols_bid')) {
+                    set.add('bid');
+                    localStorage.setItem('ads_camp_cols_bid', '1');
+                    localStorage.setItem('ads_camp_cols', JSON.stringify([...set]));
+                }
                 setVisibleCols(set);
             }
             const drr = Number(localStorage.getItem('ads_drr_plan_pct'));
@@ -309,7 +353,13 @@ export default function AdsManagerPage() {
     const handleSync = async () => {
         setSyncing(true); setSyncProgress('');
         try {
-            await api.syncAdCampaigns();
+            // Приоритет синка — кампании под активным фильтром страницы (их бюджеты бэк
+            // тянет первыми). Гейтим на «срез уже полного списка» (любой фильтр: поиск,
+            // бренд/предмет/артикул, пресеты, статус) — без сужения шлём пустой список,
+            // и бэк держит прежний порядок по расходу.
+            const priorityIds = visibleCampaigns.length < campaigns.length
+                ? visibleCampaigns.map(c => c.campaign_id) : [];
+            await api.syncAdCampaigns(priorityIds);
             // Наблюдаем прогресс до ФАКТИЧЕСКОГО завершения (бэк тянет бюджеты по 0.5с/кампанию,
             // TIME_BUDGET ~600с). Раньше цикл обрывался на 120с → loadCampaigns садился на
             // частично записанное зеркало, часть бюджетов «догоняла» лишь на следующем синке.
@@ -473,6 +523,11 @@ export default function AdsManagerPage() {
     // а вложенные кнопки/ссылки гасят всплытие сами.
     const onRowClick = (e: React.MouseEvent, c: AdsManagerCampaign) => {
         if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        // Клик по интерактивному контролу ИЛИ по его ячейке (правка ставки/ДРР%, пуск-пауза,
+        // автопополнение, ссылка WB) не должен проваливаться в карточку. Проверяем реальную
+        // цель клика — не полагаемся только на stopPropagation дочерних контролов (мимо мелкого
+        // инпута легко попасть в пустое поле ячейки, где всплытие уже не погашено).
+        if ((e.target as HTMLElement).closest?.('button, a, input, select, textarea, [role="button"], [data-nonav]')) return;
         openCampaign(c);
     };
     // Средняя кнопка мыши по строке — новая вкладка (нативно так работают только ссылки).
@@ -483,6 +538,9 @@ export default function AdsManagerPage() {
     };
 
     const visibleCampColumns = CAMP_COLS.filter(col => col.fixed || visibleCols.has(col.key));
+    // Колонки с интерактивными контролами: клик в любом месте такой ячейки остаётся в ней,
+    // а не открывает кампанию (см. onRowClick — проверка [data-nonav]).
+    const NONAV_COLS = new Set(['status', 'bid', 'drr_plan', 'autopay', 'wb']);
     const renderCampCell = (key: string, c: AdsManagerCampaign): React.ReactNode => {
         switch (key) {
             case 'name': return (
@@ -538,6 +596,47 @@ export default function AdsManagerPage() {
                     <div style={{ fontSize: 10.5, color: '#9ca3af' }} title="Расход за выбранный период (по умолчанию — вчера)">{fmt(c.spend_period)}</div>
                 </div>
             );
+            case 'bid': {
+                // WB принимает ставку только у статусов 4/9/11 — иначе показываем значение без правки.
+                const editable = c.status === 4 || c.status === 9 || c.status === 11;
+                const cur = c.default_bid;
+                if (!editable) return <span style={{ color: '#9ca3af' }}>{cur != null ? fmt(cur) : '—'}</span>;
+                const busy = bidBusy === c.campaign_id;
+                const pending = bidPending?.cid === c.campaign_id ? bidPending : null;
+                // Шаг 2: встроенное подтверждение — реальные деньги пишутся только по клику ✓
+                if (pending) {
+                    return (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end' }}
+                            onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}>
+                            <span style={{ fontWeight: 700, color: '#7c3aed', whiteSpace: 'nowrap' }}>{pending.value} ₽?</span>
+                            <button aria-label="Применить ставку" title={`Применить ${pending.value} ₽`} onClick={e => { e.stopPropagation(); applyBid(c, pending.value); }}
+                                style={{ border: '1px solid #10b981', background: '#ecfdf5', color: '#059669', borderRadius: 4, cursor: 'pointer', width: 20, height: 20, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0, fontSize: 12 }}>✓</button>
+                            <button aria-label="Отменить" title="Отменить" onClick={e => { e.stopPropagation(); setBidPending(null); }}
+                                style={{ border: '1px solid #e5e7eb', background: '#fff', color: '#6b7280', borderRadius: 4, cursor: 'pointer', width: 20, height: 20, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0, fontSize: 12 }}>✕</button>
+                        </span>
+                    );
+                }
+                const isDraft = bidDraft?.key === String(c.campaign_id);
+                const curText = cur != null ? String(Math.round(cur)) : '';
+                // Шаг 1: правка значения; Enter/уход с поля — «взводит» подтверждение (armBid)
+                return (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, justifyContent: 'flex-end' }}>
+                        <input type="text" inputMode="decimal" aria-label="Ставка кампании ₽" disabled={busy}
+                            value={isDraft ? bidDraft!.text : curText} placeholder="—"
+                            onClick={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}
+                            onKeyDown={e => {
+                                e.stopPropagation();
+                                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                                else if (e.key === 'Escape') { setBidDraft({ key: String(c.campaign_id), text: curText }); (e.target as HTMLInputElement).blur(); }
+                            }}
+                            onFocus={() => setBidDraft({ key: String(c.campaign_id), text: curText })}
+                            onChange={e => setBidDraft({ key: String(c.campaign_id), text: e.target.value })}
+                            onBlur={e => armBid(c, e.currentTarget.value)}
+                            style={{ width: 52, padding: '1px 4px', fontSize: 12, textAlign: 'right', borderRadius: 4, fontWeight: 600, color: busy ? '#9ca3af' : '#111827', border: '1px solid #e5e7eb', background: busy ? '#f9fafb' : '#fff' }} />
+                        <span style={{ fontSize: 10.5, color: '#9ca3af', width: 8 }}>{busy ? '…' : '₽'}</span>
+                    </span>
+                );
+            }
             case 'clicks_period': return fmt(c.clicks_period);
             case 'ctr': return fmtPct(c.ctr);
             case 'cpc': return c.cpc > 0 ? fmt(c.cpc) : '—';
@@ -592,8 +691,8 @@ export default function AdsManagerPage() {
                                     : <><IcGear size={13} />{ap ? 'выключено' : 'настроить'}</>}
                             </button>
                         </Tooltip>
-                        <Tooltip text="История пополнений">
-                            <button onClick={e => { e.stopPropagation(); setAutopayLogModal(c); }} aria-label="История пополнений"
+                        <Tooltip text="История бюджета">
+                            <button onClick={e => { e.stopPropagation(); setAutopayLogModal(c); }} aria-label="История бюджета"
                                 style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#6b7280', padding: '0 4px', display: 'inline-flex', alignItems: 'center' }}><IcHistory size={14} /></button>
                         </Tooltip>
                     </span>
@@ -819,7 +918,7 @@ export default function AdsManagerPage() {
                                                 {visibleCampColumns.map(col => {
                                                     const b = col.align === 'left' ? tdLeft : col.align === 'center' ? { ...tdStyle, textAlign: 'center' as const } : tdStyle;
                                                     const base = { ...(col.blockStart ? { ...b, borderLeft: BLOCK_DIVIDER } : b), width: col.w, padding: '3px 5px', overflow: 'hidden' as const, textOverflow: 'ellipsis' as const };
-                                                    return <td key={col.key} style={base}>{renderCampCell(col.key, c)}</td>;
+                                                    return <td key={col.key} style={base} data-nonav={NONAV_COLS.has(col.key) ? '' : undefined}>{renderCampCell(col.key, c)}</td>;
                                                 })}
                                             </tr>
                                         ))}

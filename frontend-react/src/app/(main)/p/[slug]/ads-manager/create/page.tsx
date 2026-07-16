@@ -7,7 +7,7 @@ import { formatNumber } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import type { AdsAutopaySetting } from '@/types/api';
 import { IcX } from '../components/icons';
-import { DEFAULT_AUTOPAY } from '../components/adsShared';
+import { DEFAULT_AUTOPAY, buildAutoCampaignName } from '../components/adsShared';
 import AutopaySettingsModal from '../components/AutopaySettingsModal';
 import AddProductsModal from '../components/AddProductsModal';
 import BulkCreate from '../components/BulkCreate';
@@ -27,12 +27,6 @@ function defaultName(): string {
     return `Кампания от ${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`;
 }
 
-// Каноничное имя кампании по типу: CPM единая → «Авто», CPM ручная → «Поиск + рек», CPC → «Поиск».
-function campaignTypeName(payment: string, bid: string): string {
-    if (payment === 'cpc') return 'Поиск';
-    return bid === 'unified' ? 'Авто' : 'Поиск + рек';
-}
-
 /** Раздел создания рекламной кампании (по кабинету WB Продвижение).
  *  Один вызов save-ad создаёт кампанию; бюджет и автопополнение применяются следом. */
 export default function CreateCampaignPage() {
@@ -45,6 +39,10 @@ export default function CreateCampaignPage() {
 
     // Настройки
     const [name, setName] = useState(defaultName());
+    // Имя правил вручную → авто-предзаполнение больше не перезаписывает его
+    const [nameEdited, setNameEdited] = useState(false);
+    // Каталог артикулов: nm → артикул продавца (для авто-имени «nmID артикул ТИП»)
+    const [vendorByNm, setVendorByNm] = useState<Map<number, string>>(() => new Map());
     const [payment, setPayment] = useState<Payment>('cpm');
     const [bidType, setBidType] = useState<Bid>('unified');
     const [zones, setZones] = useState<Set<string>>(() => new Set(['search', 'recommendations']));
@@ -69,21 +67,27 @@ export default function CreateCampaignPage() {
         if (pay) setPayment(pay);
         if (bd) setBidType(bd);
         const z = sp.get('zones'); if (z) setZones(new Set(z.split(',').filter(s => s === 'search' || s === 'recommendations')));
-        if (pay) setName(campaignTypeName(pay, bd || 'unified'));  // авто-имя по типу
         const nmParam = sp.get('nm');
-        if (bulk || !nmParam) return;
-        const nms = nmParam.split(',').map(Number).filter(n => Number.isFinite(n) && n > 0);
-        if (nms.length === 0) return;
-        const fill = (title: (nm: number) => string) => setSelected(prev => {
-            const n = new Map(prev);
-            for (const nm of nms) if (!n.has(nm)) n.set(nm, title(nm));
-            return n;
-        });
+        const nms = bulk || !nmParam ? [] : nmParam.split(',').map(Number).filter(n => Number.isFinite(n) && n > 0);
+        // Каталог: артикулы для авто-имени + подстановка названий предзаполненных из URL товаров
         api.getAdArticleCatalog()
-            .then(rows => { const by = new Map(rows.map(r => [r.nm_id, r.vendor_code])); fill(nm => by.get(nm) || String(nm)); })
-            .catch(() => fill(nm => String(nm)));
+            .then(rows => {
+                setVendorByNm(new Map(rows.map(r => [r.nm_id, r.vendor_code || ''])));
+                if (nms.length) {
+                    const by = new Map(rows.map(r => [r.nm_id, r.vendor_code]));
+                    setSelected(prev => { const n = new Map(prev); for (const nm of nms) if (!n.has(nm)) n.set(nm, by.get(nm) || String(nm)); return n; });
+                }
+            })
+            .catch(() => { if (nms.length) setSelected(prev => { const n = new Map(prev); for (const nm of nms) if (!n.has(nm)) n.set(nm, String(nm)); return n; }); });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // Первый выбранный товар → авто-имя «nmID артикул ТИП», пока имя не правили вручную
+    const firstNm = [...selected.keys()][0] ?? null;
+    useEffect(() => {
+        if (nameEdited || firstNm == null) return;
+        setName(buildAutoCampaignName(firstNm, vendorByNm.get(firstNm) || '', payment, bidType));
+    }, [firstNm, vendorByNm, payment, bidType, nameEdited]);
 
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
@@ -153,7 +157,7 @@ export default function CreateCampaignPage() {
 
                 {/* Название */}
                 <div style={{ ...card, marginTop: 10 }}>
-                    <EditableName value={name} onChange={setName} maxLength={50} />
+                    <EditableName value={name} onChange={v => { setName(v); setNameEdited(true); }} maxLength={50} />
                     <div style={{ display: 'flex', gap: 12, marginTop: 14, flexWrap: 'wrap' }}>
                         {([['cpc', 'Оплата за клики (CPC)', 'Вы платите за 1 клик'], ['cpm', 'Оплата за показы (CPM)', 'Вы платите за 1000 показов']] as const).map(([k, t, sub]) => (
                             <button key={k} onClick={() => setPayment(k)}

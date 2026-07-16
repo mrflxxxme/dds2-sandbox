@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytz
-from sqlalchemy import func, select
+from sqlalchemy import Date, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbAdCampaign, WbAdCampaignEvent, WbFunnelDaily
@@ -32,6 +32,16 @@ AUTOPAY_SETTINGS_KEY = "ads_autopay"
 
 # WB не принимает пополнение рекламной кампании меньше этой суммы.
 MIN_TOPUP_RUB = 1000.0
+
+# Окно (дней МСК) — глубина поиска полных дней для оценки «реальных возможностей».
+BUDGET_GAP_WINDOW_DAYS = 30
+# Потенциал полного дня = медиана по стольким ПОСЛЕДНИМ дням-остановкам (текущий режим,
+# а не устаревшее среднее). Фолбэк на полные дни, если кампания не упирается в бюджет.
+BUDGET_GAP_POTENTIAL_DAYS = 7
+# «Хронический» риск: кампания регулярно упирается в бюджет до конца дня. Показываем её
+# в «нехватке» ещё утром, до фактической остановки (прогноз по паттерну прошлых дней).
+BUDGET_GAP_CHRONIC_MIN_DAYS = 3    # минимум дней-остановок в окне, чтобы счесть паттерном
+BUDGET_GAP_CHRONIC_MIN_RATE = 0.5  # доля дней-остановок среди дней с расходом
 
 
 # ─── Список кампаний ─────────────────────────────────────────────────────────
@@ -191,6 +201,8 @@ async def list_ad_campaigns(
                 "spend_per_hour": round(spend_period / (period_days * 24), 2) if period_days > 0 else 0,
                 # Режим ставки CPM (единая/ручная) — из WB bid_type, заполняется синком
                 "bid_mode": c.bid_mode,
+                # Ставка кампании ₽ по активной зоне — для инлайн-правки в списке (из синка)
+                "default_bid": float(c.default_bid) if c.default_bid is not None else None,
                 # Доля рекл. кликов = клики кампании / все переходы её товаров
                 "ad_click_share": round(clicks_period / opens_p * 100, 2) if opens_p else 0,
                 "cr_cart": round(carts_p / opens_p * 100, 2) if opens_p else 0,  # конверсия в корзину
@@ -371,6 +383,42 @@ async def list_ad_article_catalog(db: AsyncSession, project_id: int) -> list[dic
     ]
 
 
+async def _campaign_min_bids(db: AsyncSession, project_id: int, campaign_id: int) -> dict:
+    """Минимальные (аукционный «пол») ставки ПО КАЖДОЙ ЗОНЕ — ЖИВАЯ проверка при заходе в РК.
+
+    У WB пол разный на кампанию (категорию) И на зону, поэтому пробим каждую зону отдельно.
+    НЕ кэшируем: аукционный пол динамический (меняется в течение дня) — запомненное значение
+    протухнет, а к нему клампятся и рекомендации, и ставка зоны. Read-only пробник WB (ставку
+    НЕ меняет) → {"search": ₽|None, "recommendations": ₽|None}. None у зоны — WB не отдал
+    (зона выключена/не настроена/read-only токен). CPM-единая — пробим placement 'combined'
+    и кладём результат в 'search' (единый бид рисуется одной карточкой «Поиск»).
+    """
+    from backend.services.funnel.wb_advertising_api import fetch_campaign_min_bid
+
+    camp = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    out: dict = {"search": None, "recommendations": None}
+    if camp is None:
+        return out
+    api_key = await _get_advert_api_key(db, project_id)
+    if not api_key:
+        return out
+    nm_ids = [int(n) for n in (camp.nm_ids or [])]
+    payment = (camp.campaign_type or "").lower()
+    if payment == "cpm" and (camp.bid_mode or "") == "unified":
+        out["search"] = await fetch_campaign_min_bid(api_key, campaign_id, nm_ids, "combined")
+        return out
+    out["search"] = await fetch_campaign_min_bid(api_key, campaign_id, nm_ids, "search")
+    if payment != "cpc":  # у CPC зоны «Рекомендации» нет
+        out["recommendations"] = await fetch_campaign_min_bid(api_key, campaign_id, nm_ids, "recommendations")
+    return out
+
+
 async def get_campaign_zones(
     db: AsyncSession, project_id: int, campaign_id: int,
     date_from: str | None = None, date_to: str | None = None, nm_id: int | None = None,
@@ -434,6 +482,7 @@ async def get_campaign_zones(
         }
 
     locked, lock_reason = _zones_lock(payment_type, camp.bid_mode, camp.status)
+    min_bids = await _campaign_min_bids(db, project_id, campaign_id)  # пол по каждой зоне (справочно)
     return {
         "zone_stats": zone_stats,
         "campaign_id": campaign_id,
@@ -441,6 +490,7 @@ async def get_campaign_zones(
         "bid_mode": camp.bid_mode,             # unified | manual
         "placements": info["placements"],      # {"search": bool, "recommendations": bool}
         "bids": info["bids"],                  # ₽ по зонам
+        "min_bids": min_bids,                  # аукционный «пол» ПО ЗОНАМ, ₽ (справочно, пробник WB)
         # Переключать зоны WB даёт только у CPM с ручной ставкой (статусы 4/9/11)
         "zones_locked": locked,
         "lock_reason": lock_reason,
@@ -551,6 +601,29 @@ async def set_campaign_zone_bid(
         return {"ok": False, "error": "Не настроен API-ключ «Продвижение»", "bid": None}
 
     return await set_campaign_bid(api_key, campaign_id, nm_ids, bid, placement)
+
+
+async def set_campaign_default_bid(
+    db: AsyncSession, project_id: int, campaign_id: int, bid: float,
+) -> dict:
+    """Сменить ставку кампании из СПИСКА (инлайн-правка) — по активной зоне.
+
+    Ставит ставку на зону «Поиск» (для manual она приоритетная — как и в
+    default_bid), 'combined' для единой, 'search' для CPC — ту же, что показана
+    в колонке «Ставка». При успехе обновляет зеркало (wb_ad_campaigns.default_bid),
+    чтобы список показывал новое значение и без ре-синка. Реальные деньги.
+    Возвращает {"ok", "error", "bid", "min_bid"?} (min_bid — если ставка ниже
+    аукционного минимума WB).
+    """
+    res = await set_campaign_zone_bid(db, project_id, campaign_id, "search", bid)
+    if res.get("ok"):
+        await db.execute(
+            update(WbAdCampaign)
+            .where(WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id)
+            .values(default_bid=res["bid"])
+        )
+        await db.commit()
+    return res
 
 
 async def get_campaign_metrics(
@@ -1341,6 +1414,100 @@ async def append_autopay_log(db: AsyncSession, project_id: int, entry: dict) -> 
     await set_setting(db, project_id, AUTOPAY_LOG_KEY, json.dumps(log[:AUTOPAY_LOG_CAP], ensure_ascii=False))
 
 
+# ─── История бюджета: единая лента движения денег из данных, парсимых из WB ───
+
+# ₽: рост бюджета меньше порога — это дрожание значения между синками, а не пополнение
+BUDGET_TOPUP_MIN_DELTA = 50.0
+LEDGER_CAP = 300  # сколько записей ленты отдаём (новые первыми)
+
+
+def _iso_utc(dt) -> str | None:
+    """datetime (naive = UTC по конвенции проекта) → ISO-строка с UTC-смещением для фронта."""
+    from datetime import timezone
+
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+async def get_budget_ledger(
+    db: AsyncSession, project_id: int, campaign_id: int | None = None, kind: str | None = None
+) -> list[dict]:
+    """Лента движения бюджета из данных WB (новые первыми, обрезано до LEDGER_CAP):
+
+    - `campaign_topup` — пополнение кампании: рост бюджета (`wb_ad_campaign_events`, delta ≥ порога),
+      ловит любой источник (кабинет WB / авто / наш апп), т.к. WB видит итоговый бюджет;
+    - `account_topup` — пополнение счёта кабинета (`wb_ad_payments`), уровень аккаунта — только в
+      режиме «все кампании» (campaign_id=None), у пополнений счёта нет привязки к кампании;
+    - `charge` — списание/расход (`wb_ad_upd`), сумма со знаком минус.
+
+    campaign_id=None — по всему проекту, иначе по конкретной кампании.
+    kind: None — всё; "topup" — только пополнения (+); "charge" — только списания (−).
+    Каждый вид тянется своим лимитом LEDGER_CAP (вкладки не делят один лимит на двоих).
+    """
+    from sqlalchemy import Float, cast, desc, select
+
+    from backend.models.integrations import WbAdCampaignEvent, WbAdPayment, WbAdUpd
+
+    want_topup = kind in (None, "topup")
+    want_charge = kind in (None, "charge")
+    entries: list[dict] = []
+
+    if want_topup:
+        # Пополнения кампании — рост бюджета выше порога
+        new_f = cast(WbAdCampaignEvent.new_value, Float)
+        old_f = cast(WbAdCampaignEvent.old_value, Float)
+        ev_q = select(WbAdCampaignEvent).where(
+            WbAdCampaignEvent.project_id == project_id,
+            WbAdCampaignEvent.event_type == "budget_change",
+            new_f > old_f + BUDGET_TOPUP_MIN_DELTA,
+        )
+        if campaign_id is not None:
+            ev_q = ev_q.where(WbAdCampaignEvent.campaign_id == campaign_id)
+        ev_q = ev_q.order_by(desc(WbAdCampaignEvent.created_at)).limit(LEDGER_CAP)
+        for e in (await db.execute(ev_q)).scalars().all():
+            old_v, new_v = float(e.old_value or 0), float(e.new_value or 0)
+            entries.append({
+                "ts": _iso_utc(e.created_at), "kind": "campaign_topup",
+                "amount": round(new_v - old_v, 2), "campaign_id": e.campaign_id,
+                "source": "бюджет кампании", "note": f"{old_v:.0f} → {new_v:.0f} ₽",
+            })
+
+        # Пополнения счёта кабинета — только в режиме «все кампании» (нет привязки к кампании)
+        if campaign_id is None:
+            pay_q = (
+                select(WbAdPayment).where(WbAdPayment.project_id == project_id)
+                .order_by(desc(WbAdPayment.paid_at)).limit(LEDGER_CAP)
+            )
+            for p in (await db.execute(pay_q)).scalars().all():
+                note = f"статус {p.status_id}" if p.status_id is not None else None
+                if p.card_status:
+                    note = f"{note} · {p.card_status}" if note else p.card_status
+                entries.append({
+                    "ts": _iso_utc(p.paid_at), "kind": "account_topup",
+                    "amount": round(float(p.amount or 0), 2), "campaign_id": None,
+                    "source": "счёт кабинета", "note": note,
+                })
+
+    if want_charge:
+        # Списания / расход
+        upd_q = select(WbAdUpd).where(WbAdUpd.project_id == project_id)
+        if campaign_id is not None:
+            upd_q = upd_q.where(WbAdUpd.advert_id == campaign_id)
+        upd_q = upd_q.order_by(desc(WbAdUpd.upd_time)).limit(LEDGER_CAP)
+        for u in (await db.execute(upd_q)).scalars().all():
+            entries.append({
+                "ts": _iso_utc(u.upd_time), "kind": "charge",
+                "amount": -round(float(u.upd_sum or 0), 2), "campaign_id": u.advert_id,
+                "source": u.payment_type or "—", "note": (f"док. {u.upd_num}" if u.upd_num else None),
+            })
+
+    entries.sort(key=lambda x: x["ts"] or "", reverse=True)
+    return entries[:LEDGER_CAP]
+
+
 def _round_up_50(value: float) -> int:
     """Округление суммы пополнения вверх до шага 50₽ (шаг кабинета WB)."""
     import math
@@ -1568,12 +1735,163 @@ def _parse_num(value: str | None) -> float | None:
         return None
 
 
-async def get_budget_gaps(db: AsyncSession, project_id: int) -> list[dict]:
-    """Кампании, у которых сегодня (МСК) кончился бюджет до конца дня.
+def _runout_by_day(ev_rows: list) -> dict[int, dict[date, datetime]]:
+    """{campaign_id: {МСК-день: момент последнего budget_change→0}} за окно событий.
 
-    Критерий: активная кампания (status=9), текущий бюджет 0, сегодня был
-    расход. Час остановки — последнее событие budget_change → 0 за сегодня;
-    если события нет (кончился между синками/до первого) — None.
+    Зеркало today-логики get_budget_gaps, но по каждому дню отдельно: в пределах дня
+    последний переход бюджета в 0 выигрывает, а пополнение (>0) после него сбрасывает
+    день из «остановленных» (день закончился с бюджетом). Ожидает ev_rows,
+    отсортированные по created_at ASC; created_at — naive UTC.
+    """
+    out: dict[int, dict[date, datetime]] = {}
+    for ev in ev_rows:
+        new_v = _parse_num(ev.new_value)
+        if new_v is None:
+            continue
+        d = pytz.UTC.localize(ev.created_at).astimezone(MSK).date()
+        camp = out.setdefault(ev.campaign_id, {})
+        if new_v <= 0:
+            camp[d] = ev.created_at  # последний →0 за день выигрывает
+        else:
+            camp.pop(d, None)  # пополнение после → день не считается остановленным
+    return out
+
+
+def _stop_hour_msk(stop_utc: datetime | None) -> float | None:
+    """Момент остановки (naive UTC) → дробный час МСК (0..24), None если None."""
+    if stop_utc is None:
+        return None
+    m = pytz.UTC.localize(stop_utc).astimezone(MSK)
+    return m.hour + m.minute / 60
+
+
+def _extrapolate_full_day(spend: float, stop_hour: float | None) -> tuple[float, float]:
+    """(потенциал полного дня, недобор) для одного дня — линейная экстраполяция до 24:00.
+
+    Бюджет кончился в stop_hour (МСК, дробный час) → скорость расхода = spend/stop_hour,
+    потенциал = скорость × 24 ч, недобор = потенциал − факт (сколько не хватило, чтобы
+    крутить до полуночи). Если день не кончался (stop_hour None) — потенциал = факт,
+    недобора нет. hours_active защищён снизу от сверх-ранних остановок / деления на ноль.
+    """
+    if spend <= 0 or stop_hour is None:
+        return spend, 0.0
+    hours_active = max(stop_hour, 0.25)
+    potential = spend / hours_active * 24.0
+    return potential, max(0.0, potential - spend)
+
+
+def _median(xs: list[float]) -> float | None:
+    if not xs:
+        return None
+    s = sorted(xs)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def _campaign_potential(
+    day_spend: dict[date, float], day_stop_hour: dict[date, float], recent_days: int,
+) -> tuple[float | None, int]:
+    """Потенциал полного дня кампании (₽) = МЕДИАНА экстраполированных полных дней по
+    последним `recent_days` дням, когда бюджет КОНЧИЛСЯ (есть момент остановки) — так
+    оцениваем реальный спрос у кампании, что упирается в бюджет. Медиана устойчива к
+    сверх-ранним остановкам (выбросам вверх).
+
+    Фолбэк: если дней-остановок нет (кампания не упирается в бюджет) — средний расход по
+    последним полным дням. Возвращает (потенциал | None, число усреднённых дней).
+    """
+    runout_dates = sorted((d for d in day_spend if d in day_stop_hour and day_spend[d] > 0), reverse=True)[:recent_days]
+    if runout_dates:
+        pots = [_extrapolate_full_day(day_spend[d], day_stop_hour[d])[0] for d in runout_dates]
+        return _median(pots), len(pots)
+    full_dates = sorted((d for d, s in day_spend.items() if s > 0 and d not in day_stop_hour), reverse=True)[:recent_days]
+    if not full_dates:
+        return None, 0
+    vals = [day_spend[d] for d in full_dates]
+    return sum(vals) / len(vals), len(vals)
+
+
+def _chronic_stats(day_spend: dict[date, float], stop_hours: dict[date, float]) -> tuple[int, int, float | None]:
+    """(дни-остановки, дни-с-расходом, типичный час остановки МСК) по окну (без сегодня).
+
+    Дни-с-расходом — сколько дней кампания вообще крутилась; дни-остановки — из них
+    те, где бюджет кончился до конца дня; типичный час — медиана часов остановки
+    (устойчива к разбросу), None если остановок не было.
+    """
+    active_days = sum(1 for s in day_spend.values() if s > 0)
+    runout_hours = [stop_hours[d] for d in stop_hours if day_spend.get(d, 0.0) > 0]
+    return len(runout_hours), active_days, _median(runout_hours)
+
+
+async def _budget_window_history(
+    db: AsyncSession, project_id: int, ids: list[int], today_msk: date,
+) -> dict[int, tuple[dict[date, float], dict[date, float]]]:
+    """{campaign_id: (расход по дням ₽, час остановки по дням МСК)} за окно, БЕЗ сегодня.
+
+    Один батч дневного расхода + один событий budget_change по всем `ids`. День считается
+    «остановкой», если ПОСЛЕДНЕЕ событие бюджета за МСК-день ≤ 0 (пополнение после сбрасывает
+    день — та же логика, что в _runout_by_day). Собираем «последнее событие дня» прямо в SQL
+    (DISTINCT ON campaign+день, ORDER BY … created_at DESC) — иначе на большом аккаунте тянули
+    бы сотни тысяч событий и упирались в лимит. База и для потенциала, и для «хроников».
+    """
+    if not ids:
+        return {}
+    win_start = today_msk - timedelta(days=BUDGET_GAP_WINDOW_DAYS)
+    win_start_utc = MSK.localize(datetime.combine(win_start, datetime.min.time())).astimezone(pytz.UTC).replace(tzinfo=None)
+    day_start_utc = MSK.localize(datetime.combine(today_msk, datetime.min.time())).astimezone(pytz.UTC).replace(tzinfo=None)
+
+    CD = WbAdCampaignDaily
+    win_rows = (
+        await db.execute(
+            select(CD.campaign_id, CD.date, CD.spend)
+            .where(CD.project_id == project_id, CD.campaign_id.in_(ids), CD.date >= win_start, CD.date < today_msk)
+            .limit(200000)
+        )
+    ).all()
+    daily_by_c: dict[int, dict[date, float]] = {}
+    for r in win_rows:
+        daily_by_c.setdefault(r.campaign_id, {})[r.date] = float(r.spend or 0)
+
+    # created_at — naive UTC; переводим в МСК-дату средствами БД для DISTINCT ON по дню
+    E = WbAdCampaignEvent
+    msk_day = cast(func.timezone("Europe/Moscow", func.timezone("UTC", E.created_at)), Date)
+    last_ev = (
+        await db.execute(
+            select(E.campaign_id, msk_day.label("msk_day"), E.new_value, E.created_at)
+            .where(
+                E.project_id == project_id,
+                E.campaign_id.in_(ids),
+                E.event_type == "budget_change",
+                E.created_at >= win_start_utc,
+                E.created_at < day_start_utc,
+            )
+            .distinct(E.campaign_id, msk_day)
+            .order_by(E.campaign_id, msk_day, E.created_at.desc())
+            .limit(200000)
+        )
+    ).all()
+    stop_by_c: dict[int, dict[date, float]] = {}
+    for r in last_ev:
+        v = _parse_num(r.new_value)
+        if v is None or v > 0:
+            continue  # день закончился с бюджетом → не остановка
+        m = pytz.UTC.localize(r.created_at).astimezone(MSK)
+        stop_by_c.setdefault(r.campaign_id, {})[r.msk_day] = m.hour + m.minute / 60
+
+    return {cid: (daily_by_c.get(cid, {}), stop_by_c.get(cid, {})) for cid in ids}
+
+
+async def get_budget_gaps(db: AsyncSession, project_id: int) -> list[dict]:
+    """Кампании с нехваткой бюджета: фактически кончившиеся сегодня + «хронические».
+
+    Факт (predicted=False): активная кампания (status=9), текущий бюджет 0, сегодня
+    был расход. Час остановки — последнее событие budget_change → 0 за сегодня; если
+    события нет (кончился между синками/до первого) — None.
+
+    Прогноз (predicted=True): активная кампания с бюджетом >0, которая за окно упиралась
+    в бюджет ≥ BUDGET_GAP_CHRONIC_MIN_DAYS дней И на ≥ BUDGET_GAP_CHRONIC_MIN_RATE дней
+    с расходом. typical_stop_hour — медиана часа остановки (МСК). Так утром, ещё до
+    фактической остановки, виден риск: «этот артикул обычно кончается ~15:00».
     """
     now_utc = utcnow()
     now_msk = now_utc.astimezone(MSK) if now_utc.tzinfo else MSK.localize(now_utc.replace(tzinfo=None), is_dst=None).astimezone(MSK)
@@ -1587,8 +1905,7 @@ async def get_budget_gaps(db: AsyncSession, project_id: int) -> list[dict]:
                 select(WbAdCampaign).where(
                     WbAdCampaign.project_id == project_id,
                     WbAdCampaign.status == 9,
-                    WbAdCampaign.budget <= 0,
-                ).limit(2000)
+                ).limit(5000)
             )
         )
         .scalars()
@@ -1596,46 +1913,85 @@ async def get_budget_gaps(db: AsyncSession, project_id: int) -> list[dict]:
     )
     if not campaigns:
         return []
-    ids = [c.campaign_id for c in campaigns]
+    # Кончившиеся (бюджет ≤ 0) — кандидаты в «факт»; живые (>0) — кандидаты в «прогноз».
+    ran_campaigns = [c for c in campaigns if float(c.budget or 0) <= 0]
+    alive_campaigns = [c for c in campaigns if float(c.budget or 0) > 0]
+    ran_ids = [c.campaign_id for c in ran_campaigns]
+    all_ids = [c.campaign_id for c in campaigns]
 
     CD = WbAdCampaignDaily
     spend_rows = (
         await db.execute(
             select(CD.campaign_id, func.coalesce(func.sum(CD.spend), Decimal("0")).label("spend"))
-            .where(CD.project_id == project_id, CD.campaign_id.in_(ids), CD.date == today_msk)
+            .where(CD.project_id == project_id, CD.campaign_id.in_(all_ids), CD.date == today_msk)
             .group_by(CD.campaign_id)
         )
     ).all()
     spend_map = {r.campaign_id: float(r.spend) for r in spend_rows}
 
-    # Последнее событие «бюджет → 0» за сегодня по каждой кампании
-    ev_rows = (
-        (
-            await db.execute(
-                select(WbAdCampaignEvent)
-                .where(
-                    WbAdCampaignEvent.project_id == project_id,
-                    WbAdCampaignEvent.campaign_id.in_(ids),
-                    WbAdCampaignEvent.event_type == "budget_change",
-                    WbAdCampaignEvent.created_at >= day_start_utc,
-                )
-                .order_by(WbAdCampaignEvent.created_at)
-                .limit(5000)
-            )
-        )
-        .scalars()
-        .all()
-    )
+    # Последнее событие «бюджет → 0» за сегодня по кончившимся кампаниям
     ran_out_at: dict[int, datetime] = {}
-    for ev in ev_rows:
-        new_v = _parse_num(ev.new_value)
-        if new_v is not None and new_v <= 0:
-            ran_out_at[ev.campaign_id] = ev.created_at  # последний по времени выигрывает
-        elif new_v is not None and new_v > 0:
-            ran_out_at.pop(ev.campaign_id, None)  # после пополнения не считается остановленной
+    if ran_ids:
+        ev_rows = (
+            (
+                await db.execute(
+                    select(WbAdCampaignEvent)
+                    .where(
+                        WbAdCampaignEvent.project_id == project_id,
+                        WbAdCampaignEvent.campaign_id.in_(ran_ids),
+                        WbAdCampaignEvent.event_type == "budget_change",
+                        WbAdCampaignEvent.created_at >= day_start_utc,
+                    )
+                    .order_by(WbAdCampaignEvent.created_at)
+                    .limit(5000)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for ev in ev_rows:
+            new_v = _parse_num(ev.new_value)
+            if new_v is not None and new_v <= 0:
+                ran_out_at[ev.campaign_id] = ev.created_at  # последний по времени выигрывает
+            elif new_v is not None and new_v > 0:
+                ran_out_at.pop(ev.campaign_id, None)  # после пополнения не считается остановленной
 
-    # Карта nm_id → бренд/категория (для фильтров бренд/категория на фронте)
-    all_nm_ids = {nm for c in campaigns for nm in (c.nm_ids or [])}
+    # Факт-строки: бюджет кончился И сегодня был расход. Прогноз-кандидаты: живые кампании.
+    actual_campaigns = [c for c in ran_campaigns if spend_map.get(c.campaign_id, 0.0) > 0]
+    eligible_ids = [c.campaign_id for c in actual_campaigns]
+    alive_ids = [c.campaign_id for c in alive_campaigns]
+
+    # История окна (без сегодня): база для потенциала полного дня и «хронического» паттерна.
+    # «Реальные возможности» = медиана экстраполированных дней-остановок (скорость × 24 ч).
+    hist = await _budget_window_history(db, project_id, list(set(eligible_ids) | set(alive_ids)), today_msk)
+    stats_map = {cid: _chronic_stats(ds, sh) for cid, (ds, sh) in hist.items()}
+    potential_map: dict[int, float] = {}
+    full_days_map: dict[int, int] = {}
+
+    def _remember_potential(cid: int) -> None:
+        ds, sh = hist.get(cid, ({}, {}))
+        pot, fdays = _campaign_potential(ds, sh, BUDGET_GAP_POTENTIAL_DAYS)
+        if pot is not None:
+            potential_map[cid] = pot
+            full_days_map[cid] = fdays
+
+    for cid in eligible_ids:
+        _remember_potential(cid)
+
+    # Хронические (прогноз): живые кампании, что за окно регулярно упирались в бюджет
+    chronic_ids: set[int] = set()
+    for c in alive_campaigns:
+        runout_days, active_days, _typical = stats_map.get(c.campaign_id, (0, 0, None))
+        if runout_days >= BUDGET_GAP_CHRONIC_MIN_DAYS and active_days > 0 and runout_days / active_days >= BUDGET_GAP_CHRONIC_MIN_RATE:
+            chronic_ids.add(c.campaign_id)
+            _remember_potential(c.campaign_id)
+
+    result_campaigns = actual_campaigns + [c for c in alive_campaigns if c.campaign_id in chronic_ids]
+    if not result_campaigns:
+        return []
+
+    # Карта nm_id → бренд/категория (для фильтров бренд/категория на фронте) — только выдача
+    all_nm_ids = {nm for c in result_campaigns for nm in (c.nm_ids or [])}
     nm_meta: dict[int, tuple] = {}
     if all_nm_ids:
         meta_rows = (
@@ -1653,11 +2009,12 @@ async def get_budget_gaps(db: AsyncSession, project_id: int) -> list[dict]:
 
     now_hour = now_msk.hour + now_msk.minute / 60
     result = []
-    for c in campaigns:
-        spend_today = spend_map.get(c.campaign_id, 0.0)
-        if spend_today <= 0:
-            continue  # сегодня не крутилась — это не «нехватка бюджета», а «не работает реклама»
-        stopped_utc = ran_out_at.get(c.campaign_id)
+    for c in result_campaigns:
+        cid = c.campaign_id
+        predicted = cid in chronic_ids
+        spend_today = spend_map.get(cid, 0.0)
+        # Прогноз ещё не остановился сегодня → часа остановки нет; у факта — из события
+        stopped_utc = None if predicted else ran_out_at.get(cid)
         if stopped_utc is not None:
             stopped_msk = pytz.UTC.localize(stopped_utc).astimezone(MSK)
             ran_out_hour: float | None = stopped_msk.hour + stopped_msk.minute / 60
@@ -1666,9 +2023,14 @@ async def get_budget_gaps(db: AsyncSession, project_id: int) -> list[dict]:
             ran_out_hour = None
             ran_out_iso = None
         gap = compute_budget_gap(spend_today, ran_out_hour, now_hour)
+        # Недобор по «реальным возможностям»: потенциал полного дня − потрачено сегодня
+        pot = potential_map.get(cid)
+        raw_pot_needed = max(0.0, pot - spend_today) if pot is not None else 0.0
+        needed_potential = max(MIN_TOPUP_RUB, round(raw_pot_needed)) if raw_pot_needed > 0 else 0.0
+        runout_days, active_days, typical = stats_map.get(cid, (0, 0, None))
         result.append(
             {
-                "campaign_id": c.campaign_id,
+                "campaign_id": cid,
                 "name": c.name,
                 "campaign_type": c.campaign_type,
                 "nm_ids": c.nm_ids or [],
@@ -1676,12 +2038,114 @@ async def get_budget_gaps(db: AsyncSession, project_id: int) -> list[dict]:
                 "brands": sorted({nm_meta[nm][0] for nm in (c.nm_ids or []) if nm in nm_meta and nm_meta[nm][0]}),
                 "subjects": sorted({nm_meta[nm][1] for nm in (c.nm_ids or []) if nm in nm_meta and nm_meta[nm][1]}),
                 "spend_today": round(spend_today, 2),
-                "ran_out_at": ran_out_iso,  # None = кончился до первого синка (час неизвестен)
+                "ran_out_at": ran_out_iso,  # None = кончился до первого синка / прогноз (ещё не кончился)
+                "predicted": predicted,  # True — риск по истории, кампания сегодня ещё крутится
+                "typical_stop_hour": round(typical, 2) if typical is not None else None,  # медиана часа остановки, МСК
+                "runout_days": runout_days,  # дней-остановок за окно
+                "active_days": active_days,  # дней с расходом за окно
+                "potential_daily": round(pot, 2) if pot is not None else None,  # ₽/день по полным дням (None — нет данных)
+                "full_days": full_days_map.get(cid, 0),
+                "window_days": BUDGET_GAP_WINDOW_DAYS,
+                "needed_potential": needed_potential,  # долить до потенциала (с минимумом WB)
+                "raw_needed_potential": round(raw_pot_needed, 2),
                 **gap,
             }
         )
-    result.sort(key=lambda r: -r["spend_today"])
+    # Факт-строки первыми (predicted=False < True), внутри — по расходу сегодня ↓
+    result.sort(key=lambda r: (r["predicted"], -r["spend_today"]))
     return result
+
+
+async def get_budget_gap_history(
+    db: AsyncSession, project_id: int, campaign_id: int, days: int = BUDGET_GAP_WINDOW_DAYS,
+) -> dict:
+    """История «недобора бюджета» по дням (МСК) для одной кампании за `days` дней.
+
+    По каждому дню: расход/показы/клики, кончился ли бюджет и во сколько (МСК),
+    недобор ЗА ЭТОТ ДЕНЬ — линейная экстраполяция скорости расхода до 24:00
+    (сколько не хватило, чтобы крутить до полуночи). Дни без остановки — недобора нет.
+    potential_daily (заголовок) = медиана экстраполированных дней-остановок за окно,
+    сегодня в базу не входит (неполный день). Дни отдаются от свежих к старым.
+    """
+    days = max(1, min(days, 180))
+    today_msk = msk_now().date()
+    win_start = today_msk - timedelta(days=days)
+    win_start_utc = MSK.localize(datetime.combine(win_start, datetime.min.time())).astimezone(pytz.UTC).replace(tzinfo=None)
+
+    CD = WbAdCampaignDaily
+    rows = (
+        await db.execute(
+            select(CD.date, CD.spend, CD.views, CD.clicks)
+            .where(CD.project_id == project_id, CD.campaign_id == campaign_id, CD.date >= win_start, CD.date <= today_msk)
+            .order_by(CD.date)
+            .limit(400)
+        )
+    ).all()
+    daily = {
+        r.date: {"spend": float(r.spend or 0), "views": int(r.views or 0), "clicks": int(r.clicks or 0)}
+        for r in rows
+    }
+
+    ev = (
+        (
+            await db.execute(
+                select(WbAdCampaignEvent)
+                .where(
+                    WbAdCampaignEvent.project_id == project_id,
+                    WbAdCampaignEvent.campaign_id == campaign_id,
+                    WbAdCampaignEvent.event_type == "budget_change",
+                    WbAdCampaignEvent.created_at >= win_start_utc,
+                )
+                .order_by(WbAdCampaignEvent.created_at)
+                .limit(20000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    runout = _runout_by_day(ev).get(campaign_id, {})  # МСК-день → момент остановки (naive UTC)
+    stop_hours = {d: _stop_hour_msk(dt) for d, dt in runout.items()}
+    stop_hours = {d: h for d, h in stop_hours.items() if h is not None}
+
+    # Потенциал (заголовок) — по дням-остановкам за окно, БЕЗ сегодня (неполный день)
+    base_spend = {d: v["spend"] for d, v in daily.items() if d != today_msk}
+    base_stops = {d: h for d, h in stop_hours.items() if d != today_msk}
+    potential, full_days = _campaign_potential(base_spend, base_stops, BUDGET_GAP_POTENTIAL_DAYS)
+
+    out_days: list[dict] = []
+    total_shortfall = 0.0
+    days_ran_out = 0
+    for d in sorted(daily.keys(), reverse=True):
+        v = daily[d]
+        stopped = runout.get(d)
+        ran_out = stopped is not None and v["spend"] > 0
+        if ran_out:
+            days_ran_out += 1
+        ran_out_iso = pytz.UTC.localize(stopped).astimezone(MSK).isoformat() if stopped is not None else None
+        # Недобор дня = экстраполяция скорости расхода до 24:00 (для дней-остановок)
+        _, shortfall = _extrapolate_full_day(v["spend"], stop_hours.get(d) if ran_out else None)
+        total_shortfall += shortfall
+        out_days.append(
+            {
+                "date": d.isoformat(),
+                "spend": round(v["spend"], 2),
+                "views": v["views"],
+                "clicks": v["clicks"],
+                "ran_out": ran_out,
+                "ran_out_at": ran_out_iso,
+                "shortfall": round(shortfall, 2),
+            }
+        )
+
+    return {
+        "campaign_id": campaign_id,
+        "window_days": days,
+        "potential_daily": round(potential, 2) if potential is not None else None,
+        "full_days": full_days,
+        "days_ran_out": days_ran_out,
+        "total_shortfall": round(total_shortfall, 2),
+        "days": out_days,
+    }
 
 
 async def _budget_gap_today_map(

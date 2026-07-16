@@ -63,6 +63,20 @@ export function campaignTypeBadge(c: AdsManagerCampaign): { label: string; bg: s
     return { label: 'Авто', bg: '#fce7f3', color: '#be185d' };                          // нет payment_type — авто
 }
 
+/** Аббревиатура типа рекламы для авто-имени кампании (3 буквы):
+ *  CPM единая → «АВТ», CPM ручная → «АУК», CPC → «CPC». */
+export function campaignTypeAbbr(payment: string, bid: string): string {
+    if (payment === 'cpc') return 'CPC';
+    return bid === 'unified' ? 'АВТ' : 'АУК';
+}
+
+/** Авто-наименование кампании по шаблону «nmID артикул_продавца ТИП» (обрезано до maxLen).
+ *  Пустые части опускаются — если каталог ещё не подтянул артикул, будет «nmID ТИП». */
+export function buildAutoCampaignName(nm: number, vendorCode: string, payment: string, bid: string, maxLen = 50): string {
+    return [String(nm), (vendorCode || '').trim(), campaignTypeAbbr(payment, bid)]
+        .filter(Boolean).join(' ').slice(0, maxLen);
+}
+
 // Известные (неравномерные) границы vol → номер basket-хоста WB.
 const WB_BASKET_RANGES: [number, number][] = [
     [143, 1], [287, 2], [431, 3], [719, 4], [1007, 5], [1061, 6], [1115, 7], [1169, 8],
@@ -105,3 +119,39 @@ export const AUTOPAY_STATUS_BADGE: Record<AdsAutopayLogEntry['status'], { label:
     error: { label: 'Ошибка', cls: 'badge-danger' },
     unknown: { label: 'Неизвестно', cls: 'badge-warning' },
 };
+
+// Известные сигнатуры ошибок WB → понятный менеджеру текст. Матчим по подстроке (lowercase),
+// первое совпадение выигрывает. Ключи — фрагменты, которые WB стабильно возвращает в теле ошибки.
+const ADS_ERROR_MAP: [string, string][] = [
+    ['no budget to start', 'Недостаточно бюджета для запуска. Пополните бюджет кампании и попробуйте снова.'],
+    ['has no budget', 'Недостаточно бюджета для запуска. Пополните бюджет кампании и попробуйте снова.'],
+    ['not found', 'Кампания не найдена в кабинете WB. Обновите список и попробуйте снова.'],
+    ['rate limit', 'WB временно ограничил частоту запросов. Подождите немного и повторите.'],
+    ['too many requests', 'WB временно ограничил частоту запросов. Подождите немного и повторите.'],
+    ['status unchanged', 'WB не изменил статус кампании — возможно, он уже такой или кампания сейчас недоступна для изменения.'],
+];
+
+/** Техническую ошибку WB/бэка (сырой JSON, gRPC-префиксы, «HTTP 400: …») превращает в
+ *  понятное менеджеру сообщение. Известные сигнатуры переводим точно; для незнакомых —
+ *  снимаем HTTP/JSON-обёртку и технические префиксы, чтобы не показывать сырой код. */
+export function humanizeAdsError(raw: unknown, fallback = 'Не удалось выполнить действие'): string {
+    const src = raw instanceof Error ? raw.message : typeof raw === 'string' ? raw : '';
+    if (!src.trim()) return fallback;
+    // Вытаскиваем вложенный текст из "HTTP 400: {"error":"...."}" (или голого JSON-тела)
+    let inner = src;
+    const brace = src.indexOf('{');
+    if (brace !== -1) {
+        try {
+            const obj = JSON.parse(src.slice(brace)) as Record<string, unknown>;
+            const val = obj?.error ?? obj?.message ?? obj?.detail;
+            if (typeof val === 'string' && val.trim()) inner = val;
+        } catch { /* не JSON — оставляем строку как есть */ }
+    }
+    const low = inner.toLowerCase();
+    const known = ADS_ERROR_MAP.find(([sig]) => low.includes(sig));
+    if (known) return known[1];
+    // Незнакомая ошибка: снимаем «HTTP NNN:» и gRPC-префикс метода (advert…ViaGRPC:),
+    // показываем хотя бы очищенный текст вместо сырого JSON.
+    const cleaned = inner.replace(/^HTTP\s+\d+:\s*/i, '').replace(/^advert\w*ViaGRPC:\s*/i, '').trim();
+    return cleaned || fallback;
+}
