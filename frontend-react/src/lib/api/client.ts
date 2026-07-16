@@ -270,11 +270,23 @@ export class ApiClient {
 
     /**
      * Helper for FormData uploads — shared by all upload methods.
+     *
+     * `opts.retries` включает авто-повтор при ТРАНЗИЕНТНОМ сбое — обрыве соединения
+     * (fetch reject) или 5xx (напр. backend/nginx пересобираются во время деплоя →
+     * in-flight запрос ловит 502/reset). 4xx НЕ ретраятся — это проблема самого файла.
+     * Брошенная ошибка несёт `.status` (HTTP-код; 0 = сетевой обрыв) для классификации в UI.
      */
-    async uploadFormData<T>(path: string, formData: FormData): Promise<T> {
+    async uploadFormData<T>(
+        path: string,
+        formData: FormData,
+        opts?: { retries?: number; retryDelayMs?: number },
+    ): Promise<T> {
         if (this.bounceExternalToFf()) {
             throw new Error('Внешний аккаунт фулфилмента: доступ только к ФФ-порталу');
         }
+
+        const retries = opts?.retries ?? 0;
+        const retryDelayMs = opts?.retryDelayMs ?? 1000;
 
         const headers: Record<string, string> = {};
         const token = this.getToken();
@@ -282,34 +294,56 @@ export class ApiClient {
         const projectId = this.getProjectId();
         if (projectId) headers['X-Project-Id'] = String(projectId);
 
-        let res = await fetch(`${API_URL}${path}`, {
-            method: 'POST', headers, body: formData,
-        });
-
-        // На 401 — рефреш токена и повтор (зеркалит request()/requestBlob()). Без этого
-        // долгая форма (распознавание+подбор+выбор файла) → протухший токен → сырой Error 401.
-        if (res.status === 401) {
-            const refreshResult = await this.tryRefresh();
-            if (refreshResult === 'ok') {
-                headers['Authorization'] = `Bearer ${this.getToken()}`;
+        for (let attempt = 0; ; attempt++) {
+            let res: Response;
+            try {
                 res = await fetch(`${API_URL}${path}`, { method: 'POST', headers, body: formData });
-            } else if (refreshResult === 'unavailable') {
-                throw new Error('Сервер временно недоступен. Попробуйте через минуту.');
+            } catch (netErr) {
+                // Сетевой обрыв (напр. соединение сброшено при пересборке контейнеров) — транзиентно.
+                if (attempt < retries) { await this.sleep(retryDelayMs); continue; }
+                const e = netErr instanceof Error ? netErr : new Error('Ошибка сети');
+                (e as Error & { status?: number }).status = 0;
+                throw e;
             }
-            if (res.status === 401) {
-                this.clearToken();
-                if (typeof window !== 'undefined') window.location.href = '/login';
-                throw new Error('Unauthorized');
-            }
-        }
 
-        if (!res.ok) {
+            // На 401 — рефреш токена и повтор (зеркалит request()/requestBlob()). Без этого
+            // долгая форма (распознавание+подбор+выбор файла) → протухший токен → сырой Error 401.
+            if (res.status === 401) {
+                const refreshResult = await this.tryRefresh();
+                if (refreshResult === 'ok') {
+                    headers['Authorization'] = `Bearer ${this.getToken()}`;
+                    res = await fetch(`${API_URL}${path}`, { method: 'POST', headers, body: formData });
+                } else if (refreshResult === 'unavailable') {
+                    throw new Error('Сервер временно недоступен. Попробуйте через минуту.');
+                }
+                if (res.status === 401) {
+                    this.clearToken();
+                    if (typeof window !== 'undefined') window.location.href = '/login';
+                    throw new Error('Unauthorized');
+                }
+            }
+
+            if (res.ok) return res.json();
+
+            // 5xx — транзиентный серверный сбой (деплой/перезапуск): ретраим, если есть попытки.
+            if (res.status >= 500 && attempt < retries) {
+                await this.sleep(retryDelayMs);
+                continue;
+            }
+
             const err = await res.json().catch(() => ({}));
             const detail = err.detail;
-            if (typeof detail === 'string') throw new Error(detail);
-            if (Array.isArray(detail)) throw new Error(detail.map((d: any) => `${d.loc ? d.loc.join('.') + ': ' : ''}${d.msg || JSON.stringify(d)}`).join('; '));
-            throw new Error(JSON.stringify(detail) || `Error ${res.status}`);
+            const message =
+                typeof detail === 'string' ? detail
+                : Array.isArray(detail) ? detail.map((d: any) => `${d.loc ? d.loc.join('.') + ': ' : ''}${d.msg || JSON.stringify(d)}`).join('; ')
+                : (JSON.stringify(detail) || `Error ${res.status}`);
+            const e = new Error(message) as Error & { status?: number };
+            e.status = res.status;
+            throw e;
         }
-        return res.json();
+    }
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 }

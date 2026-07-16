@@ -136,7 +136,11 @@ export function addPaymentRequestMethods(api: ApiClient) {
             const formData = new FormData();
             formData.append('file', file);
             formData.append('doc_type', docType);
-            return api.uploadFormData<PaymentRequestDocument>(`/api/v1/payment-requests/${id}/documents`, formData);
+            // Авто-повтор при обрыве/5xx: заявка уже создана, а загрузка файла может попасть
+            // в окно деплоя (backend/nginx пересобираются) — тихо переживаем короткий сбой.
+            return api.uploadFormData<PaymentRequestDocument>(
+                `/api/v1/payment-requests/${id}/documents`, formData, { retries: 3, retryDelayMs: 1000 },
+            );
         },
 
         /** POST /api/v1/payment-requests/parse-invoice — распознать реквизиты из счёта (PDF/Word/Excel/фото) */
