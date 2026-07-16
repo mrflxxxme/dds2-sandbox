@@ -1,40 +1,147 @@
 # ruff: noqa: RUF002 — русские комментарии и docstring
 """
-Service: WB customer feedbacks (отзывы).
+Service: WB customer feedbacks (отзывы) — чтение из зеркала БД (wb_feedbacks).
 
-Live-фетч через WB-ключ проекта (без зеркала в БД) — отзыв это «живые» данные
-провайдера. Нет активного WB-ключа → возвращаем пустой ответ с has_key=False,
-фронт показывает подсказку вместо ошибки.
+Список и сводная аналитика строятся из таблицы wb_feedbacks (наполняется
+`wb_reviews_sync`). Категория/бренд резолвятся по nm_id: Nomenclature.subject /
+Nomenclature.brand (фолбэк — brand-снапшот отзыва). Непривязанные → «Без …».
+
+Фильтр по ЯРЛЫКУ (как в воронке): `tag` = имя ProductTag; резолвится в набор nm_id
+(ProductTagMap), которым ограничивается ВСЯ сводка. tag=None → без фильтра.
+
+has_key: у проекта есть активный WB-ключ ИЛИ уже накоплены отзывы — тогда фронт
+показывает данные, иначе подсказку «настройте ключ».
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from datetime import datetime, timedelta
 
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.selectable import Subquery
 
+from backend.cache import cached
+from backend.models import Nomenclature, ProductTag, ProductTagMap, WBFeedback
 from backend.schemas.reviews import ReviewItem, ReviewsListResponse
+from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.reviews")
 
+_LIST_MAX = 5000
+_GROUP_LIMIT = 100  # топ категорий/брендов в сводке
+_NO_CATEGORY = "Без категории"
+_NO_BRAND = "Без бренда"
 
-def _map_feedback(fb: dict) -> ReviewItem:
-    """WB feedback dict → ReviewItem."""
-    pd = fb.get("productDetails") or {}
-    return ReviewItem(
-        id=str(fb.get("id", "")),
-        text=(fb.get("text") or "").strip(),
-        rating=int(fb.get("productValuation") or 0),
-        created_date=fb.get("createdDate"),
-        user_name=(fb.get("userName") or "").strip() or None,
-        pros=(fb.get("pros") or "").strip() or None,
-        cons=(fb.get("cons") or "").strip() or None,
-        nm_id=pd.get("nmId"),
-        product_name=(pd.get("productName") or "").strip() or None,
-        article=(pd.get("supplierArticle") or "").strip() or None,
-        brand=(pd.get("brandName") or "").strip() or None,
-        is_answered=bool(fb.get("answer")),
+# Диапазоны сводки: ключ → глубина в днях (None = всё время). Дефолт — год.
+_PERIOD_DAYS: dict[str, int | None] = {
+    "2w": 14,
+    "1m": 30,
+    "3m": 90,
+    "6m": 180,
+    "1y": 365,
+    "all": None,
+}
+_DEFAULT_PERIOD = "1y"
+# Короткие периоды рисуем посуточно, длинные — помесячно (иначе 1–2 точки на графике).
+_DAILY_PERIODS = {"2w", "1m"}
+
+
+def _normalize_period(period: str | None) -> str:
+    """Нормализовать ключ периода к известному (иначе — дефолт «год»)."""
+    return period if period in _PERIOD_DAYS else _DEFAULT_PERIOD
+
+
+def _period_start(period: str) -> datetime | None:
+    """Начало окна выборки (naive UTC) для периода; None = всё время."""
+    days = _PERIOD_DAYS[period]
+    if days is None:
+        return None
+    # created_date хранится naive UTC — сравниваем с naive границей
+    return utcnow().replace(tzinfo=None) - timedelta(days=days)
+
+
+def _bucket_expr(granularity: str) -> ColumnElement[str]:
+    """SQL-выражение бакета временного ряда (день или месяц)."""
+    fmt = "YYYY-MM-DD" if granularity == "day" else "YYYY-MM"
+    return func.to_char(WBFeedback.created_date, fmt).label("month")
+
+
+async def resolve_wb_key(db: AsyncSession, project_id: int) -> str | None:
+    """Активный WB-ключ проекта (каскад feedbacks→analytics→wb) или None."""
+    from backend.services.funnel.wb_api_client import get_wb_key
+
+    return (
+        await get_wb_key(db, project_id, "wb_feedbacks")
+        or await get_wb_key(db, project_id, "wb_analytics")
+        or await get_wb_key(db, project_id, "wb")
     )
+
+
+async def _has_wb_key(db: AsyncSession, project_id: int) -> bool:
+    """Есть ли у проекта активный WB-ключ."""
+    return bool(await resolve_wb_key(db, project_id))
+
+
+async def has_any_feedback(db: AsyncSession, project_id: int) -> bool:
+    """Есть ли у проекта хоть один отзыв в зеркале (за всё время, вне окна периода).
+
+    Используется как для data-UI гейта сводки, так и для решения о full_backfill
+    при on-demand синке (пустое зеркало → тянем и архив = полная история).
+    """
+    return bool(
+        await db.scalar(
+            select(WBFeedback.id).where(WBFeedback.project_id == project_id).limit(1)
+        )
+    )
+
+
+def _round(v: float | None) -> float | None:
+    return round(float(v), 2) if v is not None else None
+
+
+def _r(n: int) -> ColumnElement[int]:
+    """Кол-во отзывов с оценкой n (для распределения 1..5)."""
+    return func.sum(case((WBFeedback.rating == n, 1), else_=0))
+
+
+def _avg_and_count() -> tuple[ColumnElement[float], ColumnElement[int]]:
+    """(avg рейтинг>0, count)."""
+    return (
+        func.avg(WBFeedback.rating).filter(WBFeedback.rating > 0),
+        func.count(WBFeedback.id),
+    )
+
+
+async def _resolve_tag_nm_ids(db: AsyncSession, project_id: int, tag: str | None) -> set[int] | None:
+    """Имя ярлыка → набор nm_id (активные привязки). None = фильтр не задан."""
+    if not tag:
+        return None
+    rows = await db.execute(
+        select(ProductTagMap.nm_id)
+        .join(ProductTag, ProductTag.id == ProductTagMap.tag_id)
+        .where(
+            ProductTagMap.project_id == project_id,
+            ProductTag.name == tag,
+            ProductTag.is_deleted == False,  # noqa: E712
+        )
+    )
+    return {r[0] for r in rows}
+
+
+def _conds(project_id: int, nm_ids: set[int] | None, date_from: datetime | None = None) -> list:
+    """Базовый фильтр отзывов проекта (+ ярлык + окно по дате, если заданы)."""
+    conds: list = [WBFeedback.project_id == project_id]
+    if nm_ids is not None:
+        # пустой set → in_([]) → ни одной строки (у ярлыка нет товаров)
+        conds.append(WBFeedback.nm_id.in_(nm_ids))
+    if date_from is not None:
+        # отзывы без даты выпадают из периодной выборки (их нельзя разместить во времени)
+        conds.append(WBFeedback.created_date >= date_from)
+    return conds
 
 
 async def list_reviews(
@@ -44,33 +151,232 @@ async def list_reviews(
     take: int = 100,
     skip: int = 0,
 ) -> ReviewsListResponse:
-    """Список отзывов покупателей WB для проекта (live-фетч)."""
-    from backend.services.funnel.wb_api_client import get_wb_key
+    """Список отзывов покупателей WB из зеркала БД (фильтр по ответу продавца)."""
+    take = max(1, min(take, _LIST_MAX))
+    skip = max(0, skip)
 
-    # Каскад ключей: специализированный feedbacks → аналитика → общий wb
-    api_key = (
-        await get_wb_key(db, project_id, "wb_feedbacks")
-        or await get_wb_key(db, project_id, "wb_analytics")
-        or await get_wb_key(db, project_id, "wb")
+    stmt = (
+        select(WBFeedback)
+        .where(
+            WBFeedback.project_id == project_id,
+            WBFeedback.is_answered == is_answered,
+        )
+        .order_by(WBFeedback.created_date.desc().nullslast())
+        .limit(take)
+        .offset(skip)
     )
-    if not api_key:
-        return ReviewsListResponse(items=[], has_key=False)
+    rows = (await db.execute(stmt)).scalars().all()
 
-    from backend.integrations.wb_api import WBApiClient
+    agg = (
+        await db.execute(
+            select(
+                func.count(WBFeedback.id),
+                func.count(WBFeedback.id).filter(~WBFeedback.is_answered),
+                func.avg(WBFeedback.rating).filter(WBFeedback.rating > 0),
+                func.count(WBFeedback.id).filter(WBFeedback.is_answered == is_answered),
+            ).where(WBFeedback.project_id == project_id)
+        )
+    ).one()
+    total_all, unanswered, avg, total_filtered = agg
 
-    client = WBApiClient(api_key, project_id=project_id)
-    data = await client.get_feedbacks(is_answered=is_answered, take=take, skip=skip)
+    has_key = bool(total_all) or await _has_wb_key(db, project_id)
 
-    feedbacks = data.get("feedbacks") or []
-    items = [_map_feedback(fb) for fb in feedbacks if isinstance(fb, dict)]
-
-    ratings = [i.rating for i in items if i.rating > 0]
-    avg = round(sum(ratings) / len(ratings), 2) if ratings else None
+    items = [
+        ReviewItem(
+            id=r.wb_id,
+            text=r.text or "",
+            rating=r.rating,
+            created_date=r.created_date.isoformat() if r.created_date else None,
+            user_name=r.user_name,
+            pros=r.pros,
+            cons=r.cons,
+            nm_id=r.nm_id,
+            product_name=r.product_name,
+            article=r.article,
+            brand=r.brand,
+            is_answered=r.is_answered,
+        )
+        for r in rows
+    ]
 
     return ReviewsListResponse(
         items=items,
-        count_unanswered=int(data.get("countUnanswered") or 0),
-        count_archive=int(data.get("countArchive") or 0),
-        average_rating=avg,
-        has_key=True,
+        total=int(total_filtered or 0),
+        count_unanswered=int(unanswered or 0),
+        count_archive=0,
+        average_rating=_round(avg),
+        has_key=has_key,
     )
+
+
+async def _summary_kpis(
+    db: AsyncSession, project_id: int, nm_ids: set[int] | None, date_from: datetime | None
+) -> dict:
+    row = (
+        await db.execute(
+            select(
+                func.count(WBFeedback.id),
+                func.avg(WBFeedback.rating).filter(WBFeedback.rating > 0),
+                func.count(WBFeedback.id).filter(~WBFeedback.has_text),
+                func.count(WBFeedback.id).filter(WBFeedback.has_text),
+                func.count(WBFeedback.id).filter(~WBFeedback.is_answered),
+                func.count(WBFeedback.id).filter(WBFeedback.rating.in_((4, 5))),
+                func.count(WBFeedback.id).filter(WBFeedback.rating.in_((1, 2))),
+            ).where(*_conds(project_id, nm_ids, date_from))
+        )
+    ).one()
+    total, avg, no_text, with_text, unanswered, positive, negative = row
+    return {
+        "average_rating": _round(avg),
+        "total": int(total or 0),
+        "count_no_text": int(no_text or 0),
+        "count_with_text": int(with_text or 0),
+        "count_unanswered": int(unanswered or 0),
+        "count_positive": int(positive or 0),
+        "count_negative": int(negative or 0),
+    }
+
+
+async def _monthly_rating(
+    db: AsyncSession, project_id: int, nm_ids: set[int] | None, date_from: datetime | None, granularity: str
+) -> list[dict]:
+    month = _bucket_expr(granularity)
+    avg, cnt = _avg_and_count()
+    rows = (
+        await db.execute(
+            select(month, avg, cnt)
+            .where(*_conds(project_id, nm_ids, date_from), WBFeedback.created_date.isnot(None))
+            .group_by(month)
+            .order_by(month)
+        )
+    ).all()
+    return [{"month": m, "avg_rating": _round(a), "count": int(c or 0)} for m, a, c in rows]
+
+
+async def _monthly_volume(
+    db: AsyncSession, project_id: int, nm_ids: set[int] | None, date_from: datetime | None, granularity: str
+) -> list[dict]:
+    month = _bucket_expr(granularity)
+    rows = (
+        await db.execute(
+            select(month, _r(1), _r(2), _r(3), _r(4), _r(5))
+            .where(*_conds(project_id, nm_ids, date_from), WBFeedback.created_date.isnot(None))
+            .group_by(month)
+            .order_by(month)
+        )
+    ).all()
+    return [
+        {"month": m, "r1": int(a or 0), "r2": int(b or 0), "r3": int(c or 0), "r4": int(d or 0), "r5": int(e or 0)}
+        for m, a, b, c, d, e in rows
+    ]
+
+
+def _nom_lookup(project_id: int) -> Subquery:
+    """Подзапрос nm_id → subject/brand (distinct по nm_id: размеры дают дубли)."""
+    return (
+        select(
+            Nomenclature.article_wb.label("nm_id"),
+            func.max(Nomenclature.subject).label("subject"),
+            func.max(Nomenclature.brand).label("brand"),
+        )
+        .where(
+            Nomenclature.project_id == project_id,
+            Nomenclature.article_wb.isnot(None),
+        )
+        .group_by(Nomenclature.article_wb)
+        .subquery()
+    )
+
+
+def _group_row(row: Sequence) -> dict:
+    """Строка группы (name, avg, count, r1..r5) → dict карточки распределения."""
+    n, a, c, x1, x2, x3, x4, x5 = row
+    return {
+        "name": n,
+        "avg_rating": _round(a),
+        "count": int(c or 0),
+        "r1": int(x1 or 0),
+        "r2": int(x2 or 0),
+        "r3": int(x3 or 0),
+        "r4": int(x4 or 0),
+        "r5": int(x5 or 0),
+    }
+
+
+async def _by_category(
+    db: AsyncSession, project_id: int, nm_ids: set[int] | None, date_from: datetime | None
+) -> list[dict]:
+    nom = _nom_lookup(project_id)
+    name = func.coalesce(nom.c.subject, _NO_CATEGORY).label("name")
+    avg, cnt = _avg_and_count()
+    rows = (
+        await db.execute(
+            select(name, avg, cnt, _r(1), _r(2), _r(3), _r(4), _r(5))
+            .select_from(WBFeedback)
+            .outerjoin(nom, nom.c.nm_id == WBFeedback.nm_id)
+            .where(*_conds(project_id, nm_ids, date_from))
+            .group_by(name)
+            .order_by(cnt.desc())
+            .limit(_GROUP_LIMIT)
+        )
+    ).all()
+    return [_group_row(r) for r in rows]
+
+
+async def _by_brand(
+    db: AsyncSession, project_id: int, nm_ids: set[int] | None, date_from: datetime | None
+) -> list[dict]:
+    nom = _nom_lookup(project_id)
+    # Бренд из Nomenclature по nm_id, фолбэк — снапшот отзыва, затем «Без бренда»
+    name = func.coalesce(nom.c.brand, WBFeedback.brand, _NO_BRAND).label("name")
+    avg, cnt = _avg_and_count()
+    rows = (
+        await db.execute(
+            select(name, avg, cnt, _r(1), _r(2), _r(3), _r(4), _r(5))
+            .select_from(WBFeedback)
+            .outerjoin(nom, nom.c.nm_id == WBFeedback.nm_id)
+            .where(*_conds(project_id, nm_ids, date_from))
+            .group_by(name)
+            .order_by(cnt.desc())
+            .limit(_GROUP_LIMIT)
+        )
+    ).all()
+    return [_group_row(r) for r in rows]
+
+
+@cached(prefix="reviews:summary", ttl=300)
+async def get_reviews_summary(
+    db: AsyncSession, project_id: int, tag: str | None = None, period: str = _DEFAULT_PERIOD
+) -> dict:
+    """
+    Полная сводка отзывов проекта из зеркала БД за выбранный период.
+
+    Все запросы фильтруют project_id; ярлык (`tag`) резолвится в набор nm_id, а
+    `period` — в окно по дате; вместе они ограничивают ВСЕ блоки (KPI, ряды,
+    категории, бренды). Гранулярность рядов: посуточно для коротких периодов
+    (2 недели / месяц), помесячно для остальных.
+    """
+    period = _normalize_period(period)
+    date_from = _period_start(period)
+    granularity = "day" if period in _DAILY_PERIODS else "month"
+    nm_ids = await _resolve_tag_nm_ids(db, project_id, tag)
+
+    kpis = await _summary_kpis(db, project_id, nm_ids, date_from)
+    # has_key = «показывать data-UI»: True, если у проекта есть отзывы за ВСЁ время
+    # (даже когда окно периода пустое — фронт покажет «за период пусто») или активный ключ.
+    has_key = (
+        bool(kpis["total"])
+        or await has_any_feedback(db, project_id)
+        or await _has_wb_key(db, project_id)
+    )
+
+    return {
+        "summary": kpis,
+        "monthly_rating": await _monthly_rating(db, project_id, nm_ids, date_from, granularity),
+        "monthly_volume": await _monthly_volume(db, project_id, nm_ids, date_from, granularity),
+        "by_category": await _by_category(db, project_id, nm_ids, date_from),
+        "by_brand": await _by_brand(db, project_id, nm_ids, date_from),
+        "granularity": granularity,
+        "period": period,
+        "has_key": has_key,
+    }

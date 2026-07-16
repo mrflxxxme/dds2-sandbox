@@ -13,6 +13,7 @@
 | `WbFinanceRow` (`wb_finance_rows`) | Кэш финансового отчёта WB | |
 | `WbFinanceSyncLog` (`wb_finance_sync_log`) | Лог синхронизации финансов | |
 | `WbOrderCancelDaily` (`wb_order_cancel_daily`) | Ежедневная статистика отмен | |
+| `WBFeedback` (`wb_feedbacks`) | Зеркало отзывов покупателей WB | uniq `(project_id, wb_id)`; `has_text` derived; sync_type=`feedbacks` |
 | `WbTariff` (`wb_tariffs`) | Коэффициенты WB | SoftDeleteMixin |
 
 ## Бизнес-правила
@@ -60,8 +61,19 @@ WB возвращает строки удержаний за отзывы с п�
 - Бэкфил истории: `python -m scripts.backfill_review_deductions`.
 - При новом типе удержаний с nm_id в тексте — расширить `_REVIEW_TARGET_RE` или добавить аналогичный helper.
 
+### Отзывы покупателей (feedbacks) — сводная аналитика
+Отзывы **зеркалятся в БД** (`wb_feedbacks`), сводка строится из зеркала, не из живого API (историю «за всё существование» живой API не отдаёт — старое уходит в архив, `take` ограничен).
+- Sync: `services/wb_reviews_sync.py` — активные отзывы (isAnswered false+true) + `full_backfill` тянет архив (`WBApiClient.get_feedbacks_archive`) при первом прогоне (пустое зеркало). Upsert `on_conflict (project_id, wb_id)`, дедуп ключей до executemany.
+- Job: `scheduler/jobs/wb_reviews_sync.py`, ночью 03:15 MSK, `sync_type="feedbacks"`. On-demand — `POST /reviews/sync` (кнопка «Обновить»).
+- Агрегаты: `services/reviews_service.get_reviews_summary(project_id, tag=None, period="1y")` (`@cached("reviews:summary", 300)`) — KPI, рейтинг/объём временны́м рядом, разрезы по категории (`Nomenclature.subject`)/бренду (`Nomenclature.brand` по nm_id, фолбэк — снапшот отзыва)/ярлыку (`ProductTagMap`→`ProductTag.name`, только `is_deleted=False`). Непривязанные nm_id → «Без категории/бренда/ярлыка».
+- **Период (`period`)**: `2w/1m/3m/6m/1y/all` (дефолт `1y`) → окно `created_date >= now-Δ` во ВСЕХ блоках. Гранулярность рядов адаптивная: `day` для коротких (2w/1m), `month` для остальных; отдаётся в ответе (`granularity`). Неизвестный ключ → `1y`. `GET /reviews/summary` и `POST /reviews/sync` принимают `period` (эхо в ответе).
+- **has_key = «показывать data-UI»**: True, если у проекта есть отзывы за ВСЁ время (`_has_any_feedback`) ИЛИ активный ключ — НЕ period-фильтрованный `total` (иначе пустое окно у проекта с историей ложно показало бы экран «нет ключа»). Пустое окно при has_key=True → фронт рисует «за период пусто».
+- **Список** (`GET /reviews`): пагинация `take`/`skip`, ответ несёт `total` среза (по `is_answered`) → фронт «показано N из M» + «Показать ещё».
+- Grabli: джойн `feedback.nm_id → Nomenclature.article_wb` дедуплен через `GROUP BY article_wb` в подзапросе — иначе размеры (много barcode на nm_id) раздули бы счётчики.
+
 ### Cache invalidation
 После WB sync инвалидировать **точечно**: `reports:opiu`, `reports:wb_bdr`, `reports:dashboard`. Никогда не сбрасывать все ключи разом — worker starvation.
+Отзывы: после `POST /reviews/sync` — `invalidate_cache("reviews:summary:project_id={id}")`.
 
 ## Зависимости
 - `DOMAIN_TRANSACTIONS` — WB-выплаты матчатся с транзакциями.
@@ -81,6 +93,7 @@ WB возвращает строки удержаний за отзывы с п�
 - `services/funnel/` — обёртки WB API, оркестратор синхронизации, анализ, backfill, capital, аномалии, рекламные кампании.
 - `services/wb_finance_sync.py` (+ `wb_finance_helpers.py`) — синхронизация WB Finance Report.
 - `services/wb_cancel_sync.py` — синхронизация статистики отмен.
+- `services/wb_reviews_sync.py` — синхронизация отзывов в `wb_feedbacks`; `services/reviews_service.py` — список + сводная аналитика; `routers/reviews.py` — HTTP.
 - `services/integrations_service.py` — управление API-ключами.
 - `services/tariff_service.py` — управление тарифами WB.
 - `services/warehouse_stock_service.py`, `services/stock_forecast_service.py` — остатки и прогноз.

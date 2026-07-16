@@ -49,6 +49,7 @@ from backend.scheduler.jobs.wb_finance import (
 from backend.scheduler.jobs.cbr_bic_sync import sync_cbr_bic_directory
 from backend.scheduler.jobs.faktura_statement_sync import sync_all_projects_faktura_statements
 from backend.scheduler.jobs.wb_goods_returns_sync import sync_all_projects_wb_returns
+from backend.scheduler.jobs.wb_reviews_sync import sync_all_projects_wb_feedbacks
 from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
 from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
 from backend.scheduler.jobs.measurements_digest import send_measurement_digests
@@ -361,6 +362,18 @@ def start_scheduler():
         trigger=CronTrigger(hour="8,20", minute=0, timezone=MSK),
         id="wb_goods_returns_sync",
         name="WB goods returns sync (08:00 + 20:00 MSK)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # WB customer feedbacks (отзывы): ночной прогон 03:15 MSK. Первый проход для
+    # проекта делает full backfill (тянет и архив WB), дальше — только активные.
+    _scheduler.add_job(
+        sync_all_projects_wb_feedbacks,
+        trigger=CronTrigger(hour=3, minute=15, timezone=MSK),
+        id="wb_feedbacks_sync",
+        name="WB feedbacks sync (03:15 MSK)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,

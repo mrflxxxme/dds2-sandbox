@@ -789,6 +789,42 @@ class WBApiClient:
                 inner = data.get("data") if isinstance(data, dict) else None
                 return inner or {"countUnanswered": 0, "countArchive": 0, "feedbacks": []}
 
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_feedbacks_archive(
+        self,
+        take: int = 5000,
+        skip: int = 0,
+    ) -> dict:
+        """
+        Архивные отзывы покупателей (feedbacks archive).
+        WB Feedbacks API: GET /api/v1/feedbacks/archive?take=&skip=
+        take ∈ [1..5000], skip ≥ 0. Тот же формат data-dict, что get_feedbacks
+        (архив = обработанные отзывы, без isAnswered-фильтра). Нужен для первичного
+        бэкофилла истории — активный список отдаёт только «свежие» отзывы.
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                params = {"take": take, "skip": skip}
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks/archive"
+                logger.info("wb_api.request", method="GET", path="/api/v1/feedbacks/archive", params=params)
+                response = await client.get(url, headers=self.headers, params=params)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code == 204:
+                    return {"feedbacks": []}
+                if response.status_code != 200:
+                    raise ValueError(f"WB Feedbacks archive error: HTTP {response.status_code} — {response.text[:200]}")
+
+                data = response.json()
+                inner = data.get("data") if isinstance(data, dict) else None
+                return inner or {"feedbacks": []}
+
 
 def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
     """

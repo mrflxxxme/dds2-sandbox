@@ -6051,8 +6051,63 @@ export interface Review {
 
 export interface ReviewsListResponse {
   items: Review[];
+  /** Всего отзывов в текущем срезе (по фильтру is_answered) — для пагинации */
+  total: number;
   count_unanswered: number;
   count_archive: number;
   average_rating: number | null;
+  has_key: boolean;
+}
+
+/** Диапазон выборки сводки отзывов. */
+export type ReviewsPeriod = '2w' | '1m' | '3m' | '6m' | '1y' | 'all';
+
+/** Сводная аналитика отзывов (backend Decimal-поля могут прийти строкой → Number()). */
+export interface ReviewsSummary {
+  average_rating: number | null;
+  total: number;
+  count_no_text: number;
+  count_with_text: number;
+  count_unanswered: number;
+  count_positive: number;
+  count_negative: number;
+}
+
+export interface MonthlyRatingPoint {
+  month: string;
+  avg_rating: number | null;
+  count: number;
+}
+
+export interface MonthlyVolumePoint {
+  month: string;
+  r1: number;
+  r2: number;
+  r3: number;
+  r4: number;
+  r5: number;
+}
+
+export interface GroupRating {
+  name: string;
+  avg_rating: number | null;
+  count: number;
+  r1: number;
+  r2: number;
+  r3: number;
+  r4: number;
+  r5: number;
+}
+
+export interface ReviewsSummaryResponse {
+  summary: ReviewsSummary;
+  monthly_rating: MonthlyRatingPoint[];
+  monthly_volume: MonthlyVolumePoint[];
+  by_category: GroupRating[];
+  by_brand: GroupRating[];
+  /** Гранулярность рядов: 'day' (короткие периоды) либо 'month' */
+  granularity: 'day' | 'month';
+  /** Применённый период (эхо запроса) */
+  period: ReviewsPeriod;
   has_key: boolean;
 }
