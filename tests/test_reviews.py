@@ -298,6 +298,12 @@ async def test_new_low_rated_breakdowns(db_session, project):
     assert tags["Хит"]["products"] == 1  # только 601 с ярлыком
     assert tags["Без ярлыка"]["products"] == 2  # 602 + 603 без ярлыка
 
+    # каждый item несёт свои ярлыки — для фильтра списка по ярлыку на фронте
+    by_nm = {it["nm_id"]: it for it in res["items"]}
+    assert by_nm[601]["tags"] == ["Хит"]
+    assert by_nm[602]["tags"] == []
+    assert by_nm[603]["tags"] == []
+
 
 async def test_summary_old_reviews_keep_data_ui(db_session, project):
     """Все отзывы старше окна и ключа нет → окно пустое, но has_key=True (data-UI,

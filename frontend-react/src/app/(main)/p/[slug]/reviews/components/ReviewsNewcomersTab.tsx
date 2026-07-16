@@ -26,12 +26,25 @@ function avgColor(v: number | null): string {
 
 type GroupMode = 'category' | 'brand' | 'tag';
 
-/** Карточка разреза: имя, число новинок + отзывов, средняя, распределение 5→1. */
-function GroupCard({ g }: { g: NewcomerGroup }) {
+/** Карточка разреза: имя, число новинок + отзывов, средняя, распределение 5→1. Кликабельна — фильтрует список. */
+function GroupCard({ g, active, onClick }: { g: NewcomerGroup; active: boolean; onClick: () => void }) {
     const color = avgColor(g.avg_rating);
     const counts: Record<number, number> = { 1: g.r1, 2: g.r2, 3: g.r3, 4: g.r4, 5: g.r5 };
     return (
-        <div className="glass-card" style={{ padding: 16, borderTop: `3px solid ${color}` }}>
+        <div
+            className="glass-card"
+            onClick={onClick}
+            role="button"
+            tabIndex={0}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
+            style={{
+                padding: 16,
+                borderTop: `3px solid ${color}`,
+                cursor: 'pointer',
+                outline: active ? `2px solid var(--color-accent)` : 'none',
+                outlineOffset: active ? '-2px' : undefined,
+            }}
+        >
             <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={g.name}>
                 {g.name}
             </div>
@@ -67,8 +80,12 @@ export default function ReviewsNewcomersTab() {
     const [data, setData] = useState<NewcomersResponse | null>(null);
     const [days, setDays] = useState(30);
     const [groupMode, setGroupMode] = useState<GroupMode>('category');
+    const [selected, setSelected] = useState<string | null>(null); // выбранная группа-фильтр
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+
+    // Смена разреза или срока сбрасывает выбранный фильтр
+    const changeGroupMode = useCallback((m: GroupMode) => { setGroupMode(m); setSelected(null); }, []);
 
     const load = useCallback(async (d: number) => {
         setLoading(true);
@@ -91,6 +108,14 @@ export default function ReviewsNewcomersTab() {
         : groupMode === 'brand'
             ? (data?.by_brand ?? [])
             : (data?.by_tag ?? []);
+
+    // Клик по карточке фильтрует список по выбранной группе (в разрезе groupMode)
+    const matchesSelected = useCallback((it: NewcomerReview, name: string): boolean => {
+        if (groupMode === 'category') return it.subject === name;
+        if (groupMode === 'brand') return it.brand === name;
+        return name === 'Без ярлыка' ? it.tags.length === 0 : it.tags.includes(name);
+    }, [groupMode]);
+    const shown = selected == null ? items : items.filter(it => matchesSelected(it, selected));
 
     const columns: Column[] = useMemo(() => [
         {
@@ -140,7 +165,7 @@ export default function ReviewsNewcomersTab() {
                         <button
                             key={o.key}
                             className={`btn btn-sm ${days === o.key ? 'btn-primary' : 'btn-secondary'}`}
-                            onClick={() => setDays(o.key)}
+                            onClick={() => { setDays(o.key); setSelected(null); }}
                             disabled={loading}
                         >
                             {o.label}
@@ -201,26 +226,46 @@ export default function ReviewsNewcomersTab() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '0 0 12px', flexWrap: 'wrap' }}>
                         <h3 style={{ margin: 0, fontSize: 16 }}>Распределение</h3>
                         <div style={{ display: 'flex', gap: 4 }}>
-                            <button className={`btn btn-sm ${groupMode === 'category' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setGroupMode('category')}>По предмету</button>
-                            <button className={`btn btn-sm ${groupMode === 'brand' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setGroupMode('brand')}>По бренду</button>
-                            <button className={`btn btn-sm ${groupMode === 'tag' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setGroupMode('tag')}>По ярлыку</button>
+                            <button className={`btn btn-sm ${groupMode === 'category' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => changeGroupMode('category')}>По предмету</button>
+                            <button className={`btn btn-sm ${groupMode === 'brand' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => changeGroupMode('brand')}>По бренду</button>
+                            <button className={`btn btn-sm ${groupMode === 'tag' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => changeGroupMode('tag')}>По ярлыку</button>
                         </div>
+                        {selected && (
+                            <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>
+                                фильтр: <b style={{ color: 'var(--color-text)' }}>{selected}</b> — нажмите карточку ещё раз, чтобы снять
+                            </span>
+                        )}
                     </div>
                     {groups.length === 0 ? (
                         <div className="glass-card" style={{ padding: 20, color: 'var(--color-text-dim)', fontSize: 14, marginBottom: 24 }}>Нет данных</div>
                     ) : (
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16, marginBottom: 24 }}>
-                            {groups.map(g => <GroupCard key={g.name} g={g} />)}
+                            {groups.map(g => (
+                                <GroupCard
+                                    key={g.name}
+                                    g={g}
+                                    active={selected === g.name}
+                                    onClick={() => setSelected(prev => prev === g.name ? null : g.name)}
+                                />
+                            ))}
                         </div>
                     )}
 
-                    <h3 style={{ margin: '0 0 12px', fontSize: 16 }}>Список новинок</h3>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, margin: '0 0 12px', flexWrap: 'wrap' }}>
+                        <h3 style={{ margin: 0, fontSize: 16 }}>Список новинок</h3>
+                        {selected && (
+                            <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>
+                                {selected} · {formatNumber(shown.length, 0)} из {formatNumber(items.length, 0)}
+                                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 8 }} onClick={() => setSelected(null)}>Сбросить</button>
+                            </span>
+                        )}
+                    </div>
                     <TanStackDataTable
                         columns={columns}
-                        data={items}
+                        data={shown}
                         exportName="problem_newcomers"
                         enableSorting
-                        enablePagination={items.length > 50}
+                        enablePagination={shown.length > 50}
                     />
                 </>
             )}

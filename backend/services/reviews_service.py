@@ -478,12 +478,14 @@ async def get_new_low_rated(
     items = items[:_NEWCOMERS_LIMIT]
 
     nm_to_tags = await _newcomer_tag_map(db, project_id, [it["nm_id"] for it in items])
+    for it in items:
+        it["tags"] = nm_to_tags.get(it["nm_id"], [])
     has_key = bool(items) or await has_any_feedback(db, project_id) or await _has_wb_key(db, project_id)
     return {
         "items": items,
         "by_category": _group_newcomers(items, lambda it: [it["subject"]]),
         "by_brand": _group_newcomers(items, lambda it: [it["brand"]]),
-        "by_tag": _group_newcomers(items, lambda it: nm_to_tags.get(it["nm_id"]) or [_NO_TAG]),
+        "by_tag": _group_newcomers(items, lambda it: it["tags"] or [_NO_TAG]),
         "days": days,
         "max_rating": max_rating,
         "has_key": has_key,

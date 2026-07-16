@@ -100,6 +100,7 @@ class NewcomerReview(BaseModel):
     r3: int = 0
     r4: int = 0
     r5: int = 0
+    tags: list[str] = []  # имена ярлыков товара (для фильтра списка по ярлыку)
 
 
 class NewcomerGroup(BaseModel):

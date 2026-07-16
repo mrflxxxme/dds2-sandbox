@@ -6390,6 +6390,7 @@ export interface NewcomerReview {
   r3: number;
   r4: number;
   r5: number;
+  tags: string[];
 }
 
 /** Разрез проблемных новинок по категории / бренду / ярлыку. */
