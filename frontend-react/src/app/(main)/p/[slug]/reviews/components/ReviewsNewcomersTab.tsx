@@ -17,6 +17,22 @@ const MAX_RATING = 4.6;
 const RATING_COLORS: Record<number, string> = { 1: '#ff3b30', 2: '#ff9f0a', 3: '#ffd60a', 4: '#7dd957', 5: '#34c759' };
 
 type GroupMode = 'category' | 'brand' | 'tag';
+type SubDim = 'category' | 'brand';
+
+/** Встречная размерность для разворота: у бренда/ярлыка — предмет, у предмета — бренд. */
+function subDimOf(mode: GroupMode): SubDim {
+    return mode === 'category' ? 'brand' : 'category';
+}
+function subLabel(dim: SubDim): string {
+    return dim === 'category' ? 'предмету' : 'бренду';
+}
+
+/** Строка встречного разреза внутри карточки. */
+interface SubRow {
+    name: string;
+    products: number;
+    avg: number | null;
+}
 
 /** Цвет средней оценки по значению (красный → жёлтый → зелёный). */
 function avgColor(v: number | null): string {
@@ -31,24 +47,43 @@ function toggle<T>(arr: T[], v: T): T[] {
     return arr.includes(v) ? arr.filter(x => x !== v) : [...arr, v];
 }
 
+/** Средняя оценка группы товаров по суммарному распределению r1..r5 (rating>0). */
+function subBreakdown(products: NewcomerReview[], dim: SubDim): SubRow[] {
+    const map = new Map<string, { R: number[]; n: number }>();
+    for (const p of products) {
+        const key = dim === 'category' ? p.subject : p.brand;
+        const acc = map.get(key) ?? { R: [0, 0, 0, 0, 0], n: 0 };
+        acc.R[0] += p.r1; acc.R[1] += p.r2; acc.R[2] += p.r3; acc.R[3] += p.r4; acc.R[4] += p.r5;
+        acc.n += 1;
+        map.set(key, acc);
+    }
+    return [...map.entries()]
+        .map(([name, { R, n }]) => {
+            const rated = R[0] + R[1] + R[2] + R[3] + R[4];
+            const avg = rated ? (R[0] + R[1] * 2 + R[2] * 3 + R[3] * 4 + R[4] * 5) / rated : null;
+            return { name, products: n, avg };
+        })
+        .sort((a, b) => b.products - a.products);
+}
+
 /**
  * Карточка разреза. Клик по телу — добавить/убрать группу из фильтра (объединение).
- * Кнопка ▸ — развернуть список товаров группы; клик по товару — добавить/убрать его.
+ * Кнопка «по предмету/бренду» — развернуть встречный разрез; клик по строке — фильтр по (группа ∩ разрез).
  */
-function GroupCard({ g, active, onToggle, expanded, onToggleExpand, products, selectedProducts, onToggleProduct }: {
+function GroupCard({ g, active, onToggle, expanded, onToggleExpand, subDim, subRows, selectedSubNames, onToggleSub }: {
     g: NewcomerGroup;
     active: boolean;
     onToggle: () => void;
     expanded: boolean;
     onToggleExpand: () => void;
-    products: NewcomerReview[];
-    selectedProducts: number[];
-    onToggleProduct: (nmId: number) => void;
+    subDim: SubDim;
+    subRows: SubRow[];
+    selectedSubNames: string[];
+    onToggleSub: (sub: string) => void;
 }) {
     const color = avgColor(g.avg_rating);
     const counts: Record<number, number> = { 1: g.r1, 2: g.r2, 3: g.r3, 4: g.r4, 5: g.r5 };
     const rated = g.r1 + g.r2 + g.r3 + g.r4 + g.r5;
-    const pickedHere = products.reduce((n, p) => n + (selectedProducts.includes(p.nm_id) ? 1 : 0), 0);
 
     return (
         <div
@@ -74,10 +109,10 @@ function GroupCard({ g, active, onToggle, expanded, onToggleExpand, products, se
                 <button
                     className="btn btn-secondary btn-sm"
                     onClick={onToggleExpand}
-                    title={expanded ? 'Скрыть товары' : 'Показать товары группы'}
-                    style={{ padding: '2px 8px' }}
+                    title={expanded ? 'Скрыть разрез' : `Разрез по ${subLabel(subDim)}`}
+                    style={{ padding: '2px 8px', whiteSpace: 'nowrap' }}
                 >
-                    {expanded ? '▾' : '▸'} товары
+                    {expanded ? '▾' : '▸'} по {subLabel(subDim)}
                 </button>
             </div>
 
@@ -88,7 +123,7 @@ function GroupCard({ g, active, onToggle, expanded, onToggleExpand, products, se
                 </div>
                 <div style={{ color: 'var(--color-text-dim)', fontSize: 12, marginBottom: 12 }}>
                     Новинок: {formatNumber(g.products, 0)} · Отзывов: {formatNumber(g.count, 0)}
-                    {pickedHere > 0 && <span style={{ color: 'var(--color-accent)' }}> · выбрано {formatNumber(pickedHere, 0)}</span>}
+                    {selectedSubNames.length > 0 && <span style={{ color: 'var(--color-accent)' }}> · выбрано {formatNumber(selectedSubNames.length, 0)}</span>}
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                     {[5, 4, 3, 2, 1].map(n => {
@@ -110,23 +145,24 @@ function GroupCard({ g, active, onToggle, expanded, onToggleExpand, products, se
 
             {expanded && (
                 <div style={{ marginTop: 12, borderTop: '1px solid var(--color-border)', paddingTop: 8, maxHeight: 240, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    {products.length === 0 ? (
-                        <div style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>Нет товаров</div>
-                    ) : products.map(p => {
-                        const sel = selectedProducts.includes(p.nm_id);
+                    <div style={{ fontSize: 11, color: 'var(--color-text-dim)', marginBottom: 2 }}>По {subLabel(subDim)}:</div>
+                    {subRows.length === 0 ? (
+                        <div style={{ color: 'var(--color-text-dim)', fontSize: 12 }}>Нет данных</div>
+                    ) : subRows.map(s => {
+                        const sel = selectedSubNames.includes(s.name);
                         return (
                             <div
-                                key={p.nm_id}
-                                onClick={() => onToggleProduct(p.nm_id)}
+                                key={s.name}
+                                onClick={() => onToggleSub(s.name)}
                                 role="button"
                                 tabIndex={0}
-                                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleProduct(p.nm_id); } }}
+                                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleSub(s.name); } }}
                                 style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, padding: '4px 6px', borderRadius: 8, fontSize: 12, background: sel ? 'var(--color-border)' : 'transparent' }}
                             >
                                 <input type="checkbox" checked={sel} readOnly style={{ cursor: 'pointer' }} />
-                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.name}>{p.name}</span>
-                                <span style={{ color: avgColor(p.avg_rating), fontWeight: 600 }}>{p.avg_rating != null ? `${formatNumber(Number(p.avg_rating), 2)}★` : '—'}</span>
-                                <span style={{ color: 'var(--color-text-dim)', width: 40, textAlign: 'right' }}>{formatNumber(p.count, 0)} отз.</span>
+                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.name}>{s.name}</span>
+                                <span style={{ color: avgColor(s.avg), fontWeight: 600 }}>{s.avg != null ? `${formatNumber(s.avg, 2)}★` : '—'}</span>
+                                <span style={{ color: 'var(--color-text-dim)', width: 62, textAlign: 'right' }}>{formatNumber(s.products, 0)} нов.</span>
                             </div>
                         );
                     })}
@@ -141,13 +177,12 @@ export default function ReviewsNewcomersTab() {
     const [days, setDays] = useState(30);
     const [groupMode, setGroupMode] = useState<GroupMode>('category');
     const [selectedGroups, setSelectedGroups] = useState<string[]>([]); // выбранные группы (объединение)
-    const [selectedProducts, setSelectedProducts] = useState<number[]>([]); // выбранные товары (объединение)
+    const [selectedSubs, setSelectedSubs] = useState<{ group: string; sub: string }[]>([]); // разрезы (группа ∩ встречная)
     const [expanded, setExpanded] = useState<string[]>([]); // развёрнутые карточки
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
-    const resetFilters = useCallback(() => { setSelectedGroups([]); setSelectedProducts([]); setExpanded([]); }, []);
-    // Смена разреза или срока сбрасывает выбор
+    const resetFilters = useCallback(() => { setSelectedGroups([]); setSelectedSubs([]); setExpanded([]); }, []);
     const changeGroupMode = useCallback((m: GroupMode) => { setGroupMode(m); resetFilters(); }, [resetFilters]);
 
     const load = useCallback(async (d: number) => {
@@ -172,20 +207,26 @@ export default function ReviewsNewcomersTab() {
             ? (data?.by_brand ?? [])
             : (data?.by_tag ?? []);
 
+    const subDim = subDimOf(groupMode);
+
     const matchesGroup = useCallback((it: NewcomerReview, name: string): boolean => {
         if (groupMode === 'category') return it.subject === name;
         if (groupMode === 'brand') return it.brand === name;
         return name === 'Без ярлыка' ? it.tags.length === 0 : it.tags.includes(name);
     }, [groupMode]);
 
-    // Товары конкретной группы (для разворота карточки)
+    const matchesSub = useCallback((it: NewcomerReview, sub: string): boolean =>
+        subDim === 'category' ? it.subject === sub : it.brand === sub, [subDim]);
+
+    // Товары группы (для встречного разреза в развороте)
     const productsOf = useCallback((name: string): NewcomerReview[] =>
         items.filter(it => matchesGroup(it, name)), [items, matchesGroup]);
 
-    // Список = объединение выбранных групп и выбранных товаров. Пусто → все.
-    const hasFilter = selectedGroups.length > 0 || selectedProducts.length > 0;
+    // Список = объединение выбранных групп и выбранных разрезов (группа ∩ встречная). Пусто → все.
+    const hasFilter = selectedGroups.length > 0 || selectedSubs.length > 0;
     const shown = !hasFilter ? items : items.filter(it =>
-        selectedGroups.some(g => matchesGroup(it, g)) || selectedProducts.includes(it.nm_id)
+        selectedGroups.some(g => matchesGroup(it, g)) ||
+        selectedSubs.some(s => matchesGroup(it, s.group) && matchesSub(it, s.sub))
     );
 
     const columns: Column[] = useMemo(() => [
@@ -313,7 +354,7 @@ export default function ReviewsNewcomersTab() {
                             <button className={`btn btn-sm ${groupMode === 'tag' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => changeGroupMode('tag')}>По ярлыку</button>
                         </div>
                         <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
-                            кликайте карточки, чтобы плюсовать группы; «товары» — фильтр по конкретным товарам
+                            кликайте карточки, чтобы плюсовать группы; «по {subLabel(subDim)}» — разрез внутри группы
                         </span>
                     </div>
                     {groups.length === 0 ? (
@@ -328,9 +369,13 @@ export default function ReviewsNewcomersTab() {
                                     onToggle={() => setSelectedGroups(prev => toggle(prev, g.name))}
                                     expanded={expanded.includes(g.name)}
                                     onToggleExpand={() => setExpanded(prev => toggle(prev, g.name))}
-                                    products={productsOf(g.name)}
-                                    selectedProducts={selectedProducts}
-                                    onToggleProduct={(nmId) => setSelectedProducts(prev => toggle(prev, nmId))}
+                                    subDim={subDim}
+                                    subRows={expanded.includes(g.name) ? subBreakdown(productsOf(g.name), subDim) : []}
+                                    selectedSubNames={selectedSubs.filter(s => s.group === g.name).map(s => s.sub)}
+                                    onToggleSub={(sub) => setSelectedSubs(prev => {
+                                        const exists = prev.some(s => s.group === g.name && s.sub === sub);
+                                        return exists ? prev.filter(s => !(s.group === g.name && s.sub === sub)) : [...prev, { group: g.name, sub }];
+                                    })}
                                 />
                             ))}
                         </div>
@@ -340,8 +385,8 @@ export default function ReviewsNewcomersTab() {
                         <h3 style={{ margin: 0, fontSize: 16 }}>Список новинок</h3>
                         {hasFilter && (
                             <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>
-                                {selectedGroups.length > 0 && <>группы: <b style={{ color: 'var(--color-text)' }}>{selectedGroups.join(', ')}</b>{selectedProducts.length > 0 ? ' · ' : ' '}</>}
-                                {selectedProducts.length > 0 && <>товаров: <b style={{ color: 'var(--color-text)' }}>{formatNumber(selectedProducts.length, 0)}</b> </>}
+                                {selectedGroups.length > 0 && <>группы: <b style={{ color: 'var(--color-text)' }}>{selectedGroups.join(', ')}</b>{selectedSubs.length > 0 ? ' · ' : ' '}</>}
+                                {selectedSubs.length > 0 && <>разрезы: <b style={{ color: 'var(--color-text)' }}>{selectedSubs.map(s => `${s.group} › ${s.sub}`).join(', ')}</b> </>}
                                 · {formatNumber(shown.length, 0)} из {formatNumber(items.length, 0)}
                                 <button className="btn btn-secondary btn-sm" style={{ marginLeft: 8 }} onClick={resetFilters}>Сбросить</button>
                             </span>
