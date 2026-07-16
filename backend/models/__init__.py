@@ -99,6 +99,7 @@ from backend.models.integrations import (
     WbFunnelDaily,
     WbPrice,
     WbStockSnapshot,
+    WbWarehouseRemains,
     WbWarehouseStock,
 )
 from backend.models.loan import (
@@ -347,6 +348,7 @@ __all__ = [
     "WbCostOverride",
     "WbPrice",
     "WbStockSnapshot",
+    "WbWarehouseRemains",
     "WbWarehouseStock",
     # FX Rates
     "FxRate",

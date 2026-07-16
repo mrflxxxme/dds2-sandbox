@@ -341,6 +341,39 @@ class WbWarehouseStock(Base):
     )
 
 
+class WbWarehouseRemains(Base):
+    """Mirror of WB analytics report «Остатки на складах» (warehouse_remains API).
+
+    Matches the seller cabinet numbers 1:1 — unlike statistics supplier/stocks
+    it INCLUDES goods being accepted and in transit between WB warehouses.
+    One row per (nm_id, barcode, warehouse_name). WB returns transit rows as
+    pseudo-warehouses in the same list («В пути до получателей», «В пути
+    возвраты на склад WB») plus the total row «Всего находится на складах»
+    (= sum of real warehouses — exclude it when summing to avoid double count).
+    Full replace per project on each sync.
+    """
+
+    __tablename__ = "wb_warehouse_remains"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    barcode: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    vendor_code: Mapped[str | None] = mapped_column(String(100))
+    brand: Mapped[str | None] = mapped_column(String(200))
+    subject: Mapped[str | None] = mapped_column(String(200))
+    tech_size: Mapped[str | None] = mapped_column(String(50))
+    volume: Mapped[Decimal | None] = mapped_column(Numeric(10, 3))  # литраж, не деньги
+    warehouse_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "nm_id", "barcode", "warehouse_name", name="uq_wb_remains_nm_barcode_wh"),
+        Index("ix_wb_warehouse_remains_project_id", "project_id"),
+    )
+
+
 class WbStockSnapshot(Base):
     """Historical snapshot of warehouse stock at sync time."""
 
