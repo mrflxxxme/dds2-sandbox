@@ -16,6 +16,11 @@ from backend.models.integrations import WbAdPayment, WbAdUpd
 logger = logging.getLogger(__name__)
 
 
+# asyncpg не принимает >32767 параметров на statement — вставляем чанками (общий хелпер)
+from backend.utils.batching import INSERT_CHUNK as _INSERT_CHUNK
+from backend.utils.batching import chunked as _insert_chunks
+
+
 def _parse_dt(value: str | None) -> datetime | None:
     """ISO-строка WB (с tz или без, 'Z' или '+03:00', пробел вместо 'T') → naive UTC."""
     if not value or not isinstance(value, str):
@@ -78,8 +83,9 @@ async def sync_ad_upd(db: AsyncSession, project_id: int, date_from: str, date_to
     items = await fetch_adv_upd(api_key, date_from, date_to)
     rows = _upd_rows(project_id, items)
     if rows:
-        stmt = pg_insert(WbAdUpd).values(rows)
-        await db.execute(stmt.on_conflict_do_nothing(constraint="uq_ad_upd"))
+        for chunk in _insert_chunks(rows):
+            stmt = pg_insert(WbAdUpd).values(chunk)
+            await db.execute(stmt.on_conflict_do_nothing(constraint="uq_ad_upd"))
         await db.commit()
     logger.info("Ad upd sync: project %s, %s..%s — %s строк (из %s от WB)", project_id, date_from, date_to, len(rows), len(items))
     return {"status": "ok", "rows": len(rows), "fetched": len(items)}
@@ -97,16 +103,17 @@ async def sync_ad_payments(db: AsyncSession, project_id: int, date_from: str, da
     items = await fetch_adv_payments(api_key, date_from, date_to)
     rows = _payment_rows(project_id, items)
     if rows:
-        stmt = pg_insert(WbAdPayment).values(rows)
-        await db.execute(
-            stmt.on_conflict_do_update(
-                constraint="uq_ad_payment",
-                set_={
-                    "amount": stmt.excluded.amount, "status_id": stmt.excluded.status_id,
-                    "card_status": stmt.excluded.card_status, "paid_at": stmt.excluded.paid_at,
-                },
+        for chunk in _insert_chunks(rows):
+            stmt = pg_insert(WbAdPayment).values(chunk)
+            await db.execute(
+                stmt.on_conflict_do_update(
+                    constraint="uq_ad_payment",
+                    set_={
+                        "amount": stmt.excluded.amount, "status_id": stmt.excluded.status_id,
+                        "card_status": stmt.excluded.card_status, "paid_at": stmt.excluded.paid_at,
+                    },
+                )
             )
-        )
         await db.commit()
     logger.info("Ad payments sync: project %s, %s..%s — %s строк", project_id, date_from, date_to, len(rows))
     return {"status": "ok", "rows": len(rows), "fetched": len(items)}

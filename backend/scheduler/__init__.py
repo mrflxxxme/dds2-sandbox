@@ -35,6 +35,9 @@ from backend.scheduler.jobs.funnel import (
     fast_backfill_tick,
     snapshot_ad_intraday_all_projects,
     sync_ad_campaigns_all_projects,
+    sync_all_projects_ad_payments,
+    sync_all_projects_ad_search,
+    sync_all_projects_ad_upd,
     sync_all_projects_funnel,
     sync_budgets_all_projects,
     sync_funnel_hourly,
@@ -193,6 +196,26 @@ def start_scheduler():
         max_instances=1,
         misfire_grace_time=3600,
     )
+
+    # Утренняя дозагрузка «кнопочных» рекламных источников — чтобы к 9:00 MSK
+    # раздел «Сырые данные» был свежим по каждому блоку. Стартуем после ad_nm
+    # (04:20), с шагом 10 мин, чтобы не бить в rate limit WB одновременно. Окна
+    # маленькие, синк идемпотентен. misfire_grace_time=1h — прощаем рестарт
+    # воркера рядом со слотом (доберётся, а не потеряется до завтра).
+    for job_fn, minute, job_id, job_name in [
+        (sync_all_projects_ad_upd, 25, "ad_upd_morning", "WB Ads: история затрат (утро 04:25)"),
+        (sync_all_projects_ad_search, 35, "ad_search_morning", "WB Ads: зона Поиск (утро 04:35)"),
+        (sync_all_projects_ad_payments, 45, "ad_payments_morning", "WB Ads: пополнения счёта (утро 04:45)"),
+    ]:
+        _scheduler.add_job(
+            job_fn,
+            trigger=CronTrigger(hour=4, minute=minute, timezone=MSK),
+            id=job_id,
+            name=job_name,
+            replace_existing=True,
+            max_instances=1,
+            misfire_grace_time=3600,
+        )
 
     # Funnel hourly sync: every hour at :45 — last 2 days
     _scheduler.add_job(

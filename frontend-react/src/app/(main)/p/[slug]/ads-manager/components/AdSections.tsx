@@ -1,12 +1,12 @@
 'use client';
 import React, { useState, useCallback, useEffect } from 'react';
 import { api } from '@/lib/api';
-import { formatNumber, exportToExcel } from '@/lib/utils';
+import { formatNumber, formatDate, exportToExcel } from '@/lib/utils';
 import { cThStyle as thStyle, cThLeft as thLeft, tdStyle, tdLeft, mskTime } from './adsShared';
 import WbThumb from './WbThumb';
 import { IcCopy } from './icons';
 import { useToast } from './Toasts';
-import type { AdTabProduct, FunnelSkuRow, AdsBudgetGap } from '@/types/api';
+import type { AdTabProduct, FunnelSkuRow, AdsBudgetGap, AdsBudgetGapHistory } from '@/types/api';
 
 type View = 'high-drr' | 'no-ads' | 'no-organic' | 'budget-gap';
 type SortDir = 'asc' | 'desc';
@@ -17,6 +17,16 @@ const money = (x: unknown) => formatNumber(num(x), 1);          // деньги/
 const int = (x: unknown) => formatNumber(num(x), 0);            // штуки/счётчики — 0 знаков
 const pct = (x: unknown) => formatNumber(num(x), 1) + '%';      // проценты — 1 знак
 
+// Дробный час МСК (0..24) → «ЧЧ:ММ» (типичный час остановки в «Нехватке бюджета»)
+const hourMsk = (h: number | null | undefined) => {
+    if (h == null) return '—';
+    const hh = Math.floor(h);
+    let mm = Math.round((h - hh) * 60);
+    let H = hh;
+    if (mm === 60) { H += 1; mm = 0; }
+    return `${String(H).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+};
+
 // Доля рекл. кликов от всех переходов (для «Нет органики»)
 const adShare = (r: FunnelSkuRow) => {
     const opens = num(r.open_card);
@@ -25,13 +35,14 @@ const adShare = (r: FunnelSkuRow) => {
 
 const wbUrl = (nmId: number) => `https://www.wildberries.ru/catalog/${nmId}/detail.aspx`;
 
-export default function AdSections({ view, dateFrom, dateTo, brand, subject, campNm, selectedNms, onProductClick, campMeta }: {
+export default function AdSections({ view, dateFrom, dateTo, brand, subject, campNm, selectedNms, onProductClick, campMeta, nmsWithCampaigns }: {
     view: View;
     dateFrom: string; dateTo: string; brand: string; subject: string;
     campNm?: Record<number, number>;  // campaign_id → nm_id (миниатюра товара в «Нехватке бюджета»)
     selectedNms?: Map<number, boolean>;  // выбранные товары (nm → есть ли кампания) — подсветка строк
     onProductClick?: (nmId: number, hasCampaign: boolean) => void;  // клик по товару (создать / в выбор)
     campMeta?: Record<number, { subjects: string[]; brands: string[] }>;  // предмет/бренд кампании — фильтр «Нехватки бюджета»
+    nmsWithCampaigns?: Set<number>;  // nm с незавершённой кампанией — честный hasCampaign при клике
 }) {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
@@ -40,6 +51,11 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
     const [noAdsRows, setNoAdsRows] = useState<FunnelSkuRow[]>([]);
     const [organicRows, setOrganicRows] = useState<FunnelSkuRow[]>([]);
     const [gaps, setGaps] = useState<AdsBudgetGap[]>([]);
+    // История недобора по дням (раскрытие строки): ленивая загрузка + кэш по campaign_id
+    const [histOpen, setHistOpen] = useState<Set<number>>(() => new Set());
+    const [histData, setHistData] = useState<Record<number, AdsBudgetGapHistory>>({});
+    const [histLoading, setHistLoading] = useState<Set<number>>(() => new Set());
+    const [histError, setHistError] = useState<Record<number, string>>({});
 
     // Пороги-фильтры (дефолты — как в старом коде)
     const [drrThreshold, setDrrThreshold] = useState(7);
@@ -50,7 +66,9 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
     // Копирование артикула (nm_id) из ячейки товара — единый тост, как в списке кампаний
     const toast = useToast();
     const copyNm = (nmId: number) => {
-        navigator.clipboard?.writeText(String(nmId)).then(() => toast.success(`Артикул ${nmId} скопирован`)).catch(() => { /* clipboard недоступен */ });
+        navigator.clipboard?.writeText(String(nmId))
+            .then(() => toast.success(`Артикул ${nmId} скопирован`))
+            .catch(() => toast.error('Не удалось скопировать — буфер обмена недоступен'));
     };
 
     // Загрузка данных нужного раздела. AbortController — защита от двойного монтирования StrictMode.
@@ -88,14 +106,40 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
         return () => controller.abort();
     }, [load]);
 
+    // Ленивая загрузка истории недобора по дням для раскрытой кампании
+    const loadHistory = useCallback(async (cid: number) => {
+        setHistLoading(prev => new Set(prev).add(cid));
+        try {
+            const h = await api.getBudgetGapHistory(cid, 30);
+            setHistData(prev => ({ ...prev, [cid]: h }));
+            setHistError(prev => { const n = { ...prev }; delete n[cid]; return n; });
+        } catch (e) {
+            setHistError(prev => ({ ...prev, [cid]: e instanceof Error ? e.message : 'Ошибка загрузки истории' }));
+        } finally {
+            setHistLoading(prev => { const n = new Set(prev); n.delete(cid); return n; });
+        }
+    }, []);
+    const toggleHist = (cid: number) => {
+        setHistOpen(prev => {
+            const n = new Set(prev);
+            if (n.has(cid)) { n.delete(cid); return n; }
+            n.add(cid);
+            if (!histData[cid] && !histLoading.has(cid)) loadHistory(cid);
+            return n;
+        });
+    };
+
     // ─── Клиентские фильтры/сортировки (как в старом коде) ───
 
     // Высокий ДРР: ДРР выше N% + сортировка по клику на заголовок
+    // drr === null — расход без заказов (ДРР = ∞): всегда «выше порога» и сортируется поверх любых чисел
+    const drrVal = (r: AdTabProduct, field: keyof AdTabProduct) =>
+        field === 'drr' && r.drr === null ? Infinity : num(r[field]);
     const highDrr = drrRows
-        .filter(r => num(r.drr) > drrThreshold)
+        .filter(r => (r.drr === null ? num(r.adv_sum) > 0 : num(r.drr) > drrThreshold))
         .sort((a, b) => {
-            const av = num(a[drrSort.field]);
-            const bv = num(b[drrSort.field]);
+            const av = drrVal(a, drrSort.field);
+            const bv = drrVal(b, drrSort.field);
             return drrSort.dir === 'asc' ? av - bv : bv - av;
         });
     const toggleDrrSort = (field: keyof AdTabProduct) =>
@@ -124,7 +168,7 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
     // ─── Excel-экспорт (то, что видно — с учётом фильтров и сортировки) ───
     const exportHighDrr = () => exportToExcel(highDrr.map(r => ({
         'Артикул': r.vendor_code || '', 'nm_id': r.nm_id, 'Бренд': r.brand || '', 'Категория': r.subject || '',
-        'ДРР %': num(r.drr), 'Расход ₽': num(r.adv_sum), 'Заказы ₽': num(r.orders_sum_rub),
+        'ДРР %': r.drr === null ? '∞ (заказов нет)' : num(r.drr), 'Расход ₽': num(r.adv_sum), 'Заказы ₽': num(r.orders_sum_rub),
         'CTR %': num(r.ctr), 'CPC ₽': num(r.cpc), 'Кампаний': num(r.active_campaigns),
     })), `ads-high-drr_${dateFrom}_${dateTo}`);
     const exportNoAds = () => exportToExcel(noAds.map(r => ({
@@ -140,8 +184,13 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
     })), `ads-no-organic_${dateFrom}_${dateTo}`);
     const exportGaps = () => exportToExcel(gapsFiltered.map(g => ({
         'Кампания': g.name || `#${g.campaign_id}`, 'ID': g.campaign_id, 'Тип': (g.campaign_type || '').toUpperCase(),
-        'Потрачено сегодня ₽': num(g.spend_today), 'Остановилась в (МСК)': mskTime(g.ran_out_at),
-        'Скорость ₽/час': num(g.burn_rate), 'Долить до 00:00 ₽': num(g.needed_till_midnight), 'Товаров': g.nm_count,
+        'Статус': g.predicted ? 'Прогноз' : 'Факт',
+        'Потрачено сегодня ₽': num(g.spend_today),
+        'Остановилась в (МСК)': g.predicted ? `≈ ${hourMsk(g.typical_stop_hour)}` : mskTime(g.ran_out_at),
+        'Кончается дней': num(g.active_days) > 0 ? `${int(g.runout_days)}/${int(g.active_days)}` : '',
+        'Полный день ₽': g.potential_daily != null ? num(g.potential_daily) : '',
+        'Недобор ₽': g.potential_daily != null ? num(g.needed_potential) : num(g.needed_till_midnight),
+        'Скорость ₽/час': num(g.burn_rate), 'Товаров': g.nm_count,
     })), 'ads-budget-gap');
 
     // Кол-во показанных строк текущего раздела
@@ -179,6 +228,41 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
     const centerMsg = (text: string) => (
         <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-dim)' }}>{text}</div>
     );
+
+    // Раскрытая история недобора по дням для одной кампании
+    const renderHistory = (cid: number) => {
+        if (histLoading.has(cid)) return <div style={{ padding: '12px 46px', fontSize: 12, color: '#9ca3af' }}>Загрузка истории…</div>;
+        if (histError[cid]) return <div style={{ padding: '12px 46px', fontSize: 12, color: 'var(--color-danger)' }}>⚠️ {histError[cid]}</div>;
+        const h = histData[cid];
+        if (!h) return null;
+        if (h.days.length === 0) return <div style={{ padding: '12px 46px', fontSize: 12, color: '#9ca3af' }}>Нет данных за {h.window_days} дн</div>;
+        return (
+            <div style={{ padding: '10px 16px 14px 46px' }}>
+                <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 8 }}>
+                    Потенциал полного дня: <b>{h.potential_daily != null ? `${money(h.potential_daily)} ₽` : '—'}</b>
+                    {h.potential_daily != null ? ` (медиана по ${int(h.full_days)} дн)` : ' (нет данных для оценки)'} · Кончался бюджет: <b>{int(h.days_ran_out)}</b> дн из {int(h.window_days)} · Суммарный недобор: <b style={{ color: 'var(--color-accent)' }}>{money(h.total_shortfall)} ₽</b>
+                </div>
+                <table style={{ width: '100%', maxWidth: 620, borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead><tr>
+                        <th style={{ ...tdLeft, fontWeight: 600, color: '#6b7280' }}>Дата</th>
+                        <th style={{ ...tdStyle, fontWeight: 600, color: '#6b7280' }}>Расход ₽</th>
+                        <th style={{ ...tdStyle, fontWeight: 600, color: '#6b7280' }}>Кончился в (МСК)</th>
+                        <th style={{ ...tdStyle, fontWeight: 600, color: '#6b7280' }}>Недобор ₽</th>
+                    </tr></thead>
+                    <tbody>
+                        {h.days.map(d => (
+                            <tr key={d.date} style={{ background: d.ran_out ? '#fff7ed' : undefined }}>
+                                <td style={tdLeft}>{formatDate(d.date)}</td>
+                                <td style={tdStyle}>{money(d.spend)}</td>
+                                <td style={{ ...tdStyle, color: d.ran_out ? '#ef4444' : '#9ca3af', fontWeight: d.ran_out ? 700 : 400 }}>{d.ran_out ? mskTime(d.ran_out_at) : '—'}</td>
+                                <td style={{ ...tdStyle, color: d.shortfall > 0 ? 'var(--color-accent)' : '#9ca3af', fontWeight: d.shortfall > 0 ? 600 : 400 }}>{d.shortfall > 0 ? money(d.shortfall) : '—'}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        );
+    };
 
     // ─── Тулбар раздела ───
     const toolbar = (
@@ -222,7 +306,7 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
                 </>
             )}
             {view === 'budget-gap' && excelBtn(exportGaps, gaps.length === 0)}
-            <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>Показано: {shownCount}</span>
+            {!loading && <span style={{ fontSize: 12, color: 'var(--color-text-dim)', marginLeft: 'auto' }}>Показано: {shownCount}</span>}
         </div>
     );
 
@@ -261,7 +345,9 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
                                                 title={onProductClick ? (hasCamp ? 'Клик — добавить/убрать товар из выбора, затем «Подтвердить выбор»' : 'Нет кампании — клик откроет создание кампании по этому товару') : undefined}
                                                 style={{ cursor: onProductClick ? 'pointer' : undefined, background: sel ? '#dbeafe' : undefined }}>
                                                 {productCell(r)}
-                                                <td style={{ ...tdStyle, fontWeight: 700, color: num(r.drr) > 30 ? '#ef4444' : '#f59e0b' }}>{pct(r.drr)}</td>
+                                                <td style={{ ...tdStyle, fontWeight: 700, color: r.drr === null || num(r.drr) > 30 ? '#ef4444' : '#f59e0b' }}
+                                                    title={r.drr === null ? 'Расход есть, заказов нет — ДРР бесконечен' : undefined}>
+                                                    {r.drr === null ? '∞' : pct(r.drr)}</td>
                                                 <td style={{ ...tdStyle, color: '#f97316' }}>{money(r.adv_sum)}</td>
                                                 <td style={tdStyle}>{money(r.orders_sum_rub)}</td>
                                                 <td style={tdStyle}>{pct(r.ctr)}</td>
@@ -294,7 +380,7 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
                                         {noAds.map(r => {
                                             const sel = selectedNms?.has(r.nm_id);
                                             return (
-                                            <tr key={r.nm_id} onClick={onProductClick ? () => onProductClick(r.nm_id, false) : undefined}
+                                            <tr key={r.nm_id} onClick={onProductClick ? () => onProductClick(r.nm_id, nmsWithCampaigns?.has(r.nm_id) ?? false) : undefined}
                                                 title={onProductClick ? 'Клик — добавить/убрать товар из выбора, затем выбрать тип и создать сверху' : undefined}
                                                 style={{ cursor: onProductClick ? 'pointer' : undefined, background: sel ? '#dbeafe' : undefined }}>
                                                 {productCell(r)}
@@ -331,7 +417,7 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
                                             const share = adShare(r);
                                             const sel = selectedNms?.has(r.nm_id);
                                             return (
-                                                <tr key={r.nm_id} onClick={onProductClick ? () => onProductClick(r.nm_id, true) : undefined}
+                                                <tr key={r.nm_id} onClick={onProductClick ? () => onProductClick(r.nm_id, nmsWithCampaigns?.has(r.nm_id) ?? true) : undefined}
                                                     title={onProductClick ? 'Клик — добавить/убрать товар из выбора, затем «Подтвердить выбор»' : undefined}
                                                     style={{ cursor: onProductClick ? 'pointer' : undefined, background: sel ? '#dbeafe' : undefined }}>
                                                     {productCell(r)}
@@ -352,14 +438,16 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
 
                         {/* ─── Нехватка бюджета ─── */}
                         {view === 'budget-gap' && (
-                            gapsFiltered.length === 0 ? centerMsg('Сегодня бюджет нигде не кончался 🎉') : (
+                            gapsFiltered.length === 0 ? centerMsg('Сегодня бюджет нигде не кончался, хронических рисков нет 🎉') : (
                                 <table className="data-table" style={tableStyle}>
                                     <thead><tr>
+                                        <th style={{ ...thStyle, width: 28, padding: '5px 4px' }} />
                                         <th style={thLeft}>Кампания</th>
                                         <th style={thStyle}>Потрачено сегодня ₽</th>
-                                        <th style={thStyle}>Остановилась в (МСК)</th>
-                                        <th style={thStyle}>Скорость ₽/час</th>
-                                        <th style={thStyle}>Долить до 00:00 ₽</th>
+                                        <th style={thStyle} title="Факт — во сколько кончился бюджет сегодня (МСК). Прогноз — типичный час остановки по истории (медиана дней-остановок)">Остановилась в (МСК)</th>
+                                        <th style={thStyle} title="Как часто кампания упиралась в бюджет: дней-остановок / дней с расходом за окно">Кончается, дн</th>
+                                        <th style={thStyle} title="Реальный спрос: медиана экстраполяции дней-остановок (скорость расхода × 24 ч)">Полный день ₽</th>
+                                        <th style={thStyle} title="Сколько долить сегодня, чтобы выйти на потенциал полного дня">Недобор ₽</th>
                                         <th style={thStyle}>Товаров</th>
                                     </tr></thead>
                                     <tbody>
@@ -367,28 +455,67 @@ export default function AdSections({ view, dateFrom, dateTo, brand, subject, cam
                                             const nm = campNm?.[g.campaign_id];
                                             const sel = nm != null && selectedNms?.has(nm);
                                             const clickable = onProductClick && nm != null;
+                                            const open = histOpen.has(g.campaign_id);
+                                            const hasPot = g.potential_daily != null;
+                                            // Недобор: по потенциалу полного дня, иначе фолбэк на линейную оценку
+                                            const nedobor = hasPot ? num(g.needed_potential) : num(g.needed_till_midnight);
+                                            const roundedUp = hasPot && num(g.raw_needed_potential) > 0 && num(g.raw_needed_potential) < num(g.min_topup);
                                             return (
-                                            <tr key={g.campaign_id} onClick={clickable ? () => onProductClick!(nm!, true) : undefined}
+                                            <React.Fragment key={g.campaign_id}>
+                                            <tr onClick={clickable ? () => onProductClick!(nm!, true) : undefined}
                                                 title={clickable ? 'Клик — добавить/убрать товар из выбора, затем «Подтвердить выбор»' : undefined}
                                                 style={{ cursor: clickable ? 'pointer' : undefined, background: sel ? '#dbeafe' : undefined }}>
+                                                <td style={{ ...tdStyle, textAlign: 'center', cursor: 'pointer', color: '#9ca3af' }}
+                                                    onClick={e => { e.stopPropagation(); toggleHist(g.campaign_id); }}
+                                                    title="История недобора по дням">
+                                                    <span style={{ display: 'inline-block', transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>▶</span>
+                                                </td>
                                                 <td style={tdLeft}>
                                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                                         {campNm?.[g.campaign_id] != null && <WbThumb nmId={campNm[g.campaign_id]} size={38} />}
                                                         <div style={{ minWidth: 0 }}>
-                                                            <div style={{ fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis' }}>{g.name || `#${g.campaign_id}`}</div>
+                                                            <div style={{ fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                                {g.name || `#${g.campaign_id}`}
+                                                                {g.predicted && (
+                                                                    <span style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 700, color: '#b45309', background: '#fef3c7', borderRadius: 24, padding: '1px 7px', whiteSpace: 'nowrap' }}
+                                                                        title="Сегодня бюджет ещё есть, но по истории кампания регулярно кончается до конца дня — риск">прогноз</span>
+                                                                )}
+                                                            </div>
                                                             <div style={{ fontSize: 10, color: '#9ca3af' }}>#{g.campaign_id} · {g.campaign_type || '—'}</div>
                                                         </div>
                                                     </div>
                                                 </td>
                                                 <td style={tdStyle}>{money(g.spend_today)}</td>
-                                                <td style={{ ...tdStyle, fontWeight: 700, color: '#ef4444' }}>{mskTime(g.ran_out_at)}</td>
-                                                <td style={tdStyle}>{money(g.burn_rate)}</td>
-                                                <td style={{ ...tdStyle, fontWeight: 700, color: 'var(--color-accent)' }}
-                                                    title={num(g.raw_needed) < num(g.min_topup) ? `Расчётная нужда ${money(g.raw_needed)} ₽ округлена вверх до минимума пополнения WB ${money(g.min_topup)} ₽` : undefined}>
-                                                    {money(g.needed_till_midnight)}{num(g.raw_needed) < num(g.min_topup) && num(g.raw_needed) > 0 ? ' *' : ''}
+                                                {g.predicted ? (
+                                                    <td style={{ ...tdStyle, fontWeight: 700, color: '#f59e0b' }}
+                                                        title={`Обычно кончается около ${hourMsk(g.typical_stop_hour)} МСК (медиана по ${int(g.runout_days)} дн-остановок)`}>
+                                                        ≈ {hourMsk(g.typical_stop_hour)}
+                                                    </td>
+                                                ) : (
+                                                    <td style={{ ...tdStyle, fontWeight: 700, color: '#ef4444' }}>{mskTime(g.ran_out_at)}</td>
+                                                )}
+                                                <td style={tdStyle} title={`Кончался бюджет ${int(g.runout_days)} из ${int(g.active_days)} дней с расходом за ${int(g.window_days)} дн`}>
+                                                    {num(g.active_days) > 0 ? `${int(g.runout_days)}/${int(g.active_days)}` : '—'}
+                                                </td>
+                                                <td style={tdStyle} title={hasPot ? `Медиана экстраполяции по ${int(g.full_days)} дн (окно ${int(g.window_days)} дн)` : `Нет данных за ${int(g.window_days)} дн — оценить потенциал нечем (линейная скорость ${money(g.burn_rate)} ₽/час)`}>
+                                                    {hasPot ? money(g.potential_daily) : '—'}
+                                                </td>
+                                                <td style={{ ...tdStyle, fontWeight: 700, color: nedobor > 0 ? 'var(--color-accent)' : '#9ca3af' }}
+                                                    title={hasPot
+                                                        ? (roundedUp ? `Нужно ${money(g.raw_needed_potential)} ₽, округлено вверх до минимума пополнения WB ${money(g.min_topup)} ₽` : `Потенциал ${money(g.potential_daily)} ₽/день − потрачено ${money(g.spend_today)} ₽`)
+                                                        : `Полных дней нет — линейная оценка по скорости ${money(g.burn_rate)} ₽/час`}>
+                                                    {nedobor > 0 ? money(nedobor) : '—'}{roundedUp ? ' *' : ''}{!hasPot && nedobor > 0 ? ' ~' : ''}
                                                 </td>
                                                 <td style={tdStyle}>{int(g.nm_count)}</td>
                                             </tr>
+                                            {open && (
+                                                <tr>
+                                                    <td colSpan={8} style={{ padding: 0, background: '#fafafa', borderBottom: '1px solid #e8eaed' }}>
+                                                        {renderHistory(g.campaign_id)}
+                                                    </td>
+                                                </tr>
+                                            )}
+                                            </React.Fragment>
                                             );
                                         })}
                                     </tbody>

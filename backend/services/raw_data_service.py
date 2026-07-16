@@ -59,6 +59,10 @@ class RawSource:
     refresh: str | None = None      # ключ адаптера дозагрузки (None — только по расписанию)
     refresh_hint: str | None = None  # чего ждать от кнопки
     ranged: bool = False            # адаптер принимает период
+    # Колонка «когда данные обновлялись у нас» для индикатора свежести, если отличается от
+    # date_field (пример: у кампаний date_field=created_at — дата ПОСЛЕДНЕЙ СОЗДАННОЙ кампании,
+    # а не последнего синка → свежесть краснела при живом синке)
+    freshness_field: str | None = None
     # Человеческие названия колонок для просмотра содержимого; чего нет — назовём автоматически
     labels: dict[str, str] = dc_field(default_factory=dict)
 
@@ -134,25 +138,25 @@ async def _refresh_finance(project_id: int, date_from: date | None, date_to: dat
 
 
 async def _refresh_ad_search(project_id: int, date_from: date | None, date_to: date | None) -> Any:
-    """Догрузить посуточную статистику зоны Поиск по всем CPM-кампаниям проекта."""
+    """Догрузить посуточную статистику зоны Поиск по всем CPM-кампаниям проекта.
+
+    Батч: все (advertId,nmId) пары идут в normquery/stats пачками по 100 —
+    запросов ~десяток вместо «кампания-на-запрос», обходим rate-limit WB.
+    """
     from sqlalchemy import select as _select
 
     from backend.models.integrations import WbAdCampaign
-    from backend.services.funnel.ad_search_stats import sync_ad_search_daily
+    from backend.services.funnel.ad_search_stats import sync_ad_search_daily_bulk
 
     d_to = date_to or utcnow().date()
     d_from = date_from or (d_to - timedelta(days=29))
-    total = 0
     async with AsyncSessionLocal() as db:
-        camps = (await db.execute(
+        cids = (await db.execute(
             _select(WbAdCampaign.campaign_id).where(
                 WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_type == "cpm",
             ).limit(2000)
         )).scalars().all()
-        for cid in camps:
-            r = await sync_ad_search_daily(db, project_id, cid, d_from.isoformat(), d_to.isoformat())
-            total += r.get("rows", 0)
-    return {"rows": total, "campaigns": len(camps)}
+        return await sync_ad_search_daily_bulk(db, project_id, list(cids), d_from.isoformat(), d_to.isoformat())
 
 
 async def _refresh_ad_upd(project_id: int, date_from: date | None, date_to: date | None) -> Any:
@@ -205,6 +209,7 @@ RAW_SOURCES: list[RawSource] = [
     RawSource(
         key="ad_campaigns", title="Рекламные кампании", group="Реклама",
         table="wb_ad_campaigns", model=WbAdCampaign, date_field="created_at",
+        freshness_field="updated_at",
         description="Метаданные кампаний: название, тип, статус, остаток бюджета, товары.",
         source="advert-api · /api/advert/v2/adverts, /adv/v1/budget",
         schedule="Каждые 30 минут (бюджеты — каждые 10)",
@@ -247,7 +252,7 @@ RAW_SOURCES: list[RawSource] = [
         table="wb_ad_search_daily", model=WbAdSearchDaily, date_field="date",
         description="Посуточная статистика зоны «Поиск» (сумма поисковых кластеров). Нужна для разбивки метрик кампании по зонам показов.",
         source="advert-api · /adv/v1/normquery/stats",
-        schedule="Только по кнопке",
+        schedule="Раз в сутки, 04:35 (+ по кнопке)",
         refresh="ad_search", refresh_hint="Загрузить статистику поиска по CPM-кампаниям за период", ranged=True,
         labels={
             "campaign_id": "ID кампании", "nm_id": "Номенклатура", "date": "Дата",
@@ -260,7 +265,7 @@ RAW_SOURCES: list[RawSource] = [
         table="wb_ad_upd", model=WbAdUpd, date_field="upd_time",
         description="Первичные списания за рекламу: сколько и когда WB списал по каждой кампании, каким типом оплаты.",
         source="advert-api · /adv/v1/upd",
-        schedule="Только по кнопке",
+        schedule="Раз в сутки, 04:25 (+ по кнопке)",
         refresh="ad_upd", refresh_hint="Загрузить историю затрат за период", ranged=True,
         labels={
             "advert_id": "ID кампании", "camp_name": "Кампания", "upd_time": "Время списания",
@@ -273,7 +278,7 @@ RAW_SOURCES: list[RawSource] = [
         table="wb_ad_payments", model=WbAdPayment, date_field="paid_at",
         description="История пополнений счёта WB Продвижение: когда, на сколько и каким способом.",
         source="advert-api · /adv/v1/payments",
-        schedule="Только по кнопке",
+        schedule="Раз в сутки, 04:45 (+ по кнопке)",
         refresh="ad_payments", refresh_hint="Загрузить историю пополнений за период", ranged=True,
         labels={
             "wb_id": "ID пополнения", "paid_at": "Дата", "amount": "Сумма, ₽",
@@ -303,10 +308,23 @@ RAW_SOURCES: list[RawSource] = [
     RawSource(
         key="orders", title="Заказы", group="Продажи",
         table="wb_orders", model=WbOrder, date_field="order_date",
+        freshness_field="synced_at",  # заказы всегда «по вчера» (cutoff) — свежесть по времени синка
         description="Заказы поштучно, с городом и складом. Основа индекса локализации.",
         source="statistics-api · /api/v1/supplier/orders",
         schedule="3 раза в сутки",
         refresh="orders", refresh_hint="Перечитать заказы за период", ranged=True,
+        labels={
+            "srid": "ID заказа (srid)", "g_number": "Номер заказа", "sticker": "Стикер",
+            "income_id": "Поставка", "order_date": "Дата заказа", "last_change_date": "Изменён",
+            "nm_id": "Артикул WB", "barcode": "Баркод", "vendor_code": "Артикул продавца",
+            "subject": "Предмет", "brand": "Бренд", "category": "Категория", "tech_size": "Размер",
+            "warehouse_name": "Склад", "warehouse_type": "Тип склада",
+            "country_name": "Страна", "oblast_okrug_name": "Округ", "region_name": "Регион",
+            "total_price": "Цена до скидок, ₽", "discount_percent": "Скидка, %", "spp": "СПП, %",
+            "finished_price": "Цена покупателя, ₽", "price_with_disc": "Цена со скидкой, ₽",
+            "is_cancel": "Отменён", "cancel_date": "Дата отмены",
+            "is_supply": "Догрузка", "is_realization": "Реализация", "synced_at": "Синк у нас",
+        },
     ),
     RawSource(
         key="prices", title="Цены витрины", group="Продажи",
@@ -319,6 +337,7 @@ RAW_SOURCES: list[RawSource] = [
     RawSource(
         key="returns", title="Возвраты", group="Продажи",
         table="wb_goods_returns", model=WbGoodsReturn, date_field="order_dt",
+        freshness_field="synced_at",  # дата возврата отстаёт от синка — свежесть по времени синка
         description="Возвраты покупателей на ПВЗ.",
         source="seller-analytics-api · /api/v1/analytics/goods-return",
         schedule="Дважды в сутки",
@@ -354,17 +373,62 @@ def get_refresh_progress(project_id: int) -> dict[str, dict[str, Any]]:
     return {k[1]: v for k, v in _REFRESH.items() if k[0] == project_id}
 
 
+# Технические сообщения адаптеров/WB → человекочитаемые для UI дозагрузки
+_KEY_MISSING_MARKERS = ("no wb api key", "api key not found", "api ключ wb не найден", "no_api_key")
+
+
+def _humanize_refresh_error(msg: str) -> str:
+    if any(m in msg.lower() for m in _KEY_MISSING_MARKERS):
+        return "Нет активного WB-ключа с нужным доступом (напр. «Статистика») — проверьте интеграции проекта"
+    return msg
+
+
+def _adapter_error(result: Any) -> str | None:
+    """Ошибка, которую адаптер вернул СЛОВАРЁМ (без исключения). None — успех.
+
+    Адаптеры сигналят по-разному: часть кладёт status='error' (+errors[]/error),
+    sync_ad_campaigns — error='no_api_key', заказы — errors[] без status.
+    ВАЖНО: при status='ok' непустой errors[] = частичные сбои (напр. funnel
+    отдаёт errors[:5]) — весь refresh НЕ роняем. Без status: errors[] считаем
+    провалом только если ничего не залито и не получено.
+    """
+    if not isinstance(result, dict):
+        return None
+    status = result.get("status")
+    if status == "error":
+        errs = result.get("errors") or []
+        raw = result.get("error") or (errs[0] if errs else None) or "источник вернул ошибку"
+        return _humanize_refresh_error(str(raw))
+    if status == "ok":
+        return None
+    if result.get("error"):
+        return _humanize_refresh_error(str(result["error"]))
+    errs = result.get("errors")
+    if errs:
+        touched = (result.get("inserted") or 0) + (result.get("updated") or 0) + (result.get("rows") or 0)
+        if not touched and not result.get("total_fetched"):
+            return _humanize_refresh_error(str(errs[0]))
+    return None
+
+
 async def _run_refresh(project_id: int, key: str, date_from: date | None, date_to: date | None) -> None:
     pk = _progress_key(project_id, key)
     _REFRESH[pk] = {"status": "running", "started_at": utcnow().isoformat(), "finished_at": None, "error": None}
     try:
         result = await REFRESH_ADAPTERS[key](project_id, date_from, date_to)
+        # Адаптер мог не бросить исключение, но вернуть ошибку словарём (напр. нет
+        # WB-ключа с нужным scope) — иначе UI показывал бы «загружено» при пустой заливке
+        adapter_err = _adapter_error(result)
         _REFRESH[pk] = {
-            "status": "ok", "started_at": _REFRESH[pk]["started_at"],
-            "finished_at": utcnow().isoformat(), "error": None,
+            "status": "error" if adapter_err else "ok",
+            "started_at": _REFRESH[pk]["started_at"],
+            "finished_at": utcnow().isoformat(), "error": adapter_err,
             "result": result if isinstance(result, dict) else None,
         }
-        logger.info("Raw refresh %s done for project %s", key, project_id)
+        if adapter_err:
+            logger.warning("Raw refresh %s for project %s returned error: %s", key, project_id, adapter_err)
+        else:
+            logger.info("Raw refresh %s done for project %s", key, project_id)
     except asyncio.CancelledError:
         _REFRESH[pk] = {**_REFRESH[pk], "status": "error", "finished_at": utcnow().isoformat(), "error": "Отменено"}
         raise
@@ -395,16 +459,20 @@ async def start_refresh(project_id: int, key: str, date_from: date | None, date_
 async def _source_stats(db: AsyncSession, project_id: int, src: RawSource) -> dict[str, Any]:
     """Сколько строк накоплено и за какой период."""
     col = getattr(src.model, src.date_field)
+    fresh_col = getattr(src.model, src.freshness_field) if src.freshness_field else None
+    selects = [func.count(), func.min(col), func.max(col)]
+    if fresh_col is not None:
+        selects.append(func.max(fresh_col))
     row = (
-        await db.execute(
-            select(func.count(), func.min(col), func.max(col)).where(src.model.project_id == project_id)
-        )
+        await db.execute(select(*selects).where(src.model.project_id == project_id))
     ).one()
     rows, first, last = int(row[0]), row[1], row[2]
+    fresh = row[3] if fresh_col is not None else last
     return {
         "rows": rows,
         "first_date": first.isoformat() if isinstance(first, (date, datetime)) else None,
         "last_date": last.isoformat() if isinstance(last, (date, datetime)) else None,
+        "fresh_at": fresh.isoformat() if isinstance(fresh, (date, datetime)) else None,
     }
 
 
@@ -515,7 +583,7 @@ async def get_sources_overview(db: AsyncSession, project_id: int) -> dict:
             stats = await _source_stats(db, project_id, src)
         except Exception as e:  # таблица есть, но что-то не так — не роняем всю страницу
             logger.warning("Raw stats failed for %s: %s", src.key, e)
-            stats = {"rows": None, "first_date": None, "last_date": None}
+            stats = {"rows": None, "first_date": None, "last_date": None, "fresh_at": None}
         sources.append({
             "key": src.key, "title": src.title, "group": src.group, "table": src.table,
             "date_field": src.date_field, "description": src.description,

@@ -50,8 +50,19 @@ def get_sync_progress(project_id: int) -> dict:
     return _sync_progress.get(project_id, {"status": "idle"})
 
 
-async def _sort_campaigns_by_spend(db: AsyncSession, project_id: int, campaign_ids: list[int]) -> list[int]:
-    """Sort campaign IDs by spend in last 7 days (descending). High spenders first."""
+async def _sort_campaigns_by_spend(
+    db: AsyncSession,
+    project_id: int,
+    campaign_ids: list[int],
+    priority_ids: list[int] | None = None,
+) -> list[int]:
+    """Sort campaign IDs by spend in last 7 days (descending). High spenders first.
+
+    Если задан ``priority_ids`` (кампании под текущим фильтром на странице) — они уходят
+    в начало очереди на догруз бюджетов, а остальные следом; внутри каждой группы порядок
+    по расходу сохраняется. Так пользователь первым получает свежие бюджеты по тому срезу,
+    что видит на экране, даже если TIME_BUDGET обрежет хвост.
+    """
     if not campaign_ids:
         return campaign_ids
 
@@ -70,11 +81,24 @@ async def _sort_campaigns_by_spend(db: AsyncSession, project_id: int, campaign_i
     spend_map: dict[int, Decimal] = {r.campaign_id: r.total_spend for r in rows}
 
     # Sort: campaigns with spend first (descending), then campaigns without spend
-    return sorted(campaign_ids, key=lambda cid: float(spend_map.get(cid, Decimal("0"))), reverse=True)
+    by_spend = sorted(campaign_ids, key=lambda cid: float(spend_map.get(cid, Decimal("0"))), reverse=True)
+
+    # Приоритет фильтра: стабильно вытягиваем отфильтрованные кампании вперёд, сохраняя
+    # порядок по расходу внутри обеих групп.
+    if priority_ids:
+        prio_set = set(priority_ids)
+        return [cid for cid in by_spend if cid in prio_set] + [cid for cid in by_spend if cid not in prio_set]
+
+    return by_spend
 
 
-async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
-    """Fetch campaign details + budgets from WB and upsert into wb_ad_campaigns."""
+async def sync_ad_campaigns(
+    db: AsyncSession, project_id: int, priority_ids: list[int] | None = None
+) -> dict:
+    """Fetch campaign details + budgets from WB and upsert into wb_ad_campaigns.
+
+    ``priority_ids`` — кампании под текущим фильтром страницы; их бюджеты тянутся первыми.
+    """
     _sync_progress[project_id] = {"status": "fetching_campaigns"}
 
     api_key = await get_wb_key(db, project_id, "wb_advert")
@@ -97,8 +121,9 @@ async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
 
     campaign_ids = [c["advertId"] for c in campaigns if c.get("advertId")]
 
-    # Prioritize campaigns by spend (last 7 days) — high spenders first for budget fetch
-    campaign_ids = await _sort_campaigns_by_spend(db, project_id, campaign_ids)
+    # Prioritize campaigns by spend (last 7 days) — high spenders first for budget fetch.
+    # Кампании под фильтром страницы (priority_ids) уходят в начало очереди.
+    campaign_ids = await _sort_campaigns_by_spend(db, project_id, campaign_ids, priority_ids)
 
     _sync_progress[project_id] = {
         "status": "fetching_budgets",
@@ -145,6 +170,7 @@ async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
                 "advert_type": c.get("advert_type"),  # числовой тип WB (8=авто/рекоменд., 9=аукцион)
                 "created_at": _parse_wb_created(c.get("create_time")),  # дата создания в WB
                 "bid_mode": c.get("bid_mode"),  # unified/manual из WB bid_type (_parse_advert_item)
+                "default_bid": c.get("default_bid"),  # ставка ₽ по активной зоне (из nm_settings.bids_kopecks)
                 "status": c.get("status") or 9,
                 "budget": campaign_budget or Decimal("0"),
                 "nm_ids": c.get("nm_ids") or [],
@@ -208,6 +234,8 @@ async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
                 # createTime от WB приоритетнее; если WB не прислал — сохраняем прежнее (в т.ч. бэкфилл)
                 "created_at": func.coalesce(stmt.excluded.created_at, WbAdCampaign.created_at),
                 "bid_mode": stmt.excluded.bid_mode,
+                # ставку не затираем null'ом: WB иногда не отдаёт bids_kopecks — сохраняем прежнюю
+                "default_bid": func.coalesce(stmt.excluded.default_bid, WbAdCampaign.default_bid),
                 "status": stmt.excluded.status,
                 "budget": stmt.excluded.budget,
                 "nm_ids": stmt.excluded.nm_ids,
@@ -227,13 +255,13 @@ async def sync_ad_campaigns(db: AsyncSession, project_id: int) -> dict:
     return {"synced": len(rows)}
 
 
-async def sync_ad_campaigns_bg(project_id: int) -> None:
+async def sync_ad_campaigns_bg(project_id: int, priority_ids: list[int] | None = None) -> None:
     """Background wrapper — creates own DB session."""
     from backend.database import AsyncSessionLocal
 
     try:
         async with AsyncSessionLocal() as db:
-            await sync_ad_campaigns(db, project_id)
+            await sync_ad_campaigns(db, project_id, priority_ids)
     except Exception as e:
         _sync_progress[project_id] = {"status": "error", "error": str(e)[:200]}
         logger.error(f"Ad campaigns bg sync failed for project {project_id}: {e}")
@@ -291,6 +319,7 @@ async def refresh_one_campaign(db: AsyncSession, project_id: int, campaign_id: i
         "advert_type": detail.get("advert_type"),
         "created_at": _parse_wb_created(detail.get("create_time")),
         "bid_mode": detail.get("bid_mode"),
+        "default_bid": detail.get("default_bid"),
         "status": detail.get("status") or (old.status if old else 9),
         "budget": campaign_budget or Decimal("0"),
         "nm_ids": detail.get("nm_ids") or (old.nm_ids if old else []),
@@ -322,6 +351,7 @@ async def refresh_one_campaign(db: AsyncSession, project_id: int, campaign_id: i
             "advert_type": stmt.excluded.advert_type,
             "created_at": func.coalesce(stmt.excluded.created_at, WbAdCampaign.created_at),
             "bid_mode": stmt.excluded.bid_mode,
+            "default_bid": func.coalesce(stmt.excluded.default_bid, WbAdCampaign.default_bid),
             "status": stmt.excluded.status,
             "budget": stmt.excluded.budget,
             "nm_ids": stmt.excluded.nm_ids,
@@ -714,7 +744,9 @@ async def get_ad_tab_data(
         ctr = (clicks / views * 100) if views else 0
         cpc = (adv_sum / clicks) if clicks else 0
         cpm = (adv_sum / views * 1000) if views else 0
-        drr = (adv_sum / orders_sum * 100) if orders_sum else 0
+        # Расход есть, заказов нет → ДРР бесконечен: отдаём None (JSON null), а не 0 —
+        # иначе худшие товары выпадали из «Высокого ДРР» (фильтр drr > порога)
+        drr = (adv_sum / orders_sum * 100) if orders_sum else (None if adv_sum > 0 else 0)
 
         product_campaigns = nm_campaigns.get(r.nm_id, [])
 
@@ -738,7 +770,7 @@ async def get_ad_tab_data(
                 "ctr": round(ctr, 2),
                 "cpc": round(cpc, 2),
                 "cpm": round(cpm, 2),
-                "drr": round(drr, 2),
+                "drr": round(drr, 2) if drr is not None else None,
                 "bdr_revenue": round(bdr["revenue"], 2),
                 "bdr_profit": round(bdr["profit"], 2),
                 "stock_qty": stock_qty,
@@ -845,7 +877,7 @@ async def get_ad_tab_grouped(
                 "ctr": round((clicks / views * 100) if views else 0, 2),
                 "cpc": round((adv_sum / clicks) if clicks else 0, 2),
                 "cpm": round((adv_sum / views * 1000) if views else 0, 2),
-                "drr": round((adv_sum / orders_sum * 100) if orders_sum else 0, 2),
+                "drr": round(adv_sum / orders_sum * 100, 2) if orders_sum else (None if adv_sum > 0 else 0),
                 "bdr_revenue": round(bdr_revenue, 2),
                 "bdr_profit": round(bdr_profit, 2),
                 "stock_qty": stock_qty,

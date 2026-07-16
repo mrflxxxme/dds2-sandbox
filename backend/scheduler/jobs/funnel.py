@@ -332,6 +332,163 @@ async def sync_ad_campaigns_all_projects():
                     logger.error(f"Failed to update sync_log {log_id}: {log_err}")
 
 
+# ─── Утренняя дозагрузка «кнопочных» рекламных источников ────────────────────
+# Зона Поиск (ad_search), История затрат (ad_upd) и Пополнения счёта
+# (ad_payments) не входят в штатное расписание — в разделе «Сырые данные» они
+# помечены «Только по кнопке». Чтобы к 9:00 МСК всё было свежим, гоняем их рано
+# утром (после ad_nm 04:20). Окна небольшие — синк идемпотентен (UPSERT /
+# DO NOTHING), это самолечащийся top-up, а не бэкфилл истории.
+
+
+async def _run_ad_topup_job(sync_type: str, runner):
+    """Общий каркас утренней дозагрузки рекламного источника по всем проектам.
+
+    runner(db, pid) -> dict со `status` ('ok'/'error') и `rows`. На каждый проект
+    пишет sync_log (honest-статус: status='error' из sync-сервиса → sync_log
+    ERROR, не «загружено»), изолирует ошибки проекта, пробрасывает CancelledError.
+    """
+    project_ids = await get_sync_project_ids()
+    if not project_ids:
+        logger.info("Scheduler: no projects with WB keys for %s", sync_type)
+        return
+
+    for pid in project_ids:
+        log_id = None
+        status = "ERROR"
+        rows = 0
+        error_msg = None
+        try:
+            async with AsyncSessionLocal() as db:
+                key_id = (
+                    await db.execute(
+                        select(IntegrationKey.id)
+                        .where(
+                            IntegrationKey.project_id == pid,
+                            IntegrationKey.service.in_(["wb_advert", "wb", "wb_analytics"]),
+                            IntegrationKey.is_active.is_(True),
+                            IntegrationKey.is_deleted.is_(False),
+                        )
+                        .limit(1)
+                    )
+                ).scalar() or None
+                sync_log = SyncLog(
+                    integration_id=key_id,
+                    service="wb_funnel",
+                    sync_type=sync_type,
+                    status="RUNNING",
+                )
+                db.add(sync_log)
+                await db.commit()
+                await db.refresh(sync_log)
+                log_id = sync_log.id
+
+            async with AsyncSessionLocal() as db:
+                result = await asyncio.wait_for(runner(db, pid), timeout=600)
+            rows = int((result or {}).get("rows") or 0)
+            if (result or {}).get("status") == "error":
+                error_msg = str(result.get("error") or "источник вернул ошибку")[:500]
+                logger.warning("%s: project %s — error: %s", sync_type, pid, error_msg)
+            else:
+                status = "OK"
+                logger.info("%s: project %s — %d rows", sync_type, pid, rows)
+        except TimeoutError:
+            status = "TIMEOUT"
+            error_msg = "Timeout 10min exceeded"
+            logger.error("%s TIMEOUT for project %s", sync_type, pid)
+        except asyncio.CancelledError:
+            status = "ERROR"
+            error_msg = "Task cancelled (worker shutdown or restart)"
+            logger.warning("%s CANCELLED for project %s", sync_type, pid)
+            raise  # propagate cancellation — never swallow it to keep looping
+        except Exception as e:
+            error_msg = str(e)[:500]
+            logger.error("%s failed for project %s: %s", sync_type, pid, e)
+        finally:
+            if log_id:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        await db.execute(
+                            update(SyncLog)
+                            .where(SyncLog.id == log_id)
+                            .values(
+                                status=status,
+                                rows_inserted=rows,
+                                finished_at=utcnow(),
+                                error_msg=error_msg,
+                            )
+                        )
+                        await db.commit()
+                except Exception as log_err:
+                    logger.error("Failed to update sync_log %s: %s", log_id, log_err)
+
+
+async def sync_all_projects_ad_upd():
+    """Утро: история затрат за рекламу (adv/v1/upd) за последние дни."""
+    from backend.services.funnel.ad_finance_sync import sync_ad_upd
+
+    d_to = utcnow().date()
+    d_from = d_to - timedelta(days=3)  # small self-heal window; списание неизменяемо
+
+    async def runner(db, pid):
+        return await sync_ad_upd(db, pid, d_from.isoformat(), d_to.isoformat())
+
+    logger.info("⏰ Scheduler: starting morning ad_upd top-up")
+    await _run_ad_topup_job("ad_upd", runner)
+
+
+async def sync_all_projects_ad_payments():
+    """Утро: пополнения счёта WB Продвижение (adv/v1/payments) за 30 дней."""
+    from backend.services.funnel.ad_finance_sync import sync_ad_payments
+
+    d_to = utcnow().date()
+    d_from = d_to - timedelta(days=30)  # пополнения редки → окно шире
+
+    async def runner(db, pid):
+        return await sync_ad_payments(db, pid, d_from.isoformat(), d_to.isoformat())
+
+    logger.info("⏰ Scheduler: starting morning ad_payments top-up")
+    await _run_ad_topup_job("ad_payments", runner)
+
+
+async def sync_all_projects_ad_search():
+    """Утро: посуточная статистика зоны «Поиск» по активным CPM-кампаниям (батч).
+
+    Только кампании с недавним расходом (spend>0 за окно) — у завершённых/спящих
+    статистика поиска неизменна. Тянем все их (advertId,nmId) пары батчами по 100
+    в одном запросе normquery/stats: запросов ~десяток вместо «кампания-на-запрос»
+    → обходим жёсткий per-seller rate-limit WB. Кнопка «Дозагрузить» — тот же bulk.
+    """
+    from backend.models.integrations import WbAdCampaign, WbAdCampaignDaily
+    from backend.services.funnel.ad_search_stats import sync_ad_search_daily_bulk
+
+    d_to = utcnow().date()
+    d_from = d_to - timedelta(days=3)
+
+    async def runner(db, pid):
+        active = (
+            select(WbAdCampaignDaily.campaign_id)
+            .where(
+                WbAdCampaignDaily.project_id == pid,
+                WbAdCampaignDaily.date >= d_from,
+                WbAdCampaignDaily.spend > 0,
+            )
+            .distinct()
+        )
+        cids = (
+            await db.execute(
+                select(WbAdCampaign.campaign_id).where(
+                    WbAdCampaign.project_id == pid,
+                    WbAdCampaign.campaign_type == "cpm",
+                    WbAdCampaign.campaign_id.in_(active),
+                ).limit(2000)
+            )
+        ).scalars().all()
+        return await sync_ad_search_daily_bulk(db, pid, list(cids), d_from.isoformat(), d_to.isoformat())
+
+    logger.info("⏰ Scheduler: starting morning ad_search top-up")
+    await _run_ad_topup_job("ad_search", runner)
+
+
 # ─── Nomenclature sync (2x/day) ──────────────────────────────────────────────
 
 

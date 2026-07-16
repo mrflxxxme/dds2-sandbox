@@ -141,3 +141,56 @@ async def test_progress_is_scoped_by_project():
     assert set(rds.get_refresh_progress(1)) == {"prices"}
     assert set(rds.get_refresh_progress(2)) == {"funnel"}
     rds._REFRESH.clear()
+
+
+# ─── Ошибка адаптера, возвращённая СЛОВАРЁМ (не исключением) ──────────────────
+
+
+def test_adapter_error_orders_no_key():
+    """Заказы вернули {errors:['no WB API key'], всё по нулям} → это ошибка, не «ok»."""
+    res = {"inserted": 0, "updated": 0, "total_fetched": 0, "errors": ["no WB API key"]}
+    err = rds._adapter_error(res)
+    assert err is not None
+    assert "Статистика" in err or "ключ" in err.lower()
+
+
+def test_adapter_error_status_error():
+    """{status:'error', errors:[...]} (ad_daily/funnel/ad_upd) → ошибка."""
+    assert rds._adapter_error({"status": "error", "errors": ["API key not found"]}) is not None
+    assert rds._adapter_error({"status": "error", "error": "нет ключа", "rows": 0}) is not None
+
+
+def test_adapter_error_partial_success_is_ok():
+    """status='ok' с непустым errors[] (частичные сбои funnel) — НЕ ошибка."""
+    assert rds._adapter_error({"status": "ok", "rows": 100, "days": 3, "errors": ["day 5 skipped"]}) is None
+
+
+def test_adapter_error_errors_but_data_came_is_ok():
+    """Заказы: часть залилась + одна ошибка батча — не роняем весь refresh."""
+    assert rds._adapter_error({"inserted": 500, "updated": 10, "total_fetched": 510, "errors": ["batch 2 retry"]}) is None
+
+
+def test_adapter_error_plain_error_key():
+    """{synced:0, error:'no_api_key'} (sync_ad_campaigns) → ошибка."""
+    assert rds._adapter_error({"synced": 0, "error": "no_api_key"}) is not None
+
+
+def test_adapter_error_clean_success():
+    """Чистый успех без сигналов ошибки → None."""
+    assert rds._adapter_error({"rows": 1299}) is None
+    assert rds._adapter_error({"inserted": 5, "updated": 0, "total_fetched": 5, "errors": []}) is None
+    assert rds._adapter_error(None) is None
+
+
+async def test_progress_error_from_dict_result(monkeypatch):
+    """_run_refresh: адаптер вернул ошибку словарём → status='error', а не 'ok' («загружено»)."""
+    async def orders_no_key(project_id, date_from, date_to):
+        return {"inserted": 0, "updated": 0, "total_fetched": 0, "errors": ["no WB API key"]}
+
+    rds._REFRESH.clear()
+    monkeypatch.setitem(rds.REFRESH_ADAPTERS, "orders", orders_no_key)
+    await rds._run_refresh(7, "orders", None, None)
+    p = rds.get_refresh_progress(7)["orders"]
+    assert p["status"] == "error", "ошибка адаптера показана как успех"
+    assert p["error"]
+    rds._REFRESH.clear()

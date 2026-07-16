@@ -8,7 +8,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -779,6 +779,21 @@ async def get_campaigns_autopay_log(
     return log
 
 
+@router.get("/campaigns/budget/ledger")
+async def get_campaigns_budget_ledger(
+    campaign_id: int | None = None,
+    kind: str | None = None,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """История бюджета (пополнения кампании/счёта + списания) из данных, парсимых из WB.
+    campaign_id — по конкретной кампании; без него — по всему проекту («все кампании»).
+    kind: None — всё; "topup" — только пополнения; "charge" — только списания."""
+    from backend.services.funnel.ads_manager import get_budget_ledger
+
+    return await get_budget_ledger(db, project.id, campaign_id, kind)
+
+
 @router.post("/campaigns/autopay", dependencies=[Depends(rate_limit_write)])
 async def set_campaigns_autopay(
     body: AutopaySettingRequest,
@@ -1299,6 +1314,26 @@ async def set_campaign_zone_bid_ep(
     return result
 
 
+class CampaignBidRequest(BaseModel):
+    bid: float  # ₽ — ставка по активной зоне (для инлайн-правки в списке)
+
+
+@router.put("/campaigns/{campaign_id}/bid", dependencies=[Depends(rate_limit_write)])
+async def set_campaign_bid_ep(
+    campaign_id: int,
+    body: CampaignBidRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сменить ставку кампании из СПИСКА (инлайн). Реальные деньги. Только статусы 4/9/11.
+    Возвращает результат С кодом 200 (в т.ч. min_bid при отказе по аукционному минимуму),
+    чтобы фронт показал понятную подсказку и кнопку «поставить минимум» — HTTPException
+    съел бы структурный min_bid."""
+    from backend.services.funnel.ads_manager import set_campaign_default_bid
+
+    return await set_campaign_default_bid(db, project.id, campaign_id, body.bid)
+
+
 class AdNmBackfillRequest(BaseModel):
     date_from: str | None = None  # ISO; по умолчанию — от создания старейшей кампании
     date_to: str | None = None
@@ -1346,9 +1381,29 @@ async def get_campaigns_budget_gaps(
     return await get_budget_gaps(db, project.id)
 
 
+@router.get("/campaigns/{campaign_id}/budget_gap_history")
+async def get_campaign_budget_gap_history(
+    campaign_id: int,
+    days: int = 30,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """История недобора бюджета по дням для кампании: расход, час остановки, недобор к потенциалу."""
+    from backend.services.funnel.ads_manager import get_budget_gap_history
+
+    return await get_budget_gap_history(db, project.id, campaign_id, days)
+
+
+class SyncCampaignsBody(BaseModel):
+    """Приоритет догруза: кампании под текущим фильтром страницы тянутся первыми."""
+
+    priority_campaign_ids: list[int] = Field(default_factory=list)
+
+
 @router.post("/sync_campaigns", dependencies=[Depends(rate_limit_write)])
 async def sync_campaigns(
     project: Project = Depends(get_current_project),
+    body: SyncCampaignsBody | None = None,
 ):
     """Sync ad campaigns from WB (names, types, budgets). Runs in background."""
     from backend.services.funnel.ad_campaigns_service import get_sync_progress, sync_ad_campaigns_bg
@@ -1357,7 +1412,8 @@ async def sync_campaigns(
     if progress.get("status") in ("fetching_campaigns", "fetching_budgets", "saving"):
         return {"status": "already_running", **progress}
 
-    asyncio.create_task(sync_ad_campaigns_bg(project.id))  # noqa: RUF006
+    priority_ids = body.priority_campaign_ids if body else []
+    asyncio.create_task(sync_ad_campaigns_bg(project.id, priority_ids))  # noqa: RUF006
     return {"status": "started", "message": "Синхронизация запущена в фоне"}
 
 
@@ -1611,10 +1667,32 @@ async def toggle_product_cluster_minus_ep(
     return await toggle_product_cluster_minus(db, project.id, nm_id, body.norm_query, body.action)
 
 
-class ClusterBidRequest(BaseModel):
+# «Паспорт» применения ставки для колонки «Стоит N дн»: с какого дня и от каких данных
+# считали. Источник и точка отсчёта приходят с фронта (у него всё в строке таблицы).
+class ClusterBidBasis(BaseModel):
+    source: str | None = None       # recommendation | manual
+    basis_drr: float | None = None  # ДРР фразы на момент применения, %
+    basis_cpm: float | None = None  # оплаченная CPM на момент, ₽
+    target_drr: float | None = None  # цель ДРР на момент
+
+
+class ClusterBidRequest(ClusterBidBasis):
     nm_id: int
     norm_query: str
     bid: float
+    # Перечитать ставку из WB после записи и вернуть verified. Массовое действие шлёт False
+    # (не удваивать вызовы WB на каждую фразу) и перечитывает кластеры разом на фронте.
+    verify: bool = True
+
+
+class ClusterBidBulkItem(ClusterBidBasis):
+    nm_id: int
+    norm_query: str
+    bid: float
+
+
+class ClusterBidBulkRequest(BaseModel):
+    items: list[ClusterBidBulkItem]
 
 
 class ProductBidRequest(BaseModel):
@@ -1632,7 +1710,24 @@ async def set_campaign_cluster_bid_ep(
     """Ставка по кластеру кампании (живое действие WB; <100 показов WB не примет)."""
     from backend.services.funnel.cluster_analysis_service import set_cluster_bid
 
-    return await set_cluster_bid(db, project.id, campaign_id, body.nm_id, body.norm_query, body.bid)
+    return await set_cluster_bid(
+        db, project.id, campaign_id, body.nm_id, body.norm_query, body.bid, verify=body.verify,
+        source=body.source, basis_drr=body.basis_drr, basis_cpm=body.basis_cpm, target_drr=body.target_drr,
+    )
+
+
+@router.post("/campaigns/{campaign_id}/clusters/bid-bulk", dependencies=[Depends(rate_limit_write)])
+async def set_campaign_cluster_bids_bulk_ep(
+    campaign_id: int,
+    body: ClusterBidBulkRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Массовая ставка по кластерам ОДНИМ запросом на пачку (WB normquery/bids батчевый —
+    мгновенно, без rate-limit 429, в отличие от N поштучных вызовов)."""
+    from backend.services.funnel.cluster_analysis_service import set_cluster_bids_bulk
+
+    return await set_cluster_bids_bulk(db, project.id, campaign_id, [i.model_dump() for i in body.items])
 
 
 @router.post("/products/{nm_id}/clusters/bid", dependencies=[Depends(rate_limit_write)])

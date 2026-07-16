@@ -21,13 +21,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached
 from backend.models import Nomenclature, WbAdCampaign, WbFunnelDaily
-from backend.models.integrations import WbAdCampaignDaily, WbAdNmDaily
+from backend.models.integrations import WbAdCampaignDaily, WbAdClusterBid, WbAdNmDaily
+from backend.utils.time import utcnow
 from backend.services.funnel.wb_advertising_api import (
     fetch_campaign_placements,
     fetch_normquery_stats,
     get_normquery_bids,
     get_normquery_minus,
     set_normquery_bid,
+    set_normquery_bids_batch,
     set_normquery_minus,
 )
 from backend.services.funnel.wb_api_client import get_wb_key
@@ -53,21 +55,45 @@ def _bid_map(bids: dict[tuple[int, int], dict[str, float]]) -> dict[str, float]:
 
 def _enrich(
     cluster: dict[str, Any], minus_set: set[str], bid_map: dict[str, float],
-    all_views: dict[str, int] | None = None,
+    all_views: dict[str, int] | None = None, biddable_set: set[str] | None = None,
+    bid_state_map: dict[str, WbAdClusterBid] | None = None,
 ) -> dict[str, Any]:
-    """Доклеить к кластеру: is_minused, текущую ставку и флаг locked.
+    """Доклеить к кластеру: is_minused, текущую ставку, флаг locked, biddable и «паспорт ставки».
 
     locked («сбор данных») = показов по ВСЕЙ истории кампании < 100 (all_views), а не за
     выбранный период. Иначе на узкой дате (напр. 1 день) фраза с исторически ≥100 показов
     ложно уходила бы в «сбор данных». all_views=None → фолбэк на показы кластера (легаси).
+
+    biddable — фраза ЗАФИКСИРОВАНА (WB принимает пофразовую ставку). Признак: фраза есть в
+    ответе get-bids. Небиддируемые (broad-match) WB отбивает «norm_query disabled for nm».
+    biddable_set=None → признак не определён (нет bidding-контекста, напр. категория) → True.
+
+    Паспорт ставки (bid_state_map, только для кампании) — «с какого дня стоит текущая ставка»:
+    доклеиваем bid_set_at/bid_days/bid_source/basis ТОЛЬКО если сохранённая ставка совпала с
+    текущей в WB. Разошлись (сменили вне приложения/сброс) → паспорт неактуален, отдаём null.
     """
     q = cluster["norm_query"]
     lifetime_views = all_views.get(q, cluster["views"]) if all_views is not None else cluster["views"]
+    cur_bid = bid_map.get(q)
+    state = bid_state_map.get(q) if bid_state_map else None
+    bid_set_at = bid_days = bid_source = bid_basis_drr = bid_basis_cpm = None
+    if state is not None and cur_bid is not None and round(float(state.applied_bid)) == round(float(cur_bid)):
+        bid_set_at = state.applied_at.isoformat()
+        bid_days = max(0, int((utcnow() - state.applied_at).total_seconds() // 86400))
+        bid_source = state.source
+        bid_basis_drr = float(state.basis_drr) if state.basis_drr is not None else None
+        bid_basis_cpm = float(state.basis_cpm) if state.basis_cpm is not None else None
     return {
         **cluster,
         "is_minused": q in minus_set,
-        "bid": bid_map.get(q),
+        "bid": cur_bid,
         "locked": lifetime_views < LOCK_MIN_VIEWS,
+        "biddable": (q in biddable_set) if biddable_set is not None else True,
+        "bid_set_at": bid_set_at,   # ISO-дата применения текущей ставки (null — паспорта нет)
+        "bid_days": bid_days,       # дней стоит (для колонки «Стоит» и порога зрелости)
+        "bid_source": bid_source,   # recommendation | manual
+        "bid_basis_drr": bid_basis_drr,  # ДРР на момент применения, %
+        "bid_basis_cpm": bid_basis_cpm,  # оплач. CPM на момент, ₽
     }
 
 # порядок важен: длинные окончания раньше коротких (re-альтернатива берёт первое совпадение)
@@ -379,6 +405,9 @@ async def get_campaign_clusters(
         else (zone_bids["recommendations"] or zone_bids["search"])
     minus_set = {q for lst in minus.values() for q in lst}
     bid_map = _bid_map(bids)
+    # Биддируемые (зафиксированные) фразы — те, что WB вернул в get-bids; на остальные
+    # пофразовая ставка невозможна («norm_query disabled for nm»), рекомендацию не предлагаем.
+    biddable_set = {q for per in bids.values() for q in per.keys()}
 
     # Метрики за выбранный период
     range_merged = _merge_norm(stats)
@@ -404,8 +433,10 @@ async def get_campaign_clusters(
     aov, subject = await _aov_and_subject(db, project_id, nm_ids, date_from, date_to)
     vocab = _build_vocab(clusters_raw, _subject_stems(subject))
     total_spend = sum(c["spend"] for c in clusters_raw) or 0.0
+    # Паспорта текущих ставок — «с какого дня стоит ставка» (доклеивает _enrich при совпадении)
+    bid_state_map = await _cluster_bid_state(db, project_id, campaign_id, nm_ids)
     clusters = [
-        _enrich(_classify(c, aov, total_spend, vocab), minus_set, bid_map, all_views)
+        _enrich(_classify(c, aov, total_spend, vocab), minus_set, bid_map, all_views, biddable_set, bid_state_map)
         for c in clusters_raw
     ]
     clusters.sort(key=lambda x: -x["spend"])
@@ -722,6 +753,7 @@ async def get_product_clusters(
     bids = await get_normquery_bids(key, pairs)
     minus_set = {q for lst in minus.values() for q in lst}
     bid_map = _bid_map(bids)
+    biddable_set = {q for per in bids.values() for q in per.keys()}  # зафиксированные фразы (см. _enrich)
 
     merged: dict[str, dict[str, Any]] = {}
     for lst in stats.values():
@@ -749,7 +781,7 @@ async def get_product_clusters(
     vocab = _build_vocab(clusters_raw, _subject_stems(subject))
     total_spend = sum(c["spend"] for c in clusters_raw) or 0.0
     clusters = [
-        _enrich(_classify(c, aov, total_spend, vocab), minus_set, bid_map)
+        _enrich(_classify(c, aov, total_spend, vocab), minus_set, bid_map, None, biddable_set)
         for c in clusters_raw
     ]
     clusters.sort(key=lambda x: -x["spend"])
@@ -790,26 +822,203 @@ async def toggle_product_cluster_minus(
     }
 
 
+def _phrase_bid_block_reason(camp: WbAdCampaign) -> str | None:
+    """Почему WB не примет ставку по ОТДЕЛЬНОЙ фразе у этой кампании (None = примет).
+
+    Пофразовые ставки (normquery/bids) — это CPM-аукцион с РУЧНЫМ режимом ставок.
+    У единой ставки (`unified`) одна ставка правит всеми фразами — WB отвечает 200, но
+    override по фразе игнорирует; у CPC пофразовых CPM-ставок нет вовсе. Гейтим только
+    заведомо неподдерживаемые случаи; при неизвестном `bid_mode` (ещё не синкнут) — пропускаем,
+    проверку факта применения делает `verify` ниже.
+    """
+    ct = (camp.campaign_type or "").lower()
+    if ct and ct != "cpm":
+        return "Ставки по отдельным фразам доступны только у CPM-кампаний (аукцион)."
+    if (camp.bid_mode or "").lower() == "unified":
+        return UNIFIED_CLUSTER_LOCK
+    return None
+
+
+async def _cluster_bid_state(
+    db: AsyncSession, project_id: int, campaign_id: int, nm_ids: list[int]
+) -> dict[str, WbAdClusterBid]:
+    """Паспорта текущих ставок фраз кампании — {norm_query: строка}. При нескольких товарах с
+    одной фразой берём самую свежую по applied_at (совпадение со ставкой сверяет _enrich)."""
+    if not nm_ids:
+        return {}
+    rows = (await db.execute(
+        select(WbAdClusterBid)
+        .where(
+            WbAdClusterBid.project_id == project_id,
+            WbAdClusterBid.campaign_id == campaign_id,
+            WbAdClusterBid.nm_id.in_(nm_ids),
+        )
+        .limit(5000)
+    )).scalars().all()
+    out: dict[str, WbAdClusterBid] = {}
+    for r in rows:
+        prev = out.get(r.norm_query)
+        if prev is None or r.applied_at > prev.applied_at:
+            out[r.norm_query] = r
+    return out
+
+
+async def _record_cluster_bid(
+    db: AsyncSession, project_id: int, campaign_id: int, nm_id: int, norm_query: str, applied_bid: float | None,
+    *, source: str | None = None, basis_drr: float | None = None, basis_cpm: float | None = None,
+    target_drr: float | None = None,
+) -> None:
+    """Апсертит «паспорт» текущей пофразовой ставки (старт таймера «сбора статистики»).
+
+    Правило таймера: applied_at обновляется ТОЛЬКО при СМЕНЕ значения ставки — та же ставка
+    повторно таймер и точку отсчёта не сбрасывает. Сброс к кампании (applied_bid<=0) удаляет
+    строку. Не коммитит — коммит на вызывающей стороне (одним разом на действие)."""
+    row = (await db.execute(
+        select(WbAdClusterBid).where(
+            WbAdClusterBid.project_id == project_id,
+            WbAdClusterBid.campaign_id == campaign_id,
+            WbAdClusterBid.nm_id == nm_id,
+            WbAdClusterBid.norm_query == norm_query,
+        )
+    )).scalar_one_or_none()
+    if applied_bid is None or applied_bid <= 0:   # сброс к ставке кампании — паспорта больше нет
+        if row is not None:
+            await db.delete(row)  # no-soft-delete-check: WbAdClusterBid — state (Base, не SoftDelete)
+        return
+    changed = row is None or round(float(row.applied_bid)) != round(float(applied_bid))
+    if row is None:
+        row = WbAdClusterBid(project_id=project_id, campaign_id=campaign_id, nm_id=nm_id, norm_query=norm_query)
+        db.add(row)
+    if changed:   # новое значение — переставляем ставку, таймер и точку отсчёта
+        row.applied_bid = applied_bid
+        row.applied_at = utcnow()
+        row.source = source
+        row.basis_drr = basis_drr
+        row.basis_cpm = basis_cpm
+        row.target_drr = target_drr
+
+
 async def set_cluster_bid(
-    db: AsyncSession, project_id: int, campaign_id: int, nm_id: int, norm_query: str, bid_rub: float
+    db: AsyncSession, project_id: int, campaign_id: int, nm_id: int, norm_query: str, bid_rub: float, verify: bool = True,
+    *, source: str | None = None, basis_drr: float | None = None, basis_cpm: float | None = None,
+    target_drr: float | None = None,
 ) -> dict:
-    """Ставит ставку одному кластеру кампании (живое действие WB)."""
+    """Ставит ставку одному кластеру кампании (живое действие WB).
+
+    verify=True — после записи перечитывает ставку из WB (get-bids) и возвращает `verified`:
+    True — WB реально сохранил её по фразе, False — не подтвердилась (WB принял запрос, но
+    пофразовую ставку не применил), None — проверить не удалось. Массовое действие шлёт
+    verify=False и перечитывает кластеры разом на фронте (не N×2 вызовов WB).
+    """
     camp = await _campaign_row(db, project_id, campaign_id)
     if camp is None:
         return {"ok": False, "error": "campaign_not_found"}
-    if (camp.bid_mode or "") == "unified":
-        return {"ok": False, "error": UNIFIED_CLUSTER_LOCK}
     if nm_id not in [int(n) for n in (camp.nm_ids or [])]:
         return {"ok": False, "error": "nm_not_in_campaign"}
     # bid==0 — валидный «сброс к ставке кампании» (WB принимает bid_kopecks=0); отбиваем только отрицательные
     if bid_rub is None or bid_rub < 0:
         return {"ok": False, "error": "bad_bid"}
+    # Гейт: у части типов WB пофразовую ставку не применяет — не даём молча «уйти в никуда»
+    block = _phrase_bid_block_reason(camp)
+    if block:
+        return {"ok": False, "error": block, "unsupported": True}
     key = await _resolve_key(db, project_id)
     if not key:
         return {"ok": False, "error": "no_api_key"}
-    ok, err = await set_normquery_bid(key, campaign_id, nm_id, norm_query, bid_rub)
-    logger.info(f"cluster bid: project={project_id} camp={campaign_id} nm={nm_id} q={norm_query!r} bid={bid_rub} ok={ok}")
-    return {"ok": ok, "norm_query": norm_query, "bid": bid_rub if ok else None, "error": err}
+    ok, err, applied = await set_normquery_bid(key, campaign_id, nm_id, norm_query, bid_rub)
+    adjusted = ok and applied is not None and applied != round(bid_rub, 2)
+    # Проверка факта применения: перечитываем ставку по фразе (только для реальной ставки, не сброса)
+    verified: bool | None = None
+    if verify and ok and bid_rub > 0 and applied is not None:
+        try:
+            back = await get_normquery_bids(key, [(campaign_id, nm_id)])
+            stored = (back.get((campaign_id, nm_id)) or {}).get(norm_query)
+            verified = stored is not None and abs(float(stored) - float(applied)) <= max(1.0, float(applied) * 0.02)
+        except Exception as e:  # noqa: BLE001 — сеть/парсинг: не роняем запись, просто «не проверено»
+            logger.warning(f"cluster bid verify failed camp={campaign_id} nm={nm_id} q={norm_query!r}: {e}")
+            verified = None
+    logger.info(f"cluster bid: project={project_id} camp={campaign_id} nm={nm_id} q={norm_query!r} bid={bid_rub} applied={applied} ok={ok} verified={verified}")
+    # Паспорт ставки: пишем по факту применения (или удаляем при сбросе). Запись не критична —
+    # если упадёт, ответ WB не роняем (колонка «Стоит» просто не заполнится).
+    if ok:
+        try:
+            await _record_cluster_bid(
+                db, project_id, campaign_id, nm_id, norm_query,
+                applied if applied is not None else bid_rub,
+                source=source, basis_drr=basis_drr, basis_cpm=basis_cpm, target_drr=target_drr,
+            )
+            await db.commit()
+        except Exception as e:  # noqa: BLE001 — запись паспорта не должна ронять ответ WB
+            await db.rollback()
+            logger.warning(f"record cluster bid failed camp={campaign_id} nm={nm_id} q={norm_query!r}: {e}")
+    # applied — фактическая ставка (может быть минимумом WB); adjusted=True если WB поднял до минимума
+    return {"ok": ok, "norm_query": norm_query, "bid": applied if ok else None, "adjusted": adjusted, "verified": verified, "error": err}
+
+
+async def set_cluster_bids_bulk(
+    db: AsyncSession, project_id: int, campaign_id: int, items: list[dict]
+) -> dict:  # noqa: C901 — линейный разбор пачки, дробить не на что
+    """Массовая ставка по кластерам ОДНИМ запросом на пачку (как Mkeeper) — вместо N поштучных.
+
+    items: [{"nm_id", "norm_query", "bid"}]. bid>0 — установка, bid<=0 — сброс к ставке кампании.
+    Возврат: {"ok", "results":[{norm_query, ok, bid, error}], "applied", "failed"}. Гейт по типу
+    кампании — как в set_cluster_bid (единая ставка/CPC пофразовую не поддерживают).
+    """
+    camp = await _campaign_row(db, project_id, campaign_id)
+    if camp is None:
+        return {"ok": False, "error": "campaign_not_found"}
+    block = _phrase_bid_block_reason(camp)
+    if block:
+        return {"ok": False, "error": block, "unsupported": True}
+    key = await _resolve_key(db, project_id)
+    if not key:
+        return {"ok": False, "error": "no_api_key"}
+    valid_nm = {int(n) for n in (camp.nm_ids or [])}
+    triples: list[tuple[int, str, float]] = []
+    meta_by_key: dict[tuple[int, str], dict] = {}   # (nm, q) → исходный item (source/basis для паспорта)
+    results: list[dict] = []
+    for it in items:
+        nm = int(it.get("nm_id"))
+        q = str(it.get("norm_query") or "")
+        bid = it.get("bid")
+        if nm not in valid_nm:
+            results.append({"norm_query": q, "ok": False, "bid": None, "error": "nm_not_in_campaign"})
+            continue
+        if bid is None or (isinstance(bid, (int, float)) and bid < 0):
+            results.append({"norm_query": q, "ok": False, "bid": None, "error": "bad_bid"})
+            continue
+        triples.append((nm, q, float(bid)))
+        meta_by_key[(nm, q)] = it
+    recorded = False
+    if triples:
+        by_q = await set_normquery_bids_batch(key, campaign_id, triples)
+        for (nm, q, sent_bid) in triples:
+            r = by_q.get(q) or {"ok": False, "bid": None, "error": "WB не вернул результат по фразе"}
+            ok_q = bool(r.get("ok"))
+            results.append({"norm_query": q, "ok": ok_q, "bid": r.get("bid"), "error": r.get("error")})
+            if ok_q:
+                it = meta_by_key.get((nm, q), {})
+                applied_bid = r.get("bid")   # фактическая (WB мог поднять до минимума); None → сброс
+                try:
+                    await _record_cluster_bid(
+                        db, project_id, campaign_id, nm, q,
+                        applied_bid if applied_bid is not None else sent_bid,
+                        source=it.get("source"), basis_drr=it.get("basis_drr"),
+                        basis_cpm=it.get("basis_cpm"), target_drr=it.get("target_drr"),
+                    )
+                    recorded = True
+                except Exception as e:  # noqa: BLE001 — паспорт не критичен, не роняем пачку
+                    logger.warning(f"record cluster bid (bulk) failed camp={campaign_id} nm={nm} q={q!r}: {e}")
+    if recorded:
+        try:
+            await db.commit()
+        except Exception as e:  # noqa: BLE001
+            await db.rollback()
+            logger.warning(f"commit cluster bids passport (bulk) failed camp={campaign_id}: {e}")
+    applied = sum(1 for r in results if r.get("ok"))
+    failed = [r["norm_query"] for r in results if not r.get("ok")]
+    logger.info(f"cluster bids bulk: project={project_id} camp={campaign_id} total={len(results)} applied={applied} failed={len(failed)}")
+    return {"ok": applied > 0 or not results, "results": results, "applied": applied, "failed": failed}
 
 
 async def set_product_cluster_bid(
@@ -828,7 +1037,9 @@ async def set_product_cluster_bid(
     ]
     ok = all(r.get("ok") for r in results)
     err = next((r.get("error") for r in results if not r.get("ok")), None)
-    return {"ok": ok, "norm_query": norm_query, "bid": bid_rub if ok else None, "campaigns": len(camps), "error": err}
+    applied = next((r.get("bid") for r in results if r.get("ok")), None)
+    adjusted = any(r.get("adjusted") for r in results)
+    return {"ok": ok, "norm_query": norm_query, "bid": applied if ok else None, "adjusted": adjusted, "campaigns": len(camps), "error": err}
 
 
 def _daily_row(r: Any) -> dict[str, Any]:
