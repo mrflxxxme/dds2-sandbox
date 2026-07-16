@@ -4,7 +4,7 @@ Mirror WB Feedbacks API (+архив). Сводная аналитика отз�
 таблицы: рейтинг по месяцам, объём по оценкам, разбивки по категории/бренду/ярлыку.
 
 Revision ID: rev01_wb_feedbacks
-Revises: inv01_invite_expires_at
+Revises: abt01_ab_photo_tests
 Create Date: 2026-07-12
 
 """
@@ -16,7 +16,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "rev01_wb_feedbacks"
-down_revision: str | None = "inv01_invite_expires_at"
+down_revision: str | None = "abt01_ab_photo_tests"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
