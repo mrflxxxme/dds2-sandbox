@@ -85,6 +85,15 @@ class AssemblyDraftDistribution(BaseModel):
     # авто-синк расчёта от потребности такие SKU НЕ трогает (ручное решение
     # священно), пока юзер не вернёт SKU «в авто». JSONB — миграция не нужна.
     manual_nms: list[int] = Field(default_factory=list)
+    # КАТЕГОРИЙНЫЙ СКОУП черновика: список «эффективных категорий»
+    # (CategoryOverride ?? Nomenclature.subject). None/[] = обычный черновик без
+    # ограничений. Скоупленный черновик заполняется/распределяется только по этим
+    # категориям; его содержимое резервирует сток от других черновиков
+    # (GET /assembly/drafts/reserved). JSONB — миграция не нужна.
+    category_scope: list[str] | None = None
+    # Ограничение ФФ-источника скоупленного черновика (id склада-фулфилмента):
+    # раскладка берёт товар только с этого ФФ. None = все ФФ.
+    scope_ff_id: int | None = None
 
     @field_validator(
         "rows", "source_warehouse_ids", "target_warehouse_names", "handed_units", "prebook", "prebook_origin", "manual_nms", mode="before"
@@ -147,6 +156,16 @@ class AssemblyDraftRead(BaseModel):
     # UI использует чтобы (a) показать бейдж 🆕 в матрице, (b) посчитать сколько
     # отдельных заявок будет создано (новинки идут отдельно от обычных).
     newcomer_nm_ids: list[int] = Field(default_factory=list)
+
+
+class DraftsReservedResponse(BaseModel):
+    """Резерв стока черновиками: barcode → {ff_warehouse_id → qty}.
+
+    Σ rows.src + prebook.src + handed_units.items всех не-удалённых черновиков
+    проекта (кроме exclude_draft_id). Фронт вычитает из доступного ФФ, чтобы
+    параллельные черновики (в т.ч. категорийные) не планировали один товар дважды."""
+
+    reserved: dict[str, dict[str, int]] = Field(default_factory=dict)
 
 
 class CommitSupply(BaseModel):

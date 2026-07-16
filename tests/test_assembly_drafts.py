@@ -562,6 +562,39 @@ async def test_commit_draft_one_source_two_targets(db_session):
 
 
 @pytest.mark.asyncio
+async def test_commit_draft_notifies_ff_portal(db_session, monkeypatch):
+    """Коммит черновика шлёт notify_new_ff_assembly по каждой созданной заявке —
+    оператор ФФ-портала (напр. Хамза) узнаёт о новой сборке (для складов без
+    привязанного чата уведомление — no-op внутри notify)."""
+    from backend.services import fulfillment_notify
+
+    calls: list[tuple[int, object, int | None]] = []
+
+    async def fake_notify(db, project_id, warehouse_id, *, assembly_number, warehouse_name=None, qty=None, wb_number=None):
+        calls.append((warehouse_id, assembly_number, qty))
+
+    monkeypatch.setattr(fulfillment_notify, "notify_new_ff_assembly", fake_notify)
+
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    rows = [
+        AssemblyDraftRow(
+            nm_id=111,
+            barcode=TEST_BARCODE_1,
+            src={str(wh_a): 10},
+            tgt={"Электросталь": 6, "Казань": 4},
+        )
+    ]
+    payload = _build_payload([wh_a], ["Электросталь", "Казань"], rows, pallets=1, weight=10.0, eta="2026-06-15")
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+
+    resp = await assembly_draft_service.commit_draft(db_session, PROJECT_ID, draft.id)
+    assert len(resp.created_request_ids) == 2
+    assert len(calls) == 2
+    assert {c[0] for c in calls} == {wh_a}
+    assert sorted(c[2] or 0 for c in calls) == [4, 6]
+
+
+@pytest.mark.asyncio
 async def test_commit_draft_pallet_counts_per_request(db_session):
     """pallet_counts проставляет паллеты per-request по ключу «ff::wb::pkg»;
     отсутствующий ключ → плоский distribution.pallets_count (fallback)."""

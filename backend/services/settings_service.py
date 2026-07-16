@@ -157,6 +157,97 @@ async def set_pallet_boxes_by_size(db: AsyncSession, project_id: int, mapping: d
     return clean
 
 
+# ─── Правила совместимости категорий на паллете (категорийные черновики) ─────
+#
+# Форма: {"enabled": bool, "groups": [{"name": str|None, "categories": [str]}]}.
+# enabled=False — правила выключены (любые SKU миксуются на BOX-паллете).
+# enabled=True — каждая эффективная категория едет своей паллетой; группа
+# разрешает перечисленным категориям грузиться вместе. Инвариант: категория
+# не может состоять в двух группах и не может повторяться внутри группы.
+
+
+_PALLET_CATEGORY_COMPAT_KEY = "pallet_category_compat"
+
+
+def _pallet_category_compat_default() -> dict:
+    """Свежий дефолт (не общий mutable-объект)."""
+    return {"enabled": False, "groups": []}
+
+
+async def get_pallet_category_compat(db: AsyncSession, project_id: int) -> dict:
+    """Правила совместимости категорий на паллете. Битый/чужой JSON → дефолт."""
+    raw = await get_setting(db, project_id, _PALLET_CATEGORY_COMPAT_KEY)
+    if not raw:
+        return _pallet_category_compat_default()
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            return _pallet_category_compat_default()
+        groups: list[dict] = []
+        raw_groups = parsed.get("groups") or []
+        for g in raw_groups if isinstance(raw_groups, list) else []:
+            if not isinstance(g, dict):
+                continue
+            cats = [str(c).strip() for c in (g.get("categories") or []) if str(c or "").strip()]
+            if not cats:
+                continue
+            name = g.get("name")
+            groups.append({"name": str(name) if name else None, "categories": cats})
+        return {"enabled": bool(parsed.get("enabled")), "groups": groups}
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+        return _pallet_category_compat_default()
+
+
+async def set_pallet_category_compat(
+    db: AsyncSession,
+    project_id: int,
+    enabled: bool,
+    groups: list[dict],
+) -> dict:
+    """Сохранить правила совместимости. Нормализация: категории trim'ятся,
+    пустые категории и опустевшие группы выкидываются. Валидация: категория
+    не может состоять в двух группах и не может повторяться внутри группы
+    (→ ValueError с русским текстом; роутер мапит в 400)."""
+    from backend.cache import invalidate_cache
+
+    clean_groups: list[dict] = []
+    seen_global: set[str] = set()
+    for g in groups:
+        raw_name = g.get("name")
+        cats: list[str] = []
+        seen_in_group: set[str] = set()
+        for c in g.get("categories") or []:
+            cat = str(c or "").strip()
+            if not cat:
+                continue
+            if cat in seen_in_group:
+                raise ValueError(f"Категория «{cat}» повторяется внутри группы")
+            if cat in seen_global:
+                raise ValueError(f"Категория «{cat}» не может состоять в двух группах")
+            seen_in_group.add(cat)
+            cats.append(cat)
+        if not cats:
+            continue  # опустевшая группа не сохраняется
+        seen_global.update(seen_in_group)
+        name = str(raw_name).strip() if raw_name and str(raw_name).strip() else None
+        clean_groups.append({"name": name, "categories": cats})
+
+    value = {"enabled": bool(enabled), "groups": clean_groups}
+    await set_setting(db, project_id, _PALLET_CATEGORY_COMPAT_KEY, json.dumps(value, ensure_ascii=False))
+    # Правила меняют паллетную консолидацию в матрице потребности. Iron rule 7.
+    try:
+        await invalidate_cache("reports:warehouse_need")
+    except Exception as e:
+        logger.warning("invalidate reports:warehouse_need failed: %s", e)
+    logger.info(
+        "Set pallet_category_compat for project %s: enabled=%s, %d groups",
+        project_id,
+        value["enabled"],
+        len(clean_groups),
+    )
+    return value
+
+
 async def get_all_warehouses(db: AsyncSession | None = None, project_id: int | None = None) -> list[dict]:
     """Return all known WB warehouses: union of WAREHOUSE_COORDS keys and any
     warehouse names that appear in wb_warehouse_stocks for this project.

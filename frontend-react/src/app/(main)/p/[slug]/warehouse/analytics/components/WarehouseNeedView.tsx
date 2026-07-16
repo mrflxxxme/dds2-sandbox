@@ -10,6 +10,7 @@ import { parseBoxSize, maxPalletHeightCm, consolidateDistrictPallets, canonBoxSi
 import { normalizeDraft } from '@/lib/utils/normalizeDraft';
 import { DISTRICT_LABELS, DISTRICT_COLORS, DISTRICT_ORDER } from '@/lib/constants/localization';
 import { seedNewcomerWholeBoxes } from '@/lib/assembly/coldStartSeed';
+import { subtractReserveFromArticles } from '@/lib/assembly/draftReserve';
 import type {
     AcceptanceCheckPerItem,
     AssemblyDraftRow,
@@ -239,6 +240,10 @@ export interface WarehouseNeedViewProps {
     fillAllSignal?: number;
     /** Получить готовые строки всей потребности (родитель ЗАМЕНЯЕТ ими черновик). */
     onFillAllRows?: (rows: AssemblyDraftRow[]) => void | Promise<void>;
+    /** Резерв стока другими черновиками (barcode → {ff → qty}): вычитается из
+     *  rf_stocks.available загруженной потребности, чтобы fill/долив не планировали
+     *  товар, уже занятый параллельным (категорийным) черновиком. */
+    subtractReserve?: Record<string, Record<string, number>>;
 }
 
 export function WarehouseNeedView({
@@ -248,6 +253,7 @@ export function WarehouseNeedView({
     autoCheckAcceptance,
     fillAllSignal,
     onFillAllRows,
+    subtractReserve,
 }: WarehouseNeedViewProps = {}) {
     const params = useParams();
     const router = useRouter();
@@ -605,7 +611,11 @@ export function WarehouseNeedView({
                 // % локализации из индекса локализации (то же окно 14д).
                 api.getLocalizationSkus(dateFrom, dateTo).catch(() => [] as Array<{ nm_id: number; loc_pct: number }>),
             ]);
-            setData(resp);
+            // Резерв других черновиков (категорийных): вычитаем из available ДО
+            // раскладки/fill — параллельные черновики не планируют товар дважды.
+            setData(subtractReserve && Object.keys(subtractReserve).length
+                ? { ...resp, articles: subtractReserveFromArticles(resp.articles || [], subtractReserve) }
+                : resp);
             const aMap = new Map<number, { margin_pct: number | null; stocks_wb: number; days_left: number }>();
             for (const a of analyticsResp.articles ?? []) {
                 aMap.set(a.nm_id, {
@@ -628,7 +638,7 @@ export function WarehouseNeedView({
             setError(message);
         }
         setLoading(false);
-    }, [supplyDays, analysisDays, mode, localizationOptimized, onlyAvailable, assemblyWarehouseId]);
+    }, [supplyDays, analysisDays, mode, localizationOptimized, onlyAvailable, assemblyWarehouseId, subtractReserve]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -3452,11 +3462,10 @@ export function WarehouseNeedView({
                                                 : tipParts.length
                                                     ? `\u041f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442: ${tipParts.join(', ')}${noLimit ? ' \u2014 \u231b \u043d\u0435\u0442 \u043b\u0438\u043c\u0438\u0442\u0430 \u043f\u0440\u0438\u0451\u043c\u043a\u0438, \u043d\u0443\u0436\u043d\u0430 \u043f\u0440\u0435\u0434\u0437\u0430\u044f\u0432\u043a\u0430' : ''}`
                                                     : '';
-                                            // \u0412 \u0441\u0431\u043e\u0440\u043a\u0435 + \u0432 \u043f\u0443\u0442\u0438 \u043d\u0430 \u044d\u0442\u043e\u0442 WB-\u0441\u043a\u043b\u0430\u0434 (target \u2014 assembly_target_map/transit_target_map).
-                                            // \u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u043c \ud83d\ude9a N \u0435\u0441\u043b\u0438 \u0445\u043e\u0442\u044f \u0431\u044b \u043e\u0434\u043d\u043e >0 \u2014 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c \u0432\u0438\u0434\u0438\u0442, \u043a\u0443\u0434\u0430 \u0443\u0436\u0435 \u0435\u0434\u0435\u0442 \u0442\u043e\u0432\u0430\u0440.
+                                            // \u0412 \u0441\u0431\u043e\u0440\u043a\u0435 / \u0432 \u043f\u0443\u0442\u0438 \u043d\u0430 \u044d\u0442\u043e\u0442 WB-\u0441\u043a\u043b\u0430\u0434 (target \u2014 assembly_target_map/transit_target_map),
+                                            // \u0440\u0430\u0437\u0434\u0435\u043b\u044c\u043d\u043e: \ud83d\udd27 \u0432 \u0441\u0431\u043e\u0440\u043a\u0435 \u043d\u0430 \u0424\u0424 \u00b7 \ud83d\ude9a \u0432 \u043f\u0443\u0442\u0438 (\u043f\u0430\u0440\u0438\u0442\u0435\u0442 \u0441 \u043c\u0430\u0442\u0440\u0438\u0446\u0430\u043c\u0438 \u00ab\u0420\u0430\u0441\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c\u00bb).
                                             const asmAtWh = a.asm_by_warehouse?.[wh.name] || 0;
                                             const transitAtWh = a.transit_by_warehouse?.[wh.name] || 0;
-                                            const onWayAtWh = asmAtWh + transitAtWh;
                                             // Режим редактирования: ячейки отмеченных SKU (не закрытых по
                                             // приёмке) вводимы; шаг = K, потолок = свободный остаток ФФ.
                                             const isEditing = editMode && !m.closed;
@@ -3473,7 +3482,8 @@ export function WarehouseNeedView({
                                                 tooltipBase,
                                                 isBumped ? `\ud83d\udce4 \u0414\u043e\u0440\u0430\u0441\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u043e +${formatNumber(bumpQty, 0)} \u0448\u0442 (\u0438\u0437 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e FF-\u0441\u0442\u043e\u043a\u0430)` : '',
                                                 stockAtWh > 0 ? `\ud83c\udfec \u0421\u0435\u0439\u0447\u0430\u0441 \u043d\u0430 \u00ab${wh.name}\u00bb: ${formatNumber(stockAtWh, 0)} \u0448\u0442` : '',
-                                                onWayAtWh > 0 ? `\ud83d\ude9a \u0423\u0436\u0435 \u0435\u0434\u0435\u0442 \u0441\u044e\u0434\u0430: ${formatNumber(onWayAtWh, 0)} \u0448\u0442${asmAtWh > 0 && transitAtWh > 0 ? ` (\u0432 \u0441\u0431\u043e\u0440\u043a\u0435 ${formatNumber(asmAtWh, 0)} + \u0432 \u043f\u0443\u0442\u0438 ${formatNumber(transitAtWh, 0)})` : ''}` : '',
+                                                asmAtWh > 0 ? `\ud83d\udd27 \u0412 \u0441\u0431\u043e\u0440\u043a\u0435 \u043d\u0430 \u0424\u0424: ${formatNumber(asmAtWh, 0)} \u0448\u0442` : '',
+                                                transitAtWh > 0 ? `\ud83d\ude9a \u0423\u0436\u0435 \u0435\u0434\u0435\u0442 \u0441\u044e\u0434\u0430: ${formatNumber(transitAtWh, 0)} \u0448\u0442` : '',
                                             ].filter(Boolean).join('\n');
                                             return (
                                                 <td key={`wb_${wh.name}`} title={tooltip} style={{
@@ -3519,9 +3529,14 @@ export function WarehouseNeedView({
                                                             \ud83c\udfec {formatNumber(stockAtWh, 0)}
                                                         </div>
                                                     )}
-                                                    {onWayAtWh > 0 && (
+                                                    {asmAtWh > 0 && (
                                                         <div style={{ fontSize: 10, color: '#16a34a', fontWeight: 600, lineHeight: 1.1, marginTop: 2 }}>
-                                                            \ud83d\ude9a {formatNumber(onWayAtWh, 0)}
+                                                            \ud83d\udd27 {formatNumber(asmAtWh, 0)}
+                                                        </div>
+                                                    )}
+                                                    {transitAtWh > 0 && (
+                                                        <div style={{ fontSize: 10, color: '#16a34a', fontWeight: 600, lineHeight: 1.1, marginTop: 2 }}>
+                                                            \ud83d\ude9a {formatNumber(transitAtWh, 0)}
                                                         </div>
                                                     )}
                                                 </td>

@@ -7,6 +7,7 @@ Handles:
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -330,6 +331,24 @@ def _parse_advert_item(c: dict) -> dict | None:
     # Хранится отдельно от payment_type, который перетирает "type" ниже.
     raw_type = c.get("type")
     advert_type = raw_type if isinstance(raw_type, int) else None
+    # Ставка кампании по активной зоне (поиск приоритетнее): макс. bids_kopecks по nm → ₽.
+    # Нужна для инлайн-правки ставки в списке (рендер из зеркала, без лишнего вызова WB).
+    search_kop: list[int] = []
+    reco_kop: list[int] = []
+    for ns in c.get("nm_settings") or []:
+        if not isinstance(ns, dict):
+            continue
+        bk = ns.get("bids_kopecks") or {}
+        if isinstance(bk.get("search"), (int, float)):
+            search_kop.append(int(bk["search"]))
+        if isinstance(bk.get("recommendations"), (int, float)):
+            reco_kop.append(int(bk["recommendations"]))
+    if search_kop:
+        default_bid = round(max(search_kop) / 100, 2)
+    elif reco_kop:
+        default_bid = round(max(reco_kop) / 100, 2)
+    else:
+        default_bid = None
     return {
         "advertId": advert_id,
         "name": name or str(advert_id or ""),
@@ -339,6 +358,7 @@ def _parse_advert_item(c: dict) -> dict | None:
         "create_time": c.get("createTime"),  # ISO-строка создания кампании в WB (дата добавления)
         # bid_mode: режим ставки WB — 'unified'/'manual' как есть (совпадает с контрактом фронта)
         "bid_mode": c.get("bid_type"),
+        "default_bid": default_bid,  # ставка ₽ по активной зоне (None если WB не прислал ставок)
         "status": c.get("status"),
         "nm_ids": nm_ids,
     }
@@ -445,6 +465,31 @@ async def set_campaign_placements(api_key: str, campaign_id: int, placements: di
     return {"ok": False, "error": f"HTTP {resp.status_code}: {err}"}
 
 
+def _extract_min_bid(err_text: str) -> float | None:
+    """Из ошибки WB «bid value must be no less than 555.00» вытащить минимум (₽).
+
+    WB держит динамический аукционный «пол» ставки и отбивает запись ниже него
+    сообщением с числом. Возвращает минимум ₽ или None, если это не тот случай.
+    """
+    m = re.search(r"no less than\s*([\d]+(?:\.[\d]+)?)", err_text or "")
+    if not m:
+        return None
+    try:
+        return round(float(m.group(1)), 2)
+    except ValueError:
+        return None
+
+
+def _extract_bad_phrase(err_text: str) -> str | None:
+    """Из глобальной ошибки батча вытащить «отравившую» фразу: `'фраза' norm_query disabled for nm`.
+
+    WB-батч normquery/bids — ВСЁ-ИЛИ-НИЧЕГО: одна невалидная фраза (broad-match, «disabled»)
+    отбивает весь запрос своей ошибкой. Имя фразы — в одинарных кавычках в начале сообщения.
+    """
+    m = re.match(r"^'([^']+)'", err_text or "")
+    return m.group(1) if m else None
+
+
 async def set_campaign_bid(
     api_key: str, campaign_id: int, nm_ids: list[int], bid_rub: float, placement: str
 ) -> dict:
@@ -453,33 +498,88 @@ async def set_campaign_bid(
     placement: "combined" (единая ставка), "search"/"recommendations" (ручная), для CPC — за клик.
     Тело: {"bids":[{"advert_id":id,"nm_bids":[{"nm_id","bid_kopecks","placement"} ...]}]}. Ставка —
     в копейках (₽×100). WB: только статусы 4/9/11; проверку типа/статуса делает вызывающий.
-    Лимит WB — 1 запрос/сек, 429 повторяем один раз. Возвращает {"ok","error","bid"}.
+
+    Авто-минимум: WB держит динамический аукционный «пол» ставки и отбивает запись ниже
+    него ошибкой «bid value must be no less than X». Тогда СРАЗУ повторяем запись с этим X
+    (до 3 попыток — пол мог подняться ещё). Так пользователь может ввести любую ставку (хоть
+    1 ₽) и получить минимально доступную. Возвращает {"ok","error","bid","adjusted","min_bid"}
+    (bid — фактически применённая ставка ₽; adjusted=True если WB поднял до минимума).
     """
     headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
     url = "https://advert-api.wildberries.ru/api/advert/v1/bids"
-    kop = int(round(bid_rub * 100))
-    nm_bids = [{"nm_id": nm, "bid_kopecks": kop, "placement": placement} for nm in nm_ids]
-    body = {"bids": [{"advert_id": campaign_id, "nm_bids": nm_bids}]}
-    try:
+
+    async def _send(kopecks: int) -> httpx.Response:
+        nm_bids = [{"nm_id": nm, "bid_kopecks": kopecks, "placement": placement} for nm in nm_ids]
+        body = {"bids": [{"advert_id": campaign_id, "nm_bids": nm_bids}]}
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.patch(url, headers=headers, json=body)
             if resp.status_code == 429:
                 ra = resp.headers.get("Retry-After", "1")
                 await asyncio.sleep(int(ra) if ra.isdigit() else 1)
                 resp = await client.patch(url, headers=headers, json=body)
-    except httpx.HTTPError as e:
-        logger.warning(f"WB set bid failed for {campaign_id}: {e}")
-        return {"ok": False, "error": str(e)[:300], "bid": None}
+        return resp
 
+    kop = int(round(bid_rub * 100))
+    adjusted = False
+    last_min: float | None = None
+    for _ in range(3):
+        try:
+            resp = await _send(kop)
+        except httpx.HTTPError as e:
+            logger.warning(f"WB set bid failed for {campaign_id}: {e}")
+            return {"ok": False, "error": str(e)[:300], "bid": None}
+        if resp.status_code == 200:
+            applied = round(kop / 100, 2)
+            logger.info(f"WB bid updated: campaign {campaign_id} → {applied} ₽ ({placement}, adjusted={adjusted})")
+            return {"ok": True, "error": None, "bid": applied, "adjusted": adjusted, "min_bid": last_min}
+        if resp.status_code in (401, 403):
+            logger.warning(f"WB set bid forbidden {resp.status_code} for {campaign_id} — read-only токен?")
+            return {"ok": False, "error": "Нет доступа: токен «Продвижение» должен быть с правом записи (не read-only).", "bid": None}
+        err = resp.text[:300]
+        min_bid = _extract_min_bid(err)
+        if min_bid is None:
+            logger.warning(f"WB set bid rejected {resp.status_code} for {campaign_id}: {err}")
+            return {"ok": False, "error": f"HTTP {resp.status_code}: {err}", "bid": None}
+        # Ставка ниже аукционного «пола» WB — повторяем с названным минимумом
+        logger.info(f"WB bid below floor for {campaign_id}: auto-bumping to minimum {min_bid} ₽")
+        kop = int(round(min_bid * 100))
+        last_min = min_bid
+        adjusted = True
+    # Три раза подряд WB поднимал минимум — не сходится
+    return {"ok": False, "error": f"WB минимум ставки {last_min:g} ₽ не удалось применить, повторите", "bid": None, "min_bid": last_min}
+
+
+async def fetch_campaign_min_bid(
+    api_key: str, campaign_id: int, nm_ids: list[int], placement: str = "search"
+) -> float | None:
+    """Минимальная (аукционный «пол») ставка кампании по зоне — READ-ONLY пробник.
+
+    У WB нет API отдать пол (`/adv/v1/cpm` → 404). Трюк: шлём заведомо мизерную ставку 1 ₽
+    (CPM требует ЦЕЛОЕ число рублей → bid_kopecks=100, не 1 — иначе «bid must be a whole number»)
+    — WB отбивает валидацией «bid value must be no less than X» ДО применения, ставку НЕ меняем.
+    X = текущий пол. None — узнать не удалось (нет прав/сеть/иной ответ).
+    """
+    if not nm_ids:
+        return None
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = "https://advert-api.wildberries.ru/api/advert/v1/bids"
+    nm_bids = [{"nm_id": nm, "bid_kopecks": 100, "placement": placement} for nm in nm_ids]
+    body = {"bids": [{"advert_id": campaign_id, "nm_bids": nm_bids}]}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.patch(url, headers=headers, json=body)
+            if resp.status_code == 429:
+                ra = resp.headers.get("Retry-After", "1")
+                await asyncio.sleep(int(ra) if ra.isdigit() else 1)
+                resp = await client.patch(url, headers=headers, json=body)
+    except httpx.HTTPError as e:
+        logger.warning(f"WB min-bid probe failed for {campaign_id}: {e}")
+        return None
     if resp.status_code == 200:
-        logger.info(f"WB bid updated: campaign {campaign_id} → {bid_rub} ₽ ({placement})")
-        return {"ok": True, "error": None, "bid": round(kop / 100, 2)}
-    if resp.status_code in (401, 403):
-        logger.warning(f"WB set bid forbidden {resp.status_code} for {campaign_id} — read-only токен?")
-        return {"ok": False, "error": "Нет доступа: токен «Продвижение» должен быть с правом записи (не read-only).", "bid": None}
-    err = resp.text[:300]
-    logger.warning(f"WB set bid rejected {resp.status_code} for {campaign_id}: {err}")
-    return {"ok": False, "error": f"HTTP {resp.status_code}: {err}", "bid": None}
+        # 0.01 ₽ приняли — для CPM невозможно (пол десятки ₽); не трактуем как пол, чтобы не соврать
+        logger.warning(f"WB min-bid probe unexpectedly accepted 0.01₽ for {campaign_id}")
+        return None
+    return _extract_min_bid(resp.text[:300])
 
 
 async def fetch_campaign_default_bid(api_key: str, campaign_id: int) -> float | None:
@@ -841,6 +941,70 @@ async def fetch_search_daily(api_key: str, campaign_id: int, nm_ids: list[int], 
     return agg
 
 
+# WB: normquery/stats.Items ограничен `lte 100` (проверено — 300 → 400). Батчим
+# многие (advertId,nmId) пары в один запрос: запросов на порядок меньше, чем
+# «кампания-на-запрос» → обходим жёсткий per-seller rate-limit (даже
+# конкурентность 3 по кампаниям упирается в 429/461).
+_NORMQUERY_ITEM_CAP = 100
+
+
+async def fetch_search_daily_batch(
+    api_key: str, pairs: list[tuple[int, int]], date_from: str, date_to: str,
+) -> dict[tuple[int, int, str], dict]:
+    """POST /adv/v1/normquery/stats батчами по многим кампаниям сразу.
+
+    pairs — [(advert_id, nm_id), …]. Возвращает
+    {(advert_id, nm_id, "YYYY-MM-DD"): {views, clicks, spend, atbs, orders, shks}}.
+    Ответ echo'ит advertId+nmId на уровне item → демукс по кампаниям. Чанк, чей
+    запрос упал/рейт-лимитнут (после одного бэкоффа) — пропускаем, остальные идут.
+    """
+    agg: dict[tuple[int, int, str], dict] = {}
+    if not pairs:
+        return agg
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    url = "https://advert-api.wildberries.ru/adv/v1/normquery/stats"
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        for i in range(0, len(pairs), _NORMQUERY_ITEM_CAP):
+            chunk = pairs[i : i + _NORMQUERY_ITEM_CAP]
+            body = {
+                "from": date_from, "to": date_to,
+                "items": [{"advertId": a, "nmId": n} for a, n in chunk],
+            }
+            try:
+                resp = await client.post(url, headers=headers, json=body)
+                if resp.status_code in (429, 461):  # 461 = «too many requests» (per-seller лимитер)
+                    await asyncio.sleep(int(resp.headers.get("Retry-After", "5")))
+                    resp = await client.post(url, headers=headers, json=body)
+                if resp.status_code != 200:
+                    logger.warning(f"WB normquery/stats batch {resp.status_code}: {resp.text[:200]}")
+                    continue
+                items = (resp.json() or {}).get("items") or []
+            except Exception as e:
+                logger.warning(f"WB normquery/stats batch failed: {e!r}")
+                continue
+
+            for it in items:
+                advert_id = it.get("advertId")  # echo'ится WB → демукс по кампании
+                nm_id = it.get("nmId")
+                if advert_id is None or nm_id is None:
+                    continue
+                for day in it.get("dailyStats") or []:
+                    date_key = day.get("date")
+                    if not date_key:
+                        continue
+                    st = day.get("stat") or {}
+                    key = (int(advert_id), int(nm_id), date_key)
+                    a = agg.setdefault(key, {"views": 0, "clicks": 0, "spend": 0.0, "atbs": 0, "orders": 0, "shks": 0})
+                    a["views"] += int(st.get("views") or 0)
+                    a["clicks"] += int(st.get("clicks") or 0)
+                    a["spend"] += float(st.get("spend") or 0)
+                    a["atbs"] += int(st.get("atbs") or 0)
+                    a["orders"] += int(st.get("orders") or 0)
+                    a["shks"] += int(st.get("shks") or 0)
+    return agg
+
+
 async def fetch_ad_subjects(api_key: str) -> list[dict]:
     """GET /adv/v1/supplier/subjects — предметы, по которым можно создать кампанию.
 
@@ -1130,7 +1294,10 @@ async def set_normquery_minus(
     отсутствующие фразы удаляются. Возвращает (ok, error) — error читаемый для UI.
     """
     headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
-    body = {"items": [{"advert_id": advert_id, "nm_id": nm_id, "norm_queries": norm_queries}]}
+    # ВАЖНО: в отличие от get-minus (батч items[]), set-minus принимает поля на
+    # ВЕРХНЕМ уровне. Обёртка items[] давала 400 «invalid advert id» — WB не
+    # находил advert_id в корне тела (проверено на живом токене 2026-07-14).
+    body = {"advert_id": advert_id, "nm_id": nm_id, "norm_queries": norm_queries}
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             resp = await client.post(f"{_NQ_BASE}/set-minus", json=body, headers=headers)
@@ -1148,6 +1315,9 @@ async def set_normquery_minus(
                 "«Продвижение» и правом записи (без «Только на чтение») — тогда минус-фразы "
                 "будут применяться в кабинете."
             )
+        if resp.status_code == 400 and "is not valid for nm" in text:
+            # WB принимает в минус только фразы из известной ему истории кластеров товара
+            return False, "WB отклонил фразу: она не входит в известные кластеры этого товара"
         return False, f"WB вернул {resp.status_code}"
 
 
@@ -1184,47 +1354,247 @@ async def get_normquery_bids(
     return result
 
 
+def _parse_bids_result(resp: httpx.Response) -> tuple[bool, str]:
+    """Разбор ответа normquery/bids → (ok, reason). WB отдаёт 200 И НА ОТКАЗ — истина в теле
+    {"success":[...], "failed":[{...,"reason":...}]}; статус 200 сам по себе успеха не значит."""
+    if resp.status_code in (500, 502, 503, 504):
+        return False, "WB временно недоступен, попробуйте ещё раз"
+    if resp.status_code not in (200, 204):
+        # тело может быть HTML-страницей ошибки — сырьё пользователю не показываем
+        return False, f"WB вернул {resp.status_code}"
+    try:
+        data = resp.json() or {}
+    except Exception:
+        return False, "WB вернул нечитаемый ответ"
+    success = data.get("success") or []
+    failed = data.get("failed") or []
+    if success and not failed:
+        return True, ""
+    if failed and isinstance(failed[0], dict):
+        return False, str(failed[0].get("reason") or "")
+    return False, "WB отклонил ставку по фразе"
+
+
+def _parse_bids_batch(resp: "httpx.Response | None") -> tuple[set[str], dict[str, str], str | None]:
+    """Разбор ПАЧЕЧНОГО ответа normquery/bids → (успешные norm_query, {norm_query: reason} отбитых,
+    global_error). global_error≠None — весь батч не разобрать (сеть/не-200): все items считать отбитыми.
+    Фразы, которых нет ни в success, ни в failed (WB молча уронил), вызывающий помечает отказом."""
+    if resp is None:
+        return set(), {}, "Сеть недоступна, повторите позже"
+    if resp.status_code == 429:
+        return set(), {}, "WB ограничивает частоту запросов (429), повторите позже"
+    if resp.status_code in (500, 502, 503, 504):
+        return set(), {}, "WB временно недоступен, попробуйте ещё раз"
+    if resp.status_code in (401, 403) and "read-only" in resp.text[:200]:
+        return set(), {}, ("WB-токен только для чтения. Нужен токен «Продвижение» с правом записи.")
+    if resp.status_code not in (200, 204):
+        return set(), {}, f"WB вернул {resp.status_code}"
+    try:
+        data = resp.json() or {}
+    except Exception:
+        return set(), {}, "WB вернул нечитаемый ответ"
+    succ = {str(x.get("norm_query")) for x in (data.get("success") or []) if isinstance(x, dict)}
+    fail = {str(x.get("norm_query")): str(x.get("reason") or "") for x in (data.get("failed") or []) if isinstance(x, dict)}
+    return succ, fail, None
+
+
+async def _bids_request_with_retry(method: str, body: dict, headers: dict, tag: str) -> httpx.Response | None:
+    """Запрос к normquery/bids (POST/DELETE) с ретраем rate-limit и транзиентных сбоев.
+
+    WB-лимит на bid-эндпоинты ~1 запрос/сек — при массовой правке ставок пачка запросов
+    ловит 429 «слишком много запросов». Ждём `Retry-After` (или 2с, кап 10с) и повторяем;
+    5xx — короткий бэкофф. Возвращает последний ответ (в т.ч. 429 после исчерпания ретраев,
+    его разберёт вызывающий), либо None при сетевой ошибке.
+    """
+    resp: httpx.Response | None = None
+    for attempt in range(5):
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                if method == "POST":
+                    resp = await client.post(f"{_NQ_BASE}/bids", json=body, headers=headers)
+                else:
+                    resp = await client.request(method, f"{_NQ_BASE}/bids", json=body, headers=headers)
+        except Exception as e:
+            logger.error(f"WB normquery/bids {method} failed for {tag}: {e}")
+            return None
+        if resp.status_code == 429:
+            ra = resp.headers.get("Retry-After", "")
+            wait = float(ra) if ra.replace(".", "", 1).isdigit() else 2.0
+            wait = min(max(wait, 1.0), 10.0)
+            logger.warning(f"WB normquery/bids 429 rate limit, waiting {wait:.0f}s (attempt {attempt + 1}/5) for {tag}")
+            await asyncio.sleep(wait)
+            continue
+        if resp.status_code in (500, 502, 503, 504) and attempt < 4:
+            logger.warning(f"WB normquery/bids {resp.status_code} (transient), attempt {attempt + 1}/5 for {tag}")
+            await asyncio.sleep(1.5 * (attempt + 1))
+            continue
+        return resp
+    return resp  # исчерпали ретраи — вернём последний ответ (429/5xx) на разбор выше
+
+
 async def set_normquery_bid(
     api_key: str,
     advert_id: int,
     nm_id: int,
     norm_query: str,
     bid_rub: float,
-) -> tuple[bool, str | None]:
-    """Ставит ставку одному кластеру (₽ → копейки). WB не даёт ставку кластерам <100 показов.
+) -> tuple[bool, str | None, float | None]:
+    """Ставит/снимает ставку одному кластеру (₽). Возвращает (ok, error, applied_₽).
 
-    Схема set-bids подтверждается вживую при write-scoped токене (сейчас токен read-only → 401).
+    Контракт WB (adv/v0/normquery/bids), выверен эмпирически 2026-07-15:
+    - установка: POST, тело {"bids":[{advert_id,nm_id,norm_query,"bid": <ЦЕЛЫЕ ₽>}]}. Поле именно
+      `bid` в РУБЛЯХ — прежний `bid_kopecks`/копейки WB молча складывал в failed (ставка не менялась).
+    - сброс к ставке кампании (bid_rub<=0): HTTP DELETE того же /bids с телом
+      {"bids":[{advert_id,nm_id,norm_query}]} (bid:0 WB отвергает «invalid bid cost 0»).
+    Успех — по массивам success/failed в теле, а НЕ по статусу 200. Авто-минимум: reason
+    «no less than X» → повтор с X (до 3). applied_₽ = фактически применённая ставка (или минимум WB).
     """
     headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
-    body = {
-        "bids": [
-            {
-                "advert_id": advert_id,
-                "nm_id": nm_id,
-                "norm_query": norm_query,
-                "bid_kopecks": int(round(bid_rub * 100)),
-            }
-        ]
-    }
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            resp = await client.post(f"{_NQ_BASE}/bids", json=body, headers=headers)
-        except Exception as e:
-            logger.error(f"WB normquery/bids failed for {advert_id}/{nm_id}: {e}")
-            return False, "Сеть недоступна, повторите позже"
-        if resp.status_code in (200, 204):
-            logger.info(f"WB normquery/bids ok: advert={advert_id} nm={nm_id} q={norm_query!r} bid={bid_rub}")
-            return True, None
-        text = resp.text[:200]
-        logger.error(f"WB normquery/bids {resp.status_code}: {text}")
-        if resp.status_code in (401, 403) and "read-only" in text:
+    item = {"advert_id": advert_id, "nm_id": nm_id, "norm_query": norm_query}
+    tag = f"{advert_id}/{nm_id} q={norm_query!r}"
+
+    # Сброс к ставке кампании — снятие пофразовой ставки отдельным DELETE (bid=0 WB не принимает)
+    if bid_rub is None or bid_rub <= 0:
+        resp = await _bids_request_with_retry("DELETE", {"bids": [item]}, headers, tag)
+        if resp is None:
+            return False, "Сеть недоступна, повторите позже", None
+        ok, reason = _parse_bids_result(resp)
+        if ok:
+            logger.info(f"WB normquery/bids reset ok: {tag}")
+            return True, None, None
+        logger.error(f"WB normquery/bids reset failed: {tag} reason={reason!r}")
+        return False, reason or "WB не смог сбросить ставку по фразе", None
+
+    bid = int(round(bid_rub))
+    for _ in range(3):  # авто-минимум: reason «no less than X» → повтор с X
+        resp = await _bids_request_with_retry("POST", {"bids": [{**item, "bid": bid}]}, headers, tag)
+        if resp is None:
+            return False, "Сеть недоступна, повторите позже", None
+        if resp.status_code in (401, 403) and "read-only" in resp.text[:200]:
             return False, (
                 "WB-токен только для чтения. Нужен токен «Продвижение» с правом записи, "
                 "чтобы менять ставки по кластерам."
-            )
-        if resp.status_code == 400 and ("100" in text or "views" in text.lower()):
-            return False, "Кластер в стадии сбора данных (<100 показов) — WB не принимает ставку."
-        return False, f"WB вернул {resp.status_code}"
+            ), None
+        # 429/5xx уже переждал хелпер; если дошло досюда — это уже не транзиент
+        if resp.status_code == 429:
+            return False, "WB ограничивает частоту запросов (429), часть ставок не применилась. Повторите позже.", None
+        if resp.status_code in (500, 502, 503, 504):
+            return False, "WB временно недоступен (сервис ставок отвечает 503). Попробуйте ещё раз через минуту.", None
+        ok, reason = _parse_bids_result(resp)
+        if ok:
+            applied = float(bid)
+            logger.info(f"WB normquery/bids ok: {tag} bid={applied}")
+            return True, None, applied
+        logger.error(f"WB normquery/bids failed: {tag} reason={reason!r}")
+        min_bid = _extract_min_bid(reason)
+        if min_bid is not None:
+            bid = int(round(min_bid))  # ниже аукционного пола — повторяем с минимумом WB
+            continue
+        low = reason.lower()
+        if "views" in low or "100" in low:
+            return False, "Кластер в стадии сбора данных — WB не принимает ставку.", None
+        return False, reason or "WB отклонил ставку по фразе", None
+    return False, "WB не принял даже минимальную ставку, повторите", None
+
+
+_BID_BATCH_MAX = 100  # предохранитель на случай лимита размера тела WB; батч режем на чанки этого размера
+
+
+def _bid_reason_to_error(reason: str) -> str:
+    """Причина отказа WB по фразе → человекочитаемая ошибка (как в поштучном set_normquery_bid)."""
+    low = reason.lower()
+    if "views" in low or "100" in low:
+        return "Кластер в стадии сбора данных — WB не принимает ставку."
+    return reason or "WB отклонил ставку по фразе"
+
+
+async def set_normquery_bids_batch(
+    api_key: str,
+    advert_id: int,
+    items: list[tuple[int, str, float]],
+) -> dict[str, dict]:
+    """Ставит/снимает ставки ПАЧКОЙ — одним запросом на чанк (как это делает Mkeeper).
+
+    WB `adv/v0/normquery/bids` принимает МАССИВ `bids[]` и отдаёт `success[]`/`failed[]` пофразно —
+    т.е. эндпоинт батчевый по замыслу. Поштучный цикл упирался в лимит ~1 запрос/сек (429); пачка
+    из 91 фразы = 1–2 запроса вместо 91 → мгновенно и без rate-limit.
+
+    items: (nm_id, norm_query, bid_rub). bid>0 — установка (POST), bid<=0 — сброс к ставке кампании
+    (DELETE, bid:0 WB не принимает). Авто-минимум: фразы, отбитые «no less than X», повторяются
+    добатчем с X. Возврат: {norm_query: {"ok":bool, "bid":float|None, "error":str|None}}.
+    """
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    result: dict[str, dict] = {}
+    sets = [(nm, q, int(round(b))) for (nm, q, b) in items if b is not None and b > 0]
+    resets = [(nm, q) for (nm, q, b) in items if b is None or b <= 0]
+
+    def _mark_failed(qs: list[str], err: str) -> None:
+        for q in qs:
+            result[q] = {"ok": False, "bid": None, "error": err}
+
+    # ── Сбросы (DELETE-батч) ──
+    for i in range(0, len(resets), _BID_BATCH_MAX):
+        chunk = resets[i:i + _BID_BATCH_MAX]
+        body = {"bids": [{"advert_id": advert_id, "nm_id": nm, "norm_query": q} for (nm, q) in chunk]}
+        resp = await _bids_request_with_retry("DELETE", body, headers, f"{advert_id} reset×{len(chunk)}")
+        succ, fail, gerr = _parse_bids_batch(resp)
+        if gerr is not None:
+            _mark_failed([q for (_nm, q) in chunk], gerr)
+            continue
+        for (_nm, q) in chunk:
+            if q in succ:
+                result[q] = {"ok": True, "bid": None, "error": None}
+            else:
+                result[q] = {"ok": False, "bid": None, "error": fail.get(q) or "WB не сбросил ставку по фразе"}
+
+    # ── Установки (POST-батч) + один добатч по авто-минимуму ──
+    retry: list[tuple[int, str, int]] = []  # (nm, norm_query, min_bid) — отбитые «no less than X»
+    for i in range(0, len(sets), _BID_BATCH_MAX):
+        remaining = sets[i:i + _BID_BATCH_MAX]
+        guard = len(remaining) + 1  # не больше 1 итерации на каждую отравившую фразу
+        while remaining and guard > 0:
+            guard -= 1
+            body = {"bids": [{"advert_id": advert_id, "nm_id": nm, "norm_query": q, "bid": bid} for (nm, q, bid) in remaining]}
+            resp = await _bids_request_with_retry("POST", body, headers, f"{advert_id} set×{len(remaining)}")
+            succ, fail, gerr = _parse_bids_batch(resp)
+            if gerr is not None:  # сеть/429/не-200 — весь остаток не разобрать
+                _mark_failed([q for (_n, q, _b) in remaining], gerr)
+                break
+            # WB-батч ВСЁ-ИЛИ-НИЧЕГО: при одной невалидной «disabled» фразе WB кладёт ВЕСЬ батч
+            # в failed, и reason каждой строки называет ту одну отравившую фразу. Вычленяем такие
+            # (reason начинается с 'фраза', которая есть в батче), выкидываем и повторяем ОСТАТОК.
+            poison = {named for (_n, q, _b) in remaining if q not in succ
+                      for named in [_extract_bad_phrase(fail.get(q, ""))]
+                      if named and any(t[1] == named for t in remaining)}
+            if poison and len(remaining) > len(poison):
+                for p in poison:
+                    result[p] = {"ok": False, "bid": None, "error": _bid_reason_to_error(fail.get(p) or f"'{p}' norm_query disabled")}
+                remaining = [t for t in remaining if t[1] not in poison]
+                continue
+            for (nm, q, bid) in remaining:  # нормальный пофразный разбор
+                if q in succ:
+                    result[q] = {"ok": True, "bid": float(bid), "error": None}
+                    continue
+                reason = fail.get(q, "")
+                mn = _extract_min_bid(reason)
+                if mn is not None:
+                    retry.append((nm, q, int(round(mn))))  # ниже пола — добьём минимумом WB
+                else:
+                    result[q] = {"ok": False, "bid": None, "error": _bid_reason_to_error(reason)}
+            break
+
+    for i in range(0, len(retry), _BID_BATCH_MAX):
+        retry_chunk = retry[i:i + _BID_BATCH_MAX]
+        body = {"bids": [{"advert_id": advert_id, "nm_id": nm, "norm_query": q, "bid": bid} for (nm, q, bid) in retry_chunk]}
+        resp = await _bids_request_with_retry("POST", body, headers, f"{advert_id} set-min×{len(retry_chunk)}")
+        succ, fail, gerr = _parse_bids_batch(resp)
+        for (nm, q, bid) in retry_chunk:
+            if gerr is None and q in succ:
+                result[q] = {"ok": True, "bid": float(bid), "error": None}
+            else:
+                result[q] = {"ok": False, "bid": None, "error": gerr or _bid_reason_to_error(fail.get(q, ""))}
+
+    return result
 
 
 async def fetch_ad_stats_today_nm(api_key: str, campaign_id: int, nm_id: int, day: str) -> dict | None:

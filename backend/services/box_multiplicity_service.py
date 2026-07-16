@@ -1732,3 +1732,73 @@ async def revert_batch(
         "locked_barcodes": sorted(locked_barcodes),
         "affected_barcodes": sorted(affected),
     }
+
+
+# ─── Наследование кратности при перемещении между ФФ-складами ────────────────
+
+
+async def inherit_on_transfer(
+    db: AsyncSession,
+    project_id: int,
+    from_warehouse_id: int,
+    to_warehouse_id: int,
+    barcodes: list[str],
+    reference: str,
+) -> int:
+    """Перенести ручную кратность (barcode, склад-источник) → (barcode, склад-
+    получатель) при приёмке перемещения: товар переехал — «шт/короб» физически
+    те же, а раньше получатель оставался «не задана», и кратность заносили
+    заново руками (жалоба юзера 2026-07-16, TR-20 Брянцево→Домодедово).
+
+    Свою настройку получателя НЕ перетираем (наследуем только если записи нет
+    или её box_qty пуст). Только `db.add`/мутации в сессии — коммитит
+    вызывающий (`complete_transfer`) вместе с приёмкой. Возвращает число
+    унаследованных баркодов; журнал — `transfer:<номер>` per поле.
+    """
+    bcs = [b for b in dict.fromkeys(barcodes) if b]
+    if not bcs or from_warehouse_id == to_warehouse_id:
+        return 0
+    src_rows = (
+        await db.execute(
+            select(BoxQtyPerWarehouse)
+            .where(
+                BoxQtyPerWarehouse.project_id == project_id,
+                BoxQtyPerWarehouse.warehouse_id == from_warehouse_id,
+                BoxQtyPerWarehouse.barcode.in_(bcs),
+                BoxQtyPerWarehouse.box_qty.isnot(None),
+            )
+            .limit(len(bcs))
+        )
+    ).scalars().all()
+    if not src_rows:
+        return 0
+    dst_rows = (
+        await db.execute(
+            select(BoxQtyPerWarehouse)
+            .where(
+                BoxQtyPerWarehouse.project_id == project_id,
+                BoxQtyPerWarehouse.warehouse_id == to_warehouse_id,
+                BoxQtyPerWarehouse.barcode.in_([r.barcode for r in src_rows]),
+            )
+            .limit(len(src_rows))
+        )
+    ).scalars().all()
+    dst_by_bc = {r.barcode: r for r in dst_rows}
+    source = f"transfer:{reference}"[:20]
+    inherited = 0
+    for src in src_rows:
+        dst = dst_by_bc.get(src.barcode)
+        if dst is not None and dst.box_qty is not None:
+            continue  # у получателя своя кратность — не перетираем
+        if dst is None:
+            dst = BoxQtyPerWarehouse(project_id=project_id, barcode=src.barcode, warehouse_id=to_warehouse_id)
+            db.add(dst)
+        _log_change(db, project_id, src.barcode, to_warehouse_id, "box_qty", dst.box_qty, src.box_qty, source)
+        dst.box_qty = src.box_qty
+        if src.box_size and not dst.box_size:
+            _log_change(db, project_id, src.barcode, to_warehouse_id, "box_size", dst.box_size, src.box_size, source)
+            dst.box_size = src.box_size
+        dst.use_box_multiplicity = src.use_box_multiplicity
+        dst.updated_at = utcnow()
+        inherited += 1
+    return inherited

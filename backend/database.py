@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from sqlalchemy import create_engine, event, text
@@ -74,9 +75,20 @@ class Base(DeclarativeBase):
 
 
 async def get_db() -> AsyncSession:
-    """Get async DB session (no RLS context)."""
-    async with AsyncSessionLocal() as session:
+    """Get async DB session (no RLS context).
+
+    Тердаун под `asyncio.shield`: когда клиент рвёт запрос (перезагрузка тяжёлой
+    страницы), отмена таска прилетает и в cleanup — незащищённый `close()`
+    прерывается ПЕРВЫМ же await и соединение возвращается в пул с открытой
+    серверной транзакцией. Такие зомби (idle in transaction) выедают пул
+    pgbouncer, и стенд встаёт колом (клин 2026-07-16: 20 зомби = весь пул,
+    все запросы 60с+ таймаут). shield доводит rollback+close до конца.
+    """
+    session = AsyncSessionLocal()
+    try:
         yield session
+    finally:
+        await asyncio.shield(session.close())
 
 
 async def get_db_with_rls(project_id: int) -> AsyncSession:

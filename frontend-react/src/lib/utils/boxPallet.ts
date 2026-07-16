@@ -191,6 +191,10 @@ export interface PalletLine {
     boxQty: number | null | undefined;
     /** Габариты коробки «ДxШxВ» (см). null — габаритов нет. */
     boxSize: string | null | undefined;
+    /** Класс совместимости категорий (`lib/assembly/categoryCompat`): линии разных
+     *  классов НЕ делят смешанную BOX-паллету — box-режим считает паллеты per-класс.
+     *  Не задан — все линии в одном классе (прежнее поведение). Моно игнорирует. */
+    group?: string;
 }
 
 export interface PalletCount {
@@ -286,7 +290,11 @@ export function palletsForLines(
     overrides?: Record<string, number>,
 ): PalletCount {
     let fill = 0;
-    let tol = 0; // допуск дискретизации = одна штука «крупнейшего» (мин upp) SKU
+    // box-режим: fill/tol копятся ПО КЛАССАМ совместимости (`line.group`) — линии
+    // разных классов не делят паллету, паллеты = Σ per-класс ceil. Без group все
+    // линии в одном классе → поведение прежнее (один общий ceil).
+    const fillByGroup = new Map<string, number>();
+    const tolByGroup = new Map<string, number>(); // допуск = короб «крупнейшего» SKU класса
     let unknownLines = 0;
     let unknownUnits = 0;
     const monoItems: { key: string; units: number; cap: number; box?: number }[] = [];
@@ -303,17 +311,18 @@ export function palletsForLines(
             continue;
         }
         fill += units / upp;
+        const g = line.group ?? '*';
+        fillByGroup.set(g, (fillByGroup.get(g) || 0) + units / upp);
         // Гранула допуска = короб (если кратность задана) — зеркало snapToWholePallets:
         // после короб-гранулярного среза footprint садится в пределах короба от целого.
-        tol = Math.max(tol, (boxQty && boxQty > 1 ? boxQty : 1) / upp);
+        tolByGroup.set(g, Math.max(tolByGroup.get(g) || 0, (boxQty && boxQty > 1 ? boxQty : 1) / upp));
         monoItems.push({ key: String(idx++), units, cap: upp, box: boxQty ?? 0 });
     }
-    tol = Math.min(tol, 0.5); // предохранитель (как в snapToWholePallets)
-    // mono — ≤3 артикула на паллету (бин-пакинг). box — смешанные паллеты: `ceil(fill − tol)`,
-    // а НЕ ceil(fill): после snapToWholePallets footprint садится чуть ВЫШЕ целого (сливер
-    // дискретизации ≤ tol, нужен для идемпотентности/не-потери товара). ceil(fill) посчитал
-    // бы лишнюю полупустую паллету (1.05 → 2); −tol поглощает сливер (1.05 → 1), а реальный
-    // хвост > tol (1.5 → 2) остаётся.
+    // mono — ≤3 артикула на паллету (бин-пакинг). box — смешанные паллеты per-класс:
+    // `ceil(fill − tol)`, а НЕ ceil(fill): после snapToWholePallets footprint садится чуть
+    // ВЫШЕ целого (сливер дискретизации ≤ tol, нужен для идемпотентности/не-потери товара).
+    // ceil(fill) посчитал бы лишнюю полупустую паллету (1.05 → 2); −tol поглощает сливер
+    // (1.05 → 1), а реальный хвост > tol (1.5 → 2) остаётся.
     let palletsRaw: number;
     if (mode === 'mono') {
         // Авторитет = packMonoPallets: считаем только ГОТОВЫЕ (строго полные) паллеты —
@@ -324,7 +333,12 @@ export function palletsForLines(
         for (const it of monoItems) { km[it.key] = (km[it.key] || 0) + it.units; capBy[it.key] = it.cap; boxBy[it.key] = it.box ?? 0; }
         palletsRaw = packMonoPallets(km, (k) => capBy[k] ?? null, MONO_MAX_PALLET_ARTICLES, (k) => boxBy[k] ?? 0).pallets.length;
     } else {
-        palletsRaw = Math.ceil(fill - Math.max(tol, PALLET_FILL_EPS));
+        palletsRaw = 0;
+        for (const [g, gFill] of fillByGroup) {
+            const gTol = Math.min(tolByGroup.get(g) || 0, 0.5); // предохранитель (как в snapToWholePallets)
+            const p = Math.ceil(gFill - Math.max(gTol, PALLET_FILL_EPS));
+            if (p > 0) palletsRaw += p;
+        }
     }
     const pallets = palletsRaw > 0 ? palletsRaw : 0; // нормализуем -0 → 0
     return { pallets, fill, unknownLines, unknownUnits };

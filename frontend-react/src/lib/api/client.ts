@@ -224,7 +224,10 @@ export class ApiClient {
             throw new Error(typeof detail === 'object' ? JSON.stringify(detail) : `Error ${res.status}`);
         }
 
-        return res.json();
+        // 204 No Content / пустое тело (DELETE-эндпоинты): res.json() на пустоте
+        // кидал «Unexpected end of JSON input», хотя операция прошла успешно.
+        if (res.status === 204) return undefined as T;
+        return res.json().catch(() => undefined as T);
     }
 
     /**

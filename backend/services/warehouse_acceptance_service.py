@@ -992,6 +992,10 @@ async def get_acceptance_limits(
     api_key = await get_wb_key(db, project_id, "wb")
     if not api_key:
         raise ValueError("WB API key not configured for this project")
+    # Дальше БД не нужна — только WB (кэш-мисс/force = живой вызов под rate-limit):
+    # отпускаем транзакцию, чтобы /acceptance-limits и /acceptance-slots не держали
+    # пул pgbouncer как idle-in-tx на время WB-очереди (клин локалки 2026-07-16).
+    await db.commit()
 
     client = WBApiClient(api_key=api_key, project_id=project_id)
     wh_id_to_name = await _load_warehouse_id_map(client, project_id)
@@ -1074,6 +1078,13 @@ async def check_acceptance_and_redistribute(
     api_key = await get_wb_key(db, project_id, "wb")
     if not api_key:
         raise ValueError("WB API key not configured for this project")
+    # Дальше БД не нужна — только WB HTTP (rate-limit 6/мин: очередь параллельных
+    # проверок ждёт минутами). Отпускаем транзакцию/серверный коннект pgbouncer
+    # СЕЙЧАС, иначе батч проверок матрицы держит весь пул открытыми idle-in-tx
+    # (клин локалки 2026-07-16: 20 зомби-BEGIN = весь пул, все запросы 60с+).
+    # db=None — юнит-тесты с мокированным WB/Redis, БД не трогают.
+    if db is not None:
+        await db.commit()
 
     client = WBApiClient(api_key=api_key, project_id=project_id)
     wh_id_to_name = await _load_warehouse_id_map(client, project_id)

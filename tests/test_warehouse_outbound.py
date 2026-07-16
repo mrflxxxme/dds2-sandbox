@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.warehouse import OutboundStatus, TransferStatus
@@ -307,6 +307,69 @@ class TestCompleteTransfer:
         await send_transfer(db_session, project.id, transfer.id)
         completed = await complete_transfer(db_session, project.id, transfer.id)
         assert completed.status == TransferStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_complete_transfer_inherits_box_qty(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        """Приёмка перемещения наследует ручную кратность на склад-получатель
+        (жалоба юзера 2026-07-16: после TR кратность приходилось заносить заново)."""
+        from backend.models.cost import BoxQtyPerWarehouse
+
+        await _stock_warehouse(db_session, project, fulfillment_wh, barcode, 100)
+        db_session.add(BoxQtyPerWarehouse(project_id=project.id, barcode=barcode, warehouse_id=fulfillment_wh.id, box_qty=20, box_size="60x40x50"))
+        await db_session.commit()
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": 30}],
+            },
+        )
+        await send_transfer(db_session, project.id, transfer.id)
+        await complete_transfer(db_session, project.id, transfer.id)
+        dst = (
+            await db_session.execute(
+                select(BoxQtyPerWarehouse).where(
+                    BoxQtyPerWarehouse.project_id == project.id,
+                    BoxQtyPerWarehouse.warehouse_id == external_wh.id,
+                    BoxQtyPerWarehouse.barcode == barcode,
+                )
+            )
+        ).scalar_one()
+        assert dst.box_qty == 20
+        assert dst.box_size == "60x40x50"
+
+    @pytest.mark.asyncio
+    async def test_complete_transfer_keeps_target_box_qty(self, db_session, project, fulfillment_wh, external_wh, barcode):
+        """Своя кратность получателя НЕ перетирается наследованием."""
+        from backend.models.cost import BoxQtyPerWarehouse
+
+        await _stock_warehouse(db_session, project, fulfillment_wh, barcode, 100)
+        db_session.add(BoxQtyPerWarehouse(project_id=project.id, barcode=barcode, warehouse_id=fulfillment_wh.id, box_qty=20))
+        db_session.add(BoxQtyPerWarehouse(project_id=project.id, barcode=barcode, warehouse_id=external_wh.id, box_qty=18))
+        await db_session.commit()
+        transfer = await create_transfer(
+            db_session,
+            project.id,
+            {
+                "from_warehouse_id": fulfillment_wh.id,
+                "to_warehouse_id": external_wh.id,
+                "items": [{"barcode": barcode, "quantity": 30}],
+            },
+        )
+        await send_transfer(db_session, project.id, transfer.id)
+        await complete_transfer(db_session, project.id, transfer.id)
+        dst = (
+            await db_session.execute(
+                select(BoxQtyPerWarehouse).where(
+                    BoxQtyPerWarehouse.project_id == project.id,
+                    BoxQtyPerWarehouse.warehouse_id == external_wh.id,
+                    BoxQtyPerWarehouse.barcode == barcode,
+                )
+            )
+        ).scalar_one()
+        assert dst.box_qty == 18
 
     @pytest.mark.asyncio
     async def test_complete_draft_fails(self, db_session, project, fulfillment_wh, external_wh, barcode):

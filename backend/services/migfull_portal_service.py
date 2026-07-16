@@ -67,6 +67,14 @@ _WB_MARKETPLACE_ID_INT = 2
 # Кэш справочника складов назначения (read-API тяжёлый: /destinations + /shipments)
 _DEST_CACHE_TTL_SEC = 3600.0
 _dest_cache: dict[int, tuple[float, list[dict]]] = {}
+# Потолок ожидания индекса: /shipments у migfull бывает 20с+/таймаут, а
+# @retry_with_backoff×3 превращал это в 60с+ «Загрузка заявки…» на КАЖДЫЙ draft.
+# Резолв — nice-to-have (нерезолв → «склад заполнит оператор»), дольше не ждём.
+_DEST_FETCH_TIMEOUT_SEC = 20.0
+# Негативный кэш фейла: без него массовое создание платило бы таймаут за каждую
+# строку батча (draft+send каждый зовут резолвер заново).
+_DEST_FAIL_TTL_SEC = 300.0
+_dest_fail_at: dict[int, float] = {}
 
 
 # ─── Резолв склада назначения (наш WB-склад сборки → migfull destination id) ──
@@ -172,6 +180,9 @@ async def _read_destinations(db: AsyncSession, project_id: int, warehouse_id: in
     cached = _dest_cache.get(project_id)
     if cached and (now - cached[0]) < _DEST_CACHE_TTL_SEC:
         return cached[1]
+    if (now - _dest_fail_at.get(project_id, 0.0)) < _DEST_FAIL_TTL_SEC:
+        # Индекс недавно не собрался — не долбим read-API на каждый draft/send.
+        return cached[1] if cached else []
     key = (
         await db.execute(
             select(IntegrationKey).where(
@@ -190,11 +201,15 @@ async def _read_destinations(db: AsyncSession, project_id: int, warehouse_id: in
         return cached[1] if cached else []
     try:
         client = MigfullClient(tenant_guid, _decrypt(key.encrypted_key), project_id=project_id)
-        dests: list[dict] = await client.fetch_destination_index()
-    except (MigfullApiError, httpx.HTTPError, CircuitOpenError, ValueError) as e:
-        logger.warning("migfull_portal.destinations_fetch_failed", project_id=project_id, error=str(e)[:120])
+        dests: list[dict] = await asyncio.wait_for(
+            client.fetch_destination_index(), timeout=_DEST_FETCH_TIMEOUT_SEC
+        )
+    except (MigfullApiError, httpx.HTTPError, CircuitOpenError, ValueError, TimeoutError) as e:
+        _dest_fail_at[project_id] = now
+        logger.warning("migfull_portal.destinations_fetch_failed", project_id=project_id, error=str(e)[:120] or type(e).__name__)
         return cached[1] if cached else []
     _dest_cache[project_id] = (now, dests)
+    _dest_fail_at.pop(project_id, None)
     return dests
 
 

@@ -115,16 +115,23 @@ export function trimLinesToWholePallets(
     /** Кратность короба; второй аргумент — ФФ группы (кратность может отличаться по
      *  складам: глобальный min резал бы физически целый короб чужого ФФ). */
     boxOf?: (nmId: number, ffId?: number) => number | null | undefined,
+    /** Класс совместимости категорий (см. `lib/assembly/categoryCompat`). Партиционирует
+     *  СМЕШАННУЮ BOX-паллету: SKU разных классов не делят одну паллету (ковры едут
+     *  отдельно от пледов). Не задан / константный `*` — прежнее поведение (микс всех).
+     *  МОНО (≤3 артикула) и сейф классами НЕ режутся (решение юзера / уже per-SKU). */
+    classOf?: (nmId: number) => string,
 ): TrimWholeResult {
-    // Группа = одна отгрузка по упаковке. Короб — смешанная паллета (все SKU вместе);
-    // МОНО — общая паллета ≤3 артикула (тоже без nmId в ключе, правило WB); сейф —
-    // каждый SKU своей паллетой (микс запрещён) → отдельная под-группа.
+    // Группа = одна отгрузка по упаковке. Короб — смешанная паллета (все SKU вместе
+    // ВНУТРИ класса совместимости); МОНО — общая паллета ≤3 артикула (без nmId в ключе,
+    // правило WB); сейф — каждый SKU своей паллетой (микс запрещён) → под-группа.
     const groups = new Map<string, { wb: string; ffId: number; pkg: PackageType; km: Record<string, number>; meta: Map<number, PreviewLine> }>();
     for (const l of lines) {
         if (l.qty <= 0) continue;
         const gk = l.pkg === 'SUPERSAFE'
             ? `${l.ffId}::${l.wbName}::SUPERSAFE::${l.nmId}`
-            : `${l.ffId}::${l.wbName}::${l.pkg}`;
+            : l.pkg === 'BOX' && classOf
+                ? `${l.ffId}::${l.wbName}::BOX::${classOf(l.nmId)}`
+                : `${l.ffId}::${l.wbName}::${l.pkg}`;
         let g = groups.get(gk);
         if (!g) { g = { wb: l.wbName, ffId: l.ffId, pkg: l.pkg, km: {}, meta: new Map() }; groups.set(gk, g); }
         g.km[String(l.nmId)] = (g.km[String(l.nmId)] || 0) + l.qty;

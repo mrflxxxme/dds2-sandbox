@@ -114,6 +114,34 @@ class WbBulkSyncResult(BaseModel):
     supplies_seen: int  # сколько поставок вернул кабинет
 
 
+class WbBulkPreorderStart(BaseModel):
+    """Запуск фонового батч-заноса преордеров (по одной с паузой ~10с)."""
+
+    assembly_ids: list[int]
+
+
+class WbBulkPreorderItemResult(BaseModel):
+    """Итог одной заявки в батче."""
+
+    assembly_id: int
+    number: str
+    ok: bool
+    note: str | None = None  # «Преордер 123…» / текст ошибки / «уже заведена»
+
+
+class WbBulkPreorderStatus(BaseModel):
+    """Статус фонового батч-заноса преордеров WB проекта."""
+
+    running: bool
+    total: int = 0
+    done: int = 0
+    current_assembly_id: int | None = None
+    interval_sec: float = 10.0
+    results: list[WbBulkPreorderItemResult] = []
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
 class WbCabinetBoxItem(BaseModel):
     """Товар внутри короба кабинета (из ListBarcodesBoxes)."""
 

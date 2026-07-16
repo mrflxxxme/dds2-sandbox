@@ -466,9 +466,12 @@ async def get_integration(db: AsyncSession, project_id: int, warehouse_id: int) 
 
 async def get_status(db: AsyncSession, project_id: int, warehouse_id: int) -> dict:
     """Connection status for the warehouse (FulfillmentStatus shape)."""
+    from backend.ff_context import warehouse_has_ff_operator  # function-local: избегаем цикла импортов
+
+    has_operator = await warehouse_has_ff_operator(db, project_id, warehouse_id)
     key = await get_integration(db, project_id, warehouse_id)
     if not key:
-        return {"connected": False}
+        return {"connected": False, "has_portal_operator": has_operator}
     config = key.config or {}
     return {
         "connected": True,
@@ -480,6 +483,7 @@ async def get_status(db: AsyncSession, project_id: int, warehouse_id: int) -> di
         "api_base_url": config.get("api_base_url"),
         "tenant_guid": config.get("tenant_guid"),
         "last_sync_at": key.last_sync_at,
+        "has_portal_operator": has_operator,
     }
 
 
@@ -6131,7 +6135,7 @@ async def push_ff_inbound(
     except RateLimitError as e:
         raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
     except SkladbotApiError as e:
-        raise ValueError(f"skladbot.ru отклонил создание приёмки (HTTP {e.status_code}): {e}") from e
+        raise ValueError(f"skladbot.ru отклонил приёмку: {e.reason or e}") from e
     except httpx.HTTPError as e:
         raise ValueError(f"Сетевая ошибка при создании приёмки в skladbot.ru: {e}") from e
 
@@ -6431,7 +6435,9 @@ async def _push_assembly_to_ff(
     except RateLimitError:
         return _result("error", message="skladbot.ru ограничил частоту запросов — повторите через минуту")
     except SkladbotApiError as e:
-        return _result("error", message=f"skladbot.ru отклонил создание заявки (HTTP {e.status_code}): {e}")
+        # В UI — чистая причина от провайдера (e.reason), техобёртка — в лог.
+        logger.warning("ff_push rejected [skladbot] %s: %s", asm_number, str(e)[:300])
+        return _result("error", message=f"skladbot.ru отклонил заявку: {e.reason or e}")
     except httpx.HTTPError as e:
         return _result("error", message=f"Сетевая ошибка при создании заявки в skladbot.ru: {e}")
 
@@ -6597,7 +6603,9 @@ async def _push_assembly_to_wms(
     except RateLimitError:
         return _result("error", message="«Целиком» ограничил частоту запросов — повторите через минуту")
     except WmsCelicomApiError as e:
-        return _result("error", message=f"«Целиком» отклонил создание заявки (HTTP {e.status_code}): {e}")
+        # В UI — чистая причина от провайдера (e.reason), техобёртка — в лог.
+        logger.warning("ff_push rejected [wmscelicom] %s: %s", asm_number, str(e)[:300])
+        return _result("error", message=f"«Целиком» отклонил заявку: {e.reason or e}")
     except httpx.HTTPError as e:
         return _result("error", message=f"Сетевая ошибка при создании заявки в «Целиком»: {e}")
 
@@ -6628,7 +6636,7 @@ async def _push_assembly_to_wms(
     except RateLimitError:
         send_error = "«Целиком» ограничил частоту запросов на подтверждении"
     except WmsCelicomApiError as e:
-        send_error = f"автоподтверждение в сборку отклонено (HTTP {e.status_code}): {e}"
+        send_error = f"автоподтверждение в сборку отклонено: {e.reason or e}"
     except (CircuitOpenError, httpx.HTTPError) as e:
         send_error = f"автоподтверждение в сборку не прошло: {e}"
 

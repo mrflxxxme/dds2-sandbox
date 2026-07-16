@@ -122,6 +122,7 @@ class WbAdCampaign(Base):
     advert_type: Mapped[int | None] = mapped_column(Integer)  # числовой тип WB: 8=авто/рекомендации, 9=аукцион (для цветовой кодировки)
     created_at: Mapped[datetime | None] = mapped_column(DateTime)  # дата создания кампании в WB (createTime) — для фильтра по дате добавления
     bid_mode: Mapped[str | None] = mapped_column(String(20))  # режим ставки: unified (единая) / manual (ручная)
+    default_bid: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))  # ставка кампании ₽ по активной зоне (для инлайн-правки в списке); из nm_settings.bids_kopecks при синке
     status: Mapped[int] = mapped_column(Integer, default=9)  # 7=completed, 9=active, 11=paused
     budget: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # remaining budget (rubles)
     nm_ids: Mapped[list | None] = mapped_column(JSONB, default=list)  # linked product IDs
@@ -273,6 +274,40 @@ class WbAdNmDaily(Base):
         Index("ix_ad_nm_daily_campaign_date", "project_id", "campaign_id", "date"),
         # Аналитика по товару поверх всех кампаний
         Index("ix_ad_nm_daily_nm_date", "project_id", "nm_id", "date"),
+    )
+
+
+class WbAdClusterBid(Base):
+    """Паспорт ТЕКУЩЕЙ пофразовой CPM-ставки: когда её применили и на основании чего.
+
+    Одна строка на (project, кампания, товар, фраза) — состояние, не журнал. При каждом
+    применении ставки апсертим: если значение изменилось — обновляем ставку и `applied_at`
+    (старт таймера «сбора статистики»); та же ставка повторно — таймер НЕ сбрасываем.
+    Сброс ставки к кампании (bid≤0) удаляет строку. Показания читаются рядом с get-bids: если
+    сохранённая `applied_bid` совпала с текущей ставкой в WB — фраза «стоит с applied_at».
+
+    `basis_*` — точка отсчёта на момент применения: ДРР и оплаченная CPM (якорь рекомендации,
+    см. clusterEff.recAnchor) + цель ДРР. Нужны, чтобы через неделю видеть, ОТ ЧЕГО считали.
+    """
+
+    __tablename__ = "wb_ad_cluster_bid"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    campaign_id: Mapped[int] = mapped_column(Integer, nullable=False)  # WB advertId
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    norm_query: Mapped[str] = mapped_column(Text, nullable=False)
+    applied_bid: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)  # применённая ставка, ₽
+    applied_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)  # старт таймера
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True)  # recommendation | manual
+    basis_drr: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)  # ДРР на момент, %
+    basis_cpm: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)  # оплач. CPM на момент, ₽
+    target_drr: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)  # цель ДРР на момент, %
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "campaign_id", "nm_id", "norm_query", name="uq_ad_cluster_bid"),
+        # Доклейка «стоит с» при чтении кластеров кампании (все фразы товара разом)
+        Index("ix_ad_cluster_bid_campaign_nm", "project_id", "campaign_id", "nm_id"),
     )
 
 

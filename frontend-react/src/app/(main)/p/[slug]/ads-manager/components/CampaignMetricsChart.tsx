@@ -92,7 +92,11 @@ export default function CampaignMetricsChart({ rows, selected, onToggle, launchD
 
     // Высота viewBox подобрана под реальную ширину, чтобы 1 юнит = 1 пиксель:
     // иначе meet вписал бы график с полями, а «none» растянул бы подписи.
-    const svgPxHeight = Math.max(H_MIN, availH - 84);  // высота под сам график = высота панели минус легенда/подписи
+    // Потолок по соотношению сторон: в свёрнутом хедере панель становится очень высокой,
+    // и без ограничения линии вытягиваются в нечитаемые вертикальные пики. Держим высоту
+    // не выше ~46% ширины графика — комфортное для линий соотношение (~2.2:1).
+    const MAX_AR = 0.46;
+    const svgPxHeight = Math.round(Math.max(H_MIN, Math.min(availH - 84, wrapW * MAX_AR)));
     const H = Math.round((W * svgPxHeight) / Math.max(1, wrapW));
 
     // Дни по возрастанию — бэкенд может отдавать в любом порядке

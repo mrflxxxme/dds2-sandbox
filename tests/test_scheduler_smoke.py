@@ -25,3 +25,5 @@ async def test_start_scheduler_registers_all_jobs(monkeypatch):
     assert inst is not None
     job_ids = {j.id for j in inst.get_jobs()}
     assert "cbr_bic_sync" in job_ids  # наш джоб зарегистрирован
+    # Утренняя дозагрузка «кнопочных» рекламных источников (свежесть к 9:00 MSK)
+    assert {"ad_upd_morning", "ad_search_morning", "ad_payments_morning"} <= job_ids

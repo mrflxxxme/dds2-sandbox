@@ -9,10 +9,12 @@ from backend.services.settings_service import (
     get_all_warehouses,
     get_excluded_warehouses,
     get_pallet_boxes_by_size,
+    get_pallet_category_compat,
     get_preorder_allowed_warehouses,
     get_setting,
     set_excluded_warehouses,
     set_pallet_boxes_by_size,
+    set_pallet_category_compat,
     set_preorder_allowed_warehouses,
     set_setting,
 )
@@ -188,6 +190,97 @@ class TestPalletBoxesBySize:
     async def test_project_isolation(self, db_session, project, other_project):
         await set_pallet_boxes_by_size(db_session, project.id, {"60x40x50": 16})
         assert await get_pallet_boxes_by_size(db_session, other_project.id) == {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Pallet category compat (правила совместимости категорий на паллете)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPalletCategoryCompat:
+    @pytest.mark.asyncio
+    async def test_default_disabled_empty(self, db_session, project):
+        """Ключ не задан → дефолт: выключено, групп нет."""
+        result = await get_pallet_category_compat(db_session, project.id)
+        assert result == {"enabled": False, "groups": []}
+
+    @pytest.mark.asyncio
+    async def test_set_and_get_roundtrip(self, db_session, project):
+        """set → get возвращает ту же форму {enabled, groups[{name, categories}]}."""
+        result = await set_pallet_category_compat(
+            db_session,
+            project.id,
+            True,
+            [
+                {"name": "Мягкое", "categories": ["Коврики", "Полки"]},
+                {"name": None, "categories": ["Держатели"]},
+            ],
+        )
+        assert result == {
+            "enabled": True,
+            "groups": [
+                {"name": "Мягкое", "categories": ["Коврики", "Полки"]},
+                {"name": None, "categories": ["Держатели"]},
+            ],
+        }
+        assert await get_pallet_category_compat(db_session, project.id) == result
+
+    @pytest.mark.asyncio
+    async def test_normalization_trim_and_drop_empty(self, db_session, project):
+        """Категории trim'ятся, пустые выкидываются, пустые группы выкидываются."""
+        result = await set_pallet_category_compat(
+            db_session,
+            project.id,
+            True,
+            [
+                {"name": "  Группа  ", "categories": ["  Коврики  ", "", "   "]},
+                {"name": "Пустая", "categories": ["", "  "]},
+                {"name": None, "categories": []},
+            ],
+        )
+        assert result["groups"] == [{"name": "Группа", "categories": ["Коврики"]}]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_across_groups_raises(self, db_session, project):
+        """Одна категория в двух группах → ValueError (русский текст)."""
+        with pytest.raises(ValueError, match="двух группах"):
+            await set_pallet_category_compat(
+                db_session,
+                project.id,
+                True,
+                [
+                    {"name": None, "categories": ["Коврики", "Полки"]},
+                    {"name": None, "categories": ["Держатели", "Коврики"]},
+                ],
+            )
+
+    @pytest.mark.asyncio
+    async def test_duplicate_within_group_raises(self, db_session, project):
+        """Дубль категории внутри одной группы → ValueError. Дубль ловится и после trim."""
+        with pytest.raises(ValueError, match="повторяется"):
+            await set_pallet_category_compat(
+                db_session,
+                project.id,
+                True,
+                [{"name": None, "categories": ["Коврики", "  Коврики  "]}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_broken_json_returns_default(self, db_session, project):
+        """Битый JSON в БД → дефолт, не исключение."""
+        await set_setting(db_session, project.id, "pallet_category_compat", "{not-json[[")
+        result = await get_pallet_category_compat(db_session, project.id)
+        assert result == {"enabled": False, "groups": []}
+
+    @pytest.mark.asyncio
+    async def test_project_isolation(self, db_session, project, other_project):
+        await set_pallet_category_compat(
+            db_session, project.id, True, [{"name": None, "categories": ["Коврики"]}]
+        )
+        assert await get_pallet_category_compat(db_session, other_project.id) == {
+            "enabled": False,
+            "groups": [],
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
@@ -9,6 +9,7 @@ import WbThumb from './WbThumb';
 import AddProductsModal from './AddProductsModal';
 import Switch from './Switch';
 import { useToast } from './Toasts';
+import { buildAutoCampaignName } from './adsShared';
 
 const MAX = 50;
 const MIN_BUDGET = 1000;
@@ -25,6 +26,8 @@ export default function BulkCreate({ slug }: { slug: string }) {
     const [pickerOpen, setPickerOpen] = useState(false);
     const [products, setProducts] = useState<Map<number, string>>(() => new Map());  // nm → title
     const [names, setNames] = useState<Map<number, string>>(() => new Map());          // nm → имя кампании
+    const [editedNames, setEditedNames] = useState<Set<number>>(() => new Set());      // nm с ручной правкой имени
+    const [vendorByNm, setVendorByNm] = useState<Map<number, string>>(() => new Map()); // nm → артикул продавца
     const [payment, setPayment] = useState<Payment>('cpm');
     const [bidType, setBidType] = useState<Bid>('unified');
     const [zones, setZones] = useState<Set<string>>(() => new Set(['search', 'recommendations']));
@@ -39,22 +42,41 @@ export default function BulkCreate({ slug }: { slug: string }) {
     const zonesEditable = payment === 'cpm' && bidType === 'manual';
     const budgetNum = Math.round(Number(budget) || 0);
 
+    // Каталог артикулов для авто-имени «nmID артикул ТИП»
+    useEffect(() => {
+        api.getAdArticleCatalog()
+            .then(rows => setVendorByNm(new Map(rows.map(r => [r.nm_id, r.vendor_code || '']))))
+            .catch(() => {});
+    }, []);
+
     const applyProducts = (sel: Map<number, string>) => {
         setProducts(sel);
-        // Имя по умолчанию — название товара; сохраняем правки, добавляем новым
+        // Имя по умолчанию — «nmID артикул ТИП»; ручные правки и удалённые товары учитываем
         setNames(prev => {
             const next = new Map(prev);
-            for (const [nm, title] of sel) if (!next.has(nm)) next.set(nm, title.slice(0, 100));
+            for (const nm of sel.keys()) if (!next.has(nm)) next.set(nm, buildAutoCampaignName(nm, vendorByNm.get(nm) || '', payment, bidType));
             for (const nm of [...next.keys()]) if (!sel.has(nm)) next.delete(nm);
             return next;
         });
+        setEditedNames(prev => { const n = new Set(prev); for (const nm of [...n]) if (!sel.has(nm)) n.delete(nm); return n; });
         setPickerOpen(false);
     };
 
     const removeProduct = (nm: number) => {
         setProducts(prev => { const n = new Map(prev); n.delete(nm); return n; });
         setNames(prev => { const n = new Map(prev); n.delete(nm); return n; });
+        setEditedNames(prev => { const n = new Set(prev); n.delete(nm); return n; });
     };
+
+    // Пересобираем авто-имена при смене типа/каталога — кроме тех, что правили вручную
+    useEffect(() => {
+        setNames(prev => {
+            const next = new Map(prev);
+            for (const nm of products.keys()) if (!editedNames.has(nm)) next.set(nm, buildAutoCampaignName(nm, vendorByNm.get(nm) || '', payment, bidType));
+            return next;
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [payment, bidType, vendorByNm, products]);
 
     const canSubmit = products.size > 0 && !busy && budgetNum >= MIN_BUDGET && (!zonesEditable || zones.size > 0);
 
@@ -67,7 +89,7 @@ export default function BulkCreate({ slug }: { slug: string }) {
             setProgress(`Создаём ${i + 1} из ${entries.length}…`);
             try {
                 const res = await api.createCampaign({
-                    name: (names.get(nm) || title).trim().slice(0, 128),
+                    name: (names.get(nm) || title).trim().slice(0, 50),
                     nms: [nm],
                     bid_type: payment === 'cpc' ? 'manual' : bidType,
                     payment_type: payment,
@@ -178,8 +200,8 @@ export default function BulkCreate({ slug }: { slug: string }) {
                                     <tr key={nm} style={{ borderTop: '1px solid #f4f4f5' }}>
                                         <td style={{ padding: '8px' }}><WbThumb nmId={nm} size={40} /></td>
                                         <td style={{ padding: '8px' }}>
-                                            <input value={names.get(nm) ?? title} maxLength={128}
-                                                onChange={e => setNames(prev => new Map(prev).set(nm, e.target.value))}
+                                            <input value={names.get(nm) ?? title} maxLength={50}
+                                                onChange={e => { setNames(prev => new Map(prev).set(nm, e.target.value)); setEditedNames(prev => new Set(prev).add(nm)); }}
                                                 style={{ width: '100%', fontSize: 13, padding: '6px 9px', borderRadius: 8, border: '1px solid #e5e7eb' }} />
                                             {res && !res.ok && <div style={{ fontSize: 11, color: '#ef4444', marginTop: 3 }}>{res.error}</div>}
                                             {res && res.ok && <div style={{ fontSize: 11, color: '#10b981', marginTop: 3 }}>создана ✓</div>}

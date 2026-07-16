@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
     allocSrcAcrossFf,
     applyDraftCellEdit,
+    applyDraftPrebookEdit,
     buildAutoSyncPlan,
     buildDraftSkus,
     buildWriteDistribution,
@@ -205,6 +206,25 @@ describe('applyDraftCellEdit — правка ячейки черновика', 
         expect(out!.prebook).toEqual([]);
     });
 
+    it('cellPkg=MONOPALLET: правка создаёт МОНО-строку, BOX-строки не тронуты, чужая предбронь не поглощается', () => {
+        const boxRow = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 52 }, tgt: { 'ЕКБ': 52 } };
+        const monoPrebook = [{ nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 8 }, tgt: { 'Казань': 8 }, package_type: 'MONOPALLET' as const }];
+        // Правим МОНО-ячейку Невинномысска: BOX-строка ЕКБ остаётся, моно-предбронь
+        // Казани сливается в точный моно-план (та же упаковка).
+        const out = applyDraftCellEdit([boxRow], monoPrebook, art(), 'Невинномысск', 2, 4, 'MONOPALLET');
+        expect(out).not.toBeNull();
+        const mono = out!.rows.find((r) => r.package_type === 'MONOPALLET');
+        const box = out!.rows.find((r) => (r.package_type ?? 'BOX') === 'BOX');
+        expect(box?.tgt).toEqual({ 'ЕКБ': 52 });
+        expect(mono?.tgt).toEqual({ 'Невинномысск': 8, 'Казань': 8 });
+        expect(out!.prebook).toEqual([]);
+        // Обратный кейс: правка BOX-ячейки НЕ поглощает моно-предбронь (остаётся предбронью).
+        const out2 = applyDraftCellEdit([boxRow], monoPrebook, art(), 'ЕКБ', 1, 4, 'BOX');
+        expect(out2).not.toBeNull();
+        expect(out2!.prebook).toEqual(monoPrebook);
+        expect(out2!.rows.find((r) => (r.package_type ?? 'BOX') === 'BOX')?.tgt).toEqual({ 'ЕКБ': 56 });
+    });
+
     it('MONOPALLET-строки SKU не трогаются и учитываются в капе', () => {
         const mono = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 36 }, tgt: { 'Казань': 36 }, package_type: 'MONOPALLET' as const };
         const out = applyDraftCellEdit([mono], [], article('A', 1, { 4: 40 }), 'Тула', 1, 4);
@@ -251,6 +271,54 @@ describe('buildWriteDistribution — запись пересчёта с чист
         const out = buildWriteDistribution(dist, [], [], new Set());
         expect(out.rows).toHaveLength(1);
         expect(out.prebook).toHaveLength(1);
+    });
+});
+
+
+describe('applyDraftPrebookEdit — моно-предбронь степпером (моно без лимита → предзаявка)', () => {
+    const art = () => article('A', 1, { 4: 300, 5: 20 });
+
+    it('инкремент создаёт МОНО-строку в предброни, строки-заявки не тронуты', () => {
+        const rows = [{ nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 52 }, tgt: { 'ЕКБ': 52 } }];
+        const out = applyDraftPrebookEdit(rows, [], art(), 'Тула', 2, 4, 'MONOPALLET');
+        expect(out).not.toBeNull();
+        expect(out!.rows).toEqual(rows); // заявки как были
+        expect(out!.prebook).toHaveLength(1);
+        expect(out!.prebook[0].package_type).toBe('MONOPALLET');
+        expect(out!.prebook[0].tgt).toEqual({ 'Тула': 8 });
+        expect(sumRec(out!.prebook[0].src)).toBe(8);
+    });
+
+    it('декремент уменьшает предбронь и НЕ конвертирует её в строки', () => {
+        const prebook = [{ nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 12 }, tgt: { 'Тула': 12 }, package_type: 'MONOPALLET' as const }];
+        const out = applyDraftPrebookEdit([], prebook, art(), 'Тула', -1, 4, 'MONOPALLET');
+        expect(out).not.toBeNull();
+        expect(out!.rows).toEqual([]);
+        expect(out!.prebook).toHaveLength(1);
+        expect(out!.prebook[0].tgt).toEqual({ 'Тула': 8 });
+    });
+
+    it('кап: строки+чужая предбронь бронируют сток, превышение → null', () => {
+        const rows = [{ nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 300 }, tgt: { 'ЕКБ': 300 } }];
+        // свободно 320 − 300 (строки) = 20 → 6 коробов по 4 = 24 не лезут
+        expect(applyDraftPrebookEdit(rows, [], art(), 'Тула', 6, 4, 'MONOPALLET')).toBeNull();
+        // 5 коробов = 20 — ок
+        const ok = applyDraftPrebookEdit(rows, [], art(), 'Тула', 5, 4, 'MONOPALLET');
+        expect(ok).not.toBeNull();
+        expect(sumRec(ok!.prebook[0].src)).toBe(20);
+    });
+
+    it('BOX-предбронь того же SKU не тронута (правится только своя упаковка)', () => {
+        const prebook: Parameters<typeof applyDraftPrebookEdit>[1] = [
+            { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 8 }, tgt: { 'Казань': 8 } },
+            { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 4 }, tgt: { 'Тула': 4 }, package_type: 'MONOPALLET' },
+        ];
+        const out = applyDraftPrebookEdit([], prebook, art(), 'Тула', 1, 4, 'MONOPALLET');
+        expect(out).not.toBeNull();
+        const box = out!.prebook.find(r => (r.package_type ?? 'BOX') === 'BOX');
+        const mono = out!.prebook.find(r => r.package_type === 'MONOPALLET');
+        expect(box?.tgt).toEqual({ 'Казань': 8 });
+        expect(mono?.tgt).toEqual({ 'Тула': 8 });
     });
 });
 

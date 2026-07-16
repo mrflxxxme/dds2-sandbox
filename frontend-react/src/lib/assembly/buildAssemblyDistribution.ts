@@ -59,6 +59,9 @@ export interface DistributionGeom {
     /** Вес приоритета WB-склада (серверная «схема воришек») — порядок среза при
      *  дефиците источника (паритет с greedy черновика). */
     priorityOf?: (wh: string) => number;
+    /** Класс совместимости категорий (`lib/assembly/categoryCompat`): SKU разных
+     *  классов не делят смешанную BOX-паллету (паллет-срез партиционируется). */
+    classOf?: (nm_id: number) => string;
 }
 
 /** Применённый результат приёмки: per (nm_id::barcode) → набор сплитов (тип упаковки × распределение). */
@@ -231,6 +234,7 @@ export function finalizeDistribution(
         boxSizeOf: (nm) => boxSizeOf(nm) ?? null,
         overrides: palletOverrides,
         freeByNm: freeAfter(merged),
+        classOf: geom.classOf,
     };
     const norm = normalizeDraft(merged, ctx);
     return { rows: norm.rows, prebook: norm.dropped };

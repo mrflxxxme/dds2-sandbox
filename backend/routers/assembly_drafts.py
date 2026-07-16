@@ -28,6 +28,7 @@ from backend.schemas.assembly_draft import (
     CommitDraftOptions,
     DraftEventRevertResponse,
     DraftHistoryResponse,
+    DraftsReservedResponse,
     ForecastResponse,
 )
 from backend.services import assembly_draft_service, assembly_load_forecast_service
@@ -75,6 +76,24 @@ async def get_or_create_current_draft(
     """
     draft = await assembly_draft_service.get_or_create_current_draft(db, project.id)
     return await assembly_draft_service.to_read_model(db, project.id, draft)
+
+
+@router.get("/reserved", response_model=DraftsReservedResponse)
+async def get_drafts_reserved(
+    exclude_draft_id: int | None = Query(None, description="Черновик, чей собственный план не считать резервом"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> DraftsReservedResponse:
+    """Резерв ФФ-стока черновиками: barcode → {ff_warehouse_id → qty}.
+
+    Σ rows.src + prebook.src + handed_units.items всех не-удалённых черновиков
+    проекта (кроме exclude_draft_id). Фронт вычитает резерв из доступного ФФ,
+    чтобы параллельные черновики (в т.ч. категорийные) не планировали один товар
+    дважды. ⚠ Маршрут обязан стоять ВЫШЕ `GET /{draft_id}` — иначе «reserved»
+    уйдёт в int-конвертер и даст 422.
+    """
+    reserved = await assembly_draft_service.get_drafts_reserved(db, project.id, exclude_draft_id)
+    return DraftsReservedResponse(reserved=reserved)
 
 
 @router.get("/{draft_id}/forecast", response_model=ForecastResponse)
@@ -163,9 +182,13 @@ async def merge_drafts(
     source/target склады объединяются; cold_start_shares сбрасывается.
     handed_units переносятся в survivor (юниты одного ключа сливаются,
     'handed' побеждает 'draft'). Несуществующие id → 404.
+    Разный категорийный скоуп черновиков → 400 (ValueError сервиса).
     Возвращает объединённый черновик (survivor).
     """
-    draft = await assembly_draft_service.merge_drafts(db, project.id, payload.draft_ids)
+    try:
+        draft = await assembly_draft_service.merge_drafts(db, project.id, payload.draft_ids)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
     return await assembly_draft_service.to_read_model(db, project.id, draft)
 
 

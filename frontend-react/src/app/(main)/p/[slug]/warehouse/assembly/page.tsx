@@ -11,6 +11,7 @@ import type { Column } from '@/components/DataTable';
 import { usePermissions } from '@/lib/hooks/usePermissions';
 import type { AssemblyBulkStatus, AssemblyDraft, AssemblyRequest, AssemblyStatus, CreatedAssemblyGroup, FfLinkInfo, SourceVehicleOption, Warehouse, WbSupplySyncStatus } from '@/types/api';
 import { findDuplicateLanes } from '@/lib/utils/assemblyDraftMerge';
+import CreatedRequestsModal, { type CreatedRequestRow } from './distribute/components/CreatedRequestsModal';
 
 // ─── Status config ──────────────────────────────────────────────────────────
 
@@ -495,8 +496,17 @@ export default function AssemblyListPage() {
     const [ffLinkFilter, setFfLinkFilter] = useState<'' | 'none' | 'linked'>('');
     const [jointOnly, setJointOnly] = useState(false);
     // '' | pre_dist | prebooking | plain | `veh:<CostOrder.id>` (конкретная машина)
+    // | `draft:<draft_id>` (заявки конкретного черновика).
     const [sourceFilter, setSourceFilter] = useState<string>('');
     const [sourceVehicles, setSourceVehicles] = useState<SourceVehicleOption[]>([]);
+    // Диплинк на фильтр «Источник» (модалка созданных заявок / внешние ссылки):
+    // ?src_draft=<id> → заявки черновика, ?src_vehicle=<id> → заявки машины.
+    useEffect(() => {
+        const d = Number(searchParams.get('src_draft'));
+        const v = Number(searchParams.get('src_vehicle'));
+        if (d > 0) setSourceFilter(`draft:${d}`);
+        else if (v > 0) setSourceFilter(`veh:${v}`);
+    }, [searchParams]);
     // Монотонный счётчик запросов списка — отбрасываем устаревшие ответы (см. load)
     const loadSeq = useRef(0);
     // Пагинация/сортировка/экспорт — клиентские, через TanStackDataTable: грузим весь
@@ -552,11 +562,14 @@ export default function AssemblyListPage() {
                 brand: brandFilter || undefined,
                 ff_link: ffLinkFilter || undefined,
                 joint_only: jointOnly || undefined,
-                // `veh:<id>` — конкретная машина (точечный source_vehicle_id), иначе — категория source.
-                source: sourceFilter && !sourceFilter.startsWith('veh:')
+                // `veh:<id>` — конкретная машина (точечный source_vehicle_id),
+                // `draft:<id>` — заявки конкретного черновика (source_draft_id),
+                // иначе — категория source.
+                source: sourceFilter && !sourceFilter.startsWith('veh:') && !sourceFilter.startsWith('draft:')
                     ? (sourceFilter as 'pre_dist' | 'prebooking' | 'plain')
                     : undefined,
                 source_vehicle_id: sourceFilter.startsWith('veh:') ? Number(sourceFilter.slice(4)) : undefined,
+                draft_id: sourceFilter.startsWith('draft:') ? Number(sourceFilter.slice(6)) : undefined,
                 limit: LOAD_LIMIT,
             });
             if (seq !== loadSeq.current) return;
@@ -726,6 +739,22 @@ export default function AssemblyListPage() {
 
     // ─── Массовое удаление (заявки из черновика, ещё не на WB) ───────────────
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+    // «🚀 WB / ФФ» по выбранным: та же модалка, что после коммита черновика
+    // (фоновый занос WB по одной + заявки ФФ по провайдерам).
+    const [createExternal, setCreateExternal] = useState<CreatedRequestRow[] | null>(null);
+    const openCreateExternal = useCallback(() => {
+        const rows: CreatedRequestRow[] = items.filter(r => selectedIds.has(r.id)).map(r => ({
+            id: r.id,
+            number: r.number,
+            ffId: r.warehouse_id,
+            ffName: r.warehouse_name || `Склад ${r.warehouse_id}`,
+            wbName: r.effective_wb_warehouse ?? r.wb_warehouse_name_manual ?? r.wb_warehouse_name ?? null,
+            pkg: r.package_type ?? 'BOX',
+            qty: (r.items ?? []).reduce((s, i) => s + (i.quantity || 0), 0),
+            sku: (r.items ?? []).length,
+        }));
+        if (rows.length > 0) setCreateExternal(rows);
+    }, [items, selectedIds]);
     const [bulkDeleting, setBulkDeleting] = useState(false);
     const deletableCount = useMemo(() => items.filter(i => isBulkDeletable(i.status)).length, [items]);
 
@@ -1382,6 +1411,20 @@ export default function AssemblyListPage() {
                             {sourceVehicles.map(v => (
                                 <option key={v.id} value={`veh:${v.id}`}>🚚 {v.order_no}</option>
                             ))}
+                            {/* Машина из диплинка ?src_vehicle=, которой нет в справочнике, — sticky-опция. */}
+                            {sourceFilter.startsWith('veh:') && !sourceVehicles.some(v => `veh:${v.id}` === sourceFilter) && (
+                                <option value={sourceFilter}>🚚 Машина #{sourceFilter.slice(4)}</option>
+                            )}
+                            {/* Черновики с активными созданными заявками (created-groups). */}
+                            {createdGroups.map(g => (
+                                <option key={`draft-${g.draft_id}`} value={`draft:${g.draft_id}`}>
+                                    🧩 {g.draft_name || `Черновик #${g.draft_id}`}
+                                </option>
+                            ))}
+                            {/* Выбранный черновик, которого уже нет в активных группах, — sticky-опция. */}
+                            {sourceFilter.startsWith('draft:') && !createdGroups.some(g => `draft:${g.draft_id}` === sourceFilter) && (
+                                <option value={sourceFilter}>🧩 Черновик #{sourceFilter.slice(6)}</option>
+                            )}
                             <option value="prebooking">🅿️ Предзаявки</option>
                             <option value="plain">Обычные</option>
                         </select>
@@ -1476,6 +1519,10 @@ export default function AssemblyListPage() {
                                             {bulkMerging ? 'Объединение…' : `🔗 Объединить (${formatNumber(selectedIds.size, 0)})`}
                                         </button>
                                     )}
+                                    <button className="btn btn-primary btn-sm" onClick={openCreateExternal} disabled={bulkDeleting || bulkStatusing != null || bulkMerging}
+                                        title="Занести выбранные на WB (преордеры, в фоне по одной) и/или создать заявки ФФ — модалка с per-заявка статусами">
+                                        🚀 WB / ФФ ({formatNumber(selectedIds.size, 0)})
+                                    </button>
                                     <button className="btn btn-danger btn-sm" onClick={handleBulkDelete} disabled={bulkDeleting || bulkStatusing != null || bulkMerging}>
                                         {bulkDeleting ? 'Удаление…' : `🗑 Удалить выбранные (${formatNumber(selectedIds.size, 0)})`}
                                     </button>
@@ -1490,6 +1537,14 @@ export default function AssemblyListPage() {
                             )}
                         </div>
                     }
+                />
+            )}
+            {/* «🚀 WB / ФФ» по выбранным заявкам — реюз модалки созданных заявок. */}
+            {createExternal && (
+                <CreatedRequestsModal
+                    slug={slug}
+                    rows={createExternal}
+                    onClose={() => { setCreateExternal(null); load(); }}
                 />
             )}
         </div>

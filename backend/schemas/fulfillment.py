@@ -36,6 +36,9 @@ class FulfillmentStatus(BaseModel):
     api_base_url: str | None = None  # wmscelicom: инстанс, на который ходим
     tenant_guid: str | None = None  # migfull: GUID кабинета
     last_sync_at: datetime | None = None
+    # Складом управляет оператор ФФ-портала (Хамза): сборки видны ему в /ff/*
+    # автоматически — отдельная «заявка ФФ» не нужна (интеграции может не быть).
+    has_portal_operator: bool = False
 
 
 # ─── Stocks ──────────────────────────────────────────────────────────────────

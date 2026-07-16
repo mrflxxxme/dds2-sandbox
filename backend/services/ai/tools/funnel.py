@@ -132,7 +132,7 @@ async def get_ad_campaigns(db: AsyncSession, project_id: int, tax_rate: float, b
                 "adv_clicks": p.get("adv_clicks", 0),
                 "orders_sum_rub": p.get("orders_sum_rub", 0),
                 "orders_count": p.get("orders_count", 0),
-                "drr": p.get("drr", 0),
+                "drr": p["drr"] if p.get("drr") is not None else "∞ (расход есть, заказов нет)",
                 "cpc": p.get("cpc", 0),
                 "ctr": p.get("ctr", 0),
                 "profit": p.get("profit", 0),
