@@ -19,6 +19,9 @@ function StockCell({ qty, reserved }: { qty: number; reserved: number }) {
     );
 }
 
+// Единый прочерк пустых ячеек — одинаковый приглушённый вид во всех таблицах
+const DASH = <span style={{ color: 'var(--color-text-muted)' }}>{'\u2014'}</span>;
+
 // ─── Summary tab (original view) ─────────────────────────────────────────
 
 function SummaryTab({
@@ -67,14 +70,14 @@ function SummaryTab({
             align: 'right',
             render: (v: number) => v > 0
                 ? <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>{formatNumber(v, 0)}</span>
-                : '\u2014',
+                : DASH,
         },
         {
             key: 'total_in_transit',
             label: 'В пути',
             headerTitle: 'Перемещения между нашими складами — отправлено, но ещё не принято',
             align: 'right',
-            render: (v: number) => v > 0 ? formatNumber(v) : '\u2014',
+            render: (v: number) => v > 0 ? formatNumber(v, 0) : DASH,
         },
         {
             key: 'total',
@@ -516,7 +519,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
     }, [mode]);
 
     const fmtVal = useCallback((qty: number, row: UnifiedStockRow) => {
-        if (qty <= 0) return '\u2014';
+        if (qty <= 0) return DASH;
         if (mode === 'qty') return formatNumber(qty, 0);
         if (mode === 'cost') {
             const cost = row.avg_cost || 0;
@@ -540,8 +543,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         return formatNumber(qty, 0);
     }, [mode]);
 
-    const fmtGroupVal = useCallback((qty: number, avgCost: number, row?: UnifiedStockRow): string => {
-        if (qty <= 0) return '\u2014';
+    const fmtGroupVal = useCallback((qty: number, avgCost: number, row?: UnifiedStockRow): React.ReactNode => {
+        if (qty <= 0) return DASH;
         if (mode === 'qty') return formatNumber(qty, 0);
         if (mode === 'cost' && avgCost > 0) return formatNumber(qty * avgCost) + '\u00A0\u20BD';
         if (mode === 'revenue') {
@@ -613,7 +616,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             getValue: (row: UnifiedStockRow) => getTrendData(row).avg_daily_qty,
             render: (_: unknown, row: UnifiedStockRow) => {
                 const v = getTrendData(row).avg_daily_qty;
-                if (v <= 0) return '\u2014';
+                if (v <= 0) return DASH;
                 return formatNumber(v, 1);
             },
         });
@@ -626,7 +629,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             getValue: (row: UnifiedStockRow) => getTrendData(row).revenue,
             render: (_: unknown, row: UnifiedStockRow) => {
                 const v = getTrendData(row).revenue;
-                if (v <= 0) return '\u2014';
+                if (v <= 0) return DASH;
                 const est = row.is_revenue_estimated;
                 const prefix = est ? '\u2248\u00A0' : '';
                 const color = est ? 'var(--color-text-muted)' : undefined;
@@ -645,7 +648,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             },
             render: (_: unknown, row: UnifiedStockRow) => {
                 const t = getTrendData(row);
-                if (t.revenue <= 0) return '\u2014';
+                if (t.revenue <= 0) return DASH;
                 const margin = (t.profit / t.revenue) * 100;
                 const color = margin >= 0 ? 'var(--color-success)' : 'var(--color-danger)';
                 const est = row.is_revenue_estimated;
@@ -662,7 +665,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             getValue: (row: UnifiedStockRow) => getSortVal(row.total_defect || 0, row),
             render: (_: unknown, row: UnifiedStockRow) => {
                 const v = row.total_defect || 0;
-                if (v <= 0) return '\u2014';
+                if (v <= 0) return DASH;
                 const val = fmtVal(v, row);
                 return <span style={{ color: 'var(--color-warning)', fontWeight: 600 }}>{val}</span>;
             },
@@ -679,7 +682,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             },
             render: (_: unknown, row: UnifiedStockRow) => {
                 const daily = getTrendData(row).avg_daily_qty;
-                if (daily <= 0) return '\u2014';
+                if (daily <= 0) return DASH;
                 const days = getVariantTotal(row) / daily;
                 const color = days < 14 ? 'var(--color-danger)' : days < 30 ? 'var(--color-warning)' : 'var(--color-text)';
                 return <span style={{ color, fontWeight: 600 }}>{formatNumber(days, 0)}</span>;
@@ -699,7 +702,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             getValue: (row: UnifiedStockRow) => getSortVal(getVariantTotal(row), row),
             render: (_: unknown, row: UnifiedStockRow) => {
                 const v = getVariantTotal(row);
-                if (v <= 0) return <strong>{'\u2014'}</strong>;
+                if (v <= 0) return <strong>{DASH}</strong>;
                 const val = fmtVal(v, row);
                 if (typeof val === 'string') {
                     return <strong style={{ color: 'var(--color-accent)' }}>{val}</strong>;
@@ -731,7 +734,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             getValue: (row: UnifiedStockRow) => getSortVal(row.total_wb || 0, row),
             render: (_: unknown, row: UnifiedStockRow) => {
                 const v = row.total_wb || 0;
-                if (v <= 0) return <span style={{ color: 'var(--color-text-muted)' }}>{'\u2014'}</span>;
+                if (v <= 0) return DASH;
                 const isOpen = expanded.has(row.nomenclature_id);
                 return (
                     <div>
@@ -752,6 +755,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             key: 'wb_in_way_to_client',
             label: 'В пути до получателей',
             headerTitle: 'Заказы едут от склада WB к покупателям. Невыкупленное вернётся на склад WB',
+            headerWrap: true,
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => getSortVal(row.wb_in_way_to_client || 0, row),
@@ -761,6 +765,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             key: 'wb_in_way_from_client',
             label: 'Возвраты на склад WB',
             headerTitle: 'Возвраты от покупателей — едут обратно на склад WB',
+            headerWrap: true,
             align: 'right',
             sortable: true,
             getValue: (row: UnifiedStockRow) => getSortVal(row.wb_in_way_from_client || 0, row),
@@ -796,7 +801,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 },
                 render: (_: unknown, row: UnifiedStockRow) => {
                     const fq = row.factory_qty || 0;
-                    if (fq <= 0) return '\u2014';
+                    if (fq <= 0) return DASH;
                     if (mode === 'cost') {
                         const c = row.cost_factory_unit || row.avg_cost || 0;
                         if (c <= 0) return <span style={{ color: 'var(--color-text-dim)' }}>{formatNumber(fq, 0)}</span>;
@@ -832,7 +837,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
 
     // Helper: factory cell content (always ≈ in cost mode, using cost_factory_unit)
     const fmtFactoryCell = useCallback((fq: number, row: UnifiedStockRow): React.ReactNode => {
-        if (fq <= 0) return '\u2014';
+        if (fq <= 0) return DASH;
         if (mode === 'qty') return formatNumber(fq, 0);
         if (mode === 'cost') {
             const c = row.cost_factory_unit || row.avg_cost || 0;
@@ -871,7 +876,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                         {row.barcode}
                     </span>
                 </td>
-                <td style={{ textAlign: 'right' }}>{'\u2014'}</td>
+                <td style={{ textAlign: 'right' }}>{DASH}</td>
                 {groupBy === 'abc' && (
                     <td>
                         {row.abc_class && (
@@ -884,22 +889,22 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                 )}
                 {/* Sales metrics — moved to front */}
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                    {trend.avg_daily_qty > 0 ? formatNumber(trend.avg_daily_qty, 1) : '\u2014'}
+                    {trend.avg_daily_qty > 0 ? formatNumber(trend.avg_daily_qty, 1) : DASH}
                 </td>
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                    {trend.revenue > 0 ? formatNumber(trend.revenue) + '\u00A0\u20BD' : '\u2014'}
+                    {trend.revenue > 0 ? formatNumber(trend.revenue) + '\u00A0\u20BD' : DASH}
                 </td>
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                     {trend.revenue > 0 ? (
                         <span style={{ color: margin >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 600 }}>
                             {formatNumber(margin, 1)}%
                         </span>
-                    ) : '\u2014'}
+                    ) : DASH}
                 </td>
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                     {stockDays > 0 ? (
                         <span style={{ color: stockDaysColor, fontWeight: 600 }}>{formatNumber(stockDays, 0)}</span>
-                    ) : '\u2014'}
+                    ) : DASH}
                 </td>
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                     <strong style={{ color: 'var(--color-accent)' }}>
@@ -957,10 +962,10 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             <td>Итого</td>
                             <td style={{ textAlign: 'right' }}>{formatNumber(filtered.reduce((s, g) => s + (g.items_count || 0), 0), 0)}</td>
                             {groupBy === 'abc' && <td />}
-                            <td style={{ textAlign: 'right' }}>{'\u2014'}</td>
-                            <td style={{ textAlign: 'right' }}>{'\u2014'}</td>
-                            <td style={{ textAlign: 'right' }}>{'\u2014'}</td>
-                            <td style={{ textAlign: 'right' }}>{'\u2014'}</td>
+                            <td style={{ textAlign: 'right' }}>{DASH}</td>
+                            <td style={{ textAlign: 'right' }}>{DASH}</td>
+                            <td style={{ textAlign: 'right' }}>{DASH}</td>
+                            <td style={{ textAlign: 'right' }}>{DASH}</td>
                             <td style={{ textAlign: 'right', color: 'var(--color-accent)', whiteSpace: 'nowrap' }}>
                                 {mode === 'qty' ? formatNumber(totals.variantTotal, 0) : formatNumber(totals.variantMoney) + '\u00A0\u20BD'}
                             </td>
@@ -1026,7 +1031,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                                 </span>
                                             )}
                                         </td>
-                                        <td style={{ textAlign: 'right' }}>{group.items_count != null ? formatNumber(group.items_count, 0) : '\u2014'}</td>
+                                        <td style={{ textAlign: 'right' }}>{group.items_count != null ? formatNumber(group.items_count, 0) : DASH}</td>
                                         {groupBy === 'abc' && (
                                             <td>
                                                 {group.abc_class && (
@@ -1039,22 +1044,22 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                         )}
                                         {/* Sales metrics — moved to front */}
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                            {groupTrend.avg_daily_qty > 0 ? formatNumber(groupTrend.avg_daily_qty, 1) : '\u2014'}
+                                            {groupTrend.avg_daily_qty > 0 ? formatNumber(groupTrend.avg_daily_qty, 1) : DASH}
                                         </td>
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                            {groupTrend.revenue > 0 ? formatNumber(groupTrend.revenue) + '\u00A0\u20BD' : '\u2014'}
+                                            {groupTrend.revenue > 0 ? formatNumber(groupTrend.revenue) + '\u00A0\u20BD' : DASH}
                                         </td>
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                             {groupTrend.revenue > 0 ? (
                                                 <span style={{ color: groupMargin >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 600 }}>
                                                     {formatNumber(groupMargin, 1)}%
                                                 </span>
-                                            ) : '\u2014'}
+                                            ) : DASH}
                                         </td>
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                             {groupStockDays > 0 ? (
                                                 <span style={{ color: groupStockColor, fontWeight: 600 }}>{formatNumber(groupStockDays, 0)}</span>
-                                            ) : '\u2014'}
+                                            ) : DASH}
                                         </td>
                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                             <strong style={{ color: 'var(--color-accent)' }}>
@@ -1110,26 +1115,26 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                                                 </span>
                                                             )}
                                                         </td>
-                                                        <td style={{ textAlign: 'right' }}>{child.items_count != null ? formatNumber(child.items_count, 0) : '\u2014'}</td>
-                                                        {groupBy === 'abc' && <td>{'\u2014'}</td>}
+                                                        <td style={{ textAlign: 'right' }}>{child.items_count != null ? formatNumber(child.items_count, 0) : DASH}</td>
+                                                        {groupBy === 'abc' && <td>{DASH}</td>}
                                                         {/* Sales metrics — moved to front */}
                                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                                            {childTrend.avg_daily_qty > 0 ? formatNumber(childTrend.avg_daily_qty, 1) : '\u2014'}
+                                                            {childTrend.avg_daily_qty > 0 ? formatNumber(childTrend.avg_daily_qty, 1) : DASH}
                                                         </td>
                                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                                            {childTrend.revenue > 0 ? formatNumber(childTrend.revenue) + '\u00A0\u20BD' : '\u2014'}
+                                                            {childTrend.revenue > 0 ? formatNumber(childTrend.revenue) + '\u00A0\u20BD' : DASH}
                                                         </td>
                                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                                             {childTrend.revenue > 0 ? (
                                                                 <span style={{ color: childMargin >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 600 }}>
                                                                     {formatNumber(childMargin, 1)}%
                                                                 </span>
-                                                            ) : '\u2014'}
+                                                            ) : DASH}
                                                         </td>
                                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                                             {childStockDays > 0 ? (
                                                                 <span style={{ color: childStockColor, fontWeight: 600 }}>{formatNumber(childStockDays, 0)}</span>
-                                                            ) : '\u2014'}
+                                                            ) : DASH}
                                                         </td>
                                                         <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                                                             <strong style={{ color: 'var(--color-accent)' }}>
@@ -1272,7 +1277,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                             <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                                 {noveltyKpi.revenuePotential > 0
                                     ? `${formatNumber((noveltyKpi.profitPotential / noveltyKpi.revenuePotential) * 100, 1)}% маржи`
-                                    : '\u2014'}
+                                    : DASH}
                             </span>
                         </div>
                         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -1337,7 +1342,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                                     <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-accent)', fontWeight: 600 }}>{'\u2248'}&nbsp;{formatNumber(g.revenue)}</td>
                                                     <td style={{ padding: '6px 8px', textAlign: 'right', color: g.profit >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 600 }}>{'\u2248'}&nbsp;{formatNumber(g.profit)}</td>
                                                     <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-text-muted)' }}>
-                                                        {g.revenue > 0 ? `${formatNumber((g.profit / g.revenue) * 100, 1)}%` : '\u2014'}
+                                                        {g.revenue > 0 ? `${formatNumber((g.profit / g.revenue) * 100, 1)}%` : DASH}
                                                     </td>
                                                 </tr>
                                                 {isOpen && g.items.map((item) => (
@@ -1346,13 +1351,13 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                                             <div style={{ fontWeight: 500 }}>{item.article_seller || '\u2014'}</div>
                                                             <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{item.barcode || '\u2014'}</div>
                                                         </td>
-                                                        <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--color-text-muted)' }}>{'\u2014'}</td>
+                                                        <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--color-text-muted)' }}>{DASH}</td>
                                                         <td style={{ padding: '5px 8px', textAlign: 'right' }}>{formatNumber(item.qty, 0)}</td>
                                                         <td style={{ padding: '5px 8px', textAlign: 'right' }}>{formatNumber(item.cost)}</td>
                                                         <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{'\u2248'}&nbsp;{formatNumber(item.revenue)}</td>
                                                         <td style={{ padding: '5px 8px', textAlign: 'right', color: item.profit >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>{'\u2248'}&nbsp;{formatNumber(item.profit)}</td>
                                                         <td style={{ padding: '5px 8px', textAlign: 'right', color: 'var(--color-text-muted)' }}>
-                                                            {item.revenue > 0 ? `${formatNumber((item.profit / item.revenue) * 100, 1)}%` : '\u2014'}
+                                                            {item.revenue > 0 ? `${formatNumber((item.profit / item.revenue) * 100, 1)}%` : DASH}
                                                         </td>
                                                     </tr>
                                                 ))}
@@ -1570,12 +1575,12 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                                     ? <span style={{ color: totals.bdrProfitSum >= 0 ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 600 }}>
                                         {formatNumber((totals.bdrProfitSum / totals.bdrRevenueSum) * 100, 1)}%
                                       </span>
-                                    : '\u2014'}
+                                    : DASH}
                             </td>
                             <td style={{ textAlign: 'right', color: totals.defectSum > 0 ? 'var(--color-warning)' : undefined, fontWeight: 600, whiteSpace: 'nowrap' }}>
                                 {totals.defectSum > 0
                                     ? (mode === 'qty' ? formatNumber(totals.defectSum, 0) : formatNumber(totals.defectMoney) + '\u00A0\u20BD')
-                                    : '\u2014'}
+                                    : DASH}
                             </td>
                             <td />
                             <td style={{ textAlign: 'right', color: 'var(--color-accent)', whiteSpace: 'nowrap' }}>
