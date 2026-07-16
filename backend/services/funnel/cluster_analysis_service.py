@@ -835,10 +835,7 @@ def _phrase_bid_block_reason(camp: WbAdCampaign) -> str | None:
     if ct and ct != "cpm":
         return "Ставки по отдельным фразам доступны только у CPM-кампаний (аукцион)."
     if (camp.bid_mode or "").lower() == "unified":
-        return (
-            "Кампания на единой ставке — WB не принимает ставку по отдельной фразе. "
-            "Переключите режим ставок на «ручной» в кабинете WB."
-        )
+        return UNIFIED_CLUSTER_LOCK
     return None
 
 
@@ -916,8 +913,6 @@ async def set_cluster_bid(
     camp = await _campaign_row(db, project_id, campaign_id)
     if camp is None:
         return {"ok": False, "error": "campaign_not_found"}
-    if (camp.bid_mode or "") == "unified":
-        return {"ok": False, "error": UNIFIED_CLUSTER_LOCK}
     if nm_id not in [int(n) for n in (camp.nm_ids or [])]:
         return {"ok": False, "error": "nm_not_in_campaign"}
     # bid==0 — валидный «сброс к ставке кампании» (WB принимает bid_kopecks=0); отбиваем только отрицательные
