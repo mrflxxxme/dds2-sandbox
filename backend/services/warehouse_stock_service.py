@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import cached, invalidate_cache
-from backend.models import WbStockSnapshot, WbWarehouseStock
+from backend.models import WbStockSnapshot, WbWarehouseRemains, WbWarehouseStock
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.stock_analytics")
@@ -33,6 +33,68 @@ def compute_need(stock_qty: int, avg_daily: float, need_days: int) -> int:
     needed = avg_daily * need_days
     deficit = needed - stock_qty
     return max(0, int(deficit + 0.5))
+
+
+async def sync_warehouse_remains(
+    db: AsyncSession,
+    project_id: int,
+    items: list[dict],
+) -> int:
+    """Full replace of wb_warehouse_remains from the analytics report rows.
+
+    Each report row carries a `warehouses` list that includes pseudo-warehouses
+    («В пути до получателей», «В пути возвраты на склад WB», «Всего находится
+    на складах») — stored as-is, one DB row per (nm_id, barcode, warehouse).
+    Returns count of inserted rows. Empty report → keep previous data (WB
+    glitches happen; better stale-but-real than wiped).
+    """
+    if not items:
+        return 0
+
+    now = utcnow()
+    # Dedup by unique key in Python before INSERT (CardinalityViolation guard):
+    # rows without groupBy splits could repeat a (nm, barcode, warehouse) key.
+    aggregated: dict[tuple[int, str, str], dict[str, Any]] = {}
+    for item in items:
+        nm_id = item.get("nmId")
+        if not nm_id:
+            continue
+        barcode = str(item.get("barcode") or "")
+        for wh in item.get("warehouses") or []:
+            wh_name = (wh.get("warehouseName") or "").strip()
+            if not wh_name:
+                continue
+            key = (int(nm_id), barcode, wh_name)
+            existing = aggregated.get(key)
+            if existing is None:
+                aggregated[key] = {
+                    "project_id": project_id,
+                    "nm_id": int(nm_id),
+                    "barcode": barcode,
+                    "vendor_code": item.get("vendorCode") or None,
+                    "brand": item.get("brand") or None,
+                    "subject": item.get("subjectName") or None,
+                    "tech_size": item.get("techSize") or None,
+                    "volume": item.get("volume"),
+                    "warehouse_name": wh_name,
+                    "quantity": int(wh.get("quantity", 0) or 0),
+                    "synced_at": now,
+                }
+            else:
+                existing["quantity"] += int(wh.get("quantity", 0) or 0)
+
+    if not aggregated:
+        return 0
+
+    await db.execute(delete(WbWarehouseRemains).where(WbWarehouseRemains.project_id == project_id))
+
+    rows = list(aggregated.values())
+    for i in range(0, len(rows), 500):
+        await db.execute(pg_insert(WbWarehouseRemains).values(rows[i : i + 500]))
+
+    await db.commit()
+    logger.info(f"Synced {len(rows)} warehouse remains rows for project {project_id}")
+    return len(rows)
 
 
 async def sync_warehouse_stocks(

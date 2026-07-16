@@ -6,14 +6,15 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from backend.cache import invalidate_project_reports
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import VehicleStatus
-from backend.models.integrations import WbWarehouseStock
+from backend.models.integrations import WbWarehouseRemains, WbWarehouseStock
 from backend.models.refs import ImtAlias, ProductTag, ProductTagMap
 from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
 from backend.models.warehouse import (
@@ -27,6 +28,10 @@ from backend.models.wb_finance import WbFinanceRow
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
+
+# Итоговая псевдо-строка отчёта WB «Остатки на складах»: дублирует сумму
+# реальных складов — при суммировании остатков её нужно исключать.
+WB_REMAINS_TOTAL_ROW = "Всего находится на складах"
 
 
 # ─── Barcode → Nomenclature lookup ─────────────────────────────────────────
@@ -1238,26 +1243,87 @@ async def get_unified_stock_summary(
     )
     wh_name_map: dict[int, str] = {row.id: row.name for row in wh_result.all()}
 
-    # 3. WB warehouse stock -- join with Nomenclature to get nomenclature_id
-    #    Use quantity_full (includes in_way_to_client + in_way_from_client)
-    wb_query = (
-        select(
-            Nomenclature.id.label("nomenclature_id"),
-            WbWarehouseStock.warehouse_name,
-            func.sum(WbWarehouseStock.quantity_full).label("qty"),
+    # 3. WB warehouse stock. Primary source — wb_warehouse_remains: зеркало
+    #    отчёта кабинета «Остатки на складах» (включает приёмку и межскладской
+    #    транзит WB; «В пути до получателей» / «В пути возвраты на склад WB»
+    #    приходят псевдо-складами и попадают в разбивку и total_wb). Итоговая
+    #    псевдо-строка «Всего находится на складах» — дубль суммы реальных
+    #    складов, исключается. Fallback до первого синка remains — statistics
+    #    supplier/stocks (видит только «доступно к продаже», quantity_full).
+    remains_exists = (
+        await db.execute(
+            select(WbWarehouseRemains.id).where(WbWarehouseRemains.project_id == project_id).limit(1)
         )
-        .join(Nomenclature, Nomenclature.article_wb == WbWarehouseStock.nm_id)
-        .where(
-            WbWarehouseStock.project_id == project_id,
-            Nomenclature.project_id == project_id,
+    ).first() is not None
+
+    if remains_exists:
+        # Primary join by barcode (точный, per-size; не дублирует остаток при
+        # нескольких карточках с одним article_wb). Строки, чей barcode не
+        # заведён в номенклатуре, добираются fallback-джойном по nm_id.
+        remains_common = (
+            WbWarehouseRemains.project_id == project_id,
+            WbWarehouseRemains.warehouse_name != WB_REMAINS_TOTAL_ROW,
         )
-        .group_by(Nomenclature.id, WbWarehouseStock.warehouse_name)
-        .limit(10000)
-    )
-    if allowed_nom_ids is not None:
-        wb_query = wb_query.where(Nomenclature.id.in_(allowed_nom_ids))
-    wb_result = await db.execute(wb_query)
-    wb_rows = wb_result.all()
+        by_barcode_query = (
+            select(
+                Nomenclature.id.label("nomenclature_id"),
+                WbWarehouseRemains.warehouse_name,
+                func.sum(WbWarehouseRemains.quantity).label("qty"),
+            )
+            .join(
+                Nomenclature,
+                (Nomenclature.barcode == WbWarehouseRemains.barcode)
+                & (Nomenclature.project_id == project_id),
+            )
+            .where(*remains_common)
+            .group_by(Nomenclature.id, WbWarehouseRemains.warehouse_name)
+            .limit(50000)
+        )
+        nom_bc = aliased(Nomenclature)
+        by_nm_query = (
+            select(
+                Nomenclature.id.label("nomenclature_id"),
+                WbWarehouseRemains.warehouse_name,
+                func.sum(WbWarehouseRemains.quantity).label("qty"),
+            )
+            .join(
+                Nomenclature,
+                (Nomenclature.article_wb == WbWarehouseRemains.nm_id)
+                & (Nomenclature.project_id == project_id),
+            )
+            .where(
+                *remains_common,
+                ~exists().where(
+                    (nom_bc.barcode == WbWarehouseRemains.barcode) & (nom_bc.project_id == project_id)
+                ),
+            )
+            .group_by(Nomenclature.id, WbWarehouseRemains.warehouse_name)
+            .limit(50000)
+        )
+        if allowed_nom_ids is not None:
+            by_barcode_query = by_barcode_query.where(Nomenclature.id.in_(allowed_nom_ids))
+            by_nm_query = by_nm_query.where(Nomenclature.id.in_(allowed_nom_ids))
+        wb_rows = list((await db.execute(by_barcode_query)).all())
+        wb_rows.extend((await db.execute(by_nm_query)).all())
+    else:
+        wb_query = (
+            select(
+                Nomenclature.id.label("nomenclature_id"),
+                WbWarehouseStock.warehouse_name,
+                func.sum(WbWarehouseStock.quantity_full).label("qty"),
+            )
+            .join(Nomenclature, Nomenclature.article_wb == WbWarehouseStock.nm_id)
+            .where(
+                WbWarehouseStock.project_id == project_id,
+                Nomenclature.project_id == project_id,
+            )
+            .group_by(Nomenclature.id, WbWarehouseStock.warehouse_name)
+            .limit(10000)
+        )
+        if allowed_nom_ids is not None:
+            wb_query = wb_query.where(Nomenclature.id.in_(allowed_nom_ids))
+        wb_result = await db.execute(wb_query)
+        wb_rows = wb_result.all()
 
     # 4. In-transit (SHIPPED assembly request items) grouped by nomenclature_id
     shipped_query = (

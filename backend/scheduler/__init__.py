@@ -56,7 +56,7 @@ from backend.scheduler.jobs.wb_orders_sync import sync_all_projects_wb_orders
 from backend.scheduler.jobs.wb_prices_sync import sync_all_projects_wb_prices
 from backend.scheduler.jobs.measurements_digest import send_measurement_digests
 from backend.scheduler.jobs.wb_measurements import sync_all_projects_wb_measurements
-from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_stocks
+from backend.scheduler.jobs.wb_stocks import sync_all_projects_wb_remains, sync_all_projects_wb_stocks
 from backend.scheduler.jobs.wb_supply_states import sync_all_projects_wb_supply_states
 
 logger = logging.getLogger("dds.scheduler")
@@ -349,6 +349,18 @@ def start_scheduler():
         id="wb_stocks_sync",
         name="WB warehouse stocks snapshot (daily 00:00 MSK)",
         replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # WB остатки как в кабинете (analytics warehouse_remains): каждый час.
+    # Сдвиг :20 — от прочих WB-джобов, идущих в :00 (rate limit).
+    _scheduler.add_job(
+        sync_all_projects_wb_remains,
+        trigger=CronTrigger(minute=20, timezone=MSK),
+        id="wb_remains_sync",
+        name="WB warehouse remains — cabinet-accurate stock (hourly :20 MSK)",
+        replace_existing=True,
+        max_instances=1,
         misfire_grace_time=600,
     )
 
