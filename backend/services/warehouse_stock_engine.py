@@ -5,6 +5,7 @@ Warehouse stock engine — stock balance updates, movements, adjustments, summar
 import logging
 from datetime import date, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,9 +30,13 @@ from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
-# Итоговая псевдо-строка отчёта WB «Остатки на складах»: дублирует сумму
-# реальных складов — при суммировании остатков её нужно исключать.
+# Псевдо-склады отчёта WB «Остатки на складах». Итоговая строка дублирует
+# сумму реальных складов — при суммировании её нужно исключать; «в пути»
+# выносятся в отдельные поля (wb_in_way_to_client / wb_in_way_from_client),
+# а не в разбивку по складам.
 WB_REMAINS_TOTAL_ROW = "Всего находится на складах"
+WB_REMAINS_IN_WAY_TO_CLIENT = "В пути до получателей"
+WB_REMAINS_IN_WAY_FROM_CLIENT = "В пути возвраты на склад WB"
 
 
 # ─── Barcode → Nomenclature lookup ─────────────────────────────────────────
@@ -1052,6 +1057,8 @@ def _group_abc(unified_list: list[dict]) -> list[dict]:
             "items_count": 0,
             "total_own": 0,
             "total_wb": 0,
+            "wb_in_way_to_client": 0,
+            "wb_in_way_from_client": 0,
             "in_transit": 0,
             "total": 0,
             "avg_cost": 0.0,
@@ -1071,7 +1078,7 @@ def _group_abc(unified_list: list[dict]) -> list[dict]:
 
     def _acc(g: dict, row: dict) -> None:
         g["items_count"] += 1
-        for k in ("total_own", "total_wb", "in_transit", "total"):
+        for k in ("total_own", "total_wb", "wb_in_way_to_client", "wb_in_way_from_client", "in_transit", "total"):
             g[k] += row[k]
         g["avg_daily_revenue"] += row.get("avg_daily_revenue", 0)
         g["avg_daily_profit"] += row.get("avg_daily_profit", 0)
@@ -1245,11 +1252,13 @@ async def get_unified_stock_summary(
 
     # 3. WB warehouse stock. Primary source — wb_warehouse_remains: зеркало
     #    отчёта кабинета «Остатки на складах» (включает приёмку и межскладской
-    #    транзит WB; «В пути до получателей» / «В пути возвраты на склад WB»
-    #    приходят псевдо-складами и попадают в разбивку и total_wb). Итоговая
-    #    псевдо-строка «Всего находится на складах» — дубль суммы реальных
-    #    складов, исключается. Fallback до первого синка remains — statistics
-    #    supplier/stocks (видит только «доступно к продаже», quantity_full).
+    #    транзит WB). Псевдо-склады «В пути до получателей» / «В пути возвраты
+    #    на склад WB» уходят в отдельные поля wb_in_way_to_client /
+    #    wb_in_way_from_client (см. цикл «WB stock» ниже); итоговая псевдо-строка
+    #    «Всего находится на складах» — дубль суммы реальных складов, исключается.
+    #    Fallback до первого синка remains — statistics supplier/stocks («доступно
+    #    к продаже» по складам + in_way_* синтетическими псевдо-строками, чтобы
+    #    обе ветки обрабатывались одним циклом).
     remains_exists = (
         await db.execute(
             select(WbWarehouseRemains.id).where(WbWarehouseRemains.project_id == project_id).limit(1)
@@ -1310,7 +1319,7 @@ async def get_unified_stock_summary(
             select(
                 Nomenclature.id.label("nomenclature_id"),
                 WbWarehouseStock.warehouse_name,
-                func.sum(WbWarehouseStock.quantity_full).label("qty"),
+                func.sum(WbWarehouseStock.quantity).label("qty"),
             )
             .join(Nomenclature, Nomenclature.article_wb == WbWarehouseStock.nm_id)
             .where(
@@ -1320,10 +1329,44 @@ async def get_unified_stock_summary(
             .group_by(Nomenclature.id, WbWarehouseStock.warehouse_name)
             .limit(10000)
         )
+        # in_way_* — те же данные, что раньше сидели внутри quantity_full,
+        # теперь отдельными псевдо-строками (единый цикл обработки с remains).
+        inway_query = (
+            select(
+                Nomenclature.id.label("nomenclature_id"),
+                func.sum(WbWarehouseStock.in_way_to_client).label("to_client"),
+                func.sum(WbWarehouseStock.in_way_from_client).label("from_client"),
+            )
+            .join(Nomenclature, Nomenclature.article_wb == WbWarehouseStock.nm_id)
+            .where(
+                WbWarehouseStock.project_id == project_id,
+                Nomenclature.project_id == project_id,
+            )
+            .group_by(Nomenclature.id)
+            .limit(10000)
+        )
         if allowed_nom_ids is not None:
             wb_query = wb_query.where(Nomenclature.id.in_(allowed_nom_ids))
+            inway_query = inway_query.where(Nomenclature.id.in_(allowed_nom_ids))
         wb_result = await db.execute(wb_query)
-        wb_rows = wb_result.all()
+        wb_rows = list(wb_result.all())
+        for r in (await db.execute(inway_query)).all():
+            if int(r.to_client or 0) > 0:
+                wb_rows.append(
+                    SimpleNamespace(
+                        nomenclature_id=r.nomenclature_id,
+                        warehouse_name=WB_REMAINS_IN_WAY_TO_CLIENT,
+                        qty=int(r.to_client),
+                    )
+                )
+            if int(r.from_client or 0) > 0:
+                wb_rows.append(
+                    SimpleNamespace(
+                        nomenclature_id=r.nomenclature_id,
+                        warehouse_name=WB_REMAINS_IN_WAY_FROM_CLIENT,
+                        qty=int(r.from_client),
+                    )
+                )
 
     # 4. In-transit (SHIPPED assembly request items) grouped by nomenclature_id
     shipped_query = (
@@ -1585,6 +1628,8 @@ async def get_unified_stock_summary(
                 "reserved": 0,
                 "total_own": 0,
                 "total_wb": 0,
+                "wb_in_way_to_client": 0,
+                "wb_in_way_from_client": 0,
                 "total_defect": 0,
                 "total": 0,
                 "factory_qty": 0,
@@ -1626,12 +1671,19 @@ async def get_unified_stock_summary(
         if row.defect_quantity > 0:
             entry["total_defect"] += row.defect_quantity
 
-    # WB stock
+    # WB stock. «В пути…» — отдельные поля-колонки, не разбивка по складам;
+    # total_wb = только физически на складах WB («Всего находится на складах»).
     for row in wb_rows:
         qty = int(row.qty or 0)
         if qty <= 0:
             continue
         entry = _ensure(row.nomenclature_id)
+        if row.warehouse_name == WB_REMAINS_IN_WAY_TO_CLIENT:
+            entry["wb_in_way_to_client"] += qty
+            continue
+        if row.warehouse_name == WB_REMAINS_IN_WAY_FROM_CLIENT:
+            entry["wb_in_way_from_client"] += qty
+            continue
         entry["wb_stocks"][row.warehouse_name] = entry["wb_stocks"].get(row.warehouse_name, 0) + qty
         entry["total_wb"] += qty
 
@@ -1660,9 +1712,15 @@ async def get_unified_stock_summary(
         entry = _ensure(nom_id)
         entry["vehicle_transit_qty"] = qty
 
-    # Compute totals (own + wb + in_transit; supply chain is separate columns)
+    # Compute totals (own + wb + wb-в-пути + in_transit; supply chain is separate columns)
     for entry in unified.values():
-        entry["total"] = entry["total_own"] + entry["total_wb"] + entry["in_transit"]
+        entry["total"] = (
+            entry["total_own"]
+            + entry["total_wb"]
+            + entry["wb_in_way_to_client"]
+            + entry["wb_in_way_from_client"]
+            + entry["in_transit"]
+        )
 
     # Narrowed forecast fallback — only runs in forecast mode. Estimates
     # revenue/profit for items that are en route but not yet physically in
@@ -1735,6 +1793,8 @@ async def _group_unified(
             "items_count": 0,
             "total_own": 0,
             "total_wb": 0,
+            "wb_in_way_to_client": 0,
+            "wb_in_way_from_client": 0,
             "in_transit": 0,
             "total": 0,
             "factory_qty": 0,
@@ -1766,6 +1826,8 @@ async def _group_unified(
         for k in (
             "total_own",
             "total_wb",
+            "wb_in_way_to_client",
+            "wb_in_way_from_client",
             "in_transit",
             "total",
             "factory_qty",

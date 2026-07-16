@@ -166,8 +166,9 @@ class TestSyncWarehouseRemains:
 
 class TestUnifiedStockFromRemains:
     async def test_wb_column_matches_cabinet_math(self, _clean_remains, db_session, project):
-        """Кабинет: 1249 на складах + 307 к клиенту + 49 возвраты = 1605.
-        total_wb должен дать 1605; итоговая псевдо-строка не удваивает сумму."""
+        """Кабинет: 1249 на складах + 307 к клиенту + 49 возвраты.
+        total_wb = 1249 (физически на складах), «в пути» — отдельные поля,
+        итоговая псевдо-строка не удваивает сумму, «Итого» = 1605."""
         db_session.add(
             Nomenclature(
                 project_id=project.id,
@@ -199,10 +200,14 @@ class TestUnifiedStockFromRemains:
 
         rows = await get_unified_stock_summary(db_session, project.id, group_by="sku")
         row = next(r for r in rows if r["barcode"] == "2043740032052")
-        assert row["total_wb"] == 1605
+        assert row["total_wb"] == 1249
+        assert row["wb_in_way_to_client"] == 307
+        assert row["wb_in_way_from_client"] == 49
+        assert row["total"] == 1605
         assert row["wb_stocks"]["Коледино"] == 700
-        assert row["wb_stocks"]["В пути до получателей"] == 307
-        assert row["wb_stocks"]["В пути возвраты на склад WB"] == 49
+        # Псевдо-склады НЕ в разбивке по складам — только отдельными полями
+        assert "В пути до получателей" not in row["wb_stocks"]
+        assert "В пути возвраты на склад WB" not in row["wb_stocks"]
         assert WB_REMAINS_TOTAL_ROW not in row["wb_stocks"]
 
     async def test_unknown_barcode_falls_back_to_nm_id_join(self, _clean_remains, db_session, project):
@@ -249,7 +254,10 @@ class TestUnifiedStockFromRemains:
 
         rows = await get_unified_stock_summary(db_session, project.id, group_by="sku")
         row = next(r for r in rows if r["article_wb"] == 777)
-        assert row["total_wb"] == 8
+        assert row["total_wb"] == 5  # quantity (доступно), не quantity_full
+        assert row["wb_in_way_to_client"] == 2
+        assert row["wb_in_way_from_client"] == 1
+        assert row["total"] == 8  # прежний quantity_full — теперь в «Итого»
 
     async def test_remains_of_other_project_do_not_leak(
         self, _clean_remains, db_session, project, other_project
