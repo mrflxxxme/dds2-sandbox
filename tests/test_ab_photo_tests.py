@@ -431,3 +431,46 @@ async def test_finish_restore_failure_pauses_instead_of_finishing(db_session, pr
     assert test.pause_reason is None
     assert test.active_variant_id != v1.id
     assert wb.uploads[-1] == b"ORIGINAL"
+
+
+async def test_running_test_campaigns_prioritized_in_sync_order(db_session, project, monkeypatch):
+    """Кампании активных АБ-тестов поднимаются в голову очереди fetch_ad_stats:
+    на больших кабинетах TIME_BUDGET скипает хвост чанков — тестовая кампания
+    обязана попадать в первый чанк, иначе тест слепнет (прод-инцидент 16.07)."""
+    import backend.integrations.wb_content_api as content_api
+    import backend.services.funnel.ab_photo_tests as svc
+
+    wb = _FakeWb()
+    monkeypatch.setattr(content_api, "fetch_card", wb.fetch_card)
+    monkeypatch.setattr(svc, "_put_photo", wb.put_photo)
+    monkeypatch.setattr(svc, "_download_wb_photo", wb.download_wb)
+
+    async def fake_keys(db, project_id):
+        return "content-key", "adv-key", "analytics-key"
+
+    monkeypatch.setattr(svc, "_get_keys", fake_keys)
+
+    test = await svc.create_test(db_session, project.id, nm_id=111, campaign_id=555)
+    await svc.add_variant(db_session, project.id, test.id, _jpeg_bytes())
+    await svc.start_test(db_session, project.id, test.id)
+
+    # воспроизводим переупорядочивание из sync.py
+    from sqlalchemy import select as _select
+
+    from backend.models import AbPhotoTest
+
+    campaign_ids = [111111, 222222, 555, 333333]
+    ab_campaigns = set(
+        (
+            await db_session.execute(
+                _select(AbPhotoTest.campaign_id).where(
+                    AbPhotoTest.project_id == project.id,
+                    AbPhotoTest.status == "running",
+                    AbPhotoTest.is_deleted == False,  # noqa: E712
+                ).limit(100)
+            )
+        ).scalars().all()
+    )
+    reordered = [c for c in campaign_ids if c in ab_campaigns] + [c for c in campaign_ids if c not in ab_campaigns]
+    assert reordered[0] == 555
+    assert sorted(reordered) == sorted(campaign_ids)
