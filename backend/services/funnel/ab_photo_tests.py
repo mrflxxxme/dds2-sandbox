@@ -802,6 +802,14 @@ async def _finish_test(
     test.active_variant_id = control.id if control else None
 
 
+def _iso(dt: datetime | None) -> str | None:
+    """Naive-UTC datetime → ISO с +00:00: фронтовый new Date() покажет локальное время
+    (без суффикса таймзоны браузер трактует строку как локальную — время уезжало на -3ч)."""
+    if dt is None:
+        return None
+    return pytz.UTC.localize(dt).isoformat()
+
+
 # ── Выдача результатов ───────────────────────────────────────────────────────
 
 
@@ -864,18 +872,18 @@ async def get_test_results(db: AsyncSession, project_id: int, test_id: int) -> d
             "max_days": test.max_days,
             "title": (test.original_media or {}).get("title") or "",
             "vendor_code": (test.original_media or {}).get("vendor_code") or "",
-            "started_at": test.started_at.isoformat() if test.started_at else None,
-            "finished_at": test.finished_at.isoformat() if test.finished_at else None,
+            "started_at": _iso(test.started_at),
+            "finished_at": _iso(test.finished_at),
             "winner_variant_id": test.winner_variant_id,
-            "winner_applied_at": test.winner_applied_at.isoformat() if test.winner_applied_at else None,
+            "winner_applied_at": _iso(test.winner_applied_at),
         },
         "variants": per_variant,
         "rounds": [
             {
                 "round_no": r.round_no,
                 "variant_id": r.variant_id,
-                "started_at": r.started_at.isoformat(),
-                "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+                "started_at": _iso(r.started_at),
+                "ended_at": _iso(r.ended_at),
                 "views": r.views,
                 "clicks": r.clicks,
                 "ctr": round(r.clicks / r.views * 100, 2) if r.views else 0.0,
@@ -926,9 +934,9 @@ async def list_tests(db: AsyncSession, project_id: int) -> list[dict]:
                 "vendor_code": (t.original_media or {}).get("vendor_code") or "",
                 "variants_count": len(variants),
                 "progress_pct": min(100, round(got / target_total * 100)) if target_total else 0,
-                "created_at": t.created_at.isoformat(),
-                "started_at": t.started_at.isoformat() if t.started_at else None,
-                "finished_at": t.finished_at.isoformat() if t.finished_at else None,
+                "created_at": _iso(t.created_at),
+                "started_at": _iso(t.started_at),
+                "finished_at": _iso(t.finished_at),
             }
         )
     return out
