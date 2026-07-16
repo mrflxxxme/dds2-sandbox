@@ -16,6 +16,8 @@ send_shipment — РЕАЛЬНОЕ создание заявки (шапка + �
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 import httpx
 import structlog
@@ -27,6 +29,7 @@ from sqlalchemy.orm import selectinload
 from backend.integrations.migfull_client import MigfullApiError, MigfullClient
 from backend.integrations.migfull_portal_client import (
     BASE_URL,
+    MigfullPortalAuthError,
     MigfullPortalClient,
     MigfullPortalError,
 )
@@ -75,6 +78,15 @@ _DEST_FETCH_TIMEOUT_SEC = 20.0
 # строку батча (draft+send каждый зовут резолвер заново).
 _DEST_FAIL_TTL_SEC = 300.0
 _dest_fail_at: dict[int, float] = {}
+# Потолок строк зеркала отгрузок для локального индекса складов назначения
+_MIRROR_DEST_LIMIT = 3000
+
+# Кэш cookie-сессий портала: батч отправок логинится ОДИН раз, а не на каждую
+# заявку — Filament-логин портала троттлит ~5 попыток/мин (6-я+ заявка батча
+# падала «вход не подтверждён»). TTL ниже 120-мин лайфтайма Laravel-сессии;
+# протухание ловится и раньше — редирект на логин → перелогин (см. _with_portal_session).
+_SESSION_TTL_SEC = 45 * 60.0
+_portal_sessions: dict[tuple[int | None, str, str], tuple[float, dict]] = {}
 
 
 # ─── Резолв склада назначения (наш WB-склад сборки → migfull destination id) ──
@@ -172,7 +184,62 @@ def _client_from_key(key: IntegrationKey) -> MigfullPortalClient:
     )
 
 
+def _destinations_from_mirror_rows(rows: list[tuple]) -> list[dict]:
+    """(dest_id, name, delivery_type, marketplace_id) из raw зеркала отгрузок →
+    [{id, name, ...}]. Дедуп по id (строки идут от свежих к старым — свежее имя
+    побеждает), строки без numeric id или имени пропускаются."""
+    out: dict[int, dict] = {}
+    for did, name, dtype, mkt in rows:
+        if did is None or not name or did in out:
+            continue
+        out[int(did)] = {"id": int(did), "name": name, "delivery_type": dtype, "marketplace_id": mkt}
+    return list(out.values())
+
+
+async def _mirror_destinations(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
+    """Индекс складов назначения из НАШЕГО зеркала отгрузок (FulfillmentRequest.raw).
+
+    Read-sync регулярно качает /shipments целиком — numeric id и имя склада уже
+    лежат в raw. Локальный индекс мгновенный и всегда тёплый, в отличие от
+    read-API (/shipments 20с+ → таймаут → «склад не распознан» на ровном месте).
+    """
+    raw = FulfillmentRequest.raw
+    rows = (
+        await db.execute(
+            select(
+                raw["destination_marketplace_id"].as_integer(),
+                raw["destination_marketplace"]["name"].as_string(),
+                raw["delivery_type"].as_string(),
+                raw["marketplace_id"].as_integer(),
+            )
+            .where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.warehouse_id == warehouse_id,
+                FulfillmentRequest.provider == MIGFULL_PROVIDER,
+                FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+                FulfillmentRequest.raw.is_not(None),
+            )
+            .order_by(FulfillmentRequest.external_created_at.desc().nulls_last(), FulfillmentRequest.id.desc())
+            .limit(_MIRROR_DEST_LIMIT)
+        )
+    ).all()
+    return _destinations_from_mirror_rows([tuple(r) for r in rows])
+
+
 async def _read_destinations(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
+    """Справочник складов назначения: зеркало БД + read-API (кэш 1ч), API-записи
+    поверх зеркальных при совпадении id. Best-effort: оба источника пусты → []."""
+    api = await _api_destinations(db, project_id, warehouse_id)
+    mirror = await _mirror_destinations(db, project_id, warehouse_id)
+    if not mirror:
+        return api
+    by_id: dict[int, dict] = {d["id"]: d for d in mirror}
+    for d in api:
+        by_id[d["id"]] = d
+    return list(by_id.values())
+
+
+async def _api_destinations(db: AsyncSession, project_id: int, warehouse_id: int) -> list[dict]:
     """Справочник складов назначения из read-API migfull (кэш 1ч). Best-effort:
     нет read-ключа / ошибка → []. Использует ОТДЕЛЬНЫЙ ключ `service="migfull"`
     (Bearer read-API), не портальный."""
@@ -226,6 +293,51 @@ async def _resolve_destination_id(
     dests = await _read_destinations(db, project_id, warehouse_id)
     wb_dests = [d for d in dests if d.get("marketplace_id") in (None, _WB_MARKETPLACE_ID_INT)]
     return resolve_destination(wb_name, None, wb_dests or dests)
+
+
+# ─── Cookie-сессия портала (переиспользование между отправками) ──────────────
+
+
+def _session_cache_key(client: MigfullPortalClient) -> tuple[int | None, str, str]:
+    # login/host в ключе: смена кредов интеграции не должна подхватить чужую сессию
+    return (client.project_id, client.host, client.login)
+
+
+def _restore_portal_session(client: MigfullPortalClient) -> bool:
+    cached = _portal_sessions.get(_session_cache_key(client))
+    if cached is None or (utcnow().timestamp() - cached[0]) > _SESSION_TTL_SEC:
+        return False
+    return client.restore_session(cached[1])
+
+
+def _save_portal_session(client: MigfullPortalClient) -> None:
+    _portal_sessions[_session_cache_key(client)] = (utcnow().timestamp(), client.export_session())
+
+
+def _drop_portal_session(client: MigfullPortalClient) -> None:
+    _portal_sessions.pop(_session_cache_key(client), None)
+
+
+_T = TypeVar("_T")
+
+
+async def _with_portal_session(client: MigfullPortalClient, fn: Callable[[], Awaitable[_T]]) -> _T:
+    """Выполнить портальный вызов под живой cookie-сессией.
+
+    Сессия из кэша (батч логинится один раз — иначе Filament-троттлинг ~5 логинов/мин
+    валит 6-ю+ заявку); нет кэша → логин. Сессия протухла (MigfullPortalAuthError —
+    поднимается только из начального GET, ДО мутаций) → один перелогин и повтор.
+    """
+    if not _restore_portal_session(client):
+        await client.authenticate()
+    try:
+        result = await fn()
+    except MigfullPortalAuthError:
+        _drop_portal_session(client)
+        await client.authenticate()
+        result = await fn()
+    _save_portal_session(client)
+    return result
 
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -606,10 +718,11 @@ async def send_shipment(
 
     try:
         async with _client_from_key(key) as client:
-            await client.authenticate()
-            created = await client.create_shipment(header)
+            created = await _with_portal_session(client, lambda: client.create_shipment(header))
             guid = created.guid
-            upload = await client.upload_opis(guid, filename, xlsx, OPIS_CONTENT_TYPE)
+            upload = await _with_portal_session(
+                client, lambda: client.upload_opis(guid, filename, xlsx, OPIS_CONTENT_TYPE)
+            )
         reference = upload.reference
         status = MigfullShipmentStatus.SENT if upload.ok else MigfullShipmentStatus.UNCERTAIN
         message = (

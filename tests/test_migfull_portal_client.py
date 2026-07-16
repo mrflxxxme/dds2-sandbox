@@ -1,12 +1,15 @@
 # ruff: noqa: RUF001, RUF002, RUF003
-"""Тесты чистых хелперов migfull-портального клиента (без сети)."""
+"""Тесты чистых хелперов migfull-портального клиента (без сети; HTTP — MockTransport)."""
 
 import html as _html
+import json
 
+import httpx
 import pytest
 
 from backend.integrations.migfull_portal_client import (
     _GUID_RE,
+    MigfullPortalAuthError,
     MigfullPortalClient,
     MigfullPortalError,
     _find_snapshot,
@@ -95,3 +98,60 @@ def test_redact_strips_login_and_email():
 def test_host_used_for_base_url():
     client = MigfullPortalClient(login="a@b.ru", password="p", host="plusvb.migfull.app")
     assert client.host == "https://plusvb.migfull.app"
+
+
+# ─── Переиспользование cookie-сессии ──────────────────────────────────────────
+
+
+async def test_export_restore_session_roundtrip():
+    async with MigfullPortalClient(login="a@b.ru", password="p") as c1:
+        c1._http.cookies.set("migfull_session", "abc", domain="plusvb.migfull.app")
+        state = c1.export_session()
+    assert state["cookies"]["migfull_session"] == "abc"
+    async with MigfullPortalClient(login="a@b.ru", password="p") as c2:
+        assert c2.restore_session(state) is True
+        assert dict(c2._http.cookies)["migfull_session"] == "abc"
+        assert c2.restore_session(None) is False
+        assert c2.restore_session({"cookies": {}}) is False
+
+
+def _mock_transport_client(client: MigfullPortalClient, handler) -> None:
+    """Подменить внутренний httpx-клиент на MockTransport (тесты без сети)."""
+    client._client = httpx.AsyncClient(base_url=client.host, transport=httpx.MockTransport(handler))
+
+
+async def test_create_and_upload_raise_auth_error_on_login_redirect():
+    # Протухшая/отсутствующая сессия: портал редиректит на логин ДО любых мутаций —
+    # клиент должен поднять различимую MigfullPortalAuthError (вызвавший перелогинится).
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "/app/login"})
+
+    client = MigfullPortalClient(login="a@b.ru", password="p")
+    async with client:
+        _mock_transport_client(client, handler)
+        with pytest.raises(MigfullPortalAuthError):
+            await client.create_shipment({})
+        with pytest.raises(MigfullPortalAuthError):
+            await client.upload_opis("4dfc6d57-acda-432c-be18-de8f4236a323", "f.xlsx", b"x", "application/xlsx")
+
+
+async def test_authenticate_no_redirect_no_errors_hints_rate_limit():
+    # Filament-троттлинг логина (~5/мин): ни redirect, ни errors — только уведомление.
+    login_snap = json.dumps({"data": [], "memo": {"id": "a", "name": "Filament\\Auth\\Pages\\Login", "errors": []}})
+    page = '<meta name="csrf-token" content="tok" />' + _snapshot_attr(login_snap)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/app/login":
+            return httpx.Response(200, text=page)
+        return httpx.Response(
+            200,
+            json={"components": [{"snapshot": json.dumps({"memo": {"errors": {}}}), "effects": {}}]},
+        )
+
+    client = MigfullPortalClient(login="a@b.ru", password="p")
+    async with client:
+        _mock_transport_client(client, handler)
+        with pytest.raises(MigfullPortalError) as exc:
+            await client.authenticate()
+    assert exc.value.status_code == 429
+    assert "частоту входа" in str(exc.value)

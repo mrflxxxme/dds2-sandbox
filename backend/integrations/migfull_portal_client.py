@@ -68,6 +68,17 @@ class MigfullPortalError(ValueError):
         self.status_code = status_code
 
 
+class MigfullPortalAuthError(MigfullPortalError):
+    """Нет живой сессии (страница редиректит на логин) — нужен (пере)логин.
+
+    Поднимается ТОЛЬКО из начального GET страницы (до каких-либо мутаций на
+    портале), поэтому вызывающий может безопасно перелогиниться и повторить.
+    """
+
+    def __init__(self, message: str = "migfull-портал: сессия истекла — нужен повторный вход"):
+        super().__init__(message, status_code=401)
+
+
 # Per-project circuit breakers — сбои одного проекта не блокируют другие
 _portal_circuits = CircuitBreakerRegistry(
     name_prefix="migfull_portal",
@@ -186,6 +197,22 @@ class MigfullPortalClient:
         out = text.replace(self.login, "[login]") if self.login else text
         return _EMAIL_RE.sub("[email]", out)
 
+    # ─── Переиспользование сессии (куки Laravel) ─────────────────────────────
+
+    def export_session(self) -> dict:
+        """Снимок cookie-сессии (XSRF-TOKEN + migfull_session) для повторного входа
+        без логина — Filament-логин портала троттлит попытки входа (~5/мин)."""
+        return {"cookies": dict(self._http.cookies)}
+
+    def restore_session(self, state: dict | None) -> bool:
+        """Восстановить cookie-сессию из снимка. True — было что восстанавливать
+        (живость сессии подтвердится первым GET: редирект → MigfullPortalAuthError)."""
+        cookies = (state or {}).get("cookies") or {}
+        if not cookies:
+            return False
+        self._http.cookies.update(cookies)
+        return True
+
     # ─── Низкоуровневый Livewire ─────────────────────────────────────────────
 
     async def _get(self, path: str) -> httpx.Response:
@@ -243,7 +270,13 @@ class MigfullPortalClient:
             if not str(redirect).rstrip("/").endswith("/app"):
                 if errors:
                     raise MigfullPortalError("migfull-портал: не удалось войти — проверьте логин/пароль", status_code=401)
-                raise MigfullPortalError("migfull-портал: вход не подтверждён", status_code=401)
+                # Нет ни редиректа, ни ошибок валидации — так Filament отвечает на
+                # троттлинг логина (~5 попыток/мин): уведомление вместо errors.
+                raise MigfullPortalError(
+                    "migfull-портал: вход не подтверждён — похоже, портал ограничил частоту входа "
+                    "(~5 попыток/мин); подождите минуту и повторите",
+                    status_code=429,
+                )
 
     async def test_connection(self) -> bool:
         """Проверка кредов: логин прошёл. 4xx/HTML-ошибки → False; 5xx пробрасываются."""
@@ -265,8 +298,10 @@ class MigfullPortalClient:
         """
         async with self._circuit:
             page = await self._get("/app/shipments/create")
+            if page.status_code in _REDIRECT_CODES:
+                raise MigfullPortalAuthError()  # ничего не создано — безопасно перелогиниться и повторить
             if page.status_code != 200:
-                raise MigfullPortalError("migfull-портал: форма создания недоступна (нужен логин)", status_code=page.status_code)
+                raise MigfullPortalError("migfull-портал: форма создания недоступна", status_code=page.status_code)
             self._csrf = _meta_csrf(page.text) or self._csrf
             snap = _find_snapshot(page.text, _CREATE_COMPONENT)
             if not snap:
@@ -307,6 +342,8 @@ class MigfullPortalClient:
         ref = f"/app/shipments/{guid}/edit"
         async with self._circuit:
             page = await self._get(ref)
+            if page.status_code in _REDIRECT_CODES:
+                raise MigfullPortalAuthError()  # файл ещё не грузили — безопасно перелогиниться и повторить
             if page.status_code != 200:
                 raise MigfullPortalError(f"migfull-портал: заявка {guid} недоступна", status_code=page.status_code)
             self._csrf = _meta_csrf(page.text) or self._csrf
