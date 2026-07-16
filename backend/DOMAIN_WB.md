@@ -63,6 +63,7 @@ WB возвращает строки удержаний за отзывы с п�
 
 ### Отзывы покупателей (feedbacks) — сводная аналитика
 Отзывы **зеркалятся в БД** (`wb_feedbacks`), сводка строится из зеркала, не из живого API (историю «за всё существование» живой API не отдаёт — старое уходит в архив, `take` ограничен).
+- **Ключ**: `resolve_wb_key` каскад `wb_feedbacks`→`wb_analytics`→`wb`. Отдельный тип ключа `wb_feedbacks` (scope «Вопросы и отзывы») добавляется в Настройка→Интеграции — валидируется `wb_api.check_feedbacks_scope` (401/403→no_scope→400; 429/5xx/сеть→unknown→сохраняем, как wb_content/wb_advert). Резолвер берёт его первым, поэтому битый feedbacks-ключ ЗАТЕНИТ рабочий `wb` → удалять невалидный.
 - Sync: `services/wb_reviews_sync.py` — активные отзывы (isAnswered false+true) + `full_backfill` тянет архив (`WBApiClient.get_feedbacks_archive`) при первом прогоне (пустое зеркало). Upsert `on_conflict (project_id, wb_id)`, дедуп ключей до executemany.
 - Job: `scheduler/jobs/wb_reviews_sync.py`, ночью 03:15 MSK, `sync_type="feedbacks"`. On-demand — `POST /reviews/sync` (кнопка «Обновить»).
 - Агрегаты: `services/reviews_service.get_reviews_summary(project_id, tag=None, period="1y")` (`@cached("reviews:summary", 300)`) — KPI, рейтинг/объём временны́м рядом, разрезы по категории (`Nomenclature.subject`)/бренду (`Nomenclature.brand` по nm_id, фолбэк — снапшот отзыва)/ярлыку (`ProductTagMap`→`ProductTag.name`, только `is_deleted=False`). Непривязанные nm_id → «Без категории/бренда/ярлыка».

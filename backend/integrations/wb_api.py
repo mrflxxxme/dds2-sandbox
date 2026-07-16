@@ -47,6 +47,29 @@ WB_FEEDBACKS_API_BASE = "https://feedbacks-api.wildberries.ru"
 # Request timeout in seconds
 TIMEOUT = 30
 
+
+async def check_feedbacks_scope(api_key: str) -> str:
+    """Есть ли у токена категория «Вопросы и отзывы». Возвращает "ok" | "no_scope" | "unknown".
+
+    Лёгкий пробник — GET /api/v1/feedbacks?take=1: валидирует именно feedbacks-scope.
+    "unknown" (429/5xx/сеть) НЕ считать невалидным ключом — зеркало check_content_scope.
+    """
+    params = {"isAnswered": "true", "take": "1", "skip": "0"}
+    url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers={"Authorization": api_key}, params=params)
+    except httpx.HTTPError as e:
+        logger.warning("feedbacks_scope_check.network_error", error=str(e))
+        return "unknown"
+    if resp.status_code in (200, 204):
+        return "ok"
+    if resp.status_code in (401, 403):
+        logger.info("feedbacks_scope_check.rejected", status=resp.status_code)
+        return "no_scope"
+    logger.warning("feedbacks_scope_check.transient", status=resp.status_code)
+    return "unknown"
+
 # Per-project circuit breakers — one project's failures don't block others
 _wb_circuits = CircuitBreakerRegistry(
     name_prefix="wb",

@@ -28,7 +28,7 @@ router = APIRouter(prefix="/integrations")
 
 
 class AddKeyRequest(BaseModel):
-    service: Literal["wb", "wb_advert", "wb_content", "ozon"]
+    service: Literal["wb", "wb_advert", "wb_content", "wb_feedbacks", "ozon"]
     api_key: str
     label: str | None = None
 
