@@ -17,7 +17,7 @@ from backend.database import get_db
 from backend.integrations.resilience import CircuitOpenError, RateLimitError
 from backend.models import Project
 from backend.project_context import get_current_project
-from backend.schemas.reviews import ReviewsListResponse, ReviewsSummaryResponse
+from backend.schemas.reviews import NewcomersResponse, ReviewsListResponse, ReviewsSummaryResponse
 from backend.services import reviews_service
 from backend.services.wb_reviews_sync import sync_project_feedbacks
 from backend.utils.rate_limit import rate_limit_write
@@ -54,6 +54,18 @@ async def reviews_summary(
 ) -> ReviewsSummaryResponse:
     """Сводная аналитика отзывов проекта за период (KPI, ряды, категории/бренды). Опц. фильтр по ярлыку."""
     return await reviews_service.get_reviews_summary(db, project.id, tag=tag, period=period)
+
+
+@router.get("/newcomers", response_model=NewcomersResponse)
+async def reviews_newcomers(
+    days: int = Query(30, ge=1, le=365, description="Окно «новинки» — дней на продаже"),
+    max_rating: float = Query(4.6, gt=0, le=5, description="Порог «плохого» рейтинга"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> NewcomersResponse:
+    """Проблемные новинки: товары на продаже < `days` дней со средним рейтингом < `max_rating`."""
+    data = await reviews_service.get_new_low_rated(db, project.id, days=days, max_rating=max_rating)
+    return NewcomersResponse(**data)
 
 
 @router.post("/sync", response_model=ReviewsSummaryResponse)

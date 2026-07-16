@@ -5,8 +5,9 @@ import PageHeader from '@/components/PageHeader';
 import TabLayout from '@/components/TabLayout';
 import ReviewsSummaryTab from './components/ReviewsSummaryTab';
 import ReviewsListTab from './components/ReviewsListTab';
+import ReviewsNewcomersTab from './components/ReviewsNewcomersTab';
 
-type Tab = 'summary' | 'list';
+type Tab = 'summary' | 'list' | 'newcomers';
 
 export default function ReviewsPage() {
     const [tab, setTab] = useState<Tab>('summary');
@@ -23,12 +24,15 @@ export default function ReviewsPage() {
                 tabs={[
                     { key: 'summary', label: '📊 Сводка' },
                     { key: 'list', label: '💬 Отзывы' },
+                    { key: 'newcomers', label: '🆕 Проблемные новинки' },
                 ]}
                 active={tab}
                 onChange={(k) => setTab(k as Tab)}
             />
 
-            {tab === 'summary' ? <ReviewsSummaryTab /> : <ReviewsListTab />}
+            {tab === 'summary' && <ReviewsSummaryTab />}
+            {tab === 'list' && <ReviewsListTab />}
+            {tab === 'newcomers' && <ReviewsNewcomersTab />}
         </div>
     );
 }

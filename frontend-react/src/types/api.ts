@@ -6374,6 +6374,31 @@ export interface ReviewsListResponse {
 /** Диапазон выборки сводки отзывов. */
 export type ReviewsPeriod = '2w' | '1m' | '3m' | '6m' | '1y' | 'all';
 
+/** Проблемная новинка: недавно на продаже + рейтинг ниже порога. */
+export interface NewcomerReview {
+  nm_id: number;
+  name: string;
+  brand: string;
+  subject: string;
+  first_date: string;
+  days_on_sale: number;
+  avg_rating: number | null;
+  count: number;
+  count_unanswered: number;
+  r1: number;
+  r2: number;
+  r3: number;
+  r4: number;
+  r5: number;
+}
+
+export interface NewcomersResponse {
+  items: NewcomerReview[];
+  days: number;
+  max_rating: number;
+  has_key: boolean;
+}
+
 /** Сводная аналитика отзывов (backend Decimal-поля могут прийти строкой → Number()). */
 export interface ReviewsSummary {
   average_rating: number | null;

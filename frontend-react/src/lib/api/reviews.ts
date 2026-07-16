@@ -1,6 +1,6 @@
 /** Отзывы покупателей WB (feedbacks) API methods */
 import { ApiClient } from './client';
-import type { ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse } from '@/types/api';
+import type { NewcomersResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse } from '@/types/api';
 
 export interface GetReviewsParams {
     isAnswered?: boolean;
@@ -17,6 +17,13 @@ export function addReviewMethods(api: ApiClient) {
             if (params.skip != null) q.set('skip', String(params.skip));
             const qs = q.toString();
             return api.request<ReviewsListResponse>('GET', `/api/v1/reviews${qs ? `?${qs}` : ''}`);
+        },
+        getReviewsNewcomers(days?: number, maxRating?: number) {
+            const q = new URLSearchParams();
+            if (days != null) q.set('days', String(days));
+            if (maxRating != null) q.set('max_rating', String(maxRating));
+            const qs = q.toString();
+            return api.request<NewcomersResponse>('GET', `/api/v1/reviews/newcomers${qs ? `?${qs}` : ''}`);
         },
         getReviewsSummary(tag?: string, period?: ReviewsPeriod) {
             const q = new URLSearchParams();

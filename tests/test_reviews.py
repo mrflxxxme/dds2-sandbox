@@ -225,6 +225,49 @@ async def test_summary_bad_period_falls_back_to_year(db_session, project):
     assert res["period"] == "1y"
 
 
+async def test_new_low_rated(db_session, project):
+    """Проблемные новинки: новинка+плохой рейтинг → в списке; хороший/старый → нет."""
+    now = utcnow().replace(tzinfo=None)
+    # 501 — новинка (первый отзыв 5 дн назад) + плохой рейтинг (avg 3.0)
+    await _add_feedback(db_session, project.id, "n1", 3, 501, created=now - timedelta(days=5))
+    await _add_feedback(db_session, project.id, "n2", 3, 501, created=now - timedelta(days=2))
+    # 502 — новинка, но рейтинг хороший (5.0) → исключается
+    await _add_feedback(db_session, project.id, "g1", 5, 502, created=now - timedelta(days=5))
+    # 503 — плохой рейтинг, но старый (первый отзыв 100 дн назад) → не новинка
+    await _add_feedback(db_session, project.id, "o1", 2, 503, created=now - timedelta(days=100))
+    await db_session.commit()
+
+    res = await reviews_service.get_new_low_rated(db_session, project.id, days=30, max_rating=4.6)
+    nms = {i["nm_id"] for i in res["items"]}
+    assert 501 in nms  # новинка + плохой
+    assert 502 not in nms  # новинка, но хороший рейтинг
+    assert 503 not in nms  # плохой, но старый
+
+    item = next(i for i in res["items"] if i["nm_id"] == 501)
+    assert item["avg_rating"] == 3.0
+    assert item["count"] == 2
+    assert item["days_on_sale"] <= 30
+
+
+async def test_new_low_rated_first_sale_date_precedence(db_session, project):
+    """first_sale_date из номенклатуры важнее даты первого отзыва при определении новинки."""
+    now = utcnow().replace(tzinfo=None)
+    # старые отзывы (200 дн), но first_sale_date 10 дн назад → всё равно новинка
+    await _add_feedback(db_session, project.id, "s1", 2, 504, created=now - timedelta(days=200))
+    db_session.add(
+        Nomenclature(
+            project_id=project.id, barcode="bc504", article_wb=504,
+            first_sale_date=(now - timedelta(days=10)).date(),
+        )
+    )
+    await db_session.commit()
+
+    res = await reviews_service.get_new_low_rated(db_session, project.id, days=30, max_rating=4.6)
+    item = next((i for i in res["items"] if i["nm_id"] == 504), None)
+    assert item is not None  # новинка по first_sale_date, несмотря на старый отзыв
+    assert item["days_on_sale"] == 10
+
+
 async def test_summary_old_reviews_keep_data_ui(db_session, project):
     """Все отзывы старше окна и ключа нет → окно пустое, но has_key=True (data-UI,
     не экран «настройте ключ») — фронт покажет «за период пусто»."""

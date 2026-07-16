@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -380,3 +380,101 @@ async def get_reviews_summary(
         "period": period,
         "has_key": has_key,
     }
+
+
+# ─── Проблемные новинки (недавно на продаже + низкий рейтинг) ────────────────
+
+_NEWCOMERS_LIMIT = 300
+
+
+def _nom_lookup_dated(project_id: int) -> Subquery:
+    """nm_id → subject/brand/first_sale_date (distinct по nm_id)."""
+    return (
+        select(
+            Nomenclature.article_wb.label("nm_id"),
+            func.max(Nomenclature.subject).label("subject"),
+            func.max(Nomenclature.brand).label("brand"),
+            func.max(Nomenclature.first_sale_date).label("first_sale_date"),
+        )
+        .where(Nomenclature.project_id == project_id, Nomenclature.article_wb.isnot(None))
+        .group_by(Nomenclature.article_wb)
+        .subquery()
+    )
+
+
+async def get_new_low_rated(
+    db: AsyncSession,
+    project_id: int,
+    days: int = 30,
+    max_rating: float = 4.6,
+    min_reviews: int = 1,
+) -> dict:
+    """
+    Проблемные новинки: товары «на продаже» меньше `days` дней и со средним
+    рейтингом ниже `max_rating` — ранний сигнал «новинка уже собирает плохие отзывы».
+
+    «Дата старта» = `Nomenclature.first_sale_date`, а если её нет (не заполнена) —
+    фолбэк на дату ПЕРВОГО отзыва по товару (прокси начала продаж). Всё project-scoped.
+    """
+    days = max(1, min(days, 365))
+    nom = _nom_lookup_dated(project_id)
+    avg, cnt = _avg_and_count()
+    subject = func.coalesce(nom.c.subject, _NO_CATEGORY).label("subject")
+    brand = func.coalesce(nom.c.brand, func.max(WBFeedback.brand), _NO_BRAND).label("brand")
+
+    rows = (
+        await db.execute(
+            select(
+                WBFeedback.nm_id,
+                avg,
+                cnt,
+                func.count(WBFeedback.id).filter(~WBFeedback.is_answered),
+                func.min(WBFeedback.created_date),
+                _r(1), _r(2), _r(3), _r(4), _r(5),
+                subject,
+                brand,
+                func.max(WBFeedback.product_name),
+                nom.c.first_sale_date,
+            )
+            .select_from(WBFeedback)
+            .outerjoin(nom, nom.c.nm_id == WBFeedback.nm_id)
+            .where(WBFeedback.project_id == project_id, WBFeedback.nm_id.isnot(None))
+            .group_by(WBFeedback.nm_id, nom.c.subject, nom.c.brand, nom.c.first_sale_date)
+        )
+    ).all()
+
+    today = utcnow().replace(tzinfo=None).date()
+    items: list[dict] = []
+    for r in rows:
+        nm_id, ar, c, unanswered, first_rev, x1, x2, x3, x4, x5, subj, brnd, pname, fsd = r
+        # эффективная дата старта: продажа, иначе первый отзыв
+        eff: date | None = fsd if fsd is not None else (first_rev.date() if first_rev is not None else None)
+        if eff is None:
+            continue
+        days_on_sale = (today - eff).days
+        if days_on_sale < 0 or days_on_sale > days:
+            continue
+        if int(c or 0) < min_reviews:
+            continue
+        if ar is None or float(ar) >= max_rating:
+            continue
+        items.append({
+            "nm_id": int(nm_id),
+            "name": (pname or f"nmID {nm_id}"),
+            "brand": brnd,
+            "subject": subj,
+            "first_date": eff.isoformat(),
+            "days_on_sale": days_on_sale,
+            "avg_rating": _round(ar),
+            "count": int(c or 0),
+            "count_unanswered": int(unanswered or 0),
+            "r1": int(x1 or 0), "r2": int(x2 or 0), "r3": int(x3 or 0),
+            "r4": int(x4 or 0), "r5": int(x5 or 0),
+        })
+
+    # худшие первыми (рейтинг ↑), при равенстве — больше отзывов
+    items.sort(key=lambda it: (it["avg_rating"] if it["avg_rating"] is not None else 5.0, -it["count"]))
+    items = items[:_NEWCOMERS_LIMIT]
+
+    has_key = bool(items) or await has_any_feedback(db, project_id) or await _has_wb_key(db, project_id)
+    return {"items": items, "days": days, "max_rating": max_rating, "has_key": has_key}

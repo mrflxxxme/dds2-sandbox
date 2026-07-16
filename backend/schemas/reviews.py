@@ -83,6 +83,35 @@ class GroupRating(BaseModel):
     r5: int = 0
 
 
+class NewcomerReview(BaseModel):
+    """Проблемная новинка: товар недавно на продаже, но рейтинг ниже порога."""
+
+    nm_id: int
+    name: str  # название товара (снапшот WB) либо «nmID …»
+    brand: str
+    subject: str  # предмет/категория
+    first_date: str  # YYYY-MM-DD — эффективная дата старта (продажа или первый отзыв)
+    days_on_sale: int  # сколько дней «на продаже» по first_date
+    avg_rating: float | None = None
+    count: int = 0  # всего отзывов
+    count_unanswered: int = 0
+    r1: int = 0
+    r2: int = 0
+    r3: int = 0
+    r4: int = 0
+    r5: int = 0
+
+
+class NewcomersResponse(BaseModel):
+    """Раздел «Проблемные новинки»: новинки с рейтингом ниже порога."""
+
+    items: list[NewcomerReview] = []
+    days: int = 30  # окно «новинки» (дней на продаже)
+    max_rating: float = 4.6  # порог «плохого» рейтинга
+    # False → у проекта не настроен активный WB-ключ (фронт покажет подсказку)
+    has_key: bool = True
+
+
 class ReviewsSummaryResponse(BaseModel):
     """Полная сводка отзывов проекта (все блоки сводной страницы)."""
 
