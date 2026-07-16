@@ -770,6 +770,9 @@ export default function AssemblyListPage() {
                 number: r.number,
                 wb: r.effective_wb_warehouse || r.wb_warehouse_name || '',
                 supply: r.wb_supply_name || wbCabinetNo(r.wb_supply) || '',
+                // Голый номер поставки WB: FBW-номер связанной FBO-поставки, иначе
+                // кабинетный номер (бронь supply_id → предзаказ preorder_id).
+                supply_no: r.wb_supply_id_wb || r.wb_supply?.supply_id || r.wb_supply?.preorder_id || '',
                 pkg: PKG_PLAIN[r.package_type || 'BOX'] || r.package_type || '',
                 article: it.article || it.product_name || '',
                 barcode: it.barcode,
@@ -783,11 +786,12 @@ export default function AssemblyListPage() {
         }
         const totalBoxes = items.reduce((s, r) => s + (r.items ?? []).reduce((a, it) => a + (it.boxes ?? 0), 0), 0);
         const totalQty = items.reduce((s, r) => s + (r.items ?? []).reduce((a, it) => a + (it.quantity || 0), 0), 0);
-        rows.push({ number: 'ИТОГО', wb: '', supply: '', pkg: '', article: '', barcode: '', boxes: totalBoxes, qty: totalQty });
+        rows.push({ number: 'ИТОГО', wb: '', supply: '', supply_no: '', pkg: '', article: '', barcode: '', boxes: totalBoxes, qty: totalQty });
         exportToExcel(rows, 'assembly_picklist', [
             { key: 'number', label: '№ заявки' },
             { key: 'wb', label: 'WB-склад' },
             { key: 'supply', label: 'FBO поставка' },
+            { key: 'supply_no', label: '№ поставки WB' },
             { key: 'pkg', label: 'Тип' },
             { key: 'article', label: 'Артикул' },
             { key: 'barcode', label: 'Баркод' },
