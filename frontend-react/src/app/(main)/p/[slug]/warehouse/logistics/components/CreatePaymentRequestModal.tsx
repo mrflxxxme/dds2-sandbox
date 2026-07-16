@@ -527,7 +527,15 @@ export default function CreatePaymentRequestModal({ initialShipmentId, initialSh
             startPolling(created.id);
             onSuccess?.(detail);
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Ошибка загрузки документов');
+            const status = (e as { status?: number })?.status;
+            // 4xx = проблема самого файла (велик / не тот тип / битый) — повтор не поможет,
+            // показываем конкретную причину. 5xx / обрыв сети (0) — заявка УЖЕ создана, файлы
+            // на месте: достаточно повторить (напр. если сервер обновлялся). Не пугаем «Error 500».
+            if (status != null && status >= 400 && status < 500) {
+                setError(e instanceof Error ? e.message : 'Ошибка загрузки документов');
+            } else {
+                setError(`Заявка ${created.number} создана, но документы не загрузились — возможно, сервер обновляется. Файлы на месте: нажмите «Сохранить и закрыть» ещё раз через минуту.`);
+            }
         }
         setUploading(false);
     };
