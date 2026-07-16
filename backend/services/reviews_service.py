@@ -448,8 +448,15 @@ async def get_new_low_rated(
     items: list[dict] = []
     for r in rows:
         nm_id, ar, c, unanswered, first_rev, x1, x2, x3, x4, x5, subj, brnd, pname, fsd = r
-        # эффективная дата старта: продажа, иначе первый отзыв
-        eff: date | None = fsd if fsd is not None else (first_rev.date() if first_rev is not None else None)
+        # эффективная дата старта: реальная продажа, иначе прокси — первый отзыв
+        if fsd is not None:
+            eff: date | None = fsd
+            date_source = "sale"
+        elif first_rev is not None:
+            eff = first_rev.date()
+            date_source = "review"
+        else:
+            eff = None
         if eff is None:
             continue
         days_on_sale = (today - eff).days
@@ -465,6 +472,7 @@ async def get_new_low_rated(
             "brand": brnd,
             "subject": subj,
             "first_date": eff.isoformat(),
+            "date_source": date_source,
             "days_on_sale": days_on_sale,
             "avg_rating": _round(ar),
             "count": int(c or 0),

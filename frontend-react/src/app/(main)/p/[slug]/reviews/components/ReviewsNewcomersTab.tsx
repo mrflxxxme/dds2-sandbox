@@ -132,7 +132,18 @@ export default function ReviewsNewcomersTab() {
         {
             key: 'first_date', label: 'Старт продаж',
             render: (v: string, row: NewcomerReview) => (
-                <span style={{ fontSize: 13 }}>{formatDate(v)}<span style={{ color: 'var(--color-text-dim)' }}> · {formatNumber(row.days_on_sale, 0)} дн</span></span>
+                <span style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
+                    {formatDate(v)}
+                    <span style={{ color: 'var(--color-text-dim)' }}> · {formatNumber(row.days_on_sale, 0)} дн</span>
+                    {row.date_source === 'review' && (
+                        <span
+                            title="Дата первой продажи неизвестна — показана дата первого отзыва (приблизительно)"
+                            style={{ marginLeft: 6, fontSize: 11, color: 'var(--color-warning)', cursor: 'help' }}
+                        >
+                            ≈ по отзыву
+                        </span>
+                    )}
+                </span>
             ),
         },
         {

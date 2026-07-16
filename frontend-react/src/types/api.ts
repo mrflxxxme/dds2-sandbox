@@ -6381,6 +6381,8 @@ export interface NewcomerReview {
   brand: string;
   subject: string;
   first_date: string;
+  /** Источник даты старта: 'sale' — дата первой продажи; 'review' — дата первого отзыва (прокси) */
+  date_source: 'sale' | 'review';
   days_on_sale: number;
   avg_rating: number | null;
   count: number;

@@ -91,6 +91,7 @@ class NewcomerReview(BaseModel):
     brand: str
     subject: str  # предмет/категория
     first_date: str  # YYYY-MM-DD — эффективная дата старта (продажа или первый отзыв)
+    date_source: str = "review"  # "sale" — Nomenclature.first_sale_date; "review" — дата первого отзыва (прокси)
     days_on_sale: int  # сколько дней «на продаже» по first_date
     avg_rating: float | None = None
     count: int = 0  # всего отзывов

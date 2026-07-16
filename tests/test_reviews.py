@@ -266,6 +266,21 @@ async def test_new_low_rated_first_sale_date_precedence(db_session, project):
     item = next((i for i in res["items"] if i["nm_id"] == 504), None)
     assert item is not None  # новинка по first_sale_date, несмотря на старый отзыв
     assert item["days_on_sale"] == 10
+    assert item["date_source"] == "sale"  # дата взята из номенклатуры
+
+
+async def test_new_low_rated_date_source_review_fallback(db_session, project):
+    """Нет first_sale_date → дата и пометка источника берутся по первому отзыву."""
+    now = utcnow().replace(tzinfo=None)
+    await _add_feedback(db_session, project.id, "rv1", 2, 505, created=now - timedelta(days=5))
+    # номенклатуры для 505 нет → first_sale_date отсутствует
+    await db_session.commit()
+
+    res = await reviews_service.get_new_low_rated(db_session, project.id, days=30, max_rating=4.6)
+    item = next((i for i in res["items"] if i["nm_id"] == 505), None)
+    assert item is not None
+    assert item["date_source"] == "review"  # фолбэк на дату первого отзыва
+    assert item["days_on_sale"] == 5
 
 
 async def test_new_low_rated_breakdowns(db_session, project):
