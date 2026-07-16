@@ -196,16 +196,9 @@ export default function ReviewsNewcomersTab() {
                     <div style={{ marginBottom: 12, fontSize: 14 }}>
                         Найдено <b>{formatNumber(items.length, 0)}</b> проблемных новинок
                     </div>
-                    <TanStackDataTable
-                        columns={columns}
-                        data={items}
-                        exportName="problem_newcomers"
-                        enableSorting
-                        enablePagination={items.length > 50}
-                    />
 
-                    {/* Распределение проблемных новинок по разрезам */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '24px 0 12px', flexWrap: 'wrap' }}>
+                    {/* Распределение проблемных новинок по разрезам (над таблицей — сразу видно) */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '0 0 12px', flexWrap: 'wrap' }}>
                         <h3 style={{ margin: 0, fontSize: 16 }}>Распределение</h3>
                         <div style={{ display: 'flex', gap: 4 }}>
                             <button className={`btn btn-sm ${groupMode === 'category' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setGroupMode('category')}>По предмету</button>
@@ -214,12 +207,21 @@ export default function ReviewsNewcomersTab() {
                         </div>
                     </div>
                     {groups.length === 0 ? (
-                        <div className="glass-card" style={{ padding: 20, color: 'var(--color-text-dim)', fontSize: 14 }}>Нет данных</div>
+                        <div className="glass-card" style={{ padding: 20, color: 'var(--color-text-dim)', fontSize: 14, marginBottom: 24 }}>Нет данных</div>
                     ) : (
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16 }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16, marginBottom: 24 }}>
                             {groups.map(g => <GroupCard key={g.name} g={g} />)}
                         </div>
                     )}
+
+                    <h3 style={{ margin: '0 0 12px', fontSize: 16 }}>Список новинок</h3>
+                    <TanStackDataTable
+                        columns={columns}
+                        data={items}
+                        exportName="problem_newcomers"
+                        enableSorting
+                        enablePagination={items.length > 50}
+                    />
                 </>
             )}
         </div>
