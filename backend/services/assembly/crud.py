@@ -22,7 +22,7 @@ from backend.models.assembly import (
     AssemblyRequestItem,
     AssemblyStatus,
 )
-from backend.models.cost import Nomenclature
+from backend.models.cost import CostOrder, Nomenclature
 from backend.models.counterparty import Counterparty
 from backend.models.fulfillment import FulfillmentRequest
 from backend.models.gazelka import GazelkaOrder, GazelkaOrderStatus
@@ -293,6 +293,8 @@ async def _build_items_with_stock(
     *,
     nom_map: dict[int, Nomenclature] | None = None,
     stock_by_wh_nom: dict[tuple[int, int], int] | None = None,
+    box_qty_by_wh_bc: dict[tuple[int, str], int | None] | None = None,
+    machine_box_qty: dict[tuple[int, str], int] | None = None,
 ) -> list[dict]:
     """Build items list with product_name and stock_quantity.
 
@@ -333,6 +335,18 @@ async def _build_items_with_stock(
         nom = nom_map.get(item.nomenclature_id)
         product_name = (nom.subject or nom.article_seller or item.barcode) if nom else item.barcode
 
+        # Кратность короба (склад заявки + ШК) → коробов на позицию = ⌈штук/кратность⌉
+        # (зеркало compute_boxes_count: хвост < короба — отдельный неполный короб).
+        # box_qty_by_wh_bc может отсутствовать (single-row без резолва) или не иметь
+        # записи по ШК → box_qty/boxes = None («коробов» в листе пусто, не ложный 0).
+        # Фолбэк для заявок ЕДУЩЕЙ машины: справочника склада ещё нет (заводится на
+        # приёмке) → берём кратность со строк машины-источника (machine_box_qty).
+        box_qty = box_qty_by_wh_bc.get((request.warehouse_id, item.barcode)) if box_qty_by_wh_bc else None
+        if not box_qty and machine_box_qty and request.source_vehicle_id is not None:
+            box_qty = machine_box_qty.get((request.source_vehicle_id, item.barcode))
+        qty = int(item.quantity or 0)
+        boxes = -(-qty // box_qty) if (box_qty and box_qty > 0 and qty > 0) else None
+
         items_out.append(
             {
                 "id": item.id,
@@ -343,6 +357,8 @@ async def _build_items_with_stock(
                 "article": (nom.article_seller if nom else None),
                 "brand": nom.brand if nom else None,
                 "stock_quantity": stock_map.get(item.nomenclature_id, 0),
+                "box_qty": box_qty,
+                "boxes": boxes,
             }
         )
     return items_out
@@ -359,6 +375,7 @@ async def _build_response(
     via_gazelka_ids: set[int] | None = None,
     weight_by_barcode: dict[str, Decimal | None] | None = None,
     box_qty_by_wh_bc: dict[tuple[int, str], int | None] | None = None,
+    machine_box_qty: dict[tuple[int, str], int] | None = None,
     box_weight_kg: Decimal | None = None,
 ) -> dict:
     """
@@ -463,6 +480,15 @@ async def _build_response(
             db, request.project_id, {request.warehouse_id: [it.barcode for it in (request.items or [])]}
         )
         box_weight_kg = await get_box_weight_kg(db, request.project_id)
+    # Фолбэк кратности со строк машины-источника (единичный путь; список — из prefetch).
+    if machine_box_qty is None and request.source_vehicle_id is not None:
+        from backend.services.box_multiplicity_service import resolve_source_machine_box_qty
+
+        vehicle = await db.get(CostOrder, request.source_vehicle_id)
+        if vehicle is not None and vehicle.project_id == request.project_id and not vehicle.is_deleted:
+            machine_box_qty = await resolve_source_machine_box_qty(
+                db, request.project_id, {request.source_vehicle_id: vehicle.order_no}
+            )
     boxes_count = compute_boxes_count(request, box_qty_by_wh_bc)
     suggested_total_weight_kg = compute_suggested_total_weight(goods_weight_kg, boxes_count, box_weight_kg)
 
@@ -537,7 +563,8 @@ async def _build_response(
         "carrier_name": carrier_name,
         "items": (
             items := await _build_items_with_stock(
-                db, request, nom_map=nom_map, stock_by_wh_nom=stock_by_wh_nom
+                db, request, nom_map=nom_map, stock_by_wh_nom=stock_by_wh_nom,
+                box_qty_by_wh_bc=box_qty_by_wh_bc, machine_box_qty=machine_box_qty,
             )
         ),
         "brands": ", ".join(sorted({i["brand"] for i in items if i.get("brand")})) or None,
@@ -660,6 +687,24 @@ async def prefetch_list_maps(
     )
     box_weight_kg = await get_box_weight_kg(db, project_id)
 
+    # Фолбэк кратности для заявок ЕДУЩЕЙ машины (справочника склада ещё нет): резолв
+    # со строк машин-источников. Одним батчем на все машины страницы (не N+1).
+    machine_box_qty: dict[tuple[int, str], int] = {}
+    vehicle_ids = {req.source_vehicle_id for req in requests if req.source_vehicle_id is not None}
+    if vehicle_ids:
+        from backend.services.box_multiplicity_service import resolve_source_machine_box_qty
+
+        veh_rows = await db.execute(
+            select(CostOrder.id, CostOrder.order_no).where(
+                CostOrder.project_id == project_id,
+                CostOrder.id.in_(vehicle_ids),
+                CostOrder.is_deleted == False,  # noqa: E712
+            )
+        )
+        vid_to_order = {r.id: r.order_no for r in veh_rows.all()}
+        if vid_to_order:
+            machine_box_qty = await resolve_source_machine_box_qty(db, project_id, vid_to_order)
+
     return {
         "nom_map": nom_map,
         "stock_by_wh_nom": stock_by_wh_nom,
@@ -668,6 +713,7 @@ async def prefetch_list_maps(
         "via_gazelka_ids": via_gazelka_ids,
         "weight_by_barcode": weight_by_barcode,
         "box_qty_by_wh_bc": box_qty_by_wh_bc,
+        "machine_box_qty": machine_box_qty,
         "box_weight_kg": box_weight_kg,
     }
 
@@ -718,6 +764,34 @@ async def list_wb_warehouses(
     return sorted(names)
 
 
+async def list_source_vehicles(
+    db: AsyncSession,
+    project_id: int,
+) -> list[dict[str, Any]]:
+    """Машины (CostOrder), у которых есть не удалённые заявки сборки, — опции
+    дропдауна «Источник» в списке сборок. Свежие сверху (по max id заявки)."""
+    rows = (
+        await db.execute(
+            select(
+                CostOrder.id,
+                CostOrder.order_no,
+                func.max(AssemblyRequest.id).label("last_req_id"),
+            )
+            .join(AssemblyRequest, AssemblyRequest.source_vehicle_id == CostOrder.id)
+            .where(
+                AssemblyRequest.project_id == project_id,
+                AssemblyRequest.is_deleted == False,  # noqa: E712
+                CostOrder.project_id == project_id,
+                CostOrder.is_deleted == False,  # noqa: E712
+            )
+            .group_by(CostOrder.id, CostOrder.order_no)
+            .order_by(func.max(AssemblyRequest.id).desc())
+            .limit(100)
+        )
+    ).all()
+    return [{"id": r.id, "order_no": r.order_no} for r in rows]
+
+
 # --- CRUD -------------------------------------------------------------------
 
 
@@ -747,6 +821,8 @@ async def list_assembly_requests(
     brand: str | None = None,
     ff_link: str | None = None,
     joint_only: bool = False,
+    source: str | None = None,
+    source_vehicle_id: int | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[AssemblyRequest], int]:
@@ -765,6 +841,14 @@ async def list_assembly_requests(
     joint_only: True — только «совместные» сборки (делят WB FBO-поставку с ≥1
     другой активной сборкой, т.е. ≥2 сборок на одну поставку под тем же
     предикатом, что у partial-unique индекса: не удалена, не CANCELLED).
+
+    source: происхождение заявки. "pre_dist" — с меткой машины
+    (source_vehicle_id, предраспределение И долив принятой машины);
+    "prebooking" — 🅿️ предзаявки (is_prebooking); "plain" — без того и
+    другого; None — без фильтра.
+
+    source_vehicle_id: точечный фильтр «заявки ЭТОЙ машины» (уточняет
+    source="pre_dist"; сам по себе тоже работает).
     """
     base = select(AssemblyRequest).where(
         AssemblyRequest.project_id == project_id,
@@ -820,6 +904,18 @@ async def list_assembly_requests(
             .distinct()
         )
         base = base.where(AssemblyRequest.id.in_(brand_requests))
+
+    if source_vehicle_id is not None:
+        base = base.where(AssemblyRequest.source_vehicle_id == source_vehicle_id)
+    if source == "pre_dist":
+        base = base.where(AssemblyRequest.source_vehicle_id.is_not(None))
+    elif source == "prebooking":
+        base = base.where(AssemblyRequest.is_prebooking == True)  # noqa: E712
+    elif source == "plain":
+        base = base.where(
+            AssemblyRequest.source_vehicle_id.is_(None),
+            AssemblyRequest.is_prebooking == False,  # noqa: E712
+        )
 
     if ff_link in ("none", "linked"):
         ff_exists = (
@@ -1524,13 +1620,14 @@ async def update_assembly_request(
 
     # Ручная правка реквизитов машины в шапке заявки тоже тянется в WB-пропуск
     # (как и при assign_vehicle). Best-effort: сбой синка не роняет сохранение.
-    if (
+    vehicle_edited = (
         payload.vehicle_info is not None
         or payload.vehicle_brand is not None
         or payload.driver_phone is not None
         or payload.driver_first_name is not None
         or payload.driver_last_name is not None
-    ):
+    )
+    if vehicle_edited:
         from backend.services import wb_supply_service
 
         try:
@@ -1539,6 +1636,15 @@ async def update_assembly_request(
             logger.warning("sync_pass_from_vehicle failed for request %s", req.id)
 
     await db.commit()
+    # Правка реквизитов могла дозаполнить пропуск → пробуем авто-занос в WB
+    # (если дата забронирована и пропуск полный). После commit, best-effort.
+    if vehicle_edited:
+        from backend.services import wb_supply_service
+
+        try:
+            await wb_supply_service.try_autopush_pass_by_assembly(db, project_id, req.id)
+        except Exception:  # noqa: BLE001
+            logger.warning("try_autopush_pass_by_assembly failed for request %s", req.id)
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
     await invalidate_cache("reports:warehouse_need")

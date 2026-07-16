@@ -9,6 +9,11 @@
 машины (``accept_receipt``) заявки авто → ``IN_PROGRESS`` (резерв стал реальным
 стоком в той же транзакции).
 
+Принятая машина (DELIVERED) остаётся в распределении ещё
+``PRE_DIST_DELIVERED_WINDOW_DAYS`` дней после приёмки: её груз уже оприходован в
+``WarehouseStock`` ФФ, поэтому заявки из неё создаются ОБЫЧНЫМИ (IN_PROGRESS, с
+валидацией реального остатка), а метка машины сохраняется через ``source_vehicle_id``.
+
 См. .claude/PREDIST_DESIGN.md (полный спек + критика).
 """
 
@@ -17,7 +22,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import func, nulls_last, select
+from sqlalchemy import func, nulls_last, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_cache
@@ -25,7 +30,7 @@ from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, Assemb
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import VehicleStatus
 from backend.models.supply_chain import FactoryOrderItem
-from backend.models.warehouse import Warehouse, WarehouseType
+from backend.models.warehouse import InboundReceipt, InboundStatus, Warehouse, WarehouseType
 # Единый источник «эффективной» кратности/габарита FactoryOrderItem (mix-вариант учтён) —
 # переиспользуем, чтобы кратность машины на экране совпадала со справочником приёмок.
 from backend.services.box_multiplicity_service import _foi_effective_box_size, _foi_effective_ppb
@@ -41,13 +46,29 @@ from backend.schemas.assembly import (
     PreDistVehiclePool,
 )
 
-from .crud import _build_response, create_assembly_request, get_assembly_request
+from .crud import (
+    _build_response,
+    _format_deficit_error,
+    _validate_available_for_assembly,
+    create_assembly_request,
+    get_assembly_request,
+)
 from .status import _check_transition, _log_status_change
 
 logger = logging.getLogger(__name__)
 
 # Машины, товар которых можно предраспределять (в пути, ещё не разгружены).
 PRE_DIST_VEHICLE_STATUSES = (VehicleStatus.CUSTOMS, VehicleStatus.DISPATCHED)
+
+# Принятая (DELIVERED) машина остаётся доступной для распределения ещё N дней после
+# приёмки: остаток уже оприходован на ФФ, заявки из неё создаются ОБЫЧНЫМИ (IN_PROGRESS,
+# с валидацией реального стока), а не PRE_DISTRIBUTED.
+PRE_DIST_DELIVERED_WINDOW_DAYS = 3
+
+
+def _delivered_window_start() -> date:
+    """Первая дата приёмки, с которой принятая машина ещё видна в распределении."""
+    return date.today() - timedelta(days=PRE_DIST_DELIVERED_WINDOW_DAYS)
 
 
 def _vehicle_status_str(status: str | None) -> str:
@@ -69,8 +90,35 @@ def _is_machine_newcomer(first_sale: date | None) -> bool:
 # ─── Загрузка/валидация машины ─────────────────────────────────────────────
 
 
+async def _vehicle_accepted_date(db: AsyncSession, project_id: int, vehicle: CostOrder) -> date | None:
+    """Дата последней ПРИНЯТОЙ приёмки машины (``InboundReceipt.actual_date``).
+
+    Связь смотрим в обе стороны: ``InboundReceipt.cost_order_id`` (создание приёмки
+    под машину) и ``CostOrder.inbound_receipt_id`` (авто-создание при отправке) —
+    исторически могла быть заполнена только одна из них.
+    """
+    return (
+        await db.execute(
+            select(func.max(InboundReceipt.actual_date)).where(
+                InboundReceipt.project_id == project_id,
+                InboundReceipt.is_deleted == False,  # noqa: E712
+                InboundReceipt.status == InboundStatus.ACCEPTED,
+                or_(
+                    InboundReceipt.cost_order_id == vehicle.id,
+                    InboundReceipt.id == vehicle.inbound_receipt_id,
+                ),
+            )
+        )
+    ).scalar()
+
+
 async def _load_distributable_vehicle(db: AsyncSession, project_id: int, vehicle_id: int) -> CostOrder:
-    """Машина проекта в статусе, допускающем предраспределение. Иначе ValueError."""
+    """Машина проекта в статусе, допускающем (пред)распределение. Иначе ValueError.
+
+    В пути (CUSTOMS/DISPATCHED) — классическое предраспределение. DELIVERED — только
+    в окне ``PRE_DIST_DELIVERED_WINDOW_DAYS`` после приёмки (остаток уже на ФФ,
+    заявки создаются обычными).
+    """
     vehicle = (
         await db.execute(
             select(CostOrder).where(
@@ -83,7 +131,14 @@ async def _load_distributable_vehicle(db: AsyncSession, project_id: int, vehicle
     if not vehicle:
         raise ValueError("Машина не найдена")
     if vehicle.status not in PRE_DIST_VEHICLE_STATUSES:
-        raise ValueError("Предраспределять можно только машину в пути (на таможне или отправленную со склада)")
+        accepted: date | None = None
+        if vehicle.status == VehicleStatus.DELIVERED:
+            accepted = await _vehicle_accepted_date(db, project_id, vehicle)
+        if accepted is None or accepted < _delivered_window_start():
+            raise ValueError(
+                "Распределять можно машину в пути (на таможне или отправленную со склада) "
+                f"или принятую не позднее {PRE_DIST_DELIVERED_WINDOW_DAYS} дн. назад"
+            )
     return vehicle
 
 
@@ -263,12 +318,49 @@ async def get_vehicle_pre_dist_pool(db: AsyncSession, project_id: int, vehicle_i
         distributed_qty=sum(reserved.values()),
         can_distribute=True,
         block_reason=None,
+        accepted_date=(
+            await _vehicle_accepted_date(db, project_id, vehicle)
+            if vehicle.status == VehicleStatus.DELIVERED
+            else None
+        ),
     )
     return PreDistVehiclePool(vehicle=vehicle_brief, rows=rows)
 
 
+async def _recently_accepted_vehicles(db: AsyncSession, project_id: int) -> list[tuple[CostOrder, date]]:
+    """Принятые машины в окне: DELIVERED + ACCEPTED-приёмка не старше окна → (машина, дата приёмки).
+
+    Свежепринятые первыми (окно короткое — выборка мала by design, без .limit()).
+    """
+    accepted_date = func.max(InboundReceipt.actual_date)
+    rows = (
+        await db.execute(
+            select(CostOrder, accepted_date)
+            .join(
+                InboundReceipt,
+                or_(
+                    InboundReceipt.cost_order_id == CostOrder.id,
+                    InboundReceipt.id == CostOrder.inbound_receipt_id,
+                ),
+            )
+            .where(
+                CostOrder.project_id == project_id,
+                CostOrder.is_deleted == False,  # noqa: E712
+                CostOrder.status == VehicleStatus.DELIVERED,
+                InboundReceipt.project_id == project_id,
+                InboundReceipt.is_deleted == False,  # noqa: E712
+                InboundReceipt.status == InboundStatus.ACCEPTED,
+            )
+            .group_by(CostOrder.id)
+            .having(accepted_date >= _delivered_window_start())
+            .order_by(accepted_date.desc(), CostOrder.id.desc())
+        )
+    ).all()
+    return [(row[0], row[1]) for row in rows]
+
+
 async def get_pre_distribution_vehicles(db: AsyncSession, project_id: int) -> list[PreDistVehicle]:
-    """Машины в пути (CUSTOMS/DISPATCHED) с агрегатами для списка предраспределения."""
+    """Машины в пути (CUSTOMS/DISPATCHED) + принятые в окне, с агрегатами для списка."""
     vehicles = list(
         (
             await db.execute(
@@ -284,6 +376,10 @@ async def get_pre_distribution_vehicles(db: AsyncSession, project_id: int) -> li
         .scalars()
         .all()
     )
+    # Принятые ≤ окна — в хвост списка (в пути важнее: их ещё можно разложить заранее).
+    delivered_pairs = await _recently_accepted_vehicles(db, project_id)
+    accepted_map = {v.id: d for v, d in delivered_pairs}
+    vehicles += [v for v, _ in delivered_pairs]
     if not vehicles:
         return []
 
@@ -366,6 +462,7 @@ async def get_pre_distribution_vehicles(db: AsyncSession, project_id: int) -> li
                 distributed_qty=dist_map.get(v.id, 0),
                 can_distribute=block_reason is None,
                 block_reason=block_reason,
+                accepted_date=accepted_map.get(v.id),
             )
         )
     return out
@@ -422,18 +519,26 @@ async def _fold_into_pre_dist_request(
     await db.flush()
     await invalidate_cache("reports:assembly_flow")
     await invalidate_cache("reports:assembly_link_anomalies")
+    # Fold в IN_PROGRESS-заявку (принятая машина) растит реальный резерв ФФ — экран
+    # «Потребность по складам» обязан пересчитаться (create-путь инвалидирует сам).
+    await invalidate_cache("reports:warehouse_need")
 
 
 async def create_pre_distribution(
     db: AsyncSession, project_id: int, payload: PreDistributionCreate
 ) -> PreDistributionCreateResult:
-    """Создать заявки PRE_DISTRIBUTED из строк раскладки.
+    """Создать заявки из строк раскладки машины.
 
     Строки группируются по (WB-склад, упаковка) → одна заявка на группу. Источник-склад
-    всех заявок = ФФ разгрузки машины. Валидации ДО создания (fail-fast):
-      - машина в пути + ФФ-склад назначения (M3);
+    всех заявок = ФФ разгрузки машины. Машина в пути → заявки PRE_DISTRIBUTED (без
+    реального стока). Машина ПРИНЯТА (DELIVERED в окне) → ОБЫЧНЫЕ заявки IN_PROGRESS:
+    её груз уже оприходован в WarehouseStock ФФ, поэтому работает штатная валидация
+    остатка; метка машины сохраняется через source_vehicle_id (is_pre_distribution=False).
+    Валидации ДО создания (fail-fast):
+      - машина в пути или принята ≤ окна + ФФ-склад назначения (M3);
       - все ШК есть в номенклатуре проекта;
-      - Σ запрошенного по ШК ≤ доступного в пуле (over-commit guard).
+      - Σ запрошенного по ШК ≤ доступного в пуле (over-commit guard);
+      - для принятой машины — единый предчек реального остатка ФФ по всем группам.
     wb_fbo_supply_id допустим только при одном WB-складе назначения.
     """
     if not payload.rows:
@@ -441,6 +546,7 @@ async def create_pre_distribution(
 
     vehicle = await _load_distributable_vehicle(db, project_id, payload.vehicle_id)
     target_wh = await _resolve_target_ff_warehouse(db, project_id, vehicle)
+    is_delivered = vehicle.status == VehicleStatus.DELIVERED
 
     # Нормализуем строки + агрегируем запрошенное по ШК
     requested: dict[str, int] = {}
@@ -466,6 +572,24 @@ async def create_pre_distribution(
         available = max(0, gross[bc] - reserved.get(bc, 0))
         if req_qty > available:
             raise ValueError(f"Превышение по {bc}: запрошено {req_qty}, доступно {available}")
+
+    if is_delivered:
+        # Машина принята: заявки будут ОБЫЧНЫМИ и обязаны пройти валидацию реального
+        # остатка ФФ. Единый предчек по Σ всех групп ДО первой мутации: create-путь
+        # валидирует и сам, но fold-путь — нет, а fail-fast здесь не оставляет частично
+        # созданных групп (create_assembly_request коммитит на каждой группе).
+        probe_items = [
+            AssemblyRequestItem(
+                project_id=project_id,
+                nomenclature_id=nom_map[bc].id,
+                barcode=bc,
+                quantity=qty,
+            )
+            for bc, qty in requested.items()
+        ]
+        deficits = await _validate_available_for_assembly(db, project_id, target_wh.id, probe_items)
+        if deficits:
+            raise ValueError(_format_deficit_error(deficits))
 
     # Группировка по (WB-склад, упаковка)
     groups: dict[tuple[str, str], dict[str, int]] = {}
@@ -522,16 +646,25 @@ async def create_pre_distribution(
             package_type=cast(PackageTypeStr, pkg),
             items=items,
         )
+        # В пути → PRE_DISTRIBUTED без реального стока. Принята → обычная сборка
+        # (IN_PROGRESS по умолчанию, штатная стоковая валидация); source_vehicle_id
+        # остаётся меткой машины в обоих случаях.
         req = await create_assembly_request(
             db,
             project_id,
             create_payload,
-            skip_stock_validation=True,
-            status_override=AssemblyStatus.PRE_DISTRIBUTED,
+            skip_stock_validation=not is_delivered,
+            status_override=None if is_delivered else AssemblyStatus.PRE_DISTRIBUTED,
             source_vehicle_id=vehicle.id,
-            is_pre_distribution=True,
+            is_pre_distribution=not is_delivered,
         )
         created.append(req)
+
+    # Fold-путь меняет данные только flush'ем, а get_db за сервис не коммитит: без
+    # явного commit чисто-fold запрос (все направления уже существуют) молча
+    # откатывался при закрытии сессии — 200 OK, но БД без изменений (кейс V-0033).
+    # Create-путь коммитит внутри create_assembly_request — повторный commit no-op.
+    await db.commit()
 
     # create_assembly_request инвалидирует reports:* на каждом вызове — отдельно не нужно.
     # Перечитываем через get_assembly_request (selectinload) — релейшены загружены,

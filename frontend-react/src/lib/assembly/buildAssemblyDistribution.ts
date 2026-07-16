@@ -49,10 +49,16 @@ export type AvailabilityOf = (nm_id: number, barcode: string) => Record<number, 
 export interface DistributionGeom {
     /** Кратность короба (шт/короб) per nm_id. null/0 — россыпь. */
     ppbOf: (nm_id: number) => number | null | undefined;
+    /** Кратность короба КОНКРЕТНОГО ФФ (может отличаться по складам) — паритет
+     *  нормализации со страницей черновика (она re-нормализует с ppbAt). */
+    ppbAt?: (nm_id: number, ffId: number) => number | null | undefined;
     /** Габариты короба «ДxШxВ» per nm_id. null — не палетизируется. */
     boxSizeOf: (nm_id: number) => string | null | undefined;
     /** Override «коробов на паллету» по канон-размеру короба. */
     palletOverrides: Record<string, number>;
+    /** Вес приоритета WB-склада (серверная «схема воришек») — порядок среза при
+     *  дефиците источника (паритет с greedy черновика). */
+    priorityOf?: (wh: string) => number;
 }
 
 /** Применённый результат приёмки: per (nm_id::barcode) → набор сплитов (тип упаковки × распределение). */
@@ -127,7 +133,14 @@ export function buildDistributionSkus(
     return out;
 }
 
-/** Применить сплиты приёмки к базовым скусам (closed→open + тип упаковки per WB-склад). */
+/** Применить сплиты приёмки к базовым скусам (closed→open + тип упаковки per WB-склад).
+ *
+ *  ВАЖНО: сплиты одного SKU склеиваются в ОДИН вход (`target` = объединение,
+ *  упаковка — картой `packageByWh`), а НЕ дублируются отдельными скусами.
+ *  Дубли ломали конвейер дважды: `buildDraftRows` кладёт планы в Map по
+ *  `${nm_id}::${barcode}` — второй сплит молча перетирал первый (прод-кейс
+ *  150х200_серый 2026-07-15: BOX-часть 360 шт исчезала, ехало 13 шт моно), а
+ *  выживи оба — каждый сорсил бы ФФ-сток независимо (двойной счёт источника). */
 export function applyAcceptanceSplits(
     skus: DraftSkuInput[],
     splitMap: AcceptanceSplitMap | null,
@@ -140,13 +153,19 @@ export function applyAcceptanceSplits(
             out.push(s);
             continue;
         }
+        const target: Record<string, number> = {};
+        const packageByWh: Record<string, PackageType> = {};
         for (const sp of splits) {
-            const target = Object.fromEntries(
-                Object.entries(sp.distribution || {}).filter(([, q]) => (q || 0) > 0),
-            );
-            if (Object.keys(target).length === 0) continue;
-            out.push({ ...s, target, packageType: sp.package_type });
+            for (const [wh, q] of Object.entries(sp.distribution || {})) {
+                if ((q || 0) <= 0) continue;
+                // Один склад в двух сплитах не встречается (сплит — по складам);
+                // на всякий случай суммируем qty, упаковка — последнего сплита.
+                target[wh] = (target[wh] || 0) + (q || 0);
+                packageByWh[wh] = sp.package_type;
+            }
         }
+        if (Object.keys(target).length === 0) continue;
+        out.push({ ...s, target, packageByWh: { ...(s.packageByWh || {}), ...packageByWh } });
     }
     return out;
 }
@@ -173,7 +192,7 @@ export function finalizeDistribution(
     if (effectiveSkus.length === 0 && extraRows.length === 0) return { rows: [], prebook: [] };
     const { ppbOf, boxSizeOf, palletOverrides } = geom;
 
-    let rows = buildDraftRows({ skus: effectiveSkus, palletOverrides, minOneBoxPerWh });
+    let rows = buildDraftRows({ skus: effectiveSkus, palletOverrides, minOneBoxPerWh, priorityOf: geom.priorityOf });
 
     // Свободный источник per nm = доступно − уже засорсенное (для добивки/паллет).
     const freeAfter = (current: AssemblyDraftRow[]): Record<number, Record<number, number>> => {
@@ -196,7 +215,7 @@ export function finalizeDistribution(
     };
 
     // Добить неполные коробы из ОСТАВШЕГОСЯ источника (как в AddFromNeedPanel/finalizePoolRows).
-    rows = roundDraftRowsToWholeBoxes(rows, (nm) => ppbOf(nm), freeAfter(rows), () => false).rows;
+    rows = roundDraftRowsToWholeBoxes(rows, (nm) => ppbOf(nm), freeAfter(rows), () => false, geom.ppbAt).rows;
 
     // Пред-построенные целые коробы (засев/дозабор) вливаем в набор ДО нормализации.
     const merged = extraRows.length ? [...rows, ...extraRows] : rows;
@@ -208,6 +227,7 @@ export function finalizeDistribution(
     // Побочный выход `dropped` = под-паллетные хвосты целых коробов → предбронь.
     const ctx: NormalizeDraftCtx = {
         ppbOf: (nm) => ppbOf(nm),
+        ppbAt: geom.ppbAt,
         boxSizeOf: (nm) => boxSizeOf(nm) ?? null,
         overrides: palletOverrides,
         freeByNm: freeAfter(merged),

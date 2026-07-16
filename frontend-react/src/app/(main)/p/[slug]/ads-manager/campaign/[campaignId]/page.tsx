@@ -1,40 +1,35 @@
 'use client';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import PageGuard from '@/components/PageGuard';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import type { AdsManagerCampaign, AdsAutopaySetting, CampaignClustersResponse, CampaignMetricsResponse, CampaignZones, SearchCluster } from '@/types/api';
-import { IcChart, IcClusters, IcCalendar, IcRefresh, IcPause, IcPlay, IcExternal, IcClock, IcGear, IcHistory } from '../../components/icons';
+import type { AdsManagerCampaign, AdsAutopaySetting, CampaignClustersResponse, CampaignMetricRow, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionSnapshot, CampaignZones, SearchCluster } from '@/types/api';
+import { IcChart, IcClusters, IcCalendar, IcRefresh, IcPause, IcPlay, IcExternal, IcClock, IcGear, IcHistory, IcCopy } from '../../components/icons';
 import ClusterTable from '../../components/ClusterTable';
 import CampaignMetricsTable from '../../components/CampaignMetricsTable';
+import CampaignZoneMetricsTable from '../../components/CampaignZoneMetricsTable';
+import CampaignHourlyChart from '../../components/CampaignHourlyChart';
+import CampaignIntradayChart from '../../components/CampaignIntradayChart';
 import CampaignMetricsChart, { DEFAULT_CHART_METRICS, type MetricKey } from '../../components/CampaignMetricsChart';
 import AutopayModal from '../../components/AutopayModal';
 import AutopayLogModal from '../../components/AutopayLogModal';
 import WbThumb from '../../components/WbThumb';
 import AdsPeriodPicker from '../../components/AdsPeriodPicker';
-import { fmt, iso, STATUS_BADGE, adTypeLabel, wbCampaignUrl } from '../../components/adsShared';
+import Tooltip from '../../components/Tooltip';
+import EditableName from '../../components/EditableName';
+import { useToast } from '../../components/Toasts';
+import ZonesPanel, { ZONES, zoneRuleText } from '../../components/ZonesPanel';
+import { fmt, iso, STATUS_BADGE, adTypeLabel, wbCampaignUrl, autopayLabel } from '../../components/adsShared';
 
 type CatalogEntry = { vendor_code: string; subject: string; brand: string };
 
-type CampTab = 'metrics' | 'clusters';
-
-// Зоны показов WB: ставка и статистика у каждой своя
-const ZONES: { key: 'search' | 'recommendations'; label: string }[] = [
-    { key: 'search', label: 'Поиск' },
-    { key: 'recommendations', label: 'Рекомендации' },
-];
-
-/** Как устроена ставка у этого типа кампании (правила WB, зоны переключать нельзя). */
-function zoneRuleText(z: CampaignZones): string {
-    if (z.payment_type === 'cpc') return 'CPC · только поиск, ставка за клик — единая для всех фраз';
-    if (z.bid_mode === 'unified') return 'CPM · единая ставка сразу на все зоны, они работают одновременно';
-    return 'CPM · ручные ставки';
-}
+type CampTab = 'metrics' | 'clusters' | 'hourly' | 'intraday';
 
 export default function CampaignPage() {
     const routeParams = useParams();
+    const toast = useToast();
     const slug = typeof routeParams?.slug === 'string' ? routeParams.slug : Array.isArray(routeParams?.slug) ? routeParams.slug[0] : '';
     const campaignId = Number(Array.isArray(routeParams?.campaignId) ? routeParams.campaignId[0] : routeParams?.campaignId);
 
@@ -51,18 +46,22 @@ export default function CampaignPage() {
     const [autopayModal, setAutopayModal] = useState(false);
     const [autopayLogModal, setAutopayLogModal] = useState(false);
     const [stateBusy, setStateBusy] = useState(false);
+    const [refreshing, setRefreshing] = useState(false);  // живой догруз кампании из WB по «Обновить»
 
-    const loadCampaign = useCallback(async () => {
-        setCampLoading(true); setCampError('');
+    // silent=true — тихая фоновая сверка после оптимистичного апдейта: не гасит шапку
+    // спиннером и не роняет ошибку в UI (значение уже показано из ответа действия).
+    const loadCampaign = useCallback(async (silent = false) => {
+        if (!silent) setCampLoading(true);
+        if (!silent) setCampError('');
         try {
             const [list, ap] = await Promise.all([api.getAdCampaignsList(), api.getCampaignsAutopay().catch(() => ({}))]);
             const found = list.find(c => c.campaign_id === campaignId) ?? null;
             setCampaign(found);
             setAutopay(ap);
-            if (!found) setCampError('Кампания не найдена. Возможно, она ещё не синхронизирована.');
+            if (!found && !silent) setCampError('Кампания не найдена. Возможно, она ещё не синхронизирована.');
         } catch (e) {
-            setCampError(e instanceof Error ? e.message : 'Ошибка загрузки кампании');
-        } finally { setCampLoading(false); }
+            if (!silent) setCampError(e instanceof Error ? e.message : 'Ошибка загрузки кампании');
+        } finally { if (!silent) setCampLoading(false); }
     }, [campaignId]);
 
     useEffect(() => { loadCampaign(); }, [loadCampaign]);
@@ -79,8 +78,9 @@ export default function CampaignPage() {
 
     const isCpm = (campaign?.campaign_type || '').toLowerCase() === 'cpm';
     const [tab, setTab] = useState<CampTab>('metrics');
-    // При заходе в кампанию метрики показываем графиком; «По дням» — та же таблица
-    const [metricsView, setMetricsView] = useState<'chart' | 'table'>('chart');
+    // При заходе в кампанию метрики показываем графиком; «По дням» — та же таблица;
+    // «По зонам» — отдельная таблица РК-метрик с селектором зоны (только CPM)
+    const [metricsView, setMetricsView] = useState<'chart' | 'table' | 'zones'>('chart');
     // Выбор метрик графика живёт здесь: при смене товара/периода метрики перезагружаются
     // и график размонтируется — своё состояние он бы потерял.
     const [chartMetrics, setChartMetrics] = useState<Set<MetricKey>>(() => new Set(DEFAULT_CHART_METRICS));
@@ -91,6 +91,12 @@ export default function CampaignPage() {
     }), []);
     // Выбранный товар: показывать воронку только по нему (клик по карточке товара)
     const [selectedNm, setSelectedNm] = useState<number | null>(null);
+    // Кластеризатор (поисковые фразы) есть только у CPM. Разбивка статистики по зонам
+    // живёт на отдельной вкладке «По зонам»; блок «ЗОНЫ ПОКАЗОВ» — лишь вкл/выкл зон.
+    const clustersAvailable = isCpm;
+    // Вкладка кластеров исчезла под ногами (выбрали «Рекомендации») — уводим на метрики,
+    // иначе на экране не осталось бы ни одной вкладки с содержимым.
+    useEffect(() => { if (!clustersAvailable) setTab(t => (t === 'clusters' ? 'metrics' : t)); }, [clustersAvailable]);
     // Ручное пополнение бюджета
     const [depositAmount, setDepositAmount] = useState('');
     const [depositSource, setDepositSource] = useState(0);  // 0 = счёт кабинета Продвижения, 1 = баланс взаиморасчёта
@@ -112,6 +118,80 @@ export default function CampaignPage() {
         return () => controller.abort();
     }, [campaignId, dateFrom, dateTo, reloadKey, selectedNm]);
 
+    // ─── Метрики по зонам показов (только CPM): своя таблица РК-метрик + селектор зоны ───
+    const [zoneMetricsZone, setZoneMetricsZone] = useState<'total' | 'search' | 'recommendations'>('total');
+    const [zoneMetrics, setZoneMetrics] = useState<CampaignZoneMetricsResponse | null>(null);
+    const [zoneMetricsLoading, setZoneMetricsLoading] = useState(false);
+    const [zoneMetricsError, setZoneMetricsError] = useState('');
+    // Не CPM — вкладки «По зонам» нет; если вдруг активна, уводим на график
+    useEffect(() => { if (!isCpm) setMetricsView(v => (v === 'zones' ? 'chart' : v)); }, [isCpm]);
+    useEffect(() => {
+        // Зонные данные нужны и таблице «По зонам», и графику при выбранной зоне (кроме «Всего»)
+        const needZone = tab === 'metrics' && (metricsView === 'zones' || (metricsView === 'chart' && zoneMetricsZone !== 'total'));
+        if (!Number.isFinite(campaignId) || !needZone) return;
+        const controller = new AbortController();
+        setZoneMetricsLoading(true); setZoneMetricsError(''); setZoneMetrics(null);
+        api.getCampaignZoneMetrics(campaignId, dateFrom, dateTo, zoneMetricsZone)
+            .then(res => { if (controller.signal.aborted) return; if (res.error) setZoneMetricsError(res.error); else setZoneMetrics(res); })
+            .catch(e => { if (!controller.signal.aborted) setZoneMetricsError(e instanceof Error ? e.message : 'Ошибка загрузки метрик по зонам'); })
+            .finally(() => { if (!controller.signal.aborted) setZoneMetricsLoading(false); });
+        return () => controller.abort();
+    }, [campaignId, dateFrom, dateTo, reloadKey, zoneMetricsZone, tab, metricsView]);
+
+    // ─── Расход по часам (вкладка «По часам»): восстановлен из снимков остатка бюджета ───
+    const [hourly, setHourly] = useState<CampaignHourlySpend | null>(null);
+    const [hourlyLoading, setHourlyLoading] = useState(false);
+    const [hourlyError, setHourlyError] = useState('');
+    useEffect(() => {
+        if (!Number.isFinite(campaignId) || tab !== 'hourly') return;
+        const controller = new AbortController();
+        setHourlyLoading(true); setHourlyError(''); setHourly(null);
+        api.getCampaignHourly(campaignId, dateTo)
+            .then(res => { if (controller.signal.aborted) return; if (res.error) setHourlyError(res.error); else setHourly(res); })
+            .catch(e => { if (!controller.signal.aborted) setHourlyError(e instanceof Error ? e.message : 'Ошибка загрузки почасового расхода'); })
+            .finally(() => { if (!controller.signal.aborted) setHourlyLoading(false); });
+        return () => controller.abort();
+    }, [campaignId, dateTo, reloadKey, tab]);
+
+    // ─── Внутридневные показы/клики/CTR (вкладка «Внутри дня»): снимки campaigns-stats ~30 мин ───
+    const [intraday, setIntraday] = useState<CampaignIntradayMetrics | null>(null);
+    const [intradayLoading, setIntradayLoading] = useState(false);
+    const [intradayError, setIntradayError] = useState('');
+    useEffect(() => {
+        if (!Number.isFinite(campaignId) || tab !== 'intraday') return;
+        const controller = new AbortController();
+        setIntradayLoading(true); setIntradayError(''); setIntraday(null);
+        api.getCampaignIntraday(campaignId, dateTo)
+            .then(res => { if (controller.signal.aborted) return; if (res.error) setIntradayError(res.error); else setIntraday(res); })
+            .catch(e => { if (!controller.signal.aborted) setIntradayError(e instanceof Error ? e.message : 'Ошибка загрузки внутридневных метрик'); })
+            .finally(() => { if (!controller.signal.aborted) setIntradayLoading(false); });
+        return () => controller.abort();
+    }, [campaignId, dateTo, reloadKey, tab]);
+
+    // Зонные RK-строки в форме строки графика: воронки продаж по зонам нет → её поля пустые
+    // (в графике они покажутся как «нет данных»). Корзины/Заказы здесь — рекламная атрибуция.
+    const zoneChartRows = useMemo<CampaignMetricRow[]>(() => (zoneMetrics?.rows ?? []).map(r => ({
+        date: r.date, views: r.views, clicks: r.clicks, ctr: r.ctr, cpc: r.cpc, spend: r.spend,
+        add_to_cart: r.atbs, orders: r.orders, cpo: r.cpo,
+        open_card: 0, cr1: 0, cr2: 0, orders_sum: 0, cpl: null, avg_price: 0, customer_price: 0, spp: 0, drr: 0,
+    })), [zoneMetrics]);
+
+    // Селектор зоны показов — общий для «Графика» и таблицы «По зонам»
+    const zoneSelectorBar = (
+        <div style={{ padding: '10px 12px', borderBottom: '1px solid #eef0f2', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12, color: '#6b7280' }}>Зона показов:</span>
+            <span style={{ display: 'inline-flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #e5e7eb' }}>
+                {(([['total', 'Всего'], ['search', 'Поиск'], ['recommendations', 'Рекомендации']]) as [typeof zoneMetricsZone, string][]).map(([v, label]) => (
+                    <button key={v} onClick={() => setZoneMetricsZone(v)}
+                        style={{ padding: '5px 12px', fontSize: 12, fontWeight: 500, border: 'none', cursor: 'pointer', background: zoneMetricsZone === v ? '#3b82f6' : '#fff', color: zoneMetricsZone === v ? '#fff' : '#374151' }}>
+                        {label}
+                    </button>
+                ))}
+            </span>
+            <span style={{ fontSize: 11, color: '#9ca3af' }}>рекламные показы/клики/затраты/корзины/заказы по зоне; воронка продаж по зонам не делится</span>
+        </div>
+    );
+
     // Зоны показов и правила ставки (работает и для CPC, где кластеров нет)
     const [zones, setZones] = useState<CampaignZones | null>(null);
     useEffect(() => {
@@ -125,15 +205,18 @@ export default function CampaignPage() {
     const doDeposit = async () => {
         if (!campaign) return;
         const amt = Math.round(Number(depositAmount) || 0);
-        if (amt < 1000) { setCampError('Минимальная сумма пополнения — 1000 ₽.'); return; }
+        if (amt < 1000) { toast.warning('Минимальная сумма пополнения — 1000 ₽.'); return; }
         const srcLabel = depositSource === 1 ? 'с баланса взаиморасчёта' : 'со счёта кабинета Продвижения';
         if (!window.confirm(`Пополнить бюджет кампании на ${amt} ₽ реальными деньгами ${srcLabel} WB?`)) return;
         setDepositing(true); setCampError('');
         try {
             const res = await api.depositCampaignBudget(campaign.campaign_id, amt, depositSource);
-            if (!res.ok) { setCampError(res.error || 'Не удалось пополнить бюджет'); return; }
+            if (!res.ok) { toast.error(res.error || 'Не удалось пополнить бюджет'); return; }
+            toast.success(`Бюджет пополнен на ${amt.toLocaleString('ru-RU')} ₽`);
             setDepositAmount('');
-            await loadCampaign();
+            // WB возвращает новый остаток (budget_after) — показываем сразу, без тяжёлого рефетча
+            if (res.budget_after != null) setCampaign(prev => prev ? { ...prev, budget: res.budget_after as number } : prev);
+            loadCampaign(true);  // тихая сверка (в т.ч. на случай, когда WB не вернул total)
         } catch (e) {
             setCampError(e instanceof Error ? e.message : 'Ошибка пополнения');
         } finally { setDepositing(false); }
@@ -168,7 +251,72 @@ export default function CampaignPage() {
         return () => controller.abort();
     }, [campaignId, dateFrom, dateTo, reloadKey, selectedNm]);
 
+    // ─── Органические позиции по фразам (кластеризатор): «Позиция»/«Была» ───
+    // Позиция товара по фразе из публичного поиска WB; собирается по кнопке, копится история.
+    const posNm = selectedNm ?? campaign?.nm_ids?.[0] ?? null;
+    const [positions, setPositions] = useState<Record<string, PositionSnapshot> | undefined>(undefined);
+    const [posCollecting, setPosCollecting] = useState<{ done: number; total: number; throttled?: number } | null>(null);
+    const [collectingOne, setCollectingOne] = useState<Set<string>>(new Set());
+    useEffect(() => {
+        if (tab !== 'clusters' || posNm == null) return;
+        let aborted = false;
+        api.getPositions(posNm).then(res => { if (!aborted) setPositions(res.positions); }).catch(() => { /* позиции опциональны */ });
+        return () => { aborted = true; };
+    }, [posNm, tab, reloadKey]);
+    // Play: массовый сбор ПРОГОНОМ по таблице — воркеры идут по фразам сверху вниз, помечают
+    // текущую строку крутящимся кружком (collectingOne) и вписывают позицию. Видно, как бежит.
+    const collectAbortRef = useRef(false);
+    const handleCollectPositions = useCallback(async () => {
+        if (posNm == null || !data || data.clusters.length === 0) return;
+        const phrases = data.clusters.map(c => c.norm_query);
+        collectAbortRef.current = false;
+        let done = 0, throttled = 0, idx = 0;
+        setPosCollecting({ done: 0, total: phrases.length, throttled: 0 });
+        const worker = async () => {
+            while (idx < phrases.length && !collectAbortRef.current) {
+                const phrase = phrases[idx++];
+                setCollectingOne(prev => new Set(prev).add(phrase));  // строка «крутится»
+                try {
+                    const res = await api.collectPositionOne(posNm, phrase);
+                    setPositions(prev => ({ ...(prev ?? {}), [phrase]: { position: res.position, prev: res.prev, depth: res.depth, at: res.at } }));
+                    if (res.throttled) throttled++;
+                } catch { /* одну фразу пропускаем, прогон продолжается */ }
+                finally {
+                    setCollectingOne(prev => { const n = new Set(prev); n.delete(phrase); return n; });
+                    done++;
+                    setPosCollecting({ done, total: phrases.length, throttled });
+                }
+            }
+        };
+        // 3 воркера параллельно (как лимит WB) — до 3 крутящихся строк одновременно
+        await Promise.all([worker(), worker(), worker()]);
+        setPosCollecting(null);
+        if (throttled > 0) toast.warning(`Слишком частый запрос — WB ограничил, ${throttled} фраз(ы) не собрано. Повторите позже.`);
+    }, [posNm, data, toast]);
+    // Stop: прерываем прогон (собранное уже сохранено — collect-one коммитит каждую фразу)
+    const handleStopPositions = useCallback(() => { collectAbortRef.current = true; }, []);
+    // Кругляшок: собрать позицию одной фразы, сразу вписать в ячейку
+    const handleCollectOne = useCallback(async (phrase: string) => {
+        if (posNm == null) return;
+        setCollectingOne(prev => new Set(prev).add(phrase));
+        try {
+            const res = await api.collectPositionOne(posNm, phrase);
+            setPositions(prev => ({ ...(prev ?? {}), [phrase]: { position: res.position, prev: res.prev, depth: res.depth, at: res.at } }));
+            if (res.throttled) toast.warning('Слишком частый запрос — WB временно ограничил. Подождите немного и попробуйте снова.');
+        } catch (e) {
+            toast.error(e instanceof Error ? e.message : 'Не удалось собрать позицию');
+        } finally {
+            setCollectingOne(prev => { const n = new Set(prev); n.delete(phrase); return n; });
+        }
+    }, [posNm, toast]);
+
+    // Единая ставка CPM: WB не даёт управлять кластерами по отдельности (400 на set-minus/set-bids),
+    // только у кампаний с ручной ставкой (по зонам). Гасим действия и объясняем причину.
+    const clusterUnified = ((data?.bid_mode ?? campaign?.bid_mode) || '') === 'unified';
+    const CLUSTER_UNIFIED_MSG = 'Единая ставка CPM: WB не даёт управлять кластерами по отдельности (исключать или менять ставки). Переключите кампанию на ручные ставки (по зонам) в кабинете WB.';
+
     const handleToggleMinus = async (c: SearchCluster) => {
+        if (clusterUnified) { setMinusError(CLUSTER_UNIFIED_MSG); return; }
         const action: 'add' | 'remove' = c.is_minused ? 'remove' : 'add';
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setMinusError('Не удалось определить товар (nm_id) кампании'); return; }
@@ -191,6 +339,7 @@ export default function CampaignPage() {
 
     // Массовое добавление/возврат минус-фраз: одно подтверждение, затем последовательно по WB.
     const handleBulkMinus = async (list: SearchCluster[], action: 'add' | 'remove') => {
+        if (clusterUnified) { setMinusError(CLUSTER_UNIFIED_MSG); return; }
         const items = list.filter(c => !c.locked);
         if (items.length === 0) return;
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
@@ -215,6 +364,7 @@ export default function CampaignPage() {
     };
 
     const handleSetBid = async (c: SearchCluster, bid: number) => {
+        if (clusterUnified) { setBidError(CLUSTER_UNIFIED_MSG); return; }
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setBidError('Не удалось определить товар (nm_id) кампании'); return; }
         if (!window.confirm(`Поставить ставку ${formatNumber(bid, 0)} ₽ на кластер «${c.norm_query}» в кабинете WB?`)) return;
@@ -233,6 +383,7 @@ export default function CampaignPage() {
 
     // Массовая ставка: одно подтверждение, затем последовательно по WB. bid=0 — сброс к ставке кампании.
     const handleBulkBid = async (items: { cluster: SearchCluster; bid: number }[], label: string) => {
+        if (clusterUnified) { setBidError(CLUSTER_UNIFIED_MSG); return; }
         if (items.length === 0) return;
         const nmId = data?.nm_ids?.[0] ?? campaign?.nm_ids?.[0];
         if (nmId == null) { setBidError('Не удалось определить товар (nm_id) кампании'); return; }
@@ -259,23 +410,85 @@ export default function CampaignPage() {
         if (!campaign) return;
         const active = campaign.status !== 9;  // не активна → запускаем, активна → пауза
         setStateBusy(true);
-        try { await api.setCampaignState(campaign.campaign_id, active); await loadCampaign(); }
-        catch (e) { setCampError(e instanceof Error ? e.message : 'Не удалось изменить статус кампании'); }
+        try {
+            const r = await api.setCampaignState(campaign.campaign_id, active);
+            if (r && (r as { ok?: boolean }).ok === false) { toast.error((r as { error?: string }).error || 'Не удалось изменить статус'); return; }
+            toast.success(active ? 'Кампания запущена' : 'Кампания приостановлена');
+            // Мгновенный флип из эхо-статуса ответа (9 активна / 11 пауза), без ожидания рефетча
+            const newStatus = r.status ?? (active ? 9 : 11);
+            setCampaign(prev => prev ? { ...prev, status: newStatus, status_label: active ? 'Активна' : 'Пауза' } : prev);
+            loadCampaign(true);  // тихая фоновая сверка — не блокирует тумблер
+        }
+        catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось изменить статус кампании'); }
         finally { setStateBusy(false); }
     };
 
     const saveAutopay = async (s: AdsAutopaySetting) => {
         const res = await api.setCampaignAutopay(campaignId, s);
-        setAutopay(res.settings);
-        if (s.enabled) loadCampaign();  // включение активирует кампанию — подтянем статус
+        setAutopay(res.settings);  // значение автопея (шестерёнка) — мгновенно из эхо-мапы
+        if (s.enabled) {
+            // включение автопея могло активировать кампанию из паузы — отразим статус сразу
+            if (res.activation?.ok) setCampaign(prev => prev ? { ...prev, status: res.activation!.status ?? 9, status_label: 'Активна' } : prev);
+            loadCampaign(true);  // тихая сверка
+        }
     };
 
-    // Статистика зоны: у CPM берём расчётную разбивку из кластеров, у CPC зона одна —
-    // это вся кампания, поэтому берём итог метрик за период.
-    const zoneStat = (key: 'search' | 'recommendations') => {
-        // CPC: зона одна, данные прямые (рекламные заказы, не воронка)
-        if (zones?.payment_type === 'cpc') return key === 'search' ? zones.zone_stats?.search ?? null : null;
-        return key === 'search' ? data?.zone_stats?.search ?? null : data?.zone_stats?.recommendations ?? null;
+    // ─── Управление кампанией (завершить / переименовать / удалить) ───
+    const [manageBusy, setManageBusy] = useState(false);
+    const renameWith = async (name: string) => {
+        if (!campaign || name === campaign.name) return;
+        setManageBusy(true); setCampError('');
+        try {
+            const res = await api.renameCampaign(campaign.campaign_id, name);
+            if (!res.ok) { toast.error(res.error || 'Не удалось переименовать кампанию'); return; }
+            toast.success('Кампания переименована');
+            setCampaign(prev => prev ? { ...prev, name: res.name ?? name } : prev);
+            loadCampaign(true);
+        } catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось переименовать кампанию'); }
+        finally { setManageBusy(false); }
+    };
+
+    const doStop = async () => {
+        if (!campaign || !window.confirm('Завершить кампанию? Это НЕОБРАТИМО — запустить её снова будет нельзя.')) return;
+        setManageBusy(true); setCampError('');
+        try {
+            const res = await api.stopCampaign(campaign.campaign_id);
+            if (!res.ok) { toast.error(res.error || 'Не удалось завершить кампанию'); return; }
+            toast.success('Кампания завершена');
+            setCampaign(prev => prev ? { ...prev, status: res.status ?? 7, status_label: 'Завершена' } : prev);
+            loadCampaign(true);
+        } catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось завершить кампанию'); }
+        finally { setManageBusy(false); }
+    };
+
+    const doDelete = async () => {
+        if (!campaign || !window.confirm('Удалить кампанию в WB? Действие необратимо.')) return;
+        setManageBusy(true); setCampError('');
+        try {
+            const res = await api.deleteCampaign(campaign.campaign_id);
+            if (!res.ok) toast.error(res.error || 'Не удалось удалить кампанию');
+            else toast.success('Кампания удалена');
+            await loadCampaign();
+        } catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось удалить кампанию'); }
+        finally { setManageBusy(false); }
+    };
+
+    // «Обновить» = живой догруз этой кампании из WB (деталь+бюджет+свежая стата) → зеркало,
+    // затем перечитать шапку и метрики/график/зоны из уже свежего зеркала.
+    const doRefresh = async () => {
+        setRefreshing(true);
+        try {
+            const res = await api.refreshCampaign(campaignId);
+            if (!res.ok) toast.warning('Не удалось догрузить из WB — показаны последние данные из базы');
+        } catch { toast.warning('Не удалось догрузить из WB — показаны последние данные из базы'); }
+        await loadCampaign(true);      // шапка (остаток/статус) из свежего зеркала, без мигания
+        setReloadKey(k => k + 1);      // метрики/график/зоны — тоже перечитать
+        setRefreshing(false);
+    };
+
+    // Копирование артикула (nm_id) из карточки товара кампании
+    const copyNm = (nmId: number) => {
+        navigator.clipboard?.writeText(String(nmId)).then(() => toast.success(`Артикул ${nmId} скопирован`)).catch(() => { /* clipboard недоступен */ });
     };
 
     const ap = autopay[String(campaignId)];
@@ -283,8 +496,9 @@ export default function CampaignPage() {
 
     return (
         <PageGuard page="ads-manager">
-            <div className="animate-in">
-                <Link href={`/p/${slug}/ads-manager`} className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, marginBottom: 12 }}>
+            {/* Во всю высоту .main-content (её паддинг 40+40) — только внутренняя панель скроллится, страница не прокручивается */}
+            <div className="animate-in" style={{ height: 'calc(100vh - 80px)', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+                <Link href={`/p/${slug}/ads-manager`} className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignSelf: 'flex-start', alignItems: 'center', gap: 6, fontSize: 13, marginBottom: 12 }}>
                     ← Все кампании
                 </Link>
 
@@ -306,11 +520,15 @@ export default function CampaignPage() {
 
                                 {/* Переключатель «реклама вкл/выкл» */}
                                 {(campaign.status === 9 || campaign.status === 11) && (
-                                    <button onClick={toggleState} disabled={stateBusy} title={campaign.status === 9 ? 'Приостановить рекламу' : 'Запустить рекламу'}
-                                        aria-pressed={campaign.status === 9}
-                                        style={{ width: 38, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 2, background: campaign.status === 9 ? '#10b981' : '#d1d5db', display: 'inline-flex', justifyContent: campaign.status === 9 ? 'flex-end' : 'flex-start', opacity: stateBusy ? 0.6 : 1 }}>
-                                        <span style={{ width: 16, height: 16, borderRadius: '50%', background: '#fff' }} />
-                                    </button>
+                                    <Tooltip text={campaign.status === 9 ? 'Приостановить рекламу' : 'Запустить рекламу'}>
+                                        <button onClick={toggleState} disabled={stateBusy}
+                                            aria-label={campaign.status === 9 ? 'Приостановить рекламу' : 'Запустить рекламу'}
+                                            aria-pressed={campaign.status === 9}
+                                            style={{ width: 38, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 2, background: campaign.status === 9 ? '#10b981' : '#d1d5db', display: 'inline-flex', justifyContent: campaign.status === 9 ? 'flex-end' : 'flex-start', opacity: stateBusy ? 0.6 : 1 }}>
+                                            {/* Кружок не должен ловить мышь: переход button→span рвал бы hover */}
+                                            <span style={{ width: 16, height: 16, borderRadius: '50%', background: '#fff', pointerEvents: 'none' }} />
+                                        </button>
+                                    </Tooltip>
                                 )}
 
                                 <span style={{ fontSize: 12, color: '#6b7280' }}>
@@ -362,9 +580,11 @@ export default function CampaignPage() {
                         <div className="glass-card static" style={{ padding: 20, marginBottom: 12 }}>
                             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
                                 <div style={{ flex: '1 1 320px', minWidth: 260 }}>
-                                    <h1 style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 22, fontWeight: 700, margin: '0 0 6px' }}>
-                                        <IcChart size={22} />{campaign.name || `#${campaign.campaign_id}`}
-                                    </h1>
+                                    {/* Название редактируется прямо здесь — карандаш справа (как при создании) */}
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 6px' }}>
+                                        <IcChart size={22} />
+                                        <EditableName value={campaign.name || `#${campaign.campaign_id}`} onChange={renameWith} size={22} maxLength={50} />
+                                    </div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12, color: 'var(--color-text-dim)' }}>
                                         <span className={`badge ${STATUS_BADGE[campaign.status] || 'badge-secondary'}`}>{campaign.status_label}</span>
                                         {typeInfo && <span style={{ color: typeInfo.color, fontWeight: 600 }} title={typeInfo.hint}>{typeInfo.text}</span>}
@@ -372,6 +592,7 @@ export default function CampaignPage() {
                                         {campaign.subjects.length > 0 && <span>· {campaign.subjects.join(', ')}</span>}
                                     </div>
                                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+                                        {/* Порядок: Приостановить → Завершить → Открыть в WB. Цвета — из палитры: оранжевый/зелёный/красный/серый */}
                                         {(campaign.status === 9 || campaign.status === 11) && (
                                             <button onClick={toggleState} disabled={stateBusy} className="btn btn-secondary btn-sm"
                                                 style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: campaign.status === 9 ? '#f59e0b' : '#10b981' }}>
@@ -379,48 +600,58 @@ export default function CampaignPage() {
                                                 {stateBusy ? '…' : campaign.status === 9 ? 'Приостановить' : 'Запустить'}
                                             </button>
                                         )}
+                                        {/* Переименование — карандашом у заголовка. Здесь только завершение/удаление. */}
+                                        {(campaign.status === 4 || campaign.status === 9 || campaign.status === 11) && (
+                                            <button onClick={doStop} disabled={manageBusy} className="btn btn-secondary btn-sm"
+                                                style={{ fontSize: 13, color: '#ef4444' }} title="Завершить кампанию (необратимо)">
+                                                {manageBusy ? '…' : 'Завершить'}
+                                            </button>
+                                        )}
                                         <a href={wbCampaignUrl(campaign, { from: dateFrom, to: dateTo })} target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm"
-                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }} title="Открыть кампанию в кабинете WB">
+                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#6b7280' }} title="Открыть кампанию в кабинете WB">
                                             <IcExternal size={14} />Открыть в WB
                                         </a>
+                                        {campaign.status === 4 && (
+                                            <button onClick={doDelete} disabled={manageBusy} className="btn btn-danger btn-sm"
+                                                style={{ fontSize: 13 }} title="Удалить кампанию (только не запускавшуюся)">Удалить</button>
+                                        )}
                                     </div>
                                 </div>
 
-                                {/* Остаток бюджета + автопополнение */}
-                                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                                    <div style={{ minWidth: 140, padding: '10px 14px', border: '1px solid #e5e7eb', borderRadius: 12, background: '#f9fafb' }}>
-                                        <div style={{ fontSize: 11, color: '#6b7280' }}>Остаток бюджета</div>
+                                {/* Остаток бюджета + автопополнение + пополнение — карточки одной высоты, метки на одном уровне */}
+                                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
+                                    <div style={{ minWidth: 140, padding: '10px 14px', border: '1px solid #d1d5db', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                        <div style={{ fontSize: 12, color: '#4b5563', fontWeight: 600 }}>Остаток бюджета</div>
                                         <div style={{ fontSize: 24, fontWeight: 700, color: campaign.budget <= 0 && campaign.status === 9 ? '#ef4444' : '#111827' }}>{fmt(campaign.budget)} ₽</div>
-                                        <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>Расход сегодня: {fmt(campaign.spend_today)} ₽</div>
+                                        <div style={{ fontSize: 12, color: '#6b7280', marginTop: 'auto' }}>Расход сегодня: {fmt(campaign.spend_today)} ₽</div>
                                     </div>
-                                    <div style={{ minWidth: 160, padding: '10px 14px', border: '1px solid #e5e7eb', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                        <div style={{ fontSize: 11, color: '#6b7280' }}>Автопополнение</div>
+                                    <div style={{ minWidth: 160, padding: '10px 14px', border: '1px solid #d1d5db', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                        <div style={{ fontSize: 12, color: '#4b5563', fontWeight: 600 }}>Автопополнение</div>
                                         <button onClick={() => setAutopayModal(true)} className="btn btn-secondary btn-sm"
-                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: ap?.enabled ? '#10b981' : '#374151', fontWeight: ap?.enabled ? 600 : 500 }}>
-                                            {ap?.enabled ? <><IcClock size={14} />{`${String(ap.hour).padStart(2, '0')}:00 · ${fmt(ap.amount)} ₽`}</> : <><IcGear size={14} />Настроить</>}
+                                            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: ap?.enabled ? '#10b981' : '#6b7280', fontWeight: ap?.enabled ? 600 : 500 }}>
+                                            {ap?.enabled ? <><IcClock size={14} />{autopayLabel(ap)}</> : <><IcGear size={14} />Настроить</>}
                                         </button>
-                                        <button onClick={() => setAutopayLogModal(true)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#6b7280', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0 }}>
+                                        <button onClick={() => setAutopayLogModal(true)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#3b82f6', fontSize: 12.5, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, marginTop: 'auto' }}>
                                             <IcHistory size={13} />История пополнений
                                         </button>
                                     </div>
-                                    <div style={{ minWidth: 210, padding: '10px 14px', border: '1px solid #e5e7eb', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                        <div style={{ fontSize: 11, color: '#6b7280' }}>Пополнение бюджета</div>
+                                    <div style={{ minWidth: 210, padding: '10px 14px', border: '1px solid #d1d5db', borderRadius: 12, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                        <div style={{ fontSize: 12, color: '#4b5563', fontWeight: 600 }}>Пополнение бюджета</div>
                                         <div style={{ display: 'flex', gap: 6 }}>
                                             <input type="number" min={1000} step={100} inputMode="numeric" value={depositAmount} placeholder="Сумма, ₽"
                                                 onChange={e => setDepositAmount(e.target.value)}
                                                 disabled={depositing}
-                                                style={{ width: 100, padding: '6px 8px', border: '1px solid #e5e7eb', borderRadius: 8, fontSize: 13, background: '#fff' }} />
+                                                style={{ width: 100, padding: '7px 9px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 14, color: '#111827', background: '#fff' }} />
                                             <select value={depositSource} onChange={e => setDepositSource(Number(e.target.value))} disabled={depositing}
                                                 title="Откуда списать деньги"
-                                                style={{ padding: '6px 8px', border: '1px solid #e5e7eb', borderRadius: 8, fontSize: 13, background: '#fff' }}>
+                                                style={{ padding: '7px 9px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 14, color: '#111827', background: '#fff' }}>
                                                 <option value={0}>Счёт</option>
                                                 <option value={1}>Баланс</option>
                                             </select>
                                         </div>
-                                        <button onClick={doDeposit} disabled={depositing || Number(depositAmount) < 1000} className="btn btn-primary btn-sm" style={{ fontSize: 13 }}>
+                                        <button onClick={doDeposit} disabled={depositing || Number(depositAmount) < 1000} className="btn btn-primary btn-sm" style={{ fontSize: 13, marginTop: 'auto' }}>
                                             {depositing ? 'Пополняем…' : 'Пополнить'}
                                         </button>
-                                        <div style={{ fontSize: 11, color: '#9ca3af' }}>Минимальный бюджет — 1000 ₽</div>
                                     </div>
                                 </div>
                             </div>
@@ -430,7 +661,6 @@ export default function CampaignPage() {
                                 <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid #eef0f2' }}>
                                     <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', marginBottom: 8 }}>
                                         ТОВАРЫ КАМПАНИИ · {campaign.nm_ids.length}
-                                        {campaign.nm_ids.length > 1 && <span style={{ fontWeight: 500, textTransform: 'none' }}> · нажмите на товар, чтобы увидеть его воронку</span>}
                                     </div>
                                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
                                         {campaign.nm_ids.map(nmId => {
@@ -445,7 +675,16 @@ export default function CampaignPage() {
                                                     <WbThumb nmId={nmId} size={48} />
                                                     <div style={{ minWidth: 0 }}>
                                                         <div style={{ fontSize: 13, fontWeight: 600, color: active ? '#065f46' : '#111827', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cat?.vendor_code || `#${nmId}`}</div>
-                                                        <div style={{ fontSize: 11, color: active ? '#059669' : '#9ca3af' }}>#{nmId}{cat?.subject ? ` · ${cat.subject}` : ''}</div>
+                                                        <div style={{ fontSize: 11, color: active ? '#059669' : '#9ca3af', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }} title="Артикул товара">
+                                                                <span style={{ fontWeight: 700, color: active ? '#065f46' : '#374151' }}>{nmId}</span>
+                                                                <button onClick={e => { e.preventDefault(); e.stopPropagation(); copyNm(nmId); }} title="Скопировать артикул" aria-label="Скопировать артикул"
+                                                                    style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0, display: 'inline-flex', lineHeight: 1, color: active ? '#059669' : '#9ca3af' }}>
+                                                                    <IcCopy size={11} />
+                                                                </button>
+                                                            </span>
+                                                            {cat?.subject ? <span>· {cat.subject}</span> : null}
+                                                        </div>
                                                     </div>
                                                     <a href={`https://www.wildberries.ru/catalog/${nmId}/detail.aspx`} target="_blank" rel="noreferrer"
                                                         onClick={e => e.stopPropagation()}
@@ -460,51 +699,20 @@ export default function CampaignPage() {
                                 </div>
                             )}
 
-                            {/* Зоны показов. Правила WB: CPM-единая — обе зоны всегда включены,
-                                ставка одна на все зоны; CPC — только «Поиск», ставка за клик,
-                                единая для всех фраз. Переключать зоны из интерфейса нельзя. */}
+                            {/* Зоны показов: тумблеры вкл/выкл (где WB разрешает). Разбивка статистики по зонам — на вкладке «По зонам». */}
                             {zones && Object.keys(zones.placements).length > 0 && (
-                                <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid #eef0f2' }}>
-                                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
-                                        <span style={{ fontSize: 11, fontWeight: 700, color: '#6b7280' }}>ЗОНЫ ПОКАЗОВ</span>
-                                        <span style={{ fontSize: 11, color: '#9ca3af' }}>{zoneRuleText(zones)}</span>
-                                    </div>
-                                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                                        {ZONES.map(z => {
-                                            const on = zones.placements[z.key] ?? false;
-                                            const bid = zones.bids[z.key];
-                                            const st = zoneStat(z.key);
-                                            if (!on && bid == null) return null;
-                                            return (
-                                                <div key={z.key} style={{ minWidth: 236, padding: '10px 14px', borderRadius: 12, background: on ? '#fff' : '#f9fafb', border: `1px solid ${on ? '#a7f3d0' : '#e5e7eb'}`, opacity: on ? 1 : 0.65 }}>
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: on ? '#10b981' : '#d1d5db' }} />
-                                                        <span style={{ fontSize: 13, fontWeight: 600, color: '#111827' }}>{z.label}</span>
-                                                        <span style={{ fontSize: 11, color: on ? '#059669' : '#9ca3af' }}>{on ? 'работает' : 'не участвует'}</span>
-                                                        {on && bid != null && (
-                                                            <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 700 }} title={zones.payment_type === 'cpc' ? 'Ставка за клик' : 'Ставка за 1000 показов'}>
-                                                                {fmt(bid)} ₽<span style={{ fontSize: 10, fontWeight: 500, color: '#9ca3af' }}>{zones.payment_type === 'cpc' ? ' / клик' : ' / 1000'}</span>
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                    {on && st && (
-                                                        <div style={{ display: 'flex', gap: 12, marginTop: 8, fontSize: 11, color: '#6b7280', flexWrap: 'wrap' }}>
-                                                            <span>Показы <b style={{ color: '#111827' }}>{fmt(st.views)}</b></span>
-                                                            <span>Клики <b style={{ color: '#111827' }}>{fmt(st.clicks)}</b></span>
-                                                            <span>Затраты <b style={{ color: '#111827' }}>{fmt(st.spend)} ₽</b></span>
-                                                            <span>Заказы <b style={{ color: '#111827' }}>{fmt(st.orders)}</b></span>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                    {zones.payment_type !== 'cpc' && data?.zone_stats?.derived && (
-                                        <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 6 }}>
-                                            Разбивка по зонам — расчёт за период: поиск взят из поисковых кластеров, рекомендации — остаток от итога кампании. WB зоны в статистике не разделяет.
-                                        </div>
-                                    )}
-                                </div>
+                                <ZonesPanel
+                                    zones={zones}
+                                    campaignId={campaignId}
+                                    onZonesLocal={pl => setZones(z => z ? { ...z, placements: pl } : z)}
+                                    onBidLocal={(zone, bid) => setZones(z => {
+                                        if (!z) return z;
+                                        // CPM · единая: одна ставка на обе зоны (редактор идёт через 'search')
+                                        const unified = z.payment_type === 'cpm' && (z.bid_mode || '') === 'unified';
+                                        const bids = unified ? { search: bid, recommendations: bid } : { ...z.bids, [zone]: bid };
+                                        return { ...z, bids };
+                                    })}
+                                />
                             )}
 
                             {/* Свернуть — освободить экран под график и таблицу */}
@@ -523,7 +731,7 @@ export default function CampaignPage() {
                         {/* Период + обновление */}
                         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
                             <AdsPeriodPicker from={dateFrom} to={dateTo} onApply={(f, t) => { if (f && t) { setDateFrom(f); setDateTo(t); } }} minWidth={230} />
-                            <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }} onClick={() => setReloadKey(k => k + 1)} disabled={loading || metricsLoading}><IcRefresh size={14} />Обновить</button>
+                            <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }} onClick={doRefresh} disabled={loading || metricsLoading || refreshing}><IcRefresh size={14} />{refreshing ? 'Обновление…' : 'Обновить'}</button>
                         </div>
 
                         {/* Вкладки */}
@@ -534,7 +742,7 @@ export default function CampaignPage() {
                                 <IcCalendar />Метрики
                                 {tab === 'metrics' && (
                                     <span style={{ display: 'inline-flex', borderRadius: 6, overflow: 'hidden', border: '1px solid rgba(255,255,255,.55)' }}>
-                                        {([['table', 'По дням'], ['chart', 'График']] as const).map(([v, label]) => (
+                                        {(([['table', 'По дням'], ['chart', 'График'], ...(isCpm ? [['zones', 'По зонам']] : [])]) as [typeof metricsView, string][]).map(([v, label]) => (
                                             <button key={v} onClick={e => { e.stopPropagation(); setMetricsView(v); }}
                                                 style={{ padding: '3px 10px', fontSize: 12, fontWeight: 500, border: 'none', cursor: 'pointer', background: metricsView === v ? '#fff' : 'transparent', color: metricsView === v ? '#1d4ed8' : '#fff' }}>
                                                 {label}
@@ -543,12 +751,20 @@ export default function CampaignPage() {
                                     </span>
                                 )}
                             </div>
-                            {isCpm && (
+                            {clustersAvailable && (
                                 <button onClick={() => setTab('clusters')}
                                     style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 18px', fontSize: 13, fontWeight: 500, cursor: 'pointer', border: 'none', borderLeft: '1px solid #e5e7eb', background: tab === 'clusters' ? '#3b82f6' : '#fff', color: tab === 'clusters' ? '#fff' : '#374151' }}>
                                     <IcClusters />Кластеризатор
                                 </button>
                             )}
+                            <button onClick={() => setTab('hourly')}
+                                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 18px', fontSize: 13, fontWeight: 500, cursor: 'pointer', border: 'none', borderLeft: '1px solid #e5e7eb', background: tab === 'hourly' ? '#3b82f6' : '#fff', color: tab === 'hourly' ? '#fff' : '#374151' }}>
+                                <IcClock size={14} />По часам
+                            </button>
+                            <button onClick={() => setTab('intraday')}
+                                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 18px', fontSize: 13, fontWeight: 500, cursor: 'pointer', border: 'none', borderLeft: '1px solid #e5e7eb', background: tab === 'intraday' ? '#3b82f6' : '#fff', color: tab === 'intraday' ? '#fff' : '#374151' }}>
+                                <IcClock size={14} />Внутри дня
+                            </button>
                         </div>
 
                         {/* Выбранный товар — и метрики, и кластеры считаются по нему */}
@@ -556,25 +772,61 @@ export default function CampaignPage() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', marginBottom: 8, background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 8, fontSize: 12, color: '#065f46' }}>
                                 <b>{catalog[selectedNm]?.vendor_code || `#${selectedNm}`}</b>
                                 <span style={{ color: '#059669' }}>#{selectedNm}</span>
-                                <button onClick={() => setSelectedNm(null)} title="Показать всю кампанию"
-                                    style={{ marginLeft: 'auto', border: 'none', background: 'none', cursor: 'pointer', color: '#065f46', fontSize: 12, padding: 0 }}>✕ вся кампания</button>
+                                <Tooltip text="Показать всю кампанию">
+                                    <button onClick={() => setSelectedNm(null)}
+                                        style={{ marginLeft: 'auto', border: 'none', background: 'none', cursor: 'pointer', color: '#065f46', fontSize: 12, padding: 0 }}>✕ вся кампания</button>
+                                </Tooltip>
                             </div>
                         )}
 
-                        {/* ─── Метрики по дням ─── */}
+                        {/* ─── Метрики: по дням / график / по зонам ─── */}
                         {tab === 'metrics' && (
-                            <div className="glass-card static" style={{ padding: 0, overflow: 'hidden' }}>
-                                {metricsLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка метрик…</div>}
-                                {!metricsLoading && metricsError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {metricsError === 'campaign_not_found' ? 'Кампания не найдена' : metricsError}</span></div>}
-                                {!metricsLoading && !metricsError && metrics && (metrics.rows.length === 0
-                                    ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период нет данных по кампании</div>
-                                    : metricsView === 'chart' ? <CampaignMetricsChart rows={metrics.rows} selected={chartMetrics} onToggle={toggleChartMetric} /> : <CampaignMetricsTable resp={metrics} />)}
+                            <div className="glass-card static" style={{ padding: 0, overflow: 'hidden', flex: 1, minHeight: 0 }}>
+                                {metricsView === 'zones' ? (
+                                    <>
+                                        {zoneSelectorBar}
+                                        {zoneMetricsLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка метрик…</div>}
+                                        {!zoneMetricsLoading && zoneMetricsError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {zoneMetricsError === 'campaign_not_found' ? 'Кампания не найдена' : zoneMetricsError}</span></div>}
+                                        {!zoneMetricsLoading && !zoneMetricsError && zoneMetrics && (zoneMetrics.rows.length === 0
+                                            ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период нет данных по зоне</div>
+                                            : <CampaignZoneMetricsTable resp={zoneMetrics} />)}
+                                    </>
+                                ) : metricsView === 'chart' ? (
+                                    <>
+                                        {zoneSelectorBar}
+                                        {zoneMetricsZone === 'total' ? (
+                                            <>
+                                                {metricsLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка метрик…</div>}
+                                                {!metricsLoading && metricsError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {metricsError === 'campaign_not_found' ? 'Кампания не найдена' : metricsError}</span></div>}
+                                                {!metricsLoading && !metricsError && metrics && (metrics.rows.length === 0
+                                                    ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период нет данных по кампании</div>
+                                                    : <CampaignMetricsChart rows={metrics.rows} selected={chartMetrics} onToggle={toggleChartMetric} launchDate={campaign?.created_at} />)}
+                                            </>
+                                        ) : (
+                                            <>
+                                                {zoneMetricsLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка метрик…</div>}
+                                                {!zoneMetricsLoading && zoneMetricsError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {zoneMetricsError === 'campaign_not_found' ? 'Кампания не найдена' : zoneMetricsError}</span></div>}
+                                                {!zoneMetricsLoading && !zoneMetricsError && zoneMetrics && (zoneChartRows.length === 0
+                                                    ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период нет данных по зоне</div>
+                                                    : <CampaignMetricsChart rows={zoneChartRows} selected={chartMetrics} onToggle={toggleChartMetric} launchDate={campaign?.created_at} />)}
+                                            </>
+                                        )}
+                                    </>
+                                ) : (
+                                    <>
+                                        {metricsLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка метрик…</div>}
+                                        {!metricsLoading && metricsError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {metricsError === 'campaign_not_found' ? 'Кампания не найдена' : metricsError}</span></div>}
+                                        {!metricsLoading && !metricsError && metrics && (metrics.rows.length === 0
+                                            ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период нет данных по кампании</div>
+                                            : <CampaignMetricsTable resp={metrics} />)}
+                                    </>
+                                )}
                             </div>
                         )}
 
                         {/* ─── Кластеризатор ─── */}
-                        {tab === 'clusters' && isCpm && (
-                            <div className="glass-card static" style={{ padding: 20 }}>
+                        {tab === 'clusters' && clustersAvailable && (
+                            <div className="glass-card static" style={{ padding: 20, flex: 1, minHeight: 0, overflow: 'hidden' }}>
                                 {loading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка кластеров…</div>}
                                 {!loading && error && (
                                     <div className="glass-card" style={{ padding: '16px 20px', border: '1px solid var(--color-danger)', background: '#fef2f2' }}>
@@ -592,10 +844,43 @@ export default function CampaignPage() {
                                             aov={data.aov}
                                             defaultBid={data.default_bid}
                                             exportName={`clusters_${campaignId}_${dateFrom}_${dateTo}`}
+                                            clusterLock={clusterUnified ? CLUSTER_UNIFIED_MSG : null}
                                             minus={{ pending, onToggle: handleToggleMinus, onBulk: handleBulkMinus, error: minusError }}
                                             bids={{ pending: bidPending, onSetBid: handleSetBid, onBulkBid: handleBulkBid, error: bidError }}
+                                            positions={positions}
+                                            onCollectPositions={handleCollectPositions}
+                                            onStopPositions={handleStopPositions}
+                                            collecting={posCollecting}
+                                            onCollectOne={handleCollectOne}
+                                            collectingOne={collectingOne}
                                         />
                                     )
+                                )}
+                            </div>
+                        )}
+
+                        {/* ─── Расход по часам ─── */}
+                        {tab === 'hourly' && (
+                            <div className="glass-card static" style={{ padding: 0, overflow: 'auto', flex: 1, minHeight: 0 }}>
+                                {hourlyLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка расхода по часам…</div>}
+                                {!hourlyLoading && hourlyError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {hourlyError === 'campaign_not_found' ? 'Кампания не найдена' : hourlyError}</span></div>}
+                                {!hourlyLoading && !hourlyError && hourly && <CampaignHourlyChart resp={hourly} />}
+                            </div>
+                        )}
+
+                        {/* ─── Внутри дня: показы/клики/CTR по интервалам снимков ─── */}
+                        {tab === 'intraday' && (
+                            <div className="glass-card static" style={{ padding: 0, overflow: 'auto', flex: 1, minHeight: 0 }}>
+                                {intradayLoading && <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Загрузка внутридневных метрик…</div>}
+                                {!intradayLoading && intradayError && <div style={{ padding: '16px 20px' }}><span style={{ fontSize: 13, color: 'var(--color-danger)' }}>⚠️ {intradayError === 'campaign_not_found' ? 'Кампания не найдена' : intradayError}</span></div>}
+                                {!intradayLoading && !intradayError && intraday && (
+                                    <CampaignIntradayChart
+                                        resp={intraday}
+                                        onSetInterval={async (m) => {
+                                            try { await api.setAdsSnapshotInterval(m); setReloadKey(k => k + 1); toast.success('Частота снимков: ' + m + ' мин'); }
+                                            catch (e) { toast.error(e instanceof Error ? e.message : 'Не удалось сохранить частоту'); }
+                                        }}
+                                    />
                                 )}
                             </div>
                         )}

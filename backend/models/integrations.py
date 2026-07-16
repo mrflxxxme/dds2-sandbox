@@ -172,6 +172,73 @@ class WbAdCampaignDaily(Base):
     )
 
 
+class WbAdCampaignSnapshot(Base):
+    """Снимки накопительных ВНУТРИДНЕВНЫХ счётчиков кампании (показы/клики/расход).
+
+    WB НЕ отдаёт внутридневную разбивку показы/клики — самая мелкая ось у кабинетного
+    get-stats = DATE (сутки); dimension HOUR → 400 (проверено вживую 2026-07-11, см.
+    reference-память wb-ad-cabinet-internal-api). Поэтому копим сами: scheduler-job
+    каждые ~30 мин снимает накопительный «сегодняшний» счётчик из кабинетного
+    campaigns-stats (cmp.wildberries.ru, сессия wb_portal_session), а дельта между
+    соседними снимками одного stat_date = показы/клики/расход за интервал. Отсюда
+    строится интрадей-график «место принятия решения» (стиль mkeeper). Реконструкция
+    задним числом невозможна — только накопление вперёд.
+
+    stat_date — МСК-дата, к которой относится счётчик (WB обнуляет его в полночь МСК).
+    captured_at — момент снимка (naive UTC, как у WbAdCampaignEvent.created_at; читатель
+    локализует pytz.UTC → МСК, зеркало get_hourly_spend).
+    """
+
+    __tablename__ = "wb_ad_campaign_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    campaign_id: Mapped[int] = mapped_column(Integer, nullable=False)  # WB advertId
+    stat_date: Mapped[date] = mapped_column(Date, nullable=False)  # МСК-день накопления
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)  # naive UTC
+    views_cum: Mapped[int] = mapped_column(Integer, default=0)  # накопительно за stat_date
+    clicks_cum: Mapped[int] = mapped_column(Integer, default=0)
+    spend_cum: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+
+    __table_args__ = (
+        # покрывающий индекс под выборку интервалов: (проект, кампания, день) + порядок по времени
+        Index(
+            "ix_ad_snapshot_campaign_captured",
+            "project_id",
+            "campaign_id",
+            "stat_date",
+            "captured_at",
+        ),
+    )
+
+
+class WbSearchPosition(Base):
+    """Снимок ОРГАНИЧЕСКОЙ позиции товара по поисковой фразе (для кластеризатора).
+
+    Источник — публичный поиск WB (search.wb.ru/.../search): фразу ищем постранично
+    (100 товаров/стр.) и находим ранг nmId. Позиция — свойство пары (товар, фраза, регион,
+    момент), от кампании НЕ зависит → ключ (project_id, nm_id, phrase), переиспользуется
+    между кампаниями. «Позиция» на экране = последний снимок, «Была» = предыдущий.
+
+    position=NULL — товар не найден в пределах проверенной глубины (depth позиций).
+    captured_at — момент сбора (naive UTC).
+    """
+
+    __tablename__ = "wb_search_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    phrase: Mapped[str] = mapped_column(String(300), nullable=False)
+    position: Mapped[int | None] = mapped_column(Integer)  # 1-based ранг; NULL = не найден
+    depth: Mapped[int] = mapped_column(Integer, default=0)  # сколько позиций проверено (глубина)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_search_pos_lookup", "project_id", "nm_id", "phrase", "captured_at"),
+    )
+
+
 class WbAdNmDaily(Base):
     """Посуточная РК-статистика в разбивке по товару: кампания × nmId × дата.
 
@@ -293,4 +360,93 @@ class WbStockSnapshot(Base):
     __table_args__ = (
         Index("ix_wb_stock_snap_project_date", "project_id", "synced_at"),
         Index("ix_wb_stock_snap_nm", "project_id", "nm_id", "synced_at"),
+    )
+
+
+class WbAdUpd(Base):
+    """История фактических затрат на рекламу (WB /adv/v1/upd).
+
+    Каждая строка — списание по кампании: сколько и когда WB списал за показы/клики.
+    В отличие от wb_ad_campaign_daily (агрегат за день из fullstats), это первичные
+    документы списаний с типом оплаты (Баланс/Счёт) и статусом кампании на момент списания.
+
+    upd_time приходит с таймзоной (+03:00 МСК) — храним в UTC-naive, как остальные даты.
+    Строки без upd_time WB иногда отдаёт (документный артефакт) — их пропускаем при синке.
+    """
+
+    __tablename__ = "wb_ad_upd"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    advert_id: Mapped[int] = mapped_column(Integer, nullable=False)  # WB advertId
+    upd_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # момент списания (UTC)
+    upd_sum: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # сумма списания, ₽
+    upd_num: Mapped[int] = mapped_column(Integer, default=0)  # номер документа WB
+    camp_name: Mapped[str | None] = mapped_column(String(255))
+    advert_type: Mapped[int | None] = mapped_column(Integer)  # числовой тип WB
+    payment_type: Mapped[str | None] = mapped_column(String(50))  # "Баланс" / "Счет"
+    advert_status: Mapped[int | None] = mapped_column(Integer)  # статус кампании на момент списания
+    currency: Mapped[str | None] = mapped_column(String(10))
+
+    __table_args__ = (
+        # Идемпотентность заливки периода: одно списание = (кампания, момент, документ, сумма)
+        UniqueConstraint("project_id", "advert_id", "upd_time", "upd_num", "upd_sum", name="uq_ad_upd"),
+        Index("ix_ad_upd_project_time", "project_id", "upd_time"),
+        Index("ix_ad_upd_advert", "project_id", "advert_id", "upd_time"),
+    )
+
+
+class WbAdSearchDaily(Base):
+    """Посуточная статистика зоны ПОИСК: кампания × товар × дата (сумма поисковых кластеров).
+
+    Источник — WB /adv/v1/normquery/stats (статистика кластеров с детализацией по дням).
+    По каждому дню суммируем все нормализованные запросы (кластеры) — это метрики зоны
+    «Поиск». Зона «Рекомендации» получается вычитанием: итог кампании (wb_ad_nm_daily)
+    минус поиск. WB не отдаёт зоны по дням готовыми — это единственный источник разбивки.
+
+    Только для CPM-кампаний (у CPC поиск = вся кампания, отдельная разбивка не нужна).
+    """
+
+    __tablename__ = "wb_ad_search_daily"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    campaign_id: Mapped[int] = mapped_column(Integer, nullable=False)  # WB advertId
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    spend: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)
+    atbs: Mapped[int] = mapped_column(Integer, default=0)  # корзины
+    orders: Mapped[int] = mapped_column(Integer, default=0)
+    shks: Mapped[int] = mapped_column(Integer, default=0)  # штуки
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "campaign_id", "nm_id", "date", name="uq_ad_search_daily"),
+        Index("ix_ad_search_daily_campaign_date", "project_id", "campaign_id", "date"),
+    )
+
+
+class WbAdPayment(Base):
+    """История пополнений счёта WB Продвижение (WB /adv/v1/payments).
+
+    Пополнения баланса рекламного кабинета: когда и на сколько был пополнен счёт,
+    каким способом (type) и с каким статусом. У WB есть свой уникальный id пополнения.
+    """
+
+    __tablename__ = "wb_ad_payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    wb_id: Mapped[int] = mapped_column(BigInteger, nullable=False)  # id пополнения в WB
+    paid_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)  # дата пополнения
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0)  # сумма, ₽
+    payment_type: Mapped[int | None] = mapped_column(Integer)  # способ (WB type)
+    status_id: Mapped[int | None] = mapped_column(Integer)
+    currency: Mapped[str | None] = mapped_column(String(10))
+    card_status: Mapped[str | None] = mapped_column(String(50))
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "wb_id", name="uq_ad_payment"),
+        Index("ix_ad_payment_project_date", "project_id", "paid_at"),
     )

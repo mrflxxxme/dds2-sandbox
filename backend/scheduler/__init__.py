@@ -26,12 +26,14 @@ from backend.scheduler.jobs.fbo_supplies import (
     refresh_all_projects_assemblies_from_fbo,
     sync_all_projects_fbo_supplies,
 )
+from backend.scheduler.jobs.ab_tests import ab_tests_tick_all_projects
 from backend.scheduler.jobs.fulfillment_sync import sync_all_fulfillment_warehouses
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
     ad_nm_backfill_tick,
     ads_autopay_tick,
     fast_backfill_tick,
+    snapshot_ad_intraday_all_projects,
     sync_ad_campaigns_all_projects,
     sync_all_projects_funnel,
     sync_budgets_all_projects,
@@ -42,6 +44,7 @@ from backend.scheduler.jobs.health_check import health_monitor
 from backend.scheduler.jobs.heartbeat import heartbeat_ping
 from backend.scheduler.jobs.prewarm import prewarm_all_reports, prewarm_project  # noqa: F401
 from backend.scheduler.jobs.stock_distribution_snapshot import snapshot_all_projects_stock_distribution
+from backend.scheduler.jobs.supply_discrepancy import check_all_projects_supply_discrepancies
 from backend.scheduler.jobs.wb_finance import (
     sync_all_projects_wb_finance,
     sync_all_projects_wb_finance_daily,
@@ -151,6 +154,32 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,
+    )
+
+    # Ad intraday snapshots: тик каждые 10 мин (:7,:17,…) — накопительные показы/клики/расход
+    # из кабинетной сессии (cmp campaigns-stats) для интрадей-графика «место принятия решения».
+    # Фактическая частота на проект — настройка ads_snapshot_interval_min (10/20/30/60): гейт
+    # внутри snapshot_ad_intraday пропускает тик, если с прошлого снимка прошло меньше интервала.
+    _scheduler.add_job(
+        snapshot_ad_intraday_all_projects,
+        trigger=CronTrigger(minute="7,17,27,37,47,57", timezone=MSK),
+        id="snapshot_ad_intraday",
+        name="WB Ad Intraday Snapshots (every 10min tick)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+
+    # АБ-тесты главного фото: тик каждые 5 мин — дельты счётчиков, ротация по границе
+    # круга (по времени round_minutes, досрочно по показам), финиш с возвратом исходного.
+    _scheduler.add_job(
+        ab_tests_tick_all_projects,
+        trigger=IntervalTrigger(minutes=5),
+        id="ab_tests_tick",
+        name="WB AB photo tests tick (every 5min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=120,
     )
 
     # РК-статистика по товарам: раз в сутки ночью. Первый проход после релиза
@@ -287,14 +316,28 @@ def start_scheduler():
         misfire_grace_time=600,
     )
 
-    # WB supply live-states sync: every 4h (≈6×/день) — фоновая «Обновить» WB-панели.
-    # Тянет listSupplies + справочник статусов кабинета и обновляет wb_supply_state
-    # локальных связей заявка↔WB-поставка (bulk, один клиент на проект).
+    # WB supply live-states sync: every 30 min — фоновая «Обновить» WB-панели +
+    # добор авто-заноса пропуска (F3+: как только дата забронирована и пропуск
+    # полный — заносим в кабинет сам). Тянет listSupplies + справочник статусов и
+    # обновляет wb_supply_state локальных связей заявка↔WB-поставка (bulk, один
+    # клиент на проект; scope — только активные заявки, звонков немного).
     _scheduler.add_job(
         sync_all_projects_wb_supply_states,
-        trigger=IntervalTrigger(hours=4),
+        trigger=IntervalTrigger(minutes=30),
         id="wb_supply_states_sync",
-        name="WB supply states sync (every 4h)",
+        name="WB supply states sync (every 30 min)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=600,
+    )
+
+    # Расхождение WB-поставок → TG: every 2 hours (машина назначена/в пути,
+    # дата/паллеты/пропуск не сходятся; повтор пока проблема не исправлена).
+    _scheduler.add_job(
+        check_all_projects_supply_discrepancies,
+        trigger=IntervalTrigger(hours=2),
+        id="supply_discrepancy_notify",
+        name="Supply discrepancy notify (every 2h)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=600,

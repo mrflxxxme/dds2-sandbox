@@ -186,15 +186,12 @@ async def _check_urgent_shipments(
                 max_need = wh_art["need"]
                 target_warehouse = wh.get("name", "")
 
-        # days_left on WB: stocks_wb / avg_daily
-        stocks_wb = art.get("stocks_wb", 0)
-        # Estimate avg_daily from any warehouse data
-        total_avg_daily = 0.0
-        for wh in need_data.get("warehouses", []):
-            wh_art = wh.get("articles", {}).get(nm_id)
-            if wh_art:
-                total_avg_daily += wh_art.get("avg_daily", 0)
-        days_left_wb = round(stocks_wb / total_avg_daily, 1) if total_avg_daily > 0 else 0.0
+        # days_left on WB — готовое поле артикула (growth-aware скорость, включает
+        # unmapped-спрос); ручная сумма клеточных avg_daily дублировала бы логику
+        # скорости и расходилась с ней.
+        days_left_wb = art.get("wb_days_left")
+        if days_left_wb is None:
+            days_left_wb = 0.0
 
         result.append(
             {

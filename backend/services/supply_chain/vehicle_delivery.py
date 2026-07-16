@@ -1215,6 +1215,26 @@ async def update_vehicle_item(
     if not cost_item:
         raise ValueError(f"Item {item_id} not found in vehicle {order_no}")
 
+    # Root fix: смена наполнения короба → пересчёт qty с сохранением ЧИСЛА КОРОБОВ.
+    # Физический якорь — коробов, поэтому qty = коробов × наполнение. Раньше qty
+    # залипал на старом значении (108@9 оставалось 108 после правки наполнения на 5)
+    # → фантомный сток на ФФ. Пересчитываем только когда:
+    #   - явно меняем наполнение и НЕ передан явный qty (тот берёт верх);
+    #   - не задана ручная поразрядка коробов (box_detail — источник истины qty);
+    #   - старый qty кратен старому наполнению (число коробов однозначно).
+    if (
+        set_pcs_per_box_override
+        and pcs_per_box_override
+        and new_qty is None
+        and not box_detail_override
+        and not cost_item.box_detail_override
+    ):
+        old_ppb = cost_item.pcs_per_box_override
+        if old_ppb and old_ppb > 0 and cost_item.qty and cost_item.qty % old_ppb == 0:
+            recomputed = (cost_item.qty // old_ppb) * pcs_per_box_override
+            if recomputed != cost_item.qty:
+                new_qty = recomputed
+
     qty_changed = new_qty is not None and new_qty != cost_item.qty
     any_override_set = set_box_size_override or set_pcs_per_box_override or set_box_detail_override
 
@@ -1843,8 +1863,37 @@ async def update_vehicle_status(
             errors.append("склад назначения")
         if errors:
             raise ValueError(f"Укажите: {', '.join(errors)}")
+        assert vehicle.target_warehouse_id is not None  # проверен выше через errors — сузить для mypy
+        target_wh_id = vehicle.target_warehouse_id
+
+        # 1) Создать приёмку у ФФ ДО перевода статуса. Сбой → ValueError → статус
+        #    не меняется, приёмки/зеркала нет (skladbot POST — единственный внешний
+        #    сайд-эффект; при ошибке ничего не создано). None — ФФ не подключён или
+        #    провайдер без поддержки создания приёмки: переход идёт как раньше.
+        from backend.services import fulfillment_service
+
+        qty_by_barcode = _aggregate_vehicle_barcodes(vehicle)
+        arrival = vehicle.estimated_arrival_date or utcnow().date()
+        ff_created = await fulfillment_service.push_ff_inbound(
+            db,
+            project_id,
+            target_wh_id,
+            qty_by_barcode,
+            arrival,
+            comment=f"Машина {vehicle.order_no} (DDS)",
+        )
+        # 2) Наша приёмка (EXPECTED) + связь с приёмкой ФФ в одном коммите с переводом статуса.
+        #    Окно неатомарности: POST приёмки уже прошёл выше; если этот финальный commit
+        #    упадёт (БД недоступна) — приёмка у ФФ осиротеет, а ретрай создаст вторую (как у
+        #    сборочного PUSH). Баркоды здесь резолвятся из Nomenclature best-effort, не бросая.
         receipt = await _create_inbound_from_vehicle(db, project_id, vehicle)
         vehicle.inbound_receipt_id = receipt.id
+        if ff_created is not None:
+            ff_request_id = await fulfillment_service.link_ff_inbound_mirror(
+                db, project_id, target_wh_id, receipt.id, ff_created
+            )
+            result_data["ff_inbound_number"] = ff_created.get("number")
+            result_data["ff_request_id"] = ff_request_id
 
     vehicle.status = data.status
 
@@ -2106,6 +2155,27 @@ async def recalculate_all_vehicles(
     return {"ok": True, "vehicles": len(order_nos), "items_updated": total_updated}
 
 
+def _aggregate_vehicle_barcodes(vehicle: CostOrder) -> dict[str, int]:
+    """ACTIVE cost items → {barcode: qty}, агрегировано по ШК.
+
+    vehicle.items не отфильтрован (включает soft-deleted), и один ШК может прийти
+    отдельными cost items из 2+ заказов фабрики — без агрегации это дублирующие
+    строки приёмки, задваивающие сток при приёме. Общий источник для строк нашей
+    приёмки и состава приёмки ФФ, чтобы они совпадали позиция-в-позицию.
+    """
+    qty_by_barcode: dict[str, int] = {}
+    for cost_item in vehicle.items:
+        if cost_item.is_deleted:
+            continue
+        # strip: ключи должны совпадать с нормализованными ШК из skladbot resolve_products
+        # (иначе ШК с пробелами → ложный «товар не заведён» блок при создании приёмки ФФ)
+        barcode = (cost_item.barcode or "").strip()
+        if not barcode:
+            continue
+        qty_by_barcode[barcode] = qty_by_barcode.get(barcode, 0) + (cost_item.qty or 0)
+    return qty_by_barcode
+
+
 async def _create_inbound_from_vehicle(
     db: AsyncSession,
     project_id: int,
@@ -2129,16 +2199,7 @@ async def _create_inbound_from_vehicle(
     db.add(receipt)
     await db.flush()  # get receipt.id
 
-    # Aggregate ACTIVE cost items by barcode → one receipt line per barcode.
-    # vehicle.items is unfiltered (includes soft-deleted), and the same barcode
-    # can arrive as separate cost items from 2+ factory orders — either would
-    # create duplicate receipt lines that double the stock on accept.
-    qty_by_barcode: dict[str, int] = {}
-    for cost_item in vehicle.items:
-        if cost_item.is_deleted:
-            continue
-        qty_by_barcode[cost_item.barcode] = qty_by_barcode.get(cost_item.barcode, 0) + (cost_item.qty or 0)
-
+    qty_by_barcode = _aggregate_vehicle_barcodes(vehicle)
     for barcode, qty in qty_by_barcode.items():
         try:
             nom = await _resolve_barcode(db, project_id, barcode)

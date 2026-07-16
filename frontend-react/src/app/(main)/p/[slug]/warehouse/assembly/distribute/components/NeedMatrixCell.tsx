@@ -1,5 +1,5 @@
 'use client';
-import React from 'react';
+import React, { useState } from 'react';
 import { formatNumber } from '@/lib/utils';
 import type { PackageType } from '@/types/api';
 
@@ -56,6 +56,37 @@ const STEP_BTN: React.CSSProperties = {
 };
 const STEP_BTN_OFF: React.CSSProperties = { ...STEP_BTN, opacity: 0.35, cursor: 'not-allowed' };
 
+/** Число коробов — редактируемое поле («простой ввод»: вписать сколько коробов,
+ *  Enter/blur применяет как абсолютное значение; хэндлеры экрана капят рост). */
+function BoxCountInput({ boxes, ppb, onSet }: { boxes: number; ppb: number; onSet: (n: number) => void }) {
+    const [draft, setDraft] = useState<string | null>(null);
+    const commit = () => {
+        if (draft == null) return;
+        const n = Math.floor(Number(draft));
+        setDraft(null);
+        if (Number.isFinite(n) && n >= 0 && n !== boxes) onSet(n);
+    };
+    return (
+        <input
+            type="number" min={0} inputMode="numeric" aria-label="Коробов на склад"
+            value={draft ?? String(boxes)}
+            onFocus={(ev) => ev.currentTarget.select()}
+            onChange={(ev) => setDraft(ev.currentTarget.value)}
+            onBlur={commit}
+            onKeyDown={(ev) => {
+                if (ev.key === 'Enter') ev.currentTarget.blur();          // blur → commit
+                else if (ev.key === 'Escape') setDraft(null);             // откат к текущему, без blur (иначе stale-commit)
+            }}
+            title={`${formatNumber(boxes, 0)} короб × ${formatNumber(ppb, 0)} шт — впиши число коробов (Enter — применить)`}
+            style={{
+                width: 40, padding: '1px 3px', fontSize: 12, fontWeight: 700, textAlign: 'right',
+                borderRadius: 6, border: '1px solid var(--color-border)', background: 'var(--color-bg-card)',
+                color: boxes > 0 ? 'var(--color-accent)' : 'var(--color-dim)',
+            }}
+        />
+    );
+}
+
 /**
  * Ячейка матрицы распределения — показываем ТОЛЬКО что реально поедет (не потребность):
  *   строка 1 — сколько отправляем + иконка типа упаковки (📦 короб / 📐 моно / 🔒 сейф) + ⌛ предзаявка,
@@ -74,10 +105,8 @@ export default function NeedMatrixCell({ ship, stock = 0, onWay = 0, tint, mark,
                         <button type="button" title="− короб" aria-label="Убрать короб"
                             style={edit.boxes <= 0 ? STEP_BTN_OFF : STEP_BTN}
                             disabled={edit.boxes <= 0} onClick={() => edit.onDelta(-1)}>−</button>
-                        <span style={{ fontWeight: 700, minWidth: 18, textAlign: 'center', color: edit.boxes > 0 ? 'var(--color-accent)' : 'var(--color-dim)' }}
-                            title={`${formatNumber(edit.boxes, 0)} короб × ${formatNumber(edit.ppb, 0)} шт`}>
-                            {formatNumber(edit.boxes, 0)}<span style={{ fontSize: 9, fontWeight: 500, color: 'var(--color-muted)' }}> кор</span>
-                        </span>
+                        <BoxCountInput boxes={edit.boxes} ppb={edit.ppb} onSet={(n) => edit.onDelta(n - edit.boxes)} />
+                        <span style={{ fontSize: 9, fontWeight: 500, color: 'var(--color-muted)' }}>кор</span>
                         <button type="button" title="+ короб" aria-label="Добавить короб"
                             style={edit.disableInc ? STEP_BTN_OFF : STEP_BTN}
                             disabled={edit.disableInc} onClick={() => edit.onDelta(1)}>+</button>

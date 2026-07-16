@@ -21,6 +21,7 @@ const FUNNEL_COLS: { k: keyof CampaignMetricRow; label: string; pct?: boolean }[
     { k: 'orders_sum', label: 'Сумма ₽' },
     { k: 'cpo', label: 'CPO ₽' },
     { k: 'avg_price', label: 'Цена ₽' },
+    { k: 'customer_price', label: 'Цена Клиенту ₽' },
     { k: 'drr', label: 'ДРР', pct: true },
 ];
 const fmtCell = (r: CampaignMetricRow, k: keyof CampaignMetricRow, pct?: boolean) => {

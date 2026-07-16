@@ -744,9 +744,13 @@ async def get_ad_campaigns_list(
 class AutopaySettingRequest(BaseModel):
     campaign_id: int
     enabled: bool = False
-    amount: float = 0
-    hour: int = 9  # час пополнения, МСК
-    threshold_pct: int = 50  # пополнять, только если открут за сутки ≥ порога
+    mode: str = "to_target"  # to_target — до X в час по порогу оборота; low_balance — «как на ВБ», по остатку
+    amount: float = 0  # to_target: дневной бюджет X
+    hour: int = 9  # to_target: час пополнения, МСК
+    threshold_pct: int = 50  # to_target: пополнять, только если открут за сутки ≥ порога
+    low_balance_threshold: float = 1000  # low_balance: долить, когда остаток < этого, ₽
+    topup_amount: float = 1000  # low_balance: сумма разового долива, ₽
+    daily_cap: int = 1  # low_balance: не чаще N раз в день (0 = без ограничения)
 
 
 @router.get("/campaigns/autopay")
@@ -789,7 +793,12 @@ async def set_campaigns_autopay(
 
     return await save_autopay_and_maybe_activate(
         db, project.id, body.campaign_id,
-        {"enabled": body.enabled, "amount": body.amount, "hour": body.hour, "threshold_pct": body.threshold_pct},
+        {
+            "enabled": body.enabled, "mode": body.mode, "amount": body.amount,
+            "hour": body.hour, "threshold_pct": body.threshold_pct,
+            "low_balance_threshold": body.low_balance_threshold, "topup_amount": body.topup_amount,
+            "daily_cap": body.daily_cap,
+        },
     )
 
 
@@ -810,6 +819,171 @@ async def set_campaign_state_endpoint(
     result = await set_campaign_active(db, project.id, campaign_id, body.active)
     if not result["ok"]:
         raise HTTPException(400, result.get("error") or "Не удалось изменить статус кампании")
+    return result
+
+
+@router.post("/campaigns/{campaign_id}/refresh", dependencies=[Depends(rate_limit_write)])
+async def refresh_campaign_ep(
+    campaign_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Точечный догруз ОДНОЙ кампании из WB (деталь + бюджет + свежая дневная стата за 2 дня)
+    и синхронная запись в зеркало. По кнопке «Обновить» на странице кампании."""
+    from backend.services.funnel.ad_campaigns_service import refresh_one_campaign
+
+    result = await refresh_one_campaign(db, project.id, campaign_id)
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось обновить кампанию")
+    return result
+
+
+@router.post("/campaigns/{campaign_id}/stop", dependencies=[Depends(rate_limit_write)])
+async def stop_campaign_ep(
+    campaign_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Завершить кампанию в WB (необратимо)."""
+    from backend.services.funnel.ads_manager import stop_campaign
+
+    result = await stop_campaign(db, project.id, campaign_id)
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось завершить кампанию")
+    return result
+
+
+class CampaignRenameRequest(BaseModel):
+    name: str
+
+
+@router.post("/campaigns/{campaign_id}/rename", dependencies=[Depends(rate_limit_write)])
+async def rename_campaign_ep(
+    campaign_id: int,
+    body: CampaignRenameRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Переименовать кампанию в WB."""
+    from backend.services.funnel.ads_manager import rename_campaign
+
+    result = await rename_campaign(db, project.id, campaign_id, body.name)
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось переименовать кампанию")
+    return result
+
+
+@router.delete("/campaigns/{campaign_id}", dependencies=[Depends(rate_limit_write)])
+async def delete_campaign_ep(
+    campaign_id: int,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Удалить кампанию в WB (только статус «Готова»)."""
+    from backend.services.funnel.ads_manager import delete_campaign
+
+    result = await delete_campaign(db, project.id, campaign_id)
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось удалить кампанию")
+    return result
+
+
+class CampaignNmsRequest(BaseModel):
+    add: list[int] = []
+    delete: list[int] = []
+
+
+@router.patch("/campaigns/{campaign_id}/nms", dependencies=[Depends(rate_limit_write)])
+async def change_campaign_nms_ep(
+    campaign_id: int,
+    body: CampaignNmsRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Добавить/убрать товары кампании в WB."""
+    from backend.services.funnel.ads_manager import change_campaign_nms
+
+    result = await change_campaign_nms(db, project.id, campaign_id, body.add, body.delete)
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось изменить товары кампании")
+    return result
+
+
+class CardBid(BaseModel):
+    nm_id: int
+    bid_rub: float
+    placement: str = "search"
+
+
+class CardBidsRequest(BaseModel):
+    bids: list[CardBid]
+
+
+@router.patch("/campaigns/{campaign_id}/card-bids", dependencies=[Depends(rate_limit_write)])
+async def set_card_bids_ep(
+    campaign_id: int,
+    body: CardBidsRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Изменить ставки карточек товаров в WB."""
+    from backend.services.funnel.ads_manager import set_card_bids
+
+    result = await set_card_bids(db, project.id, campaign_id, [b.model_dump() for b in body.bids])
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось изменить ставки")
+    return result
+
+
+@router.get("/ad-subjects")
+async def ad_subjects_ep(
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Предметы, по которым можно создать рекламную кампанию."""
+    from backend.services.funnel.ads_manager import get_ad_subjects
+
+    return await get_ad_subjects(db, project.id)
+
+
+class AdNmsRequest(BaseModel):
+    subject_ids: list[int]
+
+
+@router.post("/ad-nms")
+async def ad_nms_ep(
+    body: AdNmsRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Карточки товаров для кампании по выбранным предметам."""
+    from backend.services.funnel.ads_manager import get_ad_nms
+
+    return await get_ad_nms(db, project.id, body.subject_ids)
+
+
+class CreateCampaignRequest(BaseModel):
+    name: str
+    nms: list[int]
+    bid_type: str = "manual"
+    payment_type: str = "cpm"
+    placement_types: list[str] | None = None
+
+
+@router.post("/campaigns/create", dependencies=[Depends(rate_limit_write)])
+async def create_campaign_ep(
+    body: CreateCampaignRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Создать рекламную кампанию в WB."""
+    from backend.services.funnel.ads_manager import create_campaign
+
+    result = await create_campaign(
+        db, project.id, body.name, body.nms, body.bid_type, body.payment_type, body.placement_types,
+    )
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось создать кампанию")
     return result
 
 
@@ -844,14 +1018,198 @@ async def get_campaign_metrics_endpoint(
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
     nm_id: int | None = Query(None),
+    zone: str | None = Query(None, pattern="^(search|recommendations)$"),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
     """Посуточные метрики кампании: статистика РК + воронка её товаров, со строкой-итогом.
-    nm_id — воронка только по этому товару."""
+    nm_id — воронка только по этому товару. zone — разбить РК-часть по зоне показов."""
     from backend.services.funnel.ads_manager import get_campaign_metrics
 
-    return await get_campaign_metrics(db, project.id, campaign_id, date_from=date_from, date_to=date_to, nm_id=nm_id)
+    # Разбивка по зоне нужна свежая посуточная статистика поиска — подгружаем on-demand
+    if zone and date_from and date_to:
+        from backend.services.funnel.ad_search_stats import sync_ad_search_daily
+
+        try:
+            await sync_ad_search_daily(db, project.id, campaign_id, date_from, date_to)
+        except Exception:  # noqa: BLE001 — статистика не критична, отдадим что есть
+            pass
+
+    # СПП по дням из отчёта «Заказы» (wb_orders, поштучно → среднее за день) — для «Цены Клиенту».
+    # Источник свежее и полнее финотчёта; тот же интерфейс BdrRatesLookup.
+    from backend.services.funnel.orders_spp import get_orders_spp_map
+
+    spp_map = await get_orders_spp_map(db, project.id)
+    return await get_campaign_metrics(
+        db, project.id, campaign_id, date_from=date_from, date_to=date_to, nm_id=nm_id, zone=zone,
+        bdr_rates_map=spp_map,
+    )
+
+
+@router.get("/campaigns/{campaign_id}/metrics/by-zone")
+async def get_campaign_zone_metrics_endpoint(
+    campaign_id: int,
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    zone: str = Query("total", pattern="^(total|search|recommendations)$"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Посуточные РК-метрики кампании в разрезе зоны показов (Всего / Поиск / Рекомендации).
+    Только рекламная статистика; воронка по зонам не делится. Разбивка — только для CPM."""
+    from backend.services.funnel.ads_manager import get_campaign_zone_metrics
+
+    # Для «Поиска»/«Рекомендаций» нужна свежая посуточная статистика поиска — подгружаем on-demand
+    if zone in ("search", "recommendations") and date_from and date_to:
+        from backend.services.funnel.ad_search_stats import sync_ad_search_daily
+
+        try:
+            await sync_ad_search_daily(db, project.id, campaign_id, date_from, date_to)
+        except Exception:  # noqa: BLE001 — статистика не критична, отдадим что есть
+            pass
+
+    return await get_campaign_zone_metrics(
+        db, project.id, campaign_id, date_from=date_from, date_to=date_to, zone=zone,
+    )
+
+
+@router.get("/campaigns/{campaign_id}/hourly")
+async def get_campaign_hourly_endpoint(
+    campaign_id: int,
+    date: str | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Почасовой расход кампании за день (восстановлен из снимков остатка бюджета, ~10 мин).
+    Показов/кликов по часам WB не отдаёт — только расход. date по умолчанию — сегодня (МСК)."""
+    from backend.services.funnel.ads_manager import get_hourly_spend
+
+    return await get_hourly_spend(db, project.id, campaign_id, date=date)
+
+
+@router.get("/campaigns/{campaign_id}/intraday")
+async def get_campaign_intraday_endpoint(
+    campaign_id: int,
+    date: str | None = Query(None),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Внутридневные показы/клики/расход по интервалам (снимки campaigns-stats).
+
+    Данные копятся вперёд из кабинетной сессии (WB нативно почасовку не отдаёт). Пустой
+    points[] = снимков за день ещё нет (сессия не задана/не набралось). date — сегодня (МСК).
+    В ответе interval_min — текущая частота снимков проекта (для селектора на фронте)."""
+    from backend.services.funnel.ads_manager import get_intraday_metrics
+    from backend.services.settings_service import get_ads_snapshot_interval_min
+
+    res = await get_intraday_metrics(db, project.id, campaign_id, date=date)
+    if "error" not in res:
+        res["interval_min"] = await get_ads_snapshot_interval_min(db, project.id)
+    return res
+
+
+class SnapshotIntervalRequest(BaseModel):
+    interval_min: int  # 10 / 20 / 30 / 60 — частота снимков внутридневной статы (проект-глобально)
+
+
+@router.put("/ads/snapshot-interval", dependencies=[Depends(rate_limit_write)])
+async def set_ads_snapshot_interval_endpoint(
+    body: SnapshotIntervalRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Задать частоту внутридневных снимков рекламы (проект-глобально): 10/20/30/60 мин."""
+    from backend.services.settings_service import set_ads_snapshot_interval_min
+
+    try:
+        m = await set_ads_snapshot_interval_min(db, project.id, body.interval_min)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    return {"interval_min": m}
+
+
+class CollectPositionsRequest(BaseModel):
+    nm_id: int
+    phrases: list[str]
+    max_pages: int = 5  # глубина сбора: сколько страниц выдачи (×100 позиций) проверять
+
+
+@router.post("/positions/collect", dependencies=[Depends(rate_limit_write)])
+async def collect_positions_endpoint(
+    body: CollectPositionsRequest,
+    project: Project = Depends(get_current_project),
+):
+    """Запустить фоновый сбор органических позиций товара по фразам (кластеризатор, кнопка Play).
+    Идемпотентно: если сбор для (nm_id) уже идёт — вернёт текущий прогресс. Коммит порционный."""
+    from backend.services.funnel.search_positions import start_collection
+
+    return start_collection(project.id, body.nm_id, body.phrases, body.max_pages)
+
+
+class CollectOneRequest(BaseModel):
+    nm_id: int
+    phrase: str
+    max_pages: int = 5
+
+
+@router.post("/positions/collect-one", dependencies=[Depends(rate_limit_write)])
+async def collect_position_one_endpoint(
+    body: CollectOneRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Синхронно собрать позицию ОДНОЙ фразы (кнопка-кругляшок в ячейке). Сразу отдаёт результат.
+    throttled=true → WB ограничил («слишком частый запрос»)."""
+    from backend.services.funnel.search_positions import collect_one
+
+    return await collect_one(db, project.id, body.nm_id, body.phrase, body.max_pages)
+
+
+@router.post("/positions/stop", dependencies=[Depends(rate_limit_write)])
+async def stop_positions_endpoint(
+    nm_id: int = Query(...),
+    project: Project = Depends(get_current_project),
+):
+    """Остановить фоновый сбор позиций (кнопка Stop). Частичный результат сохраняется."""
+    from backend.services.funnel.search_positions import stop_collection
+
+    return stop_collection(project.id, nm_id)
+
+
+@router.get("/positions/progress")
+async def positions_progress_endpoint(
+    nm_id: int = Query(...),
+    project: Project = Depends(get_current_project),
+):
+    """Прогресс фонового сбора позиций для nm_id."""
+    from backend.services.funnel.search_positions import get_progress
+
+    return get_progress(project.id, nm_id)
+
+
+@router.get("/positions/history")
+async def positions_history_endpoint(
+    nm_id: int = Query(...),
+    phrase: str = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """История позиций одной фразы (для спарклайна)."""
+    from backend.services.funnel.search_positions import get_position_history
+
+    return {"history": await get_position_history(db, project.id, nm_id, phrase)}
+
+
+@router.get("/positions")
+async def positions_map_endpoint(
+    nm_id: int = Query(...),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Карта позиций товара по фразам: {phrase: {position, prev, depth, at}} (последний+предыдущий снимок)."""
+    from backend.services.funnel.search_positions import get_positions_map
+
+    return {"nm_id": nm_id, "positions": await get_positions_map(db, project.id, nm_id)}
 
 
 class DepositRequest(BaseModel):
@@ -891,6 +1249,54 @@ async def get_campaign_zones_ep(
     from backend.services.funnel.ads_manager import get_campaign_zones
 
     return await get_campaign_zones(db, project.id, campaign_id, date_from, date_to, nm_id)
+
+
+class CampaignZonesRequest(BaseModel):
+    search: bool
+    recommendations: bool
+
+
+@router.put("/campaigns/{campaign_id}/zones", dependencies=[Depends(rate_limit_write)])
+async def set_campaign_zones_ep(
+    campaign_id: int,
+    body: CampaignZonesRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Включить/выключить зоны показов в WB (только CPM с ручной ставкой).
+
+    Передаются обе зоны разом — WB заменяет набор целиком.
+    """
+    from backend.services.funnel.ads_manager import set_campaign_zones
+
+    result = await set_campaign_zones(
+        db, project.id, campaign_id, {"search": body.search, "recommendations": body.recommendations},
+    )
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось изменить зоны показов")
+    return result
+
+
+class ZoneBidRequest(BaseModel):
+    zone: str  # search | recommendations
+    bid: float  # ₽
+
+
+@router.put("/campaigns/{campaign_id}/zone-bid", dependencies=[Depends(rate_limit_write)])
+async def set_campaign_zone_bid_ep(
+    campaign_id: int,
+    body: ZoneBidRequest,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Сменить ставку кампании для зоны (Поиск/Рекомендации). Реальные деньги.
+    Единая ставка → обе зоны; ручная → выбранная зона; CPC → поиск. Только статусы 4/9/11."""
+    from backend.services.funnel.ads_manager import set_campaign_zone_bid
+
+    result = await set_campaign_zone_bid(db, project.id, campaign_id, body.zone, body.bid)
+    if not result["ok"]:
+        raise HTTPException(400, result.get("error") or "Не удалось изменить ставку")
+    return result
 
 
 class AdNmBackfillRequest(BaseModel):

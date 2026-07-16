@@ -27,11 +27,15 @@ export function distributeByBoxMultiple(
      *  это перебор над его потребностью. Кап — только физический сток (totalCanSend);
      *  приоритет тот же (по убыванию потребности = speed-локализация). Для pre-dist-матрицы. */
     minOneBoxPerWh = false,
+    /** Вес приоритета склада (якорь↑/воришка↓ — «схема воришек» сервера). Задан →
+     *  при ДЕФИЦИТЕ бюджета режем в том же порядке, что серверный greedy черновика
+     *  (паритет черновик↔машина); не задан — легаси-порядок «по потребности». */
+    priorityOf?: (name: string) => number,
 ): Record<string, number> {
     if (ppb <= 0 || totalCanSend <= 0) return {};
     const sorted = [...needs]
         .filter(w => w.need > 0)
-        .sort((a, b) => b.need - a.need);
+        .sort((a, b) => (priorityOf ? (priorityOf(b.name) - priorityOf(a.name)) || (b.need - a.need) : b.need - a.need));
     if (sorted.length === 0) return {};
 
     const totalNeed = sorted.reduce((s, w) => s + w.need, 0);
@@ -48,15 +52,23 @@ export function distributeByBoxMultiple(
         remaining -= ppb;
     }
 
-    // Pass 2: доразать целые коробки по убыванию незакрытой потребности.
+    // Pass 2: доразать целые коробки. С priorityOf — сперва заполняем самых
+    // приоритетных ДО их потребности (порядок среза = серверный greedy);
+    // легаси — по убыванию незакрытой потребности.
     while (remaining >= ppb) {
         let bestName: string | null = null;
-        let bestUnmet = 0;
-        for (const wh of sorted) {
-            const unmet = wh.need - (tgt[wh.name] || 0);
-            if (unmet >= ppb && unmet > bestUnmet) {
-                bestName = wh.name;
-                bestUnmet = unmet;
+        if (priorityOf) {
+            for (const wh of sorted) {
+                if (wh.need - (tgt[wh.name] || 0) >= ppb) { bestName = wh.name; break; }
+            }
+        } else {
+            let bestUnmet = 0;
+            for (const wh of sorted) {
+                const unmet = wh.need - (tgt[wh.name] || 0);
+                if (unmet >= ppb && unmet > bestUnmet) {
+                    bestName = wh.name;
+                    bestUnmet = unmet;
+                }
             }
         }
         if (!bestName) break;
@@ -71,7 +83,9 @@ export function distributeByBoxMultiple(
         let loose = budget - sorted.reduce((s, wh) => s + (tgt[wh.name] || 0), 0);
         if (loose > 0) {
             const byUnmet = [...sorted].sort(
-                (a, b) => (b.need - (tgt[b.name] || 0)) - (a.need - (tgt[a.name] || 0)),
+                (a, b) => priorityOf
+                    ? (priorityOf(b.name) - priorityOf(a.name)) || ((b.need - (tgt[b.name] || 0)) - (a.need - (tgt[a.name] || 0)))
+                    : (b.need - (tgt[b.name] || 0)) - (a.need - (tgt[a.name] || 0)),
             );
             for (const wh of byUnmet) {
                 if (loose <= 0) break;

@@ -289,7 +289,13 @@ async def update_draft(
 
     Если `payload.event` задан (дозабор из предброни / запись из матрицы) — снапшотит
     СТАРЫЙ distribution в историю (`AssemblyDraftEvent`) для отката. Обычный autosave
-    события не передаёт → не логируется."""
+    события не передаёт → не логируется.
+
+    Входящий distribution проходит server-side ДЕЛЬТА-гейт `_subtract_in_transit`:
+    транзит активных заявок вычитается только из ПРИРОСТА плана относительно уже
+    сохранённого в БД черновика (baseline). Уже сохранённый план чистый (гейтован
+    при записи) — безусловный вычет на каждом PUT повторно урезал бы его при
+    каждом автосейве матрицы (PUT на каждый клик), и черновик «таял»."""
     import copy
 
     draft = await get_draft(db, project_id, draft_id)
@@ -303,15 +309,20 @@ async def update_draft(
     if payload.distribution is not None:
         payload.distribution.rows = _dedupe_rows(payload.distribution.rows)
         _reconcile_handed_with_rows(payload.distribution)
-        # «Один мир», server-side гейт: план не может дублировать уже едущее в
-        # активных заявках (вкл. PRE_DISTRIBUTED — резерв машины). Клиентский
-        # reconcile при загрузке страницы НЕ защищает от stale-вкладки: открытая
-        # до создания заявок вкладка автосейвом PUT'ила старые строки поверх
-        # очищенных (прод-кейс «швабры апл» 2026-07-10: 7 PUT за 20с вернули
-        # дубль 54 шт после клиентской очистки). Гейт на записи закрывает гонку
-        # для ЛЮБОГО источника PUT. Сбой выборки не валит автосейв (best-effort).
+        # «Один мир», server-side ДЕЛЬТА-гейт: план не может дублировать уже
+        # едущее в активных заявках (вкл. PRE_DISTRIBUTED — резерв машины).
+        # Клиентский reconcile при загрузке страницы НЕ защищает от stale-вкладки:
+        # открытая до создания заявок вкладка автосейвом PUT'ила старые строки
+        # поверх очищенных (прод-кейс «швабры апл» 2026-07-10: 7 PUT за 20с
+        # вернули дубль 54 шт после клиентской очистки). Гейт на записи закрывает
+        # гонку для ЛЮБОГО источника PUT.
+        # Baseline = Σ tgt ТЕКУЩЕГО draft.distribution (в этот момент ещё старый):
+        # транзит вычитается только из прироста относительно него, иначе каждый
+        # автосейв матрицы повторно урезал бы уже чистый план (см. docstring
+        # _subtract_in_transit). Сбой выборки не валит автосейв (best-effort).
         try:
-            await _subtract_in_transit(db, project_id, payload.distribution)
+            baseline = _plan_tgt_sums(AssemblyDraftDistribution.model_validate(draft.distribution or {}))
+            await _subtract_in_transit(db, project_id, payload.distribution, baseline)
         except Exception:
             logger.warning("draft %s: in-transit гейт пропущен (ошибка выборки)", draft_id, exc_info=True)
         draft.distribution = payload.distribution.model_dump()
@@ -348,16 +359,25 @@ async def remove_rows_by_nm(
     draft_id: int,
     nm_ids: list[int],
 ) -> AssemblyDraft:
-    """Убрать из черновика все строки и handed-юниты указанных SKU (удаление неликвида
-    из прогноза). handed-юниты с несколькими SKU очищаются от этих nm_id; пустые
-    юниты выбрасываются. Остальные поля черновика не трогаются. 404 если не найден."""
+    """Убрать из черновика все строки, ПРЕДБРОНЬ и handed-юниты указанных SKU
+    (удаление неликвида из прогноза / чистка SKU из ручной раскладки). handed-юниты
+    с несколькими SKU очищаются от этих nm_id; пустые юниты выбрасываются.
+    Остальные поля черновика не трогаются. 404 если не найден."""
     draft = await get_draft(db, project_id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
 
+    import copy
+
     nm_set = set(nm_ids)
+    before_distribution = copy.deepcopy(draft.distribution)
     distribution = AssemblyDraftDistribution.model_validate(draft.distribution or {})
     distribution.rows = [r for r in distribution.rows if r.nm_id not in nm_set]
+    distribution.prebook = [r for r in distribution.prebook if r.nm_id not in nm_set]
+    # Бейджи «из предброни» (ключ nmId::wb) удаляемых SKU — иначе stale-метка
+    # всплывёт, если SKU вернётся в черновик пересчётом.
+    prefixes = tuple(f"{nm}::" for nm in nm_set)
+    distribution.prebook_origin = [k for k in distribution.prebook_origin if not k.startswith(prefixes)]
     kept_units = []
     for unit in distribution.handed_units:
         unit.items = [it for it in unit.items if it.nm_id not in nm_set]
@@ -368,6 +388,24 @@ async def remove_rows_by_nm(
     draft.distribution = distribution.model_dump(mode="json")
     await db.commit()
     await db.refresh(draft)
+
+    # История: ✕ из матрицы / чистка неликвида — значимое изменение, снапшотим
+    # старый distribution для отката. Best-effort — сбой лога не валит удаление.
+    try:
+        from backend.services.assembly.draft_history import log_draft_event
+
+        await log_draft_event(
+            db,
+            project_id,
+            draft_id,
+            "REMOVE_ROWS",
+            summary=f"Убраны SKU из черновика: {len(nm_set)} шт (nm {', '.join(str(n) for n in sorted(nm_set)[:5])}{'…' if len(nm_set) > 5 else ''})",
+            before_distribution=before_distribution,
+            draft_updated_at=draft.updated_at,
+        )
+        await db.refresh(draft)
+    except Exception:
+        logger.warning("Failed to log REMOVE_ROWS event for draft_id=%s", draft_id, exc_info=True)
     return draft
 
 
@@ -1187,25 +1225,73 @@ def _subtract_in_transit_rows(
     return kept, subtracted
 
 
+def _plan_tgt_sums(distribution: AssemblyDraftDistribution) -> dict[int, dict[str, int]]:
+    """Σ tgt плана per (nm_id, WB-склад) по rows И prebook вместе."""
+    sums: dict[int, dict[str, int]] = {}
+    for r in list(distribution.rows or []) + list(distribution.prebook or []):
+        if not r.nm_id:
+            continue
+        per = sums.setdefault(r.nm_id, {})
+        for wh, q in (r.tgt or {}).items():
+            per[wh] = per.get(wh, 0) + int(q or 0)
+    return sums
+
+
 async def _subtract_in_transit(
     db: AsyncSession,
     project_id: int,
     distribution: AssemblyDraftDistribution,
+    baseline: dict[int, dict[str, int]] | None = None,
 ) -> int:
-    """Server-side «один мир»: урезать rows+prebook на уже едущее в активных
-    заявках (fetch_in_transit_by_nm, вкл. PRE_DISTRIBUTED). Возвращает Σ вычтено."""
+    """Server-side «один мир», ДЕЛЬТА-гейт: урезать rows+prebook на уже едущее в
+    активных заявках (fetch_in_transit_by_nm, вкл. PRE_DISTRIBUTED) — но только
+    в пределах ПРИРОСТА плана относительно `baseline`. Возвращает Σ вычтено.
+
+    `baseline` — Σ tgt per (nm_id, склад) УЖЕ сохранённого в БД черновика
+    (rows+prebook, см. `_plan_tgt_sums`). Уже сохранённый план прошёл гейт при
+    записи → он чистый; повторный безусловный вычет транзита из ВСЕГО входящего
+    плана урезал бы его заново на каждом PUT (матрица-редактор автосейвит каждый
+    клик) — черновик «таял». Поэтому лимит вычета per (nm, склад):
+
+        effective = min(transit, max(0, incoming_sum − baseline_sum))
+
+    Семантика: повторный автосейв неизменного плана → прирост 0 → вычет 0
+    (идемпотентность); stale-вкладка вернула старый план поверх очищенного
+    черновика → baseline меньше → прирост есть → вычет как раньше.
+    `baseline=None` ≡ пустой черновик (весь входящий план — прирост).
+
+    ✋ SKU из `distribution.manual_nms` гейт НЕ трогает: степпер матрицы правится
+    при видимой колонке «В сборке» — прирост поверх транзита там осознанный
+    добор, а не stale-дубль (прод-кейс 2026-07-15: +4 короба в Электросталь
+    молча резались до нуля → «правка не сохраняется»).
+    """
     from backend.services.cold_start_distribution_service import fetch_in_transit_by_nm
 
+    manual = set(distribution.manual_nms or [])
     nm_ids = sorted(
-        {r.nm_id for r in (distribution.rows or []) if r.nm_id}
-        | {r.nm_id for r in (distribution.prebook or []) if r.nm_id}
+        {r.nm_id for r in (distribution.rows or []) if r.nm_id and r.nm_id not in manual}
+        | {r.nm_id for r in (distribution.prebook or []) if r.nm_id and r.nm_id not in manual}
     )
     if not nm_ids:
         return 0
     transit = await fetch_in_transit_by_nm(db, project_id, nm_ids)
     if not transit:
         return 0
-    remaining = {nm: dict(per) for nm, per in transit.items()}
+    incoming = _plan_tgt_sums(distribution)
+    remaining: dict[int, dict[str, int]] = {}
+    for nm, per in transit.items():
+        base_per = (baseline or {}).get(nm, {})
+        inc_per = incoming.get(nm, {})
+        eff: dict[str, int] = {}
+        for wh, tq in per.items():
+            growth = max(0, inc_per.get(wh, 0) - base_per.get(wh, 0))
+            take = min(int(tq), growth)
+            if take > 0:
+                eff[wh] = take
+        if eff:
+            remaining[nm] = eff
+    if not remaining:
+        return 0
     distribution.rows, sub_rows = _subtract_in_transit_rows(distribution.rows or [], remaining)
     distribution.prebook, sub_pb = _subtract_in_transit_rows(distribution.prebook or [], remaining)
     return sub_rows + sub_pb

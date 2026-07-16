@@ -215,6 +215,33 @@ async def list_measurements_notify_chats(db: AsyncSession, project_id: int) -> l
     return list(result.scalars().all())
 
 
+async def toggle_supply_notify(db: AsyncSession, binding_id: int, project_id: int, enabled: bool) -> bool:
+    """Toggle supply_notify_enabled (расхождение поставок ФФ) for a chat binding."""
+    result = await db.execute(
+        select(TelegramChatBinding).where(
+            TelegramChatBinding.id == binding_id,
+            TelegramChatBinding.project_id == project_id,
+        )
+    )
+    binding = result.scalar_one_or_none()
+    if not binding:
+        return False
+    binding.supply_notify_enabled = enabled
+    await db.commit()
+    return True
+
+
+async def list_supply_notify_chats(db: AsyncSession, project_id: int) -> list[TelegramChatBinding]:
+    """Chat bindings of a project that opted into supply-discrepancy alerts."""
+    result = await db.execute(
+        select(TelegramChatBinding).where(
+            TelegramChatBinding.project_id == project_id,
+            TelegramChatBinding.supply_notify_enabled == True,  # noqa: E712
+        )
+    )
+    return list(result.scalars().all())
+
+
 async def toggle_ff_board(db: AsyncSession, binding_id: int, project_id: int, enabled: bool) -> bool:
     """Toggle the pinned FF-board for a chat binding. Disabling also forgets the
     pinned message id so a fresh board is created on re-enable."""

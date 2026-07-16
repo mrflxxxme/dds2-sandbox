@@ -750,6 +750,8 @@ export interface TelegramChatBinding {
   notify_enabled: boolean;
   ff_notify_enabled: boolean;
   measurements_notify_enabled: boolean;
+  /** Отдельный opt-in под алерты «Расхождение поставок ФФ» (раз в 2ч). */
+  supply_notify_enabled: boolean;
   ff_board_enabled: boolean;
   /** NULL = табло по всем складам; иначе — заявки только этого склада ФФ. */
   ff_board_warehouse_id: number | null;
@@ -1420,6 +1422,46 @@ export interface WbStocksResponse {
   last_synced_at: string | null;
 }
 
+// ─── Stock Analytics (GET /reports/stock_analytics — «Аналитика остатков») ─────
+
+export interface StockAnalyticsArticle {
+  nm_id: number;
+  vendor_code: string;
+  subject: string;
+  brand: string;
+  orders_30d: number;
+  trend_pct: number;
+  avg_daily: number;
+  stocks_wb: number;
+  /** Запас в днях по остатку выбранного mode (wb / wb_rf / wb_rf_transit / wb_assembly_transit). */
+  days_left: number;
+  traffic_light: string;
+  forecast: number[];
+  /** Свободный остаток на ФФ-складах (mode ≠ wb). */
+  stocks_rf?: number;
+  in_assembly?: number;
+  in_transit?: number;
+  wb_buyout_pct?: number;
+  /** Реализация БДР за trend_days, ₽. */
+  revenue_bdr?: number;
+  margin_pct?: number | null;
+  rf_avg_days?: number | null;
+  first_sale_date?: string | null;
+}
+
+export interface StockAnalyticsResponse {
+  articles: StockAnalyticsArticle[];
+  dates: string[];
+  total_articles: number;
+  orders_30d: number;
+  avg_daily: number;
+  data_date: string;
+  most_critical: { article: string; days_left: number } | null;
+  traffic_light: { red: number; orange: number; yellow: number; green: number };
+  subjects: string[];
+  brands: string[];
+}
+
 export interface WbArticleWarehouse {
   name: string;
   quantity: number;
@@ -1770,6 +1812,10 @@ export interface AssemblyRequestItem {
   article?: string | null;
   brand?: string;
   stock_quantity: number;
+  /** Кратность короба (склад заявки + ШК); null — не задана. */
+  box_qty?: number | null;
+  /** Коробов на позицию = ⌈штук/кратность⌉; null без кратности. */
+  boxes?: number | null;
 }
 
 /** Содержимое одного SKU внутри паллеты: целые короба + хвост-россыпь. */
@@ -1863,6 +1909,12 @@ export interface WbSupplyStateBrief {
 }
 
 // Итог bulk-синка WB-состояний заявок проекта (F1).
+/** Машина с заявками сборки — опция фильтра «Источник» в списке сборок. */
+export interface SourceVehicleOption {
+  id: number;
+  order_no: string;
+}
+
 export interface WbBulkSyncResult {
   checked: number;
   updated: number;
@@ -2075,7 +2127,10 @@ export interface FfMismatchDetail {
   our_total: number;
   ff_total: number;
   ff_request_numbers: string[];
+  /** Расхождение по НАШИМ ШК (наш qty ≠ qty ФФ, включая «мы отправили, а в заявке нет») */
   rows: FfMismatchDetailRow[];
+  /** ШК только у ФФ (мы их не отправляли) — инфо, расхождением не считается */
+  extra_rows?: FfMismatchDetailRow[];
 }
 
 // ─── Предраспределение машины в пути ─────────────────────────────────────────
@@ -2083,6 +2138,7 @@ export interface FfMismatchDetail {
 export interface PreDistVehicle {
   id: number;
   order_no: string;
+  /** CUSTOMS | DISPATCHED — в пути; DELIVERED — принята ≤ 3 дн. назад (см. accepted_date). */
   status: string;
   target_warehouse_id: number | null;
   target_warehouse_name: string | null;
@@ -2092,6 +2148,9 @@ export interface PreDistVehicle {
   distributed_qty: number;
   can_distribute: boolean;
   block_reason: string | null;
+  /** Дата приёмки (только для DELIVERED): остаток уже на ФФ, заявки из машины
+   *  создаются ОБЫЧНЫМИ сборками (со списанием остатков), метка машины остаётся. */
+  accepted_date: string | null;
 }
 
 /** Строка пула машины: товар и его доступный для раздачи остаток (gross − уже разнесённое). */
@@ -2671,6 +2730,46 @@ export interface StockMismatchWarehouseRow {
   rows: StockMismatchSkuRow[];
 }
 
+/** Сборка (машина назначена / в пути), чья WB-поставка расходится по дате / паллетам / пропуску. */
+export interface SupplyDiscrepancyRow {
+  assembly_id: number;
+  number: string;
+  /** VEHICLE_ASSIGNED / SHIPPED */
+  status: string;
+  /** наш ФФ-склад, откуда забрали товар */
+  source_warehouse_name: string | null;
+  /** склад ВБ (город сдачи) */
+  warehouse_name: string | null;
+  /** наша дата сдачи, ISO */
+  delivery_date: string | null;
+  /** дата брони WB, ISO */
+  planned_date: string | null;
+  /** delivery_date − planned_date, дней (знаковая) */
+  date_diff_days: number | null;
+  /** наши паллеты (AssemblyRequest.pallets_count) */
+  pallets_count: number;
+  /** паллеты в пропуске WB (null — пропуск не оформлен) */
+  pass_pallets: number | null;
+  wb_supply_id: string | null;
+  wb_status: string | null;
+  /** стадия реплея пропуска (PASSED = пропуск занесён) */
+  sync_status: string | null;
+  /** номер машины в пропуске кабинета WB (снимок) */
+  wb_car_number: string | null;
+  /** паллеты в пропуске кабинета WB (снимок) */
+  wb_pass_pallets: number | null;
+  date_mismatch: boolean;
+  pallet_mismatch: boolean;
+  /** пропуск не оформлен нигде (ни ВБ, ни наш PASSED) */
+  pass_missing: boolean;
+  /** пропуск заведён в кабинете WB */
+  pass_on_wb: boolean;
+  /** пропуск есть на ВБ, а у нас поля пусты */
+  pass_missing_dds: boolean;
+  /** номер машины ДДС ≠ ВБ */
+  car_number_mismatch: boolean;
+}
+
 export interface LinkAnomaliesResponse {
   ff_composition_mismatch: FfMismatchRow[];
   assemblies_without_ff: UnlinkedAssemblyRow[];
@@ -2678,6 +2777,8 @@ export interface LinkAnomaliesResponse {
   fbo: FboAnomalyRollup;
   /** Расхождение остатков по складам с ФФ-интеграцией. */
   stock_mismatch: StockMismatchWarehouseRow[];
+  /** Расхождение WB-поставок (машина назначена/в пути): дата / паллеты / пропуск. */
+  supply_discrepancies: SupplyDiscrepancyRow[];
 }
 
 /* ─── Распределение остатков сборки (stock distribution) ─── */
@@ -3328,18 +3429,29 @@ export interface AdsManagerCampaign {
   cpo: number;  // стоимость одного заказа за период
   drr: number;
   margin: number;
+  spend_per_hour: number;  // средний расход ₽/час за день (расход за период / (дней × 24))
   ad_click_share: number;  // доля рекл. кликов от всех переходов товаров кампании
   cr_cart: number;  // конверсия переход→корзина
   cr_order: number;  // конверсия корзина→заказ
+  rev_yesterday: number;  // сумма заказов товаров кампании ВЧЕРА (для «ДРР план» = rev_yesterday × целевой ДРР%)
+  budget_gap: number;  // недобор бюджета до конца дня, ₽ (0 — бюджет не исчерпан сегодня)
   bid_mode?: string | null;  // для CPM: 'unified' (единая) / 'manual' (ручная); пока не синкается
   updated_at: string | null;
 }
 
+/** Режим автопополнения: to_target — долить до X в заданный час при пороге по обороту (наш);
+ *  low_balance — «как на ВБ»: когда остаток < порога, долить фиксированную сумму (любой час, повторяемо). */
+export type AdsAutopayMode = 'to_target' | 'low_balance';
+
 export interface AdsAutopaySetting {
   enabled: boolean;
-  amount: number;
-  hour: number;  // час пополнения, МСК
-  threshold_pct: number;  // пополнять, только если открут за сутки ≥ порога
+  mode: AdsAutopayMode;
+  amount: number;  // to_target: дневной бюджет X
+  hour: number;  // to_target: час пополнения, МСК
+  threshold_pct: number;  // to_target: пополнять, только если открут за сутки ≥ порога
+  low_balance_threshold: number;  // low_balance: долить, когда остаток < этого, ₽
+  topup_amount: number;  // low_balance: сумма разового долива, ₽
+  daily_cap: number;  // low_balance: не чаще N раз в день (0 = без ограничения)
 }
 
 export interface AdsAutopayLogEntry {
@@ -3498,7 +3610,8 @@ export interface ZoneMetrics {
 export interface CampaignZoneStats {
   search: ZoneMetrics;
   recommendations: ZoneMetrics | null;
-  total: { views: number; clicks: number; spend: number; orders: number } | null;
+  /** У CPC бэкенд total не отдаёт: зона одна, итог кампании равен ей. */
+  total?: { views: number; clicks: number; spend: number; orders: number } | null;
   derived: boolean;
 }
 
@@ -3509,16 +3622,25 @@ export interface CampaignZones {
   bid_mode: string | null;  // unified | manual
   placements: Record<string, boolean>;
   bids: { search: number | null; recommendations: number | null };
-  zones_locked: boolean;  // зоны нельзя включать/выключать
+  zones_locked: boolean;  // зоны нельзя включать/выключать (не CPM-ручная, либо статус не 4/9/11)
+  lock_reason?: string | null;  // почему нельзя — показываем в подсказке у тумблера
   single_bid: boolean;    // ставка одна: на все зоны (CPM-единая) или на все фразы (CPC)
   zone_stats?: CampaignZoneStats | null;  // только для CPC: зона одна, данные прямые
   error?: string;
+}
+
+/** Результат PUT /campaigns/{id}/zones */
+export interface CampaignZonesUpdate {
+  ok: boolean;
+  error: string | null;
+  placements: Record<string, boolean> | null;
 }
 
 export interface CampaignClustersResponse {
   campaign_id: number;
   name: string | null;
   campaign_type: string | null;
+  bid_mode?: string | null;  // 'unified' (единая) / 'manual' (ручная); при unified WB не даёт управлять кластерами
   nm_ids: number[];
   subject: string | null;
   window: ClusterWindow;
@@ -3551,6 +3673,8 @@ export interface CampaignMetricRow {
   cpl: number | null;  // стоимость 1 корзины
   cpo: number | null;  // стоимость 1 заказа
   avg_price: number;
+  customer_price: number;  // цена клиенту с учётом СПП (avg_price × (1 − СПП))
+  spp: number;             // средний СПП за день, %
   drr: number;
 }
 
@@ -3562,6 +3686,88 @@ export interface CampaignMetricsResponse {
   ad_by_nm?: boolean;  // РК-метрики отфильтрованы по товару, а не по всей кампании
   totals: CampaignMetricRow;
   rows: CampaignMetricRow[];
+  error?: string;
+}
+
+/** Точка почасового расхода кампании (hour 0..23, ₽ за час). */
+export interface CampaignHourlyPoint {
+  hour: number;
+  spend: number;
+}
+
+/** Почасовой расход кампании за день (GET /campaigns/{id}/hourly).
+ *  Восстановлен из снимков остатка бюджета (~10 мин). Показы/клики по часам WB не отдаёт. */
+export interface CampaignHourlySpend {
+  campaign_id: number;
+  name: string | null;
+  date: string;
+  total: number;
+  hours: CampaignHourlyPoint[];
+  error?: string;
+}
+
+/** Органическая позиция товара по фразе (последний + предыдущий снимок из search.wb.ru). */
+export interface PositionSnapshot {
+  position: number | null;  // 1-based ранг; null = не найден в пределах depth (или не собрано)
+  prev: number | null;      // позиция в предыдущем сборе («Была»)
+  depth: number | null;     // сколько позиций проверено (для «N+» — не в топ-N)
+  at: string | null;        // ISO момент последнего сбора
+}
+export interface PositionsResponse {
+  nm_id: number;
+  positions: Record<string, PositionSnapshot>;  // norm_query → снимок
+}
+export interface PositionsProgress { status: string; done: number; total: number; throttled: number; error: string | null; }
+export interface CollectPositionsResult { started: boolean; status: string; done: number; total: number; throttled: number; error: string | null; }
+/** Результат сбора ОДНОЙ фразы (кнопка-кругляшок). throttled=true → «слишком частый запрос». */
+export interface CollectOneResult extends PositionSnapshot { phrase: string; throttled: boolean; }
+
+/** Интервал внутридневного графика (дельта между снимками накопительного счётчика). */
+export interface CampaignIntradayPoint {
+  time: string;   // ЧЧ:ММ МСК (момент снимка = конец интервала)
+  views: number;  // показы за интервал
+  clicks: number; // клики за интервал
+  spend: number;  // расход ₽ за интервал
+}
+
+/** Внутридневные показы/клики/расход по кампании (GET /campaigns/{id}/intraday).
+ *  Копятся вперёд из снимков кабинетного campaigns-stats (~30 мин) — WB нативно почасовку
+ *  не отдаёт. CTR и порог «мин показов» считаются на клиенте. */
+export interface CampaignIntradayMetrics {
+  campaign_id: number;
+  name: string | null;
+  date: string;
+  points: CampaignIntradayPoint[];
+  totals: { views: number; clicks: number; spend: number };
+  snapshots: number;
+  interval_min?: number;  // текущая частота снимков проекта (10/20/30/60)
+  error?: string;
+}
+
+/** Строка РК-метрик зоны показов (без воронки — её WB по зонам не делит).
+ *  atbs/orders — корзины/заказы, атрибутированные рекламе. date может быть «За всё время». */
+export interface CampaignZoneMetricRow {
+  date: string;
+  views: number;
+  clicks: number;
+  ctr: number;
+  cpc: number;
+  cpm: number;    // цена 1000 показов зоны
+  spend: number;
+  atbs: number;   // корзины (реклама)
+  orders: number; // заказы (реклама)
+  cpo: number | null;  // стоимость 1 заказа
+}
+
+/** Посуточные РК-метрики кампании по зоне показов (GET /campaigns/{id}/metrics/by-zone).
+ *  zone: total — вся кампания; search — поиск; recommendations — итог минус поиск. */
+export interface CampaignZoneMetricsResponse {
+  campaign_id: number;
+  name: string | null;
+  zone: 'total' | 'search' | 'recommendations';
+  window: ClusterWindow;
+  totals: CampaignZoneMetricRow;
+  rows: CampaignZoneMetricRow[];
   error?: string;
 }
 
@@ -4829,6 +5035,9 @@ export interface AssemblyDraftDistribution {
    *  предброни (Оставить так / Дозабить / авто-консолидация). Только для бейджа на
    *  паллете раскладки; сбрасывается при полном «Заполнить из потребности». */
   prebook_origin?: string[];
+  /** РУЧНЫЕ SKU (nm_id): план правлен в матрице-редакторе (степпер/✕) — авто-синк
+   *  расчёта такие SKU не трогает, пока юзер не вернёт SKU «в авто». */
+  manual_nms?: number[];
 }
 
 /** Ссылка на заявку-юнит черновика (hand-off / revert / commit).
@@ -4873,7 +5082,7 @@ export interface AssemblyDraftCommitResponse {
 
 /** Опциональный маркер для updateAssemblyDraft — логирует событие истории со снапшотом. */
 export interface DraftEventLog {
-  event_type: 'PREBOOK_TOPUP' | 'MATRIX_WRITE';
+  event_type: 'PREBOOK_TOPUP' | 'MATRIX_WRITE' | 'MATRIX_EDIT' | 'AUTO_SYNC';
   summary?: string;
 }
 
@@ -5064,6 +5273,21 @@ export interface StockNeedArticle {
   can_send: number;
   deficit: number;
   stocks_wb: number;
+  /** Плоское среднее заказов за analysis_days, шт/день. */
+  avg_daily_base?: number;
+  /** Рабочая growth-aware скорость: max(окно, 7д, 3д), шт/день. */
+  eff_avg_daily?: number;
+  /** Коэффициент роста eff/base (≥1; ⚡ растущий SKU при ≥1.3). */
+  growth_ratio?: number;
+  /** Спрос-взвешенное плечо доставки (сборка+дорога+приёмка), дни. */
+  lead_days?: number;
+  /** На сколько дней хватит остатка на WB при eff-скорости (null — нет продаж). */
+  wb_days_left?: number | null;
+  /** То же, но с учётом «в сборке» и «в пути». */
+  wb_days_left_inbound?: number | null;
+  /** Раскладочная потребность: Σ локальных дефицитов складов (то, что реально
+   *  хотим дослать). total_need — нетто по сети (KPI «сколько докупить»). */
+  ship_need?: number;
   /** Per-WB-склад: сколько уже в сборке на этот склад (не учтено в need). */
   asm_by_warehouse?: Record<string, number>;
   /** Per-WB-склад: сколько уже едет на этот склад транзитом. */
@@ -5073,10 +5297,15 @@ export interface StockNeedArticle {
 export interface StockNeedWbWarehouse {
   name: string;
   total_need: number;
-  articles: Record<number, { need: number; stock: number; avg_daily: number }>;
+  /** need_raw — остаточный дефицит клетки ДО greedy-налива (only_available);
+   *  веса «Распределить все остатки» и паритет с сырыми клетками машины. */
+  articles: Record<number, { need: number; stock: number; avg_daily: number; need_raw?: number }>;
   /** Ключ ФО (central|south_caucasus|volga|ural|far_east_siberia|northwest|abroad|unknown).
    *  Backend заполняет через `warehouse_to_district`. UI рендерит label под названием. */
   district_key?: string;
+  /** Вес «схемы воришек» (якорь↑/воришка↓) — порядок среза при дефиците источника
+   *  (паритет клиентского движка машины с серверным greedy черновика). */
+  priority_weight?: number;
 }
 
 export interface StockNeedSummary {
@@ -5135,6 +5364,9 @@ export interface ColdStartTableRow {
   is_newcomer: boolean;
   allocations: Record<string, number>;
   total_allocated: number;
+  /** Гвард пересорта: посев лежит на WB и не продаётся → авто-досев остановлен. */
+  oversort_guard?: boolean;
+  guard_reason?: string | null;
 }
 export interface ColdStartTableResponse {
   rows: ColdStartTableRow[];
@@ -5491,28 +5723,36 @@ export interface FfStockRow {
   brand: string | null;
   ff_good: number;
   ff_reserve: number;
-  /** migfull: часть резерва под собранные отгрузки (ready) */
+  /** migfull: часть резерва под активные отгрузки (собрано) */
   ff_reserve_ready: number;
+  /** migfull: часть резерва под свежий приход (позиции в EXPECTED-приёмках) */
+  ff_inbound_locked: number;
   ff_defect: number;
   ff_nominal: number;
   /** из ff_good пришло коробами (в штуках россыпи) */
   ff_box_units: number;
   /** сколько коробов годного сведено в этот товар */
   ff_box_count: number;
+  /** досчитано к ff_good: товар в стадии списания логистики ФФ, физически ещё на складе */
+  ff_logistics: number;
   our_quantity: number;
   our_defect: number;
-  /** ff_good - our_quantity */
+  /** ff_good - our_quantity (ff_good уже включает ff_logistics) */
   diff: number;
 }
 
 export interface FfStockTotals {
   ff_good: number;
   ff_reserve: number;
-  /** migfull: резерв под собранные отгрузки (ready) */
+  /** migfull: резерв под активные отгрузки (собрано) */
   ff_reserve_ready: number;
+  /** migfull: резерв под свежий приход (EXPECTED-приёмки) */
+  ff_inbound_locked: number;
   ff_defect: number;
   /** сколько штук годного пришло коробами */
   ff_box_units: number;
+  /** досчитано к ff_good: товар в стадии списания логистики ФФ */
+  ff_logistics: number;
   our_quantity: number;
   diff: number;
   /** строк ФФ без нашей номенклатуры */
@@ -6110,4 +6350,168 @@ export interface ReviewsSummaryResponse {
   /** Применённый период (эхо запроса) */
   period: ReviewsPeriod;
   has_key: boolean;
+}
+
+// ─── Сырые данные (GET /raw-data/sources) ───────────────────────────────────
+
+/** Прогресс принудительной дозагрузки источника (живёт в памяти бэкенда). */
+export interface RawRefreshProgress {
+  status: 'running' | 'ok' | 'error';
+  started_at: string;
+  finished_at: string | null;
+  error: string | null;
+  result?: Record<string, unknown> | null;
+}
+
+/** Один источник сырых данных: что копим и сколько накопили. */
+export interface RawSource {
+  key: string;
+  title: string;
+  group: string;         // Реклама / Продажи / Склад / Финансы
+  table: string;         // имя таблицы в БД
+  date_field: string;
+  description: string;
+  source: string;        // внешний API, откуда тянем
+  schedule: string;      // как часто тянет планировщик
+  refreshable: boolean;  // доступна ли кнопка дозагрузки
+  refresh_hint: string | null;
+  ranged: boolean;       // дозагрузка принимает период
+  rows: number | null;
+  first_date: string | null;
+  last_date: string | null;
+  progress: RawRefreshProgress | null;
+}
+
+export interface RawSourcesResponse {
+  sources: RawSource[];
+  groups: string[];
+}
+
+export interface RawRefreshStart {
+  status: 'started' | 'already_running' | 'unsupported';
+  error?: string;
+}
+
+/** Колонка таблицы источника — берётся из ORM-модели на бэкенде. */
+export interface RawColumn {
+  key: string;
+  label: string;
+  type: 'id' | 'date' | 'datetime' | 'number' | 'bool' | 'json' | 'string';
+}
+
+/** Содержимое таблицы источника (GET /raw-data/sources/{key}/rows). */
+export interface RawSourceRows {
+  key: string;
+  title: string;
+  table: string;
+  date_field: string;
+  description: string;
+  source: string;
+  columns: RawColumn[];
+  rows: Record<string, unknown>[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** Предмет для создания кампании (GET /funnel/ad-subjects). */
+export interface AdSubject { id: number; name: string; count: number }
+/** Карточка товара для кампании (POST /funnel/ad-nms). */
+export interface AdNmCard { nm: number; title: string; subjectId: number }
+/** Результат создания кампании. */
+export interface CreateCampaignResult { ok: boolean; campaign_id: number | null; error: string | null }
+
+// ── АБ-тесты главного фото ───────────────────────────────────────────────────
+export type AbTestStatus = 'draft' | 'running' | 'paused' | 'finished' | 'error';
+
+export interface AbTestListItem {
+  id: number;
+  nm_id: number;
+  campaign_id: number;
+  name: string;
+  status: AbTestStatus;
+  pause_reason: string | null;
+  title: string;
+  vendor_code: string;
+  variants_count: number;
+  progress_pct: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface AbTestInfo {
+  id: number;
+  nm_id: number;
+  campaign_id: number;
+  name: string;
+  comment: string | null;
+  status: AbTestStatus;
+  pause_reason: string | null;
+  views_per_round: number;
+  round_minutes: number;
+  target_views: number;
+  max_days: number;
+  title: string;
+  vendor_code: string;
+  started_at: string | null;
+  finished_at: string | null;
+  winner_variant_id: number | null;
+  winner_applied_at: string | null;
+}
+
+export interface AbTestVariantStats {
+  id: number;
+  position: number;
+  is_control: boolean;
+  excluded: boolean;
+  is_active: boolean;
+  is_winner: boolean;
+  rounds: number;
+  views: number;
+  clicks: number;
+  ctr: number;
+  atbs: number;
+  orders: number;
+  spend: number;
+  orders_sum: number;
+  organic_open: number;
+  organic_cart: number;
+  organic_orders: number;
+  round_wins: number;
+  progress_pct: number;
+  enough_data: boolean;
+  ctr_gap: number | null;
+}
+
+export interface AbTestRoundRow {
+  round_no: number;
+  variant_id: number;
+  started_at: string;
+  ended_at: string | null;
+  views: number;
+  clicks: number;
+  ctr: number;
+  atbs: number;
+  orders: number;
+  organic_open: number;
+  organic_cart: number;
+  flags: Record<string, unknown>;
+}
+
+export interface AbTestResults {
+  test: AbTestInfo;
+  variants: AbTestVariantStats[];
+  rounds: AbTestRoundRow[];
+}
+
+export interface AbTestCreatePayload {
+  nm_id: number;
+  campaign_id: number;
+  name?: string;
+  comment?: string | null;
+  views_per_round?: number;
+  round_minutes?: number;
+  target_views?: number;
+  max_days?: number;
 }

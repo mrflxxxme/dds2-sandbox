@@ -29,6 +29,7 @@ const pages = [
   { path: '/container-loader', name: 'Container Loader' },
   { path: '/funnel', name: 'Funnel' },
   { path: '/ads-manager', name: 'Ads Manager' },
+  { path: '/ab-tests', name: 'AB Tests' },
   { path: '/trends', name: 'Trends' },
   { path: '/order-geography', name: 'Order Geography' },
   { path: '/opiu', name: 'OPIU' },

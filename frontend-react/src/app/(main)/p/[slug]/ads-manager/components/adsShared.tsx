@@ -8,9 +8,12 @@ export const fmtPct = (n: number | undefined) => (Number(n) || 0).toFixed(1) + '
 export const iso = (d: Date) => d.toISOString().slice(0, 10);
 
 // ─── Стили таблиц ───
-export const thStyle: React.CSSProperties = { background: '#f9fafb', color: '#6b7280', fontSize: 10.5, fontWeight: 600, textAlign: 'right', borderBottom: '1px solid #e5e7eb', padding: '5px 8px', whiteSpace: 'nowrap' };
+export const thStyle: React.CSSProperties = { background: '#f3f4f6', color: '#374151', fontSize: 10.5, fontWeight: 700, textAlign: 'right', borderBottom: '1px solid #d1d5db', padding: '5px 8px', whiteSpace: 'nowrap' };
 export const thLeft: React.CSSProperties = { ...thStyle, textAlign: 'left' };
-export const tdStyle: React.CSSProperties = { textAlign: 'right', borderBottom: '1px solid #f3f4f6', padding: '3px 8px', fontSize: 12, whiteSpace: 'nowrap' };
+// Тёмная шапка таблицы кампаний (тот же вид, что у списка кампаний) — переиспользуем в разделах
+export const cThStyle: React.CSSProperties = { ...thStyle, background: '#374151', color: '#e5e7eb', borderBottom: '1px solid #4b5563', position: 'sticky', top: 0, zIndex: 3 };
+export const cThLeft: React.CSSProperties = { ...cThStyle, textAlign: 'left' };
+export const tdStyle: React.CSSProperties = { textAlign: 'right', borderBottom: '1px solid #e8eaed', padding: '3px 8px', fontSize: 12, whiteSpace: 'nowrap', color: '#111827' };
 export const tdLeft: React.CSSProperties = { ...tdStyle, textAlign: 'left' };
 
 // Статус кампании: активна — зелёный, приостановлена — красный, завершена — серый
@@ -39,10 +42,10 @@ export function wbCampaignUrl(c: AdsManagerCampaign, opts?: { from?: string; to?
 export function adTypeLabel(c: AdsManagerCampaign): { text: string; hint: string; color: string } {
     const t = (c.campaign_type || '').toLowerCase();
     const mode = c.bid_mode === 'unified' ? ' · единая ставка' : c.bid_mode === 'manual' ? ' · ручная ставка' : '';
-    if (t === 'cpc') return { text: 'Реклама: CPC', hint: 'CPC — оплата за клик', color: '#0369a1' };  // синий
-    if (c.advert_type === 8) return { text: `Реклама: Авто · рекомендации${mode}`, hint: 'Автоматическая кампания (рекомендации/каталог)', color: '#be185d' };  // розовый
+    if (t === 'cpc') return { text: 'Реклама: CPC', hint: 'CPC — оплата за клик', color: '#3b82f6' };  // синий
+    if (c.advert_type === 8) return { text: `Реклама: Авто · рекомендации${mode}`, hint: 'Автоматическая кампания (рекомендации/каталог)', color: '#6d28d9' };  // фиолетовый
     if (t === 'cpm') return { text: `Реклама: CPM · аукцион${mode}`, hint: 'CPM — оплата за 1000 показов (аукцион)', color: '#6d28d9' };  // фиолетовый
-    return { text: `Реклама: ${c.campaign_type || '—'}`, hint: '', color: '#9ca3af' };
+    return { text: `Реклама: ${c.campaign_type || '—'}`, hint: '', color: '#6b7280' };
 }
 
 /** Бейдж типа кампании с цветовой кодировкой:
@@ -51,7 +54,12 @@ export function campaignTypeBadge(c: AdsManagerCampaign): { label: string; bg: s
     const t = (c.campaign_type || '').toLowerCase();
     if (t === 'cpc') return { label: 'CPC', bg: '#e0f2fe', color: '#0369a1' };        // синий
     if (c.advert_type === 8) return { label: 'Авто', bg: '#fce7f3', color: '#be185d' }; // розовый — авто/рекомендации
-    if (t === 'cpm') return { label: 'CPM', bg: '#ede9fe', color: '#6d28d9' };         // фиолетовый — аукцион
+    if (t === 'cpm') {
+        // Единая — фиолетовый, ручная — розовый (разный режим ставки виден цветом)
+        if (c.bid_mode === 'manual') return { label: 'CPM · ручная', bg: '#fce7f3', color: '#be185d' };
+        if (c.bid_mode === 'unified') return { label: 'CPM · единая', bg: '#ede9fe', color: '#6d28d9' };
+        return { label: 'CPM', bg: '#ede9fe', color: '#6d28d9' };  // режим ещё не синкнулся
+    }
     return { label: 'Авто', bg: '#fce7f3', color: '#be185d' };                          // нет payment_type — авто
 }
 
@@ -81,7 +89,16 @@ export function wbImageUrl(nmId: number, size: 'small' | 'big' | 'c246x328' | 'c
     return `https://basket-${host}.wbbasket.ru/vol${vol}/part${part}/${nmId}/images/${size}/1.webp`;
 }
 
-export const DEFAULT_AUTOPAY: AdsAutopaySetting = { enabled: true, amount: 1000, hour: 9, threshold_pct: 50 };
+export const DEFAULT_AUTOPAY: AdsAutopaySetting = {
+    enabled: true, mode: 'to_target', amount: 1000, hour: 9, threshold_pct: 50,
+    low_balance_threshold: 1000, topup_amount: 1000, daily_cap: 1,
+};
+
+/** Короткий ярлык активного автопополнения для кнопки/ячейки (зависит от режима). */
+export function autopayLabel(s: AdsAutopaySetting): string {
+    if (s.mode === 'low_balance') return `< ${fmt(s.low_balance_threshold)} → +${fmt(s.topup_amount)} ₽`;
+    return `${String(s.hour).padStart(2, '0')}:00 · ${fmt(s.amount)} ₽`;
+}
 
 export const AUTOPAY_STATUS_BADGE: Record<AdsAutopayLogEntry['status'], { label: string; cls: string }> = {
     ok: { label: 'Успешно', cls: 'badge-success' },

@@ -248,6 +248,8 @@ class AssemblyItemResponse(BaseModel):
     article: str | None = None
     brand: str | None = None
     stock_quantity: int = 0
+    box_qty: int | None = None  # кратность короба (склад+ШК); None — не задана
+    boxes: int | None = None    # коробов на позицию = ⌈штук/кратность⌉; None без кратности
 
 
 class FfProposedItem(BaseModel):
@@ -416,11 +418,11 @@ class ApplyGoodsWeightBulkResult(BaseModel):
 
 
 class PreDistVehicle(BaseModel):
-    """Машина в пути, доступная (или нет) для предраспределения."""
+    """Машина в пути (или недавно принятая), доступная (или нет) для распределения."""
 
     id: int
     order_no: str
-    status: str  # CUSTOMS | DISPATCHED
+    status: str  # CUSTOMS | DISPATCHED | DELIVERED (принята ≤ окна, см. accepted_date)
     target_warehouse_id: int | None = None  # ФФ-склад разгрузки (источник будущих сборок)
     target_warehouse_name: str | None = None
     eta: date | None = None  # estimated_arrival_date
@@ -429,6 +431,10 @@ class PreDistVehicle(BaseModel):
     distributed_qty: int = 0  # уже разнесено в заявки этой машины (не CANCELLED)
     can_distribute: bool = True  # target_warehouse_id задан и это FULFILLMENT-склад
     block_reason: str | None = None  # почему нельзя (если can_distribute=False)
+    # Дата последней ПРИНЯТОЙ приёмки машины (InboundReceipt.actual_date). Заполнена только
+    # для DELIVERED: такая машина остаётся в предраспределении ещё PRE_DIST_DELIVERED_WINDOW_DAYS
+    # дней, но заявки из неё создаются ОБЫЧНЫМИ (остаток уже оприходован на ФФ).
+    accepted_date: date | None = None
 
 
 class PreDistPoolRow(BaseModel):
@@ -545,6 +551,13 @@ class CreatedGroupResponse(BaseModel):
     total_qty: int
     total_sku: int
     requests: list[CreatedRequestBrief]
+
+
+class SourceVehicleOption(BaseModel):
+    """Машина с заявками сборки — опция фильтра «Источник» в списке."""
+
+    id: int
+    order_no: str
 
 
 class RefreshFromFboResponse(BaseModel):
@@ -957,6 +970,38 @@ class UnlinkedFfRow(BaseModel):
     external_created_at: str | None  # ISO
 
 
+class SupplyDiscrepancyRow(BaseModel):
+    """Сборка с назначенной машиной / в пути, чья WB-поставка расходится с фактом.
+
+    Три независимых флага (строка попадает в блок, если хотя бы один True):
+      • date_mismatch — наша дата сдачи вне окна ±1 дня от даты брони WB (72ч);
+      • pallet_mismatch — наши паллеты ≠ паллеты в пропуске WB (pass_pallets);
+      • pass_missing — машина назначена/в пути, но пропуск WB не оформлен.
+    """
+
+    assembly_id: int
+    number: str
+    status: str  # VEHICLE_ASSIGNED / SHIPPED
+    source_warehouse_name: str | None  # наш ФФ-склад, откуда забрали товар
+    warehouse_name: str | None  # склад ВБ (город сдачи)
+    delivery_date: str | None  # наша дата сдачи, ISO
+    planned_date: str | None  # дата брони WB, ISO
+    date_diff_days: int | None  # delivery_date − planned_date, дней (знаковая)
+    pallets_count: int  # наши паллеты (AssemblyRequest.pallets_count)
+    pass_pallets: int | None  # паллеты в пропуске WB (None — пропуск не оформлен)
+    wb_supply_id: str | None  # WB-I-xxxx (для показа/drill), если поставка привязана
+    wb_status: str | None  # статус WB-поставки (ON_DELIVERY и т.п.)
+    sync_status: str | None  # стадия реплея пропуска (PASSED = пропуск занесён)
+    wb_car_number: str | None  # номер машины в пропуске кабинета WB (снимок)
+    wb_pass_pallets: int | None  # паллеты в пропуске кабинета WB (снимок)
+    date_mismatch: bool
+    pallet_mismatch: bool
+    pass_missing: bool  # пропуск не оформлен нигде (ни ВБ, ни наш PASSED)
+    pass_on_wb: bool  # пропуск заведён в кабинете WB
+    pass_missing_dds: bool  # пропуск есть на ВБ, а у нас поля пусты
+    car_number_mismatch: bool  # номер машины ДДС ≠ ВБ
+
+
 class FboAnomalySupply(BaseModel):
     """Одна аномальная FBO-поставка (для разворота-списка с drill на /warehouse/fbo-supplies)."""
 
@@ -1025,6 +1070,8 @@ class LinkAnomaliesResponse(BaseModel):
     # Расхождение остатков по складам с ФФ-интеграцией. Дефолт — на случай
     # записи в кэше от прошлой версии без этого ключа.
     stock_mismatch: list[StockMismatchWarehouseRow] = []
+    # Расхождение WB-поставок (машина назначена/в пути): дата сдачи / паллеты / пропуск.
+    supply_discrepancies: list[SupplyDiscrepancyRow] = []
 
 
 # ─── Распределение остатков (stock distribution) ───────────────────────────

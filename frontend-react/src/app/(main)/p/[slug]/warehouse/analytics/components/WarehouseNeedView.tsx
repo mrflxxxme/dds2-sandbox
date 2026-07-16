@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
+import { NEED_SUPPLY_DAYS } from '@/lib/assembly/needParams';
 import { formatNumber, exportToExcel } from '@/lib/utils';
 import { distributeByBoxMultiple } from '@/lib/utils/boxDistribution';
 import { parseBoxSize, maxPalletHeightCm, consolidateDistrictPallets, canonBoxSize, effectiveBoxesPerPallet, consolidateMixedDistrictPallets } from '@/lib/utils/boxPallet';
@@ -266,7 +267,7 @@ export function WarehouseNeedView({
      *  Используется для столбца «% лок» в обеих таблицах. */
     const [locMap, setLocMap] = useState<Map<number, number>>(new Map());
     const [creatingAssembly, setCreatingAssembly] = useState(false);
-    const [supplyDays, setSupplyDays] = useState(14);
+    const [supplyDays, setSupplyDays] = useState(NEED_SUPPLY_DAYS);
     const [analysisDays, setAnalysisDays] = useState(14);
     const [mode, setMode] = useState<'actual' | 'hypothetical'>('actual');
     /** Идеальная локализация: распределяем потребность по ближайшим доступным
@@ -441,12 +442,22 @@ export function WarehouseNeedView({
 
     /* ── Cold-start режим ── */
     const [coldStartData, setColdStartData] = useState<ColdStartTableResponse | null>(null);
-    const [coldStartMinPack, setColdStartMinPack] = useState(5);
+    // Параметры новинок персистятся: их же читает «Ручная раскладка» черновика
+    // (DraftMatrixView) — иначе два экрана считали бы новинки разными настройками.
+    const csSaved = (() => {
+        try { return JSON.parse(localStorage.getItem('dds.coldStartParams') || '{}') as { minPack?: number; shipPct?: number; floor?: number }; }
+        catch { return {} as { minPack?: number; shipPct?: number; floor?: number }; }
+    })();
+    const [coldStartMinPack, setColdStartMinPack] = useState(csSaved.minPack ?? 5);
     // Доля свободного ФФ-остатка, разрешённая к отгрузке новинки за раз (дефолт 55%):
     // «сеем» часть, остаток держим буфером под добор по факту продаж.
-    const [coldStartShipPct, setColdStartShipPct] = useState(55);
+    const [coldStartShipPct, setColdStartShipPct] = useState(csSaved.shipPct ?? 55);
     // Пол: если свободного ФФ ≤ N шт — отгружаем 100% (буфер держать бессмысленно).
-    const [coldStartShipFloor, setColdStartShipFloor] = useState(50);
+    const [coldStartShipFloor, setColdStartShipFloor] = useState(csSaved.floor ?? 50);
+    useEffect(() => {
+        try { localStorage.setItem('dds.coldStartParams', JSON.stringify({ minPack: coldStartMinPack, shipPct: coldStartShipPct, floor: coldStartShipFloor })); }
+        catch { /* private mode — не критично */ }
+    }, [coldStartMinPack, coldStartShipPct, coldStartShipFloor]);
     const [coldStartQtyOverrides, setColdStartQtyOverrides] = useState<Record<number, number>>({});
 
     useEffect(() => {
@@ -703,6 +714,8 @@ export function WarehouseNeedView({
         for (const r of coldStartData?.rows ?? []) s.add(r.nm_id);
         return s;
     }, [coldStartData]);
+    /** Строка cold-start per nm — гвард пересорта (oversort_guard/guard_reason). */
+    const csRowByNm = useMemo(() => new Map((coldStartData?.rows ?? []).map(r => [r.nm_id, r])), [coldStartData]);
 
     /** Единый источник истины распределения новинок (cold-start) по WB-складам.
      *  Map<nm_id, {alloc: wh→qty, total}>. Кормит матрицу (getBaseArticleWbNeed),
@@ -739,6 +752,15 @@ export function WarehouseNeedView({
             }
             const overrideQty = coldStartQtyOverrides[row.nm_id];
             const useOverride = overrideQty !== undefined && overrideQty !== row.total_allocated;
+            // Гвард пересорта (backend): прошлый посев лежит на WB и не продаётся →
+            // авто-досев 0 (иначе фронтовый K-засев ниже сеет из полного freeFf мимо
+            // backend-аллокаций и после каждой поставки перетаривает склады — кейс
+            // «швабры» 2026-07-10). Правка ячеек (выше) и явный qty-override —
+            // осознанные действия юзера, их гвард не режет.
+            if (row.oversort_guard && !useOverride) {
+                m.set(row.nm_id, { alloc: {}, total: 0 });
+                continue;
+            }
             const { ppb, use } = resolveSkuLevelPpb(row.nm_id);
             const hasK = !!(ppb && ppb > 0 && use);
             const boxPpb = hasK && ppb ? ppb : 1;
@@ -1591,7 +1613,10 @@ export function WarehouseNeedView({
                 const sendQty = newcomerSet.has(a.nm_id)
                     ? (newcomerBoxedAlloc.get(a.nm_id)?.total ?? 0)
                     : getDisplayShipTotal(a);
-                if (sendQty <= 0) return false;
+                // Guarded-новинка (гвард пересорта дал 0) НЕ прячется — иначе SKU
+                // «молча исчезает» и причина невидима; бейдж ⚠ объяснит.
+                const guarded = !!csRowByNm.get(a.nm_id)?.oversort_guard;
+                if (sendQty <= 0 && !guarded) return false;
             }
             if (statusFilter === 'deficit' && a.deficit <= 0) return false;
             if (statusFilter === 'can_send' && a.can_send <= 0) return false;
@@ -1624,7 +1649,7 @@ export function WarehouseNeedView({
             if (noLimitFilter && !skuHasNoLimitCell(a)) return false;
             return true;
         });
-    }, [data, coldStartAsArticles, newcomerBoxedAlloc, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet, showAdvanced, getDisplayShipTotal, noLimitFilter, skuHasNoLimitCell, hiddenNmIds]);
+    }, [data, coldStartAsArticles, newcomerBoxedAlloc, brandFilter, subjectFilter, searchQuery, statusFilter, packageFilter, multiplicityFilter, resolveSkuLevelPpb, acceptanceMap, newcomerSet, csRowByNm, showAdvanced, getDisplayShipTotal, noLimitFilter, skuHasNoLimitCell, hiddenNmIds]);
 
     /** WB-колонки в матрице, отфильтрованные по packageFilter.
      *  При packageFilter='mono' — оставляем только склады где для хотя бы одного
@@ -2674,7 +2699,7 @@ export function WarehouseNeedView({
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     <span style={{ fontSize: 11, opacity: 0.6, whiteSpace: 'nowrap' }}>Запас:</span>
-                    {[7, 14, 30, 60].map(d => (
+                    {[7, 14, 21, 30, 60].map(d => (
                         <button key={d} className={`btn btn-sm ${supplyDays === d ? 'btn-primary' : 'btn-secondary'}`}
                             onClick={() => setSupplyDays(d)}>{d}д</button>
                     ))}
@@ -3226,6 +3251,13 @@ export function WarehouseNeedView({
                                                         background: '#a855f7', color: '#fff', fontSize: 9, fontWeight: 700,
                                                         verticalAlign: 'middle',
                                                     }} title="\u041D\u043E\u0432\u0438\u043D\u043A\u0430 \u2014 \u0440\u0430\u0441\u043F\u0440\u0435\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u043F\u043E cold-start \u0431\u0435\u043D\u0447\u043C\u0430\u0440\u043A\u0443">\uD83C\uDD95</span>
+                                                )}
+                                                {csRowByNm.get(a.nm_id)?.oversort_guard && (
+                                                    <span style={{
+                                                        marginRight: 6, padding: '1px 5px', borderRadius: 6,
+                                                        background: 'rgba(255,159,10,0.9)', color: '#fff', fontSize: 9, fontWeight: 700,
+                                                        verticalAlign: 'middle',
+                                                    }} title={`Гвард пересорта: ${csRowByNm.get(a.nm_id)?.guard_reason || 'посев лежит на WB без продаж'}. Авто-досев 0; ручной ввод количества гвард перекрывает.`}>⚠</span>
                                                 )}
                                                 {a.vendor_code}
                                             </div>

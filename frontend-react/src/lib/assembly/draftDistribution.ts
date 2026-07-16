@@ -60,14 +60,27 @@ export interface DraftDistInput {
     palletOverrides: Record<string, number>;
     /** Новинки (cold-start) — засеваются отдельно, в base-skus помечаются is_newcomer. */
     newcomerSet: Set<number>;
+    /** Авто-раздача новинок из backend cold-start (`allocations` per nm_id) — канал
+     *  новинок ручной раскладки. Гвард пересорта уже применён на бэке (guarded SKU
+     *  приходит с пустым alloc → новинка остаётся с нулями, причина — в guard_reason
+     *  строки cold-start). Не задан → новинки без авто-раскладки (как раньше). */
+    newcomerAlloc?: Map<number, Record<string, number>>;
+    /** Кратность короба конкретного ФФ (per-склад, machine-first) — паритет
+     *  нормализации со страницей черновика. */
+    ppbAt?: (nm_id: number, ffId: number) => number | null | undefined;
+    /** Вес приоритета WB-склада (stockNeed.warehouses[].priority_weight). */
+    priorityByWh?: Record<string, number>;
 }
 
 /** Геометрия движка из DraftDistInput (кратность/габарит per nm + паллет-override). */
 function draftGeom(input: DraftDistInput): DistributionGeom {
+    const pw = input.priorityByWh;
     return {
         ppbOf: (nm) => input.nmPpb.get(nm),
+        ppbAt: input.ppbAt,
         boxSizeOf: (nm) => input.nmBoxSize.get(nm) ?? null,
         palletOverrides: input.palletOverrides,
+        priorityOf: pw ? (wh) => Number(pw[wh] ?? 0) : undefined,
     };
 }
 
@@ -118,6 +131,33 @@ export function buildDraftSkus(input: DraftDistInput): {
 } {
     const { skus: distSkus, nmByBarcode } = articlesToDistSkus(input.articles, input.newcomerSet);
     const skus = buildDistributionSkus(distSkus, input.stockNeed, draftAvailabilityOf(input.articles), draftGeom(input));
+    // Канал новинок: движок исключает is_newcomer из need-канала (потребность от
+    // продаж у новинки ~всегда 0) — target берём из backend cold-start `allocations`
+    // (там уже вычтены WB-сток/сборки, применены концентрация, ship-кап и гвард
+    // пересорта). Дальше новинка идёт общим конвейером: приёмка → целые
+    // коробы/паллеты → предбронь.
+    if (input.newcomerAlloc && input.newcomerAlloc.size > 0) {
+        const geom = draftGeom(input);
+        for (const a of input.articles) {
+            if (!input.newcomerSet.has(a.nm_id)) continue;
+            const alloc = input.newcomerAlloc.get(a.nm_id);
+            if (!alloc) continue;
+            const target = Object.fromEntries(Object.entries(alloc).filter(([, q]) => (q || 0) > 0));
+            if (Object.keys(target).length === 0) continue;
+            const avail = ffAvailOf(a);
+            if (Object.values(avail).reduce((s, v) => s + v, 0) <= 0) continue;
+            skus.push({
+                nm_id: a.nm_id,
+                barcode: a.barcode,
+                vendor_code: a.vendor_code || a.barcode,
+                target,
+                ffStock: avail,
+                ppb: geom.ppbOf(a.nm_id),
+                box_size: geom.boxSizeOf(a.nm_id) ?? null,
+                packageType: 'BOX',
+            });
+        }
+    }
     return { skus, nmByBarcode };
 }
 
@@ -164,6 +204,130 @@ export function allocSrcAcrossFf(
         need -= take;
     }
     return src;
+}
+
+/** Ключ строки распределения для замены по SKU (nm × баркод × упаковка × as_is) —
+ *  зеркало бэкенд-ключа `_merge_rows`/`_dedupe_rows`. */
+export const keyOfDraftRow = (r: AssemblyDraftRow): string =>
+    `${r.nm_id}::${r.barcode || ''}::${r.package_type || 'BOX'}::${r.as_is ? 1 : 0}`;
+
+/**
+ * Итог «Пересчитать от потребности → в черновик» — ЗАМЕНА по SKU:
+ * строки/предбронь SKU, которыми владеет расчёт (дал отгрузку ИЛИ предбронь),
+ * заменяются его результатом; SKU из `purgeNms` (новинки под гвардом пересорта —
+ * посев лежит на WB без продаж, расчёт им даёт 0) вычищаются ЦЕЛИКОМ, иначе их
+ * старый план (особенно предбронь) висел бы в черновике вечно; прочие SKU не
+ * трогаются. Списки складов пересчитываются из новых строк. Чистая.
+ */
+export function buildWriteDistribution(
+    dist: { rows?: AssemblyDraftRow[] | null; prebook?: AssemblyDraftRow[] | null },
+    shipRows: AssemblyDraftRow[],
+    effPrebook: AssemblyDraftRow[],
+    purgeNms: Set<number> = new Set(),
+): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; source_warehouse_ids: number[]; target_warehouse_names: string[] } {
+    // Владение — по nm ЦЕЛИКОМ (как обещают confirm и docstring): расчёт мог сменить
+    // тип упаковки (вчера MONO, сегодня короб открыт) — старая MONO/as_is-строка SKU
+    // при владении по ключу пережила бы замену и задвоила план.
+    const ownedNms = new Set([...shipRows, ...effPrebook].map((r) => r.nm_id));
+    const keep = (r: AssemblyDraftRow) => !ownedNms.has(r.nm_id) && !purgeNms.has(r.nm_id);
+    const rows = [...(dist.rows ?? []).filter(keep), ...shipRows];
+    const prebook = [...(dist.prebook ?? []).filter(keep), ...effPrebook];
+    const srcIds = new Set<number>();
+    const tgtNames = new Set<string>();
+    for (const r of [...rows, ...prebook]) {
+        for (const ff of Object.keys(r.src || {})) srcIds.add(Number(ff));
+        for (const wb of Object.keys(r.tgt || {})) tgtNames.add(wb);
+    }
+    return { rows, prebook, source_warehouse_ids: [...srcIds], target_warehouse_names: [...tgtNames] };
+}
+
+/**
+ * АВТО-СИНК черновика с живым расчётом: план авто-SKU приводится к расчёту
+ * (замена по nm), guarded-новинки вычищаются, а РУЧНЫЕ SKU (`manualNms`,
+ * правленные степпером/✕) не трогаются вовсе — ручное решение священно.
+ * Возвращает null, если синк ничего не меняет (по Σ и составу строк — чтобы
+ * не спамить PUT/историю на каждом заходе). Чистая.
+ */
+export function buildAutoSyncPlan(
+    dist: { rows?: AssemblyDraftRow[] | null; prebook?: AssemblyDraftRow[] | null },
+    calcShipRows: AssemblyDraftRow[],
+    calcPrebook: AssemblyDraftRow[],
+    guardedNms: Set<number>,
+    manualNms: Set<number>,
+): ReturnType<typeof buildWriteDistribution> | null {
+    const autoShip = calcShipRows.filter((r) => !manualNms.has(r.nm_id));
+    const autoPrebook = calcPrebook.filter((r) => !manualNms.has(r.nm_id));
+    const purge = new Set([...guardedNms].filter((nm) => !manualNms.has(nm)));
+    const next = buildWriteDistribution(dist, autoShip, autoPrebook, purge);
+    const sig = (rows: AssemblyDraftRow[]) =>
+        rows.map((r) => `${keyOfDraftRow(r)}|${JSON.stringify(r.tgt)}|${JSON.stringify(r.src)}`).sort().join(';');
+    const same = sig(next.rows) === sig(dist.rows ?? []) && sig(next.prebook) === sig(dist.prebook ?? []);
+    return same ? null : next;
+}
+
+/**
+ * Правка ячейки ЧЕРНОВИКА (матрица = редактор черновика): изменить план SKU на
+ * складе `wh` на `deltaBoxes` целых коробов. BOX-строки (без as_is) и ВСЯ
+ * предбронь этого SKU сливаются в одну строку rows (ручная правка = точный план
+ * юзера, «хвост в предбронь» — только для авто-пересчёта); строки других типов
+ * упаковки (MONOPALLET/SUPERSAFE) и as_is («Оставить так») не трогаются и
+ * сохраняют свои src. ИНКРЕМЕНТ капится свободным ФФ-остатком SKU (минус занятое
+ * нетронутыми строками; превышение → null, вызывающий игнорирует клик);
+ * ДЕКРЕМЕНТ разрешён всегда — перезаложенный план (сток ушёл после записи)
+ * можно уменьшить. src пересобирается по ФФ с резервом под нетронутые строки;
+ * пул источников = max(живой остаток, уже забронированное строками SKU) — чтобы
+ * декремент при упавшем стоке не терял источники. Чистая — юнит-тестируется.
+ */
+export function applyDraftCellEdit(
+    skuRows: AssemblyDraftRow[],
+    skuPrebook: AssemblyDraftRow[],
+    article: StockNeedArticle,
+    wh: string,
+    deltaBoxes: number,
+    ppb: number | null | undefined,
+): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } | null {
+    if (!ppb || ppb <= 0 || !deltaBoxes) return null;
+    const isMergeable = (r: AssemblyDraftRow) => (r.package_type ?? 'BOX') === 'BOX' && !r.as_is;
+    const kept = skuRows.filter((r) => !isMergeable(r)); // MONO/SUPERSAFE/as_is остаются как есть
+    const merged = [...skuRows.filter(isMergeable), ...skuPrebook];
+
+    const tgt: Record<string, number> = {};
+    for (const r of merged) {
+        for (const [w, q] of Object.entries(r.tgt || {})) if ((q || 0) > 0) tgt[w] = (tgt[w] || 0) + (q || 0);
+    }
+    const prevTotal = Object.values(tgt).reduce((s, v) => s + v, 0);
+    tgt[wh] = Math.max(0, (tgt[wh] || 0) + deltaBoxes * ppb);
+    for (const k of Object.keys(tgt)) if ((tgt[k] || 0) <= 0) delete tgt[k];
+
+    const ffAvail = ffAvailOf(article);
+    // Бронь нетронутых строк per ФФ — их источники новой строке недоступны.
+    const keptSrc: Record<number, number> = {};
+    for (const r of kept) for (const [ff, q] of Object.entries(r.src || {})) keptSrc[Number(ff)] = (keptSrc[Number(ff)] || 0) + (q || 0);
+    const keptUnits = kept.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0);
+    const availForBox = Math.max(0, Object.values(ffAvail).reduce((s, v) => s + v, 0) - keptUnits);
+    const total = Object.values(tgt).reduce((s, v) => s + v, 0);
+    // Кап — только на рост плана: уменьшение перезаложенного SKU должно проходить.
+    if (total > prevTotal && total > availForBox) return null;
+
+    if (total === 0) return { rows: kept, prebook: [] };
+    // Пул источников: живой остаток, но не меньше уже забронированного строками SKU —
+    // иначе декремент при упавшем стоке не набрал бы src (Σsrc==Σtgt — инвариант).
+    const mergedSrc: Record<number, number> = {};
+    for (const r of merged) for (const [ff, q] of Object.entries(r.src || {})) mergedSrc[Number(ff)] = (mergedSrc[Number(ff)] || 0) + (q || 0);
+    const srcPool: Record<number, number> = { ...ffAvail };
+    for (const ff of new Set([...Object.keys(mergedSrc), ...Object.keys(keptSrc)].map(Number))) {
+        srcPool[ff] = Math.max(srcPool[ff] || 0, (mergedSrc[ff] || 0) + (keptSrc[ff] || 0));
+    }
+    const base = merged[0] ?? kept[0];
+    const row: AssemblyDraftRow = {
+        nm_id: article.nm_id,
+        barcode: article.barcode,
+        vendor_code: article.vendor_code || base?.vendor_code || String(article.nm_id),
+        src: allocSrcAcrossFf(total, srcPool, keptSrc),
+        tgt,
+        package_type: 'BOX',
+    };
+    return { rows: [...kept, row], prebook: [] };
 }
 
 /**
@@ -326,12 +490,12 @@ export function enrichArticles(
     coldStartSet: Set<number>,
 ): Map<number, EnrichedSku> {
     // per-WB-склад потребность+остаток из warehouses[].articles[nm].
-    const whCells = new Map<number, Record<string, { need: number; stock: number }>>();
+    const whCells = new Map<number, Record<string, { need: number; needRaw?: number; stock: number }>>();
     for (const w of stockNeed?.warehouses ?? []) {
         for (const [nmStr, cell] of Object.entries(w.articles ?? {})) {
             const nm = Number(nmStr);
             const m = whCells.get(nm) ?? {};
-            m[w.name] = { need: Number(cell?.need) || 0, stock: Number(cell?.stock) || 0 };
+            m[w.name] = { need: Number(cell?.need) || 0, needRaw: cell?.need_raw == null ? undefined : Number(cell.need_raw) || 0, stock: Number(cell?.stock) || 0 };
             whCells.set(nm, m);
         }
     }
@@ -345,10 +509,11 @@ export function enrichArticles(
             ...Object.keys(a.asm_by_warehouse ?? {}),
             ...Object.keys(a.transit_by_warehouse ?? {}),
         ]);
-        const byWh: Record<string, { need: number; stock: number; asm: number; transit: number }> = {};
+        const byWh: Record<string, { need: number; needRaw?: number; stock: number; asm: number; transit: number }> = {};
         for (const name of names) {
             byWh[name] = {
                 need: cells[name]?.need ?? 0,
+                needRaw: cells[name]?.needRaw,
                 stock: cells[name]?.stock ?? 0,
                 asm: Number(a.asm_by_warehouse?.[name]) || 0,
                 transit: Number(a.transit_by_warehouse?.[name]) || 0,

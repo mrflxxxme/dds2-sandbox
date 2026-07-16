@@ -12,11 +12,12 @@ import { allocatePairs } from '@/lib/utils/assemblyPreview';
 import { scopedNormalizeDraft, mergeDraftRows, directionKey } from '@/lib/utils/scopedNormalizeDraft';
 import { palletFootprint, planTopUpBoxes, type TopUpCandidate } from '@/lib/assembly/prebookFootprint';
 import { buildPrebookGroups } from '@/lib/assembly/buildPrebookGroups';
+import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams';
 import { applyAcceptanceRedistToPrebook } from '@/lib/assembly/prebookRedistribute';
 import { Toast } from '@/components';
 import TabLayout from '@/components/TabLayout';
 import DraftPreview from './components/DraftPreview';
-import AddFromNeedPanel from './components/AddFromNeedPanel';
+import UrgentShipPanel from './components/UrgentShipPanel';
 import { WarehouseNeedView } from '../../analytics/components/WarehouseNeedView';
 import { BoxMultiplicityView } from '../../box-multiplicity/BoxMultiplicityView';
 import { PalletSizesView } from '../../pallet-sizes/PalletSizesView';
@@ -200,7 +201,7 @@ export default function AssemblyDraftPage() {
                     // (greedy-cap до целевой локализации с весами воришек). Иначе панель
                     // «Добавить из потребности» строила target по сырому bench без всей
                     // механики распределения (аудит 2026-07-09).
-                    api.getStockNeed(14, 14, 'actual', true, true, 0).catch(() => null) as Promise<StockNeedResponse | null>,
+                    api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, true, 0).catch(() => null) as Promise<StockNeedResponse | null>,
                 ]);
                 if (cancelled) return;
                 applyDraft(draftResp);
@@ -521,52 +522,6 @@ export default function AssemblyDraftPage() {
             finally { selfHealBusyRef.current = false; }
         })();
     }, [draftId, draft, geomState, loading, normalizeAndSave, applyDraft, showToast]);
-
-    // Дозалив строк из панелей A/B: флашим локальные правки, merge на бэке (возвращает
-    // обновлённый черновик), нормализуем к целым коробам+паллетам и применяем результат
-    // (без лишних reload-GET). Бросает — панель ловит и тостит.
-    const handleAddRows = useCallback(async (newRows: AssemblyDraftRow[]) => {
-        // ЖЁСТКИЙ ГЕЙТ (зеркало handleFillAllRows): без геометрии не добавляем — сырые
-        // некратные строки молча легли бы в черновик.
-        if (geomState !== 'ready') throw new Error('Кратности коробов не загружены — обновите страницу и дождитесь загрузки');
-        // БЕЗ КРАТНОСТИ — НЕ УЧАСТВУЮТ (правило юзера):
-        // SKU без «шт/короб» не добавляется — укажите кратность (вкладка «Кратность»).
-        const usable = newRows.filter(r => (nmPpb.get(r.nm_id) || 0) > 0);
-        const skippedNoPpb = newRows.length - usable.length;
-        if (usable.length === 0) throw new Error('У выбранных артикулов нет кратности короба — заполните вкладку «Кратность»');
-        newRows = usable;
-        if (skippedNoPpb > 0) showToast(`⚠️ ${formatNumber(skippedNoPpb, 0)} арт. без кратности короба пропущены — укажите кратность (вкладка «Кратность»)`, 'error');
-        // Гарантируем id черновика. Если state ещё не прогрузил draft (ремоунт/гонка
-        // StrictMode — в логах виден шквал POST /current), тянем синглтон. Иначе add
-        // молча возвращался (`return`), а панель ЛОЖНО рапортовала «Добавлено» — POST
-        // не уходил, ничего не сохранялось (баг «новинки не добавляются»).
-        let id = draftId;
-        if (!id) {
-            const cur = await api.getOrCreateCurrentDraft();
-            applyDraft(cur);
-            id = cur.id;
-        } else {
-            // Флашим локальные правки редактора перед merge (иначе reload их затрёт).
-            const ok = await ensureSaved();
-            if (!ok) throw new Error('Не удалось сохранить текущие правки перед добавлением');
-        }
-        // merge возвращает обновлённый черновик → передаём его в нормализатор (без лишнего GET).
-        const merged = await api.addAssemblyDraftRows(id, newRows);
-        // Инвариант: приводим ВЕСЬ черновик к целым коробам + целым паллетам (короб —
-        // смешанные паллеты; моно — ≤3 артикула). Идемпотентно. Best-effort: сбой не блокирует.
-        try {
-            const norm = await normalizeAndSave(id, merged);
-            if (norm === null) {
-                // geom ещё не загружена → нормализация пропущена (не молча): предупреждаем.
-                showToast('Геометрия коробок ещё грузится — нажмите «Пересчитать», чтобы привести к целым коробам и паллетам', 'error');
-                applyDraft(merged);
-            } else {
-                applyDraft(norm.draft);
-            }
-        } catch {
-            applyDraft(merged); // нормализация упала — показываем хотя бы добавленное
-        }
-    }, [draftId, geomState, nmPpb, ensureSaved, normalizeAndSave, applyDraft, showToast]);
 
     // Долив строк из встроенной вкладки «Потребность» → перезагрузить черновик и
     // переключиться на вкладку 'draft', чтобы пользователь увидел добавленное.
@@ -1763,21 +1718,6 @@ export default function AssemblyDraftPage() {
         }
     }, [draftId, draft, name, showToast]);
 
-    // WB-склад → ключ округа (для кросс-SKU палет-консолидации в панелях добавления).
-    const districtRecord = useMemo(() => {
-        const m: Record<string, string> = {};
-        for (const w of stockNeed?.warehouses ?? []) if (w.district_key) m[w.name] = w.district_key;
-        return m;
-    }, [stockNeed]);
-
-    // nm_id уже в черновике (строки + переданные на ФФ юниты) — вычитаем из кандидатов.
-    const existingNmIds = useMemo(() => {
-        const s = new Set<number>();
-        for (const r of rows) s.add(r.nm_id);
-        for (const h of handedUnits) for (const it of h.items) s.add(it.nm_id);
-        return s;
-    }, [rows, handedUnits]);
-
     // nm_id строк черновика — скрыть из таблицы потребности во встроенной вкладке.
     const draftNmIds = useMemo(() => {
         const s = new Set<number>();
@@ -1860,13 +1800,39 @@ export default function AssemblyDraftPage() {
                             Соберёт черновик заново строго из «Потребность по складам» (с bump). Текущие строки будут заменены.
                         </span>
                     </div>
-                    {prebook.length > 0 && (
-                        <div className="glass-card" style={{ padding: 12, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                            <span style={{ fontWeight: 700 }}>🅿️ Предбронь: {formatNumber(prebook.length, 0)} поз.</span>
-                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>целые коробы, не собравшие паллету — дозабор/удаление на вкладке «Предбронь»</span>
-                            <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setTab('prebook')}>Открыть предбронь →</button>
-                        </div>
-                    )}
+                    {prebook.length > 0 && (() => {
+                        // Разбивка предброни по ФФ. Склады БЕЗ строк-заявок помечаем «⚠ только
+                        // предбронь»: группы предпросмотра строятся из rows, и такой ФФ там
+                        // «исчезает», хотя план в черновике есть (кейс «апл» 2026-07-11 —
+                        // матрица показывает план единой суммой, а в заявках склада нет).
+                        const pbByFf = new Map<number, number>();
+                        for (const r of prebook) for (const [ff, q] of Object.entries(r.src || {})) {
+                            if ((q || 0) > 0) pbByFf.set(Number(ff), (pbByFf.get(Number(ff)) || 0) + (q || 0));
+                        }
+                        const rowsFf = new Set<number>();
+                        for (const r of rows) for (const [ff, q] of Object.entries(r.src || {})) if ((q || 0) > 0) rowsFf.add(Number(ff));
+                        const pbTotal = [...pbByFf.values()].reduce((s, v) => s + v, 0);
+                        const ffName = (id: number) => warehouses.find(w => w.id === id)?.name || `ФФ ${id}`;
+                        return (
+                            <div className="glass-card" style={{ padding: 12, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                                <span style={{ fontWeight: 700 }}>🅿️ Предбронь: {formatNumber(pbTotal, 0)} шт · {formatNumber(prebook.length, 0)} поз.</span>
+                                {[...pbByFf.entries()].sort((a, b) => b[1] - a[1]).map(([ff, q]) => {
+                                    const noRows = !rowsFf.has(ff);
+                                    return (
+                                        <span key={ff} className="badge"
+                                            title={noRows
+                                                ? 'ВЕСЬ план этого ФФ — в предброни: заявок нет, в предпросмотре заявок склад не виден. Дозабор/отправка — на вкладке Предбронь.'
+                                                : 'Часть плана этого ФФ в предброни (плюс есть заявки в предпросмотре).'}
+                                            style={{ fontSize: 11, padding: '2px 8px', background: noRows ? 'rgba(255,159,10,0.14)' : 'rgba(59,130,246,0.10)', color: noRows ? 'var(--color-warning)' : 'var(--color-text)' }}>
+                                            {noRows ? '⚠ ' : ''}{ffName(ff)} · {formatNumber(q, 0)} шт{noRows ? ' — только предбронь, заявок нет' : ''}
+                                        </span>
+                                    );
+                                })}
+                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>хвосты меньше паллеты — дозабор/отправка на вкладке «Предбронь»</span>
+                                <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setTab('prebook')}>Открыть предбронь →</button>
+                            </div>
+                        );
+                    })()}
                     {geomState === 'error' && (
                         <div className="glass-card" style={{ padding: 12, marginBottom: 12, borderLeft: '3px solid var(--color-danger)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                             <span style={{ color: 'var(--color-danger)', fontWeight: 700 }}>⛔ Кратности коробов не загрузились</span>
@@ -1948,16 +1914,7 @@ export default function AssemblyDraftPage() {
                             </div>
                         </div>
                     )}
-                    <AddFromNeedPanel
-                        stockNeed={stockNeed}
-                        existingNmIds={existingNmIds}
-                        nmPpb={nmPpb}
-                        nmBoxSize={nmBoxSize}
-                        palletOverrides={palletOverrides}
-                        districtMap={districtRecord}
-                        onAddRows={handleAddRows}
-                        onToast={showToast}
-                    />
+                    <UrgentShipPanel slug={slug} rows={rows} stockNeed={stockNeed} />
                     <DraftPreview
                         slug={slug}
                         draftId={draft.id}
@@ -2009,7 +1966,14 @@ export default function AssemblyDraftPage() {
                     <DraftMatrixView
                         draftId={draftId}
                         ffNameById={new Map(warehouses.map(w => [w.id, w.name]))}
-                        onWritten={() => { reloadDraft(); setTab('draft'); }}
+                        onDraftChanged={(d) => {
+                            // Тихая синхронизация из редактора-матрицы (автосейв степпера / ✕):
+                            // ручная правка = ТОЧНЫЙ план юзера — пустой heal-scope на эту
+                            // версию, иначе полный self-heal переупаковал бы её (rows→prebook,
+                            // некратные released) вторым PUT. Вкладку НЕ переключаем.
+                            healScopeRef.current = { ts: d.updated_at, only: new Set() };
+                            applyDraft(d);
+                        }}
                     />
                 ) : (
                     <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>

@@ -51,11 +51,13 @@ class FfStockRow(BaseModel):
     brand: str | None = None  # бренд из номенклатуры (если сматчен)
     ff_good: int = 0
     ff_reserve: int = 0
-    ff_reserve_ready: int = 0  # migfull: часть резерва под собранные отгрузки (ready)
-    ff_defect: int = 0  # migfull: расч. = ff_reserve − собрано; прочие — из API
+    ff_reserve_ready: int = 0  # migfull: часть резерва под активные отгрузки (собрано)
+    ff_inbound_locked: int = 0  # migfull: часть резерва под свежий приход (EXPECTED-приёмки)
+    ff_defect: int = 0  # migfull: расч. = ff_reserve − собрано − В приёмке; прочие — из API
     ff_nominal: int = 0
     ff_box_units: int = 0  # из ff_good пришло коробами (в штуках россыпи)
     ff_box_count: int = 0  # сколько коробов годного сведено в этот товар
+    ff_logistics: int = 0  # досчитано к ff_good: товар в стадии списания логистики ФФ, ещё на складе
     our_quantity: int = 0
     our_defect: int = 0
     diff: int = 0  # прочие: ff_good − our_quantity; migfull: ff_good − (our_quantity + our_defect)
@@ -64,9 +66,11 @@ class FfStockRow(BaseModel):
 class FfStockTotals(BaseModel):
     ff_good: int = 0
     ff_reserve: int = 0
-    ff_reserve_ready: int = 0  # migfull: резерв под собранные отгрузки (ready)
+    ff_reserve_ready: int = 0  # migfull: резерв под активные отгрузки (собрано)
+    ff_inbound_locked: int = 0  # migfull: резерв под свежий приход (EXPECTED-приёмки)
     ff_defect: int = 0
     ff_box_units: int = 0  # сколько штук годного пришло коробами
+    ff_logistics: int = 0  # досчитано к ff_good: товар в стадии списания логистики ФФ
     our_quantity: int = 0
     diff: int = 0
     unmatched: int = 0  # строк ФФ без нашей номенклатуры
@@ -230,7 +234,11 @@ class FfMismatchDetail(BaseModel):
     our_total: int = 0
     ff_total: int = 0
     ff_request_numbers: list[str] = Field(default_factory=list)
+    # rows — расхождение по НАШИМ ШК (наш qty ≠ qty у ФФ, включая «мы отправили, а в
+    # заявке нет»). extra_rows — ШК, которые есть только у ФФ (мы их не отправляли):
+    # инфо-строки, расхождением не считаются (не зажигают ⚠ и бейдж «расхождение»).
     rows: list[FfMismatchDetailRow] = Field(default_factory=list)
+    extra_rows: list[FfMismatchDetailRow] = Field(default_factory=list)
 
 
 class FfRequestStageLog(BaseModel):

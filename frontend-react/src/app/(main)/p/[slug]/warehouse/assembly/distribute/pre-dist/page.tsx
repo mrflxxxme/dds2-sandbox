@@ -2,7 +2,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { formatDate, formatNumber } from '@/lib/utils';
+import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams';
+import { exportToExcel, formatDate, formatNumber } from '@/lib/utils';
 import { parseBoxSize, palletsForLines, maxPalletHeightCm, type PalletLine } from '@/lib/utils/boxPallet';
 import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constants/localization';
 import { Toast } from '@/components';
@@ -30,15 +31,33 @@ import AcceptanceBanner, { type AcceptanceSummary } from '../components/Acceptan
 import PrebookView, { type PrebookAcceptanceMark } from '../components/PrebookView';
 import DraftPreview from '../components/DraftPreview';
 import { seedNewcomerWholeBoxes, type SeedAnchor } from '@/lib/assembly/coldStartSeed';
+import { allocateWholeBoxes, buildLeftoverWeights } from '@/lib/assembly/leftoverAlloc';
 import type {
     AcceptanceCheckPerItem,
     AcceptanceFlags,
     AssemblyDraftRow,
+    LocalizationSkuRow,
     PackageType,
     PreDistVehiclePool,
+    StockNeedArticle,
     StockNeedResponse,
     Warehouse,
 } from '@/types/api';
+
+/** Цвет «Лок %» по статусу КТР (excellent/neutral/weak/critical) — как в матрице черновика. */
+const LOC_STATUS_COLOR: Record<LocalizationSkuRow['status'], string> = {
+    excellent: 'var(--color-success)',
+    neutral: 'var(--color-text)',
+    weak: 'var(--color-warning)',
+    critical: 'var(--color-danger)',
+};
+
+/** Срез «Сводных остатков» per SKU для колонок Реализация/Маржа/Тренд. */
+interface SkuAnalytics {
+    revenue_bdr: number;
+    margin_pct: number | null;
+    trend_pct: number | null;
+}
 
 /** Сколько коробов из штук при кратности `ppb`. */
 const boxesOf = (qty: number, ppb: number | null | undefined): number =>
@@ -56,7 +75,7 @@ const districtTint = (d: string): string | undefined => {
 };
 
 /** Ключ сортировки таблицы раскладки. Фиксированные колонки + `wb:<склад>` (сколько сдаём туда). */
-type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
+type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'days' | 'revenue' | 'margin' | 'loc' | 'trend' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
 
 /** Агрегаты одной раскладки (позиции · ячейки матрицы · итоги по складам · коробы/паллеты).
  *  Считается дважды: для коммита (целые паллеты → Заявки) и для матрицы (коробное покрытие). */
@@ -135,17 +154,26 @@ export default function PreDistVehiclePage() {
 
     // Справочники движка (зеркало PreDistributionView / distribute page).
     const [stockNeed, setStockNeed] = useState<StockNeedResponse | null>(null);
+    // Метрики SKU для колонок: Лок% (индекс локализации, окно 14д как потребность)
+    // и Реализация/Маржа/Тренд («Сводные остатки», trend_days=14).
+    const [locByNm, setLocByNm] = useState<Map<number, LocalizationSkuRow>>(new Map());
+    const [analyticsByNm, setAnalyticsByNm] = useState<Map<number, SkuAnalytics>>(new Map());
     const [newcomerSet, setNewcomerSet] = useState<Set<number>>(new Set());
+    // Гвард пересорта (backend cold-start, nm → причина): посев новинки лежит на WB
+    // без продаж → авто-засев машины её НЕ раздаёт (из newcomerSet НЕ убирать — он
+    // также исключает SKU из need-канала движка; иначе guarded провалился бы в need).
+    // Причина показывается бейджем ⚠ в строке матрицы (как в матрице черновика).
+    const [guardByNm, setGuardByNm] = useState<Map<number, string>>(new Map());
     const [anchors, setAnchors] = useState<SeedAnchor[]>([]);
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
     const [nmBoxSize, setNmBoxSize] = useState<Map<number, string | null>>(new Map());
     const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
     const [geomReady, setGeomReady] = useState(false);
 
-    // Раскладка. `distRows` — целые паллеты (коммит/Заявки); `distRowsBox` — коробное
-    // покрытие для матрицы (частичные паллеты ок). Две независимые раскладки одного пула.
+    // Раскладка: `distRows` — целые паллеты + ручные пины (коммит/Заявки), `prebookRows` —
+    // под-паллетные хвосты. Матрица показывает ЕДИНЫЙ план (заявки + 🅿️ предбронь одной
+    // суммой) — как матрица черновика; отдельного слоя «коробного покрытия» больше нет.
     const [distRows, setDistRows] = useState<AssemblyDraftRow[] | null>(null);
-    const [distRowsBox, setDistRowsBox] = useState<AssemblyDraftRow[]>([]);
     // Предбронь машины (под-паллетные хвосты pallet-mode): короб=«Дозабить» / моно=«Предзаявка».
     const [prebookRows, setPrebookRows] = useState<AssemblyDraftRow[]>([]);
     const [subTab, setSubTab] = useState<'dist' | 'preview' | 'prebook'>('dist');
@@ -160,8 +188,9 @@ export default function PreDistVehiclePage() {
     // Вливается в раскладку как extraRows → неполная паллета набирается и уходит в отгрузку.
     const [manualTopUp, setManualTopUp] = useState<Map<string, Record<string, number>>>(new Map());
     // Ручное редактирование ячеек матрицы «Раскладка»: barcode → { WB-склад → коробов }.
-    // Абсолютный пин (не дельта). Баркод с любым пином полностью управляется вручную
-    // (исключается из авто-раскладки), проходит приёмку и общий движок паллет/предброни.
+    // Абсолютный пин (не дельта). ТОЧЕЧНЫЙ ручной режим (как степперы матрицы черновика):
+    // тронутый SKU полностью управляется вручную (исключается из авто-раскладки и НЕ
+    // переупаковывается в паллеты — точный план юзера), остальные SKU остаются в авто.
     const [cellEdits, setCellEdits] = useState<CellEdits>(new Map());
     // Режим редактирования матрицы (тумблер «✏️») — показывает +/− степперы в ячейках.
     const [editMode, setEditMode] = useState(false);
@@ -181,11 +210,12 @@ export default function PreDistVehiclePage() {
     // Сортировка таблицы раскладки (клик по заголовку). Дефолт — Σ отпр. по убыванию
     // (прежнее поведение: сначала то, что отправляем).
     const [sortKey, setSortKey] = useState<SortKey>('ship');
+    const [searchQuery, setSearchQuery] = useState('');
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
     const toggleSort = useCallback((key: SortKey) => {
         setSortKey(prev => {
             if (prev === key) { setSortDir(d => (d === 'asc' ? 'desc' : 'asc')); return prev; }
-            setSortDir(key === 'label' ? 'asc' : 'desc');  // текст — по возрастанию, числа — по убыванию
+            setSortDir(key === 'label' || key === 'days' ? 'asc' : 'desc');  // текст/«Хватит,дн» — по возрастанию, числа — по убыванию
             return key;
         });
     }, []);
@@ -206,22 +236,49 @@ export default function PreDistVehiclePage() {
             setLoading(true);
             setError(null);
             try {
-                const [poolData, need, cold, boxMult, palletOv, preorder] = await Promise.all([
+                const locTo = new Date();
+                const locFrom = new Date(locTo.getTime() - 13 * 86_400_000);
+                const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+                const [poolData, need, cold, boxMult, palletOv, preorder, locSkus, analytics] = await Promise.all([
                     api.getPreDistVehiclePool(vehicleId),
                     // Форма спроса ТА ЖЕ, что у «Черновика сборки»: localizationOptimized=true
                     // (локализованное распределение по округам). НО onlyAvailable=false — машинный
                     // кап нельзя стекать поверх серверного ФФ-капа (источник = пул машины, не ФФ);
                     // кап применяется клиентски в buildDraftRows (min(pool, need)). См. план, часть A.
-                    (api.getStockNeed(14, 14, 'actual', true, false, 0) as Promise<StockNeedResponse | null>).catch(() => null),
-                    api.getColdStartTable(14).catch(() => null),  // окно 14д — как getStockNeed(14,14) и «Потребность»
+                    // bootstrapShape=true: bump-бутстрап пустых ФО и в сырой форме машины
+                    // (кап клиентский по пулу) — паритет с черновиком.
+                    (api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, false, 0, 100, true) as Promise<StockNeedResponse | null>).catch(() => null),
+                    // Параметры новинок — те же, что настроены на экране «Потребность»
+                    // (персистятся в localStorage): иначе машина считала бы новинки
+                    // другими настройками (min-pack / % отгрузки / floor), чем матрица
+                    // черновика. Окно 14д — как getStockNeed(14,14) и «Потребность».
+                    (() => {
+                        let csp: { minPack?: number; shipPct?: number; floor?: number } = {};
+                        try { csp = JSON.parse(localStorage.getItem('dds.coldStartParams') || '{}'); } catch { /* дефолты */ }
+                        return api.getColdStartTable(14, csp.minPack ?? 5, csp.shipPct ?? 55, csp.floor ?? 50).catch(() => null);
+                    })(),
                     api.getBoxMultiplicity().catch(() => null),
                     api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
                     api.getPreorderAllowedWarehouses().catch(() => [] as string[]),  // whitelist предзаявки (⌛)
+                    // Лок% — то же 14-дневное окно, что analysis_days потребности.
+                    api.getLocalizationSkus(isoDay(locFrom), isoDay(locTo)).catch(() => [] as LocalizationSkuRow[]),
+                    // Реализация (BDR) / маржа / тренд — «Сводные остатки», окно 14д.
+                    api.getStockAnalytics(14).catch(() => null),
                 ]);
                 if (controller.signal.aborted) return;
                 setPool(poolData);
                 setStockNeed(need);
                 setPreorderWbs(new Set(preorder));
+                setLocByNm(new Map(locSkus.map((r) => [r.nm_id, r])));
+                const am = new Map<number, SkuAnalytics>();
+                for (const a of (analytics?.articles ?? []) as { nm_id: number; revenue_bdr?: number; margin_pct?: number | null; trend_pct?: number | null }[]) {
+                    if (a?.nm_id) am.set(a.nm_id, {
+                        revenue_bdr: Number(a.revenue_bdr) || 0,
+                        margin_pct: a.margin_pct == null ? null : Number(a.margin_pct),
+                        trend_pct: a.trend_pct == null ? null : Number(a.trend_pct),
+                    });
+                }
+                setAnalyticsByNm(am);
                 // Новый пул машины → сбрасываем клиентские решения предброни и ручной дозабор
                 // (пересчёт раскладки их больше НЕ трогает — дозабор должен переживать recompute).
                 setPromotedDirs(new Set());
@@ -241,6 +298,11 @@ export default function PreDistVehiclePage() {
                     if (nm && pr.is_newcomer) ncs.add(nm);
                 }
                 setNewcomerSet(ncs);
+                const guards = new Map<number, string>();
+                for (const r of cold?.rows ?? []) {
+                    if (r.oversort_guard) guards.set(r.nm_id, r.guard_reason || 'посев уже лежит на WB и не продаётся');
+                }
+                setGuardByNm(guards);
                 // district — для гарантии СЗФО в seedNewcomerWholeBoxes (≥4 коробов → 1 короб СЗФО).
                 setAnchors((cold?.main_warehouses ?? []).map(w => ({ warehouse: w.warehouse, share_pct: w.share_pct, district: w.district_key })));
 
@@ -302,9 +364,13 @@ export default function PreDistVehiclePage() {
     // ─── Авто-раскладка: пул × потребность → приёмка → целые коробы/паллеты ──
     const computeDistribution = useCallback(async (poolData: PreDistVehiclePool, signal: AbortSignal) => {
         const targetWh = poolData.vehicle.target_warehouse_id;
-        if (targetWh == null) { setDistRows([]); setAcceptanceNote(null); return; }
+        if (targetWh == null) { setDistRows([]); setPrebookRows([]); setAcceptanceNote(null); return; }
         setDistComputing(true);
         try {
+            // Паритет с черновиком: веса «схемы воришек» — порядок среза при
+            // дефиците пула тот же, что серверный greedy при дефиците ФФ.
+            const priorityByWh: Record<string, number> = {};
+            for (const w of stockNeed?.warehouses ?? []) if (w.priority_weight != null) priorityByWh[w.name] = Number(w.priority_weight) || 0;
             const distInput: PoolDistInput = {
                 poolRows: poolData.rows,
                 targetWarehouseId: targetWh,
@@ -312,6 +378,7 @@ export default function PreDistVehiclePage() {
                 nmPpb,
                 nmBoxSize,
                 palletOverrides,
+                priorityByWh,
             };
             const { skus: allSkus } = buildPoolSkus(distInput);
             // Россыпь запрещена (как в «Черновике»): SKU без кратности короба округлять нечем
@@ -321,18 +388,15 @@ export default function PreDistVehiclePage() {
                 if (!signal.aborted) { setDistRows([]); setPrebookRows([]); setAcceptanceNote(null); }
                 return;
             }
-            // Режим правки = ПОЛНОСТЬЮ ручной: авто-раскладка ВЫКЛючена (чистый лист), матрицу
-            // формируют ТОЛЬКО ручные пины (`cellEdits`). Вне режима правки — авто-раскладка
-            // «по потребности», а пины дремлют (не влияют, но сохраняются до включения правки).
+            // ТОЧЕЧНЫЙ ручной режим (зеркало степперов матрицы черновика): пинованный
+            // баркод полностью управляется вручную и исключается из авто-раскладки;
+            // остальные SKU продолжают жить в авто. «Готово» лишь прячет степперы;
+            // возврат SKU в авто — ↺ на строке или «↺ Сбросить все правки».
             // Приёмку по пинам проверяем отдельными item'ами (nm→pkg-флаги для pinnedPkgOf/меток).
-            // Ручной режим активен, пока (а) включена правка ИЛИ (б) есть хоть один пин —
-            // чтобы «Готово» (спрятать степперы) НЕ откатывало ручную раскладку в авто. Возврат
-            // к авто — только «↺ Сбросить все правки» (очищает cellEdits).
-            const manualMode = editMode || cellEdits.size > 0;
-            const activeEdits: CellEdits = manualMode ? cellEdits : new Map();
+            const activeEdits: CellEdits = cellEdits;
             const nmByBarcodePool = new Map<string, number>();
             for (const pr of poolData.rows) nmByBarcodePool.set(pr.barcode, pr.article_wb ? Number(pr.article_wb) : 0);
-            const autoSkus = manualMode ? [] : skus.filter(s => !activeEdits.has(s.barcode));
+            const autoSkus = skus.filter(s => !activeEdits.has(s.barcode));
             const pinnedItems: { nm_id: number; barcode: string; distribution: Record<string, number> }[] = [];
             for (const [bc, whBoxes] of activeEdits) {
                 const nm = nmByBarcodePool.get(bc) ?? 0;
@@ -415,24 +479,40 @@ export default function PreDistVehiclePage() {
             // уедет по потребности per баркод/склад, чтобы не сеять поверх того же склада).
             const needBoxRows = finalizePoolDistribution(effective, distInput, false).rows;
             const seededRows: AssemblyDraftRow[] = [];
-            if (!manualMode && anchors.length > 0) {
+            if (anchors.length > 0) {
                 const shippedByBc = new Map<string, number>();
-                const needShipByBcWh = new Map<string, Map<string, number>>();
-                for (const r of rowsToPreDistRows(needBoxRows)) {
-                    shippedByBc.set(r.barcode, (shippedByBc.get(r.barcode) ?? 0) + r.qty);
-                    const wh = needShipByBcWh.get(r.barcode) ?? new Map<string, number>();
-                    wh.set(r.wb_warehouse_name, (wh.get(r.wb_warehouse_name) ?? 0) + r.qty);
-                    needShipByBcWh.set(r.barcode, wh);
-                }
-                // Покрытие per nm per WB-склад (остаток WB + в сборке + в пути + уже по потребности).
+                // Покрытие засева per nm per WB-склад (а НЕ per barcode): сколько этого nm
+                // уже уедет на склад в ЭТОМ расчёте — потребность + ручные ПИНЫ (в т.ч.
+                // пин соседнего баркода/размера того же nm). Иначе засев одного размера
+                // сеял бы поверх склада, уже покрытого пином другого размера (пересорт).
+                const plannedByNmWh = new Map<number, Map<string, number>>();
+                const addPlanned = (rows: AssemblyDraftRow[]) => {
+                    for (const r of rowsToPreDistRows(rows)) {
+                        const nm = nmByBarcodePool.get(r.barcode) ?? 0;
+                        if (!nm) continue;
+                        const m = plannedByNmWh.get(nm) ?? new Map<string, number>();
+                        m.set(r.wb_warehouse_name, (m.get(r.wb_warehouse_name) ?? 0) + r.qty);
+                        plannedByNmWh.set(nm, m);
+                    }
+                };
+                for (const r of rowsToPreDistRows(needBoxRows)) shippedByBc.set(r.barcode, (shippedByBc.get(r.barcode) ?? 0) + r.qty);
+                addPlanned(needBoxRows);
+                addPlanned(pinnedRows);
+                // Остаток WB + в сборке + в пути (per nm) — базовое покрытие складов.
                 const enrich = enrichPoolRows(poolData.rows, stockNeed, newcomerSet);
                 for (const pr of poolData.rows) {
                     const nm = pr.article_wb ? Number(pr.article_wb) : 0;
                     if (!nm || !newcomerSet.has(nm)) continue;
+                    // Пин = ручной план баркода целиком — авто-засев в него не лезет.
+                    if (activeEdits.has(pr.barcode)) continue;
+                    // Гвард пересорта: прошлый посев лежит на WB без продаж — машину
+                    // этим SKU не досеиваем (ровно кейс «поставка приехала → опять
+                    // раздали»); ручные правки ячеек гвард не ограничивает.
+                    if (guardByNm.has(nm)) continue;
                     const avail = Math.max(0, Math.floor(Number(pr.available_qty) || 0));
                     const remaining = avail - (shippedByBc.get(pr.barcode) ?? 0);
                     const byWh = enrich.get(nm)?.byWh;
-                    const needWh = needShipByBcWh.get(pr.barcode);
+                    const needWh = plannedByNmWh.get(nm);
                     const covAnchors = anchors.map(a => {
                         const c = byWh?.[a.warehouse];
                         const existing = (c ? c.stock + c.asm + c.transit : 0) + (needWh?.get(a.warehouse) ?? 0);
@@ -454,6 +534,9 @@ export default function PreDistVehiclePage() {
             // «WB везёт этот регион из Москвы»), ровно как в черновике (`applyAcceptanceRedistToPrebook`).
             // ДО паллетизации — чтобы закрытый склад не попал ни в Заявки, ни в Предбронь.
             // Приёмка не ответила → засев оставляем как есть (товар не теряем).
+            // Полный дроп (ни одного открытого склада, moves to=null) → `dropUnplaced`:
+            // группу НЕ сеем (остаётся в остатке машины) — паритет с черновиком, где
+            // `applyAcceptanceSplits` в том же кейсе оставляет новинку на ФФ.
             let seededEffective = seededRows;
             if (seededRows.length > 0) {
                 const bySku = new Map<string, { nm_id: number; barcode: string; distribution: Record<string, number> }>();
@@ -480,7 +563,7 @@ export default function PreDistVehiclePage() {
                         seedByKey = null;  // приёмка не ответила — засев оставляем как есть (товар не теряем)
                     }
                 }
-                if (seedByKey) seededEffective = applyAcceptanceRedistToPrebook(seededRows, seedByKey).rows;
+                if (seedByKey) seededEffective = applyAcceptanceRedistToPrebook(seededRows, seedByKey, { dropUnplaced: true }).rows;
             }
             // Ручной дозабор из остатка машины (кнопка «Дозабить» предброни) — целые коробы.
             // Кап по ОСТАТКУ баркода (available − занятое потребностью/засевом) не даёт гонке
@@ -490,33 +573,33 @@ export default function PreDistVehiclePage() {
                 const s = Object.values(r.src).reduce((a, v) => a + (v || 0), 0);
                 reservedByBc.set(r.barcode, (reservedByBc.get(r.barcode) ?? 0) + s);
             }
-            const topUpRows = manualMode ? [] : buildTopUpRows(manualTopUp, poolData.rows, targetWh, nmPpb, reservedByBc);
-            const extra = [...seededEffective, ...topUpRows, ...pinnedRows];
-            // ДВЕ независимые раскладки одного пула (по решению юзера):
-            //  • whole — строго целые паллеты → ЗАЯВКИ (коммит) + под-паллетные хвосты в ПРЕДБРОНЬ.
-            //  • box   — целые коробы под потребность (частичные паллеты ок) → МАТРИЦА «Раскладка»
-            //            (коробное покрытие: Краснодар/Шушары с потребностью видят короб).
-            // Числа матрицы и Заявок могут расходиться — матрица шлёт короб, а в Заявку он попадёт
-            // только целой паллетой либо после решения в Предброни (Дозабить/Оставить так/На ФФ).
+            // Дозабор пинованного баркода уже сидит в его ручном плане — не дублируем.
+            const autoTopUp = new Map([...manualTopUp].filter(([bc]) => !activeEdits.has(bc)));
+            const topUpRows = buildTopUpRows(autoTopUp, poolData.rows, targetWh, nmPpb, reservedByBc);
+            const extra = [...seededEffective, ...topUpRows];
+            // ЕДИНАЯ раскладка (как черновик): строго целые паллеты → ЗАЯВКИ (коммит),
+            // под-паллетные хвосты → ПРЕДБРОНЬ. Матрица показывает план = заявки + 🅿️
+            // предбронь одной суммой, поэтому её числа сходятся с Заявками+Предбронью
+            // ПО ПОСТРОЕНИЮ (отдельный слой «коробного покрытия» удалён — он расходился).
             // minOneBoxPerWh=true: каждый склад с потребностью получает ≥1 целый короб
-            // (перебор над потребностью, кап машинным стоком) — по требованию юзера, как
-            // speed-локализация «но не менее одной коробки на склад». Действует на обе
-            // раскладки: матрица показывает короб, в whole неполная паллета уйдёт в Предбронь.
+            // (перебор над потребностью, кап машинным стоком); неполная паллета уйдёт в
+            // Предбронь, где решается дозабор/«Оставить так».
+            // Ручные пины — ТОЧНЫЙ план юзера (зеркало степперов матрицы черновика):
+            // в паллеты НЕ переупаковываются и в предбронь не сваливаются — идут строками
+            // как есть, поверх авто-раскладки остальных SKU.
             const whole = finalizePoolDistribution(effective, distInput, true, extra, true);
-            const box = finalizePoolDistribution(effective, distInput, false, extra, true);
             if (!signal.aborted) {
-                setDistRows(whole.rows);
+                setDistRows([...whole.rows, ...pinnedRows]);
                 setPrebookRows(whole.prebook);
-                setDistRowsBox(box.rows);
                 setAcceptanceNote(summary);
                 setAcceptanceByNm(accByNm);
             }
         } catch (e) {
-            if (!signal.aborted) { setDistRows([]); setPrebookRows([]); setDistRowsBox([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
+            if (!signal.aborted) { setDistRows([]); setPrebookRows([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
-    }, [stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, editMode, newcomerSet, anchors, showToast]);
+    }, [stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, newcomerSet, guardByNm, anchors, showToast]);
 
     useEffect(() => {
         if (!pool || !geomReady) return;
@@ -565,12 +648,24 @@ export default function PreDistVehiclePage() {
         return m;
     }, [pool]);
 
-    // ─── Производные: коммит (целые паллеты → Заявки) vs матрица (коробное покрытие) ──
-    // Две независимые раскладки. `commit` = целые паллеты (Заявки/создание/KPI), `matrix` =
-    // коробное покрытие (ячейки/колонки/сортировка/итоги «Сдаём»). Числа могут расходиться.
+    // ─── Производные: коммит (заявки) и ЕДИНЫЙ план (заявки + 🅿️ предбронь) ──
+    // `commit` = что реально станет заявками (создание/кнопка). `plan` = план машины
+    // одной суммой (rows + предбронь) — источник матрицы (ячейки/колонки/сортировка/
+    // итоги «Сдаём»), как draftAgg в матрице черновика. plan ⊇ commit по построению.
     const commit = useMemo(() => buildDistAgg(shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides), [shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
-    const matrix = useMemo(() => buildDistAgg(distRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides), [distRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+    const plan = useMemo(() => buildDistAgg([...shipRows, ...effPrebook], nmByBc, nmPpb, nmBoxSize, palletOverrides), [shipRows, effPrebook, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
     const submitRows = commit.submitRows;
+    /** Предбронь-доля per (barcode, wh) — подсветка ячеек и тултип «в т.ч. 🅿️» (числа единые). */
+    const prebookCellByBc = useMemo(() => {
+        const m = new Map<string, Map<string, number>>();
+        for (const r of effPrebook) {
+            if (!r.barcode) continue;
+            const cell = m.get(r.barcode) ?? new Map<string, number>();
+            for (const [wh, q] of Object.entries(r.tgt || {})) if ((q || 0) > 0) cell.set(wh, (cell.get(wh) || 0) + (q || 0));
+            m.set(r.barcode, cell);
+        }
+        return m;
+    }, [effPrebook]);
 
     // ─── Пропсы для реального «Предпросмотра заявок» (DraftPreview в машинном режиме) ──
     const previewWarehouses = useMemo<Warehouse[]>(() => {
@@ -597,15 +692,32 @@ export default function PreDistVehiclePage() {
         [pool, stockNeed, newcomerSet],
     );
 
-    // Колонки WB-складов матрицы (куда шлём короба ИЛИ где есть потребность) + округа.
-    // Источник — matrix (коробное покрытие), чтобы box-only склады (Краснодар/Шушары) были колонками.
+    // Артикул потребности per nm — метрики «Хватит, дн» / плечо / рост (growth-aware движок).
+    const needArtByNm = useMemo(() => {
+        const m = new Map<number, StockNeedArticle>();
+        for (const a of stockNeed?.articles ?? []) m.set(a.nm_id, a);
+        return m;
+    }, [stockNeed]);
+
+    // Колонки WB-складов матрицы (куда шлём ИЛИ где есть потребность) + округа.
+    // Источник — plan (заявки + предбронь), чтобы направления предброни были колонками.
+    // В ручном режиме — плюс склады с присутствием SKU машины (остаток/в сборке/в пути):
+    // когда всё уже отправлено, потребность обнуляется, и без этого фолбэка холст
+    // оставался бы без единой колонки — остаток машины некуда дораздать (кейс V-0033).
     const wbCols = useMemo(() => {
         const distByWh = new Map<string, string>();
         for (const w of stockNeed?.warehouses ?? []) if (w.name) distByWh.set(w.name, w.district_key || 'unknown');
         const names = new Set<string>();
-        for (const r of matrix.submitRows) names.add(r.wb_warehouse_name);
+        for (const r of plan.submitRows) names.add(r.wb_warehouse_name);
         for (const e of enrichMap.values()) {
             for (const [wh, c] of Object.entries(e.byWh)) if (c.need > 0) names.add(wh);
+        }
+        if (editMode) {
+            for (const e of enrichMap.values()) {
+                for (const [wh, c] of Object.entries(e.byWh)) if (c.stock > 0 || c.asm > 0 || c.transit > 0) names.add(wh);
+            }
+            // Совсем нет присутствия (свежий кабинет) — полный справочник складов.
+            if (names.size === 0) for (const name of distByWh.keys()) names.add(name);
         }
         const arr = [...names].map(name => ({ name, district: distByWh.get(name) || 'unknown' }));
         arr.sort((a, b) => {
@@ -613,7 +725,7 @@ export default function PreDistVehiclePage() {
             return ra !== rb ? ra - rb : a.name.localeCompare(b.name, 'ru');
         });
         return arr;
-    }, [matrix, enrichMap, stockNeed]);
+    }, [plan, enrichMap, stockNeed, editMode]);
 
     const districtGroups = useMemo(() => {
         const groups: { label: string; color: string; count: number }[] = [];
@@ -627,15 +739,11 @@ export default function PreDistVehiclePage() {
         return groups;
     }, [wbCols]);
 
-    // Остаётся на ФФ по коммиту (целые паллеты) — для KPI «На хранение».
+    // Остаётся на машине ПО ПЛАНУ (заявки + предбронь) — KPI «На хранение» и итоги «Сдаём».
+    // Предбронь — часть плана (решается дозабором/«Оставить так»), а не хранение.
     const onHoldQty = useMemo(
-        () => (pool?.rows ?? []).reduce((s, r) => s + Math.max(0, (Number(r.available_qty) || 0) - (commit.allocByBc.get(r.barcode) ?? 0)), 0),
-        [pool, commit],
-    );
-    // Остаётся на ФФ по матрице (коробное покрытие) — для строки итогов «Сдаём».
-    const matrixOnHold = useMemo(
-        () => (pool?.rows ?? []).reduce((s, r) => s + Math.max(0, (Number(r.available_qty) || 0) - (matrix.allocByBc.get(r.barcode) ?? 0)), 0),
-        [pool, matrix],
+        () => (pool?.rows ?? []).reduce((s, r) => s + Math.max(0, (Number(r.available_qty) || 0) - (plan.allocByBc.get(r.barcode) ?? 0)), 0),
+        [pool, plan],
     );
 
     // Артикулы машины БЕЗ кратности короба: округлять до целого короба нечем → россыпь
@@ -721,8 +829,19 @@ export default function PreDistVehiclePage() {
     const topUpBox = useCallback((pkg: PackageType, wb: string, ffId: number) => {
         if (pkg !== 'BOX') { promoteDir(pkg, wb, ffId); return; }
         const g = prebookGroups.find(x => x.pkg === 'BOX' && x.wb === wb && x.ffId === ffId);
-        const adds = g?.topUp ? planBoxTopUp(g.topUp.candidates, wb, pool?.rows ?? [], commit.allocByBc, nmPpb) : [];
-        if (adds.length === 0) { showToast('Нет остатка машины, чтобы дозабрать паллету', 'error'); return; }
+        // Свободный остаток — за вычетом ВСЕГО плана (заявки + предбронь): штуки в
+        // предброни других направлений уже закреплены, дозабор их не перебронирует.
+        const rawAdds = g?.topUp ? planBoxTopUp(g.topUp.candidates, wb, pool?.rows ?? [], plan.allocByBc, nmPpb) : [];
+        // Запинованный баркод управляется вручную (autoTopUp его отфильтрует при пересчёте) —
+        // дозабор в него молча потерялся бы. Такие адды отсекаем: если добор целиком лёг на
+        // ручные SKU — просим добрать степпером (иначе клик был бы no-op без сигнала).
+        const adds = rawAdds.filter(a => !cellEdits.has(a.barcode));
+        if (adds.length === 0) {
+            showToast(rawAdds.length > 0
+                ? 'Дозабрать нечем: свободный остаток есть только у SKU, размеченных вручную (✏️) — добавьте короба степпером в матрице'
+                : 'Нет остатка машины, чтобы дозабрать паллету', 'error');
+            return;
+        }
         setPrebookOpKey(`${pkg}::${wb}::${ffId}`);
         setManualTopUp(prev => {
             const next = new Map(prev);
@@ -734,7 +853,7 @@ export default function PreDistVehiclePage() {
             return next;
         });
         setTimeout(() => setPrebookOpKey(null), 250);
-    }, [prebookGroups, pool, commit, nmPpb, promoteDir, showToast]);
+    }, [prebookGroups, pool, plan, nmPpb, cellEdits, promoteDir, showToast]);
 
     // Метка приёмки WB ячейки отгрузки: ⌛ нет лимита приёмки (нужна предзаявка).
     // Тип для выбора meta — по факту отправки (shipPkg), иначе высший доступный.
@@ -752,65 +871,160 @@ export default function PreDistVehiclePage() {
         return { noLimit: ((meta?.free_days_14 ?? 0) + (meta?.paid_days_14 ?? 0)) <= 0 };
     }, [acceptanceByNm]);
 
-    // Правка ячейки матрицы на ±1 короб. Первая правка баркода «замораживает» текущую
-    // авто-раскладку строки в пины (соседние ячейки не прыгают — меняется только кликнутая).
-    // Σ коробов баркода капится остатком машины (нельзя дорисовать больше, чем стоит).
+    // Правка ячейки матрицы на ±1 короб (зеркало степперов матрицы черновика). Первая
+    // правка баркода «замораживает» его ТЕКУЩИЙ план (строки + 🅿️ предбронь) в пины —
+    // соседние ячейки не прыгают, предбронь SKU сливается в точный ручной план; остальные
+    // SKU остаются в авто. Σ коробов баркода капится остатком машины.
     const editCellBoxes = useCallback((barcode: string, nm: number, wh: string, delta: number) => {
         const ppb = nmPpb.get(nm) || 0;
         if (ppb <= 0) return;
         const avail = availByBc.get(barcode) ?? 0;
+        const firstPin = !cellEdits.has(barcode);
         setCellEdits(prev => {
             const next = new Map(prev);
-            // Режим правки = чистый лист: новый баркод стартует ПУСТЫМ (0 везде), ставишь короба
-            // сам из остатка машины. Уже тронутый — продолжаем с его пинов.
-            const rec = next.get(barcode) ?? {};
+            let rec = next.get(barcode);
+            if (!rec) {
+                rec = {};
+                const cells = plan.cellByBc.get(barcode);
+                // Сид ЦЕЛЫМИ коробами через floor (НЕ ceil): некратный ppb хвост (моно-порция,
+                // предбронь-хвост, loose BOX) не раздувается вверх и Σ пинов ≤ floor(avail/ppb) —
+                // иначе сид сверх капа заставлял applyCellBoxDelta уменьшать кликнутую ячейку на «+».
+                // Россыпь < короба отбрасывается (её всё равно нельзя отгрузить коробом).
+                if (cells) for (const [w, c] of cells) { const b = Math.floor((c.qty ?? 0) / ppb); if (b > 0) rec[w] = b; }
+            }
             next.set(barcode, applyCellBoxDelta(rec, wh, delta, ppb, avail));
             return next;
         });
-    }, [nmPpb, availByBc]);
+        // Первый пин забирает план баркода целиком (включая уже влитый в plan.cellByBc дозабор) —
+        // снимаем его накопленный manualTopUp, иначе после ↺ он «воскреснет» фантомными коробами.
+        if (firstPin) setManualTopUp(prev => { if (!prev.has(barcode)) return prev; const n = new Map(prev); n.delete(barcode); return n; });
+    }, [nmPpb, availByBc, plan, cellEdits]);
     const resetRowEdits = useCallback((barcode: string) => {
         setCellEdits(prev => { if (!prev.has(barcode)) return prev; const n = new Map(prev); n.delete(barcode); return n; });
     }, []);
     const resetAllEdits = useCallback(() => setCellEdits(new Map()), []);
 
-    // Вход в ручной режим: «замораживаем» ТЕКУЩУЮ авто-раскладку в редактируемые пины,
-    // чтобы правка начиналась с уже разложенных данных (а не с чистого листа). Сеем только
-    // если правок ещё нет (повторный вход не перетирает ручные изменения). `matrix.cellByBc`
-    // тут = авто-покрытие (editMode ещё false в момент клика).
-    const enterManual = useCallback(() => {
-        setCellEdits(prev => {
-            if (prev.size > 0) return prev;  // уже есть ручные правки — не перетираем
-            const seeded: CellEdits = new Map();
-            for (const [bc, cells] of matrix.cellByBc) {
-                const nm = nmByBc.get(bc) ?? 0;
-                const ppb = nmPpb.get(nm) || 0;
-                if (ppb <= 0) continue;
-                const rec: Record<string, number> = {};
-                for (const [wh, c] of cells) { const b = boxesOf(c.qty, ppb); if (b > 0) rec[wh] = b; }
-                if (Object.keys(rec).length > 0) seeded.set(bc, rec);
-            }
-            return seeded;
+    // Пин раздачи остатка ОДНОЙ строки машины: база = существующий пин ИЛИ текущий
+    // план (floor до целых коробов — как первая ручная правка в editCellBoxes),
+    // добавка — buildLeftoverWeights (спрос → присутствие, ⛔ скип). Общее ядро
+    // для строки и «всех остатков».
+    const pinRowLeftover = useCallback((
+        row: PreDistVehiclePool['rows'][number],
+        edits: CellEdits,
+    ): { rec?: Record<string, number>; boxes: number; ppb: number; skip?: 'noPpb' | 'guard' | 'nothing' | 'noTarget' } => {
+        const nm = nmByBc.get(row.barcode) ?? 0;
+        const ppb = nmPpb.get(nm) || 0;
+        const avail = Number(row.available_qty) || 0;
+        if (ppb <= 0) return { boxes: 0, ppb: 0, skip: 'noPpb' };
+        // Гвард пересорта: посев лежит без продаж — авто-досев запрещён (степпер работает).
+        if (guardByNm.has(nm)) return { boxes: 0, ppb, skip: 'guard' };
+        // Новинка МАШИНЫ (без ФФ-остатка) в cold-start-справочник не попадает и
+        // guardByNm её не видит — та же проверка локально: посев уже лежит на WB,
+        // продаж нет → раздача остатков досыпала бы пересорт (кейс зебра_молочный).
+        const _na = needArtByNm.get(nm);
+        if (newcomerSet.has(nm) && (Number(_na?.eff_avg_daily) || 0) === 0 && (Number(_na?.stocks_wb) || 0) > 0) {
+            return { boxes: 0, ppb, skip: 'guard' };
+        }
+        if (avail <= 0) return { boxes: 0, ppb, skip: 'nothing' };
+        const prev = edits.get(row.barcode);
+        const rec: Record<string, number> = prev ? { ...prev } : {};
+        if (!prev) {
+            const cells0 = plan.cellByBc.get(row.barcode);
+            if (cells0) for (const [w, c] of cells0) { const b = Math.floor((c.qty ?? 0) / ppb); if (b > 0) rec[w] = b; }
+        }
+        const pinnedUnits = Object.values(rec).reduce((s, b) => s + b, 0) * ppb;
+        const boxes = Math.floor((avail - pinnedUnits) / ppb);
+        if (boxes <= 0) return { boxes: 0, ppb, skip: 'nothing' };
+        const weights = buildLeftoverWeights(enrichMap.get(nm)?.byWh, (wh) => {
+            // Открыт для раздачи остатков = не ⛔ И не ⌛ (без лимита приёмки —
+            // заявка не пройдёт без предзаявки; раздача их плодить не должна).
+            const m = markFor(nm, wh, null);
+            return !m || (!m.closed && !m.noLimit);
         });
+        const alloc = allocateWholeBoxes(boxes, weights);
+        if (alloc.size === 0) return { boxes: 0, ppb, skip: 'noTarget' };
+        for (const [wh, b] of alloc) rec[wh] = (rec[wh] ?? 0) + b;
+        return { rec, boxes, ppb };
+    }, [nmByBc, nmPpb, plan, enrichMap, markFor, guardByNm, needArtByNm, newcomerSet]);
+
+    // «Распределить все остатки»: раздать остаток машины сверх плана ЦЕЛЫМИ коробами
+    // как ручные пины — дальше тот же конвейер (приёмка/паллеты/предбронь), капы
+    // держит buildPinnedRows.
+    const distributeAllLeftovers = useCallback(() => {
+        // Во время пересчёта plan.cellByBc пуст/устарел — сид пинов раздал бы весь
+        // остаток мимо плана (кнопка тоже disabled, гард — от stale-рендера).
+        if (!pool || distComputing || distRows === null) return;
+        let addedBoxes = 0, addedUnits = 0, touched = 0, skipNoPpb = 0, skipNoTarget = 0, skipGuard = 0;
+        const nextEdits: CellEdits = new Map(cellEdits);
+        const pinnedNow: string[] = [];
+        for (const row of pool.rows) {
+            const res = pinRowLeftover(row, nextEdits);
+            if (res.skip === 'noPpb') { skipNoPpb++; continue; }
+            if (res.skip === 'guard') { skipGuard++; continue; }
+            if (res.skip === 'noTarget') { skipNoTarget++; continue; }
+            if (!res.rec || res.boxes <= 0) continue;
+            nextEdits.set(row.barcode, res.rec);
+            pinnedNow.push(row.barcode);
+            addedBoxes += res.boxes; addedUnits += res.boxes * res.ppb; touched++;
+        }
+        if (touched === 0) {
+            showToast(`Нечего распределять: остатки уже в плане${skipNoPpb ? ` · без кратности: ${skipNoPpb} SKU` : ''}${skipNoTarget ? ` · некуда (нет спроса и присутствия): ${skipNoTarget} SKU` : ''}${skipGuard ? ` · гвард пересорта: ${skipGuard} SKU` : ''}`, 'error');
+            return;
+        }
+        setCellEdits(nextEdits);
+        // Пин забирает план баркода целиком (его дозабор уже в базе пина через plan.cellByBc).
+        setManualTopUp(prevT => { const n = new Map(prevT); for (const bc of pinnedNow) n.delete(bc); return n; });
         setEditMode(true);
-    }, [matrix, nmByBc, nmPpb]);
+        showToast(`Распределено ${formatNumber(addedUnits, 0)} шт (${formatNumber(addedBoxes, 0)} кор) по ${formatNumber(touched, 0)} SKU${skipNoPpb ? ` · пропущено без кратности: ${skipNoPpb}` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget}` : ''}${skipGuard ? ` · гвард пересорта: ${skipGuard}` : ''}`, 'success');
+    }, [pool, distComputing, distRows, cellEdits, pinRowLeftover, showToast]);
+
+    // Раздача остатка ОДНОЙ строки машины (кнопка в «Остаётся ФФ»).
+    const distributeRowLeftovers = useCallback((row: PreDistVehiclePool['rows'][number]) => {
+        if (!pool || distComputing || distRows === null) return;
+        const res = pinRowLeftover(row, cellEdits);
+        if (!res.rec || res.boxes <= 0) {
+            const nm = nmByBc.get(row.barcode) ?? 0;
+            const msg = res.skip === 'noPpb' ? 'Не задана кратность короба'
+                : res.skip === 'guard' ? `Гвард пересорта: ${guardByNm.get(nm) || 'посев лежит без продаж'} — только вручную степпером`
+                : res.skip === 'noTarget' ? 'Некуда: нет ни потребности, ни присутствия на открытых складах'
+                : 'Остаток меньше короба — распределять нечего';
+            showToast(msg, 'error');
+            return;
+        }
+        setCellEdits(prev => { const n = new Map(prev); n.set(row.barcode, res.rec!); return n; });
+        setManualTopUp(prev => { if (!prev.has(row.barcode)) return prev; const n = new Map(prev); n.delete(row.barcode); return n; });
+        setEditMode(true);
+        showToast(`${row.article_seller || row.barcode}: распределено ${formatNumber(res.boxes * res.ppb, 0)} шт (${formatNumber(res.boxes, 0)} кор) — строка запинована ✏️`, 'success');
+    }, [pool, distComputing, distRows, cellEdits, pinRowLeftover, nmByBc, guardByNm, showToast]);
+
+    // Вход в ручной режим = просто показать степперы поверх авто-раскладки (как в матрице
+    // черновика). Пины НЕ сеются: нетронутые SKU остаются в авто, «вручную» становится
+    // лишь баркод, где юзер кликнул −/+ (editCellBoxes сидит его текущий план в пин).
+    const enterManual = useCallback(() => setEditMode(true), []);
 
     // Значение строки для сортировки по ключу колонки.
     const sortValue = useCallback((row: PreDistVehiclePool['rows'][number], key: SortKey): number | string => {
         const nm = nmByBc.get(row.barcode) ?? 0;
         const e = enrichMap.get(nm);
-        const ship = matrix.allocByBc.get(row.barcode) ?? 0;
+        const ship = plan.allocByBc.get(row.barcode) ?? 0;
         switch (key) {
             case 'label': return (row.article_seller || row.article_wb || row.barcode).toLowerCase();
             case 'avail': return Number(row.available_qty) || 0;
             case 'inAssembly': return e?.inAssembly ?? 0;
             case 'stocksWb': return e?.stocksWb ?? 0;
+            // null (нет продаж) — в конец при сортировке «кому хуже всех» (asc).
+            case 'days': { const d = needArtByNm.get(nm)?.wb_days_left; return d == null ? Number.POSITIVE_INFINITY : Number(d); }
+            case 'revenue': return analyticsByNm.get(nm)?.revenue_bdr ?? 0;
+            case 'margin': { const m = analyticsByNm.get(nm)?.margin_pct; return m == null ? Number.NEGATIVE_INFINITY : Number(m); }
+            case 'loc': return locByNm.has(nm) ? Number(locByNm.get(nm)!.loc_pct) || 0 : -1;
+            case 'trend': { const t = analyticsByNm.get(nm)?.trend_pct; return t == null ? Number.NEGATIVE_INFINITY : Number(t); }
             case 'ship': return ship;
             case 'boxes': return boxesOf(ship, nmPpb.get(nm));
             case 'stays': return Math.max(0, (Number(row.available_qty) || 0) - ship);
             default:  // wb:<склад> — сколько сдаём в этот WB-склад
-                return matrix.cellByBc.get(row.barcode)?.get(key.slice(3))?.qty ?? 0;
+                return plan.cellByBc.get(row.barcode)?.get(key.slice(3))?.qty ?? 0;
         }
-    }, [nmByBc, enrichMap, matrix, nmPpb]);
+    }, [nmByBc, enrichMap, plan, nmPpb, needArtByNm, analyticsByNm, locByNm]);
 
     // Строки таблицы, отсортированные по активной колонке (клик по заголовку).
     const sortedRows = useMemo(() => {
@@ -827,6 +1041,59 @@ export default function PreDistVehiclePage() {
         });
         return rows;
     }, [pool, sortKey, sortDir, sortValue]);
+
+    // Поиск по артикулу / ШК / nm / названию — фильтрует только строки таблицы
+    // (итоги «Сдаём»/футер остаются по полному плану машины).
+    const visibleRows = useMemo(() => {
+        const q = searchQuery.trim().toLowerCase();
+        if (!q) return sortedRows;
+        return sortedRows.filter((r) =>
+            `${r.article_seller || ''} ${r.barcode || ''} ${r.article_wb || ''} ${r.name || ''}`.toLowerCase().includes(q));
+    }, [sortedRows, searchQuery]);
+
+    // Экспорт матрицы в Excel — WYSIWYG: те же строки (поиск/сортировка), KPI-колонки,
+    // склады из wbCols и итоговая строка «Сдаём, шт», что на экране.
+    const handleExportExcel = useCallback(() => {
+        const data: Record<string, string | number>[] = visibleRows.map(row => {
+            const nm = nmByBc.get(row.barcode) ?? 0;
+            const e = enrichMap.get(nm);
+            const na = needArtByNm.get(nm);
+            const an = analyticsByNm.get(nm);
+            const loc = locByNm.get(nm);
+            const avail = Number(row.available_qty) || 0;
+            const ship = plan.allocByBc.get(row.barcode) ?? 0;
+            const cells = plan.cellByBc.get(row.barcode);
+            const ppb = nmPpb.get(nm) || 0;
+            const out: Record<string, string | number> = {
+                'Товар': row.article_seller || row.article_wb || row.barcode,
+                'Название': row.name || '',
+                'ШК': row.barcode,
+                'nm': nm || '',
+                'Новинка': e?.isNew ? 'да' : '',
+                'Кратность': ppb || '',
+                'На машине': avail,
+                'В сборке': e?.inAssembly ?? 0,
+                'На WB': e?.stocksWb ?? 0,
+                'Хватит, дн': na?.wb_days_left == null ? '' : Number(na.wb_days_left),
+                '₽ 14д': Number(an?.revenue_bdr) || 0,
+                'Маржа %': an?.margin_pct == null ? '' : Number(an.margin_pct),
+                'Лок %': loc ? Number(loc.loc_pct) || 0 : '',
+                'Тренд %': an?.trend_pct == null ? '' : Number(an.trend_pct),
+            };
+            for (const c of wbCols) out[c.name] = cells?.get(c.name)?.qty ?? 0;
+            out['Σ отпр.'] = ship;
+            out['Мест'] = boxesOf(ship, ppb);
+            out['Остаётся ФФ'] = Math.max(0, avail - ship);
+            return out;
+        });
+        const totals: Record<string, string | number> = { 'Товар': 'Сдаём, шт' };
+        for (const c of wbCols) totals[c.name] = plan.shipByWh.get(c.name) ?? 0;
+        totals['Σ отпр.'] = plan.totalShip;
+        totals['Мест'] = plan.totalBoxes;
+        totals['Остаётся ФФ'] = onHoldQty;
+        data.push(totals);
+        exportToExcel(data, `predist_${pool?.vehicle.order_no || vehicleId || 'vehicle'}`);
+    }, [visibleRows, nmByBc, enrichMap, needArtByNm, analyticsByNm, locByNm, plan, nmPpb, wbCols, onHoldQty, pool, vehicleId]);
 
     const handleSubmit = useCallback(async () => {
         if (!vehicleId || submitRows.length === 0 || submitting) return;
@@ -857,10 +1124,14 @@ export default function PreDistVehiclePage() {
             </h1>
             {vehicle && (
                 <>
-                    <span className="badge badge-info">{vehicle.status}</span>
+                    <span className={`badge ${vehicle.status === 'DELIVERED' ? 'badge-success' : 'badge-info'}`}>
+                        {vehicle.status === 'DELIVERED' ? '✅ Принята' : vehicle.status}
+                    </span>
                     <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>
                         Склад: <b style={{ color: 'var(--color-text)' }}>{vehicle.target_warehouse_name || '—'}</b>
-                        {vehicle.eta ? ` · ETA ${formatDate(vehicle.eta)}` : ''}
+                        {vehicle.status === 'DELIVERED' && vehicle.accepted_date
+                            ? ` · Принята ${formatDate(vehicle.accepted_date)}`
+                            : vehicle.eta ? ` · ETA ${formatDate(vehicle.eta)}` : ''}
                     </span>
                 </>
             )}
@@ -912,6 +1183,14 @@ export default function PreDistVehiclePage() {
             {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
             {header}
 
+            {vehicle?.status === 'DELIVERED' && (
+                <div className="glass-card" style={{ padding: 12, marginBottom: 16, fontSize: 13, color: 'var(--color-muted)' }}>
+                    ✅ Машина уже принята на ФФ — её остаток оприходован на склад. Заявки создадутся{' '}
+                    <b style={{ color: 'var(--color-text)' }}>обычными сборками</b> (со списанием остатков ФФ,
+                    сразу «В сборке») с меткой машины {vehicle.order_no}.
+                </div>
+            )}
+
             <AcceptanceBanner summary={acceptanceNote} />
 
             {noKratnostArticles.length > 0 && (
@@ -938,17 +1217,21 @@ export default function PreDistVehiclePage() {
 
             {/* Машинная KPI-сводка + управление раскладкой — общая над табами. */}
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'center', fontSize: 14 }}>
-                <span>К отправке: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalShip, 0)}</b> шт</span>
-                <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalBoxes, 0)}</b></span>
-                <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalPallets, 0)}</b></span>
-                <span style={{ color: 'var(--color-muted)' }}>Заявок: <b style={{ color: 'var(--color-text)' }}>{formatNumber(commit.requestCount, 0)}</b></span>
-                <span style={{ color: 'var(--color-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
+                <span>План: <b style={{ fontSize: 18 }}>{formatNumber(plan.totalShip, 0)}</b> шт</span>
+                <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(plan.totalBoxes, 0)}</b></span>
+                <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(plan.totalPallets, 0)}</b></span>
                 {prebookUnits > 0 && (
-                    <span style={{ color: 'var(--color-muted)' }}>🅿️ Предбронь: <b style={{ color: 'var(--color-text)' }}>{formatNumber(prebookUnits, 0)}</b> шт</span>
+                    <span style={{ color: 'var(--color-muted)' }} title="Часть плана машины, лежащая в предброни (хвосты < паллеты). Заявкой станет после решения (Дозабить / Оставить так). Входит в общую сумму — здесь всё единым числом.">
+                        в т.ч. 🅿️ {formatNumber(prebookUnits, 0)} шт
+                    </span>
                 )}
+                <span style={{ color: 'var(--color-muted)' }} title="Что реально станет заявками сейчас (целые паллеты + ручные пины + промоут из предброни)">
+                    Заявок: <b style={{ color: 'var(--color-text)' }}>{formatNumber(commit.requestCount, 0)}</b> · {formatNumber(commit.totalShip, 0)} шт
+                </span>
+                <span style={{ color: 'var(--color-muted)' }} title="Остаётся на машине вне плана (не в заявках и не в предброни)">На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
-                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="Матрица «Раскладка» = коробное покрытие потребности. В Заявки идут только целые паллеты; неполные — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ).">
-                        📦 Матрица — покрытие · 🚚 Заявки — целые паллеты
+                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="Матрица «Раскладка» = план машины: заявки (целые паллеты) и 🅿️ предбронь единой суммой — числа сходятся с вкладками «Заявки» и «Предбронь».">
+                        Матрица — план · 🚚 Заявки — целые паллеты
                     </span>
                     <button className="btn btn-primary" onClick={handleSubmit} disabled={submitting || submitRows.length === 0}>
                         {submitting ? 'Создание…' : `Создать заявки (${formatNumber(commit.requestCount, 0)})`}
@@ -1016,9 +1299,22 @@ export default function PreDistVehiclePage() {
                     <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={editMode ? () => setEditMode(false) : enterManual}>
                         {editMode ? '✓ Готово с ручной раскладкой' : '✏️ Разложить вручную'}
                     </button>
+                    <button className="btn btn-sm btn-secondary" onClick={distributeAllLeftovers} disabled={computing}
+                        title="Раздать весь остаток машины сверх плана целыми коробами: по складам с потребностью, иначе — куда товар уже лежит/едет; закрытые по приёмке пропускаются. Результат — ручные пины (правь степперами/вводом). Кнопка 📦→ на строке — то же для одного SKU.">
+                        📦 Распределить все остатки
+                    </button>
+                    <input className="form-input" style={{ maxWidth: 220 }} type="search" value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)} placeholder="🔎 Артикул / ШК / nm" />
+                    <button className="btn btn-sm btn-secondary" onClick={handleExportExcel} disabled={computing || visibleRows.length === 0}
+                        title="Выгрузить матрицу в Excel как на экране: KPI-колонки, склады WB, Σ отпр. / Мест / Остаётся ФФ + итоговая строка «Сдаём, шт»">
+                        📥 Excel
+                    </button>
+                    {searchQuery.trim() && (
+                        <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>показано {formatNumber(visibleRows.length, 0)} из {formatNumber(sortedRows.length, 0)}</span>
+                    )}
                     {editMode && (
                         <span style={{ fontSize: 12, color: 'var(--color-warning)' }}>
-                            Ручной режим: стартует с текущей авто-раскладки — правь короба (−/+) под себя из остатка машины; лимит приёмки склада проверяется (⌛ предзаявка · ⛔ закрыт).
+                            Правь короба (−/+) из остатка машины: тронутый SKU становится ручным (✏️, его предбронь сливается в точный план), остальные остаются в авто; лимит приёмки проверяется (⌛ предзаявка · ⛔ закрыт).
                         </span>
                     )}
                     {cellEdits.size > 0 && (
@@ -1028,27 +1324,35 @@ export default function PreDistVehiclePage() {
                     )}
                 </div>
                 <div style={{ color: 'var(--color-muted)', fontSize: 13 }}>
-                    Матрица показывает <b style={{ color: 'var(--color-text)' }}>коробное покрытие</b> потребности (целые коробы под потребность каждого WB-склада, как «Потребность по складам»),
-                    источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · что сдаём коробом.
-                    В <b style={{ color: 'var(--color-text)' }}>Заявки</b> идут только целые паллеты; неполные — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ). Поэтому числа матрицы и Заявок могут расходиться.
+                    Матрица показывает <b style={{ color: 'var(--color-text)' }}>план машины</b>: заявки (целые паллеты) и 🅿️ предбронь каждого SKU единой суммой (ячейки с предбронью подсвечены, доля — в подсказке «Σ отпр.»),
+                    источник — остатки этой машины. Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность.
+                    В <b style={{ color: 'var(--color-text)' }}>Заявки</b> идут целые паллеты и ручные пины; под-паллетные хвосты — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ) — числа сходятся с матрицей по построению.
                 </div>
             </div>
 
             {computing ? (
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>Считаю раскладку (потребность · приёмка · коробы · паллеты)…</div>
-            ) : matrix.totalShip === 0 && !editMode ? (
+            ) : plan.totalShip === 0 && !editMode && onHoldQty === 0 ? (
                 // В ручном режиме матрица стартует пустой (0 распределено) — таблицу ВСЕГДА
-                // показываем как чистый холст со степперами; заглушка только для авто-режима.
+                // показываем как чистый холст со степперами; заглушка только для авто-режима
+                // И только когда на машине вообще нет нераспределённого остатка — иначе
+                // остаток «пропадает с экрана» и его нельзя дораздать (кейс V-0033).
                 <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
                     Нечего разложить: ни у одного артикула машины нет потребности по WB-складам (или не задана кратность короба).
                 </div>
             ) : (
                 <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
+                    {plan.totalShip === 0 && !editMode && (
+                        <div style={{ padding: '10px 16px', fontSize: 13, color: 'var(--color-warning)', borderBottom: '1px solid var(--color-border)' }}>
+                            Потребности по складам нет (весь спрос закрыт), но на машине остаётся {formatNumber(onHoldQty, 0)} шт вне плана — см. колонку «Остаётся ФФ».
+                            Нажми «✏️ Разложить вручную», чтобы дораздать их степперами в склады, где товар уже лежит или едет, — доливка сложится в существующие заявки направлений.
+                        </div>
+                    )}
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                         <thead>
                             {/* Шапка округов */}
                             <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                <th colSpan={4} style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }} />
+                                <th colSpan={9} style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }} />
                                 {districtGroups.map((g, i) => (
                                     <th key={i} colSpan={g.count} style={{ padding: '6px 8px', textAlign: 'center', color: '#fff', background: g.color, fontSize: 11, letterSpacing: 0.4, textTransform: 'uppercase' }}>
                                         {g.label}
@@ -1063,6 +1367,11 @@ export default function PreDistVehiclePage() {
                                 <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('avail')} title="Сортировать по остатку на машине">На машине{sortArrow('avail')}</th>
                                 <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('inAssembly')} title="Уже в сборке на WB">В сборке{sortArrow('inAssembly')}</th>
                                 <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('stocksWb')} title="Остаток на Wildberries">На WB{sortArrow('stocksWb')}</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('days')} title="На сколько дней хватит остатка на WB при текущей скорости (growth-aware: max из среднего за 14д/7д/3д). Красный — меньше плеча доставки: разрыв стока до приезда">Хватит, дн{sortArrow('days')}</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('revenue')} title="Реализация за 14 дней (BDR, как «Сводные остатки»)">₽ 14д{sortArrow('revenue')}</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('margin')} title="Маржа % (BDR-пайплайн «Сводных остатков», окно 14д)">Маржа{sortArrow('margin')}</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('loc')} title="Индекс локализации артикула за 14 дней (доля локальных заказов; цвет — статус КТР)">Лок %{sortArrow('loc')}</th>
+                                <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('trend')} title="Тренд заказов: % к прошлому окну («Сводные остатки») · ⚡ — ускорение последних дней (движок потребности)">Тренд{sortArrow('trend')}</th>
                                 {wbCols.map(c => (
                                     <th key={c.name} style={{ padding: '8px 8px', whiteSpace: 'nowrap', background: districtTint(c.district), ...sortableTh }} onClick={() => toggleSort(`wb:${c.name}`)} title={`Сортировать по отправке в «${c.name}»`}>{c.name}{sortArrow(`wb:${c.name}`)}</th>
                                 ))}
@@ -1073,25 +1382,25 @@ export default function PreDistVehiclePage() {
                             {/* Итоги сдачи на склад — сразу под шапкой (зеркало нижнего футера, чтобы видеть без скролла) */}
                             <tr style={{ borderBottom: '2px solid var(--color-border)', fontWeight: 700, background: 'rgba(59,130,246,0.06)', textAlign: 'right' }}>
                                 <td style={{ padding: '6px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }}>Сдаём, шт</td>
-                                <td colSpan={3} />
+                                <td colSpan={8} />
                                 {wbCols.map(c => (
                                     <td key={c.name} style={{ padding: '6px 8px', color: 'var(--color-accent)', background: districtTint(c.district) }}>
-                                        {formatNumber(matrix.shipByWh.get(c.name) ?? 0, 0)}
+                                        {formatNumber(plan.shipByWh.get(c.name) ?? 0, 0)}
                                     </td>
                                 ))}
-                                <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }}>{formatNumber(matrix.totalShip, 0)}</td>
-                                <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего коробов к отправке">{formatNumber(matrix.totalBoxes, 0)}</td>
-                                <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Остаётся на хранении ФФ">{formatNumber(matrixOnHold, 0)}</td>
+                                <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }}>{formatNumber(plan.totalShip, 0)}</td>
+                                <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего коробов в плане (заявки + предбронь)">{formatNumber(plan.totalBoxes, 0)}</td>
+                                <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Остаётся на машине вне плана">{formatNumber(onHoldQty, 0)}</td>
                             </tr>
                         </thead>
                         <tbody>
-                            {sortedRows.map(row => {
+                            {visibleRows.map(row => {
                                 const nm = nmByBc.get(row.barcode) ?? 0;
                                 const e: EnrichedSku | undefined = enrichMap.get(nm);
                                 const avail = Number(row.available_qty) || 0;
-                                const ship = matrix.allocByBc.get(row.barcode) ?? 0;
+                                const ship = plan.allocByBc.get(row.barcode) ?? 0;
                                 const stays = Math.max(0, avail - ship);
-                                const cells = matrix.cellByBc.get(row.barcode);
+                                const cells = plan.cellByBc.get(row.barcode);
                                 const ppb = nmPpb.get(nm);
                                 const label = row.article_seller || row.article_wb || row.barcode;
                                 const rowBoxes = boxesOf(ship, ppb);
@@ -1104,6 +1413,12 @@ export default function PreDistVehiclePage() {
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                                 <span style={{ fontWeight: 600 }}>{label}</span>
                                                 {e?.isNew && <span className="badge" style={{ background: 'rgba(168,85,247,0.16)', color: '#a855f7', fontSize: 10, padding: '1px 6px' }}>🆕 новинка</span>}
+                                                {guardByNm.has(nm) && (
+                                                    <span className="badge" title={`Гвард пересорта: ${guardByNm.get(nm)}. Авто-засев машины выключен; ручные −/+ работают.`}
+                                                        style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>
+                                                        ⚠ посев лежит без продаж
+                                                    </span>
+                                                )}
                                                 {ppb ? <span className="badge badge-secondary" style={{ fontSize: 10, padding: '1px 6px' }}>📦 кратно {formatNumber(ppb, 0)}</span> : <span className="badge" style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>без кратности</span>}
                                                 {editRec && (
                                                     <button type="button" className="badge" title="Сбросить ручные правки строки"
@@ -1116,17 +1431,61 @@ export default function PreDistVehiclePage() {
                                         <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(avail, 0)}</td>
                                         <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.inAssembly > 0 ? formatNumber(e.inAssembly, 0) : '·'}</td>
                                         <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.stocksWb > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.stocksWb > 0 ? formatNumber(e.stocksWb, 0) : '·'}</td>
+                                        {(() => {
+                                            const na = needArtByNm.get(nm);
+                                            const an = analyticsByNm.get(nm);
+                                            const loc = locByNm.get(nm);
+                                            const days = na?.wb_days_left == null ? null : Number(na.wb_days_left);
+                                            const leadDays = Number(na?.lead_days) || 0;
+                                            const effDaily = Number(na?.eff_avg_daily) || 0;
+                                            const growth = Number(na?.growth_ratio) || 1;
+                                            const daysInbound = na?.wb_days_left_inbound == null ? null : Number(na.wb_days_left_inbound);
+                                            const daysColor = days == null ? 'var(--color-dim)'
+                                                : days < leadDays ? 'var(--color-danger)'
+                                                : days < leadDays + 7 ? 'var(--color-warning)'
+                                                : 'var(--color-muted)';
+                                            const rev = an?.revenue_bdr ?? 0;
+                                            const margin = an?.margin_pct == null ? null : Number(an.margin_pct);
+                                            const trend = an?.trend_pct == null ? null : Number(an.trend_pct);
+                                            const locPct = loc ? Number(loc.loc_pct) || 0 : null;
+                                            return (
+                                                <>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: daysColor, fontWeight: days != null && days < leadDays ? 700 : 400, whiteSpace: 'nowrap' }}
+                                                        title={days == null
+                                                            ? 'Нет заказов за окно — скорость 0, дни не считаются'
+                                                            : `Остатка WB ${formatNumber(e?.stocksWb ?? 0, 0)} шт хватит на ~${formatNumber(days, 1)} дн при скорости ${formatNumber(effDaily, 1)} шт/д${growth >= 1.05 ? ` (рост ×${formatNumber(growth, 1)})` : ''} · с учётом сборки и в пути — ~${daysInbound != null ? formatNumber(daysInbound, 1) : '—'} дн · плечо ~${formatNumber(leadDays, 0)} дн`}>
+                                                        {days == null ? '·' : formatNumber(days, days < 10 ? 1 : 0)}
+                                                    </td>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: rev > 0 ? 'var(--color-muted)' : 'var(--color-dim)' }}
+                                                        title="Реализация BDR за 14 дней («Сводные остатки»)">{rev > 0 ? formatNumber(rev, 0) : '·'}</td>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: margin == null ? 'var(--color-dim)' : margin < 0 ? 'var(--color-danger)' : margin < 10 ? 'var(--color-warning)' : 'var(--color-success)' }}
+                                                        title={margin == null ? 'Нет данных маржи (BDR) за окно' : `Маржа BDR за 14 дней: ${formatNumber(margin, 1)}%`}>
+                                                        {margin == null ? '·' : `${formatNumber(margin, 0)}%`}
+                                                    </td>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: locPct != null ? (LOC_STATUS_COLOR[loc!.status] || 'var(--color-text)') : 'var(--color-dim)' }}
+                                                        title={loc ? `Заказов 14д: ${formatNumber(loc.total, 0)} · локальных: ${formatNumber(loc.local, 0)} · КТР ${formatNumber(Number(loc.ktr), 2)}` : 'Нет данных локализации за окно 14 дней'}>
+                                                        {locPct != null ? `${formatNumber(locPct, 0)}%` : '·'}
+                                                    </td>
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', whiteSpace: 'nowrap', color: trend == null ? 'var(--color-dim)' : trend > 0 ? 'var(--color-success)' : trend < 0 ? 'var(--color-danger)' : 'var(--color-muted)' }}
+                                                        title={`Тренд заказов к прошлому окну: ${trend == null ? 'нет данных' : `${trend > 0 ? '+' : ''}${formatNumber(trend, 0)}%`}${growth >= 1.3 ? ` · ⚡ скорость последних дней ×${formatNumber(growth, 1)} к среднему за окно` : ''}`}>
+                                                        {trend == null ? '·' : `${trend > 0 ? '↗ +' : trend < 0 ? '↘ ' : ''}${formatNumber(trend, 0)}%`}
+                                                        {growth >= 1.3 && <span style={{ fontSize: 10, color: 'var(--color-warning)' }}> ⚡×{formatNumber(growth, 1)}</span>}
+                                                    </td>
+                                                </>
+                                            );
+                                        })()}
                                         {wbCols.map(c => {
                                             const cell = cells?.get(c.name);
                                             const ctx = e?.byWh[c.name];
                                             const ctxBusy = (ctx?.asm ?? 0) + (ctx?.transit ?? 0);
+                                            const pbPart = prebookCellByBc.get(row.barcode)?.get(c.name) ?? 0;
                                             return (
                                                 <NeedMatrixCell
                                                     key={c.name}
                                                     ship={cell ?? null}
                                                     stock={ctx?.stock ?? 0}
                                                     onWay={ctxBusy}
-                                                    tint={districtTint(c.district)}
+                                                    tint={pbPart > 0 ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : districtTint(c.district)}
                                                     mark={markFor(nm, c.name, cell?.pkg ?? null)}
                                                     edit={rowEditable && ppb ? {
                                                         boxes: editRec ? (editRec[c.name] ?? 0) : boxesOf(cell?.qty ?? 0, ppb),
@@ -1137,9 +1496,39 @@ export default function PreDistVehiclePage() {
                                                 />
                                             );
                                         })}
-                                        <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600 }}>{ship > 0 ? formatNumber(ship, 0) : '·'}</td>
+                                        {(() => {
+                                            const pbCell = prebookCellByBc.get(row.barcode);
+                                            const pbNm = pbCell ? [...pbCell.values()].reduce((s2, v) => s2 + v, 0) : 0;
+                                            return (
+                                                <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600, whiteSpace: 'nowrap' }}
+                                                    title={ship > 0 ? `План машины: ${formatNumber(ship, 0)} шт${pbNm > 0 ? ` (в т.ч. 🅿️ ${formatNumber(pbNm, 0)} в предброни)` : ''}` : 'Этого SKU нет в плане'}>
+                                                    {ship > 0 ? (
+                                                        <>
+                                                            {formatNumber(ship, 0)}
+                                                            {pbNm > 0 && (
+                                                                <span style={{ color: 'var(--color-accent)', fontWeight: 400, fontSize: 11 }}
+                                                                    title={pbNm >= ship
+                                                                        ? 'Весь план SKU — в предброни: заявкой НЕ станет без решения (вкладка 🅿️ Предбронь)'
+                                                                        : `${formatNumber(pbNm, 0)} шт из плана — в предброни (не станут заявками без решения)`}>
+                                                                    {' '}{pbNm >= ship ? '🅿️!' : `(${formatNumber(pbNm, 0)}🅿️)`}
+                                                                </span>
+                                                            )}
+                                                        </>
+                                                    ) : '·'}
+                                                </td>
+                                            );
+                                        })()}
                                         <td style={{ padding: '6px 8px', textAlign: 'right' }}>{rowBoxes > 0 ? formatNumber(rowBoxes, 0) : '·'}</td>
-                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-muted)' }}>{formatNumber(stays, 0)}</td>
+                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
+                                            {formatNumber(stays, 0)}
+                                            {!!ppb && ppb > 0 && stays >= ppb && (
+                                                <button type="button" className="badge"
+                                                    title={`Распределить остаток этого SKU (${formatNumber(Math.floor(stays / ppb), 0)} кор) целыми коробами: по складам с потребностью, иначе — куда уже лежит/едет; строка станет ручным пином ✏️`}
+                                                    style={{ marginLeft: 6, background: 'rgba(59,130,246,0.12)', color: 'var(--color-accent)', fontSize: 10, padding: '1px 6px', border: 'none', cursor: 'pointer' }}
+                                                    disabled={computing}
+                                                    onClick={() => distributeRowLeftovers(row)}>📦→</button>
+                                            )}
+                                        </td>
                                     </tr>
                                 );
                             })}
@@ -1147,29 +1536,29 @@ export default function PreDistVehiclePage() {
                         <tfoot>
                             <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600 }}>
                                 <td style={{ padding: '8px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>Отправить, шт</td>
-                                <td colSpan={3} />
+                                <td colSpan={8} />
                                 {wbCols.map(c => (
-                                    <td key={c.name} style={{ padding: '8px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{formatNumber(matrix.shipByWh.get(c.name) ?? 0, 0)}</td>
+                                    <td key={c.name} style={{ padding: '8px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{formatNumber(plan.shipByWh.get(c.name) ?? 0, 0)}</td>
                                 ))}
-                                <td style={{ padding: '8px 8px', textAlign: 'right' }}>{formatNumber(matrix.totalShip, 0)}</td>
+                                <td style={{ padding: '8px 8px', textAlign: 'right' }}>{formatNumber(plan.totalShip, 0)}</td>
                                 <td colSpan={2} />
                             </tr>
                             <tr style={{ color: 'var(--color-muted)' }}>
                                 <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>📦 Коробов</td>
-                                <td colSpan={3} />
+                                <td colSpan={8} />
                                 {wbCols.map(c => (
-                                    <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrix.boxesByWh.get(c.name) ?? 0, 0)}</td>
+                                    <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(plan.boxesByWh.get(c.name) ?? 0, 0)}</td>
                                 ))}
-                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrix.totalBoxes, 0)}</td>
+                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(plan.totalBoxes, 0)}</td>
                                 <td colSpan={2} />
                             </tr>
                             <tr style={{ color: 'var(--color-muted)' }}>
                                 <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>🚚 Паллет</td>
-                                <td colSpan={3} />
+                                <td colSpan={8} />
                                 {wbCols.map(c => (
-                                    <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrix.palletsByWh.get(c.name) ?? 0, 0)}</td>
+                                    <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(plan.palletsByWh.get(c.name) ?? 0, 0)}</td>
                                 ))}
-                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrix.totalPallets, 0)}</td>
+                                <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(plan.totalPallets, 0)}</td>
                                 <td colSpan={2} />
                             </tr>
                         </tfoot>

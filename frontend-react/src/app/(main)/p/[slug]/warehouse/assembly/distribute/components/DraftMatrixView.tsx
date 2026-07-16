@@ -4,33 +4,30 @@ import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import { parseBoxSize, palletsForLines, maxPalletHeightCm, type PalletLine } from '@/lib/utils/boxPallet';
 import { allocatePairs } from '@/lib/utils/assemblyPreview';
+import { allocateWholeBoxes, buildLeftoverWeights } from '@/lib/assembly/leftoverAlloc';
 import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constants/localization';
 import { Toast } from '@/components';
+import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams';
 import {
     applyAcceptanceSplits,
-    applyCellBoxDelta,
+    applyDraftCellEdit,
+    buildAutoSyncPlan,
     buildDraftSkus,
-    buildPinnedRowsFf,
-    buildTopUpRowsFf,
+    buildWriteDistribution,
     enrichArticles,
     finalizeDraftDistribution,
-    planBoxTopUpFf,
     rowsToPreDistRows,
     sliceRowsByFf,
     splitByKratnost,
     type AcceptanceSplitMap,
-    type CellEdits,
     type DraftDistInput,
     type EnrichedSku,
-    type PinnedPkgOf,
 } from '@/lib/assembly/draftDistribution';
-import { buildPrebookGroups } from '@/lib/assembly/buildPrebookGroups';
 import NeedMatrixCell, { type CellMark } from './NeedMatrixCell';
 import AcceptanceBanner, { type AcceptanceSummary } from './AcceptanceBanner';
-import PrebookView, { type PrebookAcceptanceMark } from './PrebookView';
 import type {
     AcceptanceCheckPerItem,
-    AcceptanceFlags,
+    AssemblyDraft,
     AssemblyDraftRow,
     LocalizationSkuRow,
     PackageType,
@@ -51,7 +48,7 @@ const districtTint = (d: string): string | undefined => {
     return c ? `color-mix(in srgb, ${c} 6%, transparent)` : undefined;
 };
 
-type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'need' | 'revenue' | 'loc' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
+type SortKey = 'label' | 'avail' | 'inAssembly' | 'stocksWb' | 'days' | 'need' | 'revenue' | 'loc' | 'ship' | 'boxes' | 'stays' | `wb:${string}`;
 
 // Цвет «Лок %» по статусу КТР (excellent/neutral/weak/critical) — как на странице «Локализация».
 const LOC_STATUS_COLOR: Record<string, string> = {
@@ -60,10 +57,6 @@ const LOC_STATUS_COLOR: Record<string, string> = {
     weak: 'var(--color-warning)',
     critical: 'var(--color-danger)',
 };
-
-/** Ключ строки распределения для замены по SKU (nm × баркод × упаковка × as_is) —
- *  зеркало бэкенд-ключа `_merge_rows`/`_dedupe_rows`. */
-const keyOfRow = (r: AssemblyDraftRow) => `${r.nm_id}::${r.barcode || ''}::${r.package_type || 'BOX'}::${r.as_is ? 1 : 0}`;
 
 interface DistAgg {
     submitRows: { barcode: string; wb_warehouse_name: string; qty: number; package_type: PackageType }[];
@@ -122,14 +115,18 @@ interface DraftMatrixViewProps {
     draftId: number;
     /** Справочник WB-складов (id→имя) для резолва имени ФФ-источника в предброни. */
     ffNameById: Map<number, string>;
-    onWritten?: () => void;
+    /** Черновик изменён редактором (автосейв степпера / ✕ / авто-синк с расчётом).
+     *  Родитель обновляет свой стейт БЕЗ смены вкладки и БЕЗ полного self-heal
+     *  (план редактора = точное состояние). */
+    onDraftChanged?: (draft: AssemblyDraft) => void;
 }
 
-/** Ручная раскладка ЧЕРНОВИКА по WB-складам — зеркало экрана «Распределить машину»,
- *  но ИСТОЧНИК = весь свободный ФФ-сток проекта (мульти-склад), а не пул одной машины.
- *  Матрица со степперами −/+; правка → пин → общий движок (целые паллеты в черновик,
- *  под-паллетные хвосты в 🅿️ Предбронь: Дозабить / Оставить так / На ФФ). */
-export default function DraftMatrixView({ draftId, ffNameById, onWritten }: DraftMatrixViewProps) {
+/** РЕДАКТОР черновика в виде матрицы SKU × WB-склады. Таблица показывает сам
+ *  черновик (rows + 🅿️ предбронь единой суммой); степперы −/+ правят черновик
+ *  напрямую с автосейвом; «⟳ Пересчитать от потребности» пишет живой расчёт
+ *  (need-канал + новинки cold-start с гвардом пересорта) заменой по SKU:
+ *  целые паллеты → строки, хвосты → предбронь. */
+export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }: DraftMatrixViewProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -137,25 +134,30 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const [stockNeed, setStockNeed] = useState<StockNeedResponse | null>(null);
     const [locByNm, setLocByNm] = useState<Map<number, LocalizationSkuRow>>(new Map());
     const [newcomerSet, setNewcomerSet] = useState<Set<number>>(new Set());
+    // Канал новинок: авто-раздача из backend cold-start (allocations per nm) и
+    // причины гварда пересорта (посев лежит на WB без продаж → авто-досев 0).
+    const [newcomerAlloc, setNewcomerAlloc] = useState<Map<number, Record<string, number>>>(new Map());
+    const [guardByNm, setGuardByNm] = useState<Map<number, string>>(new Map());
+    // Текущее содержимое черновика (rows+prebook) — колонка «В черновике» и чистка per-SKU.
+    const [draftRows, setDraftRowsState] = useState<AssemblyDraftRow[]>([]);
+    const [draftPrebook, setDraftPrebook] = useState<AssemblyDraftRow[]>([]);
+    const [removingNm, setRemovingNm] = useState<number | null>(null);
+    // РУЧНЫЕ SKU (правлены степпером/✕; персистятся в distribution.manual_nms) —
+    // авто-синк с расчётом их не трогает, пока юзер не вернёт SKU «в авто» (↺).
+    const [manualNms, setManualNms] = useState<Set<number>>(new Set());
     const [nmPpb, setNmPpb] = useState<Map<number, number | null>>(new Map());
+    // Кратность конкретного ФФ (может отличаться по складам) — паритет нормализации
+    // со страницей черновика (она re-нормализует с ppbAt).
+    const [nmPpbByWh, setNmPpbByWh] = useState<Map<number, Record<number, number>>>(new Map());
     const [nmBoxSize, setNmBoxSize] = useState<Map<number, string | null>>(new Map());
     const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
     const [geomReady, setGeomReady] = useState(false);
 
     const [distRows, setDistRows] = useState<AssemblyDraftRow[] | null>(null);
-    const [distRowsBox, setDistRowsBox] = useState<AssemblyDraftRow[]>([]);
     const [prebookRows, setPrebookRows] = useState<AssemblyDraftRow[]>([]);
-    const [subTab, setSubTab] = useState<'dist' | 'prebook'>('dist');
-    const [promotedDirs, setPromotedDirs] = useState<Set<string>>(new Set());
-    const [hiddenDirs, setHiddenDirs] = useState<Set<string>>(new Set());
-    const [hiddenSkus, setHiddenSkus] = useState<Set<string>>(new Set());
-    const [manualTopUp, setManualTopUp] = useState<Map<string, Record<string, number>>>(new Map());
-    const [cellEdits, setCellEdits] = useState<CellEdits>(new Map());
     const [editMode, setEditMode] = useState(false);
     const acceptanceCacheRef = useRef<{ sig: string; splitMap: AcceptanceSplitMap | null; summary: AcceptanceSummary | null; accByNm: Map<number, AcceptanceCheckPerItem> } | null>(null);
-    const [prebookOpKey, setPrebookOpKey] = useState<string | null>(null);
     const [acceptanceByNm, setAcceptanceByNm] = useState<Map<number, AcceptanceCheckPerItem>>(new Map());
-    const [preorderWbs, setPreorderWbs] = useState<Set<string>>(new Set());
     const [distComputing, setDistComputing] = useState(false);
     const [acceptanceNote, setAcceptanceNote] = useState<AcceptanceSummary | null>(null);
     const [writing, setWriting] = useState(false);
@@ -165,11 +167,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     const [filterSubject, setFilterSubject] = useState('');
     const [filterBrand, setFilterBrand] = useState('');
     const [filterFf, setFilterFf] = useState('');
+    // Тип товара: новинки (cold-start) / обычные. Лупа по отображению, как предмет/бренд.
+    const [filterKind, setFilterKind] = useState<'' | 'new' | 'regular'>('');
+    const [filterQuery, setFilterQuery] = useState('');
     const [hideEmpty, setHideEmpty] = useState(false);
     const toggleSort = useCallback((key: SortKey) => {
         setSortKey((prev) => {
             if (prev === key) { setSortDir((d) => (d === 'asc' ? 'desc' : 'asc')); return prev; }
-            setSortDir(key === 'label' ? 'asc' : 'desc');
+            setSortDir(key === 'label' || key === 'days' ? 'asc' : 'desc');
             return key;
         });
     }, []);
@@ -189,43 +194,63 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                 const locTo = new Date();
                 const locFrom = new Date(locTo.getTime() - 13 * 86_400_000);
                 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
-                const [need, cold, boxMult, palletOv, preorder, locSkus] = await Promise.all([
+                const [need, cold, boxMult, palletOv, locSkus] = await Promise.all([
                     // Первичный источник экрана — НЕ глушим (иначе 500 покажет пустое «нечего
                     // отгружать» вместо ошибки). Отказ → reject Promise.all → error-стейт.
-                    api.getStockNeed(14, 14, 'actual', true, true, 0) as Promise<StockNeedResponse>,
-                    api.getColdStartTable(14).catch(() => null),
+                    api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, true, 0) as Promise<StockNeedResponse>,
+                    // Параметры новинок — те же, что настроены на экране «Потребность»
+                    // (персистятся в localStorage), иначе два экрана считали бы новинки
+                    // разными настройками (min-pack / % отгрузки / floor).
+                    (() => {
+                        let csp: { minPack?: number; shipPct?: number; floor?: number } = {};
+                        try { csp = JSON.parse(localStorage.getItem('dds.coldStartParams') || '{}'); } catch { /* дефолты */ }
+                        return api.getColdStartTable(14, csp.minPack ?? 5, csp.shipPct ?? 55, csp.floor ?? 50).catch(() => null);
+                    })(),
                     api.getBoxMultiplicity().catch(() => null),
                     api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
-                    api.getPreorderAllowedWarehouses().catch(() => [] as string[]),
                     api.getLocalizationSkus(isoDay(locFrom), isoDay(locTo)).catch(() => [] as LocalizationSkuRow[]),
                 ]);
                 if (controller.signal.aborted) return;
                 setStockNeed(need);
                 setLocByNm(new Map(locSkus.map((r) => [r.nm_id, r])));
-                setPreorderWbs(new Set(preorder));
-                setPromotedDirs(new Set());
-                setHiddenDirs(new Set());
-                setHiddenSkus(new Set());
-                setManualTopUp(new Map());
-                setCellEdits(new Map());
                 acceptanceCacheRef.current = null;
 
                 const ncs = new Set<number>();
                 for (const r of cold?.rows ?? []) if (r.is_newcomer) ncs.add(r.nm_id);
                 setNewcomerSet(ncs);
 
+                // Раздача новинок и гвард пересорта — из тех же cold-start строк.
+                const nAlloc = new Map<number, Record<string, number>>();
+                const guards = new Map<number, string>();
+                for (const r of cold?.rows ?? []) {
+                    if (r.oversort_guard) {
+                        guards.set(r.nm_id, r.guard_reason || 'посев уже лежит на WB и не продаётся');
+                        continue;
+                    }
+                    if (r.allocations && Object.keys(r.allocations).length > 0) nAlloc.set(r.nm_id, r.allocations);
+                }
+                setNewcomerAlloc(nAlloc);
+                setGuardByNm(guards);
+
                 const ppbMap = new Map<number, number | null>();
+                const ppbWhMap = new Map<number, Record<number, number>>();
                 const sizeMap = new Map<number, string | null>();
                 for (const r of boxMult?.items ?? []) {
                     let ppb: number | null = null;
                     if (r.box_qty_override && r.box_qty_override > 0 && r.use_box_multiplicity) {
                         ppb = r.box_qty_override;
+                        // override глобальный — per-ФФ карта не нужна (везде одинаково).
                     } else {
                         let best = 0;
+                        let perWh: Record<number, number> | null = null;
                         for (const p of r.per_warehouse) {
-                            if (p.box_qty && p.box_qty > 0 && p.use_box_multiplicity && (best === 0 || p.box_qty < best)) best = p.box_qty;
+                            if (p.box_qty && p.box_qty > 0 && p.use_box_multiplicity) {
+                                if (best === 0 || p.box_qty < best) best = p.box_qty;
+                                (perWh ??= {})[p.warehouse_id] = p.box_qty;
+                            }
                         }
                         ppb = best > 0 ? best : null;
+                        if (perWh) ppbWhMap.set(r.nm_id, perWh);
                     }
                     let boxSize: string | null = null;
                     let bestStock = -1;
@@ -237,6 +262,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                     sizeMap.set(r.nm_id, boxSize);
                 }
                 setNmPpb(ppbMap);
+                setNmPpbByWh(ppbWhMap);
                 setNmBoxSize(sizeMap);
                 setPalletOverrides(palletOv || {});
                 setGeomReady(true);
@@ -261,49 +287,33 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
 
     // ─── Авто-раскладка: потребность × ФФ-сток → приёмка → коробы/паллеты ────
     const computeDistribution = useCallback(async (signal: AbortSignal) => {
-        if (articles.length === 0 && cellEdits.size === 0) { setDistRows([]); setPrebookRows([]); setDistRowsBox([]); setAcceptanceNote(null); return; }
+        if (articles.length === 0) { setDistRows([]); setPrebookRows([]); setAcceptanceNote(null); return; }
         setDistComputing(true);
         try {
-            const distInput: DraftDistInput = { articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, newcomerSet };
+            // Паритет с сервером/машиной: per-ФФ кратность и веса «схемы воришек».
+            const priorityByWh: Record<string, number> = {};
+            for (const w of stockNeed?.warehouses ?? []) if (w.priority_weight != null) priorityByWh[w.name] = Number(w.priority_weight) || 0;
+            const distInput: DraftDistInput = {
+                articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc,
+                ppbAt: (nm, ffId) => nmPpbByWh.get(nm)?.[ffId] ?? null,
+                priorityByWh,
+            };
             const { skus: allSkus } = buildDraftSkus(distInput);
-            const { shippable: skus } = splitByKratnost(allSkus, (nm) => nmPpb.get(nm));
-
-            // Ручной режим = АВТО + пер-строчные override: артикулы БЕЗ пина остаются
-            // авто-раскладкой, а запинённые (юзер тронул ячейку) — ручные. Так «вручную»
-            // помечается ТОЛЬКО реально отредактированная строка, а не весь список.
-            const activeEdits: CellEdits = cellEdits;
-            const nmByBarcode = new Map<string, number>();
-            for (const a of articles) nmByBarcode.set(a.barcode, a.nm_id);
-            const autoSkus = skus.filter((s) => !activeEdits.has(s.barcode));
-            const pinnedItems: { nm_id: number; barcode: string; distribution: Record<string, number> }[] = [];
-            for (const [bc, whBoxes] of activeEdits) {
-                const nm = nmByBarcode.get(bc) ?? 0;
-                const ppb = nmPpb.get(nm) || 0;
-                if (!nm || ppb <= 0) continue;
-                const dist: Record<string, number> = {};
-                for (const [wb, boxes] of Object.entries(whBoxes)) if ((boxes || 0) > 0) dist[wb] = Math.floor(boxes) * ppb;
-                if (Object.keys(dist).length > 0) pinnedItems.push({ nm_id: nm, barcode: bc, distribution: dist });
-            }
-            const accSig = JSON.stringify([
-                ...autoSkus.map((s) => [s.nm_id, s.barcode, s.target]),
-                ...pinnedItems.map((p) => [p.nm_id, p.barcode, Object.keys(p.distribution).sort()]),
-            ]);
+            const { shippable: autoSkus } = splitByKratnost(allSkus, (nm) => nmPpb.get(nm));
+            const accSig = JSON.stringify(autoSkus.map((s) => [s.nm_id, s.barcode, s.target]));
             let splitMap: AcceptanceSplitMap | null = null;
             let summary: AcceptanceSummary | null = null;
             let accByNm = new Map<number, AcceptanceCheckPerItem>();
             const accCache = acceptanceCacheRef.current;
             if (accCache && accCache.sig === accSig) {
                 splitMap = accCache.splitMap; summary = accCache.summary; accByNm = accCache.accByNm;
-            } else if (autoSkus.length === 0 && pinnedItems.length === 0) {
+            } else if (autoSkus.length === 0) {
                 splitMap = new Map();
                 acceptanceCacheRef.current = { sig: accSig, splitMap, summary, accByNm };
             } else {
                 try {
                     const resp = await api.checkWbAcceptance({
-                        items: [
-                            ...autoSkus.map((s) => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
-                            ...pinnedItems.map((p) => ({ nm_id: p.nm_id, barcode: p.barcode, distribution: p.distribution })),
-                        ],
+                        items: autoSkus.map((s) => ({ nm_id: s.nm_id, barcode: s.barcode, distribution: s.target })),
                     });
                     splitMap = new Map();
                     let moved = 0, dropped = 0, monoCount = 0, splitCount = 0;
@@ -324,40 +334,171 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                 acceptanceCacheRef.current = { sig: accSig, splitMap, summary, accByNm };
             }
             const effective = applyAcceptanceSplits(autoSkus, splitMap);
-
-            const pinnedPkgOf: PinnedPkgOf = (nm, wb) => {
-                const f = accByNm.get(nm)?.availability?.[wb];
-                if (!f) return 'BOX';
-                return f.can_box ? 'BOX' : f.can_monopallet ? 'MONOPALLET' : f.can_supersafe ? 'SUPERSAFE' : 'BOX';
-            };
-            const pinnedRows = buildPinnedRowsFf(activeEdits, articles, nmPpb, pinnedPkgOf);
-
-            // Резерв per баркод (Σsrc потребности + пинов) — кап ручного дозабора.
-            // minOneBoxPerWh=true — как у финальных box/whole, иначе резерв недооценён.
-            const needBoxRows = finalizeDraftDistribution(effective, distInput, false, [], true).rows;
-            const reservedByBc = new Map<string, number>();
-            for (const r of [...needBoxRows, ...pinnedRows]) {
-                const s = Object.values(r.src).reduce((a, v) => a + (v || 0), 0);
-                reservedByBc.set(r.barcode, (reservedByBc.get(r.barcode) ?? 0) + s);
-            }
-            const topUpRows = buildTopUpRowsFf(manualTopUp, articles, nmPpb, reservedByBc);
-            const extra = [...topUpRows, ...pinnedRows];
-
-            const whole = finalizeDraftDistribution(effective, distInput, true, extra, true);
-            const box = finalizeDraftDistribution(effective, distInput, false, extra, true);
+            const whole = finalizeDraftDistribution(effective, distInput, true, [], true);
             if (!signal.aborted) {
                 setDistRows(whole.rows);
                 setPrebookRows(whole.prebook);
-                setDistRowsBox(box.rows);
                 setAcceptanceNote(summary);
                 setAcceptanceByNm(accByNm);
             }
         } catch (e) {
-            if (!signal.aborted) { setDistRows([]); setPrebookRows([]); setDistRowsBox([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
+            if (!signal.aborted) { setDistRows([]); setPrebookRows([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
-    }, [articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, manualTopUp, cellEdits, newcomerSet, showToast]);
+    }, [articles, stockNeed, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc, showToast]);
+
+    // ─── Черновик: ИСТОЧНИК таблицы (матрица = редактор черновика) ──────────
+    const draftDistRef = useRef<AssemblyDraft['distribution'] | null>(null);
+    const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const refreshDraftInfo = useCallback(async () => {
+        try {
+            const d = await api.getAssemblyDraft(draftId);
+            draftDistRef.current = d.distribution ?? null;
+            setDraftRowsState(d.distribution?.rows ?? []);
+            setDraftPrebook(d.distribution?.prebook ?? []);
+            setManualNms(new Set(d.distribution?.manual_nms ?? []));
+        } catch {
+            // Черновик мог быть удалён/пересоздан — таблица остаётся пустой.
+        }
+    }, [draftId]);
+    useEffect(() => { refreshDraftInfo(); }, [refreshDraftInfo]);
+
+    /** Автосейв правок степперов. Свойства:
+     *  - дебаунс 1.2с, PUT-ы СЕРИАЛИЗОВАНЫ (новый не стартует, пока летит текущий);
+     *  - база PUT — СВЕЖИЙ GET черновика (не затираем чужие изменения:
+     *    handed_units, правки другой вкладки), rows/prebook — локальные;
+     *  - списки складов пересчитываются из отправляемых строк;
+     *  - ответ сервера применяется ТОЛЬКО если поколение правок не изменилось
+     *    (иначе стейл-ответ откатил бы более свежие клики);
+     *  - серверный гейт мог вычесть «уже едущее» — про это говорит тост. */
+    const editGenRef = useRef(0);
+    const saveInFlightRef = useRef(false);
+    const pendingSaveRef = useRef<{ rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; manualNms: number[] } | null>(null);
+    const sumUnits = (rows: AssemblyDraftRow[]) => rows.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0);
+    const flushDraftSave = useCallback(async (): Promise<void> => {
+        if (saveInFlightRef.current) return; // доедет из finally текущего PUT
+        const pending = pendingSaveRef.current;
+        if (!pending) return;
+        pendingSaveRef.current = null;
+        saveInFlightRef.current = true;
+        const gen = editGenRef.current;
+        try {
+            let base = draftDistRef.current;
+            try {
+                const fresh = await api.getAssemblyDraft(draftId);
+                base = fresh.distribution ?? base;
+            } catch { /* сеть мигнула — шлём от последней известной базы */ }
+            if (!base) {
+                showToast('Черновик недоступен — правка НЕ сохранена', 'error');
+                return;
+            }
+            const next = buildWriteDistribution({ rows: [], prebook: [] }, pending.rows, pending.prebook);
+            const sent = sumUnits(pending.rows) + sumUnits(pending.prebook);
+            // Событие истории: правка степпером — значимое изменение (снапшот для
+            // отката). Дебаунс+сериализация PUT-ов не дают спама на серию кликов.
+            const d = await api.updateAssemblyDraft(draftId, {
+                distribution: { ...base, ...next, manual_nms: pending.manualNms },
+                event: { event_type: 'MATRIX_EDIT', summary: `Степпер: план ${formatNumber(sent, 0)} шт` },
+            });
+            draftDistRef.current = d.distribution ?? null;
+            const got = sumUnits(d.distribution?.rows ?? []) + sumUnits(d.distribution?.prebook ?? []);
+            if (got < sent) {
+                showToast(`⚠ Сервер вычел уже едущее в заявках: −${formatNumber(sent - got, 0)} шт (защита от дублей)`, 'success');
+            }
+            if (editGenRef.current === gen) {
+                // Новых правок не было — ответ сервера канон.
+                setDraftRowsState(d.distribution?.rows ?? []);
+                setDraftPrebook(d.distribution?.prebook ?? []);
+                setManualNms(new Set(d.distribution?.manual_nms ?? pending.manualNms));
+                onDraftChanged?.(d);
+            }
+            // Были новые правки → базу обновили, стейт не трогаем; pending уже ждёт.
+        } catch (err) {
+            showToast(err instanceof Error ? err.message : 'Не удалось сохранить черновик', 'error');
+        } finally {
+            saveInFlightRef.current = false;
+            if (pendingSaveRef.current) void flushDraftSave();
+        }
+    }, [draftId, onDraftChanged, showToast]);
+    const scheduleDraftSave = useCallback((rows: AssemblyDraftRow[], prebook: AssemblyDraftRow[], manual: number[]) => {
+        editGenRef.current += 1;
+        pendingSaveRef.current = { rows, prebook, manualNms: manual };
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = setTimeout(() => {
+            saveTimerRef.current = null;
+            void flushDraftSave();
+        }, 1200);
+    }, [flushDraftSave]);
+    // Анмаунт: незаписанный дебаунс ФЛАШИТСЯ (fire-and-forget), а не выбрасывается.
+    useEffect(() => () => {
+        if (saveTimerRef.current) {
+            clearTimeout(saveTimerRef.current);
+            saveTimerRef.current = null;
+        }
+        if (pendingSaveRef.current) void flushDraftSave();
+    }, [flushDraftSave]);
+
+    /** SKU с замороженными draft-юнитами (set_unit_items вырезал поток из rows в
+     *  снимок): правка степпером пересобрала бы rows и _reconcile_handed_with_rows
+     *  на сейве вырезал бы снимок — молчаливая потеря. Такие SKU правим только на
+     *  странице склада. */
+    const [handedNms, setHandedNms] = useState<Set<number>>(new Set());
+    useEffect(() => {
+        const s = new Set<number>();
+        const units = (draftDistRef.current?.handed_units ?? []) as { status?: string; items?: { nm_id: number }[] }[];
+        for (const u of units) if (u.status === 'draft') for (const it of u.items ?? []) if (it.nm_id) s.add(it.nm_id);
+        setHandedNms(s);
+    }, [draftRows, draftPrebook]);
+
+    const draftByNm = useMemo(() => {
+        const m = new Map<number, { rows: number; prebook: number; vendor: string }>();
+        const sumTgt = (r: AssemblyDraftRow) => Object.values(r.tgt || {}).reduce((s, v) => s + (v || 0), 0);
+        const acc = (list: AssemblyDraftRow[], key: 'rows' | 'prebook') => {
+            for (const r of list) {
+                if (!r.nm_id) continue;
+                const cur = m.get(r.nm_id) ?? { rows: 0, prebook: 0, vendor: r.vendor_code || String(r.nm_id) };
+                cur[key] += sumTgt(r);
+                m.set(r.nm_id, cur);
+            }
+        };
+        acc(draftRows, 'rows');
+        acc(draftPrebook, 'prebook');
+        return m;
+    }, [draftRows, draftPrebook]);
+    /** SKU черновика без свободного остатка на ФФ — их нет среди articles, но видеть и чистить их нужно. */
+    const draftOnlyNms = useMemo(() => {
+        const inArticles = new Set(articles.map((a) => a.nm_id));
+        return [...draftByNm.entries()].filter(([nm, v]) => !inArticles.has(nm) && v.rows + v.prebook > 0);
+    }, [draftByNm, articles]);
+
+    const removeFromDraft = useCallback(async (nm: number, label: string) => {
+        if (!window.confirm(`Убрать «${label}» из черновика? Удалятся строки и предбронь этого SKU.`)) return;
+        setRemovingNm(nm);
+        try {
+            // Висящий автосейв дожимаем ДО удаления — иначе стейл-PUT воскресил бы SKU.
+            if (saveTimerRef.current) {
+                clearTimeout(saveTimerRef.current);
+                saveTimerRef.current = null;
+            }
+            await flushDraftSave();
+            const removed = await api.removeAssemblyDraftRows(draftId, [nm]);
+            // ✕ — ручное решение «не отправлять»: помечаем SKU ручным, иначе
+            // авто-синк с расчётом вернул бы его на следующем заходе.
+            const withManual = [...new Set([...(removed.distribution?.manual_nms ?? []), nm])];
+            const d = await api.updateAssemblyDraft(draftId, { distribution: { ...removed.distribution, manual_nms: withManual } });
+            draftDistRef.current = d.distribution ?? null;
+            setDraftRowsState(d.distribution?.rows ?? []);
+            setDraftPrebook(d.distribution?.prebook ?? []);
+            setManualNms(new Set(withManual));
+            showToast(`«${label}» убран из черновика (✋ ручное решение — авто-синк не вернёт)`, 'success');
+            onDraftChanged?.(d);
+        } catch (err) {
+            showToast(err instanceof Error ? err.message : 'Не удалось убрать из черновика', 'error');
+        } finally {
+            setRemovingNm(null);
+        }
+    }, [draftId, flushDraftSave, showToast, onDraftChanged]);
 
     useEffect(() => {
         if (!geomReady) return;
@@ -366,62 +507,100 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         return () => controller.abort();
     }, [geomReady, computeDistribution]);
 
-    // ─── Предбронь: атомарные направления (per ФФ×WB через allocatePairs) ────
-    const dirKeyOf = (r: AssemblyDraftRow): string =>
-        `${r.package_type ?? 'BOX'}::${Object.keys(r.tgt)[0] ?? ''}::${Object.keys(r.src)[0] ?? ''}`;
-    const atomicPrebook = useMemo<AssemblyDraftRow[]>(() => {
+    // ─── Предбронь РАСЧЁТА: атомарные направления (per ФФ×WB, allocatePairs) —
+    //     хвосты < паллеты, которые «Пересчитать» положит в prebook черновика. ──
+    const effPrebook = useMemo<AssemblyDraftRow[]>(() => {
         const out: AssemblyDraftRow[] = [];
         for (const r of prebookRows) {
             const pkg = r.package_type ?? 'BOX';
             for (const [pair, q] of allocatePairs(r.src, r.tgt)) {
                 if ((q || 0) <= 0) continue;
                 const [ff, wb] = pair.split('::');
-                if (hiddenSkus.has(`${r.nm_id}::${wb}::${pkg}`)) continue;
                 out.push({ nm_id: r.nm_id, barcode: r.barcode, vendor_code: r.vendor_code, src: { [ff]: q }, tgt: { [wb]: q }, package_type: pkg });
             }
         }
         return out;
-    }, [prebookRows, hiddenSkus]);
-    const effPrebook = useMemo(
-        () => atomicPrebook.filter((r) => { const k = dirKeyOf(r); return !promotedDirs.has(k) && !hiddenDirs.has(k); }),
-        [atomicPrebook, promotedDirs, hiddenDirs],
-    );
-    const promotedRows = useMemo(() => atomicPrebook.filter((r) => promotedDirs.has(dirKeyOf(r))), [atomicPrebook, promotedDirs]);
-    const shipRows = useMemo(() => [...(distRows ?? []), ...promotedRows], [distRows, promotedRows]);
+    }, [prebookRows]);
+    const shipRows = useMemo(() => distRows ?? [], [distRows]);
     const prebookUnits = useMemo(() => effPrebook.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0), [effPrebook]);
 
     const nmByBc = useMemo(() => {
         const m = new Map<string, number>();
         for (const a of articles) m.set(a.barcode, a.nm_id);
+        // Черновик может держать SKU без свободного остатка (их нет в articles) —
+        // их баркоды тоже нужны агрегатам (кратность, коробы).
+        for (const r of [...draftRows, ...draftPrebook]) if (r.barcode && r.nm_id) m.set(r.barcode, r.nm_id);
         return m;
-    }, [articles]);
+    }, [articles, draftRows, draftPrebook]);
     const availByBc = useMemo(() => {
         const m = new Map<string, number>();
         for (const a of articles) m.set(a.barcode, Object.values(a.rf_stocks || {}).reduce((s, st) => s + Math.max(0, Math.floor(Number(st?.available) || 0)), 0));
         return m;
     }, [articles]);
 
+    // Расчёт от потребности (фоновый). commit = что поедет строками (для confirm);
+    // calcAgg = строки+предбронь расчёта ВМЕСТЕ — тот же слой, что и план черновика
+    // (rows+prebook), иначе колонка «Расчёт» врала бы «расходится» сразу после записи.
     const commit = useMemo(() => buildDistAgg(shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides), [shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
-    const matrix = useMemo(() => buildDistAgg(distRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides), [distRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+    const calcAgg = useMemo(() => buildDistAgg([...shipRows, ...effPrebook], nmByBc, nmPpb, nmBoxSize, palletOverrides), [shipRows, effPrebook, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
     const submitRows = commit.submitRows;
 
+    // ─── ТАБЛИЦА = ЧЕРНОВИК: строки + предбронь единой суммой ────────────────
+    const draftAll = useMemo(() => [...draftRows, ...draftPrebook], [draftRows, draftPrebook]);
+    // Draft-only SKU (в черновике, но без свободного остатка на ФФ) — полноценные
+    // строки таблицы: метрики потребности прочерком, план виден, ✕ работает.
+    const draftOnlyArticles = useMemo<StockNeedArticle[]>(() => draftOnlyNms.map(([nm, v]) => {
+        const row = draftAll.find((r) => r.nm_id === nm);
+        return {
+            nm_id: nm,
+            vendor_code: v.vendor,
+            barcode: row?.barcode || '',
+            brand: '',
+            subject: '',
+            total_need: 0,
+            revenue_30d: 0,
+            rf_stocks: {},
+            in_assembly: 0,
+            in_transit: 0,
+            in_transit_date: null,
+            can_send: 0,
+            deficit: 0,
+            stocks_wb: 0,
+        } as StockNeedArticle;
+    }), [draftOnlyNms, draftAll]);
+
+    const draftAgg = useMemo(() => buildDistAgg(draftAll, nmByBc, nmPpb, nmBoxSize, palletOverrides), [draftAll, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+    /** Предбронь-доля per (barcode, wh) — для тултипа «из них 🅿️» (числа единые). */
+    const prebookCellByBc = useMemo(() => {
+        const m = new Map<string, Map<string, number>>();
+        for (const r of draftPrebook) {
+            if (!r.barcode) continue;
+            const cell = m.get(r.barcode) ?? new Map<string, number>();
+            for (const [wh, q] of Object.entries(r.tgt || {})) if ((q || 0) > 0) cell.set(wh, (cell.get(wh) || 0) + (q || 0));
+            m.set(r.barcode, cell);
+        }
+        return m;
+    }, [draftPrebook]);
+    const draftPrebookUnits = useMemo(
+        () => draftPrebook.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0),
+        [draftPrebook],
+    );
+
     // ─── ФФ-срез (лупа «Склад забора»): показываем ДОЛЮ выбранного ФФ ────────
-    // Чистое отображение, раскладку/запись не трогает. Пары ФФ→WB — тот же
-    // `allocatePairs`, что карточки черновика → числа сходятся с карточкой ФФ.
-    // В ручном режиме срез ПРИОСТАНОВЛЕН (степперы правят ПОЛНУЮ раскладку),
-    // но видимость строк держится по срезу — набор строк не прыгает.
+    // Чистое отображение черновика, запись не трогает. В ручном режиме срез
+    // ПРИОСТАНОВЛЕН (степперы правят ПОЛНЫЙ черновик), видимость строк — по срезу.
     const ffFilterId = filterFf ? Number(filterFf) : null;
     const ffSliceActive = ffFilterId != null && !editMode;
-    const slicedRowsBox = useMemo(
-        () => (ffFilterId != null ? sliceRowsByFf(distRowsBox, ffFilterId) : distRowsBox),
-        [ffFilterId, distRowsBox],
+    const slicedDraft = useMemo(
+        () => (ffFilterId != null ? sliceRowsByFf(draftAll, ffFilterId) : draftAll),
+        [ffFilterId, draftAll],
     );
     const sliceAgg = useMemo(
-        () => (ffFilterId != null ? buildDistAgg(slicedRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides) : matrix),
-        [ffFilterId, slicedRowsBox, nmByBc, nmPpb, nmBoxSize, palletOverrides, matrix],
+        () => (ffFilterId != null ? buildDistAgg(slicedDraft, nmByBc, nmPpb, nmBoxSize, palletOverrides) : draftAgg),
+        [ffFilterId, slicedDraft, nmByBc, nmPpb, nmBoxSize, palletOverrides, draftAgg],
     );
-    /** Агрегат ЗНАЧЕНИЙ таблицы: доля ФФ при активном срезе, иначе полная матрица. */
-    const viewAgg = ffSliceActive ? sliceAgg : matrix;
+    /** Агрегат ЗНАЧЕНИЙ таблицы: доля ФФ при активном срезе, иначе весь черновик. */
+    const viewAgg = ffSliceActive ? sliceAgg : draftAgg;
     /** Наличие строки: остаток ИМЕННО выбранного ФФ при срезе, иначе Σ всех ФФ. */
     const availOf = useCallback((a: StockNeedArticle): number => (
         ffSliceActive
@@ -435,7 +614,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         const distByWh = new Map<string, string>();
         for (const w of stockNeed?.warehouses ?? []) if (w.name) distByWh.set(w.name, w.district_key || 'unknown');
         const names = new Set<string>();
-        for (const r of matrix.submitRows) names.add(r.wb_warehouse_name);
+        for (const r of draftAgg.submitRows) names.add(r.wb_warehouse_name); // черновик
+        for (const r of commit.submitRows) names.add(r.wb_warehouse_name); // расчёт (чтобы правкой можно было добрать)
         for (const e of enrichMap.values()) for (const [wh, c] of Object.entries(e.byWh)) if (c.need > 0) names.add(wh);
         const arr = [...names].map((name) => ({ name, district: distByWh.get(name) || 'unknown' }));
         arr.sort((a, b) => {
@@ -443,7 +623,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             return ra !== rb ? ra - rb : a.name.localeCompare(b.name, 'ru');
         });
         return arr;
-    }, [matrix, enrichMap, stockNeed]);
+    }, [draftAgg, commit, enrichMap, stockNeed]);
 
     const districtGroups = useMemo(() => {
         const groups: { label: string; color: string; count: number }[] = [];
@@ -458,8 +638,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
     }, [wbCols]);
 
     const onHoldQty = useMemo(
-        () => articles.reduce((s, a) => s + Math.max(0, (availByBc.get(a.barcode) ?? 0) - (commit.allocByBc.get(a.barcode) ?? 0)), 0),
-        [articles, availByBc, commit],
+        () => articles.reduce((s, a) => s + Math.max(0, (availByBc.get(a.barcode) ?? 0) - (draftAgg.allocByBc.get(a.barcode) ?? 0)), 0),
+        [articles, availByBc, draftAgg],
     );
 
     const noKratnostArticles = useMemo(() => {
@@ -469,79 +649,16 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             const qty = availByBc.get(a.barcode) ?? 0;
             if (qty > 0) out.push({ nm_id: a.nm_id, vendor: a.vendor_code || String(a.nm_id), qty });
         }
-        return out.sort((x, y) => y.qty - x.qty);
-    }, [articles, nmPpb, availByBc]);
-
-    // Предбронь: кандидаты дозабора = свободный ФФ-сток per nm (мульти-склад).
-    const prebookArticles = useMemo(() => {
-        return articles.map((a) => {
-            const rfStocks: Record<number, number> = {};
-            for (const [ff, st] of Object.entries(a.rf_stocks || {})) {
-                const av = Math.max(0, Math.floor(Number(st?.available) || 0));
-                if (av > 0) rfStocks[Number(ff)] = av;
-            }
-            return { nm_id: a.nm_id, vendor_code: a.vendor_code || String(a.nm_id), rfStocks };
-        });
-    }, [articles]);
-
-    const prebookGroups = useMemo(() => {
-        return buildPrebookGroups({
-            prebook: effPrebook,
-            usedRows: shipRows,
-            articles: prebookArticles,
-            ffName: (ff) => ffNameById.get(ff) || `ФФ ${ff}`,
-            ppbOf: (nm) => nmPpb.get(nm) || 0,
-            ppbAt: (nm) => nmPpb.get(nm) || 0,
-            boxSizeOf: (nm) => nmBoxSize.get(nm) ?? null,
-            palletOverrides,
-        });
-    }, [effPrebook, shipRows, prebookArticles, ffNameById, nmPpb, nmBoxSize, palletOverrides]);
-
-    const prebookAcceptanceMarks = useMemo<Map<string, PrebookAcceptanceMark>>(() => {
-        const out = new Map<string, PrebookAcceptanceMark>();
-        if (acceptanceByNm.size === 0) return out;
-        for (const g of prebookGroups) {
-            const key = `${g.pkg}::${g.wb}::${g.ffId}`;
-            let flags: AcceptanceFlags | undefined;
-            for (const it of g.items) { const f = acceptanceByNm.get(it.nm_id)?.availability?.[g.wb]; if (f) { flags = f; break; } }
-            if (!flags) { out.set(key, { checked: false, open: false, closed: false, noLimit: false }); continue; }
-            const closed = !flags.can_box && !flags.can_monopallet && !flags.can_supersafe;
-            const meta = g.pkg === 'MONOPALLET' ? flags.mono_meta : g.pkg === 'SUPERSAFE' ? flags.super_meta : flags.box_meta;
-            const open = g.pkg === 'MONOPALLET' ? !!flags.can_monopallet : g.pkg === 'SUPERSAFE' ? !!flags.can_supersafe : !!flags.can_box;
-            const freeDays = meta?.free_days_14, paidDays = meta?.paid_days_14;
-            const noLimit = open && (freeDays ?? 0) + (paidDays ?? 0) <= 0;
-            out.set(key, { checked: true, open, closed, freeDays, paidDays, noLimit });
+        // Draft-only SKU без кратности: их план есть в черновике, но «Мест»/паллеты
+        // для них не считаются — тоже показываем в баннере (иначе потеря молчаливая).
+        for (const [nm, v] of draftByNm) {
+            if ((nmPpb.get(nm) || 0) > 0) continue;
+            if (v.rows + v.prebook <= 0) continue;
+            if (out.some((x) => x.nm_id === nm) || articles.some((a) => a.nm_id === nm)) continue;
+            out.push({ nm_id: nm, vendor: v.vendor, qty: v.rows + v.prebook });
         }
-        return out;
-    }, [prebookGroups, acceptanceByNm]);
-
-    const promoteDir = useCallback((pkg: PackageType, wb: string, ffId: number) => {
-        const k = `${pkg}::${wb}::${ffId}`;
-        setPrebookOpKey(k);
-        setPromotedDirs((s) => new Set(s).add(k));
-        setTimeout(() => setPrebookOpKey(null), 250);
-    }, []);
-    const hideDir = useCallback((pkg: PackageType, wb: string, ffId: number) => {
-        setHiddenDirs((s) => new Set(s).add(`${pkg}::${wb}::${ffId}`));
-    }, []);
-
-    const topUpBox = useCallback((pkg: PackageType, wb: string, ffId: number) => {
-        if (pkg !== 'BOX') { promoteDir(pkg, wb, ffId); return; }
-        const g = prebookGroups.find((x) => x.pkg === 'BOX' && x.wb === wb && x.ffId === ffId);
-        const adds = g?.topUp ? planBoxTopUpFf(g.topUp.candidates, wb, articles, commit.allocByBc, nmPpb) : [];
-        if (adds.length === 0) { showToast('Нет свободного ФФ-остатка, чтобы дозабрать паллету', 'error'); return; }
-        setPrebookOpKey(`${pkg}::${wb}::${ffId}`);
-        setManualTopUp((prev) => {
-            const next = new Map(prev);
-            for (const a of adds) {
-                const wbMap = { ...(next.get(a.barcode) ?? {}) };
-                wbMap[a.wb] = (wbMap[a.wb] ?? 0) + a.units;
-                next.set(a.barcode, wbMap);
-            }
-            return next;
-        });
-        setTimeout(() => setPrebookOpKey(null), 250);
-    }, [prebookGroups, articles, commit, nmPpb, promoteDir, showToast]);
+        return out.sort((x, y) => y.qty - x.qty);
+    }, [articles, nmPpb, availByBc, draftByNm]);
 
     const markFor = useCallback((nm: number, wh: string, shipPkg: PackageType | null): CellMark | null => {
         const flags = acceptanceByNm.get(nm)?.availability?.[wh];
@@ -554,32 +671,169 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         return { noLimit: ((meta?.free_days_14 ?? 0) + (meta?.paid_days_14 ?? 0)) <= 0 };
     }, [acceptanceByNm]);
 
-    const editCellBoxes = useCallback((barcode: string, nm: number, wh: string, delta: number) => {
+    // Правка ячейки = правка ЧЕРНОВИКА: BOX-строки и предбронь SKU сливаются в
+    // одну строку, tgt[склада] двигается на ±короб, автосейв дебаунсом. Кап —
+    // свободный ФФ-остаток SKU (превышение = клик игнорируется с тостом).
+    const editDraftCell = useCallback((barcode: string, nm: number, wh: string, delta: number) => {
         const ppb = nmPpb.get(nm) || 0;
         if (ppb <= 0) return;
-        const avail = availByBc.get(barcode) ?? 0;
-        setCellEdits((prev) => {
-            const next = new Map(prev);
-            let rec = next.get(barcode);
-            if (!rec) {
-                // Первая правка строки — замораживаем её ТЕКУЩУЮ авто-раскладку в пины,
-                // чтобы правка одной ячейки не обнулила остальные склады этой строки.
-                rec = {};
-                const cells = matrix.cellByBc.get(barcode);
-                if (cells) for (const [w, c] of cells) { const b = boxesOf(c.qty, ppb); if (b > 0) rec[w] = b; }
+        if (handedNms.has(nm)) {
+            showToast('Раскладка этого SKU частично заморожена юнитами на странице склада — правь её там', 'error');
+            return;
+        }
+        // Для draft-only SKU (нет свободного остатка) article-заглушка позволяет
+        // ДЕКРЕМЕНТ (кап держит только рост плана).
+        const article = articles.find((a) => a.nm_id === nm) ?? draftOnlyArticles.find((a) => a.nm_id === nm);
+        if (!article) { showToast('SKU не найден среди остатков и черновика', 'error'); return; }
+        const skuPrebook = draftPrebook.filter((r) => r.nm_id === nm);
+        const out = applyDraftCellEdit(
+            draftRows.filter((r) => r.nm_id === nm),
+            skuPrebook,
+            article, wh, delta, ppb,
+        );
+        if (!out) { if (delta > 0) showToast('Не хватает свободного остатка на ФФ', 'error'); return; }
+        // Моно-предбронь при ручной правке сливается в КОРОБНЫЙ план — если склад
+        // принимает только монопаллеты, приёмка на создании заявки не пропустит.
+        if (skuPrebook.some((r) => r.package_type === 'MONOPALLET')) {
+            const flags = acceptanceByNm.get(nm)?.availability?.[wh];
+            if (flags && !flags.can_box) {
+                showToast(`⚠ «${wh}» по последней проверке принимает только монопаллеты — коробный план может не пройти приёмку`, 'error');
             }
-            next.set(barcode, applyCellBoxDelta(rec, wh, delta, ppb, avail));
-            return next;
-        });
-    }, [nmPpb, availByBc, matrix]);
-    const resetRowEdits = useCallback((barcode: string) => {
-        setCellEdits((prev) => { if (!prev.has(barcode)) return prev; const n = new Map(prev); n.delete(barcode); return n; });
-    }, []);
-    const resetAllEdits = useCallback(() => setCellEdits(new Map()), []);
+        }
+        const nextRows = [...draftRows.filter((r) => r.nm_id !== nm), ...out.rows];
+        const nextPrebook = [...draftPrebook.filter((r) => r.nm_id !== nm), ...out.prebook];
+        const nextManual = manualNms.has(nm) ? manualNms : new Set([...manualNms, nm]);
+        setDraftRowsState(nextRows);
+        setDraftPrebook(nextPrebook);
+        if (nextManual !== manualNms) setManualNms(nextManual);
+        scheduleDraftSave(nextRows, nextPrebook, [...nextManual]);
+    }, [nmPpb, articles, draftOnlyArticles, handedNms, manualNms, draftRows, draftPrebook, acceptanceByNm, scheduleDraftSave, showToast]);
 
     // Вход в ручной режим = просто показать степперы поверх авто-раскладки. НЕ сеем пины:
     // нетронутые строки остаются авто, «вручную» помечается лишь та, где юзер кликнул −/+.
     const enterManual = useCallback(() => setEditMode(true), []);
+    // «Готово с правкой» дожимает незаписанный дебаунс СЕЙЧАС: после «Готово»
+    // пользователь обычно сразу уходит в черновик, а fire-and-forget на анмаунте
+    // гонялся бы с загрузкой той страницы (она успевала прочитать черновик без
+    // последней правки). Заодно тост «сервер вычел…» рендерится на живом компоненте.
+    const finishManual = useCallback(() => {
+        setEditMode(false);
+        if (saveTimerRef.current) {
+            clearTimeout(saveTimerRef.current);
+            saveTimerRef.current = null;
+        }
+        if (pendingSaveRef.current) void flushDraftSave();
+    }, [flushDraftSave]);
+
+    // Раздача остатка ОДНОГО SKU целыми коробами (спрос → присутствие,
+    // buildLeftoverWeights; ⛔ скип) поверх переданных rows/prebook. Возвращает
+    // новое состояние либо причину скипа. Общее ядро для строки и «всех остатков».
+    const allocSkuLeftover = useCallback((
+        a: StockNeedArticle,
+        rows0: AssemblyDraftRow[],
+        prebook0: AssemblyDraftRow[],
+    ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; boxes: number; ppb: number; skip?: 'handed' | 'noPpb' | 'guard' | 'nothing' | 'noTarget' | 'cap' | 'monoPrebook' } => {
+        const nm = a.nm_id;
+        const none = { rows: rows0, prebook: prebook0, boxes: 0, ppb: 0 };
+        if (handedNms.has(nm)) return { ...none, skip: 'handed' }; // заморожено юнитами склада
+        const ppb = nmPpb.get(nm) || 0;
+        if (ppb <= 0) return { ...none, skip: 'noPpb' };
+        // Гвард пересорта: посев лежит без продаж — не досеваем (степпер работает).
+        if (guardByNm.has(nm)) return { ...none, skip: 'guard' };
+        // Новинка вне cold-start-справочника (rf==0 на момент выборки) гвардом не
+        // помечена — локальная проверка: лежит на WB без продаж → не досыпаем.
+        if (newcomerSet.has(nm) && (Number(a.eff_avg_daily) || 0) === 0 && (Number(a.stocks_wb) || 0) > 0) {
+            return { ...none, skip: 'guard' };
+        }
+        // applyDraftCellEdit сливает ВСЮ предбронь SKU в единую BOX-строку —
+        // моно-предбронь (предзаявка) молча стала бы коробной и не прошла бы
+        // приёмку. Машина такие строки не переупаковывает (pinnedPkgOf) —
+        // паритет: скипаем, решает человек на вкладке 🅿️.
+        if (prebook0.some((r) => r.nm_id === nm && (r.package_type ?? 'BOX') !== 'BOX')) {
+            return { ...none, skip: 'monoPrebook' };
+        }
+        const avail = availByBc.get(a.barcode) ?? 0;
+        // Текущий план SKU — из ПЕРЕДАННЫХ rows/prebook (не из мемо-агрегата).
+        const shipNow = [...rows0, ...prebook0]
+            .filter((r) => r.nm_id === nm)
+            .reduce((s, r) => s + Object.values(r.tgt || {}).reduce((x, v) => x + (v || 0), 0), 0);
+        const boxes = Math.floor((avail - shipNow) / ppb);
+        if (boxes <= 0) return { ...none, skip: 'nothing' };
+        const weights = buildLeftoverWeights(enrichMap.get(nm)?.byWh, (wh) => {
+            // Открыт для раздачи остатков = не ⛔ И не ⌛ (без лимита приёмки —
+            // заявка не пройдёт без предзаявки; раздача их плодить не должна).
+            const m = markFor(nm, wh, null);
+            return !m || (!m.closed && !m.noLimit);
+        });
+        const alloc = allocateWholeBoxes(boxes, weights);
+        if (alloc.size === 0) return { ...none, skip: 'noTarget' };
+        let rows = rows0, prebook = prebook0, applied = 0;
+        for (const [wh, b] of alloc) {
+            const out = applyDraftCellEdit(
+                rows.filter((r) => r.nm_id === nm),
+                prebook.filter((r) => r.nm_id === nm),
+                a, wh, b, ppb,
+            );
+            if (!out) return { rows, prebook, boxes: applied, ppb, skip: applied > 0 ? undefined : 'cap' };
+            rows = [...rows.filter((r) => r.nm_id !== nm), ...out.rows];
+            prebook = [...prebook.filter((r) => r.nm_id !== nm), ...out.prebook];
+            applied += b;
+        }
+        return { rows, prebook, boxes: applied, ppb };
+    }, [handedNms, nmPpb, guardByNm, newcomerSet, availByBc, enrichMap, markFor]);
+
+    // «Распределить все остатки»: один проход по локальному стейту (editDraftCell в
+    // цикле терял бы правки на stale-замыкании) → один автосейв; SKU становятся ✋.
+    const distributeAllLeftovers = useCallback(() => {
+        const totalFree = articles.reduce((s, a) => s + Math.max(0, (availByBc.get(a.barcode) ?? 0) - (draftAgg.allocByBc.get(a.barcode) ?? 0)), 0);
+        if (totalFree > 0 && !window.confirm(`Распределить весь свободный остаток ФФ (~${formatNumber(totalFree, 0)} шт) целыми коробами по складам спроса? Тронутые SKU станут ✋ ручными.`)) return;
+        let rows = draftRows, prebook = draftPrebook;
+        const manual = new Set(manualNms);
+        let addedUnits = 0, addedBoxes = 0, touched = 0, skipNoPpb = 0, skipNoTarget = 0, skipGuard = 0, skipCap = 0, skipMono = 0;
+        for (const a of articles) {
+            const res = allocSkuLeftover(a, rows, prebook);
+            if (res.skip === 'noPpb') skipNoPpb++;
+            else if (res.skip === 'noTarget') skipNoTarget++;
+            else if (res.skip === 'guard') skipGuard++;
+            else if (res.skip === 'cap') skipCap++;
+            else if (res.skip === 'monoPrebook') skipMono++;
+            if (res.boxes <= 0) continue;
+            rows = res.rows; prebook = res.prebook;
+            manual.add(a.nm_id);
+            touched++; addedBoxes += res.boxes; addedUnits += res.boxes * res.ppb;
+        }
+        if (touched === 0) {
+            showToast(`Нечего распределять: свободный ФФ уже в плане${skipNoPpb ? ` · без кратности: ${skipNoPpb} SKU` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget} SKU` : ''}${skipGuard ? ` · гвард пересорта: ${skipGuard} SKU` : ''}`, 'error');
+            return;
+        }
+        setDraftRowsState(rows);
+        setDraftPrebook(prebook);
+        setManualNms(manual);
+        scheduleDraftSave(rows, prebook, [...manual]);
+        showToast(`Распределено ${formatNumber(addedUnits, 0)} шт (${formatNumber(addedBoxes, 0)} кор) по ${formatNumber(touched, 0)} SKU — помечены ✋${skipNoPpb ? ` · без кратности: ${skipNoPpb}` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget}` : ''}${skipGuard ? ` · гвард: ${skipGuard}` : ''}${skipCap ? ` · кап ФФ: ${skipCap}` : ''}${skipMono ? ` · моно-предбронь: ${skipMono}` : ''}`, 'success');
+    }, [articles, availByBc, draftAgg, draftRows, draftPrebook, manualNms, allocSkuLeftover, scheduleDraftSave, showToast]);
+
+    // Раздача остатка ОДНОЙ строки (кнопка в «Остаётся ФФ»).
+    const distributeRowLeftovers = useCallback((a: StockNeedArticle) => {
+        const res = allocSkuLeftover(a, draftRows, draftPrebook);
+        if (res.boxes <= 0) {
+            const msg = res.skip === 'handed' ? 'SKU заморожен юнитами на странице склада — правь там'
+                : res.skip === 'noPpb' ? 'Не задана кратность короба'
+                : res.skip === 'guard' ? `Гвард пересорта: ${guardByNm.get(a.nm_id) || 'посев лежит без продаж'} — только вручную степпером`
+                : res.skip === 'noTarget' ? 'Некуда: нет ни потребности, ни присутствия на открытых складах'
+                : res.skip === 'cap' ? 'Не хватает свободного остатка на ФФ'
+                : res.skip === 'monoPrebook' ? 'У SKU моно-предбронь (предзаявка) — раздача сделала бы её коробной; реши на вкладке 🅿️ Предбронь'
+                : 'Остаток меньше короба — распределять нечего';
+            showToast(msg, 'error');
+            return;
+        }
+        const manual = manualNms.has(a.nm_id) ? manualNms : new Set([...manualNms, a.nm_id]);
+        setDraftRowsState(res.rows);
+        setDraftPrebook(res.prebook);
+        setManualNms(manual);
+        scheduleDraftSave(res.rows, res.prebook, [...manual]);
+        showToast(`${a.vendor_code || a.barcode}: распределено ${formatNumber(res.boxes * res.ppb, 0)} шт (${formatNumber(res.boxes, 0)} кор) — SKU помечен ✋`, 'success');
+    }, [allocSkuLeftover, draftRows, draftPrebook, manualNms, guardByNm, scheduleDraftSave, showToast]);
 
     const sortValue = useCallback((a: StockNeedArticle, key: SortKey): number | string => {
         const nm = a.nm_id;
@@ -591,7 +845,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             case 'avail': return avail;
             case 'inAssembly': return e?.inAssembly ?? 0;
             case 'stocksWb': return e?.stocksWb ?? 0;
-            case 'need': return Number(a.total_need) || 0;
+            // null (нет продаж) — в конец при сортировке «кому хуже всех» (asc).
+            case 'days': return a.wb_days_left == null ? Number.POSITIVE_INFINITY : Number(a.wb_days_left);
+            case 'need': return Number(a.ship_need ?? a.total_need) || 0;
             case 'revenue': return Number(a.revenue_30d) || 0;
             case 'loc': return locByNm.has(nm) ? Number(locByNm.get(nm)!.loc_pct) || 0 : -1;
             case 'ship': return ship;
@@ -599,10 +855,10 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             case 'stays': return Math.max(0, avail - ship);
             default: return viewAgg.cellByBc.get(a.barcode)?.get(key.slice(3))?.qty ?? 0;
         }
-    }, [enrichMap, viewAgg, availOf, nmPpb, locByNm]);
+    }, [enrichMap, viewAgg, availOf, nmPpb, locByNm, calcAgg]);
 
     const sortedRows = useMemo(() => {
-        const rows = [...articles];
+        const rows = [...articles, ...draftOnlyArticles];
         const dir = sortDir === 'asc' ? 1 : -1;
         rows.sort((a, b) => {
             const va = sortValue(a, sortKey), vb = sortValue(b, sortKey);
@@ -611,7 +867,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             return (a.vendor_code || a.barcode).localeCompare(b.vendor_code || b.barcode, 'ru');
         });
         return rows;
-    }, [articles, sortKey, sortDir, sortValue]);
+    }, [articles, draftOnlyArticles, sortKey, sortDir, sortValue]);
 
     // ─── Фильтр таблицы: предмет / бренд / скрыть нераспределённые ───────────
     // Лупа по ОТОБРАЖЕНИЮ (не по расчёту) — раскладка/паллеты/KPI считаются по всему
@@ -634,9 +890,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
         return [...ids].map((id) => ({ id, name: ffNameById.get(id) || `ФФ ${id}` })).sort((x, y) => x.name.localeCompare(y.name, 'ru'));
     }, [articles, ffNameById]);
     const visibleRows = useMemo(
-        () => sortedRows.filter((a) => {
+        () => {
+        const q = filterQuery.trim().toLowerCase();
+        return sortedRows.filter((a) => {
+            if (q && !`${a.vendor_code || ''} ${a.barcode || ''} ${a.nm_id}`.toLowerCase().includes(q)) return false;
             if (filterSubject && a.subject !== filterSubject) return false;
             if (filterBrand && a.brand !== filterBrand) return false;
+            if (filterKind === 'new' && !newcomerSet.has(a.nm_id)) return false;
+            if (filterKind === 'regular' && newcomerSet.has(a.nm_id)) return false;
             if (ffFilterId != null) {
                 // Виден, если на этом ФФ есть остаток ИЛИ раскладка что-то с него забирает
                 // (sliceAgg, не viewAgg — набор строк стабилен при входе в ручной режим).
@@ -646,20 +907,21 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             }
             if (hideEmpty && (viewAgg.allocByBc.get(a.barcode) ?? 0) <= 0) return false;
             return true;
-        }),
-        [sortedRows, filterSubject, filterBrand, ffFilterId, hideEmpty, sliceAgg, viewAgg],
+        });
+        },
+        [sortedRows, filterQuery, filterSubject, filterBrand, filterKind, newcomerSet, ffFilterId, hideEmpty, sliceAgg, viewAgg],
     );
 
     // Итоги колонок («Сдаём» / футер) — по ВИДИМЫМ строкам, чтобы суммы под складами
     // соответствовали фильтру; при активном ФФ-срезе — по срезанным строкам (доля ФФ).
     // Без фильтра === полная матрица (переиспользуем `viewAgg`).
-    const isFiltered = !!(filterSubject || filterBrand || filterFf || hideEmpty);
+    const isFiltered = !!(filterQuery.trim() || filterSubject || filterBrand || filterFf || filterKind || hideEmpty);
     const visibleBarcodes = useMemo(() => new Set(visibleRows.map((a) => a.barcode)), [visibleRows]);
     const matrixView = useMemo(() => {
         if (!isFiltered) return viewAgg;
-        const base = ffSliceActive ? slicedRowsBox : distRowsBox;
+        const base = ffSliceActive ? slicedDraft : draftAll;
         return buildDistAgg(base.filter((r) => visibleBarcodes.has(r.barcode)), nmByBc, nmPpb, nmBoxSize, palletOverrides);
-    }, [isFiltered, viewAgg, ffSliceActive, slicedRowsBox, distRowsBox, visibleBarcodes, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+    }, [isFiltered, viewAgg, ffSliceActive, slicedDraft, draftAll, visibleBarcodes, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
     const matrixViewOnHold = useMemo(
         () => visibleRows.reduce((s, a) => s + Math.max(0, availOf(a) - (matrixView.allocByBc.get(a.barcode) ?? 0)), 0),
         [visibleRows, availOf, matrixView],
@@ -667,46 +929,79 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
 
     // «Записать в черновик» — ЗАМЕНА по SKU (не сложение): строки черновика по SKU, которые
     // разложила матрица, заменяются её результатом (целые паллеты → rows, под-паллетные хвосты
-    // → prebook «дозабить»), прочие строки черновика сохраняются. Так повторная запись
-    // идемпотентна и нет двойного счёта/двойного использования остатка. Дальше штатная
-    // логика черновика (self-heal: целые коробы/паллеты, дозабор хвостов) доводит до ума.
-    const handleWrite = useCallback(async () => {
-        if ((shipRows.length === 0 && effPrebook.length === 0) || writing) return;
+    /** СИНК плана с живым расчётом (авто-режим черновика): авто-SKU приводится к
+     *  расчёту (замена по nm; целые паллеты → строки, хвосты → предбронь),
+     *  guarded-новинки вычищаются, РУЧНЫЕ SKU (✋) не тронуты. Запускается сам
+     *  один раз при заходе (trigger='auto', молчит без дельты) и кнопкой
+     *  «⟳ Обновить сейчас». Confirm не нужен: ручные решения защищены флагом. */
+    const runAutoSync = useCallback(async (trigger: 'auto' | 'manual') => {
+        if (writing || distRows === null) return;
         setWriting(true);
         try {
+            // Висящий автосейв дожимаем ДО синка — иначе стейл-PUT затёр бы запись.
+            if (saveTimerRef.current) {
+                clearTimeout(saveTimerRef.current);
+                saveTimerRef.current = null;
+            }
+            await flushDraftSave();
             const cur = await api.getAssemblyDraft(draftId);
             const dist = cur.distribution;
-            // «Владение» матрицы = все SKU, по которым она дала отгрузку ИЛИ предбронь.
-            const owned = new Set<string>([...shipRows.map(keyOfRow), ...effPrebook.map(keyOfRow)]);
-            const keptRows = (dist?.rows ?? []).filter((r) => !owned.has(keyOfRow(r)));
-            const keptPrebook = (dist?.prebook ?? []).filter((r) => !owned.has(keyOfRow(r)));
-            const newRows = [...keptRows, ...shipRows];
-            const newPrebook = [...keptPrebook, ...effPrebook];
-            // Пересчёт списков складов из новых строк (иначе останутся stale от cur).
-            const srcIds = new Set<number>();
-            const tgtNames = new Set<string>();
-            for (const r of [...newRows, ...newPrebook]) {
-                for (const ff of Object.keys(r.src)) srcIds.add(Number(ff));
-                for (const wb of Object.keys(r.tgt)) tgtNames.add(wb);
+            const curManual = new Set<number>(dist?.manual_nms ?? []);
+            const guarded = new Set<number>(guardByNm.keys());
+            const plan = buildAutoSyncPlan(dist ?? {}, shipRows, effPrebook, guarded, curManual);
+            if (!plan) {
+                if (trigger === 'manual') showToast('План уже соответствует расчёту', 'success');
+                return;
             }
-            await api.updateAssemblyDraft(draftId, {
-                distribution: {
-                    ...dist,
-                    rows: newRows,
-                    prebook: newPrebook,
-                    source_warehouse_ids: [...srcIds],
-                    target_warehouse_names: [...tgtNames],
+            const before = sumUnits(dist?.rows ?? []) + sumUnits(dist?.prebook ?? []);
+            const after = sumUnits(plan.rows) + sumUnits(plan.prebook);
+            const d = await api.updateAssemblyDraft(draftId, {
+                distribution: { ...dist, ...plan },
+                event: {
+                    event_type: 'AUTO_SYNC',
+                    summary: `Авто-синк с расчётом: ${formatNumber(before, 0)} → ${formatNumber(after, 0)} шт` +
+                        (curManual.size > 0 ? ` (✋ ручных не тронуто: ${curManual.size})` : ''),
                 },
-                event: { event_type: 'MATRIX_WRITE', summary: `Ручная раскладка: ${formatNumber(commit.totalShip, 0)} шт` },
             });
-            showToast(`Записано в черновик: ${formatNumber(commit.totalShip, 0)} шт (замена по SKU)`, 'success');
-            onWritten?.();
+            draftDistRef.current = d.distribution ?? null;
+            setDraftRowsState(d.distribution?.rows ?? []);
+            setDraftPrebook(d.distribution?.prebook ?? []);
+            setManualNms(new Set(d.distribution?.manual_nms ?? []));
+            showToast(`⟳ План синхронизирован с расчётом: ${formatNumber(before, 0)} → ${formatNumber(after, 0)} шт${curManual.size > 0 ? ` · ✋ ручных не тронуто: ${curManual.size}` : ''}`, 'success');
+            onDraftChanged?.(d);
         } catch (e) {
-            showToast(e instanceof Error ? e.message : 'Ошибка записи в черновик', 'error');
+            showToast(e instanceof Error ? e.message : 'Ошибка синка с расчётом', 'error');
         } finally {
             setWriting(false);
         }
-    }, [shipRows, effPrebook, writing, draftId, commit, showToast, onWritten]);
+    }, [writing, distRows, draftId, guardByNm, shipRows, effPrebook, flushDraftSave, showToast, onDraftChanged]);
+
+    // Авто-запуск синка: один раз за заход, когда готовы И расчёт, И черновик.
+    const autoSyncDoneRef = useRef(false);
+    useEffect(() => {
+        if (autoSyncDoneRef.current || distRows === null || draftDistRef.current === null) return;
+        // Последняя линия обороны от двойного fail-open: если серверный blocked-set
+        // был пуст (холодный Redis) И живая проверка приёмки УПАЛА (WB 429/сеть) —
+        // авто-синк персистил бы непроверенный план на закрытые склады. Ручной
+        // «⟳ Обновить сейчас» остаётся доступен (осознанное действие).
+        if (acceptanceNote?.failed) return;
+        autoSyncDoneRef.current = true;
+        void runAutoSync('auto');
+    }, [distRows, draftRows, runAutoSync, acceptanceNote]);
+
+    /** ↺ Вернуть SKU в авто: снять ✋ и сразу синкануть его к расчёту. */
+    const returnToAuto = useCallback(async (nm: number) => {
+        try {
+            const cur = await api.getAssemblyDraft(draftId);
+            const without = (cur.distribution?.manual_nms ?? []).filter((x) => x !== nm);
+            const d = await api.updateAssemblyDraft(draftId, { distribution: { ...cur.distribution, manual_nms: without } });
+            draftDistRef.current = d.distribution ?? null;
+            setManualNms(new Set(without));
+            await runAutoSync('manual');
+        } catch (e) {
+            showToast(e instanceof Error ? e.message : 'Не удалось вернуть в авто', 'error');
+        }
+    }, [draftId, runAutoSync, showToast]);
 
     // ─── States ────────────────────────────────────────────────────────────
     if (loading) {
@@ -720,8 +1015,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             </div>
         );
     }
-    if (articles.length === 0) {
-        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>Нет свободного остатка на ФФ для распределения</div>;
+    if (articles.length === 0 && draftAll.length === 0) {
+        return <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--color-muted)' }}>Черновик пуст, и свободного остатка на ФФ нет.</div>;
     }
 
     // Спиннер — только на ПЕРВИЧНом расчёте (distRows===null). Пересчёт при клике степпера
@@ -757,85 +1052,52 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
             )}
 
             <div className="glass-card" style={{ padding: 16, marginBottom: 16, display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'center', fontSize: 14 }}>
-                <span>К отправке: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalShip, 0)}</b> шт</span>
-                <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalBoxes, 0)}</b></span>
-                <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(commit.totalPallets, 0)}</b></span>
-                <span style={{ color: 'var(--color-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
-                {prebookUnits > 0 && (
-                    <span style={{ color: 'var(--color-muted)' }}>🅿️ Предбронь: <b style={{ color: 'var(--color-text)' }}>{formatNumber(prebookUnits, 0)}</b> шт</span>
-                )}
-                <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
-                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="Матрица «Раскладка» = коробное покрытие потребности. В черновик пишутся только целые паллеты; неполные — в 🅿️ Предбронь (Дозабить / Оставить так / На ФФ).">
-                        📦 Матрица — покрытие · 🚚 Черновик — целые паллеты
+                <span>В черновике: <b style={{ fontSize: 18 }}>{formatNumber(draftAgg.totalShip, 0)}</b> шт</span>
+                <span>📦 Коробов: <b style={{ fontSize: 18 }}>{formatNumber(draftAgg.totalBoxes, 0)}</b></span>
+                <span>🚚 Паллет: <b style={{ fontSize: 18 }}>{formatNumber(draftAgg.totalPallets, 0)}</b></span>
+                {draftPrebookUnits > 0 && (
+                    <span style={{ color: 'var(--color-muted)' }} title="Часть плана черновика, лежащая в предброни (хвосты < паллеты). Входит в общую сумму — здесь всё единым числом.">
+                        в т.ч. 🅿️ {formatNumber(draftPrebookUnits, 0)} шт
                     </span>
-                    <button className="btn btn-primary" onClick={handleWrite} disabled={writing || (shipRows.length === 0 && effPrebook.length === 0)}>
-                        {writing ? 'Запись…' : `Записать в черновик (${formatNumber(commit.totalShip, 0)} шт)`}
+                )}
+                <span style={{ color: 'var(--color-muted)' }}>На хранение (ФФ): <b style={{ color: 'var(--color-text)' }}>{formatNumber(onHoldQty, 0)}</b> шт</span>
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center' }}>
+                    <span style={{ fontSize: 12, color: 'var(--color-muted)' }} title="План сам синхронизируется с живым расчётом при заходе (need-канал + новинки cold-start с гвардом пересорта): целые паллеты → строки, хвосты → предбронь. ✋ ручные SKU (правленные степпером/✕) авто-синк не трогает — вернуть SKU в авто можно кнопкой ↺ на его строке.">
+                        {computing ? 'расчёт от потребности…' : `авто-синк с расчётом включён${manualNms.size > 0 ? ` · ✋ ручных SKU: ${formatNumber(manualNms.size, 0)}` : ''}`}
+                    </span>
+                    <button className="btn btn-primary" onClick={() => runAutoSync('manual')} disabled={writing || computing}>
+                        {writing ? 'Синк…' : '⟳ Обновить сейчас'}
                     </button>
                 </div>
             </div>
 
-            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                <button className={`btn ${subTab === 'dist' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('dist')}>🚚 Раскладка</button>
-                <button className={`btn ${subTab === 'prebook' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setSubTab('prebook')}>
-                    🅿️ Предбронь{prebookUnits > 0 ? ` (${formatNumber(prebookUnits, 0)})` : ''}
-                </button>
-            </div>
-
-            {subTab === 'prebook' ? (
-                prebookGroups.length === 0 ? (
-                    <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
-                        Предброни нет — вся раскладка набирается целыми паллетами (или ничего не разложено).
-                    </div>
-                ) : (
-                    <PrebookView
-                        groups={prebookGroups}
-                        toppingUpKey={prebookOpKey}
-                        shipAsIsKey={prebookOpKey}
-                        deletingKey={null}
-                        prebookingKey={prebookOpKey}
-                        tailTopUpKey={prebookOpKey}
-                        trimTailKey={null}
-                        palletOpKey={null}
-                        acceptanceMarks={prebookAcceptanceMarks}
-                        acceptanceLoading={false}
-                        preorderWbs={preorderWbs}
-                        onTopUp={topUpBox}
-                        onShipAsIs={promoteDir}
-                        onDelete={(nm, wb, pkg) => setHiddenSkus((s) => new Set(s).add(`${nm}::${wb}::${pkg}`))}
-                        onDeleteDirection={hideDir}
-                        onCreatePrebooking={promoteDir}
-                        onTopUpPrebook={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
-                        onTrimTail={(wb, ffId) => hideDir('MONOPALLET', wb, ffId)}
-                        onBookPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
-                        onReleasePallets={(wb, ffId) => hideDir('MONOPALLET', wb, ffId)}
-                        onDraftPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
-                    />
-                )
-            ) : (<>
+            {(<>
                 <div className="glass-card" style={{ padding: 16, marginBottom: 16 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
-                        <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={editMode ? () => setEditMode(false) : enterManual}>
-                            {editMode ? '✓ Готово с ручной раскладкой' : '✏️ Разложить вручную'}
+                        <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={editMode ? finishManual : enterManual}>
+                            {editMode ? '✓ Готово с правкой' : '✏️ Править черновик'}
+                        </button>
+                        <button className="btn btn-sm btn-secondary" onClick={distributeAllLeftovers} disabled={writing || computing}
+                            title="Раздать весь свободный остаток ФФ сверх плана целыми коробами: по складам с потребностью, иначе — куда товар уже лежит/едет; закрытые по приёмке и гвард-новинки пропускаются. Тронутые SKU становятся ✋ ручными.">
+                            📦 Распределить все остатки
                         </button>
                         {editMode && (
                             <span style={{ fontSize: 12, color: 'var(--color-warning)' }}>
-                                Ручной режим: правь короба (−/+) поверх авто-раскладки. Тронутая строка помечается «вручную», нетронутые остаются авто. Лимит приёмки склада проверяется (⌛ предзаявка · ⛔ закрыт).
+                                Правь короба (−/+) — изменения сразу сохраняются в черновик (строки и предбронь SKU сливаются в точный план). Метки приёмки (⛔ закрыт и др.) — из последнего расчёта потребности.
                             </span>
-                        )}
-                        {cellEdits.size > 0 && (
-                            <button className="btn btn-sm btn-secondary" style={{ marginLeft: 'auto' }} onClick={resetAllEdits}>
-                                ↺ Сбросить все правки ({formatNumber(cellEdits.size, 0)})
-                            </button>
                         )}
                     </div>
                     <div style={{ color: 'var(--color-muted)', fontSize: 13 }}>
-                        Матрица показывает <b style={{ color: 'var(--color-text)' }}>коробное покрытие</b> потребности (целые коробы под потребность каждого WB-склада), источник — весь свободный остаток ФФ.
-                        Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность · что сдаём коробом.
-                        Метрики SKU за окно 14 дней: <b style={{ color: 'var(--color-text)' }}>Потр. 14д</b> (потребность движка) · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> (выручка) · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (индекс локализации, цвет — статус КТР).
-                        В <b style={{ color: 'var(--color-text)' }}>черновик</b> пишутся только целые паллеты; неполные — в 🅿️ Предбронь. Поэтому числа матрицы и черновика могут расходиться.
+                        Таблица показывает <b style={{ color: 'var(--color-text)' }}>черновик</b>: строки и 🅿️ предбронь каждого SKU единой суммой (ячейки с предбронью подсвечены, доля — в подсказке «Σ отпр.»).
+                        Правки степперами сохраняются в черновик сразу; ✕ убирает SKU целиком.
+                        План <b style={{ color: 'var(--color-text)' }}>сам синхронизируется</b> с живым расчётом при заходе (need-канал + новинки cold-start с гвардом пересорта ⚠): целые паллеты → строки, хвосты → предбронь. SKU, правленный руками, помечается ✋ и авто-синком не трогается (↺ на строке возвращает в авто); «⟳ Обновить сейчас» — форс-синк без перезахода.
+                        Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность. Метрики SKU: <b style={{ color: 'var(--color-text)' }}>Хватит, дн</b> (на сколько дней остатка WB при текущей скорости; 🔴 меньше плеча доставки) · <b style={{ color: 'var(--color-text)' }}>Потр. {NEED_SUPPLY_DAYS}д</b> (growth-aware: скорость = max из среднего за 14д/7д/3д, ⚡ — растущий SKU) · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (цвет — статус КТР).
+                        Колонка <b style={{ color: 'var(--color-text)' }}>«Расчёт»</b> — что предлагает живой расчёт (для сравнения с планом).
                     </div>
                     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
                         <span style={{ fontSize: 13, color: 'var(--color-muted)' }}>🔎 Фильтр:</span>
+                        <input className="form-input" style={{ maxWidth: 220 }} type="search" value={filterQuery}
+                            onChange={(e) => setFilterQuery(e.target.value)} placeholder="Артикул / ШК / nm" />
                         <select className="form-input" style={{ maxWidth: 240 }} value={filterSubject} onChange={(e) => setFilterSubject(e.target.value)}>
                             <option value="">Все предметы</option>
                             {subjectOptions.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -848,19 +1110,25 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                             <option value="">Все склады ФФ (забор)</option>
                             {ffOptions.map((f) => <option key={f.id} value={String(f.id)}>{f.name}</option>)}
                         </select>
+                        <select className="form-input" style={{ maxWidth: 200 }} value={filterKind} onChange={(e) => setFilterKind(e.target.value as '' | 'new' | 'regular')}
+                            title="Новинки — SKU из cold-start (🆕); обычные — все остальные">
+                            <option value="">Все товары</option>
+                            <option value="new">🆕 Только новинки</option>
+                            <option value="regular">Только обычные</option>
+                        </select>
                         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
                             <input type="checkbox" checked={hideEmpty} onChange={(e) => setHideEmpty(e.target.checked)} />
                             Скрыть нераспределённые
                         </label>
-                        {(filterSubject || filterBrand || filterFf || hideEmpty) && (
+                        {isFiltered && (
                             <>
-                                <button className="btn btn-sm btn-secondary" onClick={() => { setFilterSubject(''); setFilterBrand(''); setFilterFf(''); setHideEmpty(false); }}>Сбросить фильтр</button>
+                                <button className="btn btn-sm btn-secondary" onClick={() => { setFilterQuery(''); setFilterSubject(''); setFilterBrand(''); setFilterFf(''); setFilterKind(''); setHideEmpty(false); }}>Сбросить фильтр</button>
                                 <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>показано {formatNumber(visibleRows.length, 0)} из {formatNumber(sortedRows.length, 0)}</span>
                             </>
                         )}
                         {ffSliceActive && ffFilterId != null && (
-                            <span style={{ fontSize: 12, color: 'var(--color-accent)' }} title="Ячейки, «Σ отпр.», «На ФФ», «Остаётся ФФ» и итоги показывают только то, что забираем с этого склада (как в карточке черновика). Шапка «К отправке» и «Записать в черновик» — вся матрица.">
-                                📍 срез: доля забора с «{ffNameById.get(ffFilterId) || `ФФ ${ffFilterId}`}» · шапка и запись — вся матрица
+                            <span style={{ fontSize: 12, color: 'var(--color-accent)' }} title="Ячейки, «Σ отпр.», «На ФФ», «Остаётся ФФ» и итоги показывают долю ЭТОГО склада забора (как в карточке черновика). Шапка «В черновике», колонка «Расчёт» и «⟳ Пересчитать» — вся матрица.">
+                                📍 срез: доля забора с «{ffNameById.get(ffFilterId) || `ФФ ${ffFilterId}`}» · шапка/расчёт — вся матрица
                             </span>
                         )}
                         {editMode && filterFf && (
@@ -871,18 +1139,16 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                     </div>
                 </div>
 
-                {computing ? (
-                    <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>Считаю раскладку (потребность · приёмка · коробы · паллеты)…</div>
-                ) : matrix.totalShip === 0 && !editMode ? (
+                {draftAgg.totalShip === 0 && !editMode && sortedRows.length === 0 ? (
                     <div className="glass-card" style={{ padding: 32, textAlign: 'center', color: 'var(--color-muted)' }}>
-                        Нечего разложить: ни у одного артикула нет потребности по WB-складам (или не задана кратность короба).
+                        Черновик пуст и свободного остатка на ФФ нет.
                     </div>
                 ) : (
-                    <div className="glass-card" style={{ padding: 0, overflowX: 'auto' }}>
+                    <div className="glass-card asm-matrix-wrap" style={{ padding: 0 }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                             <thead>
                                 <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                                    <th colSpan={7} style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }} />
+                                    <th colSpan={8} style={{ position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }} />
                                     {districtGroups.map((g, i) => (
                                         <th key={i} colSpan={g.count} style={{ padding: '6px 8px', textAlign: 'center', color: '#fff', background: g.color, fontSize: 11, letterSpacing: 0.4, textTransform: 'uppercase' }}>
                                             {g.label}
@@ -895,7 +1161,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('avail')} title="Сортировать по остатку на ФФ">На ФФ{sortArrow('avail')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('inAssembly')} title="Уже в сборке на WB">В сборке{sortArrow('inAssembly')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('stocksWb')} title="Остаток на Wildberries">На WB{sortArrow('stocksWb')}</th>
-                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('need')} title="Потребность на горизонт 14 дней (движок раскладки: скорость заказов за 14 дней; глобальная метрика SKU — ФФ-фильтр не влияет)">Потр. 14д{sortArrow('need')}</th>
+                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('days')} title="На сколько дней хватит остатка на WB при текущей скорости (growth-aware: max из среднего за 14д / 7д / 3д). Красный — меньше плеча доставки (сборка+дорога+приёмка): разрыв стока до приезда новой поставки">Хватит, дн{sortArrow('days')}</th>
+                                    <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('need')} title={`Раскладочная потребность: Σ локальных дефицитов складов на горизонте ${NEED_SUPPLY_DAYS} дней + плечо (growth-aware скорость = max из среднего за 14д/7д/3д). Нетто к закупке — в подсказке ячейки. ФФ-фильтр не влияет`}>Потр. {NEED_SUPPLY_DAYS}д{sortArrow('need')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('revenue')} title="Выручка за 14 дней (продажи − возвраты, окно тренда движка потребности)">₽ 14д{sortArrow('revenue')}</th>
                                     <th style={{ padding: '8px 8px', ...sortableTh }} onClick={() => toggleSort('loc')} title="Индекс локализации артикула за 14 дней (доля локальных заказов; цвет — статус КТР)">Лок %{sortArrow('loc')}</th>
                                     {wbCols.map((c) => (
@@ -909,7 +1176,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                     <td style={{ padding: '6px 12px', textAlign: 'left', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 2 }}>
                                         Сдаём <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--color-muted)' }}>шт · кор</span>
                                     </td>
-                                    <td colSpan={6} />
+                                    <td colSpan={7} />
                                     {wbCols.map((c) => {
                                         const u = matrixView.shipByWh.get(c.name) ?? 0;
                                         const bx = matrixView.boxesByWh.get(c.name) ?? 0;
@@ -920,7 +1187,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                             </td>
                                         );
                                     })}
-                                    <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }} title="Всего штук к отправке">{formatNumber(matrixView.totalShip, 0)} шт</td>
+                                    <td style={{ padding: '6px 8px', color: 'var(--color-accent)' }} title="Всего штук в черновике (строки + предбронь)">{formatNumber(matrixView.totalShip, 0)} шт</td>
                                     <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Всего коробов">{formatNumber(matrixView.totalBoxes, 0)} кор</td>
                                     <td style={{ padding: '6px 8px', color: 'var(--color-muted)' }} title="Остаётся на хранении ФФ">{formatNumber(matrixViewOnHold, 0)}</td>
                                 </tr>
@@ -936,21 +1203,28 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                     const ppb = nmPpb.get(nm);
                                     const label = a.vendor_code || String(nm) || a.barcode;
                                     const rowBoxes = boxesOf(ship, ppb);
-                                    const editRec = cellEdits.get(a.barcode);
                                     const rowEditable = editMode && !!ppb && ppb > 0;
-                                    const rowAtCap = ship + (ppb || 0) > avail;
                                     return (
-                                        <tr key={a.barcode} style={{ borderBottom: '1px solid var(--color-border)', background: editRec ? 'rgba(255,159,10,0.07)' : ship > 0 ? 'rgba(59,130,246,0.04)' : undefined }}>
+                                        <tr key={a.barcode} style={{ borderBottom: '1px solid var(--color-border)', background: ship > 0 ? 'rgba(59,130,246,0.04)' : undefined }}>
                                             <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)', zIndex: 1 }}>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                                     <span style={{ fontWeight: 600 }}>{label}</span>
                                                     {e?.isNew && <span className="badge" style={{ background: 'rgba(168,85,247,0.16)', color: '#a855f7', fontSize: 10, padding: '1px 6px' }}>🆕 новинка</span>}
-                                                    {ppb ? <span className="badge badge-secondary" style={{ fontSize: 10, padding: '1px 6px' }}>📦 кратно {formatNumber(ppb, 0)}</span> : <span className="badge" style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>без кратности</span>}
-                                                    {editRec && (
-                                                        <button type="button" className="badge" title="Сбросить ручные правки строки"
-                                                            style={{ background: 'rgba(255,159,10,0.16)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px', border: 'none', cursor: 'pointer' }}
-                                                            onClick={() => resetRowEdits(a.barcode)}>✏️ вручную · ↺</button>
+                                                    {guardByNm.has(nm) && (
+                                                        <span className="badge" title={`Гвард пересорта: ${guardByNm.get(nm)}. Авто-досев выключен; ручные −/+ работают.`}
+                                                            style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>
+                                                            ⚠ посев лежит без продаж
+                                                        </span>
                                                     )}
+                                                    {manualNms.has(nm) && (
+                                                        <button type="button" className="badge"
+                                                            title={`План этого SKU задан вручную — авто-синк его не трогает. Живой расчёт предлагает: ${formatNumber(calcAgg.allocByBc.get(a.barcode) ?? 0, 0)} шт. Клик — вернуть SKU в авто (план заменится расчётом).`}
+                                                            style={{ background: 'rgba(59,130,246,0.12)', color: 'var(--color-accent)', fontSize: 10, padding: '1px 6px', border: 'none', cursor: 'pointer' }}
+                                                            onClick={() => returnToAuto(nm)}>
+                                                            ✋ вручную · ↺
+                                                        </button>
+                                                    )}
+                                                    {ppb ? <span className="badge badge-secondary" style={{ fontSize: 10, padding: '1px 6px' }}>📦 кратно {formatNumber(ppb, 0)}</span> : <span className="badge" style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>без кратности</span>}
                                                 </div>
                                                 <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>{a.subject ? `${a.subject} · ` : ''}ШК {a.barcode}</div>
                                             </td>
@@ -958,13 +1232,42 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                             <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.inAssembly > 0 ? formatNumber(e.inAssembly, 0) : '·'}</td>
                                             <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.stocksWb > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.stocksWb > 0 ? formatNumber(e.stocksWb, 0) : '·'}</td>
                                             {(() => {
-                                                const needQty = Number(a.total_need) || 0;
+                                                const days = a.wb_days_left == null ? null : Number(a.wb_days_left);
+                                                const leadDays = Number(a.lead_days) || 0;
+                                                const effDaily = Number(a.eff_avg_daily) || 0;
+                                                const growth = Number(a.growth_ratio) || 1;
+                                                const daysInbound = a.wb_days_left_inbound == null ? null : Number(a.wb_days_left_inbound);
+                                                // Красный: остатка меньше, чем едет поставка → разрыв стока
+                                                // неизбежен без немедленной отгрузки. Янтарный: впритык.
+                                                const daysColor = days == null ? 'var(--color-dim)'
+                                                    : days < leadDays ? 'var(--color-danger)'
+                                                    : days < leadDays + 7 ? 'var(--color-warning)'
+                                                    : 'var(--color-muted)';
+                                                return (
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', color: daysColor, fontWeight: days != null && days < leadDays ? 700 : 400, whiteSpace: 'nowrap' }}
+                                                        title={days == null
+                                                            ? 'Нет заказов за окно — скорость 0, дни не считаются'
+                                                            : `Остатка WB ${formatNumber(e?.stocksWb ?? 0, 0)} шт хватит на ~${formatNumber(days, 1)} дн при скорости ${formatNumber(effDaily, 1)} шт/д${growth >= 1.05 ? ` (рост ×${formatNumber(growth, 1)} к среднему за окно)` : ''} · с учётом сборки и в пути — ~${daysInbound != null ? formatNumber(daysInbound, 1) : '—'} дн · плечо доставки ~${formatNumber(leadDays, 0)} дн`}>
+                                                        {days == null ? '·' : formatNumber(days, days < 10 ? 1 : 0)}
+                                                    </td>
+                                                );
+                                            })()}
+                                            {(() => {
+                                                const needQty = Number(a.ship_need ?? a.total_need) || 0;
+                                                const netNeed = Number(a.total_need) || 0;
                                                 const rev = Number(a.revenue_30d) || 0;
+                                                const growth = Number(a.growth_ratio) || 1;
                                                 const loc = locByNm.get(nm);
                                                 const locPct = loc ? Number(loc.loc_pct) || 0 : null;
                                                 return (
                                                     <>
-                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: needQty > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{needQty > 0 ? formatNumber(needQty, 0) : '·'}</td>
+                                                        <td style={{ padding: '6px 8px', textAlign: 'right', color: needQty > 0 ? 'var(--color-text)' : 'var(--color-dim)', whiteSpace: 'nowrap' }}
+                                                            title={`Раскладочная потребность: Σ локальных дефицитов складов (излишек чужого ФО спрос региона не закрывает). Нетто по сети (к закупке): ${formatNumber(netNeed, 0)} шт`}>
+                                                            {needQty > 0 ? formatNumber(needQty, 0) : '·'}
+                                                            {growth >= 1.3 && (
+                                                                <span style={{ fontSize: 10, color: 'var(--color-warning)' }} title={`Растущий SKU: скорость последних дней ×${formatNumber(growth, 1)} к среднему за окно — потребность посчитана по ускоренному темпу`}> ⚡×{formatNumber(growth, 1)}</span>
+                                                            )}
+                                                        </td>
                                                         <td style={{ padding: '6px 8px', textAlign: 'right', color: rev > 0 ? 'var(--color-muted)' : 'var(--color-dim)' }}>{rev > 0 ? formatNumber(rev, 0) : '·'}</td>
                                                         <td style={{ padding: '6px 8px', textAlign: 'right', color: locPct != null ? (LOC_STATUS_COLOR[loc!.status] || 'var(--color-text)') : 'var(--color-dim)' }}
                                                             title={loc ? `Заказов 14д: ${formatNumber(loc.total, 0)} · локальных: ${formatNumber(loc.local, 0)} · КТР ${formatNumber(Number(loc.ktr), 2)}` : 'Нет данных локализации за окно 14 дней'}>
@@ -977,32 +1280,68 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                                 const cell = cells?.get(c.name);
                                                 const ctx = e?.byWh[c.name];
                                                 const ctxBusy = (ctx?.asm ?? 0) + (ctx?.transit ?? 0);
+                                                const pbPart = prebookCellByBc.get(a.barcode)?.get(c.name) ?? 0;
                                                 return (
                                                     <NeedMatrixCell
                                                         key={c.name}
                                                         ship={cell ?? null}
                                                         stock={ctx?.stock ?? 0}
                                                         onWay={ctxBusy}
-                                                        tint={districtTint(c.district)}
+                                                        tint={pbPart > 0 ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : districtTint(c.district)}
                                                         mark={markFor(nm, c.name, cell?.pkg ?? null)}
                                                         edit={rowEditable && ppb ? {
-                                                            boxes: editRec ? (editRec[c.name] ?? 0) : boxesOf(cell?.qty ?? 0, ppb),
+                                                            boxes: boxesOf(cell?.qty ?? 0, ppb),
                                                             ppb,
-                                                            onDelta: (d: number) => editCellBoxes(a.barcode, nm, c.name, d),
-                                                            disableInc: rowAtCap,
+                                                            onDelta: (d: number) => editDraftCell(a.barcode, nm, c.name, d),
+                                                            disableInc: false,
                                                         } : null}
                                                     />
                                                 );
                                             })}
-                                            <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600 }}>{ship > 0 ? formatNumber(ship, 0) : '·'}</td>
+                                            {(() => {
+                                                const pbCell = prebookCellByBc.get(a.barcode);
+                                                const pbNm = pbCell ? [...pbCell.values()].reduce((s2, v) => s2 + v, 0) : 0;
+                                                return (
+                                                    <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 600, whiteSpace: 'nowrap' }}
+                                                        title={ship > 0 ? `План черновика: ${formatNumber(ship, 0)} шт${pbNm > 0 ? ` (в т.ч. 🅿️ ${formatNumber(pbNm, 0)} в предброни)` : ''}` : 'В черновике этого SKU нет'}>
+                                                        {ship > 0 ? (
+                                                            <>
+                                                                {formatNumber(ship, 0)}
+                                                                {pbNm > 0 && (
+                                                                    <span style={{ color: 'var(--color-accent)', fontWeight: 400, fontSize: 11 }}
+                                                                        title={pbNm >= ship
+                                                                            ? 'Весь план SKU — в предброни: заявкой НЕ станет, пока не «Дозабить»/«Отправить как есть» (вкладка 🅿️ Предбронь черновика)'
+                                                                            : `${formatNumber(pbNm, 0)} шт из плана — в предброни (не станут заявками без дозабора)`}>
+                                                                        {' '}{pbNm >= ship ? '🅿️!' : `(${formatNumber(pbNm, 0)}🅿️)`}
+                                                                    </span>
+                                                                )}
+                                                                <button type="button" title="Убрать SKU из черновика (строки + предбронь)" disabled={removingNm === nm}
+                                                                    style={{ marginLeft: 6, border: 'none', background: 'transparent', color: 'var(--color-danger)', cursor: 'pointer', fontSize: 12, padding: 0 }}
+                                                                    onClick={() => removeFromDraft(nm, label)}>
+                                                                    {removingNm === nm ? '…' : '✕'}
+                                                                </button>
+                                                            </>
+                                                        ) : '·'}
+                                                    </td>
+                                                );
+                                            })()}
                                             <td style={{ padding: '6px 8px', textAlign: 'right' }}>{rowBoxes > 0 ? formatNumber(rowBoxes, 0) : '·'}</td>
-                                            <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-muted)' }}>{formatNumber(stays, 0)}</td>
+                                            <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
+                                                {formatNumber(stays, 0)}
+                                                {!!ppb && ppb > 0 && stays >= ppb && (
+                                                    <button type="button" className="badge"
+                                                        title={`Распределить остаток этого SKU (${formatNumber(Math.floor(stays / ppb), 0)} кор) целыми коробами: по складам с потребностью, иначе — куда уже лежит/едет; SKU станет ✋ ручным`}
+                                                        style={{ marginLeft: 6, background: 'rgba(59,130,246,0.12)', color: 'var(--color-accent)', fontSize: 10, padding: '1px 6px', border: 'none', cursor: 'pointer' }}
+                                                        disabled={writing || computing}
+                                                        onClick={() => distributeRowLeftovers(a)}>📦→</button>
+                                                )}
+                                            </td>
                                         </tr>
                                     );
                                 })}
                                 {visibleRows.length === 0 && (
                                     <tr>
-                                        <td colSpan={wbCols.length + 10} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
+                                        <td colSpan={wbCols.length + 11} style={{ padding: 24, textAlign: 'center', color: 'var(--color-muted)' }}>
                                             Ничего не найдено по выбранному фильтру
                                         </td>
                                     </tr>
@@ -1011,7 +1350,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                             <tfoot>
                                 <tr style={{ borderTop: '2px solid var(--color-border)', fontWeight: 600 }}>
                                     <td style={{ padding: '8px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>Отправить, шт</td>
-                                    <td colSpan={6} />
+                                    <td colSpan={7} />
                                     {wbCols.map((c) => (
                                         <td key={c.name} style={{ padding: '8px 8px', textAlign: 'right', color: 'var(--color-accent)' }}>{formatNumber(matrixView.shipByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
@@ -1020,7 +1359,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                 </tr>
                                 <tr style={{ color: 'var(--color-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>📦 Коробов</td>
-                                    <td colSpan={6} />
+                                    <td colSpan={7} />
                                     {wbCols.map((c) => (
                                         <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.boxesByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}
@@ -1029,7 +1368,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onWritten }: Draf
                                 </tr>
                                 <tr style={{ color: 'var(--color-muted)' }}>
                                     <td style={{ padding: '6px 12px', position: 'sticky', left: 0, background: 'var(--color-bg-card)' }}>🚚 Паллет</td>
-                                    <td colSpan={6} />
+                                    <td colSpan={7} />
                                     {wbCols.map((c) => (
                                         <td key={c.name} style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(matrixView.palletsByWh.get(c.name) ?? 0, 0)}</td>
                                     ))}

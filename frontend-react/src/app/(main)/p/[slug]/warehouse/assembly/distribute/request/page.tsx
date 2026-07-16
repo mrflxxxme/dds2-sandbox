@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
+import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams';
 import { exportToExcel, formatNumber } from '@/lib/utils';
 import { Toast } from '@/components';
 import KpiCard from '@/components/KpiCard';
@@ -78,7 +79,7 @@ export default function AssemblyRequestUnitPage() {
                 const [d, whs, sn] = await Promise.all([
                     api.getAssemblyDraft(draftId),
                     api.getWarehouses(),
-                    api.getStockNeed(14, 14, 'actual').catch(() => null) as Promise<StockNeedResponse | null>,
+                    api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual').catch(() => null) as Promise<StockNeedResponse | null>,
                 ]);
                 if (cancelled) return;
                 setDraft(d);

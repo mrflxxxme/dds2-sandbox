@@ -250,3 +250,51 @@ async def fetch_funnel_history(
         total_items = sum(len(v) for v in result.values())
         logger.info(f"WB history: {date_from}→{date_to} — " f"{len(result)} days, {total_items} product-days")
     return result
+
+
+async def fetch_funnel_nm(api_key: str, date_str: str, nm_id: int) -> dict | None:
+    """Накопительная воронка одного товара за один день (обычно «сегодня» МСК).
+
+    Лёгкий точечный запрос для АБ-тестов фото (органика: переходы/корзины/заказы всех
+    источников трафика). None — не удалось получить: вызывающий пропускает тик.
+    """
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "selectedPeriod": {"start": date_str, "end": date_str},
+        "nmIds": [nm_id],
+        "skipDeletedNm": True,
+        "limit": 50,
+        "offset": 0,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products",
+                headers=headers,
+                json=payload,
+            )
+    except httpx.HTTPError as e:
+        logger.warning(f"AB funnel: network error nm={nm_id}: {e}")
+        return None
+    if resp.status_code != 200:
+        logger.warning(f"AB funnel: HTTP {resp.status_code} nm={nm_id}: {resp.text[:150]}")
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    for item in (data.get("data") or {}).get("products") or []:
+        if (item.get("product") or {}).get("nmId") != nm_id:
+            continue
+        s = (item.get("statistic") or {}).get("selected") or {}
+        return {
+            "open": int(s.get("openCount") or 0),
+            "cart": int(s.get("cartCount") or 0),
+            "orders": int(s.get("orderCount") or 0),
+            "orders_sum": float(s.get("orderSum") or 0),
+        }
+    return {"open": 0, "cart": 0, "orders": 0, "orders_sum": 0.0}

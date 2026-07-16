@@ -29,6 +29,7 @@ from backend.integrations.gazelka_client import (
     DeliveryPlace,
     GazelkaApiError,
     GazelkaClient,
+    GazelkaCreateResult,
     SchedulePlan,
 )
 from backend.integrations.resilience import CircuitOpenError
@@ -466,12 +467,13 @@ def _prefill_from_assembly(
 
 
 async def _last_sent(db: AsyncSession, project_id: int, assembly_id: int) -> tuple[bool, str | None]:
+    """Была ли отправка по сборке: SENT или UNCERTAIN (могла создаться — тоже блокирует повтор)."""
     row = await db.execute(
         select(GazelkaOrder)
         .where(
             GazelkaOrder.project_id == project_id,
             GazelkaOrder.assembly_request_id == assembly_id,
-            GazelkaOrder.status == GazelkaOrderStatus.SENT,
+            GazelkaOrder.status.in_([GazelkaOrderStatus.SENT, GazelkaOrderStatus.UNCERTAIN]),
         )
         .order_by(GazelkaOrder.created_at.desc())
         .limit(1)
@@ -556,6 +558,73 @@ def _payload_from_request(req: GazelkaSendRequest) -> dict[str, object]:
     return payload
 
 
+# ─── Подтверждение создания по списку «Запланированных» ─────────────────────
+#
+# У портала нет машинного признака успеха save_plan (ср. migfull/«Натали», где
+# Livewire отдаёт redirect с GUID и errors). Редирект-эвристика клиента даёт
+# ложные ошибки, хотя заявка реально создана → дубли при повторной отправке.
+# Поэтому исход подтверждаем по факту: снимок id «Запланированных» ДО POST,
+# после POST — ищем НОВУЮ строку, совпадающую с нашим payload.
+
+
+def _plan_ids(data: dict) -> set[str]:
+    """id всех заявок из ответа fetch_planned."""
+    return {str(p.get("id")) for p in data.get("plans") or [] if p.get("id") is not None}
+
+
+def _plan_matches_payload(plan: dict, payload: dict[str, object]) -> bool:
+    """Строка портала совпадает с нашим payload по полям, которые мы задавали.
+
+    Сравниваем только заполненные нами поля (None = дефолт формы, не проверяем).
+    supply_id — по вхождению (портал/операторы дописывают текст вокруг номера).
+    """
+    supply = str(payload.get("supply_id") or "")
+    if supply and supply not in str(_u(plan.get("supply_id")) or ""):
+        return False
+    for key in ("departure_date", "delivery_date"):
+        want = payload.get(key)
+        if want and _clean_date(plan.get(key)) != str(want):
+            return False
+    pallets = payload.get("pallets")
+    if pallets is not None and _to_int(plan.get("pallets")) != _to_int(pallets):
+        return False
+    return True
+
+
+def _find_created_plan(before_ids: set[str], after: dict, payload: dict[str, object]) -> str | None:
+    """id новой (не было в before_ids) заявки, похожей на нашу; None = не найдена.
+
+    Чужая одновременная заявка отсеется несовпадением payload; из нескольких
+    совпавших (дубли) берём самую свежую.
+    """
+    new = [p for p in after.get("plans") or [] if p.get("id") is not None and str(p.get("id")) not in before_ids]
+    matched = [str(p["id"]) for p in new if _plan_matches_payload(p, payload)]
+    if not matched:
+        return None
+    return max(matched, key=lambda s: int(s) if s.isdigit() else -1)
+
+
+async def _snapshot_planned_ids(client: GazelkaClient) -> set[str] | None:
+    """id «Запланированных» до POST; None = снять не удалось (подтверждение недоступно)."""
+    try:
+        return _plan_ids(await client.fetch_planned())
+    except (GazelkaApiError, httpx.HTTPError, CircuitOpenError, ValueError):
+        return None
+
+
+async def _confirm_created(
+    client: GazelkaClient, before_ids: set[str] | None, payload: dict[str, object]
+) -> tuple[bool, str | None]:
+    """(проверили ли список, id созданной заявки). (False, None) = сверка недоступна."""
+    if before_ids is None:
+        return False, None
+    try:
+        after = await client.fetch_planned()
+    except (GazelkaApiError, httpx.HTTPError, CircuitOpenError, ValueError):
+        return False, None
+    return True, _find_created_plan(before_ids, after, payload)
+
+
 async def send_order(
     db: AsyncSession,
     project_id: int,
@@ -576,7 +645,8 @@ async def send_order(
         already_sent, _ = await _last_sent(db, project_id, assembly_id)
         if already_sent:
             raise GazelkaServiceError(
-                "Заявка для этой сборки уже отправлена в Газельку. Подтвердите повторную отправку.",
+                "Заявка для этой сборки уже отправлялась в Газельку. "
+                "Сверьте вкладку «Запланированные» и подтвердите повторную отправку.",
                 status_code=409,
             )
 
@@ -598,18 +668,57 @@ async def send_order(
             # Форму снимаем ОДИН раз: с неё берём и график для валидации, и CSRF для POST.
             form = await client.fetch_apply_form()
             _validate_schedule(form, req)
-            result = await client.create_order(payload, form=form)
-        status = GazelkaOrderStatus.SENT if result.ok else GazelkaOrderStatus.UNCERTAIN
-        ref = result.ref
-        message = result.message
-        excerpt = result.excerpt
+            # Снимок «Запланированных» ДО POST: редирект-эвристика ненадёжна,
+            # реальный исход подтверждаем появлением новой строки в списке.
+            before_ids = await _snapshot_planned_ids(client)
+            result: GazelkaCreateResult | None = None
+            post_exc: Exception | None = None
+            try:
+                result = await client.create_order(payload, form=form)
+            except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
+                post_exc = e  # POST мог дойти до портала — исход сверим по списку
+            if result is not None and result.ok:
+                status = GazelkaOrderStatus.SENT
+                _, confirmed = await _confirm_created(client, before_ids, payload)
+                ref = confirmed or result.ref
+                message = result.message
+                excerpt = result.excerpt
+            else:
+                checked, confirmed = await _confirm_created(client, before_ids, payload)
+                if confirmed is not None:
+                    # Портал не подтвердил редиректом, но заявка появилась в списке —
+                    # это успех (ложная ошибка ломала доверие и плодила дубли).
+                    status = GazelkaOrderStatus.SENT
+                    ref = confirmed
+                    message = f"Заявка отправлена в Газельку (№{confirmed} в «Запланированных»)"
+                    excerpt = result.excerpt if result is not None else None
+                elif post_exc is not None:
+                    if checked:  # сверили список — заявки нет: FAILED, повтор безопасен
+                        message = _scrub(
+                            f"Газелька ответила ошибкой, заявка не появилась в «Запланированных»: {post_exc}"
+                        )
+                    else:  # сверка недоступна — заявка МОГЛА создаться, повтор только с подтверждением
+                        status = GazelkaOrderStatus.UNCERTAIN
+                        message = _scrub(f"Ошибка связи с Газелькой: {post_exc}. Сверьте в кабинете перед повтором.")
+                    error = message
+                else:  # POST прошёл без редиректа-успеха (result есть), в списке заявки нет
+                    if checked:  # сверили — не создана: FAILED, повтор безопасен
+                        message = (
+                            "Газелька отклонила заявку — она не появилась в «Запланированных». "
+                            "Проверьте данные формы и попробуйте ещё раз."
+                        )
+                        error = message
+                    else:  # сверка недоступна — могла создаться
+                        status = GazelkaOrderStatus.UNCERTAIN
+                        message = result.message if result is not None else ""
+                    excerpt = result.excerpt if result is not None else None
     except GazelkaServiceError:
         raise  # недопустимые даты/склад — заявку не создавали, audit-строка не нужна
     except GazelkaApiError as e:
         message = _scrub(str(e))
         error = message
     except (httpx.HTTPError, CircuitOpenError, ValueError) as e:
-        # Сбой во время/после POST — заявка МОГЛА создаться. Не ретраим, просим сверить.
+        # Сбой до POST (логин/снятие формы) — заявку не создавали.
         message = _scrub(f"Ошибка связи с Газелькой: {e}. Сверьте в кабинете перед повтором.")
         error = message
 

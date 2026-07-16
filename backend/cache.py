@@ -170,6 +170,7 @@ async def invalidate_project_reports(project_id: int):
         "reports:localization_daily",
         "reports:warehouse_need",
         "reports:pricing_markup",
+        "ad_clusters_alltime",  # кластеры кампании за всю жизнь (список + all-time показы для locked)
         # Counterparty & Loans (Phase 1 pre-registered; @cached in Phase 2 services)
         "counterparty_list",
         "counterparty_detail",

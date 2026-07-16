@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.cache import invalidate_cache
 from backend.models import AssemblyRequest, AssemblyWbSupply, WbFboSupply, WbSupplySyncStatus
 from backend.schemas.assembly_wb import (
     WbCabinetBox,
@@ -33,11 +34,16 @@ from backend.schemas.assembly_wb import (
     WbSupplyState,
 )
 from backend.services import integrations_service
+from backend.services.warehouse_acceptance_service import (
+    _is_spec_acceptance_wh,
+    _normalize_acceptance_wh,
+)
 from backend.integrations.wb_portal_client import (
     WbPortalClient,
     WbPortalError,
     WbSessionExpired,
 )
+from backend.utils.phone import normalize_ru_phone
 from backend.utils.time import utcnow
 
 logger = structlog.get_logger("dds.wb_supply")
@@ -219,16 +225,39 @@ def _build_goods(assembly: AssemblyRequest) -> list[dict]:
 
 
 async def _resolve_warehouse_id(client: WbPortalClient, name: str) -> int:
-    """Имя направления → числовой warehouseID портала. Точный матч по имени."""
+    """Имя направления → числовой warehouseID портала.
+
+    Направление заявки — КАНОНИЧЕСКОЕ имя (ACCEPTANCE_TO_STOCK_NAME: «Краснодар»,
+    «Самара (Новосемейкино)»), а фильтр портала отдаёт СЫРЫЕ кабинетные имена
+    («Краснодар (Тихорецкая)», «Новосемейкино») — точного совпадения может не
+    быть в принципе (ASM-689/693). Порядок матча: точный → casefold → канон
+    обеих сторон (спец-двойники СГТ/Питание/СЦ исключаются, иначе id спец-склада
+    перетирает реальный — см. learnings про last-wins).
+    """
     items = await client.get_warehouse_filter_items()
     by_name = {w["warehouseName"]: w["warehouseID"] for w in items if w.get("warehouseName")}
     if name in by_name:
         return int(by_name[name])
-    # Фолбэк: сравнение без учёта регистра/пробелов.
+    # Фолбэк 1: сравнение без учёта регистра/пробелов.
     norm = name.strip().casefold()
     for wname, wid in by_name.items():
         if wname.strip().casefold() == norm:
             return int(wid)
+    # Фолбэк 2: канонический матч (только реальные склады, без спец-двойников).
+    target = _normalize_acceptance_wh(name)
+    candidates: dict[int, str] = {}
+    for wname, wid in by_name.items():
+        if _is_spec_acceptance_wh(wname):
+            continue
+        if _normalize_acceptance_wh(wname) == target:
+            candidates[int(wid)] = wname
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if len(candidates) > 1:
+        raise WbSupplyError(
+            f"WB-склад «{name}» неоднозначен в кабинете: "
+            f"{', '.join(sorted(candidates.values()))} — выберите склад вручную."
+        )
     raise WbSupplyError(
         f"WB-склад «{name}» не распознан в кабинете. Выберите склад вручную."
     )
@@ -340,7 +369,10 @@ async def get_state(db: AsyncSession, project_id: int, assembly_id: int) -> WbSu
 # Статусы заявки, для которых WB-поставка ещё «живая» (её статус меняется и
 # интересен). Терминальные (SHIPPED/DELIVERED/CLOSED/CANCELLED/RETURNED) не синкаем —
 # их сотни в истории, а статус уже финальный → лишние вызовы и рейт-лимит.
-_SYNC_ACTIVE_STATUSES = ("IN_PROGRESS", "READY", "VEHICLE_ASSIGNED")
+# SHIPPED («в пути») тоже синкаем: поставка ещё не принята (→DELIVERED после
+# приёмки WB), а блок «Расхождение поставок ФФ» и снимок кабинетного пропуска
+# нужны именно для назначенных/в пути. Терминальные (DELIVERED/CLOSED/архив) — нет.
+_SYNC_ACTIVE_STATUSES = ("IN_PROGRESS", "READY", "VEHICLE_ASSIGNED", "SHIPPED")
 _SYNC_SUPPLY_CAP = 200      # предохранитель от лавины вызовов
 _SYNC_DELAY = 0.25         # пауза между supplyDetails (щадим анти-бот)
 
@@ -357,13 +389,14 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
     Для адоптированных из FBO без строки — строка создаётся. supplyDetails также
     используется в панели (get_state). Возврат: {checked, updated, supplies_seen}.
     """
-    # 1. Связи с supply_id у АКТИВНЫХ незаархивированных заявок.
+    # 1. ВСЕ строки связи АКТИВНЫХ незаархивированных заявок — в т.ч. «голые»
+    #    (без supply_id): иначе адопция FBO ниже создала бы ДУБЛЬ по unique-индексу
+    #    ix_assembly_wb_supply_assembly_request_id (напр. локальный пропуск без брони).
     links_res = await db.execute(
         select(AssemblyWbSupply)
         .join(AssemblyRequest, AssemblyWbSupply.assembly_request_id == AssemblyRequest.id)
         .where(
             AssemblyWbSupply.project_id == project_id,
-            AssemblyWbSupply.supply_id.isnot(None),
             AssemblyRequest.status.in_(_SYNC_ACTIVE_STATUSES),
             AssemblyRequest.is_deleted.is_(False),
             AssemblyRequest.is_archived.is_(False),
@@ -406,6 +439,7 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
 
     updated = 0
     checked = 0
+    autopushed = 0
     for aid, sid, link in work[:_SYNC_SUPPLY_CAP]:
         try:
             meta = await _cabinet_status(client, sid)
@@ -433,6 +467,9 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
                     boxes=[],
                 )
                 db.add(link)
+            elif link.supply_id is None:
+                # «Голая» строка (пропуск без брони) адоптирует supply_id из FBO.
+                link.supply_id = sid
             if link.wb_supply_state != meta.name or link.wb_supply_state_id != meta.state_id:
                 link.wb_supply_state = meta.name
                 link.wb_supply_state_id = meta.state_id
@@ -440,10 +477,40 @@ async def sync_all_states(db: AsyncSession, project_id: int) -> dict:
             link.supply_date = meta.supply_date
             link.reject_reason = meta.reject_reason
             link.wb_state_synced_at = utcnow()
+            # Снимок кабинетного пропуска (для сверки ДДС↔ВБ) — best-effort:
+            # сбой пропуска не роняет синк статуса; сессия истекла — пробрасываем.
+            try:
+                cab = _parse_cabinet_pass(await client.trn_details(sid))
+            except WbSessionExpired as e:
+                await integrations_service.mark_wb_portal_expired(db, project_id)
+                raise WbSupplyError(
+                    "Сессия WB-кабинета истекла. Обновите доступ WB в настройках."
+                ) from e
+            except WbPortalError:
+                cab = None
+            if cab is not None:
+                _apply_cabinet_pass_snapshot(link, cab)
+                # Фоновый добор авто-заноса пропуска: дата забронирована, пропуск
+                # заполнен, а в кабинете его ещё нет → заносим (страховка на любой
+                # порядок событий назначение↔бронь). `cab` уже разобран — не ходим
+                # в trn_details повторно.
+                if await try_autopush_pass(
+                    db, project_id, link, client=client, cabinet_pass=cab
+                ):
+                    autopushed += 1
         await asyncio.sleep(_SYNC_DELAY)
 
     await db.commit()
-    return {"checked": checked, "updated": updated, "supplies_seen": checked}
+    if autopushed:
+        # Пропуск(и) оформлены (sync_status→PASSED) → строки уходят из блока
+        # «Расхождение поставок ФФ» (pass_missing). Гасим кэш вкладки.
+        await invalidate_cache("reports:assembly_link_anomalies")
+    return {
+        "checked": checked,
+        "updated": updated,
+        "supplies_seen": checked,
+        "autopushed": autopushed,
+    }
 
 
 async def save_boxes(
@@ -469,11 +536,15 @@ async def save_pass(
     )
     link.pass_driver_first = data.get("driver_first")
     link.pass_driver_last = data.get("driver_last")
-    link.pass_driver_phone = data.get("driver_phone")
+    # Телефон сразу в формат WB-пропуска (79XXXXXXXXX) — иначе setTRNDetails
+    # отбивает «8-…»/«+7…» как «Номер телефона не валиден».
+    link.pass_driver_phone = normalize_ru_phone(data.get("driver_phone")) or None
     link.pass_car_model = data.get("car_model")
     link.pass_car_number = data.get("car_number")
     link.pass_pallets = data.get("pallets")
     await db.commit()
+    # pass_pallets кормит блок «Расхождение поставок ФФ» (pallet_mismatch) — гасим кэш.
+    await invalidate_cache("reports:assembly_link_anomalies")
     return link
 
 
@@ -543,7 +614,7 @@ async def sync_pass_from_vehicle(
     if veh_brand:
         link.pass_car_model = veh_brand
     if veh_phone:
-        link.pass_driver_phone = veh_phone
+        link.pass_driver_phone = normalize_ru_phone(veh_phone) or None
 
     # ФИО: явные поля заявки — источник истины. Их нет только у старых заявок →
     # тогда best-effort парсинг из свободной строки, и только в пустой пропуск.
@@ -601,6 +672,14 @@ async def create_preorder(
         await db.commit()
         await client.draft_update_goods(draft_id, goods)
         validation = await client.validate_warehouse_goods(draft_id, warehouse_id)
+        goods_errors = _extract_goods_errors(validation)
+        if goods_errors:
+            shown = "; ".join(goods_errors[:8])
+            more = f" (и ещё {len(goods_errors) - 8})" if len(goods_errors) > 8 else ""
+            raise WbSupplyError(
+                f"WB не принимает часть товаров на складе «{name}»: {shown}{more}. "
+                "Уберите эти товары из заявки или выберите другой склад."
+            )
         box_type_id = _choose_box_type(desired_box_type, _extract_box_types(validation), pkg, name)
         preorder_id = await client.supply_create(draft_id, warehouse_id, box_type_id)
 
@@ -673,7 +752,12 @@ async def sync_supply_id(db: AsyncSession, project_id: int, assembly_id: int) ->
         link.sync_status = WbSupplySyncStatus.BOOKED.value
         link.last_error = None
         link.last_synced_at = utcnow()
+        # Дата только что забронирована → сразу пробуем занести пропуск, если он
+        # уже заполнен (например, машину назначили раньше брони).
+        pushed = await try_autopush_pass(db, project_id, link, client=client)
         await db.commit()
+        if pushed:
+            await invalidate_cache("reports:assembly_link_anomalies")
         return link
 
     return await _run(db, project_id, link, _flow())
@@ -756,12 +840,173 @@ async def push_pass(db: AsyncSession, project_id: int, assembly_id: int) -> Asse
         )
         link.barcode_id = barcode_id
         link.sync_status = WbSupplySyncStatus.PASSED.value
+        # Только что записали пропуск в WB — кабинетный снимок = отправленное.
+        # Обновляем сразу, иначе «Номер ВБ» в блоке ждёт следующего синка состояний.
+        link.wb_pass_present = True
+        link.wb_pass_car_number = car_number
+        link.wb_pass_pallets = pallets
+        link.wb_pass_driver = f"{last_name} {first_name}".strip() or None
+        link.wb_pass_synced_at = utcnow()
         link.last_error = None
         link.last_synced_at = utcnow()
         await db.commit()
+        # Пропуск оформлен (sync_status→PASSED) → строка уходит из блока
+        # «Расхождение поставок ФФ» (pass_missing). Гасим кэш вкладки.
+        await invalidate_cache("reports:assembly_link_anomalies")
         return link
 
     return await _run(db, project_id, link, _flow())
+
+
+# ─── авто-занос пропуска в WB (F3+) ───────────────────────────────────────────
+# Логист назначил машину → пропуск должен уехать в кабинет WB САМ, без ручного
+# клика. Физическое ограничение: занести пропуск можно только после брони даты
+# (нужен supply_id), а бронь — ручной антибот-шаг в портале. Поэтому «занос при
+# назначении» = попытка при КАЖДОМ событии, когда он становится возможен:
+#   1) назначение машины / правка реквизитов (assign_vehicle, update_assembly_request);
+#   2) подхват брони (sync_supply_id);
+#   3) фоновый добор (sync_all_states, шедулер) — страховка на любой порядок событий.
+# Все точки идемпотентны и best-effort: сбой не роняет вызывающего.
+
+
+def _pass_is_complete(link: AssemblyWbSupply) -> bool:
+    """Все поля, которые требует WB (setTRNDetails): ФИО, телефон, госномер,
+    марка, паллеты > 0. Неполный пропуск НЕ заносим — ждём дозаполнения логистом
+    (иначе WB отклонит занос). Зеркалит `missingPass` в панели «Поставка WB»."""
+    return bool(
+        (link.pass_driver_first or "").strip()
+        and (link.pass_driver_last or "").strip()
+        and (link.pass_driver_phone or "").strip()
+        and (link.pass_car_number or "").strip()
+        and (link.pass_car_model or "").strip()
+        and (link.pass_pallets or 0) > 0
+    )
+
+
+async def try_autopush_pass(
+    db: AsyncSession,
+    project_id: int,
+    link: AssemblyWbSupply,
+    *,
+    client: WbPortalClient | None = None,
+    cabinet_pass: "WbCabinetPass | None" = None,
+) -> bool:
+    """Занести пропуск в WB автоматически, если это возможно (best-effort, БЕЗ commit).
+
+    Заносим ТОЛЬКО когда:
+      • есть supply_id (дата забронирована);
+      • пропуск ещё не занесён (sync_status != PASSED);
+      • заполнены все обязательные поля (_pass_is_complete);
+      • в кабинете пропуска ещё нет — не перетираем ручной кабинетный ввод.
+
+    `cabinet_pass` можно передать (уже разобранный в sync_all_states) — тогда не
+    ходим в trn_details повторно. Ошибки НЕ пробрасываем (фоновая операция не
+    должна ронять назначение/синк) — только логируем; commit делает вызывающий.
+    Возвращает True, если занос выполнен.
+    """
+    if not link.supply_id:
+        return False
+    if link.sync_status == WbSupplySyncStatus.PASSED.value:
+        return False
+    if not _pass_is_complete(link):
+        return False
+    supply_id = link.supply_id
+    try:
+        if client is None:
+            client = await _client(db, project_id)
+        if cabinet_pass is None:
+            cabinet_pass = _parse_cabinet_pass(await client.trn_details(supply_id))
+        # В кабинете уже есть пропуск (завели руками/раньше) — не трогаем, расхождение
+        # покажет блок сверки. Занос только в ПУСТОЙ кабинетный пропуск.
+        if cabinet_pass.has_pass:
+            return False
+        barcode_id = cabinet_pass.barcode_id
+        if not barcode_id:
+            return False  # WB ещё не выдал ШК пропуска — попробуем на следующем событии
+        # _pass_is_complete гарантирует непустые значения — `or ""` только сужает
+        # тип для mypy (Optional-колонки), фолбэк фактически не срабатывает.
+        first_name = link.pass_driver_first or ""
+        last_name = link.pass_driver_last or ""
+        car_number = link.pass_car_number or ""
+        car_model = link.pass_car_model or ""
+        phone = link.pass_driver_phone or ""
+        pallets = link.pass_pallets or 0
+        await client.set_trn(
+            barcode_id=int(barcode_id),
+            supply_id=supply_id,
+            first_name=first_name,
+            last_name=last_name,
+            car_model=car_model,
+            car_number=car_number,
+            phone=phone,
+            pallets=pallets,
+        )
+        # Снимок как в push_pass: только что записали пропуск в WB.
+        link.barcode_id = int(barcode_id)
+        link.sync_status = WbSupplySyncStatus.PASSED.value
+        link.wb_pass_present = True
+        link.wb_pass_car_number = car_number
+        link.wb_pass_pallets = pallets
+        link.wb_pass_driver = f"{last_name} {first_name}".strip() or None
+        link.wb_pass_synced_at = utcnow()
+        link.last_error = None
+        link.last_synced_at = utcnow()
+        logger.info(
+            "wb pass auto-pushed",
+            project_id=project_id,
+            assembly_request_id=link.assembly_request_id,
+            supply_id=supply_id,
+        )
+        return True
+    except WbSessionExpired:
+        await integrations_service.mark_wb_portal_expired(db, project_id)
+        logger.warning(
+            "wb pass auto-push: session expired",
+            project_id=project_id,
+            assembly_request_id=link.assembly_request_id,
+        )
+        return False
+    except WbPortalError as e:
+        # WB отклонил занос (напр. формат данных) — не флипаем в ERROR, чтобы
+        # фон не спамил панель; логиста разблокирует ручной «Занести пропуск в WB».
+        logger.warning(
+            "wb pass auto-push: portal rejected",
+            project_id=project_id,
+            assembly_request_id=link.assembly_request_id,
+            error=str(e),
+        )
+        return False
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "wb pass auto-push: unexpected error",
+            project_id=project_id,
+            assembly_request_id=link.assembly_request_id,
+            exc_info=True,
+        )
+        return False
+
+
+async def try_autopush_pass_by_assembly(
+    db: AsyncSession, project_id: int, assembly_id: int
+) -> bool:
+    """Авто-занос пропуска для заявки по id (триггеры назначения машины).
+
+    Грузит заявку с `wb_fbo_supply` (адопция supply_id безопасна — relationship
+    загружен явно), затем `try_autopush_pass`. Коммитит и гасит кэш сверки ТОЛЬКО
+    при успешном заносе. Best-effort: любая ошибка проглатывается.
+    """
+    try:
+        assembly = await _load_assembly(db, project_id, assembly_id)
+    except WbSupplyError:
+        return False
+    link = await _get_or_create_link(
+        db, project_id, assembly_id, adopt_supply_id=_adopted_supply_id(assembly)
+    )
+    pushed = await try_autopush_pass(db, project_id, link)
+    if pushed:
+        await db.commit()
+        await invalidate_cache("reports:assembly_link_anomalies")
+    return pushed
 
 
 async def get_drivers(db: AsyncSession, project_id: int) -> list[dict]:
@@ -874,6 +1119,11 @@ async def get_cabinet_pass(
     except WbPortalError as e:
         raise WbSupplyError(f"WB отклонил операцию: {e}") from e
 
+    return _parse_cabinet_pass(details)
+
+
+def _parse_cabinet_pass(details: dict) -> WbCabinetPass:
+    """trn_details WB → WbCabinetPass (водитель/авто/паллеты/ШК пропуска)."""
     trns = ((details.get("details") or {}).get("trns")) or []
     if not trns:
         return WbCabinetPass(has_pass=False)
@@ -895,6 +1145,34 @@ async def get_cabinet_pass(
     )
 
 
+def _apply_cabinet_pass_snapshot(link: AssemblyWbSupply, cab: WbCabinetPass) -> None:
+    """Снимок кабинетного пропуска в link + заполнение ТОЛЬКО пустых полей ДДС.
+
+    Снимок (`wb_pass_*`) — для сверки нашего пропуска с кабинетным. Пустые поля
+    нашего пропуска (`pass_*`) подтягиваем из кабинета (пропуск завели прямо в WB);
+    непустые НЕ трогаем — расхождение показывается в блоке (см. link_anomalies).
+    """
+    link.wb_pass_present = cab.has_pass
+    link.wb_pass_car_number = cab.car_number
+    link.wb_pass_pallets = cab.pallets
+    link.wb_pass_driver = " ".join(x for x in (cab.driver_last, cab.driver_first) if x) or None
+    link.wb_pass_synced_at = utcnow()
+    if not cab.has_pass:
+        return
+    if not link.pass_driver_first and cab.driver_first:
+        link.pass_driver_first = cab.driver_first
+    if not link.pass_driver_last and cab.driver_last:
+        link.pass_driver_last = cab.driver_last
+    if not link.pass_car_model and cab.car_model:
+        link.pass_car_model = cab.car_model
+    if not link.pass_car_number and cab.car_number:
+        link.pass_car_number = cab.car_number
+    if not link.pass_driver_phone and cab.driver_phone:
+        link.pass_driver_phone = normalize_ru_phone(cab.driver_phone) or None
+    if link.pass_pallets is None and cab.pallets is not None:
+        link.pass_pallets = cab.pallets
+
+
 # ─── парсеры ответов WB ──────────────────────────────────────────────────────
 
 
@@ -905,6 +1183,31 @@ def _extract_box_types(validation: dict) -> list[int]:
         if types:
             return [int(t) for t in types]
     return []
+
+
+def _extract_goods_errors(validation: dict) -> list[str]:
+    """Пер-товарные ошибки validateWarehouseGoodsV2 → человекочитаемые строки.
+
+    WB отдаёт items[].hasError + errors[{field, error}] (снято живьём на ASM-701:
+    «Запрет завоза предмета на склад» — категория запрещена на складе). Если
+    такие товары не отсеять, supply/create падает с -32003 и ПУСТЫМ innerMsg
+    («есть ошибки в товарах поставки») — причину пользователь не видит.
+    """
+    out: list[str] = []
+    for it in validation.get("items") or []:
+        if not it.get("hasError"):
+            continue
+        label = it.get("sa") or it.get("nmSa") or str(it.get("nmId") or "?")
+        msgs = sorted(
+            {
+                e["error"]
+                for e in (it.get("errors") or [])
+                if isinstance(e, dict) and e.get("error")
+            }
+        )
+        text = ", ".join(msgs) if msgs else "ошибка без описания"
+        out.append(f"{label} ({it.get('barcode', '?')}) — {text}")
+    return out
 
 
 def _choose_box_type(desired: int, available: list[int], pkg: str, warehouse: str) -> int:

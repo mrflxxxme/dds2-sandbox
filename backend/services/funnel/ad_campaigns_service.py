@@ -18,12 +18,17 @@ def _parse_wb_created(value: Any) -> datetime | None:
     except (ValueError, TypeError):
         return None
 
+import pytz
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import WbAdCampaign, WbAdCampaignEvent, WbFunnelDaily
-from backend.models.integrations import WbAdCampaignDaily, WbWarehouseStock
+from backend.models.integrations import (
+    WbAdCampaignDaily,
+    WbAdCampaignSnapshot,
+    WbWarehouseStock,
+)
 from backend.models.wb_finance import WbFinanceRow
 from backend.services.funnel.wb_advertising_api import (
     fetch_ad_campaigns_detailed,
@@ -33,6 +38,8 @@ from backend.services.funnel.wb_api_client import get_wb_key
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.funnel")
+
+MSK = pytz.timezone("Europe/Moscow")
 
 # In-memory progress tracker: {project_id: {status, campaigns_total, budgets_done, budgets_total, error}}
 _sync_progress: dict[int, dict[str, Any]] = {}
@@ -232,6 +239,131 @@ async def sync_ad_campaigns_bg(project_id: int) -> None:
         logger.error(f"Ad campaigns bg sync failed for project {project_id}: {e}")
 
 
+async def refresh_one_campaign(db: AsyncSession, project_id: int, campaign_id: int) -> dict:
+    """Точечный догруз ОДНОЙ кампании из WB и синхронная запись в зеркало (по кнопке «Обновить»).
+
+    Три узких запроса WB (~1–2с): деталь (имя/тип/статус/nm_ids/bid_mode), бюджет и свежая
+    дневная стата за 2 дня (fullstats). Обновляет wb_ad_campaigns (+events на смену бюджета/
+    статуса), wb_ad_campaign_daily и wb_ad_nm_daily. НЕ трогает весь кабинет.
+    Возвращает {"ok": bool, "error": str | None}.
+    """
+    from backend.services.funnel.ad_nm_stats import upsert_ad_nm_daily
+    from backend.services.funnel.wb_advertising_api import fetch_ad_stats, fetch_campaign_detail
+
+    api_key = await get_wb_key(db, project_id, "wb_advert")
+    if not api_key:
+        api_key = await get_wb_key(db, project_id, "wb_analytics")
+    if not api_key:
+        api_key = await get_wb_key(db, project_id, "wb")
+    if not api_key:
+        return {"ok": False, "error": "no_api_key"}
+
+    detail = await fetch_campaign_detail(api_key, campaign_id)
+    if not detail or not detail.get("advertId"):
+        return {"ok": False, "error": "not_found"}
+
+    budgets = await fetch_campaign_budgets_batch(api_key, [campaign_id])
+
+    msk = pytz.timezone("Europe/Moscow")
+    today = utcnow().astimezone(msk).date()
+    yesterday = today - timedelta(days=1)
+    stats = await fetch_ad_stats(api_key, [campaign_id], yesterday.isoformat(), today.isoformat())
+
+    old = (
+        await db.execute(
+            select(WbAdCampaign)
+            .where(WbAdCampaign.project_id == project_id, WbAdCampaign.campaign_id == campaign_id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    # WB не отдал бюджет (редко) → сохраняем прежний, а не обнуляем
+    campaign_budget = budgets.get(campaign_id)
+    if campaign_budget is None and old is not None:
+        campaign_budget = old.budget
+
+    now = utcnow()
+    row = {
+        "project_id": project_id,
+        "campaign_id": campaign_id,
+        "name": str(detail.get("name") or campaign_id),
+        "campaign_type": detail.get("type"),
+        "advert_type": detail.get("advert_type"),
+        "created_at": _parse_wb_created(detail.get("create_time")),
+        "bid_mode": detail.get("bid_mode"),
+        "status": detail.get("status") or (old.status if old else 9),
+        "budget": campaign_budget or Decimal("0"),
+        "nm_ids": detail.get("nm_ids") or (old.nm_ids if old else []),
+        "updated_at": now,
+    }
+
+    # События изменения (как в sync_ad_campaigns): бюджет — только если WB реально отдал его
+    events = []
+    if old is not None:
+        if campaign_id in budgets:
+            ob, nb = float(old.budget or 0), float(campaign_budget or 0)
+            if abs(ob - nb) >= 1:
+                events.append(WbAdCampaignEvent(
+                    project_id=project_id, campaign_id=campaign_id, event_type="budget_change",
+                    old_value=str(round(ob, 2)), new_value=str(round(nb, 2))))
+        if old.status != row["status"]:
+            events.append(WbAdCampaignEvent(
+                project_id=project_id, campaign_id=campaign_id, event_type="status_change",
+                old_value=str(old.status), new_value=str(row["status"])))
+    if events:
+        db.add_all(events)
+
+    stmt = pg_insert(WbAdCampaign).values([row])
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_ad_campaign_project",
+        set_={
+            "name": stmt.excluded.name,
+            "campaign_type": stmt.excluded.campaign_type,
+            "advert_type": stmt.excluded.advert_type,
+            "created_at": func.coalesce(stmt.excluded.created_at, WbAdCampaign.created_at),
+            "bid_mode": stmt.excluded.bid_mode,
+            "status": stmt.excluded.status,
+            "budget": stmt.excluded.budget,
+            "nm_ids": stmt.excluded.nm_ids,
+            "updated_at": stmt.excluded.updated_at,
+        },
+    )
+    await db.execute(stmt)
+
+    # Дневная стата за 2 дня (из того же fullstats-ответа — доп. запросов к WB нет)
+    by_campaign = stats.get("_by_campaign") or {}
+    camp_rows = []
+    for date_str, camps in by_campaign.items():
+        if date_str.startswith("_"):
+            continue
+        for cid, s in camps.items():
+            camp_rows.append({
+                "project_id": project_id,
+                "campaign_id": cid,
+                "date": date_type.fromisoformat(date_str),
+                "views": s.get("views", 0),
+                "clicks": s.get("clicks", 0),
+                "spend": s.get("sum", 0),
+            })
+    if camp_rows:
+        cstmt = pg_insert(WbAdCampaignDaily).values(camp_rows)
+        cstmt = cstmt.on_conflict_do_update(
+            constraint="uq_ad_campaign_daily",
+            set_={"views": cstmt.excluded.views, "clicks": cstmt.excluded.clicks, "spend": cstmt.excluded.spend},
+        )
+        await db.execute(cstmt)
+
+    await db.commit()
+
+    # РК-статистика кампания×товар (та же форма, что фоновый синк) — best-effort
+    try:
+        await upsert_ad_nm_daily(db, project_id, stats.get("_by_nm_campaign") or {})
+    except Exception as e:
+        logger.error(f"refresh_one_campaign nm daily save error ({campaign_id}): {e}")
+
+    return {"ok": True, "error": None}
+
+
 async def sync_ad_budgets_only(db: AsyncSession, project_id: int) -> dict:
     """Fetch ONLY budgets for active campaigns (status=9). Lightweight sync for scheduler every 10 min.
 
@@ -299,6 +431,90 @@ async def sync_ad_budgets_only(db: AsyncSession, project_id: int) -> dict:
     await db.commit()
     logger.info(f"sync_ad_budgets_only: {updated_count}/{len(campaign_ids)} budgets updated for project {project_id}")
     return {"updated": updated_count, "events": len(events)}
+
+
+async def snapshot_ad_intraday(db: AsyncSession, project_id: int) -> dict:
+    """Снимок накопительных ВНУТРИДНЕВНЫХ счётчиков активных кампаний (показы/клики/расход).
+
+    Зовётся планировщиком каждые ~30 мин. Тянет «сегодняшний» (МСК) накопительный счётчик
+    из кабинета рекламы (cmp campaigns-stats, сессия wb_portal_session) и пишет по строке
+    WbAdCampaignSnapshot на кампанию. Дельта между снимками = интрадей-метрики
+    (get_intraday_metrics). WB нативно почасовку не отдаёт — копим сами вперёд.
+
+    Кабинетная сессия ≠ API-ключ: нет сессии → тихий skip (фича опциональна, синк не ломаем).
+    Протухла сессия (401) → mark_wb_portal_expired, UI попросит обновить доступ WB.
+    """
+    from backend.integrations.wb_portal_client import WbPortalError, WbSessionExpired
+    from backend.services.integrations_service import (
+        get_wb_portal_client,
+        mark_wb_portal_expired,
+    )
+    from backend.services.settings_service import get_ads_snapshot_interval_min
+
+    try:
+        client = await get_wb_portal_client(db, project_id)
+    except ValueError:
+        return {"snapshots": 0, "skipped": "no_session"}
+
+    # Гейт частоты: job тикает каждые 10 мин, но проект может хотеть реже (20/30/60).
+    # Пропускаем, если с последнего снимка прошло меньше интервала (grace 5 мин на джиттер тика).
+    interval_min = await get_ads_snapshot_interval_min(db, project_id)
+    last_at = (
+        await db.execute(
+            select(func.max(WbAdCampaignSnapshot.captured_at)).where(
+                WbAdCampaignSnapshot.project_id == project_id
+            )
+        )
+    ).scalar()
+    if last_at is not None and (utcnow() - last_at).total_seconds() / 60 < interval_min - 5:
+        await client.aclose()
+        return {"snapshots": 0, "skipped": "interval"}
+
+    active = (
+        await db.execute(
+            select(WbAdCampaign).where(
+                WbAdCampaign.project_id == project_id,
+                WbAdCampaign.status == 9,
+            )
+        )
+    ).scalars().all()
+    if not active:
+        await client.aclose()
+        return {"snapshots": 0}
+    campaign_ids = [c.campaign_id for c in active]
+
+    today_msk = pytz.UTC.localize(utcnow()).astimezone(MSK).date()
+    day_str = today_msk.isoformat()
+    try:
+        stats = await client.fetch_campaigns_stats(campaign_ids, day_str, day_str)
+    except WbSessionExpired:
+        await mark_wb_portal_expired(db, project_id)
+        logger.warning(f"snapshot_ad_intraday: session expired for project {project_id}")
+        return {"snapshots": 0, "error": "session_expired"}
+    except WbPortalError as e:
+        logger.warning(f"snapshot_ad_intraday: WB portal error for project {project_id}: {e}")
+        return {"snapshots": 0, "error": "wb_error"}
+    finally:
+        await client.aclose()
+
+    now = utcnow()
+    rows = [
+        WbAdCampaignSnapshot(
+            project_id=project_id,
+            campaign_id=s["campaign_id"],
+            stat_date=today_msk,
+            captured_at=now,
+            views_cum=s["views"],
+            clicks_cum=s["clicks"],
+            spend_cum=Decimal(str(round(s["spend"], 2))),
+        )
+        for s in stats
+    ]
+    if rows:
+        db.add_all(rows)
+        await db.commit()
+    logger.info(f"snapshot_ad_intraday: {len(rows)} snapshots for project {project_id}")
+    return {"snapshots": len(rows)}
 
 
 def _assign_abc(items: list[dict], value_key: str, abc_key: str) -> None:

@@ -39,7 +39,9 @@ from backend.integrations.skladbot_client import (
     ASSEMBLY_WIP_STAGE_CODES,
     ASSEMBLY_WIP_TITLE_MARKERS,
     DELIVERY_REQUEST_TYPE_ID,
+    INBOUND_REQUEST_TYPE_ID,
     INBOUND_TYPE_IDS,
+    LOGISTICS_WRITEOFF_STAGE_CODES,
     SkladbotApiError,
     SkladbotClient,
     decode_jwt_exp,
@@ -100,6 +102,12 @@ _MIGFULL_SERVICE_ITEM_MARKER = "фф грузовое место"
 _MIGFULL_BOX_UNITS_RE = re.compile(r"короб\s+(\d+)\s*шт", re.IGNORECASE)
 _QTY_MAX = 2**31 - 1  # Integer-колонка: мусорная сумма провайдера не должна валить flush
 _DEST_WAREHOUSE_MAX = 300  # String(300): значение длиннее уронит транзакцию синка
+# Состав ФФ-заявки по ШК {barcode: qty>0}, вложенный в raw-зеркало. skladbot не
+# отдаёт состав в списочном методе — кладём его сюда из живой деталки при синке
+# (_enrich_skladbot_requests), чтобы сверять расхождение ПО НАШИМ ШК в бейдже/
+# списке без повторного HTTP. Отдельной колонки нет намеренно (derived, само-
+# восстанавливается каждым синком). Приватный ключ (префикс `_`) — не поле провайдера.
+_FF_COMPOSITION_KEY = "_ff_composition"
 
 
 def _safe_int(value: object) -> int:
@@ -1576,6 +1584,20 @@ async def _enrich_skladbot_requests(
         total = min(sum(_safe_int(p.get("amount")) for p in products if isinstance(p, dict)), _QTY_MAX)
         # 0/пусто = «нет данных»: при дрейфе формы ответа не затираем прежнее значение нулём
         row["total_qty"] = total or None
+        # Состав по ШК из деталки → в raw-зеркало (см. _FF_COMPOSITION_KEY). Нужен
+        # для сверки расхождения по НАШИМ ШК без повторного HTTP: бейдж/список
+        # игнорируют строки ФФ, которых нет в нашей сборке. Пусто (дрейф формы) —
+        # ключ не пишем, старое значение остаётся, вердикт уходит в фолбэк по кол-ву.
+        comp: dict[str, int] = {}
+        for p in products:
+            if not isinstance(p, dict):
+                continue
+            bc = str(p.get("barcode") or "").strip()
+            if bc:
+                comp[bc] = comp.get(bc, 0) + _safe_int(p.get("amount"))
+        comp = {bc: q for bc, q in comp.items() if q > 0}
+        if comp:
+            row["raw"] = {**(row.get("raw") or {}), _FF_COMPOSITION_KEY: comp}
         dest = next(
             (
                 f.get("value")
@@ -2363,21 +2385,22 @@ def _parse_date(value: object) -> date | None:
 
 
 async def _migfull_assembled_by_guid(db: AsyncSession, project_id: int, warehouse_id: int) -> dict[str, int]:
-    """Σ planned-строк СОБРАННЫХ отгрузок migfull (`ready`) по product_guid.
+    """Σ planned-строк АКТИВНЫХ отгрузок migfull по product_guid = «Собрано».
 
-    Берётся из заявок-отгрузок, которые мы синкаем (`planned_lines`). У migfull
-    сток блокируется (`stock_locked`) только когда заявку СОБРАЛИ (→ `ready`);
-    заявки в статусе `uploaded` («Загружен», ещё в работе) сток НЕ держат —
-    проверено живьём. Поэтому `stock_locked = собрано (ready) + брак`, и в
-    `list_stocks`: «Собрано» = min(это, qty_reserve), «Брак» = остаток. Единицы —
-    как у qty_reserve (короб-guid → в коробах, россыпь-guid → в россыпи)."""
+    Берётся из заявок-отгрузок, которые мы синкаем (`planned_lines`). migfull
+    держит резерв (`stock_locked`) под отгрузку не только в статусе `ready`
+    («Собран»), но и в `uploaded`/`new` («Загружен»/«Новый», ещё в работе) —
+    проверено живьём (locked > собранного-ready). Считаем «собранным» ВСЕ
+    активные (не закрытые/не отменённые) отгрузки, иначе заявки-в-работе ложно
+    падают в «Брак». Перепланирование гасится `min(это, qty_reserve)` в
+    `list_stocks`. Единицы — как у qty_reserve (короб-guid → коробах, россыпь → россыпи)."""
     result = await db.execute(
         select(FulfillmentRequest.raw).where(
             FulfillmentRequest.project_id == project_id,
             FulfillmentRequest.warehouse_id == warehouse_id,
             FulfillmentRequest.provider == "migfull",
             FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
-            FulfillmentRequest.stage_code == "ready",
+            FulfillmentRequest.stage_code.in_(_MIGFULL_ACTIVE_SHIPMENT_STAGES),
         )
     )
     assembled: dict[str, int] = {}
@@ -2387,6 +2410,87 @@ async def _migfull_assembled_by_guid(db: AsyncSession, project_id: int, warehous
             if guid:
                 assembled[guid] = assembled.get(guid, 0) + _safe_int(line.get("quantity"))
     return assembled
+
+
+# Активные (не закрытые/не отменённые) статусы отгрузки migfull — держат резерв.
+_MIGFULL_ACTIVE_SHIPMENT_STAGES = ("ready", "uploaded", "new")
+
+
+async def _migfull_inbound_locked_by_barcode(
+    db: AsyncSession, project_id: int, warehouse_id: int
+) -> dict[str, int]:
+    """Σ ожидаемого по EXPECTED-приёмкам migfull, ключ = россыпь-ШК номенклатуры.
+
+    migfull лочит свежий приход (`stock_locked`) на время оприходования — товар
+    физически на складе, но не «собран» ни в одну отгрузку, поэтому без поправки
+    он падает в «Брак» (поймано на Алмазной мозаике машины V-0032: резерв=весь
+    остаток, заявок 0, а это приход). Позиции в наших EXPECTED-приёмках = входящий
+    залоченный товар — выносим его из «Брака» в бакет «В приёмке»."""
+    result = await db.execute(
+        select(Nomenclature.barcode, func.sum(InboundReceiptItem.expected_qty))
+        .join(InboundReceiptItem, InboundReceiptItem.nomenclature_id == Nomenclature.id)
+        .join(InboundReceipt, InboundReceipt.id == InboundReceiptItem.receipt_id)
+        .where(
+            InboundReceipt.project_id == project_id,
+            InboundReceipt.warehouse_id == warehouse_id,
+            InboundReceipt.status == "EXPECTED",
+            Nomenclature.project_id == project_id,
+        )
+        .group_by(Nomenclature.barcode)
+    )
+    return {bc: int(q or 0) for bc, q in result.all() if bc}
+
+
+# Сборка ещё «наша» (сток у нас на складе, ship_request не списал) — пред-отгрузочные
+# статусы. SHIPPED и далее (наш сток уже списан) сюда не входят.
+_PRESHIP_ASSEMBLY_STATUSES = (
+    AssemblyStatus.PENDING.value,
+    AssemblyStatus.IN_PROGRESS.value,
+    AssemblyStatus.READY.value,
+    AssemblyStatus.VEHICLE_ASSIGNED.value,
+)
+
+
+async def _logistics_in_transit_by_barcode(
+    db: AsyncSession, project_id: int, warehouse_id: int
+) -> dict[str, tuple[int, int | None]]:
+    """Состав сборок, чья ФФ-заявка на стадии списания логистики, но груз ещё на складе.
+
+    skladbot списывает stock_actual (=ff_good зеркало) уже на стадии «Указание
+    вида работ логистики» (`LOGISTICS_WRITEOFF_STAGE_CODES`), хотя товар физически
+    на складе ФФ, а мы сборку ещё не отгрузили и на ФБО не сдали — `ship_request`
+    списывает наш сток только по `is_completed`. Пока ФФ-заявка не завершена и
+    сборка в пред-отгрузочном статусе, её состав досчитываем к остатку ФФ в
+    расхождении (иначе ложная недостача). Возвращает {barcode: (qty, nomenclature_id)}.
+    """
+    result = await db.execute(
+        select(
+            AssemblyRequestItem.barcode,
+            AssemblyRequestItem.nomenclature_id,
+            func.sum(AssemblyRequestItem.quantity),
+        )
+        .join(AssemblyRequest, AssemblyRequestItem.assembly_request_id == AssemblyRequest.id)
+        .join(FulfillmentRequest, FulfillmentRequest.assembly_request_id == AssemblyRequest.id)
+        .where(
+            FulfillmentRequest.project_id == project_id,
+            FulfillmentRequest.warehouse_id == warehouse_id,
+            FulfillmentRequest.kind == FfRequestKind.ASSEMBLY.value,
+            FulfillmentRequest.stage_code.in_(LOGISTICS_WRITEOFF_STAGE_CODES),
+            FulfillmentRequest.is_completed == False,  # noqa: E712
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.is_deleted == False,  # noqa: E712
+            AssemblyRequest.status.in_(_PRESHIP_ASSEMBLY_STATUSES),
+        )
+        .group_by(AssemblyRequestItem.barcode, AssemblyRequestItem.nomenclature_id)
+    )
+    out: dict[str, tuple[int, int | None]] = {}
+    for barcode, nom_id, qty in result.all():
+        if not barcode:
+            continue
+        prev = out.get(barcode)
+        add = int(qty or 0)
+        out[barcode] = (prev[0] + add, prev[1] or nom_id) if prev else (add, nom_id)
+    return out
 
 
 async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> dict:
@@ -2413,6 +2517,9 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     assembled_by_guid = (
         await _migfull_assembled_by_guid(db, project_id, warehouse_id) if is_migfull else {}
     )
+    inbound_locked_by_bc = (
+        await _migfull_inbound_locked_by_barcode(db, project_id, warehouse_id) if is_migfull else {}
+    )
 
     ws_result = await db.execute(
         select(WarehouseStock)
@@ -2425,9 +2532,14 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
     )
     our_rows = list(ws_result.scalars().all())
 
+    # Товар в стадии списания логистики ФФ (skladbot списал из stock_actual, но
+    # груз ещё на складе и сборка не отгружена) — досчитаем к ff_good ниже.
+    logistics_in_transit = await _logistics_in_transit_by_barcode(db, project_id, warehouse_id)
+
     # article_seller / subject / brand одним запросом для всех номенклатур (без N+1)
     nom_ids = {r.nomenclature_id for r in ff_rows if r.nomenclature_id}
     nom_ids |= {r.nomenclature_id for r in our_rows if r.nomenclature_id}
+    nom_ids |= {nid for _, nid in logistics_in_transit.values() if nid}
     nom_by_id: dict[int, tuple[str | None, str | None, str | None]] = {}
     if nom_ids:
         nom_result = await db.execute(
@@ -2458,11 +2570,13 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
             "brand": brand,
             "ff_good": 0,
             "ff_reserve": 0,
-            "ff_reserve_ready": 0,  # migfull: часть резерва под собранные отгрузки (ready)
+            "ff_reserve_ready": 0,  # migfull: часть резерва под активные отгрузки (собрано)
+            "ff_inbound_locked": 0,  # migfull: часть резерва под свежий приход (позиции в EXPECTED-приёмках)
             "ff_defect": 0,
             "ff_nominal": 0,
             "ff_box_units": 0,  # из них пришло коробами (в штуках россыпи)
             "ff_box_count": 0,  # сколько коробов годного
+            "ff_logistics": 0,  # досчитано к ff_good: товар в стадии списания логистики, ещё на складе ФФ
             "our_quantity": 0,
             "our_defect": 0,
             "diff": 0,
@@ -2481,10 +2595,10 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         row["ff_good"] += r.qty_good * units
         row["ff_reserve"] += r.qty_reserve * units
         if is_migfull:
-            # Резерв (stock_locked) = собрано (ready) + брак. «Собрано» капуем под
-            # резерв (заявка планирует больше, чем реально заблокировано — короб
-            # собирается из россыпи), остаток резерва = брак. Так части всегда ≥0 и
-            # в сумме = qty_reserve. Единицы — как у qty_reserve → ×units к россыпи.
+            # Резерв (stock_locked) = собрано (активные отгрузки) + В приёмке + брак.
+            # «Собрано» капуем под резерв (заявка планирует больше, чем заблокировано),
+            # остаток — предварительный брак; «В приёмке» (свежий приход) вынимается
+            # из брака ниже. Единицы — как у qty_reserve → ×units к россыпи.
             ready_cap = min(assembled_by_guid.get(r.external_product_id or "", 0), r.qty_reserve)
             row["ff_reserve_ready"] += ready_cap * units
             row["ff_defect"] += (r.qty_reserve - ready_cap) * units
@@ -2516,6 +2630,33 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         ws_row["our_quantity"] = wr.quantity
         ws_row["our_defect"] = wr.defect_quantity
 
+    # Досчёт логистики к ff_good: товар списан у ФФ на стадии «Указание вида работ
+    # логистики», но физически на складе, а сборка ещё не отгружена (наш сток его
+    # держит) → без досчёта расхождение показывает ложную недостачу. Состав сборки
+    # — в россыпи (ключ = barcode, без короб-фолда).
+    for barcode, (qty, nom_id) in logistics_in_transit.items():
+        lrow = rows.get(barcode)
+        if lrow is None:
+            lrow = rows[barcode] = _new_row(barcode, nom_id)
+        elif lrow["nomenclature_id"] is None and nom_id is not None:
+            lrow["nomenclature_id"] = nom_id
+            lrow["article_seller"], lrow["subject"], lrow["brand"] = _nom_fields(nom_id)
+        lrow["ff_logistics"] += qty
+        lrow["ff_good"] += qty
+
+    # migfull: вынести «В приёмке» (свежий приход, залоченный migfull) из «Брака».
+    # Резерв под входящий товар (позиции в EXPECTED-приёмках) не «собран» ни в одну
+    # отгрузку → иначе он ложно = брак. Забираем из предварительного ff_defect.
+    if is_migfull:
+        for barcode, locked in inbound_locked_by_bc.items():
+            irow = rows.get(barcode)
+            if irow is None:
+                continue
+            take = min(locked, irow["ff_defect"])
+            if take > 0:
+                irow["ff_inbound_locked"] += take
+                irow["ff_defect"] -= take
+
     for row in rows.values():
         if is_migfull:
             # ff_good (stock_actual) включает брак → сравниваем с нашим ИТОГОМ,
@@ -2529,8 +2670,10 @@ async def list_stocks(db: AsyncSession, project_id: int, warehouse_id: int) -> d
         "ff_good": sum(r["ff_good"] for r in out_rows),
         "ff_reserve": sum(r["ff_reserve"] for r in out_rows),
         "ff_reserve_ready": sum(r["ff_reserve_ready"] for r in out_rows),
+        "ff_inbound_locked": sum(r["ff_inbound_locked"] for r in out_rows),
         "ff_defect": sum(r["ff_defect"] for r in out_rows),
         "ff_box_units": sum(r["ff_box_units"] for r in out_rows),
+        "ff_logistics": sum(r["ff_logistics"] for r in out_rows),
         "our_quantity": sum(r["our_quantity"] for r in out_rows),
         "diff": sum(r["diff"] for r in out_rows),
         "unmatched": sum(1 for k in ff_keys if rows[k]["nomenclature_id"] is None),
@@ -3729,6 +3872,24 @@ def _migfull_line_rows(value: object) -> list[dict]:
     return [r for r in rows if isinstance(r, dict)]
 
 
+def _migfull_composition_lines(req: FulfillmentRequest) -> list[dict]:
+    """Строки состава migfull-отгрузки для сверки со сборкой.
+
+    Закрытая (отгружена, `is_completed`) заявка → ФАКТ `shipped_lines`; открытая
+    (ещё собирается) → предварительный план `planned_lines`. План закрытой заявки
+    уже неактуален: ФФ мог отгрузить не весь план (недовоз, перенос остатка в
+    related_shipment) → сверка сборки с планом даёт ложное расхождение по
+    неотгруженным позициям. Закрыта, но строк отгрузки нет → фолбэк на план,
+    чтобы не потерять состав целиком.
+    """
+    raw = req.raw or {}
+    if req.is_completed:
+        shipped = _migfull_line_rows(raw.get("shipped_lines"))
+        if shipped:
+            return shipped
+    return _migfull_line_rows(raw.get("planned_lines"))
+
+
 def _migfull_products_from_lines(
     base_lines: list[dict],
     fact_lines: list[dict],
@@ -3900,8 +4061,12 @@ def _build_match(
 ) -> dict:
     """Сверка состава ФФ-заявки с нашим документом (FfRequestMatch shape).
 
-    Обе стороны по barcode: qty отличается / есть только у ФФ / есть только
-    у нас. Позиции ФФ без barcode сверке не подлежат и в тоталы не входят.
+    Расхождение считаем ТОЛЬКО по НАШИМ ШК: qty отличается по ШК из нашего
+    документа (включая «мы отправили, а в заявке ФФ нет»). Лишние ШК только у ФФ,
+    которых мы не отправляли (our_qty==0), расхождением НЕ считаются (частый мусор
+    провайдера — приписки строк соседних заявок) — они видны в общей таблице
+    состава (колонка «В нашей заявке» = 0). Согласовано с compute_doc_ff_mismatch.
+    Позиции ФФ без barcode сверке не подлежат и в тоталы не входят.
     """
     ff_by_barcode: dict[str, int] = {}
     name_by_barcode: dict[str, str | None] = {}
@@ -3916,8 +4081,8 @@ def _build_match(
     for barcode in set(ff_by_barcode) | set(our_by_barcode):
         ff_qty = ff_by_barcode.get(barcode, 0)
         our_qty = our_by_barcode.get(barcode, 0)
-        if ff_qty == our_qty:
-            continue
+        if ff_qty == our_qty or our_qty == 0:
+            continue  # our_qty==0 → лишний ШК у ФФ, не наше расхождение
         _nom_id, article = nom_by_barcode.get(barcode, (None, None))
         row = {
             "barcode": barcode,
@@ -3949,9 +4114,7 @@ def _ff_unit_total(req: FulfillmentRequest, mig_guid_map: dict[str, tuple[str, i
     """
     if req.provider == "migfull" and req.kind == FfRequestKind.ASSEMBLY.value:
         total = 0
-        for p in _migfull_products_from_lines(
-            _migfull_line_rows((req.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
-        ):
+        for p in _migfull_products_from_lines(_migfull_composition_lines(req), [], fact_field="delivery_qty"):
             if p["qty"] > 0:
                 _bc, units = mig_guid_map.get(p["guid"], (None, 1))
                 total += p["qty"] * units
@@ -3985,9 +4148,7 @@ def _mirror_ff_composition(req: FulfillmentRequest, mig_guid_map: dict[str, tupl
         if req.kind != FfRequestKind.ASSEMBLY.value:
             return None
         guid_qty: dict[str, int] = {}
-        for p in _migfull_products_from_lines(
-            _migfull_line_rows((req.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
-        ):
+        for p in _migfull_products_from_lines(_migfull_composition_lines(req), [], fact_field="delivery_qty"):
             if p["qty"] > 0:
                 guid_qty[p["guid"]] = guid_qty.get(p["guid"], 0) + p["qty"]
         if not guid_qty:
@@ -4003,7 +4164,15 @@ def _mirror_ff_composition(req: FulfillmentRequest, mig_guid_map: dict[str, tupl
             comp[bc] = comp.get(bc, 0) + qty * units
         return comp or None
 
-    return None  # skladbot — состав только в живой деталке
+    # skladbot: состав по ШК кладётся в raw живой деталкой при синке (см.
+    # _FF_COMPOSITION_KEY / _enrich_skladbot_requests). Нет ключа (заявка ещё не
+    # обогащалась / дрейф формы) → None → фолбэк на сверку по суммарному кол-ву.
+    if req.provider == "skladbot":
+        raw_comp = (req.raw or {}).get(_FF_COMPOSITION_KEY)
+        if isinstance(raw_comp, dict):
+            out = {str(bc): _safe_int(q) for bc, q in raw_comp.items() if _safe_int(q) > 0}
+            return out or None
+    return None
 
 
 async def _joint_members_for_assemblies(
@@ -4151,9 +4320,7 @@ async def compute_doc_ff_mismatch(
     mig_guids_by_wh: dict[int, set[str]] = {}
     for r in ff_reqs:
         if r.provider == "migfull" and r.kind == FfRequestKind.ASSEMBLY.value:
-            for p in _migfull_products_from_lines(
-                _migfull_line_rows((r.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
-            ):
+            for p in _migfull_products_from_lines(_migfull_composition_lines(r), [], fact_field="delivery_qty"):
                 if p["qty"] > 0:
                     mig_guids_by_wh.setdefault(r.warehouse_id, set()).add(p["guid"])
     mig_maps: dict[int, dict[str, tuple[str, int]]] = {}
@@ -4174,7 +4341,12 @@ async def compute_doc_ff_mismatch(
             for c in comps:
                 for bc, q in c.items():  # type: ignore[union-attr]
                     combined[bc] = combined.get(bc, 0) + q
-            return combined != our_comp
+            # Сверяем ТОЛЬКО по нашим ШК: расхождение = ФФ заявил иное кол-во по ШК
+            # ИЗ НАШЕЙ сборки (или не заявил его вовсе). Лишние ШК у ФФ, которых мы
+            # не отправляли, — не наше наполнение (частый мусор провайдера: заявка
+            # с приписанными строками соседних заявок) → в вердикт НЕ идут, панель
+            # покажет их как инфо (extra_rows). Согласовано с get_assembly_ff_mismatch_detail.
+            return any(combined.get(bc, 0) != q for bc, q in our_comp.items())
         # фолбэк по суммарному кол-ву В ШТУКАХ (migfull-отгрузка: короба × штук в
         # коробе, а не total_qty=коробá → иначе ложное расхождение vs наш итог в штуках)
         if any(r.total_qty is None for r in reqs):
@@ -4221,14 +4393,17 @@ async def get_assembly_ff_mismatch_detail(
     """Разбивка расхождения наполнения сборки с привязанными заявками ФФ (модалка «что не так»).
 
     None — сборка не найдена в проекте. Иначе FfMismatchDetail-shape:
-    - mode="barcode": сверка по ШК (wmscelicom/migfull) — rows только по расходящимся
-      позициям (наш qty vs суммарный qty всех АКТИВНЫХ привязанных заявок ФФ);
-    - mode="total": состав ФФ по позициям недоступен (skladbot / неполный резолв
-      migfull) → только итоги; ФФ-итог migfull считается в ШТУКАХ (`_ff_unit_total`,
-      короба × штук), а не в коробах из `total_qty`.
+    - mode="barcode": сверка по ШК (wmscelicom/migfull; skladbot — только при live)
+      — rows только по расходящимся позициям (наш qty vs суммарный qty всех АКТИВНЫХ
+      привязанных заявок ФФ);
+    - mode="total": состав ФФ по позициям недоступен (неполный резолв migfull;
+      skladbot без live или при ошибке провайдера) → только итоги; ФФ-итог migfull
+      считается в ШТУКАХ (`_ff_unit_total`, короба × штук), а не в коробах из `total_qty`.
     live=True (деталка одной сборки) — дотягиваем неразрезолвленные migfull-guid живой
-    карточкой + ручные ШК (overlay) → состав становится полным → mode="barcode".
-    live=False (батч аномалий, `compute_doc_ff_mismatch`) — только зеркало, без HTTP.
+    карточкой + ручные ШК (overlay), а состав skladbot (в зеркале его НЕТ — списочный
+    API отдаёт только тотал) — живой деталкой `/v1/requests/show` → mode="barcode".
+    live=False (батч аномалий, `compute_doc_ff_mismatch`) — только зеркало, без HTTP
+    (иначе список из N сборок дал бы N запросов к провайдеру).
     """
     asm = (
         await db.execute(
@@ -4298,9 +4473,7 @@ async def get_assembly_ff_mismatch_detail(
     name_by_guid: dict[str, str | None] = {}
     for r in ff_reqs:
         if r.provider == "migfull" and r.kind == FfRequestKind.ASSEMBLY.value:
-            for p in _migfull_products_from_lines(
-                _migfull_line_rows((r.raw or {}).get("planned_lines")), [], fact_field="delivery_qty"
-            ):
+            for p in _migfull_products_from_lines(_migfull_composition_lines(r), [], fact_field="delivery_qty"):
                 if p["qty"] > 0:
                     mig_guids_by_wh.setdefault(r.warehouse_id, set()).add(p["guid"])
                     name_by_guid.setdefault(p["guid"], p.get("name"))
@@ -4324,6 +4497,15 @@ async def get_assembly_ff_mismatch_detail(
                 await _migfull_resolve_detail_barcodes(client, guids, mig_maps[wh_id])
 
     comps = [_mirror_ff_composition(r, mig_maps.get(r.warehouse_id, {})) for r in ff_reqs]
+    # live: у skladbot состава в зеркале НЕТ (списочный API отдаёт только тотал) →
+    # дотягиваем живой деталкой /v1/requests/show. Иначе панель одной сборки вечно
+    # падала бы в mode="total" («состав недоступен»), хотя состав достать можно.
+    # Best-effort: ошибка провайдера → None → фолбэк по количеству (как раньше).
+    # Только live (деталка одной сборки): в батче (список) это дало бы N HTTP.
+    if live:
+        for i, r in enumerate(ff_reqs):
+            if comps[i] is None and r.provider == "skladbot":
+                comps[i] = await _fetch_ff_composition(db, project_id, r.warehouse_id, r)
     base = {
         "assembly_id": assembly_request_id,
         "assembly_number": assembly_number_label,
@@ -4336,7 +4518,11 @@ async def get_assembly_ff_mismatch_detail(
             for bc, q in c.items():  # type: ignore[union-attr]
                 combined[bc] = combined.get(bc, 0) + q
         noms = await _resolve_noms(db, project_id, set(our_comp) | set(combined))
+        # rows — расхождение по НАШИМ ШК (our_qty>0 и не совпало); extra_rows — ШК,
+        # которые есть только у ФФ (our_qty==0), показываем как инфо, но расхождением
+        # НЕ считаем (согласовано с вердиктом compute_doc_ff_mismatch).
         sortable: list[tuple[int, str, dict]] = []
+        extra_sortable: list[tuple[int, str, dict]] = []
         for bc in set(our_comp) | set(combined):
             our_qty = our_comp.get(bc, 0)
             ff_qty = combined.get(bc, 0)
@@ -4345,13 +4531,14 @@ async def get_assembly_ff_mismatch_detail(
             _nid, article = noms.get(bc, (None, None))
             diff = ff_qty - our_qty
             row = {"barcode": bc, "article_seller": article, "our_qty": our_qty, "ff_qty": ff_qty, "diff": diff}
-            sortable.append((-abs(diff), bc, row))
+            (sortable if our_qty > 0 else extra_sortable).append((-abs(diff), bc, row))
         rows = [row for _, _, row in sorted(sortable, key=lambda t: (t[0], t[1]))]
-        return {**base, "mode": "barcode", "ff_total": sum(combined.values()), "rows": rows}
+        extra_rows = [row for _, _, row in sorted(extra_sortable, key=lambda t: (t[0], t[1]))]
+        return {**base, "mode": "barcode", "ff_total": sum(combined.values()), "rows": rows, "extra_rows": extra_rows}
 
     # фолбэк: состав ФФ по позициям недоступен → только итоги (migfull — в штуках, не коробах)
     ff_total = sum(_ff_unit_total(r, mig_maps.get(r.warehouse_id, {})) for r in ff_reqs)
-    return {**base, "mode": "total", "ff_total": ff_total, "rows": []}
+    return {**base, "mode": "total", "ff_total": ff_total, "rows": [], "extra_rows": []}
 
 
 async def get_ff_link_for_assembly(db: AsyncSession, project_id: int, assembly_request_id: int) -> dict | None:
@@ -4803,6 +4990,9 @@ async def link_request(
         inbound_map = {inb_doc.id: (inb_doc.number, inb_doc.status)}
 
     await db.commit()
+    # Связь всегда меняет блоки «без нашей сборки» / «расхождение поставок» — гасим кэш
+    # вкладки «Связи и расхождения» (иначе строка не уходит из блока до 5 мин).
+    await invalidate_cache("reports:assembly_link_anomalies")
     if marked_ready:
         await invalidate_cache("reports:assembly_flow")
         if ready_notify is not None:
@@ -4858,6 +5048,7 @@ async def unlink_request(
     req.assembly_request_id = None
     req.inbound_receipt_id = None
     await db.commit()
+    await invalidate_cache("reports:assembly_link_anomalies")
     return _request_to_dict(req)
 
 
@@ -4899,6 +5090,9 @@ async def archive_request(
         req.local_archived = True
         req.local_archived_at = utcnow()
         await db.commit()
+        # Блок «Заявки ФФ без нашей сборки» кэширован — иначе архив «не срабатывает»
+        # (строка возвращается из старого кэша до 5 мин).
+        await invalidate_cache("reports:assembly_link_anomalies")
     return _request_to_dict(req)
 
 
@@ -4916,6 +5110,7 @@ async def unarchive_request(
         req.local_archived = False
         req.local_archived_at = None
         await db.commit()
+        await invalidate_cache("reports:assembly_link_anomalies")
     return _request_to_dict(req)
 
 
@@ -5378,6 +5573,7 @@ async def create_assembly_from_ff(
         marked_ready = True
         ready_notify = _ready_notify_payload(doc, req)
     await db.commit()
+    await invalidate_cache("reports:assembly_link_anomalies")
     if marked_ready:
         await invalidate_cache("reports:assembly_flow")
         if ready_notify is not None:
@@ -5838,6 +6034,167 @@ async def _finalize_ff_push(
             "skipped_barcodes": [],
         },
     }
+
+
+# ─── PUSH приёмки: машина «Отправлена» → приёмка у ФФ (skladbot 852) ─────────
+
+
+async def push_ff_inbound(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    qty_by_barcode: dict[str, int],
+    arrival_date: date,
+    *,
+    comment: str | None = None,
+) -> dict | None:
+    """Создать приёмку у ФФ (skladbot 852) и вернуть НОРМАЛИЗОВАННУЮ строку заявки.
+
+    Возвращает created_row (ключи как у `_apply_requests`) при успехе; None — ФФ
+    не подключён к складу ИЛИ провайдер без поддержки создания приёмки
+    (wmscelicom/migfull): тогда вызывающий продолжает перевод статуса без ФФ.
+    Бросает ValueError на любой сбой skladbot (нерезолвленные ШК / сеть / API) —
+    вызывающий блокирует перевод машины в «Отправлена».
+
+    Делает только резолв + POST; зеркало/связь НЕ пишет — это `link_ff_inbound_mirror`
+    под тем же коммитом, что и приёмка машины (атомарность приёмка+связь+статус).
+
+    ⚠️ Коммитит текущую транзакцию перед HTTP (паттерн push: не держать БД-txn на
+    время внешнего вызова). create_request — реальный заказ БЕЗ ретраев: повторный
+    вызов создаст вторую приёмку у ФФ.
+    """
+    key = await get_integration(db, project_id, warehouse_id)
+    if key is None:
+        return None  # ФФ не подключён — приёмку не создаём, переход не блокируем
+    provider = key.service
+    if provider != "skladbot":
+        # wmscelicom/migfull: создание приёмки пока не поддержано — no-op, переход идёт как раньше
+        logger.info(
+            "ff_inbound_push: провайдер %s (склад %s) не поддерживает создание приёмки — пропуск",
+            provider,
+            warehouse_id,
+        )
+        return None
+    customer_id = (key.config or {}).get("customer_id")
+    if not customer_id:
+        raise ValueError("В конфигурации ключа нет customer_id — переподключите фулфилмент")
+    if not qty_by_barcode:
+        raise ValueError("Нет позиций для создания приёмки у ФФ")
+
+    token = _decrypt(key.encrypted_key)
+    await db.commit()  # закрыть транзакцию до внешних HTTP-вызовов
+    client = SkladbotClient(token, project_id=project_id)
+
+    try:
+        resolved = await client.resolve_products(customer_id, INBOUND_REQUEST_TYPE_ID, list(qty_by_barcode))
+    except CircuitOpenError as e:
+        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+    except RateLimitError as e:
+        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+    except SkladbotApiError as e:
+        raise ValueError(f"skladbot.ru не отдал товары для приёмки (HTTP {e.status_code})") from e
+    except httpx.HTTPError as e:
+        raise ValueError(f"Сетевая ошибка при обращении к skladbot.ru: {e}") from e
+
+    # Приёмка — ПРИХОД, а не расход: остаток у ФФ не важен (counts может быть 0).
+    # Блокируем только если ШК вовсе не резолвится в карточку ФФ (товар не заведён).
+    unresolved = [bc for bc in qty_by_barcode if bc not in resolved]
+    if unresolved:
+        shown = ", ".join(unresolved[:10])
+        more = f" и ещё {len(unresolved) - 10}" if len(unresolved) > 10 else ""
+        raise ValueError(f"Товары не найдены в карточках ФФ (заведите и повторите): {shown}{more}")
+
+    products = [
+        {
+            "product_data_id": resolved[bc]["product_data_id"],
+            "amount": qty,
+            "barcode": bc,
+            "services": [],
+            "packages": [],
+        }
+        for bc, qty in qty_by_barcode.items()
+    ]
+    total_qty = sum(qty_by_barcode.values())
+    create_payload = {
+        "customer_id": customer_id,
+        "request_type_id": INBOUND_REQUEST_TYPE_ID,
+        "products": products,
+        # Единственное обязательное поле формы 852 — примерная дата прихода (Y-m-d).
+        "fields": {"product_arrival_date": {"value": arrival_date.isoformat()}},
+        "comment": comment or "",
+        "notify": False,
+    }
+    try:
+        created = await client.create_request(create_payload)
+    except CircuitOpenError as e:
+        raise ValueError(f"skladbot.ru временно недоступен, попробуйте позже ({e})") from e
+    except RateLimitError as e:
+        raise ValueError("skladbot.ru ограничил частоту запросов — повторите через минуту") from e
+    except SkladbotApiError as e:
+        raise ValueError(f"skladbot.ru отклонил создание приёмки (HTTP {e.status_code}): {e}") from e
+    except httpx.HTTPError as e:
+        raise ValueError(f"Сетевая ошибка при создании приёмки в skladbot.ru: {e}") from e
+
+    external_id = str(created.get("id") or created.get("request_id") or "").strip()
+    if not external_id or external_id == "None":
+        raise ValueError("skladbot.ru не вернул id созданной приёмки — проверьте кабинет ФФ вручную")
+
+    return {
+        "external_id": external_id,
+        "kind": FfRequestKind.INBOUND.value,
+        "number": created.get("delivery_number") or created.get("number"),
+        "type_id": INBOUND_REQUEST_TYPE_ID,
+        "type_name": created.get("type") or "2.1 Приемка без согласование маркировки",
+        "status": created.get("status"),
+        "stage_code": created.get("stage_code"),
+        "stage_title": created.get("stage_title"),
+        "is_completed": bool(created.get("is_completed")),
+        "archived": bool(created.get("archived")),
+        "expired": bool(created.get("expired")),
+        "total_qty": total_qty,
+        "dest_warehouse": None,
+        "external_created_at": _parse_date(created.get("created_at")) or date.today(),
+        "raw": created,
+    }
+
+
+async def link_ff_inbound_mirror(
+    db: AsyncSession,
+    project_id: int,
+    warehouse_id: int,
+    inbound_receipt_id: int,
+    created_row: dict,
+) -> int:
+    """Зеркалировать созданную приёмку ФФ и связать с InboundReceipt машины.
+
+    НЕ коммитит — вызывается внутри транзакции перехода машины (приёмка ФФ + связь
+    + статус машины фиксируются одним commit). Сериализуется с конкурентным синком
+    advisory-локом (uq заявок = project_id+provider+external_id). Возвращает id
+    строки-зеркала. ValueError — зеркало не сохранилось (крайне редко).
+    """
+    external_id = created_row["external_id"]
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :project_id)"),
+        {"ns": _FF_SYNC_LOCK_NS, "project_id": project_id},
+    )
+    await _apply_requests(db, project_id, warehouse_id, "skladbot", [created_row])
+    await db.flush()
+    ff_req = (
+        await db.execute(
+            select(FulfillmentRequest).where(
+                FulfillmentRequest.project_id == project_id,
+                FulfillmentRequest.provider == "skladbot",
+                FulfillmentRequest.external_id == external_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if ff_req is None:
+        raise ValueError(
+            f"Приёмка создана у ФФ ({created_row.get('number') or external_id}), но зеркало сохранить не удалось "
+            "— проверьте кабинет ФФ и свяжите вручную"
+        )
+    ff_req.inbound_receipt_id = inbound_receipt_id
+    return ff_req.id
 
 
 async def _fetch_push_form_options(client: SkladbotClient, customer_id: int) -> tuple[int, str, list[dict], list[dict]]:

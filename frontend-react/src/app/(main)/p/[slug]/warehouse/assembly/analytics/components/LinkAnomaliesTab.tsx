@@ -16,11 +16,13 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { exportToExcel, formatDate, formatNumber } from '@/lib/utils';
+import { FfLinkModal } from '../../../[id]/ff-shared';
 import type {
     FboAnomalySupply,
     FfMismatchRow,
     LinkAnomaliesResponse,
     StockMismatchWarehouseRow,
+    SupplyDiscrepancyRow,
     UnlinkedAssemblyRow,
     UnlinkedFfRow,
     Warehouse,
@@ -159,6 +161,10 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
     // Архив заявки ФФ прямо из блока «без нашей сборки» (локальная пометка)
     const [archivingId, setArchivingId] = useState<number | null>(null);
     const [archiveError, setArchiveError] = useState('');
+    // Клиентский фильтр по складу внутри блока «Заявки ФФ без нашей сборки».
+    const [ffWhFilter, setFfWhFilter] = useState<number | ''>('');
+    // Заявка ФФ, для которой открыта модалка «Связать» (реюз FfLinkModal).
+    const [linkFor, setLinkFor] = useState<UnlinkedFfRow | null>(null);
 
     // ─── Load FF-warehouses (один раз) ────────────────────────────────────
     useEffect(() => {
@@ -264,7 +270,8 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
     }, [data]);
 
     const exportFfWithoutAsm = useCallback(() => {
-        const rows = data?.ff_without_assembly ?? [];
+        const all = data?.ff_without_assembly ?? [];
+        const rows = ffWhFilter ? all.filter(r => r.warehouse_id === ffWhFilter) : all;
         if (rows.length === 0) return;
         exportToExcel(
             rows.map(r => ({
@@ -285,6 +292,50 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                 { key: 'status', label: 'Статус' },
                 { key: 'total_qty', label: 'Шт' },
                 { key: 'created', label: 'Создана' },
+            ],
+        );
+    }, [data, ffWhFilter]);
+
+    const exportSupplyDiscrepancies = useCallback(() => {
+        const rows = data?.supply_discrepancies ?? [];
+        if (rows.length === 0) return;
+        const problems = (r: SupplyDiscrepancyRow) =>
+            [
+                r.date_mismatch && 'Дата',
+                r.pallet_mismatch && 'Паллеты',
+                r.car_number_mismatch && 'Номер≠ВБ',
+                r.pass_missing && 'Нет на ВБ',
+                r.pass_missing_dds && 'Нет в ДДС',
+            ]
+                .filter(Boolean)
+                .join(', ');
+        exportToExcel(
+            rows.map(r => ({
+                number: r.number,
+                status: statusBadge(r.status).label,
+                source_warehouse: r.source_warehouse_name || '',
+                warehouse: r.warehouse_name || '',
+                delivery_date: r.delivery_date ? formatDate(r.delivery_date) : '',
+                planned_date: r.planned_date ? formatDate(r.planned_date) : '',
+                date_diff: r.date_diff_days ?? '',
+                pallets_count: r.pallets_count,
+                pass_pallets: r.pass_pallets ?? '',
+                wb_car_number: r.wb_car_number || '',
+                problems: problems(r),
+            })),
+            'assembly_supply_discrepancies',
+            [
+                { key: 'number', label: '№' },
+                { key: 'status', label: 'Статус' },
+                { key: 'source_warehouse', label: 'Со склада' },
+                { key: 'warehouse', label: 'Склад ВБ' },
+                { key: 'delivery_date', label: 'Дата сдачи' },
+                { key: 'planned_date', label: 'Дата брони' },
+                { key: 'date_diff', label: 'Δ дней' },
+                { key: 'pallets_count', label: 'Наши паллеты' },
+                { key: 'pass_pallets', label: 'Паллеты пропуска' },
+                { key: 'wb_car_number', label: 'Номер машины ВБ' },
+                { key: 'problems', label: 'Проблемы' },
             ],
         );
     }, [data]);
@@ -332,6 +383,28 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
     const asmWithoutFf: UnlinkedAssemblyRow[] = useMemo(() => data?.assemblies_without_ff ?? [], [data]);
     const ffWithoutAsm: UnlinkedFfRow[] = useMemo(() => data?.ff_without_assembly ?? [], [data]);
     const stockMismatch: StockMismatchWarehouseRow[] = useMemo(() => data?.stock_mismatch ?? [], [data]);
+    const supplyDiscrepancies: SupplyDiscrepancyRow[] = useMemo(() => data?.supply_discrepancies ?? [], [data]);
+
+    // Склады, встречающиеся в блоке «без нашей сборки» — для локального фильтра.
+    const ffWhOptions = useMemo(() => {
+        const seen = new Map<number, string>();
+        for (const r of ffWithoutAsm) {
+            if (!seen.has(r.warehouse_id)) seen.set(r.warehouse_id, r.warehouse_name || `#${r.warehouse_id}`);
+        }
+        return [...seen.entries()].map(([id, name]) => ({ id, name }));
+    }, [ffWithoutAsm]);
+
+    // Отфильтрованный по складу срез блока «без нашей сборки» (питает и таблицу, и Excel).
+    const ffWithoutAsmView = useMemo(
+        () => (ffWhFilter ? ffWithoutAsm.filter(r => r.warehouse_id === ffWhFilter) : ffWithoutAsm),
+        [ffWithoutAsm, ffWhFilter],
+    );
+
+    // После рефетча (архив/связь) выбранный склад мог исчезнуть из списка — сбрасываем
+    // фильтр, иначе селект показывает пустое значение, а таблица — «на складе пусто».
+    useEffect(() => {
+        if (ffWhFilter && !ffWhOptions.some(w => w.id === ffWhFilter)) setFfWhFilter('');
+    }, [ffWhOptions, ffWhFilter]);
     const fbo = data?.fbo;
     const fboHasAnomalies =
         !!fbo && (fbo.without_assembly_count > 0 || fbo.under_accepted_count > 0 || fbo.excess_count > 0);
@@ -500,16 +573,31 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                         <BlockHeader
                             icon="🔗"
                             title="Заявки ФФ без нашей сборки"
-                            count={ffWithoutAsm.length}
+                            count={ffWithoutAsmView.length}
                             color="var(--color-accent)"
                             onExport={exportFfWithoutAsm}
                             note="Заявка фулфилмента, к которой не привязана наша сборка."
                         />
+                        {ffWithoutAsm.length > 0 && ffWhOptions.length > 1 && (
+                            <div style={{ padding: '0 20px 12px' }}>
+                                <select
+                                    className="form-input"
+                                    style={{ width: 'auto', minWidth: 150 }}
+                                    value={ffWhFilter}
+                                    onChange={e => setFfWhFilter(e.target.value ? Number(e.target.value) : '')}
+                                >
+                                    <option value="">Все склады</option>
+                                    {ffWhOptions.map(w => (
+                                        <option key={w.id} value={w.id}>{w.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        )}
                         {archiveError && (
                             <div style={{ padding: '8px 16px', color: 'var(--color-danger)', fontSize: 13 }}>{archiveError}</div>
                         )}
-                        {ffWithoutAsm.length === 0 ? (
-                            <BlockEmpty text="Все заявки ФФ привязаны — всё чисто" />
+                        {ffWithoutAsmView.length === 0 ? (
+                            <BlockEmpty text={ffWhFilter ? 'На этом складе непривязанных заявок ФФ нет' : 'Все заявки ФФ привязаны — всё чисто'} />
                         ) : (
                             <div style={{ overflowX: 'auto' }}>
                                 <table className="data-table" style={{ fontSize: 13 }}>
@@ -526,7 +614,7 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {ffWithoutAsm.map(row => (
+                                        {ffWithoutAsmView.map(row => (
                                             <tr key={row.ff_request_id}>
                                                 <td style={{ fontWeight: 500 }}>{row.provider}</td>
                                                 <td>{row.number || '—'}</td>
@@ -545,6 +633,14 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                                                     >
                                                         Открыть
                                                     </Link>
+                                                    <button
+                                                        className="btn btn-sm btn-primary"
+                                                        title="Связать с нашей заявкой на сборку"
+                                                        style={{ marginRight: 8 }}
+                                                        onClick={() => setLinkFor(row)}
+                                                    >
+                                                        Связать
+                                                    </button>
                                                     <button
                                                         className="btn btn-sm btn-secondary"
                                                         title="Убрать заявку ФФ в архив (локальная пометка) — уйдёт из блока"
@@ -571,7 +667,14 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                         onExport={exportStockMismatch}
                     />
 
-                    {/* 5. Аномалии поставок FBO */}
+                    {/* 5. Расхождение поставок ФФ (машина назначена / в пути) */}
+                    <SupplyDiscrepancyBlock
+                        rows={supplyDiscrepancies}
+                        slug={slug}
+                        onExport={exportSupplyDiscrepancies}
+                    />
+
+                    {/* 6. Аномалии поставок FBO */}
                     {fbo && (
                         <div className="glass-card" style={{ padding: 0, overflow: 'hidden', borderLeft: '3px solid var(--color-danger)' }}>
                             <BlockHeader
@@ -649,6 +752,19 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                 </div>
             )}
 
+            {linkFor && (
+                <FfLinkModal
+                    warehouseId={linkFor.warehouse_id}
+                    kind="assembly"
+                    request={{ id: linkFor.ff_request_id, number: linkFor.number, external_id: '' }}
+                    onClose={() => setLinkFor(null)}
+                    onLinked={() => {
+                        setLinkFor(null);
+                        setReloadTick(t => t + 1);
+                    }}
+                />
+            )}
+
             <style jsx>{`
                 @keyframes shimmer {
                     0% {
@@ -659,6 +775,94 @@ export default function LinkAnomaliesTab({ slug }: { slug: string }) {
                     }
                 }
             `}</style>
+        </div>
+    );
+}
+
+/** Блок «Расхождение поставок ФФ»: сборки (машина назначена / в пути), чья WB-поставка
+ *  расходится по дате сдачи, паллетам или неоформленному пропуску. */
+function SupplyDiscrepancyBlock({
+    rows,
+    slug,
+    onExport,
+}: {
+    rows: SupplyDiscrepancyRow[];
+    slug: string;
+    onExport: () => void;
+}) {
+    return (
+        <div className="glass-card" style={{ padding: 0, overflow: 'hidden', borderLeft: '3px solid var(--color-danger)' }}>
+            <BlockHeader
+                icon="🚚"
+                title="Расхождение поставок ФФ"
+                count={rows.length}
+                color="var(--color-danger)"
+                onExport={onExport}
+                note="Машина назначена или в пути, но что-то расходится: дата сдачи вне окна брони (±1 день), паллеты не совпадают, номер машины ≠ кабинету WB, либо пропуск не оформлен (нет на ВБ / нет в ДДС)."
+            />
+            {rows.length === 0 ? (
+                <BlockEmpty text="Поставки сходятся — всё чисто" />
+            ) : (
+                <div style={{ overflowX: 'auto' }}>
+                    <table className="data-table" style={{ fontSize: 13 }}>
+                        <thead>
+                            <tr>
+                                <th>Сборка</th>
+                                <th>Статус</th>
+                                <th>Со склада</th>
+                                <th>Склад ВБ</th>
+                                <th>Дата сдачи</th>
+                                <th>Дата брони</th>
+                                <th style={{ textAlign: 'right' }}>Δ дней</th>
+                                <th style={{ textAlign: 'right' }}>Наши пал.</th>
+                                <th style={{ textAlign: 'right' }}>Пал. пропуска</th>
+                                <th>Номер ВБ</th>
+                                <th>Проблемы</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows.map(row => (
+                                <tr key={row.assembly_id}>
+                                    <td>
+                                        <Link
+                                            href={`/p/${slug}/warehouse/assembly/${row.assembly_id}`}
+                                            style={{ color: 'var(--color-accent)', fontWeight: 600, textDecoration: 'none' }}
+                                        >
+                                            {row.number}
+                                        </Link>
+                                    </td>
+                                    <td><StatusCell status={row.status} /></td>
+                                    <td style={{ color: 'var(--color-text-muted)' }}>{row.source_warehouse_name || '—'}</td>
+                                    <td style={{ color: 'var(--color-text-muted)' }}>{row.warehouse_name || '—'}</td>
+                                    <td style={{ color: row.date_mismatch ? 'var(--color-danger)' : 'var(--color-text-muted)' }}>
+                                        {row.delivery_date ? formatDate(row.delivery_date) : '—'}
+                                    </td>
+                                    <td style={{ color: 'var(--color-text-muted)' }}>
+                                        {row.planned_date ? formatDate(row.planned_date) : '—'}
+                                    </td>
+                                    <td style={{ textAlign: 'right', fontWeight: row.date_mismatch ? 700 : 400, color: row.date_mismatch ? 'var(--color-danger)' : 'var(--color-text)' }}>
+                                        {row.date_diff_days == null ? '—' : `${row.date_diff_days > 0 ? '+' : ''}${formatNumber(row.date_diff_days, 0)}`}
+                                    </td>
+                                    <td style={{ textAlign: 'right' }}>{formatNumber(row.pallets_count, 0)}</td>
+                                    <td style={{ textAlign: 'right', color: row.pallet_mismatch ? 'var(--color-danger)' : 'var(--color-text-muted)', fontWeight: row.pallet_mismatch ? 700 : 400 }}>
+                                        {row.pass_pallets == null ? '—' : formatNumber(row.pass_pallets, 0)}
+                                    </td>
+                                    <td style={{ color: row.car_number_mismatch ? 'var(--color-danger)' : 'var(--color-text-muted)', fontWeight: row.car_number_mismatch ? 700 : 400 }}>
+                                        {row.wb_car_number || '—'}
+                                    </td>
+                                    <td style={{ whiteSpace: 'nowrap' }}>
+                                        {row.date_mismatch && <span className="badge badge-danger" style={{ fontSize: 11, marginRight: 4 }}>Дата</span>}
+                                        {row.pallet_mismatch && <span className="badge badge-warning" style={{ fontSize: 11, marginRight: 4 }}>Паллеты</span>}
+                                        {row.car_number_mismatch && <span className="badge badge-danger" style={{ fontSize: 11, marginRight: 4 }}>Номер ≠ ВБ</span>}
+                                        {row.pass_missing && <span className="badge badge-secondary" style={{ fontSize: 11, marginRight: 4 }}>Нет на ВБ</span>}
+                                        {row.pass_missing_dds && <span className="badge badge-warning" style={{ fontSize: 11 }}>Нет в ДДС</span>}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
         </div>
     );
 }

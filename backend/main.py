@@ -22,6 +22,7 @@ from backend.config import settings
 from backend.database import AsyncSessionLocal, async_engine
 from backend.routers import (
     ai_chat,
+    ab_tests,
     assembly,
     assembly_drafts,
     assembly_wb,
@@ -42,6 +43,7 @@ from backend.routers import (
     media,
     migfull_portal,
     monitoring,
+    raw_data,
     payment_requests,
     planning,
     pricing,
@@ -549,6 +551,12 @@ app.include_router(
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
+    raw_data.router,
+    prefix="/api/v1",
+    tags=["RawData"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
     funnel.router,
     prefix="/api/v1",
     tags=["Funnel"],
@@ -594,6 +602,12 @@ app.include_router(
     measurements.router,
     prefix="/api/v1",
     tags=["Measurements"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    ab_tests.router,
+    prefix="/api/v1",
+    tags=["AB Tests"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

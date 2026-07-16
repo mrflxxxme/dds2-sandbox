@@ -2,10 +2,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CampaignMetricRow } from '@/types/api';
 import { fmt, fmtPct } from './adsShared';
-import { useFitViewport } from './useFitViewport';
+import Tooltip from './Tooltip';
 
 /**
- * Гистограмма посуточных метрик кампании: наложение нескольких метрик столбцами.
+ * Комбо-график посуточных метрик кампании: одна «объёмная» метрика — фоновыми
+ * столбцами, остальные выбранные — линиями с точками поверх (не перекрывают друг
+ * друга, в отличие от прежнего наложения столбцов).
  * Метрики несопоставимы по величине, поэтому каждая нормируется на свой пик
  * (шкала — доля от пика, 0…100%); абсолютный максимум показан в легенде.
  * Период задаёт страница кампании — здесь только отрисовка переданных строк.
@@ -13,24 +15,27 @@ import { useFitViewport } from './useFitViewport';
 
 export type MetricKey = Extract<
     keyof CampaignMetricRow,
-    'views' | 'clicks' | 'ctr' | 'spend' | 'cpc' | 'cpl' | 'cpo' | 'add_to_cart' | 'orders' | 'orders_sum' | 'drr'
+    'views' | 'clicks' | 'ctr' | 'spend' | 'cpc' | 'cpl' | 'cpo' | 'add_to_cart' | 'orders' | 'orders_sum' | 'customer_price' | 'spp' | 'drr'
 >;
 
 /** Метрики по умолчанию при первом заходе в кампанию. */
-export const DEFAULT_CHART_METRICS: MetricKey[] = ['clicks', 'spend'];
+export const DEFAULT_CHART_METRICS: MetricKey[] = ['clicks', 'spend', 'spp'];
 
 // «Переходы» (open_card) намеренно нет: по смыслу это те же клики.
-export const CHART_METRICS: { key: MetricKey; label: string; color: string; pct?: boolean }[] = [
-    { key: 'views', label: 'Показы', color: '#8b5cf6' },
-    { key: 'clicks', label: 'Клики', color: '#3b82f6' },
+// bar: метрика «объёмная» (может быть фоновыми столбцами). Проценты и стоимости — всегда линией.
+export const CHART_METRICS: { key: MetricKey; label: string; color: string; pct?: boolean; bar?: boolean }[] = [
+    { key: 'views', label: 'Показы', color: '#8b5cf6', bar: true },
+    { key: 'clicks', label: 'Клики', color: '#3b82f6', bar: true },
     { key: 'ctr', label: 'CTR %', color: '#6366f1', pct: true },
-    { key: 'spend', label: 'Затраты ₽', color: '#ef4444' },
+    { key: 'spend', label: 'Затраты ₽', color: '#ef4444', bar: true },
     { key: 'cpc', label: 'CPC ₽', color: '#f97316' },
     { key: 'cpl', label: 'CPL ₽', color: '#f59e0b' },
     { key: 'cpo', label: 'CPO ₽', color: '#a16207' },
-    { key: 'add_to_cart', label: 'Корзины', color: '#14b8a6' },
-    { key: 'orders', label: 'Заказы шт.', color: '#10b981' },
-    { key: 'orders_sum', label: 'Заказали на сумму', color: '#0ea5e9' },
+    { key: 'add_to_cart', label: 'Корзины', color: '#14b8a6', bar: true },
+    { key: 'orders', label: 'Заказы шт.', color: '#10b981', bar: true },
+    { key: 'orders_sum', label: 'Заказали на сумму', color: '#0ea5e9', bar: true },
+    { key: 'customer_price', label: 'Цена Клиенту ₽', color: '#0d9488' },  // цена с СПП — линией
+    { key: 'spp', label: 'СПП %', color: '#7c3aed', pct: true },           // средний СПП за день
     { key: 'drr', label: 'ДРР %', color: '#be185d', pct: true },
 ];
 
@@ -48,36 +53,46 @@ const fmtDay = (d: string) => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
 
 const MONTHS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 
+// Единая типографика графика: Roboto (наследуется от body, в SVG задаём явно) + аккуратная шкала кеглей.
+const FONT = 'var(--font-sans)';
+const FS = { tick: 10, legend: 12, hint: 11, tip: 12, empty: 13 };  // ось/подписи · легенда · подсказка · тултип · пусто
+
 // PAD_B меньше, чем было: подписи дат больше не наклонены и занимают одну строку
 const W = 1000, PAD_L = 14, PAD_R = 14, PAD_T = 14, PAD_B = 26;
-const H_MIN = 240;
+const H_MIN = 160;
 
 /** Выбор метрик — контролируемый: живёт на странице кампании, чтобы переживать
  *  перемонтирование графика при смене товара/периода (метрики перезагружаются). */
-export default function CampaignMetricsChart({ rows, selected, onToggle }: {
+export default function CampaignMetricsChart({ rows, selected, onToggle, launchDate }: {
     rows: CampaignMetricRow[];
     selected: Set<MetricKey>;
     onToggle: (k: MetricKey) => void;
+    /** Дата запуска кампании (ISO, WB createTime) — красная вертикальная линия на графике. */
+    launchDate?: string | null;
 }) {
     const [hover, setHover] = useState<number | null>(null);
     const [mouseX, setMouseX] = useState(0);
     const wrapRef = useRef<HTMLDivElement>(null);
-    // График занимает остаток экрана: свернули хедер — стало детальнее
-    const { ref: fitRef, maxHeight: fitHeight } = useFitViewport(320, 16);
+    // График заполняет ПАНЕЛЬ (а не окно): меряем свою высоту, чтобы влезать без прокрутки/клипа
+    const fitRef = useRef<HTMLDivElement>(null);
     const [wrapW, setWrapW] = useState(1000);
+    const [availH, setAvailH] = useState(400);
 
     useEffect(() => {
         const el = wrapRef.current;
+        const root = fitRef.current;
         if (!el) return;
-        const ro = new ResizeObserver(() => setWrapW(el.clientWidth || 1000));
+        const measure = () => { setWrapW(el.clientWidth || 1000); if (root) setAvailH(root.clientHeight || 400); };
+        const ro = new ResizeObserver(measure);
         ro.observe(el);
-        setWrapW(el.clientWidth || 1000);
+        if (root) ro.observe(root);
+        measure();
         return () => ro.disconnect();
     }, []);
 
     // Высота viewBox подобрана под реальную ширину, чтобы 1 юнит = 1 пиксель:
     // иначе meet вписал бы график с полями, а «none» растянул бы подписи.
-    const svgPxHeight = Math.max(H_MIN, (fitHeight ?? 420) - 70);
+    const svgPxHeight = Math.max(H_MIN, availH - 84);  // высота под сам график = высота панели минус легенда/подписи
     const H = Math.round((W * svgPxHeight) / Math.max(1, wrapW));
 
     // Дни по возрастанию — бэкенд может отдавать в любом порядке
@@ -115,11 +130,32 @@ export default function CampaignMetricsChart({ rows, selected, onToggle }: {
         return out;
     }, [points, geo]);
 
+    // x-координата линии запуска кампании. Ось категориальная (бар на строку, не на
+    // календарный день), поэтому «прилипаем» к первому дню >= даты запуска — устойчиво к
+    // пропущенным дням. Не рисуем, если запуск раньше окна (весь график уже после запуска)
+    // или позже последнего дня (данных после запуска нет).
+    const launchX = useMemo(() => {
+        if (!launchDate || !geo || points.length === 0) return null;
+        const day = launchDate.slice(0, 10);  // createTime — datetime, сравниваем по дате
+        if (day < points[0].date) return null;                 // запуск раньше видимого окна
+        const idx = points.findIndex(p => p.date >= day);
+        if (idx < 0) return null;                              // запуск позже последнего дня
+        return geo.cxs[idx] - geo.bw / 2;                     // левый край бара дня запуска (как у границ месяцев)
+    }, [launchDate, points, geo]);
+
     if (points.length === 0 || !geo) {
         return <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>За выбранный период нет данных по кампании</div>;
     }
 
     const ordered = CHART_METRICS.filter(m => selected.has(m.key));
+    // Комбо: одна объёмная метрика — фоновыми столбцами (предпочтительно с данными),
+    // остальные — линиями. Если объёмных нет — рисуем только линии.
+    const barMetric = ordered.find(m => m.bar && !bars[m.key].empty) ?? ordered.find(m => m.bar) ?? null;
+    const lineMetrics = ordered.filter(m => m.key !== barMetric?.key);
+    // Объёмная метрика рисуется «лоллипопом»: тонкий штырёк от базовой линии + точка-набалдашник
+    // на значении. Без линий — штырёк плотнее, чтобы не выглядел бледным.
+    const stickOp = lineMetrics.length > 0 ? 0.4 : 0.6;
+    const dotR = Math.min(5, Math.max(2.5, geo.barW / 6));
     const hp = hover != null ? points[hover] : null;
     const labelEvery = Math.ceil(points.length / 14);
     const onCellMove = (i: number, e: React.MouseEvent) => {
@@ -130,16 +166,16 @@ export default function CampaignMetricsChart({ rows, selected, onToggle }: {
     const val = (p: CampaignMetricRow, m: typeof CHART_METRICS[number]) => (m.pct ? fmtPct(Number(p[m.key])) : fmt(Number(p[m.key])));
 
     return (
-        <div ref={fitRef} style={{ padding: '12px 14px', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+        <div ref={fitRef} style={{ padding: '12px 14px', display: 'flex', gap: 12, alignItems: 'flex-start', height: '100%', minHeight: 0, boxSizing: 'border-box', overflow: 'hidden', fontFamily: FONT }}>
             {/* Слева — мультивыбор метрик */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 172, flexShrink: 0 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 172, flexShrink: 0, maxHeight: '100%', overflowY: 'auto' }}>
                 {CHART_METRICS.map(m => {
                     const active = selected.has(m.key);
                     return (
                         <button key={m.key} onClick={() => onToggle(m.key)}
                             style={{
                                 display: 'flex', alignItems: 'center', gap: 8, textAlign: 'left', border: 'none', cursor: 'pointer',
-                                borderRadius: 8, padding: '6px 10px', fontSize: 12.5, fontWeight: active ? 600 : 500,
+                                borderRadius: 8, padding: '4px 10px', fontSize: FS.legend, fontWeight: active ? 600 : 500,
                                 background: active ? hexA(m.color, 0.12) : 'transparent', color: active ? m.color : '#6b7280',
                             }}>
                             <span style={{
@@ -156,49 +192,86 @@ export default function CampaignMetricsChart({ rows, selected, onToggle }: {
             {/* Справа — наложение столбцов (multiply: пересечения смешиваются) */}
             <div ref={wrapRef} style={{ flex: 1, minWidth: 0, position: 'relative' }}>
                 {ordered.length === 0 ? (
-                    <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: 13 }}>Выберите слева одну или несколько метрик.</div>
+                    <div style={{ padding: 32, textAlign: 'center', color: 'var(--color-text-dim)', fontSize: FS.empty }}>Выберите слева одну или несколько метрик.</div>
                 ) : (
                     <>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px', marginBottom: 6 }}>
-                            {ordered.map(m => (
-                                // Диапазон «0…N» не показываем: пик каждой метрики виден в подсказке
-                                <span key={m.key} title={bars[m.key].empty ? 'Нет данных за период' : `Пик: ${fmtCompact(bars[m.key].max)}`}
-                                    style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#374151' }}>
-                                    <span style={{ width: 9, height: 9, borderRadius: 3, background: m.color, display: 'inline-block' }} />
-                                    {m.label}
-                                    {bars[m.key].empty && <span style={{ color: '#b0b0b0' }}>нет данных</span>}
+                            {ordered.map(m => {
+                                const isBar = m.key === barMetric?.key;
+                                return (
+                                // Диапазон «0…N» не показываем: пик каждой метрики виден в подсказке.
+                                // Маркер повторяет отрисовку: столбец — квадрат-плашка, линия — черта с точкой.
+                                <Tooltip key={m.key} text={bars[m.key].empty ? 'Нет данных за период' : `${isBar ? 'Точки' : 'Линия'} · пик: ${fmtCompact(bars[m.key].max)}`}>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: FS.legend, color: '#374151' }}>
+                                        {isBar
+                                            ? <span style={{ width: 9, height: 9, borderRadius: '50%', background: m.color, display: 'inline-block' }} />
+                                            : <span style={{ width: 14, height: 2, background: m.color, borderRadius: 2, display: 'inline-block' }} />}
+                                        {m.label}
+                                        {bars[m.key].empty && <span style={{ color: '#b0b0b0' }}>нет данных</span>}
+                                    </span>
+                                </Tooltip>
+                                );
+                            })}
+                            {launchX != null && (
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: FS.hint, color: '#ef4444', marginLeft: 'auto' }}>
+                                    <span style={{ width: 12, height: 2, background: '#ef4444', display: 'inline-block' }} />запуск кампании
                                 </span>
-                            ))}
-                            <span style={{ fontSize: 11, color: '#b0b0b0', marginLeft: 'auto' }}>шкала — доля от пика каждой метрики</span>
+                            )}
+                            <span style={{ fontSize: FS.hint, color: '#b0b0b0', marginLeft: launchX != null ? 12 : 'auto' }}>шкала — доля от пика каждой метрики</span>
                         </div>
 
-                        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" style={{ width: '100%', height: svgPxHeight, display: 'block' }}
+                        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" style={{ width: '100%', height: svgPxHeight, display: 'block', fontFamily: FONT }}
                             onMouseLeave={() => setHover(null)}>
                             {[0, 1, 2, 3, 4].map(i => {
                                 const y = PAD_T + (geo.innerH * i) / 4;
                                 return (
                                     <g key={i}>
                                         <line x1={PAD_L} x2={W - PAD_R} y1={y} y2={y} stroke="#eef0f2" strokeWidth={1} />
-                                        <text x={W - PAD_R} y={y - 2} fontSize={9} fill="#b8bcc2" textAnchor="end">{(4 - i) * 25}%</text>
+                                        <text x={W - PAD_R} y={y - 2} fontSize={FS.tick} fill="#b8bcc2" textAnchor="end">{(4 - i) * 25}%</text>
                                     </g>
                                 );
                             })}
                             <line x1={PAD_L} x2={W - PAD_R} y1={geo.baseY} y2={geo.baseY} stroke="#dde1e6" strokeWidth={1} />
 
-                            {ordered.map(m => (
-                                <g key={m.key} style={{ mixBlendMode: 'multiply' }}>
-                                    {bars[m.key].rects.map((b, i) => (
-                                        <rect key={i} x={b.x} y={b.y} width={geo.barW} height={Math.max(0, b.h)} rx={2}
-                                            fill={m.color} fillOpacity={hover == null || hover === i ? 0.55 : 0.3} />
-                                    ))}
+                            {/* Объёмная метрика — «лоллипоп»: тонкий штырёк + точка-набалдашник (вместо массивных столбцов) */}
+                            {barMetric && !bars[barMetric.key].empty && (
+                                <g>
+                                    {bars[barMetric.key].rects.map((b, i) => {
+                                        const cx = geo.cxs[i];
+                                        const dim = hover == null || hover === i ? 1 : 0.4;
+                                        return (
+                                            <g key={i} opacity={dim}>
+                                                <line x1={cx} x2={cx} y1={geo.baseY} y2={b.y} stroke={barMetric.color}
+                                                    strokeWidth={2.5} strokeOpacity={stickOp} strokeLinecap="round" />
+                                                <circle cx={cx} cy={b.y} r={dotR} fill={barMetric.color} stroke="#fff" strokeWidth={1} />
+                                            </g>
+                                        );
+                                    })}
                                 </g>
-                            ))}
+                            )}
+
+                            {/* Остальные метрики — линиями поверх (не перекрывают друг друга) */}
+                            {lineMetrics.map(m => {
+                                if (bars[m.key].empty) return null;
+                                const d = bars[m.key].rects.map((b, i) => `${i === 0 ? 'M' : 'L'}${geo.cxs[i].toFixed(1)} ${b.y.toFixed(1)}`).join(' ');
+                                const last = bars[m.key].rects[bars[m.key].rects.length - 1];
+                                return (
+                                    <g key={m.key} pointerEvents="none">
+                                        <path d={d} fill="none" stroke={m.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round"
+                                            opacity={hover == null ? 1 : 0.85} />
+                                        {/* Точка на конце линии — прямая привязка к серии */}
+                                        <circle cx={geo.cxs[geo.cxs.length - 1]} cy={last.y} r={3} fill={m.color} stroke="#fff" strokeWidth={1.5} />
+                                    </g>
+                                );
+                            })}
 
                             {hover != null && (
                                 <g pointerEvents="none">
                                     <line x1={geo.cxs[hover]} x2={geo.cxs[hover]} y1={PAD_T} y2={geo.baseY} stroke="#9ca3af" strokeWidth={1} strokeDasharray="3 3" />
                                     {ordered.map(m => (
-                                        <circle key={m.key} cx={geo.cxs[hover]} cy={bars[m.key].rects[hover].y} r={3} fill={m.color} stroke="#fff" strokeWidth={1} />
+                                        bars[m.key].empty ? null : (
+                                            <circle key={m.key} cx={geo.cxs[hover]} cy={bars[m.key].rects[hover].y} r={3} fill={m.color} stroke="#fff" strokeWidth={1} />
+                                        )
                                     ))}
                                 </g>
                             )}
@@ -209,16 +282,24 @@ export default function CampaignMetricsChart({ rows, selected, onToggle }: {
                                     <g key={`m${p.date}`} pointerEvents="none">
                                         <line x1={geo.cxs[i] - geo.bw / 2} x2={geo.cxs[i] - geo.bw / 2} y1={PAD_T} y2={geo.baseY}
                                             stroke="#cbd5e1" strokeWidth={1} strokeDasharray="4 4" />
-                                        <text x={geo.cxs[i] - geo.bw / 2 + 3} y={PAD_T + 9} fontSize={9} fill="#9ca3af">{MONTHS[Number(p.date.slice(5, 7)) - 1]}</text>
+                                        <text x={geo.cxs[i] - geo.bw / 2 + 3} y={PAD_T + 9} fontSize={FS.tick} fill="#9ca3af">{MONTHS[Number(p.date.slice(5, 7)) - 1]}</text>
                                     </g>
                                 )
                             ))}
+
+                            {/* Запуск кампании — сплошная красная линия */}
+                            {launchX != null && (
+                                <g pointerEvents="none">
+                                    <line x1={launchX} x2={launchX} y1={PAD_T} y2={geo.baseY} stroke="#ef4444" strokeWidth={1.5} />
+                                    <text x={launchX + 3} y={PAD_T + 20} fontSize={FS.tick} fill="#ef4444" fontWeight={600}>запуск</text>
+                                </g>
+                            )}
 
                             {/* Подписи дат — горизонтально (без поворота головы) */}
                             {points.map((p, i) => (
                                 (i % labelEvery === 0 || i === points.length - 1 || hover === i) && (
                                     <text key={p.date} x={geo.cxs[i]} y={H - PAD_B + 14}
-                                        fontSize={9} fill={hover === i ? '#111827' : '#9ca3af'} fontWeight={hover === i ? 600 : 400}
+                                        fontSize={FS.tick} fill={hover === i ? '#111827' : '#9ca3af'} fontWeight={hover === i ? 600 : 400}
                                         textAnchor="middle">
                                         {fmtDay(p.date)}
                                     </text>
@@ -237,8 +318,8 @@ export default function CampaignMetricsChart({ rows, selected, onToggle }: {
                 {hp && ordered.length > 0 && (
                     <div style={{
                         position: 'absolute', top: 4, left: `clamp(90px, ${mouseX}px, calc(100% - 130px))`, transform: 'translateX(-50%)',
-                        background: 'rgba(17,24,39,0.92)', color: '#fff', borderRadius: 8,
-                        padding: '8px 10px', fontSize: 12, pointerEvents: 'none', whiteSpace: 'nowrap', zIndex: 5,
+                        background: 'rgba(17,24,39,0.92)', color: '#fff', borderRadius: 8, fontFamily: FONT,
+                        padding: '8px 10px', fontSize: FS.tip, pointerEvents: 'none', whiteSpace: 'nowrap', zIndex: 5,
                     }}>
                         <div style={{ fontWeight: 600, marginBottom: 4 }}>{fmtDay(hp.date)}</div>
                         {ordered.map(m => (

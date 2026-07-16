@@ -3,7 +3,8 @@ Scheduler job: bulk-sync live WB supply states for all projects.
 
 Зеркалит кнопку «Обновить» WB-панели в фоне: тянет справочник статусов +
 поставки кабинета (listSupplies) и обновляет живое состояние (wb_supply_state)
-локальных связей заявка↔WB-поставка. Runs every ~4 hours (≈6×/день).
+локальных связей заявка↔WB-поставка. Заодно добирает авто-занос пропуска в WB
+(F3+), когда дата забронирована и пропуск заполнен. Runs every 30 min.
 """
 
 import asyncio
@@ -19,7 +20,7 @@ async def sync_all_projects_wb_supply_states():
     """
     Iterate all projects and bulk-sync WB supply states. Проекты без WB-заявок
     возвращают {0,0,0} без похода в кабинет; без активной портал-сессии — тихо
-    пропускаются (WbSupplyError → debug). Called by APScheduler every 4 hours.
+    пропускаются (WbSupplyError → debug). Called by APScheduler every 30 min.
     """
     logger.info("WB supply states sync: starting for all projects")
     project_ids = await get_sync_project_ids()
@@ -38,11 +39,13 @@ async def sync_all_projects_wb_supply_states():
                 res = await wb_supply_service.sync_all_states(db, project_id)
             if res["checked"]:
                 logger.info(
-                    "WB supply states sync: project %d — %d checked, %d updated, %d supplies",
+                    "WB supply states sync: project %d — %d checked, %d updated, "
+                    "%d supplies, %d pass auto-pushed",
                     project_id,
                     res["checked"],
                     res["updated"],
                     res["supplies_seen"],
+                    res.get("autopushed", 0),
                 )
             ok += 1
         except WbSupplyError as e:

@@ -171,6 +171,8 @@ async def sync_fbo_supplies(
         await db.commit()
         if assembly_delivered:
             await invalidate_cache("reports:assembly_flow")
+        # wb_status/planned_date кормят блок «Расхождение поставок ФФ» — гасим кэш вкладки.
+        await invalidate_cache("reports:assembly_link_anomalies")
 
         assemblies_shipped = await _ship_assemblies_best_effort(project_id, ship_ids)
 
@@ -448,6 +450,8 @@ async def sync_fbo_statuses(
     await db.commit()
     if assembly_delivered:
         await invalidate_cache("reports:assembly_flow")
+    # wb_status/planned_date кормят блок «Расхождение поставок ФФ» — гасим кэш вкладки.
+    await invalidate_cache("reports:assembly_link_anomalies")
 
     assemblies_shipped = await _ship_assemblies_best_effort(project_id, ship_ids)
 
