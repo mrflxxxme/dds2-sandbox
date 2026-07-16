@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { formatDateTime, formatNumber } from '@/lib/utils';
@@ -138,7 +139,15 @@ export default function AbTestDetailPage() {
     const uploaded = variants.filter((v) => !v.is_control);
     const variantById = new Map(variants.map((v) => [v.id, v]));
 
-    const metricRows: { label: string; render: (v: AbTestVariantStats) => string; hint?: string }[] = [
+    const pct = (num: number, den: number, digits = 1): string | null =>
+        den > 0 ? `${formatNumber((num / den) * 100, digits)}%` : null;
+    const withPct = (count: number, share: string | null) => (
+        <>
+            {formatNumber(count, 0)}
+            {share != null && <span style={{ color: 'var(--color-dim)', fontSize: 12 }}> · {share}</span>}
+        </>
+    );
+    const metricRows: { label: string; render: (v: AbTestVariantStats) => ReactNode; hint?: string }[] = [
         { label: 'Показы', render: (v) => formatNumber(v.views, 0) },
         { label: 'Клики', render: (v) => formatNumber(v.clicks, 0) },
         { label: 'CTR', render: (v) => (v.views ? `${formatNumber(v.ctr, 2)}%` : '—') },
@@ -148,15 +157,31 @@ export default function AbTestDetailPage() {
         },
         { label: 'Побед в раундах', render: (v) => formatNumber(v.round_wins, 0) },
         { label: 'Кругов', render: (v) => formatNumber(v.rounds, 0) },
-        { label: 'Корзины (реклама)', render: (v) => formatNumber(v.atbs, 0) },
-        { label: 'Заказы (реклама)', render: (v) => formatNumber(v.orders, 0) },
+        {
+            label: 'Корзины (реклама)',
+            render: (v) => withPct(v.atbs, pct(v.atbs, v.clicks)),
+            hint: 'Процент — конверсия из кликов в корзину',
+        },
+        {
+            label: 'Заказы (реклама)',
+            render: (v) => withPct(v.orders, pct(v.orders, v.atbs)),
+            hint: 'Процент — конверсия из корзины в заказ',
+        },
         {
             label: '≈ Переходы (все)',
             render: (v) => formatNumber(v.organic_open, 0),
             hint: 'Вся воронка товара за время кругов этого фото — конверсии между кругами размазываются, сравнивать на большой выборке',
         },
-        { label: '≈ Корзины (все)', render: (v) => formatNumber(v.organic_cart, 0) },
-        { label: '≈ Заказы (все)', render: (v) => formatNumber(v.organic_orders, 0) },
+        {
+            label: '≈ Корзины (все)',
+            render: (v) => withPct(v.organic_cart, pct(v.organic_cart, v.organic_open)),
+            hint: 'Процент — конверсия из переходов в корзину',
+        },
+        {
+            label: '≈ Заказы (все)',
+            render: (v) => withPct(v.organic_orders, pct(v.organic_orders, v.organic_cart)),
+            hint: 'Процент — конверсия из корзины в заказ',
+        },
         { label: 'Прогресс к цели', render: (v) => `${formatNumber(v.progress_pct, 0)}%` },
     ];
 
