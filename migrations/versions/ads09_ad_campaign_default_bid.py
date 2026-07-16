@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "ads09_ad_campaign_default_bid"
-down_revision = "ads08_wb_ad_campaign_events"
+down_revision = "abt01_ab_photo_tests"
 branch_labels = None
 depends_on = None
 
