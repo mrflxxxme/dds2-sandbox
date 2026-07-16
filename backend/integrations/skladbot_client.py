@@ -86,11 +86,29 @@ class SkladbotApiError(ValueError):
 
     Исключён из circuit breaker — пять connect'ов с плохим токеном не должны
     блокировать интеграцию на recovery_timeout.
+
+    `reason` — чистый текст причины от провайдера (message/detail из JSON-тела,
+    иначе срез тела) — для человеческих сообщений в UI; str(e) — для логов.
     """
 
-    def __init__(self, message: str, status_code: int):
+    def __init__(self, message: str, status_code: int, reason: str | None = None):
         super().__init__(message)
         self.status_code = status_code
+        self.reason = reason
+
+
+def _reason_from_body(text: str) -> str | None:
+    """Достать человекочитаемую причину из тела ошибки (JSON message/detail/error)."""
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return text[:200].strip() or None
+    if isinstance(data, dict):
+        for key in ("message", "detail", "error"):
+            val = data.get(key)
+            if val:
+                return str(val)[:200]
+    return text[:200].strip() or None
 
 
 # Per-project circuit breakers — one project's failures don't block others
@@ -164,6 +182,7 @@ class SkladbotClient:
                 raise SkladbotApiError(
                     f"Skladbot API error ({response.status_code}): {response.text[:200]}",
                     status_code=response.status_code,
+                    reason=_reason_from_body(response.text),
                 )
             if not (200 <= response.status_code < 300):
                 # 3xx (редирект) / 5xx (деградация) — циркуит-брейкер и ретрай.

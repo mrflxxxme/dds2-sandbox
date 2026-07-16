@@ -1584,11 +1584,11 @@ async def set_normquery_bids_batch(
             break
 
     for i in range(0, len(retry), _BID_BATCH_MAX):
-        chunk = retry[i:i + _BID_BATCH_MAX]
-        body = {"bids": [{"advert_id": advert_id, "nm_id": nm, "norm_query": q, "bid": bid} for (nm, q, bid) in chunk]}
-        resp = await _bids_request_with_retry("POST", body, headers, f"{advert_id} set-min×{len(chunk)}")
+        retry_chunk = retry[i:i + _BID_BATCH_MAX]
+        body = {"bids": [{"advert_id": advert_id, "nm_id": nm, "norm_query": q, "bid": bid} for (nm, q, bid) in retry_chunk]}
+        resp = await _bids_request_with_retry("POST", body, headers, f"{advert_id} set-min×{len(retry_chunk)}")
         succ, fail, gerr = _parse_bids_batch(resp)
-        for (nm, q, bid) in chunk:
+        for (nm, q, bid) in retry_chunk:
             if gerr is None and q in succ:
                 result[q] = {"ok": True, "bid": float(bid), "error": None}
             else:

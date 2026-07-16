@@ -15,6 +15,11 @@ interface Props {
     slug: string;
     rows: AssemblyDraftRow[];
     stockNeed: StockNeedResponse | null;
+    /** Категорийный скоуп черновика: срочные SKU считаются ТОЛЬКО по своим
+     *  категориям (и «в черновике», и «вне черновика» — чужие не шумят). */
+    inScope?: (nm: number) => boolean;
+    /** Подпись скоупа для заголовка (например «Панели стеновые»). */
+    scopeLabel?: string;
 }
 
 /** Бейдж «Запас, дн» — палитра светофора Аналитики остатков. */
@@ -49,7 +54,7 @@ function LocPct({ pct, target }: { pct: number | null; target: number }) {
  *  сколько реализации теряем за каждый день промедления. Заменил панель
  *  «Добавить из потребности»: срочные SKU вне черновика показаны компактной
  *  строкой-предупреждением (добавляются через «Заполнить» или вкладку «Потребность»). */
-export default function UrgentShipPanel({ slug, rows, stockNeed }: Props) {
+export default function UrgentShipPanel({ slug, rows, stockNeed, inScope, scopeLabel }: Props) {
     const [articles, setArticles] = useState<StockAnalyticsArticle[] | null>(null);
     const [locMap, setLocMap] = useState<Map<number, number>>(new Map());
     const [state, setState] = useState<'loading' | 'error' | 'ready'>('loading');
@@ -93,8 +98,13 @@ export default function UrgentShipPanel({ slug, rows, stockNeed }: Props) {
     }, [stockNeed]);
 
     const summary = useMemo(
-        () => buildUrgentShip({ articles: articles ?? [], draftQtyByNm, locPctByNm: locMap, leadDays, trendDays: TREND_DAYS }),
-        [articles, draftQtyByNm, locMap, leadDays],
+        () => {
+            // Категорийный скоуп: срочность считается только по SKU своих категорий —
+            // и «в черновике», и «вне черновика» (иначе в «Панелях» шумели бы ковры).
+            const scoped = inScope ? (articles ?? []).filter(a => inScope(a.nm_id)) : (articles ?? []);
+            return buildUrgentShip({ articles: scoped, draftQtyByNm, locPctByNm: locMap, leadDays, trendDays: TREND_DAYS });
+        },
+        [articles, draftQtyByNm, locMap, leadDays, inScope],
     );
 
     const locTarget = stockNeed?.summary?.localization_target ?? 75;
@@ -137,6 +147,12 @@ export default function UrgentShipPanel({ slug, rows, stockNeed }: Props) {
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 4 }}>
                 <span style={{ fontWeight: 700, fontSize: 15 }}>🚨 Срочно к отправке — уже в черновике, ещё не в сборке</span>
+                {inScope && (
+                    <span style={{ fontSize: 12, fontWeight: 600, padding: '2px 8px', borderRadius: 6, background: 'rgba(59,130,246,0.12)', color: 'var(--color-accent)' }}
+                        title="Категорийный черновик: срочность считается только по категориям среза">
+                        🗂 {scopeLabel || 'в срезе категорий'}
+                    </span>
+                )}
                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                     запас ≤ 14 дн с учётом созданных сборок и пути · каждый день промедления — минус реализация
                 </span>

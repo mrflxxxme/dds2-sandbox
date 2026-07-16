@@ -19,6 +19,8 @@ export interface CellMark {
     noLimit: boolean;
     /** Приёмка закрыта по всем типам (короб/моно/сейф) → ⛔ склад не принимает. */
     closed?: boolean;
+    /** Короб закрыт, но моно открыто → 📐 «+» кладёт моно-паллетный план. */
+    monoOnly?: boolean;
 }
 
 /** Управление ручной правкой ячейки (режим «✏️ Редактировать»): ±1 короб. */
@@ -38,8 +40,10 @@ export interface NeedMatrixCellProps {
     ship?: { qty: number; pkg: PackageType } | null;
     /** 🏬 остаток на WB (синий). */
     stock?: number;
-    /** 🚚 в сборке / в пути (зелёный). */
-    onWay?: number;
+    /** 🔧 в сборке на ФФ — ещё не отправлено (зелёный). */
+    asm?: number;
+    /** 🚚 в пути на склад WB (зелёный). */
+    transit?: number;
     /** Тонировка фона колонки по округу (полупрозрачный цвет округа). */
     tint?: string;
     /** Метка приёмки WB (📐/📦/🔒 · ⌛ предзаявка · ⛔ закрыто) — как в черновике. */
@@ -92,9 +96,10 @@ function BoxCountInput({ boxes, ppb, onSet }: { boxes: number; ppb: number; onSe
  *   строка 1 — сколько отправляем + иконка типа упаковки (📦 короб / 📐 моно / 🔒 сейф) + ⌛ предзаявка,
  *              либо «·», если в этот склад ничего не шлём;
  *   строка 2 — 🏬 остаток на WB (синий);
- *   строка 3 — 🚚 в сборке / в пути (зелёный).
+ *   строка 3 — 🔧 в сборке на ФФ (зелёный);
+ *   строка 4 — 🚚 в пути на склад WB (зелёный).
  */
-export default function NeedMatrixCell({ ship, stock = 0, onWay = 0, tint, mark, edit }: NeedMatrixCellProps) {
+export default function NeedMatrixCell({ ship, stock = 0, asm = 0, transit = 0, tint, mark, edit }: NeedMatrixCellProps) {
     const shipQty = ship?.qty ?? 0;
     const pkg = ship?.pkg ?? 'BOX';
     return (
@@ -111,13 +116,28 @@ export default function NeedMatrixCell({ ship, stock = 0, onWay = 0, tint, mark,
                             style={edit.disableInc ? STEP_BTN_OFF : STEP_BTN}
                             disabled={edit.disableInc} onClick={() => edit.onDelta(1)}>+</button>
                     </div>
-                    {edit.boxes > 0 && (
+                    {edit.boxes > 0 ? (
                         <div style={{ fontSize: 10, color: mark?.closed ? 'var(--color-danger)' : 'var(--color-muted)', whiteSpace: 'nowrap' }}>
                             = {formatNumber(edit.boxes * edit.ppb, 0)} шт
                             <span title={PKG_LABEL[pkg]}> {PKG_ICON[pkg]}</span>
                             {mark?.closed
                                 ? <span title="Приёмка закрыта — склад не принимает"> ⛔</span>
-                                : mark?.noLimit && <span title="Нет лимита приёмки — нужна предзаявка"> ⌛</span>}
+                                : <>
+                                    {mark?.monoOnly && <span title={mark.noLimit ? 'Только моно, и лимита нет — сдаётся ТОЛЬКО предзаявкой' : 'Короб не принимается — этот план едет моно-паллетой'}> 📐</span>}
+                                    {mark?.noLimit && <span title="Нет лимита приёмки — нужна предзаявка"> ⌛</span>}
+                                </>}
+                        </div>
+                    ) : (mark?.closed || mark?.noLimit || mark?.monoOnly) && (
+                        // Пустая ячейка в режиме правки: метку видно ДО клика — не надо
+                        // «тыкать в каждый склад», чтобы узнать, можно ли туда сдать.
+                        <div style={{ fontSize: 9.5, whiteSpace: 'nowrap', color: mark.closed ? 'var(--color-danger)' : 'var(--color-warning)' }}>
+                            {mark.closed
+                                ? <span title="Приёмка закрыта — склад не принимает">⛔ закрыт</span>
+                                : mark.monoOnly
+                                    ? (mark.noLimit
+                                        ? <span title="Короб закрыт, у моно нет лимита приёмки — сдаётся ТОЛЬКО предзаявкой">📐 предзаявка</span>
+                                        : <span title="Короб не принимается, моно открыто — «+» положит моно-паллетный план">📐 моно</span>)
+                                    : <span title="Нет лимита приёмки — нужна предзаявка">⌛ предзаявка</span>}
                         </div>
                     )}
                 </div>
@@ -127,9 +147,10 @@ export default function NeedMatrixCell({ ship, stock = 0, onWay = 0, tint, mark,
                     <span style={{ fontSize: 11, color: 'var(--color-muted)' }} title={PKG_LABEL[ship.pkg]}> {PKG_ICON[ship.pkg]}</span>
                     {mark?.closed
                         ? <span style={{ fontSize: 11 }} title="Приёмка закрыта — склад не принимает"> ⛔</span>
-                        : mark?.noLimit && (
-                            <span style={{ fontSize: 11 }} title="Нет лимита приёмки — нужна предзаявка"> ⌛</span>
-                        )}
+                        : <>
+                            {mark?.monoOnly && <span style={{ fontSize: 11 }} title={mark.noLimit ? 'Только моно, и лимита нет — сдаётся ТОЛЬКО предзаявкой' : 'Короб не принимается — едет моно-паллетой'}> 📐</span>}
+                            {mark?.noLimit && <span style={{ fontSize: 11 }} title="Нет лимита приёмки — нужна предзаявка"> ⌛</span>}
+                        </>}
                 </div>
             ) : (
                 <div style={{ color: 'var(--color-dim)', lineHeight: 1.3 }}>·</div>
@@ -139,9 +160,14 @@ export default function NeedMatrixCell({ ship, stock = 0, onWay = 0, tint, mark,
                     🏬 {formatNumber(stock, 0)}
                 </div>
             )}
-            {onWay > 0 && (
-                <div style={{ fontSize: 10, color: 'var(--color-success)', whiteSpace: 'nowrap', lineHeight: 1.4 }} title="В сборке / в пути">
-                    🚚 {formatNumber(onWay, 0)}
+            {asm > 0 && (
+                <div style={{ fontSize: 10, color: 'var(--color-success)', whiteSpace: 'nowrap', lineHeight: 1.4 }} title="В сборке на ФФ (ещё не отправлено)">
+                    🔧 {formatNumber(asm, 0)}
+                </div>
+            )}
+            {transit > 0 && (
+                <div style={{ fontSize: 10, color: 'var(--color-success)', whiteSpace: 'nowrap', lineHeight: 1.4 }} title="В пути на склад WB">
+                    🚚 {formatNumber(transit, 0)}
                 </div>
             )}
         </td>

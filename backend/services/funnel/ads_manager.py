@@ -9,6 +9,7 @@ Read-only поверх существующих таблиц: wb_ad_campaigns (�
 import json
 import logging
 import asyncio
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -1421,7 +1422,7 @@ BUDGET_TOPUP_MIN_DELTA = 50.0
 LEDGER_CAP = 300  # сколько записей ленты отдаём (новые первыми)
 
 
-def _iso_utc(dt) -> str | None:
+def _iso_utc(dt: datetime | None) -> str | None:
     """datetime (naive = UTC по конвенции проекта) → ISO-строка с UTC-смещением для фронта."""
     from datetime import timezone
 
@@ -1735,7 +1736,7 @@ def _parse_num(value: str | None) -> float | None:
         return None
 
 
-def _runout_by_day(ev_rows: list) -> dict[int, dict[date, datetime]]:
+def _runout_by_day(ev_rows: Sequence[WbAdCampaignEvent]) -> dict[int, dict[date, datetime]]:
     """{campaign_id: {МСК-день: момент последнего budget_change→0}} за окно событий.
 
     Зеркало today-логики get_budget_gaps, но по каждому дню отдельно: в пределах дня
@@ -1871,12 +1872,12 @@ async def _budget_window_history(
         )
     ).all()
     stop_by_c: dict[int, dict[date, float]] = {}
-    for r in last_ev:
-        v = _parse_num(r.new_value)
+    for er in last_ev:
+        v = _parse_num(er.new_value)
         if v is None or v > 0:
             continue  # день закончился с бюджетом → не остановка
-        m = pytz.UTC.localize(r.created_at).astimezone(MSK)
-        stop_by_c.setdefault(r.campaign_id, {})[r.msk_day] = m.hour + m.minute / 60
+        m = pytz.UTC.localize(er.created_at).astimezone(MSK)
+        stop_by_c.setdefault(er.campaign_id, {})[er.msk_day] = m.hour + m.minute / 60
 
     return {cid: (daily_by_c.get(cid, {}), stop_by_c.get(cid, {})) for cid in ids}
 
@@ -2104,8 +2105,8 @@ async def get_budget_gap_history(
         .all()
     )
     runout = _runout_by_day(ev).get(campaign_id, {})  # МСК-день → момент остановки (naive UTC)
-    stop_hours = {d: _stop_hour_msk(dt) for d, dt in runout.items()}
-    stop_hours = {d: h for d, h in stop_hours.items() if h is not None}
+    stop_hours_raw = {d: _stop_hour_msk(dt) for d, dt in runout.items()}
+    stop_hours: dict[date, float] = {d: h for d, h in stop_hours_raw.items() if h is not None}
 
     # Потенциал (заголовок) — по дням-остановкам за окно, БЕЗ сегодня (неполный день)
     base_spend = {d: v["spend"] for d, v in daily.items() if d != today_msk}

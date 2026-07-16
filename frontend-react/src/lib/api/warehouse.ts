@@ -11,6 +11,7 @@ import type {
     AssemblyDraftRow,
     BarcodeEligibilityResponse,
     CommitSupply,
+    DraftsReservedResponse,
     ForecastResponse,
     AssemblyDraftCreate,
     AssemblyDraftUnitRef,
@@ -632,6 +633,15 @@ export function addWarehouseMethods(api: ApiClient) {
         listAssemblyDrafts() {
             return api.request<AssemblyDraft[]>('GET', '/api/v1/assembly/drafts');
         },
+        /** Резерв стока другими черновиками: barcode → {ff_id → qty} (rows + prebook +
+         *  handed_units всех не-удалённых черновиков, кроме exclude). Вычитается из
+         *  доступного ФФ, чтобы параллельные черновики не планировали товар дважды. */
+        getDraftsReserved(excludeDraftId?: number) {
+            const q = new URLSearchParams();
+            if (excludeDraftId != null) q.set('exclude_draft_id', String(excludeDraftId));
+            const qs = q.toString();
+            return api.request<DraftsReservedResponse>('GET', `/api/v1/assembly/drafts/reserved${qs ? `?${qs}` : ''}`);
+        },
         /** Что уже едет/зарезервировано активными заявками по SKU (вкл. PRE_DISTRIBUTED) — reconcile черновика. */
         getAssemblyInTransit(nmIds: number[]) {
             const q = new URLSearchParams();
@@ -942,6 +952,25 @@ export function addWarehouseMethods(api: ApiClient) {
         // F1: bulk-синк живого WB-состояния всех заявок проекта (одним заходом в кабинет).
         wbSupplySyncAllStates() {
             return api.request<import('@/types/api').WbBulkSyncResult>('POST', '/api/v1/warehouse/assembly/wb/sync-states');
+        },
+        /** Фоновый батч-занос преордеров WB: по одной заявке с паузой ~10с (кабинет
+         *  не любит частые заносы). Батч уже идёт → 409, тегируем `.code='conflict'`
+         *  (как migfullPortalSend) — фронт подключается к статусу, а не матчит текст. */
+        async wbSupplyBulkPreorderStart(assemblyIds: number[]) {
+            try {
+                return await api.request<import('@/types/api').WbBulkPreorderStatus>('POST', '/api/v1/warehouse/assembly/wb/bulk-preorder', { assembly_ids: assemblyIds });
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : '';
+                if (/уже\s+идёт|409/i.test(msg)) {
+                    const err = new Error(msg || 'Батч уже идёт') as Error & { code?: string };
+                    err.code = 'conflict';
+                    throw err;
+                }
+                throw e;
+            }
+        },
+        wbSupplyBulkPreorderStatus() {
+            return api.request<import('@/types/api').WbBulkPreorderStatus>('GET', '/api/v1/warehouse/assembly/wb/bulk-preorder/status');
         },
         // Короба поставки из кабинета WB (с содержимым) — вкладка «Упаковка».
         wbSupplyCabinetBoxes(assemblyId: number) {

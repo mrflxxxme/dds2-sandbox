@@ -68,6 +68,9 @@ export interface DraftDistInput {
     /** Кратность короба конкретного ФФ (per-склад, machine-first) — паритет
      *  нормализации со страницей черновика. */
     ppbAt?: (nm_id: number, ffId: number) => number | null | undefined;
+    /** Класс совместимости категорий (`lib/assembly/categoryCompat`): SKU разных
+     *  классов не делят смешанную BOX-паллету при паллет-срезе. */
+    classOf?: (nm_id: number) => string;
     /** Вес приоритета WB-склада (stockNeed.warehouses[].priority_weight). */
     priorityByWh?: Record<string, number>;
 }
@@ -81,6 +84,7 @@ function draftGeom(input: DraftDistInput): DistributionGeom {
         boxSizeOf: (nm) => input.nmBoxSize.get(nm) ?? null,
         palletOverrides: input.palletOverrides,
         priorityOf: pw ? (wh) => Number(pw[wh] ?? 0) : undefined,
+        classOf: input.classOf,
     };
 }
 
@@ -278,18 +282,28 @@ export function buildAutoSyncPlan(
  * пул источников = max(живой остаток, уже забронированное строками SKU) — чтобы
  * декремент при упавшем стоке не терял источники. Чистая — юнит-тестируется.
  */
-export function applyDraftCellEdit(
+/**
+ * Правка ПРЕДБРОНИ ячейки: ±deltaBoxes целых коробов упаковки `pkg` на склад `wh`
+ * ТОЛЬКО в предброни SKU — строки-заявки не трогаются вовсе. Для складов
+ * «моно открыто, но лимита приёмки нет»: заявкой такое не поедет, а предзаявкой —
+ * да, поэтому «+» кладёт короб в 🅿️ предбронь (решение юзера 2026-07-16).
+ * Кап инкремента — свободный ФФ-остаток SKU за вычетом строк и чужой предброни;
+ * декремент свободен. Предбронь упаковки сливается в одну строку (Σsrc==Σtgt).
+ * null — превышение капа. Чистая — юнит-тестируется.
+ */
+export function applyDraftPrebookEdit(
     skuRows: AssemblyDraftRow[],
     skuPrebook: AssemblyDraftRow[],
     article: StockNeedArticle,
     wh: string,
     deltaBoxes: number,
     ppb: number | null | undefined,
+    pkg: PackageType = 'MONOPALLET',
 ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } | null {
     if (!ppb || ppb <= 0 || !deltaBoxes) return null;
-    const isMergeable = (r: AssemblyDraftRow) => (r.package_type ?? 'BOX') === 'BOX' && !r.as_is;
-    const kept = skuRows.filter((r) => !isMergeable(r)); // MONO/SUPERSAFE/as_is остаются как есть
-    const merged = [...skuRows.filter(isMergeable), ...skuPrebook];
+    const pkgOfRow = (r: AssemblyDraftRow) => (r.package_type ?? 'BOX');
+    const merged = skuPrebook.filter((r) => pkgOfRow(r) === pkg);
+    const keptPrebook = skuPrebook.filter((r) => pkgOfRow(r) !== pkg);
 
     const tgt: Record<string, number> = {};
     for (const r of merged) {
@@ -300,16 +314,76 @@ export function applyDraftCellEdit(
     for (const k of Object.keys(tgt)) if ((tgt[k] || 0) <= 0) delete tgt[k];
 
     const ffAvail = ffAvailOf(article);
-    // Бронь нетронутых строк per ФФ — их источники новой строке недоступны.
+    // Бронь строк-заявок И чужой предброни — их источники недоступны.
+    const keptAll = [...skuRows, ...keptPrebook];
     const keptSrc: Record<number, number> = {};
-    for (const r of kept) for (const [ff, q] of Object.entries(r.src || {})) keptSrc[Number(ff)] = (keptSrc[Number(ff)] || 0) + (q || 0);
-    const keptUnits = kept.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0);
-    const availForBox = Math.max(0, Object.values(ffAvail).reduce((s, v) => s + v, 0) - keptUnits);
+    for (const r of keptAll) for (const [ff, q] of Object.entries(r.src || {})) keptSrc[Number(ff)] = (keptSrc[Number(ff)] || 0) + (q || 0);
+    const keptUnits = keptAll.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0);
+    const availForPkg = Math.max(0, Object.values(ffAvail).reduce((s, v) => s + v, 0) - keptUnits);
+    const total = Object.values(tgt).reduce((s, v) => s + v, 0);
+    if (total > prevTotal && total > availForPkg) return null;
+
+    if (total === 0) return { rows: skuRows, prebook: keptPrebook };
+    const mergedSrc: Record<number, number> = {};
+    for (const r of merged) for (const [ff, q] of Object.entries(r.src || {})) mergedSrc[Number(ff)] = (mergedSrc[Number(ff)] || 0) + (q || 0);
+    const srcPool: Record<number, number> = { ...ffAvail };
+    for (const ff of new Set([...Object.keys(mergedSrc), ...Object.keys(keptSrc)].map(Number))) {
+        srcPool[ff] = Math.max(srcPool[ff] || 0, (mergedSrc[ff] || 0) + (keptSrc[ff] || 0));
+    }
+    const base = merged[0];
+    const row: AssemblyDraftRow = {
+        nm_id: article.nm_id,
+        barcode: article.barcode,
+        vendor_code: article.vendor_code || base?.vendor_code || String(article.nm_id),
+        src: allocSrcAcrossFf(total, srcPool, keptSrc),
+        tgt,
+        package_type: pkg,
+    };
+    return { rows: skuRows, prebook: [...keptPrebook, row] };
+}
+
+
+export function applyDraftCellEdit(
+    skuRows: AssemblyDraftRow[],
+    skuPrebook: AssemblyDraftRow[],
+    article: StockNeedArticle,
+    wh: string,
+    deltaBoxes: number,
+    ppb: number | null | undefined,
+    /** Упаковка правки: BOX (дефолт) или MONOPALLET — для складов «только моно»
+     *  «+» кладёт моно-паллетный план (решение юзера 2026-07-16). */
+    cellPkg: PackageType = 'BOX',
+): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } | null {
+    if (!ppb || ppb <= 0 || !deltaBoxes) return null;
+    const pkgOfRow = (r: AssemblyDraftRow) => (r.package_type ?? 'BOX');
+    const isMergeable = (r: AssemblyDraftRow) => pkgOfRow(r) === cellPkg && !r.as_is;
+    const kept = skuRows.filter((r) => !isMergeable(r)); // другие упаковки/as_is остаются как есть
+    // Предбронь: в точный план сливается только СВОЯ упаковка; чужая остаётся
+    // предбронью (раньше моно-предбронь молча поглощалась в КОРОБ → риск приёмки).
+    const mergedPrebook = skuPrebook.filter((r) => pkgOfRow(r) === cellPkg);
+    const keptPrebook = skuPrebook.filter((r) => pkgOfRow(r) !== cellPkg);
+    const merged = [...skuRows.filter(isMergeable), ...mergedPrebook];
+
+    const tgt: Record<string, number> = {};
+    for (const r of merged) {
+        for (const [w, q] of Object.entries(r.tgt || {})) if ((q || 0) > 0) tgt[w] = (tgt[w] || 0) + (q || 0);
+    }
+    const prevTotal = Object.values(tgt).reduce((s, v) => s + v, 0);
+    tgt[wh] = Math.max(0, (tgt[wh] || 0) + deltaBoxes * ppb);
+    for (const k of Object.keys(tgt)) if ((tgt[k] || 0) <= 0) delete tgt[k];
+
+    const ffAvail = ffAvailOf(article);
+    // Бронь нетронутых строк И чужой предброни per ФФ — их источники новой строке недоступны.
+    const keptAll = [...kept, ...keptPrebook];
+    const keptSrc: Record<number, number> = {};
+    for (const r of keptAll) for (const [ff, q] of Object.entries(r.src || {})) keptSrc[Number(ff)] = (keptSrc[Number(ff)] || 0) + (q || 0);
+    const keptUnits = keptAll.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0);
+    const availForPkg = Math.max(0, Object.values(ffAvail).reduce((s, v) => s + v, 0) - keptUnits);
     const total = Object.values(tgt).reduce((s, v) => s + v, 0);
     // Кап — только на рост плана: уменьшение перезаложенного SKU должно проходить.
-    if (total > prevTotal && total > availForBox) return null;
+    if (total > prevTotal && total > availForPkg) return null;
 
-    if (total === 0) return { rows: kept, prebook: [] };
+    if (total === 0) return { rows: kept, prebook: keptPrebook };
     // Пул источников: живой остаток, но не меньше уже забронированного строками SKU —
     // иначе декремент при упавшем стоке не набрал бы src (Σsrc==Σtgt — инвариант).
     const mergedSrc: Record<number, number> = {};
@@ -325,9 +399,9 @@ export function applyDraftCellEdit(
         vendor_code: article.vendor_code || base?.vendor_code || String(article.nm_id),
         src: allocSrcAcrossFf(total, srcPool, keptSrc),
         tgt,
-        package_type: 'BOX',
+        package_type: cellPkg,
     };
-    return { rows: [...kept, row], prebook: [] };
+    return { rows: [...kept, row], prebook: keptPrebook };
 }
 
 /**

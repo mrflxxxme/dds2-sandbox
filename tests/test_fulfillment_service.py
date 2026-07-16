@@ -284,6 +284,21 @@ async def test_connect_restores_soft_deleted_key(db_session, project, warehouse,
 async def test_status_disconnected(db_session, project, warehouse):
     status = await fulfillment_service.get_status(db_session, project.id, warehouse.id)
     assert status["connected"] is False
+    assert status["has_portal_operator"] is False
+
+
+@pytest.mark.asyncio
+async def test_status_portal_operator_without_integration(db_session, project, warehouse):
+    """Склад портального оператора (Хамза) без API-интеграции: connected=False,
+    но has_portal_operator=True — фронт не предлагает создать заявку ФФ (сборка
+    уже видна оператору в /ff/*)."""
+    from backend.models.refs import ProjectSetting
+
+    db_session.add(ProjectSetting(project_id=project.id, key="ff_warehouses_999", value=json.dumps([warehouse.id])))
+    await db_session.commit()
+    status = await fulfillment_service.get_status(db_session, project.id, warehouse.id)
+    assert status["connected"] is False
+    assert status["has_portal_operator"] is True
 
 
 @pytest.mark.asyncio

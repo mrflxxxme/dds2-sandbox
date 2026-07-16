@@ -47,6 +47,10 @@ export interface ManifestOpts {
     maxHeightCm?: number;
     /** Ручной override «коробок на паллету» по канон-размеру короба. */
     overrides?: Record<string, number>;
+    /** Класс совместимости категорий (`lib/assembly/categoryCompat`): box-бины
+     *  пакуются ПО КЛАССАМ (SKU разных классов не делят паллету), номера паллет
+     *  сквозные. Не задан — прежний микс всех. Моно игнорирует. */
+    classOf?: (nmId: number) => string;
 }
 
 /** Содержимое одного SKU на конкретной паллете. */
@@ -66,6 +70,9 @@ export interface PalletBin {
     items: PalletItem[];
     /** Заполненность 0..1 (units на паллете / ёмкость паллеты). */
     fillPct: number;
+    /** Класс совместимости категорий бина (box-режим с opts.classOf). Для бейджа —
+     *  подпись через `classLabelOf`. undefined — правила не применялись. */
+    group?: string;
 }
 
 export interface PalletManifest {
@@ -125,6 +132,23 @@ export function buildPalletManifest(lines: ManifestLine[], opts: ManifestOpts): 
         // Недобранные моно (не целая паллета) — не рисуем как паллету, а в бакет «без
         // целой паллеты» (эти штуки уедут в предбронь/«Дозабить», а не в отгрузку).
         unpalletized.push(...r.dropped);
+    } else if (opts.classOf) {
+        // Партиция по классам совместимости: каждый класс пакуется отдельно (зеркало
+        // палет-среза и per-group palletsForLines), номера паллет — сквозные.
+        const classOf = opts.classOf;
+        const buckets = new Map<string, NormLineLite[]>();
+        for (const n of norm) {
+            const cls = classOf(n.line.nmId);
+            const arr = buckets.get(cls) ?? [];
+            arr.push(n);
+            buckets.set(cls, arr);
+        }
+        pallets = [];
+        for (const [cls, bucket] of buckets) {
+            for (const bin of packBox(bucket)) {
+                pallets.push({ ...bin, palletNo: pallets.length + 1, group: cls });
+            }
+        }
     } else {
         pallets = packBox(norm);
     }

@@ -219,6 +219,82 @@ async def list_drafts(
     return list(result.scalars().all())
 
 
+async def get_drafts_reserved(
+    db: AsyncSession,
+    project_id: int,
+    exclude_draft_id: int | None = None,
+) -> dict[str, dict[str, int]]:
+    """Резерв стока черновиками: barcode → {ff_warehouse_id(str) → qty}.
+
+    Суммирует по ВСЕМ не-удалённым черновикам проекта (кроме `exclude_draft_id`)
+    ТРИ источника distribution JSONB:
+    - rows[].src (warehouse_id-строка → qty),
+    - prebook[].src (та же структура),
+    - handed_units[].items (ФФ юнита = source_ff_id, qty по items[].barcode).
+
+    Фронт вычитает резерв из доступного ФФ-стока, чтобы параллельные черновики
+    (в т.ч. категорийные) не планировали один товар дважды. Читаем сырой JSONB
+    (не Pydantic): в проде встречается explicit null вместо [] / {} — модельная
+    валидация items его не переживает, поэтому везде `.get(k) or []` / `or {}`.
+    Пустые баркоды и qty ≤ 0 пропускаются.
+    """
+    query = (
+        select(AssemblyDraft)
+        .where(
+            AssemblyDraft.project_id == project_id,
+            AssemblyDraft.is_deleted == False,  # noqa: E712 — SQLAlchemy expression
+        )
+        # Детерминированное усечение (свежие первыми) — как list_drafts; без ORDER BY
+        # кап .limit() резал бы произвольные черновики и терял их резерв.
+        .order_by(AssemblyDraft.updated_at.desc())
+        .limit(500)
+    )
+    if exclude_draft_id is not None:
+        query = query.where(AssemblyDraft.id != exclude_draft_id)
+    result = await db.execute(query)
+    drafts = list(result.scalars().all())
+
+    reserved: dict[str, dict[str, int]] = {}
+
+    def _add(barcode: str, ff_key: str, qty: object) -> None:
+        if isinstance(qty, bool) or not isinstance(qty, (int, float, str)):
+            return  # null/мусор в JSONB — пропускаем
+        try:
+            q = int(qty)
+        except (TypeError, ValueError):
+            return
+        if not barcode or not ff_key or q <= 0:
+            return
+        bucket = reserved.setdefault(barcode, {})
+        bucket[ff_key] = bucket.get(ff_key, 0) + q
+
+    for d in drafts:
+        dist = d.distribution if isinstance(d.distribution, dict) else {}
+        dist = dist or {}
+        # rows[].src и prebook[].src — одинаковая строчная структура.
+        for row_list_key in ("rows", "prebook"):
+            for row in dist.get(row_list_key) or []:
+                if not isinstance(row, dict):
+                    continue
+                barcode = str(row.get("barcode") or "")
+                for wid, qty in (row.get("src") or {}).items():
+                    _add(barcode, str(wid), qty)
+        # handed_units[].items — ФФ задаёт юнит (source_ff_id).
+        for unit in dist.get("handed_units") or []:
+            if not isinstance(unit, dict):
+                continue
+            ff = unit.get("source_ff_id")
+            if ff is None:
+                continue
+            ff_key = str(ff)
+            for item in unit.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                _add(str(item.get("barcode") or ""), ff_key, item.get("qty"))
+
+    return reserved
+
+
 async def get_draft(
     db: AsyncSession,
     project_id: int,
@@ -422,6 +498,12 @@ async def delete_draft(
     await db.commit()
 
 
+def _category_scope_set(d: AssemblyDraft) -> frozenset[str]:
+    """Категорийный скоуп черновика как множество (None и [] эквивалентны)."""
+    dist = d.distribution if isinstance(d.distribution, dict) else {}
+    return frozenset(str(c) for c in ((dist or {}).get("category_scope") or []))
+
+
 async def merge_drafts(
     db: AsyncSession,
     project_id: int,
@@ -439,6 +521,9 @@ async def merge_drafts(
     Остальные черновики → soft_delete. Атомарно.
 
     404 если хоть один id не найден или принадлежит другому проекту.
+    ValueError (роутер мапит в 400), если у объединяемых черновиков разный
+    категорийный скоуп: слияние скоупленного с общим/чужим размыло бы правило
+    «этот черновик — только эти категории».
     """
     # 1. Fetch all drafts scoped to project
     result = await db.execute(
@@ -454,6 +539,10 @@ async def merge_drafts(
     missing = [i for i in draft_ids if i not in found_ids]
     if missing:
         raise HTTPException(status_code=404, detail=f"Черновики не найдены: {missing}")
+
+    # Guard: категорийный скоуп сравнивается как множество (None ≡ []).
+    if len({_category_scope_set(d) for d in drafts}) > 1:
+        raise ValueError("Нельзя объединять черновики с разным категорийным скоупом")
 
     # 2. Choose survivor: most rows; tie-break — lowest id
     def _row_count(d: AssemblyDraft) -> tuple[int, int]:
@@ -566,12 +655,17 @@ async def get_or_create_current_draft(
     create_draft/merge_drafts, поэтому следующий ждущий запрос перечитывает
     list_drafts уже после фиксации и видит ровно один черновик. Без этого гонка
     создавала два пустых черновика или задваивала merge.
+
+    Категорийные черновики (`distribution.category_scope` непуст) — параллельные
+    рабочие пространства, в синглтоне НЕ участвуют: без фильтра консолидация либо
+    молча сливала бы категорийный черновик в общий (потеря скоупа), либо падала
+    на guard'e merge_drafts («разный категорийный скоуп»).
     """
     await db.execute(
         text("SELECT pg_advisory_xact_lock(:ns, :pid)"),
         {"ns": _CURRENT_DRAFT_LOCK_NS, "pid": project_id},
     )
-    drafts = await list_drafts(db, project_id)
+    drafts = [d for d in await list_drafts(db, project_id) if not _category_scope_set(d)]
     if not drafts:
         return await create_draft(
             db,
@@ -1003,6 +1097,8 @@ async def commit_draft(
     from backend.services.assembly.status import _log_status_change
 
     created_ids: list[int] = []
+    # (warehouse_id, номер, шт) созданных заявок — для уведомления ФФ-порталов.
+    created_notify: list[tuple[int, str, int]] = []
     try:
         for (pair_src_id, target_wb_name, package_type), barcodes in pair_items.items():
             # Дедуп повторного commit ЭТОГО ЖЕ черновика: если на это направление
@@ -1100,6 +1196,7 @@ async def commit_draft(
 
             await db.flush()
             created_ids.append(assembly_req.id)
+            created_notify.append((pair_src_id, assembly_req.number, sum(q for q in barcodes.values() if q > 0)))
 
         # Снапшот того, что реально уехало в заявки = full − leftover (для отката коммита).
         from backend.services.assembly.draft_history import build_committed_rows
@@ -1128,6 +1225,7 @@ async def commit_draft(
         raise HTTPException(status_code=400, detail=f"Failed to commit draft: {e}") from None
 
     await invalidate_cache("reports:assembly_flow")
+    await _notify_ff_portal_new_requests(db, project_id, created_notify)
 
     # Событие истории «создание заявки» — для вкладки «🕘 История» и отката.
     # Best-effort: заявки уже durable (коммит выше) — сбой лога НЕ должен валить ответ 500.
@@ -1379,6 +1477,41 @@ def _normalize_handed_units(units: list[HandedUnit]) -> list[HandedUnit]:
         if u.status == "handed":
             existing.status = "handed"
     return [by_key[k] for k in order]
+
+
+async def _notify_ff_portal_new_requests(
+    db: AsyncSession,
+    project_id: int,
+    created: list[tuple[int, str, int]],
+) -> None:
+    """Best-effort уведомление операторов ФФ-порталов (напр. Хамза) о созданных
+    из черновика сборках — паритет с create_assembly_request (ручное создание и
+    машина шлют, а коммит черновика создаёт AssemblyRequest напрямую и раньше
+    молчал). `created` = (warehouse_id, номер, шт). Для складов без привязанного
+    чата — no-op; сбой не валит ответ (CancelledError пробрасывается)."""
+    if not created:
+        return
+    try:
+        from backend.models.warehouse import Warehouse
+        from backend.services import fulfillment_notify
+
+        wh_ids = {w for w, _, _ in created}
+        rows = (
+            await db.execute(
+                select(Warehouse.id, Warehouse.name).where(
+                    Warehouse.project_id == project_id,
+                    Warehouse.id.in_(wh_ids),
+                    Warehouse.is_deleted == False,  # noqa: E712
+                )
+            )
+        ).all()
+        names: dict[int, str] = {wid: nm for wid, nm in rows}
+        for wid, number, qty in created:
+            await fulfillment_notify.notify_new_ff_assembly(
+                db, project_id, wid, assembly_number=number, warehouse_name=names.get(wid), qty=qty
+            )
+    except Exception:
+        logger.warning("new-ff-assembly notify (draft commit) failed", exc_info=True)
 
 
 async def _resolve_nomenclature(db: AsyncSession, project_id: int, barcodes: set[str]) -> dict[str, Nomenclature]:
@@ -1712,6 +1845,9 @@ async def commit_unit(
         raise HTTPException(status_code=400, detail=f"Failed to commit unit: {e}") from None
 
     await invalidate_cache("reports:assembly_flow")
+    await _notify_ff_portal_new_requests(
+        db, project_id, [(source_ff_id, req.number, sum(q for q in barcodes.values() if q > 0))]
+    )
 
     return AssemblyDraftCommitResponse(created_request_ids=created_ids, draft_id=draft_id)
 

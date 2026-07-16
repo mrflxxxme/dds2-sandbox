@@ -14,6 +14,7 @@ WB отдаёт статистику только по нормализован�
 import logging
 import re
 from datetime import date as date_type
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func, select
@@ -890,12 +891,12 @@ async def _record_cluster_bid(
         row = WbAdClusterBid(project_id=project_id, campaign_id=campaign_id, nm_id=nm_id, norm_query=norm_query)
         db.add(row)
     if changed:   # новое значение — переставляем ставку, таймер и точку отсчёта
-        row.applied_bid = applied_bid
+        row.applied_bid = Decimal(str(applied_bid))
         row.applied_at = utcnow()
         row.source = source
-        row.basis_drr = basis_drr
-        row.basis_cpm = basis_cpm
-        row.target_drr = target_drr
+        row.basis_drr = Decimal(str(basis_drr)) if basis_drr is not None else None
+        row.basis_cpm = Decimal(str(basis_cpm)) if basis_cpm is not None else None
+        row.target_drr = Decimal(str(target_drr)) if target_drr is not None else None
 
 
 async def set_cluster_bid(
@@ -978,7 +979,8 @@ async def set_cluster_bids_bulk(
     meta_by_key: dict[tuple[int, str], dict] = {}   # (nm, q) → исходный item (source/basis для паспорта)
     results: list[dict] = []
     for it in items:
-        nm = int(it.get("nm_id"))
+        nm_raw: Any = it.get("nm_id")
+        nm = int(nm_raw)
         q = str(it.get("norm_query") or "")
         bid = it.get("bid")
         if nm not in valid_nm:

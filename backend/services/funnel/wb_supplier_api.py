@@ -81,10 +81,10 @@ async def fetch_supplier_orders(api_key: str, date_from: str) -> list[dict]:
             all_orders.extend(batch)
             if len(batch) < _ORDERS_PAGE_CAP:
                 break  # последняя (неполная) страница
-            next_cursor = max(
-                (o.get("lastChangeDate") for o in batch if o.get("lastChangeDate")),
-                default=None,
-            )
+            candidates: list[str] = [
+                str(o.get("lastChangeDate")) for o in batch if o.get("lastChangeDate")
+            ]
+            next_cursor = max(candidates, default=None)
             if not next_cursor or next_cursor == cursor:
                 # вся полная страница в одну метку — иначе бесконечный цикл
                 logger.warning("WB supplier/orders: курсор не сдвинулся на %s — стоп пагинации", cursor)

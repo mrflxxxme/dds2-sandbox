@@ -1891,6 +1891,27 @@ export interface WbSupplyState {
 }
 
 // Компактная WB-сводка в строке списка заявок (F1/F2).
+/** Итог одной заявки в фоновом батч-заносе преордеров WB. */
+export interface WbBulkPreorderItemResult {
+  assembly_id: number;
+  number: string;
+  ok: boolean;
+  /** «Преордер 123…» / текст ошибки / «уже заведена». */
+  note: string | null;
+}
+
+/** Статус фонового батч-заноса преордеров WB (по одной с паузой ~10с). */
+export interface WbBulkPreorderStatus {
+  running: boolean;
+  total: number;
+  done: number;
+  current_assembly_id: number | null;
+  interval_sec: number;
+  results: WbBulkPreorderItemResult[];
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface WbSupplyStateBrief {
   sync_status: WbSupplySyncStatus;
   wb_supply_state: string | null;
@@ -5110,6 +5131,35 @@ export interface AssemblyDraftDistribution {
   /** РУЧНЫЕ SKU (nm_id): план правлен в матрице-редакторе (степпер/✕) — авто-синк
    *  расчёта такие SKU не трогает, пока юзер не вернёт SKU «в авто». */
   manual_nms?: number[];
+  /** КАТЕГОРИЙНЫЙ СКОУП черновика: «эффективные категории» (override ?? subject).
+   *  null/[] = обычный черновик. Скоупленный заполняется/распределяется только по
+   *  этим категориям; его содержимое резервирует сток от других черновиков. */
+  category_scope?: string[] | null;
+  /** Ограничение ФФ-источника скоупленного черновика (id склада). null = все ФФ. */
+  scope_ff_id?: number | null;
+}
+
+/** Группа категорий, которым разрешено ехать на одной смешанной BOX-паллете. */
+export interface PalletCompatGroup {
+  name?: string | null;
+  categories: string[];
+}
+
+/** Правила совместимости категорий на паллете (строгий режим).
+ *  enabled=false — правила выключены (любые SKU миксуются, как раньше).
+ *  enabled=true — каждая эффективная категория едет только своей паллетой;
+ *  groups разрешают перечисленным категориям грузиться вместе.
+ *  Действует только на BOX; моно (≤3 артикулов) не трогаем. */
+export interface PalletCategoryCompat {
+  enabled: boolean;
+  groups: PalletCompatGroup[];
+}
+
+/** Резерв стока черновиками: barcode → { ff_warehouse_id(str) → qty }.
+ *  Σ rows.src + prebook.src + handed_units.items всех не-удалённых черновиков
+ *  проекта (кроме exclude_draft_id). Вычитается из доступного при расчётах. */
+export interface DraftsReservedResponse {
+  reserved: Record<string, Record<string, number>>;
 }
 
 /** Ссылка на заявку-юнит черновика (hand-off / revert / commit).
@@ -5760,6 +5810,9 @@ export interface FulfillmentStatus {
   /** migfull: GUID кабинета */
   tenant_guid: string | null;
   last_sync_at: string | null;
+  /** Складом управляет оператор ФФ-портала (напр. Хамза): сборки видны ему
+   *  в /ff/* автоматически — отдельная «заявка ФФ» не нужна. */
+  has_portal_operator?: boolean;
 }
 
 export interface FulfillmentConnectPayload {

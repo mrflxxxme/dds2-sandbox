@@ -41,6 +41,26 @@ export interface PrebookTopUp {
     candidates: { vendor: string; boxes: number; nmId?: number }[];
 }
 
+/** Срез направления по КЛАССУ совместимости категорий (`lib/assembly/categoryCompat`):
+ *  SKU разных классов не делят смешанную BOX-паллету, поэтому заполнение и дозабор
+ *  внутри карточки направления считаются per-класс (только для BOX при включённых
+ *  правилах; моно классами не режется — решение юзера). */
+export interface PrebookClassSlice {
+    /** Класс (`g:<i>` | `c:<категория>`). */
+    cls: string;
+    /** Подпись для бейджа (имя группы / категория). */
+    label: string;
+    items: PrebookRowItem[];
+    boxes: number;
+    qty: number;
+    looseUnits: number;
+    /** Footprint класса в паллетах (Σ qty_i/upp_i по SKU класса). */
+    footprint: number;
+    fillPct: number;
+    /** Дозабор ТОЛЬКО кандидатами этого класса; null — нечем. */
+    topUp: PrebookTopUp | null;
+}
+
 /** Группа предброни = одна ОТГРУЗКА: направление × ФФ-источник × упаковка.
  *  Паллета собирается с ОДНОГО ФФ (короб с двух складов не собрать) — поэтому
  *  заполнение и дозабор считаются per-ФФ, а не по всему направлению. */
@@ -70,6 +90,10 @@ export interface PrebookGroup {
     monoPartials?: PrebookMonoPallet[];
     /** МОНО: сырой ОБЪЁМ недобора в паллетах (Σ хвостов/upp), для внутренней математики. */
     monoTailFrac?: number;
+    /** BOX + включённые правила совместимости: разрез направления по классам категорий.
+     *  Задан → group-level `topUp` = null (дозабор живёт на срезах), паллеты/целые
+     *  считаются per-класс. undefined — правила выключены (прежний вид). */
+    classes?: PrebookClassSlice[];
 }
 
 /** Метка приёмки WB для направления предброни (per упаковка группы). Зеркало
@@ -98,7 +122,9 @@ interface Props {
     acceptanceLoading: boolean;    // идёт фоновая проверка приёмки предброни
     /** Склады, где предзаявка разрешена без лимита приёмки (whitelist) — кнопка активна. */
     preorderWbs: Set<string>;
-    onTopUp: (pkg: PackageType, wb: string, ffId: number) => void;
+    /** `cls` — класс совместимости (только BOX с включёнными правилами): дозабор
+     *  предлагает и берёт коробы ТОЛЬКО этого класса. undefined — всё направление. */
+    onTopUp: (pkg: PackageType, wb: string, ffId: number, cls?: string) => void;
     /** Отгрузить неполную паллету направления в черновик как есть (без дозабора). */
     onShipAsIs: (pkg: PackageType, wb: string, ffId: number) => void;
     onDelete: (nm_id: number, wb: string, pkg: PackageType) => void;
@@ -354,27 +380,43 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                 // консолидацией, недобор → «Оставить так»/«Дозабить»/«На ФФ». Поэтому все
                 // кнопки предзаявки скрываем на не-⌛ направлениях (тот же предикат, что split).
                 const preorderByLimit = isPrebookingByLimit(acceptanceMarks.get(key));
-                // Полный footprint: целые паллеты (уже собраны) + дробь последней.
-                const whole = Math.floor(g.footprint + 1e-9);
+                // BOX с классами совместимости: целые паллеты считаются per-класс —
+                // хвосты РАЗНЫХ классов не складываются в «целую» (0.5 ковров + 0.5
+                // пледов ≠ 1 паллета). Иначе — полный footprint направления.
+                const clsSlices = g.pkg === 'BOX' ? (g.classes ?? []) : [];
+                const whole = clsSlices.length
+                    ? clsSlices.reduce((s, c) => s + Math.floor(c.footprint + 1e-9), 0)
+                    : Math.floor(g.footprint + 1e-9);
                 // ЧЕСТНЫЙ floor (не round): недобранная паллета (0.997) НЕ должна показываться
                 // «100%» — упаковщик её целой не считает (keep=floor<1, остаётся в предброни).
                 // Показ 99% + дозабор консистентен: добить 1 короб → станет целой → в черновик.
-                const fracPct = Math.max(0, Math.min(99, Math.floor((g.footprint - whole) * 100)));
+                const fracPct = Math.max(0, Math.min(99, Math.floor((g.footprint - Math.floor(g.footprint + 1e-9)) * 100)));
+                // Неполные хвосты классов (для бара/подписи классового вида).
+                const clsPartials = clsSlices
+                    .map((c) => ({ cls: c.cls, label: c.label, fracPct: Math.max(0, Math.min(99, Math.floor((c.footprint - Math.floor(c.footprint + 1e-9)) * 100))) }))
+                    .filter((c) => c.fracPct > 0);
                 // МОНО: недобор живёт в СТРУКТУРЕ паллет ≤3 арт (частичные), не «объёмом».
                 const partials = g.pkg === 'MONOPALLET' ? (g.monoPartials ?? []) : [];
                 // Честный floor (не round): частичная паллета не должна показываться «100%».
                 const topPartialPct = Math.min(99, Math.floor((partials[0]?.fillPct ?? 0) * 100));
                 const low = g.pkg === 'MONOPALLET'
                     ? whole === 0 && partials.length > 0 && topPartialPct < threshold
-                    : whole === 0 && g.footprint > 0 && Math.round(g.footprint * 100) < threshold;
+                    : clsSlices.length
+                        ? whole === 0 && clsPartials.length > 0 && Math.max(...clsPartials.map((c) => c.fracPct)) < threshold
+                        : whole === 0 && g.footprint > 0 && Math.round(g.footprint * 100) < threshold;
                 const fillLabel = g.pkg === 'MONOPALLET'
                     ? [
                         whole >= 1 ? `${formatNumber(whole, 0)} ${whole === 1 ? 'целая' : 'целых'}` : '',
                         partials.length > 0 ? `${formatNumber(partials.length, 0)} частичн. (макс ${topPartialPct}%)` : '',
                     ].filter(Boolean).join(' + ') || 'пусто'
-                    : whole >= 1
-                        ? `${formatNumber(whole, 0)} ${whole === 1 ? 'целая паллета' : 'целых паллеты'}${fracPct > 0 ? ` + ${fracPct}% ещё одной` : ''}`
-                        : `заполнено ${fracPct}% паллеты`;
+                    : clsSlices.length
+                        ? [
+                            whole >= 1 ? `${formatNumber(whole, 0)} ${whole === 1 ? 'целая' : 'целых'}` : '',
+                            clsPartials.length > 0 ? `${formatNumber(clsPartials.length, 0)} неполн. (по классам)` : '',
+                        ].filter(Boolean).join(' + ') || 'пусто'
+                        : whole >= 1
+                            ? `${formatNumber(whole, 0)} ${whole === 1 ? 'целая паллета' : 'целых паллеты'}${fracPct > 0 ? ` + ${fracPct}% ещё одной` : ''}`
+                            : `заполнено ${fracPct}% паллеты`;
                 return (
                     <div key={key} className="glass-card"
                         style={{ padding: '14px 16px', marginBottom: 12, borderLeft: low ? '3px solid var(--color-warning)' : undefined }}>
@@ -445,11 +487,17 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                         <div style={{ width: `${Math.round(p.fillPct * 100)}%`, height: '100%', background: low ? 'var(--color-warning)' : 'var(--color-success)' }} />
                                     </div>
                                 ))
-                                : (fracPct > 0 || whole === 0) && (
-                                    <div style={{ flex: 1, background: 'rgba(148,163,184,0.20)', borderRadius: 3, overflow: 'hidden' }} title="неполная паллета">
-                                        <div style={{ width: `${fracPct}%`, height: '100%', background: low ? 'var(--color-warning)' : 'var(--color-success)' }} />
-                                    </div>
-                                )}
+                                : clsSlices.length
+                                    ? clsPartials.slice(0, 8).map((c, i) => (
+                                        <div key={`cls-${i}`} style={{ flex: 1, background: 'rgba(148,163,184,0.20)', borderRadius: 3, overflow: 'hidden' }} title={`неполная паллета класса «${c.label}» · ${c.fracPct}%`}>
+                                            <div style={{ width: `${c.fracPct}%`, height: '100%', background: low ? 'var(--color-warning)' : 'var(--color-success)' }} />
+                                        </div>
+                                    ))
+                                    : (fracPct > 0 || whole === 0) && (
+                                        <div style={{ flex: 1, background: 'rgba(148,163,184,0.20)', borderRadius: 3, overflow: 'hidden' }} title="неполная паллета">
+                                            <div style={{ width: `${fracPct}%`, height: '100%', background: low ? 'var(--color-warning)' : 'var(--color-success)' }} />
+                                        </div>
+                                    )}
                         </div>
 
                         {isMono && monoView === 'prebooking' ? (
@@ -500,6 +548,66 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                     </span>
                                 </div>
                             )
+                        ) : clsSlices.length ? (
+                            <div style={{ marginBottom: 10 }}>
+                                {/* Разрез по классам совместимости: SKU разных классов не делят
+                                    паллету — footprint и «Дозабить» живут внутри класса. */}
+                                {clsSlices.map((sl) => {
+                                    const slWhole = Math.floor(sl.footprint + 1e-9);
+                                    const slFrac = Math.max(0, Math.min(99, Math.floor((sl.footprint - slWhole) * 100)));
+                                    return (
+                                        <div key={sl.cls} style={{ padding: '8px 10px', background: sl.topUp ? 'rgba(34,197,94,0.10)' : 'rgba(148,163,184,0.08)', borderRadius: 8, marginBottom: 6 }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                                                <span style={{ fontSize: 12, fontWeight: 600, padding: '2px 8px', borderRadius: 6, background: 'rgba(59,130,246,0.12)', color: 'var(--color-accent)' }}
+                                                    title="Класс совместимости: на одной паллете едут только категории этого класса">
+                                                    🧩 {sl.label}
+                                                </span>
+                                                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                                    {formatNumber(sl.boxes, 0)} кор · {formatNumber(sl.qty - sl.looseUnits, 0)} шт
+                                                    {slWhole >= 1 ? ` · ${formatNumber(slWhole, 0)} цел.` : ''}{slFrac > 0 ? ` · хвост ${slFrac}%` : ''}
+                                                </span>
+                                                {sl.topUp ? (
+                                                    <>
+                                                        <span style={{ fontSize: 12, color: 'var(--color-success)' }}>
+                                                            не хватает <b>{formatNumber(sl.topUp.needBoxes, 0)} кор</b> из «{sl.topUp.ff}»
+                                                        </span>
+                                                        <button className="btn btn-success btn-sm" style={{ marginLeft: 'auto', padding: '2px 8px' }} disabled={busy || otherTopUpBusy}
+                                                            title={otherTopUpBusy
+                                                                ? 'Дождитесь завершения дозабора другого направления — идёт бронь общего свободного ФФ'
+                                                                : `Добрать целыми коробами ТОЛЬКО этого класса («${sl.label}») из свободного ФФ «${sl.topUp.ff}»`}
+                                                            onClick={() => onTopUp(g.pkg, g.wb, g.ffId, sl.cls)}>
+                                                            {busyTop ? '…' : `🧩 Дозабить — ${sl.label}`}
+                                                        </button>
+                                                    </>
+                                                ) : (
+                                                    <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-dim)' }}>дозабрать нечем (в классе)</span>
+                                                )}
+                                            </div>
+                                            {sl.topUp && sl.topUp.candidates.length > 0 && (
+                                                <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'baseline' }}>
+                                                    <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>дозаберётся:</span>
+                                                    {sl.topUp.candidates.map((c, i) => (
+                                                        <span key={`${c.vendor}-${i}`} style={{ fontSize: 11, padding: '1px 7px', borderRadius: 5, background: 'rgba(34,197,94,0.15)', color: 'var(--color-success)' }}>
+                                                            {c.vendor} ×{formatNumber(c.boxes, 0)} кор
+                                                        </span>
+                                                    ))}
+                                                    <span style={{ fontSize: 10, color: 'var(--color-text-dim)' }}>· приёмка проверится при клике</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                                    <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>
+                                        классы едут отдельными паллетами одной отгрузки — ковёр не доложится пледами
+                                    </span>
+                                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} disabled={busy}
+                                        title="Отгрузить направление как есть: целые коробы едут, паллеты нарежутся по классам"
+                                        onClick={() => onShipAsIs(g.pkg, g.wb, g.ffId)}>
+                                        {busyShip ? '…' : '📦 Оставить так'}
+                                    </button>
+                                </div>
+                            </div>
                         ) : g.topUp ? (
                             <div style={{ padding: '8px 10px', background: 'rgba(34,197,94,0.10)', borderRadius: 8, marginBottom: 10 }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
