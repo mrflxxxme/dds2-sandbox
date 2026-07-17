@@ -378,6 +378,16 @@ async def update_draft(
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
 
+    # CAS-гвард фоновых писателей: full-replace от stale-снимка молча затирал
+    # свежие изменения (прод 2026-07-17: фоновая консолидация второй вкладки
+    # воскресила очищенный черновик через 9с — 11 177 шт вернулись без события).
+    # Клиент на 409 перечитывает черновик вместо записи.
+    if payload.base_updated_at is not None and draft.updated_at != payload.base_updated_at:
+        raise HTTPException(
+            status_code=409,
+            detail="DRAFT_VERSION_CONFLICT: черновик изменился в другой вкладке/окне — данные перечитаны",
+        )
+
     before_distribution = copy.deepcopy(draft.distribution) if payload.event is not None else None
 
     if payload.name is not None:

@@ -128,6 +128,12 @@ class AssemblyDraftUpdate(BaseModel):
     comment: str | None = None
     # Опц. маркер: если задан — этот PUT логируется в историю с before-снапшотом.
     event: DraftEventLog | None = None
+    # Оптимистическая версия (CAS): updated_at черновика, от которого клиент строил
+    # distribution. Не совпала с БД → 409 DRAFT_VERSION_CONFLICT вместо молчаливого
+    # full-replace (прод-кейс: фоновый синк stale-вкладки воскресил очищенный
+    # черновик через 9с). Шлют ФОНОВЫЕ писатели (автосейв/консолидация/self-heal);
+    # явные действия юзера идут без версии — последняя воля побеждает.
+    base_updated_at: datetime | None = None
 
 
 class AssemblyDraftAddRows(BaseModel):

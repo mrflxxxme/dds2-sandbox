@@ -77,6 +77,11 @@ function dedupeRows(rows: AssemblyDraftRow[]): AssemblyDraftRow[] {
     });
 }
 
+/** 409 CAS-гварда update_draft: черновик изменила другая вкладка/окно. */
+function isVersionConflict(e: unknown): boolean {
+    return e instanceof Error && e.message.includes('DRAFT_VERSION_CONFLICT');
+}
+
 /** Единая страница «Сборка»: вкладки Черновик / Потребность по складам / Кратность /
  *  Паллеты. Черновик — синглтон проекта (getOrCreateCurrentDraft), редактор строк +
  *  предпросмотр и создание заявок на одном экране. */
@@ -175,6 +180,10 @@ export default function AssemblyDraftPage() {
 
     const lastSavedJsonRef = useRef<string>('');
     const initialLoadRef = useRef(false);
+    // Версия черновика (updated_at последнего ПРИМЕНЁННОГО состояния) — CAS фоновых
+    // писателей: PUT со stale-версией сервер отбивает 409 вместо молчаливого
+    // full-replace (прод-кейс: вторая вкладка воскресила очищенный черновик).
+    const draftVersionRef = useRef<string>('');
     // Взведённый таймер автосейва — чтобы конкурирующие операции (carve категорий)
     // могли его погасить, а не ловить PUT полного до-carve снимка поверх очистки.
     const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -223,6 +232,7 @@ export default function AssemblyDraftPage() {
         manualNmsRef.current = d.distribution.manual_nms || [];
         setNewcomerNmIds(new Set(d.newcomer_nm_ids || []));
         lastSavedJsonRef.current = JSON.stringify(d.distribution);
+        draftVersionRef.current = d.updated_at;
     }, []);
 
     // ─── Load current draft (singleton) + reference data ─────────────────
@@ -275,6 +285,7 @@ export default function AssemblyDraftPage() {
                                 try {
                                     const persisted = await api.updateAssemblyDraft(draftResp.id, {
                                         distribution: { ...dist, rows: recRows.rows, prebook: recPrebook.rows },
+                                        base_updated_at: draftResp.updated_at,
                                     });
                                     if (cancelled) return;
                                     applyDraft(persisted);
@@ -574,11 +585,22 @@ export default function AssemblyDraftPage() {
 
         setSaving(true);
         try {
-            const updated = await api.updateAssemblyDraft(draftId, { name, distribution: dist, comment: comment || null });
+            const updated = await api.updateAssemblyDraft(draftId, {
+                name, distribution: dist, comment: comment || null,
+                base_updated_at: draftVersionRef.current || undefined,
+            });
             lastSavedJsonRef.current = JSON.stringify(updated.distribution);
+            draftVersionRef.current = updated.updated_at;
             if (!silent) showToast('Черновик сохранён', 'success');
             return true;
         } catch (e: unknown) {
+            if (isVersionConflict(e)) {
+                // Черновик изменила другая вкладка — наш снимок протух: перечитываем
+                // вместо записи (иначе full-replace воскресил бы затёртое).
+                try { applyDraft(await api.getAssemblyDraft(draftId)); } catch { /* следующий цикл */ }
+                showToast('Черновик изменён в другой вкладке — данные обновлены (несохранённые правки этой вкладки отменены)', 'error');
+                return false;
+            }
             showToast(e instanceof Error ? e.message : 'Ошибка сохранения', 'error');
             return false;
         } finally {
@@ -620,9 +642,18 @@ export default function AssemblyDraftPage() {
         if (geomState !== 'ready') return null;
         const base = fresh ?? await api.getAssemblyDraft(id);
         const norm = normalizeLocal(base.distribution.rows || [], base.distribution.prebook || [], only);
-        const draft = norm.changed
-            ? await api.updateAssemblyDraft(id, { distribution: { ...base.distribution, rows: norm.rows, prebook: norm.prebook } })
-            : base;
+        let draft = base;
+        if (norm.changed) {
+            try {
+                draft = await api.updateAssemblyDraft(id, {
+                    distribution: { ...base.distribution, rows: norm.rows, prebook: norm.prebook },
+                    base_updated_at: base.updated_at,
+                });
+            } catch (e) {
+                if (!isVersionConflict(e)) throw e;
+                return null; // черновик уже изменили — heal пересчитается на новой версии
+            }
+        }
         return {
             changed: norm.changed,
             droppedUnits: norm.droppedUnits,
@@ -1125,7 +1156,21 @@ export default function AssemblyDraftPage() {
                 // паллеты в черновик молча, БЕЗ метки провенанса — по требованию юзера.
                 const targetNames = Array.from(new Set(newRows.flatMap(r => Object.keys(r.tgt))));
                 const sourceIds = Array.from(new Set(newRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
-                const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: newRows, prebook: newPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames } });
+                let updated;
+                try {
+                    updated = await api.updateAssemblyDraft(draftId, {
+                        distribution: { ...buildDistribution(), rows: newRows, prebook: newPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames },
+                        base_updated_at: draftVersionRef.current || undefined,
+                    });
+                } catch (e) {
+                    if (isVersionConflict(e)) {
+                        // Черновик изменила другая вкладка (прод-кейс «воскрешение после
+                        // очистки»): наш расчёт от протухшего стейта — перечитываем и выходим.
+                        try { applyDraft(await api.getAssemblyDraft(draftId)); } catch { /* ignore */ }
+                        return;
+                    }
+                    throw e;
+                }
                 applyDraft(updated);
                 // Сводка перемещений по складам (дельта rows): + приехало в черновик, − уехало.
                 const sumBy = (rs: AssemblyDraftRow[]) => {
@@ -1207,7 +1252,19 @@ export default function AssemblyDraftPage() {
                 for (const r of prebook) for (const [wb, q] of Object.entries(r.tgt)) before[wb] = (before[wb] || 0) + (q || 0);
                 const after: Record<string, number> = {};
                 for (const r of merged) for (const [wb, q] of Object.entries(r.tgt)) after[wb] = (after[wb] || 0) + (q || 0);
-                const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: merged } });
+                let updated;
+                try {
+                    updated = await api.updateAssemblyDraft(draftId, {
+                        distribution: { ...buildDistribution(), prebook: merged },
+                        base_updated_at: draftVersionRef.current || undefined,
+                    });
+                } catch (e) {
+                    if (isVersionConflict(e)) {
+                        try { applyDraft(await api.getAssemblyDraft(draftId)); } catch { /* ignore */ }
+                        return;
+                    }
+                    throw e;
+                }
                 applyDraft(updated);
                 const off: string[] = []; const onto: string[] = [];
                 for (const wb of new Set([...Object.keys(before), ...Object.keys(after)])) {

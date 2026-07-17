@@ -5200,6 +5200,10 @@ export interface AssemblyDraftUpdate {
   comment?: string | null;
   /** Если задано — бэк логирует событие истории со снапшотом черновика (для отката). */
   event?: DraftEventLog;
+  /** CAS фоновых писателей: updated_at, от которого строился distribution.
+   *  Не совпал с БД → 409 DRAFT_VERSION_CONFLICT (клиент перечитывает, не пишет).
+   *  Явные действия юзера шлют без версии — последняя воля побеждает. */
+  base_updated_at?: string;
 }
 
 export interface AssemblyDraftCommitResponse {
