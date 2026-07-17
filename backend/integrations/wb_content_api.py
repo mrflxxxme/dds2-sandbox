@@ -61,8 +61,11 @@ async def fetch_card(api_key: str, nm_id: int) -> dict | None:
             "filter": {"textSearch": str(nm_id), "withPhoto": -1},
         }
     }
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(f"{_BASE}/content/v2/get/cards/list", headers=_headers(api_key), json=body)
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(f"{_BASE}/content/v2/get/cards/list", headers=_headers(api_key), json=body)
+    except httpx.HTTPError as e:
+        raise WbContentError(f"WB Content API: сетевая ошибка чтения карточки — {e}") from e
     if resp.status_code != 200:
         raise WbContentError(f"WB Content API: HTTP {resp.status_code} при чтении карточки")
     cards = (resp.json() or {}).get("cards") or []

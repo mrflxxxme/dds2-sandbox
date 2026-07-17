@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 MSK = pytz.timezone("Europe/Moscow")
 
 MAX_VARIANTS = 10  # загружаемых, не считая контроля
-_APPLY_RETRY_LIMIT = 3  # подряд неудачных попыток смены фото → пауза теста
+_APPLY_RETRY_LIMIT = 12  # подряд неудачных попыток смены фото → пауза теста (тик 5 мин → ~час сбоя WB)
 ACTIVE_STATUSES = ("draft", "running", "paused")
 
 _ADV_KEYS = ("views", "clicks", "atbs", "orders", "spend", "orders_sum")
@@ -692,6 +692,21 @@ async def _tick_test(db: AsyncSession, test: AbPhotoTest, content_key: str) -> N
     await db.commit()
 
 
+def _register_rotate_error(test: AbPhotoTest, current: AbPhotoRound, detail: str) -> None:
+    """Неудачная попытка смены фото: счётчик и текст ошибки — в flags круга.
+
+    Текст живёт в flags, а не только в pause_reason: resume стирает pause_reason,
+    история кругов — единственное место, где диагноз переживает «Продолжить»."""
+    flags = dict(current.flags or {})
+    flags["apply_errors"] = int(flags.get("apply_errors") or 0) + 1
+    flags["last_apply_error"] = detail[:200]
+    current.flags = flags
+    if flags["apply_errors"] >= _APPLY_RETRY_LIMIT:
+        test.status = "paused"
+        test.pause_reason = f"WB не принимает смену фото: {detail}"
+    logger.warning(f"AB test {test.id}: смена фото не прошла ({detail}), попытка {flags['apply_errors']}")
+
+
 async def _rotate(
     db: AsyncSession,
     test: AbPhotoTest,
@@ -710,7 +725,11 @@ async def _rotate(
         return
 
     # Защита от внешних правок: галерея должна соответствовать снимку
-    card = await fetch_card(content_key, test.nm_id)
+    try:
+        card = await fetch_card(content_key, test.nm_id)
+    except WbContentError as e:
+        _register_rotate_error(test, current, str(e))
+        return
     if card is not None and not media_matches_snapshot(card["photos"], test.original_media):
         test.status = "paused"
         test.pause_reason = (
@@ -728,13 +747,7 @@ async def _rotate(
     try:
         await upload_main_photo(content_key, test.nm_id, content)
     except WbContentError as e:
-        flags = dict(current.flags or {})
-        flags["apply_errors"] = int(flags.get("apply_errors") or 0) + 1
-        current.flags = flags
-        if flags["apply_errors"] >= _APPLY_RETRY_LIMIT:
-            test.status = "paused"
-            test.pause_reason = f"WB не принимает смену фото: {e}"
-        logger.warning(f"AB test {test.id}: смена фото не прошла ({e}), попытка {flags['apply_errors']}")
+        _register_rotate_error(test, current, str(e))
         return
 
     current.ended_at = now
