@@ -74,6 +74,7 @@ const itemIcons: Record<string, React.ReactNode> = {
     '/plan-fact': <Icon><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="6" /><circle cx="12" cy="12" r="2" /></Icon>,
     // AI
     '/ai-chat': <Icon><path d="M12 8V4H8" /><rect width="16" height="12" x="4" y="8" rx="2" /><path d="M2 14h2" /><path d="M20 14h2" /><path d="M15 13v2" /><path d="M9 13v2" /></Icon>,
+    '/vibecoding': <Icon><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /><line x1="14" x2="10" y1="4" y2="20" /></Icon>,
     // Настройки
     '/monitoring': <Icon><path d="M4 11a9 9 0 0 1 9 9" /><path d="M4 4a16 16 0 0 1 16 16" /><circle cx="5" cy="19" r="1" /></Icon>,
     '/raw-data': <Icon><ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M3 5v14a9 3 0 0 0 18 0V5" /><path d="M3 12a9 3 0 0 0 18 0" /></Icon>,
@@ -81,7 +82,19 @@ const itemIcons: Record<string, React.ReactNode> = {
     '/team': <Icon><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></Icon>,
 };
 
-const navGroups = [
+interface NavItem {
+    href: string;
+    label: string;
+    icon: string;
+    pageKey: string;
+    /**
+     * Пункт виден только вайбкодеру (строка в vibe_authors), а НЕ по роли в проекте.
+     * Роль тут не гейт: клиент-селлер — owner своего проекта и прошёл бы canAccess.
+     */
+    requiresVibecoder?: boolean;
+}
+
+const navGroups: { title: string; section: string; items: NavItem[] }[] = [
     {
         title: 'Финансы',
         section: 'finance',
@@ -155,6 +168,7 @@ const navGroups = [
         section: 'ai',
         items: [
             { href: '/ai-chat', label: 'AI-ассистент', icon: '🤖', pageKey: 'ai-chat' },
+            { href: '/vibecoding', label: 'Вайбкодинг', icon: '🤖', pageKey: 'vibecoding', requiresVibecoder: true },
         ],
     },
     {
@@ -177,6 +191,7 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     const [projectName, setProjectName] = useState('');
     const [mounted, setMounted] = useState(false);
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+    const [isVibecoder, setIsVibecoder] = useState(false);
     const { canAccess, canManage, loading: permLoading } = usePermissions();
 
     useEffect(() => {
@@ -193,6 +208,15 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
         });
         api.getProfile().then(u => setUsername(u.username)).catch(() => { });
     }, [slug]);
+
+    // Вайбкодер? Вкладка «Вайбкодинг» — внутренняя телеметрия репозитория, её не должны
+    // видеть внешние пользователи и клиенты-селлеры. Стартуем с false: пункт появляется
+    // только на явное «да», сбой/молчание бэкенда вкладку НЕ открывает.
+    useEffect(() => {
+        let cancelled = false;
+        api.getIsVibecoder().then(flag => { if (!cancelled) setIsVibecoder(flag); });
+        return () => { cancelled = true; };
+    }, []);
 
     // Раскрытие секций сайдбара — переживает переходы и перезагрузку
     useEffect(() => {
@@ -217,8 +241,14 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     };
 
     // Filter nav groups based on permissions
+    // Вайбкодерский пункт гейтится СПИСКОМ ДОСТУПА (vibe_authors), а не проектными
+    // правами: у этих данных нет project_id, и роль в проекте про них ничего не знает —
+    // permissions.pages никогда не перечислит 'vibecoding', а owner-селлер прошёл бы
+    // canAccess насквозь. Поэтому для таких пунктов is-vibecoder ЗАМЕНЯЕТ canAccess.
     const filteredGroups = navGroups.map(group => {
-        const visibleItems = group.items.filter(item => canAccess(item.pageKey));
+        const visibleItems = group.items.filter(item =>
+            item.requiresVibecoder ? isVibecoder : canAccess(item.pageKey),
+        );
         return { ...group, items: visibleItems };
     }).filter(group => group.items.length > 0);
 

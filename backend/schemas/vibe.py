@@ -83,6 +83,16 @@ class VibeStats(BaseModel):
     last_ingest: date | None = None  # когда CI последний раз обновлял данные
 
 
+class VibeIngestFile(BaseModel):
+    """Файл поставки. Без него не собрать «Масштаб»: из агрегата по коммиту не выводятся
+    ни уникальные файлы, ни новые, ни разбивка по областям."""
+
+    path: str
+    added: int = 0
+    deleted: int = 0
+    is_new: bool = False
+
+
 class VibeIngestCommit(BaseModel):
     """Одна строка от CI. UPSERT по sha — повторный прогон не задваивает."""
 
@@ -96,6 +106,7 @@ class VibeIngestCommit(BaseModel):
     deleted: int = 0
     files: int = 0
     is_product: bool = False
+    files_list: list[VibeIngestFile] = []
 
 
 class VibeIngestRequest(BaseModel):
@@ -106,3 +117,4 @@ class VibeIngestResult(BaseModel):
     received: int
     inserted: int
     updated: int
+    files: int = 0

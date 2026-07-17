@@ -3123,3 +3123,239 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .dds-tip--label { cursor: default; }
 .dds-tip-label { transition: opacity .15s; }
 .dds-tip--label:hover .dds-tip-label { opacity: .65; }
+
+/* ─── Вайбкодинг ────────────────────────────────────────────────────────────── */
+
+.vibe-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+/* Ритм — герой */
+.vibe-rhythm {
+    display: flex;
+    align-items: center;
+    gap: 32px;
+    flex-wrap: wrap;
+}
+
+.vibe-rhythm-figure {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    color: var(--color-accent);
+    font-weight: 700;
+    line-height: 1;
+}
+
+.vibe-rhythm-hit {
+    font-size: 56px;
+}
+
+.vibe-rhythm-denom {
+    font-size: 28px;
+    color: var(--color-text-muted);
+    font-weight: 500;
+}
+
+.vibe-rhythm-caption {
+    font-size: 13px;
+    color: var(--color-text-muted);
+    margin-top: 8px;
+}
+
+.vibe-rhythm-days {
+    flex: 1;
+    min-width: 220px;
+}
+
+/* Полоска дней окна: закрашен = день с поставкой, пустой = пауза.
+   Пауза видна пропуском, а не сбросом — окно к ней равнодушно. */
+.vibe-days {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.vibe-day {
+    width: 14px;
+    height: 20px;
+    border-radius: 4px;
+    border: 1px solid var(--color-border);
+    background: transparent;
+}
+
+.vibe-day.hit {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+}
+
+.vibe-legend {
+    font-size: 12px;
+    color: var(--color-text-dim);
+    margin-top: 8px;
+}
+
+/* KPI-строка */
+.vibe-kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+}
+
+/* Заголовок карточки */
+.vibe-card-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--color-text);
+    margin-bottom: 4px;
+}
+
+.vibe-card-sub {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    margin-bottom: 16px;
+}
+
+/* Объём по дням — колонки */
+.vibe-days-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 140px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+}
+
+.vibe-day-col {
+    flex: 1;
+    min-width: 6px;
+    height: 100%;
+    display: flex;
+    align-items: flex-end;
+}
+
+.vibe-day-bar {
+    width: 100%;
+    border-radius: 4px 4px 0 0;
+    background: var(--color-accent);
+    transition: opacity 0.2s ease;
+}
+
+.vibe-day-bar:hover {
+    opacity: 0.75;
+}
+
+/* Масштаб — числа */
+.vibe-scale-nums {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.vibe-scale-num {
+    text-align: center;
+    padding: 12px 8px;
+    border-radius: 12px;
+    background: var(--color-bg-hover);
+}
+
+.vibe-scale-num-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--color-text);
+}
+
+.vibe-scale-num-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    margin-top: 2px;
+}
+
+/* Горизонтальные бары (области, разделы) */
+.vibe-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.vibe-bar-row {
+    display: grid;
+    grid-template-columns: 160px 1fr auto;
+    align-items: center;
+    gap: 12px;
+}
+
+.vibe-bar-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vibe-bar-name-sub {
+    font-size: 11px;
+    color: var(--color-text-dim);
+    font-weight: 400;
+}
+
+.vibe-bar-track {
+    height: 10px;
+    border-radius: 8px;
+    background: var(--color-bg-hover);
+    overflow: hidden;
+}
+
+.vibe-bar-fill {
+    height: 100%;
+    border-radius: 8px;
+    background: var(--color-accent);
+}
+
+.vibe-bar-fill.added {
+    background: var(--color-success);
+}
+
+.vibe-bar-value {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+}
+
+/* Лента поставок — таблица от TanStackDataTable, свой тут только sha */
+.vibe-feed-sha {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: var(--color-text-dim);
+}
+
+/* Пустой экран */
+.vibe-empty {
+    text-align: center;
+    padding: 48px 24px;
+}
+
+.vibe-empty-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+}
+
+.vibe-empty-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--color-text);
+    margin-bottom: 8px;
+}
+
+.vibe-empty-text {
+    font-size: 14px;
+    color: var(--color-text-muted);
+    max-width: 460px;
+    margin: 0 auto;
+}

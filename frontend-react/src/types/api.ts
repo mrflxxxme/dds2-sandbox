@@ -6572,3 +6572,82 @@ export interface AbTestCreatePayload {
   target_views?: number;
   max_days?: number;
 }
+
+// ─── Vibecoding ──────────────────────────────────────────────────────────────
+// Зеркало backend/schemas/vibe.py. Все числовые поля — int (не Decimal),
+// поэтому приходят числами и Number()-обёртка перед formatNumber не нужна.
+
+/** Одна поставка на прод (= один коммит, достижимый из ветки прода). */
+export interface VibeShipment {
+  sha: string;
+  short: string;
+  day: string;
+  ctype: string;
+  scope: string;
+  /** Человеческое имя раздела («Управление рекламой»). */
+  section: string;
+  title: string;
+  added: number;
+  deleted: number;
+  files: number;
+  is_product: boolean;
+}
+
+/** Дней с поставкой в скользящем окне. НЕ стрик: пауза не обнуляет. */
+export interface VibeRhythm {
+  hit: number;
+  denom: number;
+  window: number;
+  start: string;
+  end: string;
+}
+
+/** Объём по области кода (фронтенд/бэкенд/тесты/миграции). */
+export interface VibeAreaVolume {
+  area: string;
+  files: number;
+  added: number;
+  deleted: number;
+}
+
+/** Строки за день. Дни без поставок тоже приходят — нулями. */
+export interface VibeDayVolume {
+  day: string;
+  shipments: number;
+  added: number;
+  deleted: number;
+}
+
+/** Поставок в разделе. */
+export interface VibeSectionCount {
+  section: string;
+  count: number;
+}
+
+/** Опись объёма: сколько сделано. */
+export interface VibeScale {
+  files: number;
+  new_files: number;
+  components: number;
+  migrations: number;
+  sections: number;
+  added: number;
+  deleted: number;
+  by_area: VibeAreaVolume[];
+}
+
+/** Ответ вкладки «Вайбкодинг» для текущего пользователя. */
+export interface VibeStats {
+  display_name: string;
+  since: string;
+  until: string;
+  shipments_total: number;
+  shipments_product: number;
+  rhythm: VibeRhythm;
+  scale: VibeScale;
+  by_day: VibeDayVolume[];
+  by_section: VibeSectionCount[];
+  shipments: VibeShipment[];
+  /** Когда CI последний раз обновлял данные. */
+  last_ingest: string | null;
+}
