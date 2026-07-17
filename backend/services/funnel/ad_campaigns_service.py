@@ -41,6 +41,17 @@ logger = logging.getLogger("dds.funnel")
 
 MSK = pytz.timezone("Europe/Moscow")
 
+# Лимит времени на догрузку бюджетов (N+1 к WB, ~0.7с на кампанию). Строго МЕНЬШЕ
+# AD_CAMPAIGNS_SYNC_TIMEOUT джобы: при равных лимитах внешний wait_for убивает корутину
+# раньше, чем цикл успеет мягко остановиться и вернуть частичный результат — что и дало
+# на проде 0% успешных синков с 2026-07-11 (кампаний доросло до 1319, цикл требует ~15 мин).
+BUDGET_FETCH_TIME_BUDGET = 900  # 15 мин
+
+# То же для лёгкого синка «только бюджеты» (sync_ad_budgets_only, лишь активные кампании):
+# строго меньше AD_BUDGETS_SYNC_TIMEOUT. Здесь лимиты были ещё и перевёрнуты — внутренний
+# дефолт 600с против внешних 300с, — так что мягкая остановка не срабатывала никогда.
+BUDGET_ONLY_TIME_BUDGET = 420  # 7 мин
+
 # In-memory progress tracker: {project_id: {status, campaigns_total, budgets_done, budgets_total, error}}
 _sync_progress: dict[int, dict[str, Any]] = {}
 
@@ -111,6 +122,10 @@ async def sync_ad_campaigns(
         _sync_progress[project_id] = {"status": "error", "error": "no_api_key"}
         return {"synced": 0, "error": "no_api_key"}
 
+    # Транзакцию, открытую чтениями выше, закрываем ДО походов в WB: дальше минуты HTTP,
+    # а висящий idle in transaction выедает пул pgbouncer (см. .claude/rules/learnings.md).
+    await db.commit()
+
     campaigns = await fetch_ad_campaigns_detailed(
         api_key,
         include_completed=True,
@@ -119,11 +134,22 @@ async def sync_ad_campaigns(
         _sync_progress[project_id] = {"status": "done", "campaigns_total": 0, "budgets_done": 0}
         return {"synced": 0}
 
-    campaign_ids = [c["advertId"] for c in campaigns if c.get("advertId")]
+    # Бюджет тянем только там, где он ещё может измениться: статус 7 («Завершена»)
+    # необратим, остаток на такой кампании заморожен навсегда — на проекте 4 это 294
+    # холостых запроса к WB из 1319. Строку в БД они не теряют: ниже сработает ветка
+    # «budget is None → берём old_campaign.budget».
+    from backend.services.funnel.ads_manager import CAMPAIGN_STATUS_COMPLETED
+
+    campaign_ids = [
+        c["advertId"]
+        for c in campaigns
+        if c.get("advertId") and c.get("status") != CAMPAIGN_STATUS_COMPLETED
+    ]
 
     # Prioritize campaigns by spend (last 7 days) — high spenders first for budget fetch.
     # Кампании под фильтром страницы (priority_ids) уходят в начало очереди.
     campaign_ids = await _sort_campaigns_by_spend(db, project_id, campaign_ids, priority_ids)
+    await db.commit()  # сортировка читала БД → снова закрываем транзакцию перед WB
 
     _sync_progress[project_id] = {
         "status": "fetching_budgets",
@@ -139,6 +165,7 @@ async def sync_ad_campaigns(
             project_id,
             {**_sync_progress.get(project_id, {}), "budgets_done": done},
         ),
+        time_budget=BUDGET_FETCH_TIME_BUDGET,
     )
 
     _sync_progress[project_id] = {
@@ -423,8 +450,11 @@ async def sync_ad_budgets_only(db: AsyncSession, project_id: int) -> dict:
 
     # Prioritize by spend
     campaign_ids = await _sort_campaigns_by_spend(db, project_id, campaign_ids)
+    await db.commit()  # закрываем транзакцию перед минутами HTTP к WB
 
-    budgets = await fetch_campaign_budgets_batch(api_key, campaign_ids)
+    budgets = await fetch_campaign_budgets_batch(
+        api_key, campaign_ids, time_budget=BUDGET_ONLY_TIME_BUDGET
+    )
 
     # Detect changes and write events
     now = utcnow()
@@ -466,7 +496,8 @@ async def sync_ad_budgets_only(db: AsyncSession, project_id: int) -> dict:
 async def snapshot_ad_intraday(db: AsyncSession, project_id: int) -> dict:
     """Снимок накопительных ВНУТРИДНЕВНЫХ счётчиков активных кампаний (показы/клики/расход).
 
-    Зовётся планировщиком каждые ~30 мин. Тянет «сегодняшний» (МСК) накопительный счётчик
+    Зовётся планировщиком каждые 10 мин (per-project реже — гейт ads_snapshot_interval_min).
+    Тянет «сегодняшний» (МСК) накопительный счётчик
     из кабинета рекламы (cmp campaigns-stats, сессия wb_portal_session) и пишет по строке
     WbAdCampaignSnapshot на кампанию. Дельта между снимками = интрадей-метрики
     (get_intraday_metrics). WB нативно почасовку не отдаёт — копим сами вперёд.
@@ -483,8 +514,11 @@ async def snapshot_ad_intraday(db: AsyncSession, project_id: int) -> dict:
 
     try:
         client = await get_wb_portal_client(db, project_id)
-    except ValueError:
-        return {"snapshots": 0, "skipped": "no_session"}
+    except ValueError as e:
+        # ValueError здесь двузначен: сессии нет (норма, фича опциональна) ИЛИ ключ не
+        # расшифровался (`_decrypt` → «Проверьте SECRET_KEY», уже поломка). Обе ветки
+        # выглядят одинаково, поэтому отдаём текст наружу — он попадёт в сводку тика.
+        return {"snapshots": 0, "skipped": "no_session", "detail": str(e)}
 
     # Гейт частоты: job тикает каждые 10 мин, но проект может хотеть реже (20/30/60).
     # Пропускаем, если с последнего снимка прошло меньше интервала (grace 5 мин на джиттер тика).
@@ -510,7 +544,7 @@ async def snapshot_ad_intraday(db: AsyncSession, project_id: int) -> dict:
     ).scalars().all()
     if not active:
         await client.aclose()
-        return {"snapshots": 0}
+        return {"snapshots": 0, "skipped": "no_active_campaigns"}
     campaign_ids = [c.campaign_id for c in active]
 
     today_msk = pytz.UTC.localize(utcnow()).astimezone(MSK).date()
