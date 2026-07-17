@@ -282,7 +282,11 @@ async def get_wb_portal_status(db: AsyncSession, project_id: int) -> dict:
     key = result.scalar_one_or_none()
     if not key:
         return {"status": "NONE"}
-    status = (key.config or {}).get("status", "ACTIVE" if key.is_active else "EXPIRED")
+    # Источник истины — is_active: по выключенному ключу клиент кабинета не соберётся
+    # (get_wb_portal_client фильтрует is_active). config.status — лишь снимок последнего
+    # перехода и может разойтись с флагом (маскировка sync-prod гасит is_active, не трогая
+    # config) → перебивать им флаг нельзя, иначе UI зелёный поверх мёртвой сессии.
+    status = "ACTIVE" if key.is_active else "EXPIRED"
     return {"status": status, "updated_at": (key.config or {}).get("updated_at")}
 
 

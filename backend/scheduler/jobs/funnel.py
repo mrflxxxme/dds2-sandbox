@@ -21,6 +21,18 @@ from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.scheduler")
 
+# Потолок одного проекта в синке рекламных кампаний. Джоба тикает раз в 30 мин, так что
+# 20 мин — безопасный запас без наложения прогонов (max_instances=1). Обязан быть СТРОГО
+# больше BUDGET_FETCH_TIME_BUDGET: внутренний цикл сам мягко остановится и вернёт частичные
+# бюджеты, а этот таймаут — лишь аварийный предохранитель. Когда оба были по 600с, предохранитель
+# срабатывал раньше мягкой остановки и убивал прогон целиком → 0% успеха на проде с 2026-07-11.
+AD_CAMPAIGNS_SYNC_TIMEOUT = 1200  # 20 мин
+
+# То же для лёгкого синка «только бюджеты»: тикает раз в 10 мин, потому потолок 8 мин.
+# Прежние 300с на проекте 4 уже почти выбирались (реальные прогоны ~242с) — при росте
+# кампаний джоба повторила бы судьбу sync_ad_campaigns.
+AD_BUDGETS_SYNC_TIMEOUT = 480  # 8 мин
+
 _backfill_locks: dict[int, asyncio.Lock] = {}
 _ad_check_lock = asyncio.Lock()
 
@@ -296,14 +308,14 @@ async def sync_ad_campaigns_all_projects():
             async with AsyncSessionLocal() as db:
                 result = await asyncio.wait_for(
                     sync_ad_campaigns(db, pid),
-                    timeout=600,
+                    timeout=AD_CAMPAIGNS_SYNC_TIMEOUT,
                 )
                 synced = result.get("synced", 0)
                 status = "OK"
                 logger.info(f"Ad campaigns sync: project {pid} — {synced} campaigns")
         except TimeoutError:
             status = "TIMEOUT"
-            error_msg = "Timeout 10min exceeded"
+            error_msg = f"Timeout {AD_CAMPAIGNS_SYNC_TIMEOUT // 60}min exceeded"
             logger.error(f"Ad campaigns sync TIMEOUT for project {pid}")
         except asyncio.CancelledError:
             status = "ERROR"
@@ -567,7 +579,7 @@ async def sync_budgets_all_projects():
             async with AsyncSessionLocal() as db:
                 result = await asyncio.wait_for(
                     sync_ad_budgets_only(db, pid),
-                    timeout=300,
+                    timeout=AD_BUDGETS_SYNC_TIMEOUT,
                 )
                 updated = result.get("updated", 0)
                 events = result.get("events", 0)
@@ -575,7 +587,7 @@ async def sync_budgets_all_projects():
                 logger.info(f"Budget sync: project {pid} — updated={updated}, events={events}")
         except TimeoutError:
             status = "TIMEOUT"
-            error_msg = "Timeout 5min exceeded"
+            error_msg = f"Timeout {AD_BUDGETS_SYNC_TIMEOUT // 60}min exceeded"
             logger.error(f"Budget sync TIMEOUT for project {pid}")
         except asyncio.CancelledError:
             status = "ERROR"
@@ -604,7 +616,7 @@ async def sync_budgets_all_projects():
                     logger.error(f"Failed to update sync_log {log_id}: {log_err}")
 
 
-# ─── Ad intraday snapshots (every 30 min) ────────────────────────────────────
+# ─── Ad intraday snapshots (every 10 min) ────────────────────────────────────
 
 
 async def snapshot_ad_intraday_all_projects():
@@ -619,18 +631,43 @@ async def snapshot_ad_intraday_all_projects():
     if not project_ids:
         return
 
+    # Нулевой исход — норма (нет сессии / гейт интервала), поэтому по проекту не шумим:
+    # копим причины и отдаём ОДНУ сводку на тик. Без неё «снимков нет» неотличимо от
+    # «джоба работает» — ровно на этом сгорел день расследования 2026-07-16.
+    outcomes: dict[str, int] = {}
+    details: dict[str, str] = {}
+    total_snaps = 0
+
     for pid in project_ids:
         try:
             async with AsyncSessionLocal() as db:
                 result = await asyncio.wait_for(snapshot_ad_intraday(db, pid), timeout=120)
-            if result.get("snapshots"):
-                logger.info(f"Ad intraday snapshot: project {pid} — {result['snapshots']} snapshots")
+            snaps = result.get("snapshots") or 0
+            total_snaps += snaps
+            if snaps:
+                outcomes["ok"] = outcomes.get("ok", 0) + 1
+                logger.info(f"Ad intraday snapshot: project {pid} — {snaps} snapshots")
+                continue
+            # Кампании активны, но WB не отдал строк — отдельный сигнал, не «нет кампаний».
+            reason = result.get("skipped") or result.get("error") or "no_rows_from_wb"
+            outcomes[reason] = outcomes.get(reason, 0) + 1
+            if result.get("detail"):
+                details[reason] = result["detail"]
         except TimeoutError:
+            outcomes["timeout"] = outcomes.get("timeout", 0) + 1
             logger.error(f"Ad intraday snapshot TIMEOUT for project {pid}")
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            outcomes["failed"] = outcomes.get("failed", 0) + 1
             logger.error(f"Ad intraday snapshot failed for project {pid}: {e}")
+
+    breakdown = ", ".join(f"{k}={v}" for k, v in sorted(outcomes.items()))
+    tail = "".join(f"; {k}: {v}" for k, v in sorted(details.items()))
+    logger.info(
+        f"Ad intraday snapshot done: {total_snaps} snapshots over "
+        f"{len(project_ids)} projects ({breakdown}){tail}"
+    )
 
 
 # ─── Funnel hourly sync (last 2 days) ────────────────────────────────────────

@@ -86,7 +86,9 @@ async def test_snapshot_no_session_skips(db_session, project, monkeypatch):
     await _seed_campaign(db_session, project.id)
     _patch_getter(monkeypatch, ValueError("нет сессии"))
     res = await snapshot_ad_intraday(db_session, project.id)
-    assert res == {"snapshots": 0, "skipped": "no_session"}
+    # detail несёт текст ValueError: «нет сессии» и «не расшифровался ключ» неразличимы
+    # по коду причины, и без текста обе тонут в сводке тика одинаковым no_session.
+    assert res == {"snapshots": 0, "skipped": "no_session", "detail": "нет сессии"}
 
 
 async def test_snapshot_no_active_campaigns(db_session, project, monkeypatch):
@@ -94,7 +96,7 @@ async def test_snapshot_no_active_campaigns(db_session, project, monkeypatch):
     client = _FakeClient(rows=[{"campaign_id": CID, "views": 1, "clicks": 0, "spend": 0.0}])
     _patch_getter(monkeypatch, client)
     res = await snapshot_ad_intraday(db_session, project.id)
-    assert res == {"snapshots": 0}
+    assert res == {"snapshots": 0, "skipped": "no_active_campaigns"}
     assert client.closed is True  # клиент закрыт даже на пустой выборке
 
 
@@ -206,3 +208,86 @@ async def test_interval_set_get(db_session, project):
 async def test_interval_rejects_invalid(db_session, project):
     with pytest.raises(ValueError):
         await set_ads_snapshot_interval_min(db_session, project.id, 7)
+
+
+# ─── snapshot_ad_intraday_all_projects: видимость нулевых исходов ─────────────
+
+
+class _FakeSession:
+    """Заглушка AsyncSessionLocal() — джобе сессия нужна лишь чтобы передать её в сервис."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _patch_job(monkeypatch, project_ids, results):
+    """results: dict[pid] → dict-результат сервиса или Exception."""
+    from backend.scheduler.jobs import funnel as job_mod
+
+    async def _ids():
+        return project_ids
+
+    async def _snapshot(db, pid):
+        res = results[pid]
+        if isinstance(res, Exception):
+            raise res
+        return res
+
+    monkeypatch.setattr(job_mod, "get_sync_project_ids", _ids)
+    monkeypatch.setattr(job_mod, "AsyncSessionLocal", _FakeSession)
+    monkeypatch.setattr(
+        "backend.services.funnel.ad_campaigns_service.snapshot_ad_intraday", _snapshot
+    )
+
+
+async def test_job_summary_reports_every_zero_reason(monkeypatch, caplog):
+    """Сводка тика перечисляет ПРИЧИНЫ нулей — иначе молчащая джоба неотличима от рабочей."""
+    from backend.scheduler.jobs.funnel import snapshot_ad_intraday_all_projects
+
+    _patch_job(monkeypatch, [1, 2, 3, 4], {
+        1: {"snapshots": 3},
+        2: {"snapshots": 0, "skipped": "no_session", "detail": "Сессия WB-кабинета не задана."},
+        3: {"snapshots": 0, "skipped": "interval"},
+        4: {"snapshots": 0, "skipped": "no_active_campaigns"},
+    })
+    with caplog.at_level("INFO", logger="dds.scheduler"):
+        await snapshot_ad_intraday_all_projects()
+
+    summary = [r.message for r in caplog.records if "done" in r.message]
+    assert len(summary) == 1, "ожидается ровно одна сводная строка на тик"
+    line = summary[0]
+    assert "3 snapshots" in line
+    assert "ok=1" in line and "no_session=1" in line and "interval=1" in line
+    assert "no_active_campaigns=1" in line
+    # причина «нет сессии» неоднозначна (нет ключа vs не расшифровался) → текст в сводке
+    assert "Сессия WB-кабинета не задана." in line
+
+
+async def test_job_summary_survives_project_failure(monkeypatch, caplog):
+    """Падение одного проекта не роняет тик и попадает в сводку отдельной причиной."""
+    from backend.scheduler.jobs.funnel import snapshot_ad_intraday_all_projects
+
+    _patch_job(monkeypatch, [1, 2], {
+        1: RuntimeError("боом"),
+        2: {"snapshots": 2},
+    })
+    with caplog.at_level("INFO", logger="dds.scheduler"):
+        await snapshot_ad_intraday_all_projects()
+
+    line = next(r.message for r in caplog.records if "done" in r.message)
+    assert "failed=1" in line and "ok=1" in line
+
+
+async def test_job_reports_zero_rows_from_wb(monkeypatch, caplog):
+    """Кампании активны, а WB не отдал строк — это отдельный сигнал, не «нет кампаний»."""
+    from backend.scheduler.jobs.funnel import snapshot_ad_intraday_all_projects
+
+    _patch_job(monkeypatch, [1], {1: {"snapshots": 0}})
+    with caplog.at_level("INFO", logger="dds.scheduler"):
+        await snapshot_ad_intraday_all_projects()
+
+    line = next(r.message for r in caplog.records if "done" in r.message)
+    assert "no_rows_from_wb=1" in line
