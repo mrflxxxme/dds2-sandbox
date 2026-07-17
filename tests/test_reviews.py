@@ -346,6 +346,46 @@ async def test_complaints_flow(db_session, project):
         await complaints_service.create_complaint(db_session, project.id, "nope", "other", "x")
 
 
+async def test_complaints_resolve_after_sync(db_session, project):
+    """Автодетект исхода: отзыв пропал из выдачи WB → удалён; на месте и старая → отклонена."""
+    from backend.services import complaints_service
+
+    now = utcnow()
+    await _add_feedback(db_session, project.id, "gone", 1, 111, text="исчезнет", created=now)
+    await _add_feedback(db_session, project.id, "stays", 2, 111, text="останется", created=now)
+    await db_session.commit()
+
+    c_gone = await complaints_service.create_complaint(db_session, project.id, "gone", "not_related", "т")
+    c_stay = await complaints_service.create_complaint(db_session, project.id, "stays", "not_related", "т")
+
+    # WB вернул только «stays» → «gone» удалён
+    res = await complaints_service.resolve_after_sync(db_session, project.id, {"stays"})
+    assert res["removed"] == 1 and res["rejected"] == 0
+
+    comp = await complaints_service.get_complaints(db_session, project.id)
+    by_id = {c.id: c for c in comp.items}
+    assert by_id[c_gone.id].status == "removed" and by_id[c_gone.id].resolved_at is not None
+    assert by_id[c_stay.id].status == "pending"  # ещё ждём
+
+    # состарим жалобу на «stays» → по таймауту становится «не удалён»
+    from sqlalchemy import update
+
+    from backend.models import WBFeedbackComplaint
+
+    await db_session.execute(
+        update(WBFeedbackComplaint)
+        .where(WBFeedbackComplaint.id == c_stay.id)
+        .values(created_at=now - timedelta(days=20))
+    )
+    await db_session.commit()
+
+    res2 = await complaints_service.resolve_after_sync(db_session, project.id, {"stays"})
+    assert res2["rejected"] == 1
+    stats = (await complaints_service.get_complaints(db_session, project.id)).stats
+    assert stats.removed == 1 and stats.rejected == 1 and stats.pending == 0
+    assert stats.removal_rate == 50.0
+
+
 async def test_complaints_bulk(db_session, project):
     """Массовая подача: все накопившиеся 1–3★ без жалобы, повторный прогон — 0."""
     from backend.services import complaints_service

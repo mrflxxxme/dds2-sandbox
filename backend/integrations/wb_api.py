@@ -848,6 +848,54 @@ class WBApiClient:
                 inner = data.get("data") if isinstance(data, dict) else None
                 return inner or {"feedbacks": []}
 
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def submit_feedback_complaint(
+        self,
+        feedback_id: str,
+        reason_code: str,
+        text: str | None = None,
+    ) -> bool:
+        """
+        Подать жалобу на отзыв. WB Feedbacks API: POST /api/v1/feedbacks/actions.
+
+        ⚠️ WB ВРЕМЕННО ОТКЛЮЧИЛ этот метод: жалобы подаются только через ЛК продавца,
+        а тем, у кого подача была автоматизирована, предписано перейти в ручной режим.
+        Код дремлет за флагом `settings.WB_FEEDBACK_COMPLAINTS_API` (по умолчанию False)
+        и включается, когда WB объявит возврат метода.
+
+        ⚠️ Лимит методов отзывов — 1 rps (до 3 rps → блок на 60 сек): массовую подачу
+        гнать ТОЛЬКО через фоновую очередь с троттлингом, не в HTTP-запросе.
+
+        WB не валидирует id отзыва: на неверном значении ошибки не будет — сверяй сам.
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks/actions"
+                payload: dict = {"id": feedback_id, "supplierComplaint": {"reason": reason_code}}
+                if text:
+                    payload["supplierComplaint"]["comment"] = text
+                logger.info("wb_api.request", method="POST", path="/api/v1/feedbacks/actions")
+                response = await client.post(url, headers=self.headers, json=payload)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code in (404, 405):
+                    # метод отключён/убран на стороне WB
+                    raise ValueError(
+                        "WB: метод подачи жалоб недоступен (WB временно отключил его) — "
+                        "подайте жалобу через личный кабинет"
+                    )
+                if response.status_code not in (200, 204):
+                    raise ValueError(
+                        f"WB feedbacks/actions error: HTTP {response.status_code} — {response.text[:200]}"
+                    )
+                return True
+
 
 def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:
     """

@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     # На проде игнорируется (там основной scheduler уже крутит тот же тиринг).
     FULFILLMENT_SYNC_ENABLED: bool = False
 
+    # Автоподача жалоб на отзывы через WB API (POST /api/v1/feedbacks/actions).
+    # WB ВРЕМЕННО отключил этот метод — жалобы подаются только через ЛК продавца.
+    # Клиент готов; включать, когда WB объявит возврат метода. Учти лимит 1 rps.
+    WB_FEEDBACK_COMPLAINTS_API: bool = False
+
     # Admin panel IP whitelist (comma-separated, empty = no restriction)
     ADMIN_ALLOWED_IPS: str = ""  # e.g. "1.2.3.4,2a01:e5c0:6dac::2"
 

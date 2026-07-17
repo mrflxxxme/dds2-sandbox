@@ -169,6 +169,22 @@ async def sync_project_feedbacks(
     upserted = await _upsert_rows(db, rows)
     await db.commit()
 
+    # Автопростановка исхода жалоб — только на ПОЛНОМ синке (актив+архив): там
+    # `collected` = полная выдача WB, и пропажа отзыва означает удаление. На
+    # инкрементальном прогоне отзыв мог просто уехать в архив (ложное «удалён»).
+    resolved: dict = {"removed": 0, "rejected": 0}
+    if full_backfill:
+        from backend.services.complaints_service import resolve_after_sync
+
+        resolved = await resolve_after_sync(db, project_id, set(collected.keys()))
+        if resolved["removed"] or resolved["rejected"]:
+            logger.info(
+                "WB feedbacks sync: project %d — жалобы: удалено=%d, отклонено=%d",
+                project_id,
+                resolved["removed"],
+                resolved["rejected"],
+            )
+
     logger.info(
         "WB feedbacks sync: project %d — fetched=%d, upserted=%d (backfill=%s)",
         project_id,
@@ -176,4 +192,9 @@ async def sync_project_feedbacks(
         upserted,
         full_backfill,
     )
-    return {"rows_fetched": len(rows), "rows_upserted": upserted}
+    return {
+        "rows_fetched": len(rows),
+        "rows_upserted": upserted,
+        "complaints_removed": resolved["removed"],
+        "complaints_rejected": resolved["rejected"],
+    }

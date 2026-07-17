@@ -22,12 +22,54 @@ from backend.schemas.reviews import (
     ComplaintsResponse,
     ComplaintStats,
 )
-from backend.services.reviews_service import _has_wb_key, has_any_feedback
+from backend.config import settings
+from backend.services.reviews_service import _has_wb_key, has_any_feedback, resolve_wb_key
 from backend.utils.time import utcnow
 
 _CANDIDATE_MAX = 500
 _BULK_MAX = 500  # кап массовой подачи за один прогон
 _TERMINAL = {"removed", "rejected"}
+# Сколько ждём решения WB, прежде чем считать жалобу отклонённой (отзыв на месте)
+_REJECT_AFTER_DAYS = 14
+
+
+async def resolve_after_sync(db: AsyncSession, project_id: int, seen_wb_ids: set[str]) -> dict:
+    """
+    Автопростановка исхода жалоб по итогам ПОЛНОГО синка (актив + архив).
+
+    `seen_wb_ids` — все отзывы, которые WB вернул сейчас. Логика:
+    - жалоба `pending`, а отзыва в выдаче WB БОЛЬШЕ НЕТ → его удалили → `removed`;
+    - жалоба `pending` дольше `_REJECT_AFTER_DAYS`, а отзыв на месте → `rejected`.
+
+    Вызывать ТОЛЬКО на полном синке: на инкрементальном (без архива) отзыв мог
+    просто уехать в архив — и мы бы ложно посчитали его удалённым.
+    """
+    rows = (
+        await db.execute(
+            select(WBFeedbackComplaint).where(
+                WBFeedbackComplaint.project_id == project_id,
+                WBFeedbackComplaint.status == "pending",
+            )
+        )
+    ).scalars().all()
+    if not rows:
+        return {"removed": 0, "rejected": 0}
+
+    now = utcnow()
+    removed = rejected = 0
+    for c in rows:
+        if c.wb_feedback_id not in seen_wb_ids:
+            c.status = "removed"
+            c.resolved_at = now
+            removed += 1
+        elif c.created_at is not None and (now - c.created_at).total_seconds() / 86400 > _REJECT_AFTER_DAYS:
+            # дробное сравнение: timedelta.days опаздывает почти на сутки
+            c.status = "rejected"
+            c.resolved_at = now
+            rejected += 1
+    if removed or rejected:
+        await db.commit()
+    return {"removed": removed, "rejected": rejected}
 
 
 async def list_candidates(
@@ -152,6 +194,30 @@ async def get_complaints(db: AsyncSession, project_id: int, status: str | None =
     return ComplaintsResponse(items=items, stats=stats, has_key=has_key)
 
 
+async def _try_submit_to_wb(
+    db: AsyncSession, project_id: int, wb_feedback_id: str, reason: str, text: str
+) -> bool:
+    """
+    Отправить жалобу в WB, если метод доступен (флаг) и есть ключ.
+
+    По умолчанию флаг ВЫКЛЮЧЕН: WB временно убрал подачу жалоб из API, поэтому
+    жалоба только фиксируется у нас, а подаётся продавцом через ЛК. Когда WB
+    вернёт метод — включить `WB_FEEDBACK_COMPLAINTS_API=true`, и подача пойдёт сама.
+    Возвращает True, если реально отправлено в WB.
+    """
+    if not settings.WB_FEEDBACK_COMPLAINTS_API:
+        return False
+    api_key = await resolve_wb_key(db, project_id)
+    if not api_key:
+        raise ValueError("Нет активного WB-ключа со scope «Вопросы и отзывы»")
+
+    from backend.integrations.wb_api import WBApiClient
+
+    client = WBApiClient(api_key, project_id=project_id)
+    sent = await client.submit_feedback_complaint(wb_feedback_id, reason, text)
+    return bool(sent)
+
+
 async def create_complaint(
     db: AsyncSession, project_id: int, wb_feedback_id: str, reason: str, text: str
 ) -> ComplaintItem:
@@ -172,6 +238,9 @@ async def create_complaint(
     ).scalar_one_or_none()
     if fb is None:
         raise ValueError("Отзыв не найден в зеркале")
+
+    # Автоподача в WB — только если WB вернёт метод и флаг включён (иначе просто учёт)
+    await _try_submit_to_wb(db, project_id, wb_feedback_id, reason, text)
 
     existing = (
         await db.execute(
