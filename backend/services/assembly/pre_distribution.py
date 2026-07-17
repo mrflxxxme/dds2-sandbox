@@ -22,7 +22,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import cast
 
-from sqlalchemy import func, nulls_last, or_, select
+from sqlalchemy import func, nulls_last, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.cache import invalidate_cache
@@ -64,6 +64,16 @@ PRE_DIST_VEHICLE_STATUSES = (VehicleStatus.CUSTOMS, VehicleStatus.DISPATCHED)
 # приёмки: остаток уже оприходован на ФФ, заявки из неё создаются ОБЫЧНЫМИ (IN_PROGRESS,
 # с валидацией реального стока), а не PRE_DISTRIBUTED.
 PRE_DIST_DELIVERED_WINDOW_DAYS = 3
+
+# Advisory-lock namespace для create_pre_distribution: сериализует конкурентные
+# сабмиты «Распределить машину» одного проекта (две вкладки/два юзера). Over-commit-
+# гард (gross/reserved) и дедуп existing_pd — обычные SELECT под READ COMMITTED:
+# без лока оба запроса читают stale-резерв → две дубль-заявки на направление либо
+# fold сверх пула (partial-unique ix_assembly_requests_fbo_wh_unique не спасает —
+# wb_fbo_supply_id у пре-дистрибуции обычно NULL). 0x505244 = 'PRD'. Лок
+# xact-scoped (PgBouncer-safe), снимается на commit — по образцу
+# _CURRENT_DRAFT_LOCK_NS черновиков (assembly_draft_service).
+_PRE_DIST_LOCK_NS = 0x505244
 
 
 def _delivered_window_start() -> date:
@@ -544,6 +554,13 @@ async def create_pre_distribution(
     if not payload.rows:
         raise ValueError("Нет строк для предраспределения")
 
+    # Сериализация конкурентных сабмитов — ДО первого чтения пула/гарда/дедупа.
+    # Проигравший ждёт commit победителя и перечитывает уже свежий резерв.
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :pid)"),
+        {"ns": _PRE_DIST_LOCK_NS, "pid": project_id},
+    )
+
     vehicle = await _load_distributable_vehicle(db, project_id, payload.vehicle_id)
     target_wh = await _resolve_target_ff_warehouse(db, project_id, vehicle)
     is_delivered = vehicle.status == VehicleStatus.DELIVERED
@@ -603,6 +620,27 @@ async def create_pre_distribution(
 
     created: list[AssemblyRequest] = []
     for (wb_name, pkg), bc_qty in groups.items():
+        # Ре-захват лока на каждой группе: create_assembly_request КОММИТИТ per-группу,
+        # commit снимает xact-лок — без ре-захвата дедуп-SELECT следующей группы снова
+        # гонялся бы с конкурентным сабмитом (лок реентерабелен, повторный захват в
+        # той же транзакции — no-op).
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(:ns, :pid)"),
+            {"ns": _PRE_DIST_LOCK_NS, "pid": project_id},
+        )
+        # Гард свежести под ре-захваченным локом: пока лок был отпущен (commit прошлой
+        # группы), конкурентный сабмит мог занять пул — стартовый over-commit-гард
+        # устаревает. Для машины В ПУТИ это единственный барьер (create-путь идёт со
+        # skip_stock_validation). Перечитываем живой резерв и проверяем ЭТУ группу;
+        # уже созданные группы остаются (инкрементальность экрана это допускает).
+        fresh_reserved = await _reserved_by_barcode(db, project_id, payload.vehicle_id)
+        for bc, q in bc_qty.items():
+            fresh_available = max(0, gross.get(bc, 0) - fresh_reserved.get(bc, 0))
+            if q > fresh_available:
+                raise ValueError(
+                    f"Превышение по {bc}: запрошено {q}, доступно {fresh_available} "
+                    f"(пул заняло параллельное распределение; созданные до этого группы сохранены)"
+                )
         items = [AssemblyItemCreate(barcode=bc, quantity=q) for bc, q in bc_qty.items()]
         # Паллеты — из фронта (геометрию коробов считает фронт); нет ключа → 0 (как раньше).
         pallets = max(0, int(payload.pallets_by_group.get(f"{wb_name}::{pkg}", 0)))

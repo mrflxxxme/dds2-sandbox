@@ -19,7 +19,8 @@ import {
     MONO_MAX_PALLET_ARTICLES,
 } from '@/lib/utils/boxPallet';
 import { palletFootprint, planTopUpBoxes, type TopUpCandidate } from '@/lib/assembly/prebookFootprint';
-import type { PrebookGroup, PrebookMonoPallet, PrebookTopUp } from '@/app/(main)/p/[slug]/warehouse/assembly/distribute/components/PrebookView';
+import { COMPAT_CLASS_ANY } from '@/lib/assembly/categoryCompat';
+import type { PrebookClassSlice, PrebookGroup, PrebookMonoPallet, PrebookTopUp } from '@/app/(main)/p/[slug]/warehouse/assembly/distribute/components/PrebookView';
 
 export interface PrebookGroupsSources {
     /** Строки предброни (под-паллетные хвосты) — из побочного выхода нормализатора. */
@@ -39,11 +40,17 @@ export interface PrebookGroupsSources {
     boxSizeOf: (nm: number) => string | null;
     /** Override «коробов на паллету» по канон-размеру короба. */
     palletOverrides: Record<string, number>;
+    /** Класс совместимости категорий (`lib/assembly/categoryCompat`). Включённые
+     *  правила режут BOX-карточку на срезы per-класс (footprint и дозабор в своём
+     *  классе). Не задан / всюду `*` — прежнее поведение. Моно не трогает. */
+    classOf?: (nm: number) => string;
+    /** Подпись класса для бейджа (см. `classLabelOf`). */
+    classLabelOf?: (cls: string) => string;
 }
 
 /** Собрать группы предброни (карточки направлений) из строк-хвостов. */
 export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
-    const { prebook, usedRows, articles, ffName, ppbOf, ppbAt, boxSizeOf, palletOverrides } = s;
+    const { prebook, usedRows, articles, ffName, ppbOf, ppbAt, boxSizeOf, palletOverrides, classOf } = s;
     if (prebook.length === 0) return [];
 
     const nmVendor = new Map<number, string>();
@@ -115,7 +122,7 @@ export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
     // должен предлагаться двум отгрузкам (иначе пересорт — физически коробов меньше,
     // чем суммарно обещано). Сначала строим геометрию всех групп, копим кандидатов на
     // дозабор, затем во втором проходе раздаём дефицитный пул из мутабельного клона.
-    interface BoxElig { grp: PrebookGroup; ffId: number; wb: string; shortfall: number; pallets: number }
+    interface BoxElig { grp: PrebookGroup; ffId: number; wb: string; shortfall: number; pallets: number; slice?: PrebookClassSlice }
     interface MonoElig { grp: PrebookGroup; ffId: number; wb: string; shortfall: number; topNm: Set<number>; pallets: number }
     const boxElig: BoxElig[] = [];
     const monoElig: MonoElig[] = [];
@@ -170,6 +177,37 @@ export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
         } else {
             footprint = palletFootprint(g.items.map(i => ({ nmId: i.nm_id, qty: i.qty })), uppOf);
         }
+        // BOX + правила совместимости: разрез направления на классы (SKU разных классов
+        // не делят паллету). Footprint аддитивен (Σ qty/upp) — сумма срезов == групповому,
+        // но целые/дозабор считаются per-класс. Все классы `*` → правила выключены,
+        // остаёмся на легаси-виде без срезов.
+        let classes: PrebookClassSlice[] | undefined;
+        if (g.pkg === 'BOX' && classOf) {
+            const byCls = new Map<string, typeof g.items>();
+            for (const i of g.items) {
+                const cls = classOf(i.nm_id);
+                const arr = byCls.get(cls) ?? [];
+                arr.push(i);
+                byCls.set(cls, arr);
+            }
+            if (!(byCls.size === 1 && byCls.has(COMPAT_CLASS_ANY))) {
+                classes = [...byCls.entries()].map(([cls, items]) => {
+                    const fp = palletFootprint(items.map(i => ({ nmId: i.nm_id, qty: i.qty })), uppOf);
+                    const cFrac = fp - Math.floor(fp);
+                    return {
+                        cls,
+                        label: s.classLabelOf?.(cls) ?? cls,
+                        items,
+                        boxes: items.reduce((sum, i) => sum + i.boxes, 0),
+                        qty: items.reduce((sum, i) => sum + i.qty, 0),
+                        looseUnits: items.reduce((sum, i) => sum + (i.looseUnits || 0), 0),
+                        footprint: fp,
+                        fillPct: fp > 0 ? Math.min(0.99, cFrac || 0.99) : 0.5,
+                        topUp: null,
+                    };
+                }).sort((a, b) => b.qty - a.qty);
+            }
+        }
         const boxes = g.items.reduce((sum, i) => sum + i.boxes, 0);
         const frac = footprint - Math.floor(footprint);
         const fillPct = footprint > 0 ? Math.min(0.99, frac || 0.99) : 0.5;
@@ -177,12 +215,20 @@ export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
         const looseUnits = g.items.reduce((sum, i) => sum + (i.looseUnits || 0), 0);
         // topUp/tailTopUp считаются ВО ВТОРОМ проходе (с резервированием пула между
         // направлениями) — здесь только копим геометрию дозабора.
-        const grp: PrebookGroup = { pkg: g.pkg, wb: g.wb, ff: ffLabel, ffId: g.ffId, items: g.items, boxes, qty: g.qty, looseUnits, footprint, fillPct, topUp: null, tailTopUp: null, monoPallets, monoPartials, monoTailFrac };
+        const grp: PrebookGroup = { pkg: g.pkg, wb: g.wb, ff: ffLabel, ffId: g.ffId, items: g.items, boxes, qty: g.qty, looseUnits, footprint, fillPct, topUp: null, tailTopUp: null, monoPallets, monoPartials, monoTailFrac, classes };
         out.push(grp);
         // BOX-дозабор: неполную паллету этого ФФ на wb дособрать до целой из свободных
-        // коробов ЭТОГО ЖЕ ФФ (короб с двух ФФ собрать нельзя).
-        if (g.pkg === 'BOX' && footprint > 0 && g.ffId >= 0) {
-            boxElig.push({ grp, ffId: g.ffId, wb: g.wb, shortfall: Math.ceil(footprint) - footprint, pallets: Math.max(1, Math.ceil(footprint)) });
+        // коробов ЭТОГО ЖЕ ФФ (короб с двух ФФ собрать нельзя). С классами — per-срез:
+        // дозабор целит в неполную паллету СВОЕГО класса и только его кандидатами.
+        if (g.pkg === 'BOX' && g.ffId >= 0) {
+            if (classes) {
+                for (const sl of classes) {
+                    if (sl.footprint <= 0) continue;
+                    boxElig.push({ grp, slice: sl, ffId: g.ffId, wb: g.wb, shortfall: Math.ceil(sl.footprint) - sl.footprint, pallets: Math.max(1, Math.ceil(sl.footprint)) });
+                }
+            } else if (footprint > 0) {
+                boxElig.push({ grp, ffId: g.ffId, wb: g.wb, shortfall: Math.ceil(footprint) - footprint, pallets: Math.max(1, Math.ceil(footprint)) });
+            }
         }
         // МОНО-хвост: чем дозабрать до ещё одной ЦЕЛОЙ из свободного ФФ (ТОП-3 крупнейших хвоста).
         if (g.pkg === 'MONOPALLET' && g.ffId >= 0 && pmDropped) {
@@ -208,13 +254,13 @@ export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
         poolByFf.set(ff, m);
     }
     // Кандидаты ФФ на текущий момент (учёт уже зарезервированного), отсортированы по остатку.
-    const ffCandidates = (ffId: number, wb: string, filterNm: Set<number> | null): TopUpCandidate[] => {
+    const ffCandidates = (ffId: number, wb: string, allowNm: ((nmId: number) => boolean) | null): TopUpCandidate[] => {
         const m = poolByFf.get(ffId);
         if (!m) return [];
         const arr: TopUpCandidate[] = [];
         for (const [nmId, v] of m) {
             if (v.freeBoxes <= 0) continue;
-            if (filterNm && !filterNm.has(nmId)) continue;
+            if (allowNm && !allowNm(nmId)) continue;
             arr.push({ nmId, ppb: v.ppb, freeBoxes: v.freeBoxes, bpp: effectiveBoxesPerPallet(boxSizeOf(nmId) ?? null, maxPalletHeightCm(wb), palletOverrides) });
         }
         arr.sort((x, y) => y.freeBoxes - x.freeBoxes);
@@ -227,17 +273,25 @@ export function buildPrebookGroups(s: PrebookGroupsSources): PrebookGroup[] {
     };
     const asCandidate = (pr: { nmId: number; boxes: number }) => ({ vendor: nmVendor.get(pr.nmId) || `nm ${pr.nmId}`, boxes: pr.boxes, nmId: pr.nmId });
     // BOX и МОНО-хвост тянут из ОДНОГО физического пула ФФ — обрабатываем вместе, по
-    // возрастанию shortfall (ближайшие к целой — первыми).
+    // возрастанию shortfall (ближайшие к целой — первыми). Класс-срезы BOX добирают
+    // ТОЛЬКО кандидатами своего класса (ковёр не доложится пледами), но резервируют
+    // общий пул ФФ наравне со всеми (один короб не обещается дважды).
     const eligAll = [
         ...boxElig.map(e => ({ ...e, kind: 'box' as const, topNm: null as Set<number> | null })),
-        ...monoElig.map(e => ({ ...e, kind: 'mono' as const })),
+        ...monoElig.map(e => ({ ...e, kind: 'mono' as const, slice: undefined as PrebookClassSlice | undefined })),
     ].sort((a, b) => a.shortfall - b.shortfall);
     for (const e of eligAll) {
-        const plan = planTopUpBoxes(e.shortfall, ffCandidates(e.ffId, e.wb, e.topNm));
+        const allowNm: ((nm: number) => boolean) | null =
+            e.kind === 'mono' && e.topNm ? ((nm) => e.topNm!.has(nm))
+            : e.slice && classOf ? ((nm) => classOf(nm) === e.slice!.cls)
+            : null;
+        const plan = planTopUpBoxes(e.shortfall, ffCandidates(e.ffId, e.wb, allowNm));
         if (!plan.feasible || plan.rows.length === 0) continue;
         reserve(e.ffId, plan.rows);
         const topUp: PrebookTopUp = { ff: ffName(e.ffId), needBoxes: plan.needBoxes, pallets: e.pallets, candidates: plan.rows.map(asCandidate) };
-        if (e.kind === 'box') e.grp.topUp = topUp; else e.grp.tailTopUp = topUp;
+        if (e.kind === 'mono') e.grp.tailTopUp = topUp;
+        else if (e.slice) e.slice.topUp = topUp;
+        else e.grp.topUp = topUp;
     }
     return out;
 }

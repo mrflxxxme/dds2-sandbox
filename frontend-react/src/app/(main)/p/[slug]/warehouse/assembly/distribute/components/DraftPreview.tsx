@@ -23,6 +23,7 @@ import {
 } from '@/lib/utils/assemblyPreview';
 import { palletsForLines, maxPalletHeightCm, effectiveBoxesPerPallet, MONO_MAX_PALLET_ARTICLES, type PalletCount } from '@/lib/utils/boxPallet';
 import { buildPalletManifest, type PalletBin } from '@/lib/utils/palletManifest';
+import CreatedRequestsModal, { type CreatedRequestRow } from './CreatedRequestsModal';
 
 const PKG_BADGE: Record<string, string> = {
     BOX: 'badge-info', MONOPALLET: 'badge-warning', SUPERSAFE: 'badge-secondary',
@@ -90,6 +91,11 @@ interface DraftPreviewProps {
     prebookOrigin?: Set<string>;
     /** Draft-режим: сбросить правки редактора на сервер перед commit. Опц. (нет в predist). */
     ensureSaved?: () => Promise<boolean>;
+    /** Класс совместимости категорий (`lib/assembly/categoryCompat`): BOX-паллеты
+     *  считаются и пакуются per-класс (ковры не делят паллету с пледами). */
+    classOf?: (nm: number) => string;
+    /** Подпись класса для бейджа на карточке паллеты. */
+    classLabel?: (cls: string) => string;
     onToast: (message: string, type: 'success' | 'error') => void;
     /** Draft-режим: перезагрузить черновик после частичного commit. Опц. (нет в predist). */
     onReloadDraft?: () => void;
@@ -104,13 +110,31 @@ interface DraftPreviewProps {
 export default function DraftPreview({
     slug, draftId, rows, newcomerNmIds, warehouses,
     nmPpb, nmPpbByWh, nmMeta, nmBoxSize, palletOverrides, geomReady, prebookOrigin,
-    ensureSaved, onToast, onReloadDraft, predist,
+    ensureSaved, onToast, onReloadDraft, predist, classOf, classLabel,
 }: DraftPreviewProps) {
     const router = useRouter();
 
     const [committing, setCommitting] = useState(false);
     // ФФ, по которому сейчас идёт частичный commit (для лейбла кнопки в его шапке).
     const [committingFfId, setCommittingFfId] = useState<number | null>(null);
+    // Модалка «Созданные заявки» после коммита: список + занос WB/ФФ; закрытие
+    // выполняет прежний post-commit переход (after).
+    const [createdModal, setCreatedModal] = useState<{ rows: CreatedRequestRow[]; listQuery: string; after: () => void } | null>(null);
+    // Бриф созданных заявок по ids — из created-groups (заявки только что созданы,
+    // они IN_PROGRESS с source_draft_id → группа черновика их содержит).
+    const fetchCreatedRows = useCallback(async (ids: number[]): Promise<CreatedRequestRow[]> => {
+        if (ids.length === 0) return [];
+        try {
+            const groups = await api.getCreatedAssemblyGroups();
+            const idSet = new Set(ids);
+            return groups.flatMap(g => g.requests.filter(r => idSet.has(r.id)).map(r => ({
+                id: r.id, number: r.number, ffId: r.ff_id, ffName: r.ff_name,
+                wbName: r.wb_name, pkg: r.package_type, qty: r.qty, sku: r.sku,
+            })));
+        } catch {
+            return [];
+        }
+    }, []);
     const [expanded, setExpanded] = useState<Set<number>>(new Set());
     // Раскрытые манифесты паллет «📐 Раскладка» по ключу `${ffId}::${wb}::${pkg}`.
     const [manifestOpen, setManifestOpen] = useState<Set<string>>(new Set());
@@ -289,7 +313,7 @@ export default function DraftPreview({
         let pallets = 0, fill = 0, unknownLines = 0, unknownUnits = 0;
         for (const [pkg, lns] of byPkg) {
             const r = palletsForLines(
-                lns.map(l => ({ units: l.qty, boxQty: ppbForLine(l), boxSize: nmBoxSize.get(l.nmId) ?? null })),
+                lns.map(l => ({ units: l.qty, boxQty: ppbForLine(l), boxSize: nmBoxSize.get(l.nmId) ?? null, group: classOf?.(l.nmId) })),
                 height,
                 pkg === 'BOX' ? 'box' : 'mono',
                 palletOverrides,
@@ -297,7 +321,7 @@ export default function DraftPreview({
             pallets += r.pallets; fill += r.fill; unknownLines += r.unknownLines; unknownUnits += r.unknownUnits;
         }
         return { pallets, fill, unknownLines, unknownUnits };
-    }, [ppbForLine, nmBoxSize, palletOverrides]);
+    }, [ppbForLine, nmBoxSize, palletOverrides, classOf]);
 
     const palletsForFf = useCallback((ls: PreviewLine[]): PalletCount => {
         let pallets = 0, fill = 0, unknownLines = 0, unknownUnits = 0;
@@ -328,7 +352,7 @@ export default function DraftPreview({
         const out: Record<string, number> = {};
         for (const [k, ls] of groups) {
             const r = palletsForLines(
-                ls.map(l => ({ units: l.qty, boxQty: ppbForLine(l), boxSize: nmBoxSize.get(l.nmId) ?? null })),
+                ls.map(l => ({ units: l.qty, boxQty: ppbForLine(l), boxSize: nmBoxSize.get(l.nmId) ?? null, group: classOf?.(l.nmId) })),
                 maxPalletHeightCm(ls[0].wbName),
                 ls[0].pkg === 'BOX' ? 'box' : 'mono',
                 palletOverrides,
@@ -336,7 +360,7 @@ export default function DraftPreview({
             out[k] = Math.max(1, r.pallets);
         }
         return out;
-    }, [allLines, ppbForLine, nmBoxSize, palletOverrides]);
+    }, [allLines, ppbForLine, nmBoxSize, palletOverrides, classOf]);
 
     const palletBadge = useCallback((pc: PalletCount) => {
         const avg = pc.pallets > 0 ? pc.fill / pc.pallets : 0;
@@ -491,27 +515,43 @@ export default function DraftPreview({
             const resp = await api.commitAssemblyDraft(draftId, undefined, palletCounts, effectiveWholeOnly ? wholeSupplies : undefined);
             const ids = resp.created_request_ids || [];
             // whole-only мог снять неполные отгрузки → проверяем остаток.
-            let leftoverRows = 0;
+            // null = контрольный GET не прошёл (сеть/окно деплоя): это НЕ «остатка
+            // нет» — редирект при живых строках прятал бы остаток черновика,
+            // поэтому неизвестность трактуем консервативно (остаёмся на странице).
+            let leftoverRows: number | null = null;
             try {
                 const fresh = await api.getAssemblyDraft(draftId);
                 leftoverRows = fresh.distribution.rows?.length ?? 0;
-            } catch { leftoverRows = 0; }
-            onToast(`Создано заявок: ${ids.length}${leftoverRows > 0 ? `. Осталось строк: ${leftoverRows}` : ''}`, 'success');
-            if (leftoverRows > 0) {
-                onReloadDraft?.();
+            } catch { leftoverRows = null; }
+            const hasLeftover = leftoverRows == null || leftoverRows > 0;
+            onToast(`Создано заявок: ${ids.length}${leftoverRows != null && leftoverRows > 0 ? `. Осталось строк: ${leftoverRows}` : ''}`, 'success');
+            // Частичный коммит оставил строки → черновик перезагружаем сразу (модалка
+            // от него не зависит); after — прежний post-commit переход по закрытию.
+            if (hasLeftover) onReloadDraft?.();
+            const after = () => {
+                if (hasLeftover) return; // остаёмся в черновике
+                if (ids.length === 1) router.push(`/p/${slug}/warehouse/assembly/${ids[0]}`);
+                else if (ids.length > 1) router.push(`/p/${slug}/warehouse/assembly?just_created=${ids.join(',')}`);
+                else router.push(`/p/${slug}/warehouse/assembly`);
+            };
+            const createdRows = await fetchCreatedRows(ids);
+            if (createdRows.length > 0) {
+                setCommitting(false);
+                setCreatedModal({
+                    rows: createdRows,
+                    listQuery: `src_draft=${draftId}&just_created=${ids.join(',')}`,
+                    after,
+                });
+            } else if (hasLeftover) {
                 setCommitting(false);
             } else {
-                setTimeout(() => {
-                    if (ids.length === 1) router.push(`/p/${slug}/warehouse/assembly/${ids[0]}`);
-                    else if (ids.length > 1) router.push(`/p/${slug}/warehouse/assembly?just_created=${ids.join(',')}`);
-                    else router.push(`/p/${slug}/warehouse/assembly`);
-                }, 700);
+                setTimeout(after, 700);
             }
         } catch (e: unknown) {
             onToast(e instanceof Error ? e.message : 'Ошибка создания сборок', 'error');
             setCommitting(false);
         }
-    }, [predist, draftId, ensureSaved, palletCounts, effectiveWholeOnly, wholeSupplies, router, slug, onToast, onReloadDraft]);
+    }, [predist, draftId, ensureSaved, palletCounts, effectiveWholeOnly, wholeSupplies, fetchCreatedRows, router, slug, onToast, onReloadDraft]);
 
     // Частичный commit ТОЛЬКО одного склада-ФФ (источника): заявки из порций этого ФФ,
     // порции других ФФ остаются в черновике (backend карвит остаток по allocatePairs).
@@ -532,30 +572,43 @@ export default function DraftPreview({
             if (!saved) { setCommitting(false); setCommittingFfId(null); return; }
             const resp = await api.commitAssemblyDraft(draftId, undefined, palletCounts, undefined, ffId);
             const ids = resp.created_request_ids || [];
-            let leftoverRows = 0;
+            // null = контрольный GET не прошёл — НЕ считаем «остатка нет» (см. handleCreate).
+            let leftoverRows: number | null = null;
             try {
                 const fresh = await api.getAssemblyDraft(draftId);
                 leftoverRows = fresh.distribution.rows?.length ?? 0;
-            } catch { leftoverRows = 0; }
-            onToast(`Создано заявок со склада «${ffName}»: ${ids.length}${leftoverRows > 0 ? `. Осталось строк в черновике: ${leftoverRows}` : ''}`, 'success');
-            if (leftoverRows > 0) {
-                onReloadDraft?.();
+            } catch { leftoverRows = null; }
+            const hasLeftover = leftoverRows == null || leftoverRows > 0;
+            onToast(`Создано заявок со склада «${ffName}»: ${ids.length}${leftoverRows != null && leftoverRows > 0 ? `. Осталось строк в черновике: ${leftoverRows}` : ''}`, 'success');
+            if (hasLeftover) onReloadDraft?.();
+            const after = () => {
+                if (hasLeftover) return; // порции других ФФ остались — остаёмся
+                // Черновик опустел (это был единственный ФФ) → к списку/заявке.
+                if (ids.length === 1) router.push(`/p/${slug}/warehouse/assembly/${ids[0]}`);
+                else if (ids.length > 1) router.push(`/p/${slug}/warehouse/assembly?just_created=${ids.join(',')}`);
+                else router.push(`/p/${slug}/warehouse/assembly`);
+            };
+            const createdRows = await fetchCreatedRows(ids);
+            if (createdRows.length > 0) {
+                setCommitting(false);
+                setCommittingFfId(null);
+                setCreatedModal({
+                    rows: createdRows,
+                    listQuery: `src_draft=${draftId}&just_created=${ids.join(',')}`,
+                    after,
+                });
+            } else if (hasLeftover) {
                 setCommitting(false);
                 setCommittingFfId(null);
             } else {
-                // Черновик опустел (это был единственный ФФ) → к списку/заявке.
-                setTimeout(() => {
-                    if (ids.length === 1) router.push(`/p/${slug}/warehouse/assembly/${ids[0]}`);
-                    else if (ids.length > 1) router.push(`/p/${slug}/warehouse/assembly?just_created=${ids.join(',')}`);
-                    else router.push(`/p/${slug}/warehouse/assembly`);
-                }, 700);
+                setTimeout(after, 700);
             }
         } catch (e: unknown) {
             onToast(e instanceof Error ? e.message : 'Ошибка создания сборок', 'error');
             setCommitting(false);
             setCommittingFfId(null);
         }
-    }, [predist, draftId, ensureSaved, palletCounts, router, slug, onToast, onReloadDraft]);
+    }, [predist, draftId, ensureSaved, palletCounts, fetchCreatedRows, router, slug, onToast, onReloadDraft]);
 
     const pkgBadge = (pkg: PackageType) => (
         <span className={`badge ${PKG_BADGE[pkg] || 'badge-secondary'}`} style={{ fontSize: 10 }}>{PKG_LABEL_RU[pkg] || pkg}</span>
@@ -611,7 +664,7 @@ export default function DraftPreview({
                                     nmId: l.nmId, vendorCode: l.vendor, units: l.qty,
                                     boxSize: nmBoxSize.get(l.nmId) ?? null, ppb: ppbForLine(l),
                                 })),
-                                { mode: pkg === 'BOX' ? 'box' : 'mono', maxHeightCm: maxPalletHeightCm(wb), overrides: palletOverrides },
+                                { mode: pkg === 'BOX' ? 'box' : 'mono', maxHeightCm: maxPalletHeightCm(wb), overrides: palletOverrides, classOf },
                             );
                             const mKey = `${g.ffId}::${wb}::${pkg}`;
                             // Машинный режим (predist): НЕПОЛНЫЕ моно-паллеты (недобор с габаритами)
@@ -689,6 +742,12 @@ export default function DraftPreview({
                                                             <div key={p.palletNo} style={{ border: `1px solid ${low ? 'var(--color-warning)' : 'var(--color-border)'}`, borderRadius: 10, padding: '8px 10px' }}>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
                                                                     <span className="badge badge-secondary" style={{ fontSize: 10 }}>Паллета {formatNumber(p.palletNo, 0)}</span>
+                                                                    {p.group && p.group !== '*' && classLabel && classLabel(p.group) && (
+                                                                        <span className="badge badge-info" style={{ fontSize: 10 }}
+                                                                            title="Класс совместимости: на этой паллете едут только категории этого класса (настройка «Совместимость категорий на паллете»)">
+                                                                            🧩 {classLabel(p.group)}
+                                                                        </span>
+                                                                    )}
                                                                     {fromPrebook && (
                                                                         <span className="badge badge-info" style={{ fontSize: 10 }} title="Эту паллету ты перенёс в черновик из предброни вручную (Оставить так / Дозабить / Перенести паллеты). Авто-консолидация по приёмке WB бейдж не ставит.">🅿️ из предброни</span>
                                                                     )}
@@ -745,7 +804,7 @@ export default function DraftPreview({
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {items.map(l => {
+                                            {items.map((l, i) => {
                                                 // Короб ФФ ЭТОЙ порции (l.ffId), не глобальный min — иначе целый
                                                 // короб чужого склада рисуется «N кор + M шт» (псевдо-россыпь:
                                                 // хамза 18 мерилась 13 → «1 кор + 5 шт», Газпром 30 → «1 кор + 8»).
@@ -753,7 +812,10 @@ export default function DraftPreview({
                                                 const full = k > 0 ? Math.floor(l.qty / k) : 0;
                                                 const rem = k > 0 ? l.qty % k : 0;
                                                 return (
-                                                    <tr key={`${l.nmId}-${l.pkg}`} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                                    // barcode в ключе: nm может нести несколько баркодов (размерные
+                                                    // варианты) — ключ по nm×pkg коллизировал; индекс — тай-брейк
+                                                    // (as_is-вариант той же строки даёт одинаковую тройку).
+                                                    <tr key={`${l.nmId}-${l.barcode}-${l.pkg}-${i}`} style={{ borderBottom: '1px solid var(--color-border)' }}>
                                                         <td style={{ padding: '3px 6px' }}>{l.isNew && <span style={{ marginRight: 4, color: '#a855f7', fontWeight: 700 }}>🆕</span>}{l.vendor}</td>
                                                         <td style={{ padding: '3px 6px', color: 'var(--color-text-muted)' }}>{l.barcode}</td>
                                                         <td style={{ padding: '3px 6px', textAlign: 'right', whiteSpace: 'nowrap' }} title={k > 0 ? `${full} полн. коробов по ${k} шт${rem > 0 ? ` + ${rem} шт россыпью` : ''}` : 'Без кратности короба'}>
@@ -1007,6 +1069,14 @@ export default function DraftPreview({
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
                     {presentPkgs.map(renderPkgSection)}
                 </div>
+            )}
+            {createdModal && (
+                <CreatedRequestsModal
+                    slug={slug}
+                    rows={createdModal.rows}
+                    listQuery={createdModal.listQuery}
+                    onClose={() => { const { after } = createdModal; setCreatedModal(null); after(); }}
+                />
             )}
         </div>
     );

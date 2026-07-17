@@ -426,7 +426,7 @@ async def test_push_provider_error_surfaced(db_session, project, warehouse, conn
     doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 2)])
     _mock_resolve(monkeypatch, {bc: 8001})
     _mock_create(monkeypatch, {}, exc=SkladbotApiError("bad", status_code=422))
-    with pytest.raises(ValueError, match="отклонил создание"):
+    with pytest.raises(ValueError, match="отклонил заявку"):
         await fulfillment_service.create_ff_request_from_assembly(
             db_session, project.id, warehouse.id, doc.id, _payload()
         )
@@ -897,7 +897,7 @@ async def test_wms_push_create_error_no_mirror(db_session, project, warehouse, c
     doc = await _make_assembly(db_session, project, warehouse, [(bc, nom.id, 4)])
     holder: dict = {}
     _mock_wms_create(monkeypatch, holder, create_exc=WmsCelicomApiError("нет товара", status_code=422))
-    with pytest.raises(ValueError, match="отклонил создание"):
+    with pytest.raises(ValueError, match="отклонил заявку"):
         await fulfillment_service.create_ff_request_from_assembly(
             db_session, project.id, warehouse.id, doc.id, _wms_payload()
         )

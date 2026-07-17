@@ -163,3 +163,46 @@ describe('buildAssemblyDistribution · форма черновик ≡ маши�
         expect(byNm.get(1)).toEqual({ 'Коледино': 40 });
     });
 });
+
+describe('buildDistributionSkus — потребность nm раздаётся баркодам РОВНО один раз', () => {
+    // Машина: размерные варианты одной карточки — отдельные строки пула (poolToDistSkus
+    // не дедупит по nm). Копия ПОЛНОЙ per-nm потребности каждому баркоду планировала
+    // до N× спроса — потребность должна партиционироваться между баркодами.
+    const MULTI: DistSku[] = [
+        { nm_id: 1, barcode: 'B1', vendor_code: 'ART1', is_newcomer: false, available: 200 },
+        { nm_id: 1, barcode: 'B2', vendor_code: 'ART1', is_newcomer: false, available: 200 },
+    ];
+    const availBy = (by: Record<string, Record<number, number>>): AvailabilityOf =>
+        (_nm, bc) => by[bc] ?? {};
+
+    it('ёмкости первого баркода хватает → второй не получает потребности вовсе', () => {
+        const stockNeed = mkNeed([{ name: 'Коледино', need: { 1: 100 } }]);
+        const skus = buildDistributionSkus(MULTI, stockNeed, availBy({ B1: { 500: 200 }, B2: { 500: 200 } }), GEOM);
+        expect(skus).toHaveLength(1);
+        expect(skus[0].barcode).toBe('B1');
+        expect(skus[0].target).toEqual({ 'Коледино': 100 });
+    });
+
+    it('дефицит первого баркода → второй добирает ОСТАТОК (Σ target == need, не N×)', () => {
+        const stockNeed = mkNeed([{ name: 'Коледино', need: { 1: 100 } }]);
+        const skus = buildDistributionSkus(MULTI, stockNeed, availBy({ B1: { 500: 60 }, B2: { 500: 60 } }), GEOM);
+        expect(skus).toHaveLength(2);
+        expect(skus[0].target).toEqual({ 'Коледино': 60 });
+        expect(skus[1].target).toEqual({ 'Коледино': 40 });
+    });
+
+    it('план машины с двумя баркодами карточки не превышает потребность склада', () => {
+        const stockNeed = mkNeed([{ name: 'Коледино', need: { 1: 100 } }]);
+        const skus = buildDistributionSkus(MULTI, stockNeed, availBy({ B1: { 500: 100 }, B2: { 500: 100 } }), GEOM);
+        const rows = finalizeDistribution(skus, GEOM, false).rows;
+        expect(sum(wbForm(rows))).toBe(100); // до фикса: 200 (каждый баркод планировал полную потребность)
+    });
+
+    it('одиночный баркод (черновик): потребность передаётся целиком БЕЗ ёмкостного капа', () => {
+        // Кап и форму дефицита (приоритеты «схемы воришек») накладывает buildDraftRows —
+        // здесь одиночному представителю nm потребность не режем (поведение прежнее).
+        const stockNeed = mkNeed([{ name: 'Электросталь', need: { 1: 60 } }, { name: 'Коледино', need: { 1: 40 } }]);
+        const skus = buildDistributionSkus(SKUS, stockNeed, () => ({ 500: 30 }), GEOM);
+        expect(skus[0].target).toEqual({ 'Электросталь': 60, 'Коледино': 40 });
+    });
+});

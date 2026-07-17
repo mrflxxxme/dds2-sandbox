@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { useParams, usePathname } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePermissions } from '@/lib/hooks/usePermissions';
+import ChangelogBell from '@/components/ChangelogBell';
 import Link from 'next/link';
 
 const dashboardItem = { href: '', label: 'Дашборд' };
@@ -225,7 +226,10 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     return (
         <div>
             <aside className="sidebar">
-                <Link href="/projects" className="sidebar-logo" style={{ display: 'block', textDecoration: 'none' }}>DDS</Link>
+                <div className="sidebar-top">
+                    <Link href="/projects" className="sidebar-logo" style={{ display: 'block', textDecoration: 'none' }}>DDS</Link>
+                    <ChangelogBell slug={slug} />
+                </div>
 
                 <div style={{ padding: '0 12px 12px' }}>
                     <div className="project-selector" onClick={() => window.location.href = '/projects'}>

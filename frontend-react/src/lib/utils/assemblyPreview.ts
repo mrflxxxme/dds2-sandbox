@@ -115,20 +115,33 @@ export function trimLinesToWholePallets(
     /** Кратность короба; второй аргумент — ФФ группы (кратность может отличаться по
      *  складам: глобальный min резал бы физически целый короб чужого ФФ). */
     boxOf?: (nmId: number, ffId?: number) => number | null | undefined,
+    /** Класс совместимости категорий (см. `lib/assembly/categoryCompat`). Партиционирует
+     *  СМЕШАННУЮ BOX-паллету: SKU разных классов не делят одну паллету (ковры едут
+     *  отдельно от пледов). Не задан / константный `*` — прежнее поведение (микс всех).
+     *  МОНО (≤3 артикула) и сейф классами НЕ режутся (решение юзера / уже per-SKU). */
+    classOf?: (nmId: number) => string,
 ): TrimWholeResult {
-    // Группа = одна отгрузка по упаковке. Короб — смешанная паллета (все SKU вместе);
-    // МОНО — общая паллета ≤3 артикула (тоже без nmId в ключе, правило WB); сейф —
-    // каждый SKU своей паллетой (микс запрещён) → отдельная под-группа.
-    const groups = new Map<string, { wb: string; ffId: number; pkg: PackageType; km: Record<string, number>; meta: Map<number, PreviewLine> }>();
+    // Группа = одна отгрузка по упаковке. Короб — смешанная паллета (все SKU вместе
+    // ВНУТРИ класса совместимости); МОНО — общая паллета ≤3 артикула (без nmId в ключе,
+    // правило WB); сейф — каждый SKU своей паллетой (микс запрещён) → под-группа.
+    // Ключ линии ВНУТРИ группы — nm×barcode, НЕ только nm: одна WB-карточка может
+    // нести несколько баркодов (размерные варианты), схлоп по nm приписывал бы весь
+    // объём баркоду последней линии (мисаттрибуция физического товара) — та же
+    // идентичность строки, что в linesToRows и backend `_dedupe_rows`/`_merge_rows`.
+    const keyOfLine = (l: PreviewLine) => `${l.nmId}::${l.barcode}`;
+    const nmOfKey = (k: string) => Number(k.slice(0, k.indexOf('::')));
+    const groups = new Map<string, { wb: string; ffId: number; pkg: PackageType; km: Record<string, number>; meta: Map<string, PreviewLine> }>();
     for (const l of lines) {
         if (l.qty <= 0) continue;
         const gk = l.pkg === 'SUPERSAFE'
-            ? `${l.ffId}::${l.wbName}::SUPERSAFE::${l.nmId}`
-            : `${l.ffId}::${l.wbName}::${l.pkg}`;
+            ? `${l.ffId}::${l.wbName}::SUPERSAFE::${keyOfLine(l)}`
+            : l.pkg === 'BOX' && classOf
+                ? `${l.ffId}::${l.wbName}::BOX::${classOf(l.nmId)}`
+                : `${l.ffId}::${l.wbName}::${l.pkg}`;
         let g = groups.get(gk);
         if (!g) { g = { wb: l.wbName, ffId: l.ffId, pkg: l.pkg, km: {}, meta: new Map() }; groups.set(gk, g); }
-        g.km[String(l.nmId)] = (g.km[String(l.nmId)] || 0) + l.qty;
-        g.meta.set(l.nmId, l);
+        g.km[keyOfLine(l)] = (g.km[keyOfLine(l)] || 0) + l.qty;
+        g.meta.set(keyOfLine(l), l);
     }
 
     const supplyKey = (l: PreviewLine) => `${l.ffId}::${l.wbName}::${l.pkg}`;
@@ -144,31 +157,33 @@ export function trimLinesToWholePallets(
         //    хвост / без кратности — снимается;
         //  • обычный SKU — снимаем целиком (в паллету не положить).
         const geomKm: Record<string, number> = {};
-        for (const [nmStr, u] of Object.entries(g.km)) {
-            const upp = uppOf(Number(nmStr), g.wb, g.ffId);
-            if (upp != null && upp > 0) { geomKm[nmStr] = u; continue; }
-            const line = g.meta.get(Number(nmStr));
+        for (const [k, u] of Object.entries(g.km)) {
+            const upp = uppOf(nmOfKey(k), g.wb, g.ffId);
+            if (upp != null && upp > 0) { geomKm[k] = u; continue; }
+            const line = g.meta.get(k);
             if (!line) { droppedUnits += u; continue; }
-            const bx = line.isNew ? (boxOf?.(Number(nmStr), g.ffId) ?? 0) : 0;
+            const bx = line.isNew ? (boxOf?.(nmOfKey(k), g.ffId) ?? 0) : 0;
             const wholeBoxUnits = bx > 0 ? Math.floor(u / bx) * bx : 0;
             if (wholeBoxUnits > 0) kept.push({ ...line, qty: wholeBoxUnits });
             const rest = u - wholeBoxUnits;
             if (rest > 0) { droppedUnits += rest; droppedLines.push({ ...line, qty: rest }); }
         }
-        // МОНО — упаковка ≤3 артикула на паллету (правило WB); КОРОБ/СЕЙФ — смешанный /
-        // одиночный snap по суммарному footprint'у. Сигнатуры идентичны. boxOf в ОБЕ
-        // ветки (с ФФ группы — кратность per-склад): срез только целыми коробами.
+        // МОНО — упаковка ≤3 артикула на паллету (правило WB; ключ nm×barcode, поэтому
+        // размерные варианты одного nm считаются отдельными артикулами — строже правила,
+        // безопасно); КОРОБ/СЕЙФ — смешанный / одиночный snap по суммарному footprint'у.
+        // Сигнатуры идентичны. boxOf в ОБЕ ветки (с ФФ группы — кратность per-склад):
+        // срез только целыми коробами. Геометрия ключа — по его nm (nmOfKey).
         const { kept: kk, dropped } = g.pkg === 'MONOPALLET'
-            ? packMonoPallets(geomKm, (k) => uppOf(Number(k), g.wb, g.ffId), MONO_MAX_ARTICLES, (k) => boxOf?.(Number(k), g.ffId) ?? null)
-            : snapToWholePallets(geomKm, (k) => uppOf(Number(k), g.wb, g.ffId), (k) => boxOf?.(Number(k), g.ffId) ?? null);
-        for (const [nmStr, u] of Object.entries(kk)) {
+            ? packMonoPallets(geomKm, (k) => uppOf(nmOfKey(k), g.wb, g.ffId), MONO_MAX_ARTICLES, (k) => boxOf?.(nmOfKey(k), g.ffId) ?? null)
+            : snapToWholePallets(geomKm, (k) => uppOf(nmOfKey(k), g.wb, g.ffId), (k) => boxOf?.(nmOfKey(k), g.ffId) ?? null);
+        for (const [k, u] of Object.entries(kk)) {
             if (u <= 0) continue;
-            kept.push({ ...g.meta.get(Number(nmStr))!, qty: u });
+            kept.push({ ...g.meta.get(k)!, qty: u });
         }
-        for (const [nmStr, u] of Object.entries(dropped)) {
+        for (const [k, u] of Object.entries(dropped)) {
             if (u <= 0) continue;
             droppedUnits += u;
-            const line = g.meta.get(Number(nmStr));
+            const line = g.meta.get(k);
             if (line) droppedLines.push({ ...line, qty: u });
         }
     }

@@ -38,6 +38,9 @@ export interface NormalizeDraftCtx {
     overrides?: Record<string, number>;
     /** Свободный ФФ per nm per ff для добивки неполного короба вверх (опц.). */
     freeByNm?: Record<number, Record<number, number>>;
+    /** Класс совместимости категорий (`lib/assembly/categoryCompat`): SKU разных
+     *  классов не делят смешанную BOX-паллету. Не задан — прежний микс всех. */
+    classOf?: (nm: number) => string;
 }
 
 export interface NormalizeDraftResult {
@@ -138,7 +141,7 @@ export function normalizeDraft(
         return pw && pw > 0 ? pw : (ctx.ppbOf(nm) ?? null);
     };
     const lines = buildPreviewLines(workRows, new Set());
-    const trim = trimLinesToWholePallets(lines, uppOf, boxOf);
+    const trim = trimLinesToWholePallets(lines, uppOf, boxOf, ctx.classOf);
     const outRows = linesToRows(trim.kept);
     const dropped = linesToRows(trim.droppedLines);
 
@@ -208,7 +211,7 @@ export function consolidatePrebookWholePallets(
         if (keepInPrebook?.(l.nmId, l.wbName, l.pkg)) held.push(l);
         else lines.push(l);
     }
-    const trim = trimLinesToWholePallets(lines, uppOf, boxOf);
+    const trim = trimLinesToWholePallets(lines, uppOf, boxOf, ctx.classOf);
     const toDraft = linesToRows(trim.kept);
     const prebookOut = linesToRows([...trim.droppedLines, ...held]);
     const extractedUnits = toDraft.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);

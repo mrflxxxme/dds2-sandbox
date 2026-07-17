@@ -686,6 +686,10 @@ async def get_fbo_supply_items(
 
     # Lazy-load from WB API if no items cached, force refresh, or looks stuck
     if (not items or force_refresh or stale_acceptance) and api_client and supply.wb_supply_id.isdigit():
+        # WB под rate-limit — отпускаем read-транзакцию до похода наружу, чтобы
+        # не держать серверный коннект pgbouncer как idle-in-tx (клин 2026-07-16);
+        # апсерты ниже откроют новую транзакцию сами.
+        await db.commit()
         try:
             wb_id_int = int(supply.wb_supply_id)
             goods = await api_client.get_fbw_supply_goods(

@@ -11,6 +11,7 @@ import type {
     ProductSubcategory,
     DetectedSize,
     FunnelProductsResponse,
+    PalletCategoryCompat,
 } from '@/types/api';
 
 export function addRefMethods(api: ApiClient) {
@@ -46,6 +47,9 @@ export function addRefMethods(api: ApiClient) {
         // Ручной override «коробок на паллету» по размеру коробки (canonical box_size → int). Перебивает геометрию.
         getPalletBoxesBySize() { return api.request<Record<string, number>>('GET', '/api/v1/refs/pallet-boxes-by-size'); },
         setPalletBoxesBySize(sizes: Record<string, number>) { return api.request<{ ok: boolean; sizes: Record<string, number> }>('PUT', '/api/v1/refs/pallet-boxes-by-size', { sizes }); },
+        // Правила совместимости категорий на BOX-паллете: enabled + группы категорий, которым можно ехать вместе.
+        getPalletCategoryCompat() { return api.request<PalletCategoryCompat>('GET', '/api/v1/refs/pallet-category-compat'); },
+        setPalletCategoryCompat(payload: PalletCategoryCompat) { return api.request<{ ok: boolean } & PalletCategoryCompat>('PUT', '/api/v1/refs/pallet-category-compat', payload); },
         getForecastRfDefaultDays() { return api.request<{ days: number }>('GET', '/api/v1/refs/forecast-rf-default-days'); },
         setForecastRfDefaultDays(days: number) { return api.request<{ ok: boolean; days: number }>('PUT', '/api/v1/refs/forecast-rf-default-days', { days }); },
         // Вес коробки (кг) — одно число на проект; прибавляется к нетто товаров × число коробов при авто-расчёте веса отгрузки. null = не задан.

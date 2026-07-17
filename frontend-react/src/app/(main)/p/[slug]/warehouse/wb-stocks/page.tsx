@@ -438,11 +438,15 @@ export default function WbStocksPage() {
     const sync = async () => {
         setSyncing(true);
         try {
-            const res = await api.syncWarehouseStocks();
-            alert(`Синхронизировано ${res.synced} записей`);
+            // Отчёт кабинета (warehouse_remains), НЕ старый statistics supplier/stocks:
+            // тот с 2026-07-15 отвечает 429/пустотой, и кнопка «висела» на ретраях по
+            // 60с. Remains-синк мостом пересобирает и wb_warehouse_stocks — обновляется
+            // и эта страница, и матрица потребности. Отчёт готовится до ~90с.
+            const res = await api.syncWarehouseRemains();
+            alert(`Синхронизировано ${res.synced} записей отчёта кабинета`);
             await load();
         } catch (e: unknown) {
-            alert(e instanceof Error ? e.message : 'Ошибка синхронизации');
+            alert(e instanceof Error ? e.message : 'Ошибка синхронизации (отчёт WB готовится до ~90с — попробуйте ещё раз через минуту)');
         }
         setSyncing(false);
     };

@@ -3,17 +3,20 @@ Warehouse stock engine — stock balance updates, movements, adjustments, summar
 """
 
 import logging
+import zlib
 from datetime import date, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from backend.cache import invalidate_project_reports
 from backend.models.assembly import AssemblyRequest, AssemblyRequestItem, AssemblyStatus
 from backend.models.cost import CostOrder, CostOrderItem, Nomenclature
 from backend.models.enums import VehicleStatus
-from backend.models.integrations import WbWarehouseStock
+from backend.models.integrations import WbWarehouseRemains, WbWarehouseStock
 from backend.models.refs import ImtAlias, ProductTag, ProductTagMap
 from backend.models.supply_chain import FactoryOrder, FactoryOrderItem
 from backend.models.warehouse import (
@@ -27,6 +30,14 @@ from backend.models.wb_finance import WbFinanceRow
 from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
+
+# Псевдо-склады отчёта WB «Остатки на складах». Итоговая строка дублирует
+# сумму реальных складов — при суммировании её нужно исключать; «в пути»
+# выносятся в отдельные поля (wb_in_way_to_client / wb_in_way_from_client),
+# а не в разбивку по складам.
+WB_REMAINS_TOTAL_ROW = "Всего находится на складах"
+WB_REMAINS_IN_WAY_TO_CLIENT = "В пути до получателей"
+WB_REMAINS_IN_WAY_FROM_CLIENT = "В пути возвраты на склад WB"
 
 
 # ─── Barcode → Nomenclature lookup ─────────────────────────────────────────
@@ -66,9 +77,30 @@ async def _resolve_barcodes_batch(db: AsyncSession, project_id: int, barcodes: l
 # ─── Next number generator ─────────────────────────────────────────────────
 
 
+def _number_lock_ns(prefix: str) -> int:
+    """Стабильный int32-неймспейс advisory-лока из префикса документа.
+
+    crc32, а не hash(): тот рандомизирован PYTHONHASHSEED и различается между
+    процессами (api ‖ worker) — лок обязан совпадать. Приводим к знаковому int32,
+    как требует pg_advisory_xact_lock(int4, int4)."""
+    ns = zlib.crc32(prefix.encode("utf-8"))
+    return ns - 0x1_0000_0000 if ns >= 0x8000_0000 else ns
+
+
 async def _next_number(db: AsyncSession, project_id: int, prefix: str, table) -> str:
     """Generate next sequential number for a document (IN-1, OUT-1, TR-1).
-    Counts ALL records (including soft-deleted) to avoid number collisions."""
+    Counts ALL records (including soft-deleted) to avoid number collisions.
+
+    Конкурентные транзакции не видят незакоммиченных INSERT друг друга
+    (READ COMMITTED) → одинаковый count → два документа с одним номером
+    (unique-индекса на number нет; номер — идентификатор для оператора ФФ в
+    TG-нотификациях и Excel). pg_advisory_xact_lock(_number_lock_ns(prefix), project_id)
+    сериализует выдачу per (тип документа, проект); лок снимается на commit —
+    к этому моменту строка с номером уже видна следующему ожидающему."""
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:ns, :pid)"),
+        {"ns": _number_lock_ns(prefix), "pid": project_id},
+    )
     result = await db.execute(
         select(func.count(table.id)).where(
             table.project_id == project_id,
@@ -1047,6 +1079,8 @@ def _group_abc(unified_list: list[dict]) -> list[dict]:
             "items_count": 0,
             "total_own": 0,
             "total_wb": 0,
+            "wb_in_way_to_client": 0,
+            "wb_in_way_from_client": 0,
             "in_transit": 0,
             "total": 0,
             "avg_cost": 0.0,
@@ -1066,7 +1100,7 @@ def _group_abc(unified_list: list[dict]) -> list[dict]:
 
     def _acc(g: dict, row: dict) -> None:
         g["items_count"] += 1
-        for k in ("total_own", "total_wb", "in_transit", "total"):
+        for k in ("total_own", "total_wb", "wb_in_way_to_client", "wb_in_way_from_client", "in_transit", "total"):
             g[k] += row[k]
         g["avg_daily_revenue"] += row.get("avg_daily_revenue", 0)
         g["avg_daily_profit"] += row.get("avg_daily_profit", 0)
@@ -1238,26 +1272,123 @@ async def get_unified_stock_summary(
     )
     wh_name_map: dict[int, str] = {row.id: row.name for row in wh_result.all()}
 
-    # 3. WB warehouse stock -- join with Nomenclature to get nomenclature_id
-    #    Use quantity_full (includes in_way_to_client + in_way_from_client)
-    wb_query = (
-        select(
-            Nomenclature.id.label("nomenclature_id"),
-            WbWarehouseStock.warehouse_name,
-            func.sum(WbWarehouseStock.quantity_full).label("qty"),
+    # 3. WB warehouse stock. Primary source — wb_warehouse_remains: зеркало
+    #    отчёта кабинета «Остатки на складах» (включает приёмку и межскладской
+    #    транзит WB). Псевдо-склады «В пути до получателей» / «В пути возвраты
+    #    на склад WB» уходят в отдельные поля wb_in_way_to_client /
+    #    wb_in_way_from_client (см. цикл «WB stock» ниже); итоговая псевдо-строка
+    #    «Всего находится на складах» — дубль суммы реальных складов, исключается.
+    #    Fallback до первого синка remains — statistics supplier/stocks («доступно
+    #    к продаже» по складам + in_way_* синтетическими псевдо-строками, чтобы
+    #    обе ветки обрабатывались одним циклом).
+    remains_exists = (
+        await db.execute(
+            select(WbWarehouseRemains.id).where(WbWarehouseRemains.project_id == project_id).limit(1)
         )
-        .join(Nomenclature, Nomenclature.article_wb == WbWarehouseStock.nm_id)
-        .where(
-            WbWarehouseStock.project_id == project_id,
-            Nomenclature.project_id == project_id,
+    ).first() is not None
+
+    if remains_exists:
+        # Primary join by barcode (точный, per-size; не дублирует остаток при
+        # нескольких карточках с одним article_wb). Строки, чей barcode не
+        # заведён в номенклатуре, добираются fallback-джойном по nm_id.
+        remains_common = (
+            WbWarehouseRemains.project_id == project_id,
+            WbWarehouseRemains.warehouse_name != WB_REMAINS_TOTAL_ROW,
         )
-        .group_by(Nomenclature.id, WbWarehouseStock.warehouse_name)
-        .limit(10000)
-    )
-    if allowed_nom_ids is not None:
-        wb_query = wb_query.where(Nomenclature.id.in_(allowed_nom_ids))
-    wb_result = await db.execute(wb_query)
-    wb_rows = wb_result.all()
+        by_barcode_query = (
+            select(
+                Nomenclature.id.label("nomenclature_id"),
+                WbWarehouseRemains.warehouse_name,
+                func.sum(WbWarehouseRemains.quantity).label("qty"),
+            )
+            .join(
+                Nomenclature,
+                (Nomenclature.barcode == WbWarehouseRemains.barcode)
+                & (Nomenclature.project_id == project_id),
+            )
+            .where(*remains_common)
+            .group_by(Nomenclature.id, WbWarehouseRemains.warehouse_name)
+            .limit(50000)
+        )
+        nom_bc = aliased(Nomenclature)
+        by_nm_query = (
+            select(
+                Nomenclature.id.label("nomenclature_id"),
+                WbWarehouseRemains.warehouse_name,
+                func.sum(WbWarehouseRemains.quantity).label("qty"),
+            )
+            .join(
+                Nomenclature,
+                (Nomenclature.article_wb == WbWarehouseRemains.nm_id)
+                & (Nomenclature.project_id == project_id),
+            )
+            .where(
+                *remains_common,
+                ~exists().where(
+                    (nom_bc.barcode == WbWarehouseRemains.barcode) & (nom_bc.project_id == project_id)
+                ),
+            )
+            .group_by(Nomenclature.id, WbWarehouseRemains.warehouse_name)
+            .limit(50000)
+        )
+        if allowed_nom_ids is not None:
+            by_barcode_query = by_barcode_query.where(Nomenclature.id.in_(allowed_nom_ids))
+            by_nm_query = by_nm_query.where(Nomenclature.id.in_(allowed_nom_ids))
+        wb_rows = list((await db.execute(by_barcode_query)).all())
+        wb_rows.extend((await db.execute(by_nm_query)).all())
+    else:
+        wb_query = (
+            select(
+                Nomenclature.id.label("nomenclature_id"),
+                WbWarehouseStock.warehouse_name,
+                func.sum(WbWarehouseStock.quantity).label("qty"),
+            )
+            .join(Nomenclature, Nomenclature.article_wb == WbWarehouseStock.nm_id)
+            .where(
+                WbWarehouseStock.project_id == project_id,
+                Nomenclature.project_id == project_id,
+            )
+            .group_by(Nomenclature.id, WbWarehouseStock.warehouse_name)
+            .limit(10000)
+        )
+        # in_way_* — те же данные, что раньше сидели внутри quantity_full,
+        # теперь отдельными псевдо-строками (единый цикл обработки с remains).
+        inway_query = (
+            select(
+                Nomenclature.id.label("nomenclature_id"),
+                func.sum(WbWarehouseStock.in_way_to_client).label("to_client"),
+                func.sum(WbWarehouseStock.in_way_from_client).label("from_client"),
+            )
+            .join(Nomenclature, Nomenclature.article_wb == WbWarehouseStock.nm_id)
+            .where(
+                WbWarehouseStock.project_id == project_id,
+                Nomenclature.project_id == project_id,
+            )
+            .group_by(Nomenclature.id)
+            .limit(10000)
+        )
+        if allowed_nom_ids is not None:
+            wb_query = wb_query.where(Nomenclature.id.in_(allowed_nom_ids))
+            inway_query = inway_query.where(Nomenclature.id.in_(allowed_nom_ids))
+        wb_result = await db.execute(wb_query)
+        wb_rows = list(wb_result.all())
+        for r in (await db.execute(inway_query)).all():
+            if int(r.to_client or 0) > 0:
+                wb_rows.append(
+                    SimpleNamespace(
+                        nomenclature_id=r.nomenclature_id,
+                        warehouse_name=WB_REMAINS_IN_WAY_TO_CLIENT,
+                        qty=int(r.to_client),
+                    )
+                )
+            if int(r.from_client or 0) > 0:
+                wb_rows.append(
+                    SimpleNamespace(
+                        nomenclature_id=r.nomenclature_id,
+                        warehouse_name=WB_REMAINS_IN_WAY_FROM_CLIENT,
+                        qty=int(r.from_client),
+                    )
+                )
 
     # 4. In-transit (SHIPPED assembly request items) grouped by nomenclature_id
     shipped_query = (
@@ -1519,6 +1650,8 @@ async def get_unified_stock_summary(
                 "reserved": 0,
                 "total_own": 0,
                 "total_wb": 0,
+                "wb_in_way_to_client": 0,
+                "wb_in_way_from_client": 0,
                 "total_defect": 0,
                 "total": 0,
                 "factory_qty": 0,
@@ -1560,12 +1693,19 @@ async def get_unified_stock_summary(
         if row.defect_quantity > 0:
             entry["total_defect"] += row.defect_quantity
 
-    # WB stock
+    # WB stock. «В пути…» — отдельные поля-колонки, не разбивка по складам;
+    # total_wb = только физически на складах WB («Всего находится на складах»).
     for row in wb_rows:
         qty = int(row.qty or 0)
         if qty <= 0:
             continue
         entry = _ensure(row.nomenclature_id)
+        if row.warehouse_name == WB_REMAINS_IN_WAY_TO_CLIENT:
+            entry["wb_in_way_to_client"] += qty
+            continue
+        if row.warehouse_name == WB_REMAINS_IN_WAY_FROM_CLIENT:
+            entry["wb_in_way_from_client"] += qty
+            continue
         entry["wb_stocks"][row.warehouse_name] = entry["wb_stocks"].get(row.warehouse_name, 0) + qty
         entry["total_wb"] += qty
 
@@ -1594,9 +1734,18 @@ async def get_unified_stock_summary(
         entry = _ensure(nom_id)
         entry["vehicle_transit_qty"] = qty
 
-    # Compute totals (own + wb + in_transit; supply chain is separate columns)
+    # Compute totals. «В пути до получателей» (wb_in_way_to_client) НЕ входит в
+    # «Итого»: этот товар уже уехал к покупателям (по сути продан) — считать его
+    # доступным остатком для дозаказа неверно. Он остаётся отдельной колонкой.
+    # «Возвраты на склад WB» (wb_in_way_from_client) — входят: вернутся и снова
+    # станут доступны. Supply chain — отдельные колонки.
     for entry in unified.values():
-        entry["total"] = entry["total_own"] + entry["total_wb"] + entry["in_transit"]
+        entry["total"] = (
+            entry["total_own"]
+            + entry["total_wb"]
+            + entry["wb_in_way_from_client"]
+            + entry["in_transit"]
+        )
 
     # Narrowed forecast fallback — only runs in forecast mode. Estimates
     # revenue/profit for items that are en route but not yet physically in
@@ -1669,6 +1818,8 @@ async def _group_unified(
             "items_count": 0,
             "total_own": 0,
             "total_wb": 0,
+            "wb_in_way_to_client": 0,
+            "wb_in_way_from_client": 0,
             "in_transit": 0,
             "total": 0,
             "factory_qty": 0,
@@ -1700,6 +1851,8 @@ async def _group_unified(
         for k in (
             "total_own",
             "total_wb",
+            "wb_in_way_to_client",
+            "wb_in_way_from_client",
             "in_transit",
             "total",
             "factory_qty",

@@ -318,6 +318,60 @@ async def test_apply_goods_weight_raises_without_weight(db_session):
 
 
 @pytest.mark.asyncio
+async def test_apply_goods_weight_preserve_set_pallets(db_session, monkeypatch):
+    """preserve_set_pallets=True (путь mark_ready): уже заданное pallets_count (>0)
+    НЕ перетирается автооценкой геометрии — заявки из commit черновика несут паллеты,
+    посчитанные фронтом ПО КЛАССАМ совместимости категорий (бэкендовый footprint
+    классов не знает), а ручная правка оператора — тем более авторитет. Вес при этом
+    делится на сохранённое число паллет. Дефолт (кнопка «Рассчитать вес») — прежнее
+    поведение: геометрия перетирает."""
+    from backend.services.assembly import pallets as pallets_mod
+
+    async def fake_suggest(db, project_id, request, box_qty_by_wh_bc):
+        return 3  # бэкендовая оценка расходится с фронтовой per-class раскладкой
+
+    monkeypatch.setattr(pallets_mod, "_suggest_pallets_count", fake_suggest)
+
+    req = await _make_request(db_session, [(BC1, 20)])  # pallets_count=2 задан фронтом
+    kept = await pallets_mod.apply_goods_weight(
+        db_session, PROJECT_ID, req.id, preserve_set_pallets=True
+    )
+    assert kept.pallets_count == 2  # значение фронта сохранено
+    assert kept.pallet_weight_kg == Decimal("5.00")  # нетто 10 / 2 паллеты
+
+    # Дефолтный путь — прежнее поведение: автооценка перетирает.
+    recalced = await pallets_mod.apply_goods_weight(db_session, PROJECT_ID, req.id)
+    assert recalced.pallets_count == 3
+
+
+@pytest.mark.asyncio
+async def test_apply_goods_weight_preserve_still_suggests_when_unset(db_session, monkeypatch):
+    """preserve_set_pallets=True при pallets_count=0: автооценка ПО-ПРЕЖНЕМУ
+    подставляется (нечего сохранять) — pre-dist заявки без паллет от фронта."""
+    from backend.services.assembly import pallets as pallets_mod
+    from backend.services.assembly_service import create_assembly_request as create_req
+
+    async def fake_suggest(db, project_id, request, box_qty_by_wh_bc):
+        return 4
+
+    monkeypatch.setattr(pallets_mod, "_suggest_pallets_count", fake_suggest)
+
+    payload = AssemblyRequestCreate(
+        warehouse_id=await _wh_id(db_session),
+        wb_warehouse_name_manual="Электросталь",
+        pallets_count=0,
+        pallet_weight_kg=Decimal("0"),
+        items=[AssemblyItemCreate(barcode=BC1, quantity=20)],
+    )
+    req = await create_req(db_session, PROJECT_ID, payload)
+    applied = await pallets_mod.apply_goods_weight(
+        db_session, PROJECT_ID, req.id, preserve_set_pallets=True
+    )
+    assert applied.pallets_count == 4
+    assert applied.pallet_weight_kg == Decimal("2.50")  # нетто 10 / 4 паллеты
+
+
+@pytest.mark.asyncio
 async def test_apply_goods_weight_bulk_partial(db_session):
     """Массовый авто-вес: заявка с весом применяется, без веса — в skipped."""
     from backend.services.assembly_service import apply_goods_weight_bulk

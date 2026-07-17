@@ -431,3 +431,237 @@ async def test_finish_restore_failure_pauses_instead_of_finishing(db_session, pr
     assert test.pause_reason is None
     assert test.active_variant_id != v1.id
     assert wb.uploads[-1] == b"ORIGINAL"
+
+
+async def test_running_test_campaigns_prioritized_in_sync_order(db_session, project, monkeypatch):
+    """Кампании активных АБ-тестов поднимаются в голову очереди fetch_ad_stats:
+    на больших кабинетах TIME_BUDGET скипает хвост чанков — тестовая кампания
+    обязана попадать в первый чанк, иначе тест слепнет (прод-инцидент 16.07)."""
+    import backend.integrations.wb_content_api as content_api
+    import backend.services.funnel.ab_photo_tests as svc
+
+    wb = _FakeWb()
+    monkeypatch.setattr(content_api, "fetch_card", wb.fetch_card)
+    monkeypatch.setattr(svc, "_put_photo", wb.put_photo)
+    monkeypatch.setattr(svc, "_download_wb_photo", wb.download_wb)
+
+    async def fake_keys(db, project_id):
+        return "content-key", "adv-key", "analytics-key"
+
+    monkeypatch.setattr(svc, "_get_keys", fake_keys)
+
+    test = await svc.create_test(db_session, project.id, nm_id=111, campaign_id=555)
+    await svc.add_variant(db_session, project.id, test.id, _jpeg_bytes())
+    await svc.start_test(db_session, project.id, test.id)
+
+    # воспроизводим переупорядочивание из sync.py
+    from sqlalchemy import select as _select
+
+    from backend.models import AbPhotoTest
+
+    campaign_ids = [111111, 222222, 555, 333333]
+    ab_campaigns = set(
+        (
+            await db_session.execute(
+                _select(AbPhotoTest.campaign_id).where(
+                    AbPhotoTest.project_id == project.id,
+                    AbPhotoTest.status == "running",
+                    AbPhotoTest.is_deleted == False,  # noqa: E712
+                ).limit(100)
+            )
+        ).scalars().all()
+    )
+    reordered = [c for c in campaign_ids if c in ab_campaigns] + [c for c in campaign_ids if c not in ab_campaigns]
+    assert reordered[0] == 555
+    assert sorted(reordered) == sorted(campaign_ids)
+
+
+async def test_rotate_fetch_card_errors_counted_paused_after_limit_resume_keeps_diagnosis(
+    db_session, project, monkeypatch
+):
+    """Ошибки Content API при ротации (включая fetch_card) НЕ теряются: счётчик и текст
+    последней ошибки пишутся в flags круга, после _APPLY_RETRY_LIMIT подряд — пауза с
+    причиной. Resume стирает pause_reason, но диагноз остаётся в истории круга
+    (прод-инцидент 17.07: круг висел 3.5 часа молча — fetch_card падал мимо флагов)."""
+    from datetime import timedelta as _td
+
+    from datetime import date as _date
+
+    from backend.models import WbAdNmDaily, WbFunnelDaily
+
+    import backend.integrations.wb_content_api as content_api
+    import backend.services.funnel.ab_photo_tests as svc
+    from backend.integrations.wb_content_api import WbContentError
+
+    wb = _FakeWb()
+    fail = {"on": False}
+
+    async def flaky_fetch_card(key, nm_id):
+        if fail["on"]:
+            raise WbContentError("WB Content API: HTTP 500 при чтении карточки")
+        return await wb.fetch_card(key, nm_id)
+
+    monkeypatch.setattr(content_api, "fetch_card", flaky_fetch_card)
+    monkeypatch.setattr(content_api, "upload_main_photo", wb.upload)
+    monkeypatch.setattr(svc, "_put_photo", wb.put_photo)
+    monkeypatch.setattr(svc, "get_photo", wb.get_photo)
+    monkeypatch.setattr(svc, "_download_wb_photo", wb.download_wb)
+
+    async def fake_keys(db, project_id):
+        return "content-key", "adv-key", "analytics-key"
+
+    monkeypatch.setattr(svc, "_get_keys", fake_keys)
+
+    t0 = datetime(2026, 7, 13, 8, 0, 0)
+    now = {"v": t0}
+    monkeypatch.setattr(svc, "utcnow", lambda: now["v"])
+
+    day = _date(2026, 7, 13)  # МСК-день всех тиков в этом сценарии
+    db_session.add_all([
+        WbAdNmDaily(project_id=project.id, campaign_id=222, nm_id=111, date=day, views=10),
+        WbFunnelDaily(project_id=project.id, nm_id=111, date=day),
+    ])
+    await db_session.commit()
+
+    test = await svc.create_test(
+        db_session, project.id, nm_id=111, campaign_id=222,
+        views_per_round=100, round_minutes=30, target_views=1000, max_days=7,
+    )
+    await svc.add_variant(db_session, project.id, test.id, _jpeg_bytes())
+    test = await svc.start_test(db_session, project.id, test.id)
+    control_id = test.active_variant_id
+
+    # WB лёг; время круга вышло → каждый тик пытается ротировать и падает
+    fail["on"] = True
+    for attempt in range(1, svc._APPLY_RETRY_LIMIT):
+        now["v"] = now["v"] + _td(minutes=35 if attempt == 1 else 5)
+        await svc.tick_project(db_session, project.id)
+        await db_session.refresh(test)
+        # круг открыт, фото не менялось, тест жив — но ошибки СЧИТАЮТСЯ и видны
+        assert test.status == "running", f"пауза раньше лимита: попытка {attempt}"
+        assert test.active_variant_id == control_id
+        results = await svc.get_test_results(db_session, project.id, test.id)
+        open_round = next(r for r in results["rounds"] if not r["ended_at"])
+        assert open_round["flags"]["apply_errors"] == attempt
+        assert "HTTP 500" in open_round["flags"]["last_apply_error"]
+    assert wb.uploads == []
+
+    # лимит достигнут → пауза с внятной причиной
+    now["v"] = now["v"] + _td(minutes=5)
+    await svc.tick_project(db_session, project.id)
+    await db_session.refresh(test)
+    assert test.status == "paused"
+    assert "HTTP 500" in (test.pause_reason or "")
+
+    # пауза: тик не трогает тест
+    now["v"] = now["v"] + _td(minutes=5)
+    await svc.tick_project(db_session, project.id)
+    await db_session.refresh(test)
+    assert test.status == "paused"
+
+    # WB ожил, юзер жмёт «Продолжить»: pause_reason очищен, но диагноз в flags круга жив
+    fail["on"] = False
+    test = await svc.resume_test(db_session, project.id, test.id)
+    assert test.status == "running" and test.pause_reason is None
+    results = await svc.get_test_results(db_session, project.id, test.id)
+    open_round = next(r for r in results["rounds"] if not r["ended_at"])
+    assert open_round["flags"]["apply_errors"] == svc._APPLY_RETRY_LIMIT
+    assert "HTTP 500" in open_round["flags"]["last_apply_error"]
+
+    # следующий тик ротирует штатно; закрытый круг сохраняет историю ошибок
+    now["v"] = now["v"] + _td(minutes=5)
+    await svc.tick_project(db_session, project.id)
+    await db_session.refresh(test)
+    assert test.active_variant_id != control_id
+    assert len(wb.uploads) == 1
+    results = await svc.get_test_results(db_session, project.id, test.id)
+    closed = next(r for r in results["rounds"] if r["ended_at"])
+    assert closed["flags"]["apply_errors"] == svc._APPLY_RETRY_LIMIT
+
+
+async def test_rotate_upload_errors_tolerate_transient_outage(db_session, project, monkeypatch):
+    """Лимит попыток переживает транзиентный сбой WB: 3 подряд ошибки загрузки фото
+    (15 минут тиков) НЕ паузят тест — ночной чих Content API не должен останавливать
+    тест до утра (прод-инцидент 17.07: пауза после 15 мин сбоя)."""
+    from datetime import timedelta as _td
+
+    from datetime import date as _date
+
+    from backend.models import WbAdNmDaily, WbFunnelDaily
+
+    import backend.integrations.wb_content_api as content_api
+    import backend.services.funnel.ab_photo_tests as svc
+    from backend.integrations.wb_content_api import WbContentError
+
+    wb = _FakeWb()
+    fail = {"on": False}
+
+    async def flaky_upload(key, nm_id, content, filename="photo.jpg"):
+        if fail["on"]:
+            raise WbContentError("WB Content API: HTTP 429 при загрузке фото")
+        wb.uploads.append(content)
+
+    monkeypatch.setattr(content_api, "fetch_card", wb.fetch_card)
+    monkeypatch.setattr(content_api, "upload_main_photo", flaky_upload)
+    monkeypatch.setattr(svc, "_put_photo", wb.put_photo)
+    monkeypatch.setattr(svc, "get_photo", wb.get_photo)
+    monkeypatch.setattr(svc, "_download_wb_photo", wb.download_wb)
+
+    async def fake_keys(db, project_id):
+        return "content-key", "adv-key", "analytics-key"
+
+    monkeypatch.setattr(svc, "_get_keys", fake_keys)
+
+    t0 = datetime(2026, 7, 13, 8, 0, 0)
+    now = {"v": t0}
+    monkeypatch.setattr(svc, "utcnow", lambda: now["v"])
+
+    day = _date(2026, 7, 13)  # МСК-день всех тиков в этом сценарии
+    db_session.add_all([
+        WbAdNmDaily(project_id=project.id, campaign_id=222, nm_id=111, date=day, views=10),
+        WbFunnelDaily(project_id=project.id, nm_id=111, date=day),
+    ])
+    await db_session.commit()
+
+    test = await svc.create_test(
+        db_session, project.id, nm_id=111, campaign_id=222,
+        views_per_round=100, round_minutes=30, target_views=1000, max_days=7,
+    )
+    await svc.add_variant(db_session, project.id, test.id, _jpeg_bytes())
+    test = await svc.start_test(db_session, project.id, test.id)
+
+    fail["on"] = True
+    now["v"] = t0 + _td(minutes=35)
+    for _ in range(3):
+        await svc.tick_project(db_session, project.id)
+        now["v"] = now["v"] + _td(minutes=5)
+    await db_session.refresh(test)
+    assert test.status == "running"  # 15 минут сбоя — рано паузить
+
+    # WB ожил — ротация проходит без вмешательства человека
+    fail["on"] = False
+    await svc.tick_project(db_session, project.id)
+    await db_session.refresh(test)
+    assert len(wb.uploads) == 1
+
+
+async def test_fetch_card_wraps_network_errors_into_content_error(monkeypatch):
+    """Сетевой обрыв в fetch_card = WbContentError, а не сырой httpx: иначе ошибка
+    пролетает мимо счётчика ротации в общий except тика (молчаливый висящий круг)."""
+    import httpx
+    import pytest
+
+    import backend.integrations.wb_content_api as content_api
+
+    class _BoomClient:
+        def __init__(self, *a, **kw): ...
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def post(self, *a, **kw):
+            raise httpx.ConnectError("connection reset")
+
+    monkeypatch.setattr(content_api.httpx, "AsyncClient", _BoomClient)
+    with pytest.raises(content_api.WbContentError, match="сетевая ошибка"):
+        await content_api.fetch_card("key", 111)

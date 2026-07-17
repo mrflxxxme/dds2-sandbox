@@ -286,7 +286,7 @@ async def test_dispatch_blocked_when_ff_create_fails(db_session, project, ff_war
     _mock_resolve(monkeypatch, {bc: 6001})
     _mock_create(monkeypatch, {}, exc=SkladbotApiError("bad", status_code=422))
 
-    with pytest.raises(ValueError, match="отклонил создание"):
+    with pytest.raises(ValueError, match="отклонил приёмку"):
         await update_vehicle_status(
             db_session, project.id, order_no, VehicleStatusUpdate(status=VehicleStatus.DISPATCHED)
         )

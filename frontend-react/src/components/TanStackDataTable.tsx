@@ -98,7 +98,7 @@ function adaptColumns(cols: Column[]): ColumnDef<any, any>[] {
                 if (col.render) return col.render(value, row, index);
                 return formatCell(value, col.format);
             },
-            meta: { align: col.align || 'left' },
+            meta: { align: col.align || 'left', headerTitle: col.headerTitle, headerWrap: col.headerWrap },
         };
         if (col.getValue) {
             (def as any).accessorFn = col.getValue;
@@ -218,11 +218,13 @@ export default function TanStackDataTable({
                                             return (
                                                 <th
                                                     key={header.id}
+                                                    title={meta?.headerTitle || undefined}
                                                     style={{
                                                         textAlign: meta?.align || 'left',
                                                         cursor: canSort ? 'pointer' : undefined,
                                                         userSelect: canSort ? 'none' : undefined,
-                                                        whiteSpace: 'nowrap',
+                                                        whiteSpace: meta?.headerWrap ? 'normal' : 'nowrap',
+                                                        ...(meta?.headerWrap ? { maxWidth: 120, lineHeight: 1.3, verticalAlign: 'bottom' } : {}),
                                                     }}
                                                     onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
                                                 >
@@ -294,7 +296,14 @@ export default function TanStackDataTable({
                                                 {row.getVisibleCells().map((cell) => {
                                                     const meta = cell.column.columnDef.meta as any;
                                                     return (
-                                                        <td key={cell.id} style={{ textAlign: meta?.align || 'left' }}>
+                                                        <td
+                                                            key={cell.id}
+                                                            style={{
+                                                                textAlign: meta?.align || 'left',
+                                                                // Числовые (right) ячейки не переносятся — столбик цифр ровный
+                                                                whiteSpace: meta?.align === 'right' ? 'nowrap' : undefined,
+                                                            }}
+                                                        >
                                                             {flexRender(cell.column.columnDef.cell, cell.getContext())}
                                                         </td>
                                                     );

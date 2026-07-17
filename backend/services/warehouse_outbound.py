@@ -9,6 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.cache import invalidate_cache
 from backend.models.warehouse import (
     MovementType,
     OutboundShipment,
@@ -465,8 +466,29 @@ async def complete_transfer(db: AsyncSession, project_id: int, transfer_id: int)
                 target_stock.in_transit = max(0, target_stock.in_transit - item.quantity)
             target_stock.updated_at = utcnow()
 
+    # Наследуем ручную кратность коробов на склад-получатель (товар переехал —
+    # «шт/короб» те же; раньше кратность заносили заново руками). Best-effort:
+    # сбой наследования не валит приёмку перемещения.
+    inherited = 0
+    if not is_defect:
+        try:
+            from backend.services import box_multiplicity_service
+
+            inherited = await box_multiplicity_service.inherit_on_transfer(
+                db,
+                project_id,
+                transfer.from_warehouse_id,
+                transfer.to_warehouse_id,
+                [i.barcode for i in transfer.items],
+                transfer.number,
+            )
+        except Exception:
+            logger.warning("transfer box-qty inherit failed for %s", transfer.number, exc_info=True)
+
     transfer.status = TransferStatus.COMPLETED
 
     await db.commit()
+    if inherited:
+        await invalidate_cache("reports:warehouse_need")
     await db.refresh(transfer, ["items"])
     return transfer

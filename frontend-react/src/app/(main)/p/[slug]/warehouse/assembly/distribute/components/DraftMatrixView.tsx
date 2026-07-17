@@ -8,9 +8,14 @@ import { allocateWholeBoxes, buildLeftoverWeights } from '@/lib/assembly/leftove
 import { DISTRICT_ORDER, DISTRICT_LABELS, DISTRICT_COLORS } from '@/lib/constants/localization';
 import { Toast } from '@/components';
 import { NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS } from '@/lib/assembly/needParams';
+import { subtractReserveFromArticles, restrictArticlesToFf, reservedForBarcode, type DraftReserveMap } from '@/lib/assembly/draftReserve';
+import { inScopeOf } from '@/lib/assembly/categoryCompat';
+import { scopedNormalizeDraft } from '@/lib/utils/scopedNormalizeDraft';
+import type { NormalizeDraftCtx } from '@/lib/utils/normalizeDraft';
 import {
     applyAcceptanceSplits,
     applyDraftCellEdit,
+    applyDraftPrebookEdit,
     buildAutoSyncPlan,
     buildDraftSkus,
     buildWriteDistribution,
@@ -76,6 +81,8 @@ function buildDistAgg(
     nmPpb: Map<number, number | null>,
     nmBoxSize: Map<number, string | null>,
     palletOverrides: Record<string, number>,
+    /** Класс совместимости категорий: BOX-паллеты считаются per-класс (факт=KPI). */
+    classOf?: (nm: number) => string,
 ): DistAgg {
     const submitRows = rowsToPreDistRows(rows);
     const allocByBc = new Map<string, number>();
@@ -94,7 +101,7 @@ function buildDistAgg(
         boxesByWh.set(r.wb_warehouse_name, (boxesByWh.get(r.wb_warehouse_name) ?? 0) + boxesOf(r.qty, nmPpb.get(nm)));
         const key = `${r.wb_warehouse_name}::${r.package_type}`;
         const g = linesByWhPkg.get(key) ?? { wh: r.wb_warehouse_name, pkg: r.package_type, lines: [] };
-        g.lines.push({ units: r.qty, boxQty: nmPpb.get(nm), boxSize: nmBoxSize.get(nm) ?? null });
+        g.lines.push({ units: r.qty, boxQty: nmPpb.get(nm), boxSize: nmBoxSize.get(nm) ?? null, group: classOf?.(nm) });
         linesByWhPkg.set(key, g);
     }
     const palletsByWh = new Map<string, number>();
@@ -119,6 +126,17 @@ interface DraftMatrixViewProps {
      *  Родитель обновляет свой стейт БЕЗ смены вкладки и БЕЗ полного self-heal
      *  (план редактора = точное состояние). */
     onDraftChanged?: (draft: AssemblyDraft) => void;
+    /** Резерв стока ДРУГИМИ черновиками (barcode → {ff → qty}) — вычитается из
+     *  доступного ФФ до расчёта; в ячейке «На ФФ» видна 🔒-подстрока. */
+    reserved?: DraftReserveMap;
+    /** Категорийный скоуп черновика: расчёт/таблица только по этим категориям. */
+    scopeCategories?: string[] | null;
+    /** Ограничение ФФ-источника скоупленного черновика (id склада). */
+    scopeFfId?: number | null;
+    /** Эффективная категория per nm (override ?? предмет WB) — для скоупа. */
+    categoryOf?: (nm: number) => string;
+    /** Класс совместимости категорий — партиция смешанных BOX-паллет. */
+    classOf?: (nm: number) => string;
 }
 
 /** РЕДАКТОР черновика в виде матрицы SKU × WB-склады. Таблица показывает сам
@@ -126,7 +144,7 @@ interface DraftMatrixViewProps {
  *  напрямую с автосейвом; «⟳ Пересчитать от потребности» пишет живой расчёт
  *  (need-канал + новинки cold-start с гвардом пересорта) заменой по SKU:
  *  целые паллеты → строки, хвосты → предбронь. */
-export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }: DraftMatrixViewProps) {
+export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, reserved, scopeCategories, scopeFfId, categoryOf, classOf }: DraftMatrixViewProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -152,6 +170,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     const [nmBoxSize, setNmBoxSize] = useState<Map<number, string | null>>(new Map());
     const [palletOverrides, setPalletOverrides] = useState<Record<string, number>>({});
     const [geomReady, setGeomReady] = useState(false);
+    // Исключённые склады из «⚙️ Настройки складов» — в колонки не показываем.
+    const [excludedWbs, setExcludedWbs] = useState<Set<string>>(new Set());
 
     const [distRows, setDistRows] = useState<AssemblyDraftRow[] | null>(null);
     const [prebookRows, setPrebookRows] = useState<AssemblyDraftRow[]>([]);
@@ -194,7 +214,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                 const locTo = new Date();
                 const locFrom = new Date(locTo.getTime() - 13 * 86_400_000);
                 const isoDay = (d: Date) => d.toISOString().slice(0, 10);
-                const [need, cold, boxMult, palletOv, locSkus] = await Promise.all([
+                const [need, cold, boxMult, palletOv, locSkus, excluded] = await Promise.all([
                     // Первичный источник экрана — НЕ глушим (иначе 500 покажет пустое «нечего
                     // отгружать» вместо ошибки). Отказ → reject Promise.all → error-стейт.
                     api.getStockNeed(NEED_SUPPLY_DAYS, NEED_ANALYSIS_DAYS, 'actual', true, true, 0) as Promise<StockNeedResponse>,
@@ -209,9 +229,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                     api.getBoxMultiplicity().catch(() => null),
                     api.getPalletBoxesBySize().catch(() => ({} as Record<string, number>)),
                     api.getLocalizationSkus(isoDay(locFrom), isoDay(locTo)).catch(() => [] as LocalizationSkuRow[]),
+                    // Исключённые склады (настройки) — best-effort, для видимости колонок.
+                    api.getExcludedWarehouses().catch(() => [] as string[]),
                 ]);
                 if (controller.signal.aborted) return;
                 setStockNeed(need);
+                setExcludedWbs(new Set((excluded || []).map((n) => n.trim()).filter(Boolean)));
                 setLocByNm(new Map(locSkus.map((r) => [r.nm_id, r])));
                 acceptanceCacheRef.current = null;
 
@@ -276,14 +299,23 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     }, []);
 
     // Артикулы со свободным ФФ-остатком — источник раскладки черновика.
+    // Коррекции ДО отсева: (1) резерв других черновиков вычтен из available;
+    // (2) ФФ-ограничение скоупа (available чужих складов = 0); (3) категорийный
+    // скоуп — чужие категории вообще не участвуют (ни в расчёте, ни в таблице).
     const articles = useMemo<StockNeedArticle[]>(() => {
+        let corrected = subtractReserveFromArticles(stockNeed?.articles ?? [], reserved);
+        corrected = restrictArticlesToFf(corrected, scopeFfId);
+        if (scopeCategories?.length && categoryOf) {
+            const inSc = inScopeOf(scopeCategories, categoryOf);
+            corrected = corrected.filter(a => inSc(a.nm_id));
+        }
         const out: StockNeedArticle[] = [];
-        for (const a of stockNeed?.articles ?? []) {
+        for (const a of corrected) {
             const avail = Object.values(a.rf_stocks || {}).reduce((s, st) => s + Math.max(0, Number(st?.available) || 0), 0);
             if (avail > 0) out.push(a);
         }
         return out;
-    }, [stockNeed]);
+    }, [stockNeed, reserved, scopeFfId, scopeCategories, categoryOf]);
 
     // ─── Авто-раскладка: потребность × ФФ-сток → приёмка → коробы/паллеты ────
     const computeDistribution = useCallback(async (signal: AbortSignal) => {
@@ -297,6 +329,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                 articles, stockNeed, nmPpb, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc,
                 ppbAt: (nm, ffId) => nmPpbByWh.get(nm)?.[ffId] ?? null,
                 priorityByWh,
+                classOf,
             };
             const { skus: allSkus } = buildDraftSkus(distInput);
             const { shippable: autoSkus } = splitByKratnost(allSkus, (nm) => nmPpb.get(nm));
@@ -339,14 +372,23 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                 setDistRows(whole.rows);
                 setPrebookRows(whole.prebook);
                 setAcceptanceNote(summary);
-                setAcceptanceByNm(accByNm);
+                // МЕРЖ, не замена: карту наполняют ещё префетч ручного режима и
+                // ленивые per-click проверки (гвардед-новинки в autoSkus не входят) —
+                // замена целиком стирала их метки и гейт снова «слеп» (гонка: расчёт
+                // финиширует ПОСЛЕ префетча).
+                setAcceptanceByNm((prev) => {
+                    if (prev.size === 0) return accByNm;
+                    const m = new Map(prev);
+                    for (const [nm, it] of accByNm) m.set(nm, it);
+                    return m;
+                });
             }
         } catch (e) {
             if (!signal.aborted) { setDistRows([]); setPrebookRows([]); showToast(e instanceof Error ? e.message : 'Ошибка раскладки', 'error'); }
         } finally {
             if (!signal.aborted) setDistComputing(false);
         }
-    }, [articles, stockNeed, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc, showToast]);
+    }, [articles, stockNeed, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, newcomerSet, newcomerAlloc, classOf, showToast]);
 
     // ─── Черновик: ИСТОЧНИК таблицы (матрица = редактор черновика) ──────────
     const draftDistRef = useRef<AssemblyDraft['distribution'] | null>(null);
@@ -373,38 +415,118 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
      *    (иначе стейл-ответ откатил бы более свежие клики);
      *  - серверный гейт мог вычесть «уже едущее» — про это говорит тост. */
     const editGenRef = useRef(0);
-    const saveInFlightRef = useRef(false);
+    // Летящий PUT как промис: `await flushDraftSave()` обязан ДОЖИМАТЬ и его, и
+    // pending-хвост (контракт ✕-удаления/авто-синка), а не возвращаться мгновенно.
+    const saveInFlightRef = useRef<Promise<void> | null>(null);
+    // Счётчик ретраев базового GET (сеть мигнула) — сбрасывается успешным GET.
+    const saveRetryRef = useRef(0);
     const pendingSaveRef = useRef<{ rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; manualNms: number[] } | null>(null);
     const sumUnits = (rows: AssemblyDraftRow[]) => rows.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0);
+
+    // Контекст нормализатора (зеркало buildNormalizeCtx страницы): свободный ФФ =
+    // available (уже минус резерв других черновиков) − занятое сохраняемым планом.
+    const buildNormCtx = useCallback((freshRows: AssemblyDraftRow[]): NormalizeDraftCtx => {
+        const inDraft: Record<number, Record<number, number>> = {};
+        for (const r of freshRows) {
+            const m = (inDraft[r.nm_id] ??= {});
+            for (const [ff, q] of Object.entries(r.src || {})) m[Number(ff)] = (m[Number(ff)] || 0) + (q || 0);
+        }
+        const freeByNm: Record<number, Record<number, number>> = {};
+        for (const a of articles) {
+            const pool: Record<number, number> = {};
+            for (const [ff, st] of Object.entries(a.rf_stocks || {})) {
+                const free = (st.available || 0) - (inDraft[a.nm_id]?.[Number(ff)] || 0);
+                if (free > 0) pool[Number(ff)] = free;
+            }
+            if (Object.keys(pool).length) freeByNm[a.nm_id] = pool;
+        }
+        return {
+            ppbOf: (nm) => nmPpb.get(nm),
+            ppbAt: (nm, ffId) => nmPpbByWh.get(nm)?.[ffId] ?? null,
+            boxSizeOf: (nm) => nmBoxSize.get(nm) ?? null,
+            overrides: palletOverrides,
+            freeByNm,
+            classOf,
+        };
+    }, [articles, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, classOf]);
     const flushDraftSave = useCallback(async (): Promise<void> => {
-        if (saveInFlightRef.current) return; // доедет из finally текущего PUT
+        // «Дожать сейв» (контракт ✕-удаления и авто-синка) = дождаться И летящего
+        // PUT, И pending-хвоста за ним. Ранний return при летящем PUT ломал
+        // контракт: удаление/синк уезжали ВПЕРЁД отложенного флаша, и тот
+        // воскрешал SKU снапшотом, сделанным до удаления (и затирал ✋-флаг).
+        while (saveInFlightRef.current) await saveInFlightRef.current;
         const pending = pendingSaveRef.current;
         if (!pending) return;
         pendingSaveRef.current = null;
-        saveInFlightRef.current = true;
         const gen = editGenRef.current;
+        const run = (async (): Promise<void> => {
         try {
-            let base = draftDistRef.current;
+            // База PUT — строго СВЕЖИЙ GET черновика. Сбой GET ≠ «шлём от последней
+            // известной базы»: full-replace от stale-базы затирал бы чужие изменения
+            // (handed_units со страницы склада, правки другой вкладки). Правка
+            // возвращается в pending и уедет ретраем/следующим флашем.
+            let base: AssemblyDraft['distribution'] | null = null;
+            let baseVersion = '';
             try {
                 const fresh = await api.getAssemblyDraft(draftId);
-                base = fresh.distribution ?? base;
-            } catch { /* сеть мигнула — шлём от последней известной базы */ }
+                base = fresh.distribution ?? null;
+                baseVersion = fresh.updated_at;
+            } catch {
+                if (!pendingSaveRef.current) pendingSaveRef.current = pending; // новее нет — вернуть свою
+                if (saveRetryRef.current < 3) {
+                    saveRetryRef.current += 1;
+                    if (!saveTimerRef.current) {
+                        saveTimerRef.current = setTimeout(() => {
+                            saveTimerRef.current = null;
+                            void flushDraftSave();
+                        }, 3000);
+                    }
+                    showToast('Сеть мигнула — правка пока не записана, повторю автоматически', 'error');
+                } else {
+                    pendingSaveRef.current = null;
+                    showToast('Черновик не сохраняется (сеть/сервер) — правки степперов НЕ записаны, обнови страницу', 'error');
+                }
+                return;
+            }
+            saveRetryRef.current = 0;
             if (!base) {
                 showToast('Черновик недоступен — правка НЕ сохранена', 'error');
                 return;
             }
-            const next = buildWriteDistribution({ rows: [], prebook: [] }, pending.rows, pending.prebook);
-            const sent = sumUnits(pending.rows) + sumUnits(pending.prebook);
+            // Канон (решение юзера 2026-07-16): ручной план ТОЖЕ нормализуется перед
+            // записью — целые паллеты остаются строками, недобор уходит в предбронь
+            // (✋-флаги сохраняются, авто-синк ручное не трогает). Нормализуем в самом
+            // сейве (один писатель) — без второго PUT со страницы и гонки с ним.
+            // Матрица показывает строки+предбронь единой суммой, так что для юзера
+            // план не «пропадает» — меняется только судьба хвоста при коммите.
+            let sendRows = pending.rows;
+            let sendPrebook = pending.prebook;
+            let movedToPrebook = 0;
+            if (geomReady) {
+                const norm = scopedNormalizeDraft(pending.rows, pending.prebook, buildNormCtx([...pending.rows, ...pending.prebook]), undefined);
+                if (norm.changed) {
+                    sendRows = norm.rows;
+                    sendPrebook = norm.prebook;
+                    movedToPrebook = norm.droppedToPrebook;
+                }
+            }
+            const next = buildWriteDistribution({ rows: [], prebook: [] }, sendRows, sendPrebook);
+            const sent = sumUnits(sendRows) + sumUnits(sendPrebook);
             // Событие истории: правка степпером — значимое изменение (снапшот для
             // отката). Дебаунс+сериализация PUT-ов не дают спама на серию кликов.
+            // CAS от версии свежего GET: между GET и PUT черновик могла записать
+            // другая вкладка — 409 вернёт правку в pending на ретрай (свежая база).
             const d = await api.updateAssemblyDraft(draftId, {
                 distribution: { ...base, ...next, manual_nms: pending.manualNms },
                 event: { event_type: 'MATRIX_EDIT', summary: `Степпер: план ${formatNumber(sent, 0)} шт` },
+                base_updated_at: baseVersion || undefined,
             });
             draftDistRef.current = d.distribution ?? null;
             const got = sumUnits(d.distribution?.rows ?? []) + sumUnits(d.distribution?.prebook ?? []);
             if (got < sent) {
                 showToast(`⚠ Сервер вычел уже едущее в заявках: −${formatNumber(sent - got, 0)} шт (защита от дублей)`, 'success');
+            } else if (movedToPrebook > 0) {
+                showToast(`🅿️ Хвост меньше целой паллеты: ${formatNumber(movedToPrebook, 0)} шт → предбронь (отправить как есть — вкладка «Предбронь»)`, 'success');
             }
             if (editGenRef.current === gen) {
                 // Новых правок не было — ответ сервера канон.
@@ -415,12 +537,27 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
             }
             // Были новые правки → базу обновили, стейт не трогаем; pending уже ждёт.
         } catch (err) {
-            showToast(err instanceof Error ? err.message : 'Не удалось сохранить черновик', 'error');
+            if (err instanceof Error && err.message.includes('DRAFT_VERSION_CONFLICT')) {
+                // Между нашим GET и PUT черновик записала другая вкладка: правка
+                // возвращается в pending и уедет ретраем от НОВОЙ базы (свежий GET).
+                if (!pendingSaveRef.current) pendingSaveRef.current = pending;
+                if (!saveTimerRef.current) {
+                    saveTimerRef.current = setTimeout(() => {
+                        saveTimerRef.current = null;
+                        void flushDraftSave();
+                    }, 1500);
+                }
+            } else {
+                showToast(err instanceof Error ? err.message : 'Не удалось сохранить черновик', 'error');
+            }
         } finally {
-            saveInFlightRef.current = false;
-            if (pendingSaveRef.current) void flushDraftSave();
+            saveInFlightRef.current = null;
+            if (pendingSaveRef.current && !saveTimerRef.current) void flushDraftSave();
         }
-    }, [draftId, onDraftChanged, showToast]);
+        })();
+        saveInFlightRef.current = run;
+        await run;
+    }, [draftId, onDraftChanged, showToast, geomReady, buildNormCtx]);
     const scheduleDraftSave = useCallback((rows: AssemblyDraftRow[], prebook: AssemblyDraftRow[], manual: number[]) => {
         editGenRef.current += 1;
         pendingSaveRef.current = { rows, prebook, manualNms: manual };
@@ -482,6 +619,16 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                 saveTimerRef.current = null;
             }
             await flushDraftSave();
+            // Флаш мог не пройти (сеть мигнула) и вернуть правку в pending —
+            // вычищаем из неё удаляемый SKU, иначе отложенный ретрай воскресил бы его.
+            if (pendingSaveRef.current) {
+                const p = pendingSaveRef.current;
+                pendingSaveRef.current = {
+                    rows: p.rows.filter((r) => r.nm_id !== nm),
+                    prebook: p.prebook.filter((r) => r.nm_id !== nm),
+                    manualNms: [...new Set([...p.manualNms, nm])],
+                };
+            }
             const removed = await api.removeAssemblyDraftRows(draftId, [nm]);
             // ✕ — ручное решение «не отправлять»: помечаем SKU ручным, иначе
             // авто-синк с расчётом вернул бы его на следующем заходе.
@@ -541,8 +688,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     // Расчёт от потребности (фоновый). commit = что поедет строками (для confirm);
     // calcAgg = строки+предбронь расчёта ВМЕСТЕ — тот же слой, что и план черновика
     // (rows+prebook), иначе колонка «Расчёт» врала бы «расходится» сразу после записи.
-    const commit = useMemo(() => buildDistAgg(shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides), [shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
-    const calcAgg = useMemo(() => buildDistAgg([...shipRows, ...effPrebook], nmByBc, nmPpb, nmBoxSize, palletOverrides), [shipRows, effPrebook, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+    const commit = useMemo(() => buildDistAgg(shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides, classOf), [shipRows, nmByBc, nmPpb, nmBoxSize, palletOverrides, classOf]);
+    const calcAgg = useMemo(() => buildDistAgg([...shipRows, ...effPrebook], nmByBc, nmPpb, nmBoxSize, palletOverrides, classOf), [shipRows, effPrebook, nmByBc, nmPpb, nmBoxSize, palletOverrides, classOf]);
     const submitRows = commit.submitRows;
 
     // ─── ТАБЛИЦА = ЧЕРНОВИК: строки + предбронь единой суммой ────────────────
@@ -569,7 +716,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         } as StockNeedArticle;
     }), [draftOnlyNms, draftAll]);
 
-    const draftAgg = useMemo(() => buildDistAgg(draftAll, nmByBc, nmPpb, nmBoxSize, palletOverrides), [draftAll, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+    const draftAgg = useMemo(() => buildDistAgg(draftAll, nmByBc, nmPpb, nmBoxSize, palletOverrides, classOf), [draftAll, nmByBc, nmPpb, nmBoxSize, palletOverrides, classOf]);
     /** Предбронь-доля per (barcode, wh) — для тултипа «из них 🅿️» (числа единые). */
     const prebookCellByBc = useMemo(() => {
         const m = new Map<string, Map<string, number>>();
@@ -596,8 +743,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         [ffFilterId, draftAll],
     );
     const sliceAgg = useMemo(
-        () => (ffFilterId != null ? buildDistAgg(slicedDraft, nmByBc, nmPpb, nmBoxSize, palletOverrides) : draftAgg),
-        [ffFilterId, slicedDraft, nmByBc, nmPpb, nmBoxSize, palletOverrides, draftAgg],
+        () => (ffFilterId != null ? buildDistAgg(slicedDraft, nmByBc, nmPpb, nmBoxSize, palletOverrides, classOf) : draftAgg),
+        [ffFilterId, slicedDraft, nmByBc, nmPpb, nmBoxSize, palletOverrides, draftAgg, classOf],
     );
     /** Агрегат ЗНАЧЕНИЙ таблицы: доля ФФ при активном срезе, иначе весь черновик. */
     const viewAgg = ffSliceActive ? sliceAgg : draftAgg;
@@ -610,6 +757,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
 
     const enrichMap = useMemo(() => enrichArticles(articles, stockNeed, newcomerSet), [articles, stockNeed, newcomerSet]);
 
+    // Спец-склады WB (СГТ/Питание/виртуальные/СЦ) — не цели обычной FBO-поставки.
+    const isSpecWh = useCallback((name: string): boolean => (
+        name.startsWith('Виртуальный ') || name.startsWith('СЦ ')
+        || name.includes(' СГТ') || name.includes(': Питание') || name.includes(':Питание')
+    ), []);
+
     const wbCols = useMemo(() => {
         const distByWh = new Map<string, string>();
         for (const w of stockNeed?.warehouses ?? []) if (w.name) distByWh.set(w.name, w.district_key || 'unknown');
@@ -617,13 +770,22 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         for (const r of draftAgg.submitRows) names.add(r.wb_warehouse_name); // черновик
         for (const r of commit.submitRows) names.add(r.wb_warehouse_name); // расчёт (чтобы правкой можно было добрать)
         for (const e of enrichMap.values()) for (const [wh, c] of Object.entries(e.byWh)) if (c.need > 0) names.add(wh);
+        // ВСЕ склады WB, открытые по настройкам (не спец, не исключённые в
+        // «⚙️ Настройки складов»), — в ОБОИХ режимах: срез новинок давал 8 колонок,
+        // и Казань/Электросталь «пропадали». Куда нельзя сдать — скажут метки ⛔/⌛
+        // и гейт степпера. Склады с планом/расчётом/потребностью видны всегда
+        // (даже исключённые — план не должен прятаться).
+        for (const w of stockNeed?.warehouses ?? []) {
+            if (!w.name || isSpecWh(w.name) || excludedWbs.has(w.name)) continue;
+            names.add(w.name);
+        }
         const arr = [...names].map((name) => ({ name, district: distByWh.get(name) || 'unknown' }));
         arr.sort((a, b) => {
             const ra = districtRank(a.district), rb = districtRank(b.district);
             return ra !== rb ? ra - rb : a.name.localeCompare(b.name, 'ru');
         });
         return arr;
-    }, [draftAgg, commit, enrichMap, stockNeed]);
+    }, [draftAgg, commit, enrichMap, stockNeed, excludedWbs, isSpecWh]);
 
     const districtGroups = useMemo(() => {
         const groups: { label: string; color: string; count: number }[] = [];
@@ -661,15 +823,57 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     }, [articles, nmPpb, availByBc, draftByNm]);
 
     const markFor = useCallback((nm: number, wh: string, shipPkg: PackageType | null): CellMark | null => {
-        const flags = acceptanceByNm.get(nm)?.availability?.[wh];
-        if (!flags) return null;
+        const checked = acceptanceByNm.get(nm);
+        if (!checked) return null; // приёмка ещё не проверялась
+        const flags = checked.availability?.[wh];
+        // Проверка была, склада в ответе нет — WB не предлагает его для товара → ⛔.
+        if (!flags) return { noLimit: false, closed: true };
         if (!flags.can_box && !flags.can_monopallet && !flags.can_supersafe) return { noLimit: false, closed: true };
-        const canOf = (t: 'box' | 'mono' | 'super') => (t === 'box' ? flags.can_box : t === 'mono' ? flags.can_monopallet : flags.can_supersafe);
-        const wanted: 'box' | 'mono' | 'super' | null = shipPkg === 'MONOPALLET' ? 'mono' : shipPkg === 'SUPERSAFE' ? 'super' : shipPkg === 'BOX' ? 'box' : null;
-        const type = wanted && canOf(wanted) ? wanted : flags.can_box ? 'box' : flags.can_monopallet ? 'mono' : 'super';
-        const meta = type === 'box' ? flags.box_meta : type === 'mono' ? flags.mono_meta : flags.super_meta;
-        return { noLimit: ((meta?.free_days_14 ?? 0) + (meta?.paid_days_14 ?? 0)) <= 0 };
+        const days = (m?: { free_days_14?: number; paid_days_14?: number } | null) =>
+            (m?.free_days_14 ?? 0) + (m?.paid_days_14 ?? 0);
+        // Матрица кладёт КОРОБ или МОНО. Ячейка моно (по факту плана или потому что
+        // короб закрыт) — метка 📐 «только моно» + ⌛ по моно-мете: юзер видит ДО
+        // клика, что «+» положит моно (раньше метки не было вовсе — жалоба юзера).
+        if (shipPkg === 'SUPERSAFE') {
+            return flags.can_supersafe ? { noLimit: days(flags.super_meta) <= 0 } : { noLimit: false, closed: true };
+        }
+        if (shipPkg === 'MONOPALLET' || (!flags.can_box && flags.can_monopallet)) {
+            return { noLimit: days(flags.mono_meta) <= 0, monoOnly: !flags.can_box };
+        }
+        if (!flags.can_box) return { noLimit: false, closed: true }; // только supersafe — руками не кладём
+        return { noLimit: days(flags.box_meta) <= 0 };
     }, [acceptanceByNm]);
+
+    // Фоновая проверка приёмки для SKU без данных (гвардед-новинки не попадают в
+    // авто-расчёт → их приёмка не проверялась): проверяем, кэшируем (→ метки ⛔/⌛
+    // в ячейках) и ПОВТОРЯЕМ клик через ref (свежий стейт — параллельные правки
+    // других SKU не теряются). Повторные клики во время проверки игнорируются.
+    const accCheckBusyRef = useRef<Set<number>>(new Set());
+    const editDraftCellRef = useRef<(barcode: string, nm: number, wh: string, delta: number) => void>(() => {});
+    const checkCellAcceptance = useCallback(async (barcode: string, nm: number, wh: string, delta: number) => {
+        if (accCheckBusyRef.current.has(nm)) return;
+        accCheckBusyRef.current.add(nm);
+        showToast('⏳ Проверяю приёмку WB для этого товара…', 'success');
+        try {
+            const ppb = nmPpb.get(nm) || 0;
+            const resp = await api.checkWbAcceptance({ items: [{ nm_id: nm, barcode, distribution: { [wh]: Math.max(ppb, 1) } }] });
+            const it = (resp.items || []).find(i => i.nm_id === nm);
+            if (it) setAcceptanceByNm(prev => new Map(prev).set(nm, it));
+            if (!it) { showToast(`Приёмка по «${wh}» не вернулась — попробуй ещё раз`, 'error'); return; }
+            if (!it.availability?.[wh]) {
+                // Ответ пришёл, но склада в нём нет — WB не предлагает его для
+                // этого товара (раньше зацикливалось в «попробуй ещё раз»).
+                showToast(`⛔ WB не предлагает «${wh}» для этого товара — приёмка закрыта`, 'error');
+                return;
+            }
+            // Повтор клика свежим хендлером: гейт теперь решится по кэшу.
+            editDraftCellRef.current(barcode, nm, wh, delta);
+        } catch {
+            showToast('Не удалось проверить приёмку WB (лимит ~6 зап/мин) — подожди минуту и повтори', 'error');
+        } finally {
+            accCheckBusyRef.current.delete(nm);
+        }
+    }, [nmPpb, showToast]);
 
     // Правка ячейки = правка ЧЕРНОВИКА: BOX-строки и предбронь SKU сливаются в
     // одну строку, tgt[склада] двигается на ±короб, автосейв дебаунсом. Кап —
@@ -681,25 +885,82 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
             showToast('Раскладка этого SKU частично заморожена юнитами на странице склада — правь её там', 'error');
             return;
         }
+        // Рост плана — только в склады, куда реально можно сдать. Упаковку выбирает
+        // приёмка: короб открыт → BOX; только моно → МОНО-план (решение юзера
+        // 2026-07-16 — «если можно только моно, кладём моно»). Существующая ячейка
+        // держит свою упаковку.
+        const existingPkg = draftAgg.cellByBc.get(barcode)?.get(wh)?.pkg ?? null;
+        let cellPkg: PackageType = existingPkg ?? 'BOX';
+        // Моно-предбронь (предзаявка): «+» на складе «моно без лимита» кладёт короб
+        // в 🅿️ предбронь (решение юзера 2026-07-16) — заявкой не поедет, предзаявкой да.
+        let toPrebook = false;
+        if (delta > 0) {
+            const checked = acceptanceByNm.get(nm);
+            const flags = checked?.availability?.[wh];
+            if (!flags) {
+                if (checked) {
+                    // Проверка уже была, склада нет в ответе — WB не предлагает его
+                    // для этого товара вовсе (раньше тут был вечный «попробуй ещё раз»).
+                    showToast(`⛔ WB не предлагает «${wh}» для этого товара — приёмка закрыта`, 'error');
+                    return;
+                }
+                void checkCellAcceptance(barcode, nm, wh, delta);
+                return;
+            }
+            const days = (m?: { free_days_14?: number; paid_days_14?: number } | null) =>
+                (m?.free_days_14 ?? 0) + (m?.paid_days_14 ?? 0);
+            const boxOk = !!flags.can_box && days(flags.box_meta) > 0;
+            const monoOk = !!flags.can_monopallet && days(flags.mono_meta) > 0;
+            const monoNoLimit = !!flags.can_monopallet && days(flags.mono_meta) <= 0;
+            // Сейф-ячейка (existingPkg='SUPERSAFE') гейтится своей приёмкой так же,
+            // как короб/моно — раньше проваливалась в else и росла без проверки.
+            const superOk = !!flags.can_supersafe && days(flags.super_meta) > 0;
+            const wantPkg: PackageType | null = existingPkg ?? (boxOk ? 'BOX' : monoOk ? 'MONOPALLET' : null);
+            if (!wantPkg
+                || (wantPkg === 'BOX' && !boxOk)
+                || (wantPkg === 'MONOPALLET' && !monoOk)
+                || (wantPkg === 'SUPERSAFE' && !superOk)) {
+                // Моно открыто, но лимита нет → не блокируем: кладём в предбронь.
+                if (monoNoLimit && !boxOk && (existingPkg == null || existingPkg === 'MONOPALLET')) {
+                    toPrebook = true;
+                    cellPkg = 'MONOPALLET';
+                } else {
+                    const reason = wantPkg === 'SUPERSAFE'
+                        ? (flags.can_supersafe
+                            ? `⌛ «${wh}»: суперсейф открыт, но лимита приёмки нет — в заявки не поедет`
+                            : `⛔ «${wh}» не принимает суперсейф этого товара`)
+                        : (!flags.can_box && !flags.can_monopallet && !flags.can_supersafe)
+                            ? `⛔ WB не принимает на «${wh}» — приём закрыт`
+                            : !flags.can_box && !flags.can_monopallet
+                                ? `⛔ «${wh}» не принимает ни короб, ни моно этого товара`
+                                : `⌛ «${wh}»: короб открыт, но лимита приёмки нет — в заявки не поедет`;
+                    showToast(reason, 'error');
+                    return;
+                }
+            } else {
+                cellPkg = wantPkg;
+                if (cellPkg === 'MONOPALLET' && !existingPkg) {
+                    showToast(`📐 «${wh}» принимает этот товар только моно-паллетами — кладём моно-план`, 'success');
+                }
+            }
+        }
         // Для draft-only SKU (нет свободного остатка) article-заглушка позволяет
         // ДЕКРЕМЕНТ (кап держит только рост плана).
         const article = articles.find((a) => a.nm_id === nm) ?? draftOnlyArticles.find((a) => a.nm_id === nm);
         if (!article) { showToast('SKU не найден среди остатков и черновика', 'error'); return; }
+        const skuRows = draftRows.filter((r) => r.nm_id === nm);
         const skuPrebook = draftPrebook.filter((r) => r.nm_id === nm);
-        const out = applyDraftCellEdit(
-            draftRows.filter((r) => r.nm_id === nm),
-            skuPrebook,
-            article, wh, delta, ppb,
-        );
+        // Декремент моно-ячейки, живущей ТОЛЬКО в предброни (предзаявка), правит
+        // предбронь — applyDraftCellEdit сконвертировал бы её в строку-заявку,
+        // которая без лимита приёмки не поедет.
+        const monoOf = (rs: AssemblyDraftRow[]) =>
+            rs.filter((r) => (r.package_type ?? 'BOX') === 'MONOPALLET').reduce((s, r) => s + (r.tgt?.[wh] || 0), 0);
+        const prebookEdit = toPrebook
+            || (delta < 0 && existingPkg === 'MONOPALLET' && monoOf(skuRows) === 0 && monoOf(skuPrebook) > 0);
+        const out = prebookEdit
+            ? applyDraftPrebookEdit(skuRows, skuPrebook, article, wh, delta, ppb, 'MONOPALLET')
+            : applyDraftCellEdit(skuRows, skuPrebook, article, wh, delta, ppb, cellPkg);
         if (!out) { if (delta > 0) showToast('Не хватает свободного остатка на ФФ', 'error'); return; }
-        // Моно-предбронь при ручной правке сливается в КОРОБНЫЙ план — если склад
-        // принимает только монопаллеты, приёмка на создании заявки не пропустит.
-        if (skuPrebook.some((r) => r.package_type === 'MONOPALLET')) {
-            const flags = acceptanceByNm.get(nm)?.availability?.[wh];
-            if (flags && !flags.can_box) {
-                showToast(`⚠ «${wh}» по последней проверке принимает только монопаллеты — коробный план может не пройти приёмку`, 'error');
-            }
-        }
         const nextRows = [...draftRows.filter((r) => r.nm_id !== nm), ...out.rows];
         const nextPrebook = [...draftPrebook.filter((r) => r.nm_id !== nm), ...out.prebook];
         const nextManual = manualNms.has(nm) ? manualNms : new Set([...manualNms, nm]);
@@ -707,10 +968,61 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         setDraftPrebook(nextPrebook);
         if (nextManual !== manualNms) setManualNms(nextManual);
         scheduleDraftSave(nextRows, nextPrebook, [...nextManual]);
-    }, [nmPpb, articles, draftOnlyArticles, handedNms, manualNms, draftRows, draftPrebook, acceptanceByNm, scheduleDraftSave, showToast]);
+        if (toPrebook) {
+            showToast(`⌛ «${wh}»: лимита приёмки нет — короб добавлен в 🅿️ предбронь (уедет предзаявкой)`, 'success');
+        }
+    }, [nmPpb, articles, draftOnlyArticles, handedNms, manualNms, draftRows, draftPrebook, draftAgg, acceptanceByNm, checkCellAcceptance, scheduleDraftSave, showToast]);
+    // Свежий хендлер для отложенного повтора клика после фоновой проверки приёмки.
+    useEffect(() => { editDraftCellRef.current = editDraftCell; }, [editDraftCell]);
 
-    // Вход в ручной режим = просто показать степперы поверх авто-раскладки. НЕ сеем пины:
-    // нетронутые строки остаются авто, «вручную» помечается лишь та, где юзер кликнул −/+.
+    // Префетч приёмки при входе в ручной режим (решение юзера 2026-07-16): одним
+    // батчем проверяем ВСЕ товары матрицы без данных приёмки (гвардед-новинки в
+    // авто-расчёт не попадают) по всем видимым складам → метки ⛔/⌛ видны в ячейках
+    // ДО кликов, а гейт степпера решается мгновенно из кэша. Backend кэширует
+    // per-barcode 10 мин — повторный вход дёшев. Ошибка не блокирует режим
+    // (остаётся ленивый per-click фолбэк).
+    const [accPrefetching, setAccPrefetching] = useState(false);
+    const prefetchAcceptance = useCallback(async () => {
+        const missing = articles.filter((a) => !acceptanceByNm.has(a.nm_id) && (nmPpb.get(a.nm_id) || 0) > 0);
+        if (missing.length === 0 || wbCols.length === 0 || accPrefetching) return;
+        setAccPrefetching(true);
+        try {
+            const items = missing.slice(0, 300).map((a) => {
+                const ppb = nmPpb.get(a.nm_id) || 1;
+                const dist: Record<string, number> = {};
+                for (const c of wbCols) dist[c.name] = ppb;
+                return { nm_id: a.nm_id, barcode: a.barcode, distribution: dist };
+            });
+            const resp = await api.checkWbAcceptance({ items });
+            setAcceptanceByNm((prev) => {
+                const m = new Map(prev);
+                for (const it of resp.items || []) m.set(it.nm_id, it);
+                return m;
+            });
+        } catch {
+            showToast('Приёмку по товарам проверить не удалось — метки появятся при кликах (WB лимитирует частоту)', 'error');
+        } finally {
+            setAccPrefetching(false);
+        }
+    }, [articles, acceptanceByNm, nmPpb, wbCols, accPrefetching, showToast]);
+
+    // Префетч-эффект: в ручном режиме добираем приёмку по товарам без данных —
+    // покрывает и вход ДО загрузки articles, и потери карты. Сигнатура-гард: одна
+    // попытка на состав недостающих (ошибка не даёт retry-шторма — добьют клики).
+    const accPrefetchSigRef = useRef('');
+    useEffect(() => {
+        if (!editMode || accPrefetching) return;
+        const missing = articles.filter((a) => !acceptanceByNm.has(a.nm_id) && (nmPpb.get(a.nm_id) || 0) > 0);
+        if (missing.length === 0) return;
+        const sig = missing.map((a) => a.nm_id).sort((x, y) => x - y).join(',');
+        if (accPrefetchSigRef.current === sig) return;
+        accPrefetchSigRef.current = sig;
+        void prefetchAcceptance();
+    }, [editMode, articles, acceptanceByNm, nmPpb, accPrefetching, prefetchAcceptance]);
+
+    // Вход в ручной режим = показать степперы поверх авто-раскладки (префетч приёмки
+    // подхватит эффект выше). НЕ сеем пины: нетронутые строки остаются авто, «вручную»
+    // помечается лишь та, где юзер кликнул −/+.
     const enterManual = useCallback(() => setEditMode(true), []);
     // «Готово с правкой» дожимает незаписанный дебаунс СЕЙЧАС: после «Готово»
     // пользователь обычно сразу уходит в черновик, а fire-and-forget на анмаунте
@@ -732,19 +1044,16 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         a: StockNeedArticle,
         rows0: AssemblyDraftRow[],
         prebook0: AssemblyDraftRow[],
-    ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; boxes: number; ppb: number; skip?: 'handed' | 'noPpb' | 'guard' | 'nothing' | 'noTarget' | 'cap' | 'monoPrebook' } => {
+    ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; boxes: number; ppb: number; skip?: 'handed' | 'noPpb' | 'nothing' | 'noTarget' | 'cap' | 'monoPrebook' } => {
         const nm = a.nm_id;
         const none = { rows: rows0, prebook: prebook0, boxes: 0, ppb: 0 };
         if (handedNms.has(nm)) return { ...none, skip: 'handed' }; // заморожено юнитами склада
         const ppb = nmPpb.get(nm) || 0;
         if (ppb <= 0) return { ...none, skip: 'noPpb' };
-        // Гвард пересорта: посев лежит без продаж — не досеваем (степпер работает).
-        if (guardByNm.has(nm)) return { ...none, skip: 'guard' };
-        // Новинка вне cold-start-справочника (rf==0 на момент выборки) гвардом не
-        // помечена — локальная проверка: лежит на WB без продаж → не досыпаем.
-        if (newcomerSet.has(nm) && (Number(a.eff_avg_daily) || 0) === 0 && (Number(a.stocks_wb) || 0) > 0) {
-            return { ...none, skip: 'guard' };
-        }
+        // Гвард пересорта ручную раздачу НЕ блокирует (решение юзера 2026-07-16):
+        // клик «Распределить остатки» — явное решение человека, SKU становится ✋
+        // и авто-синк его не тронет. Гвард остаётся только в авто-путях
+        // (buildAutoSyncPlan вычищает guarded-новинки без ✋).
         // applyDraftCellEdit сливает ВСЮ предбронь SKU в единую BOX-строку —
         // моно-предбронь (предзаявка) молча стала бы коробной и не прошла бы
         // приёмку. Машина такие строки не переупаковывает (pinnedPkgOf) —
@@ -780,7 +1089,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
             applied += b;
         }
         return { rows, prebook, boxes: applied, ppb };
-    }, [handedNms, nmPpb, guardByNm, newcomerSet, availByBc, enrichMap, markFor]);
+    }, [handedNms, nmPpb, availByBc, enrichMap, markFor]);
 
     // «Распределить все остатки»: один проход по локальному стейту (editDraftCell в
     // цикле терял бы правки на stale-замыкании) → один автосейв; SKU становятся ✋.
@@ -789,12 +1098,11 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         if (totalFree > 0 && !window.confirm(`Распределить весь свободный остаток ФФ (~${formatNumber(totalFree, 0)} шт) целыми коробами по складам спроса? Тронутые SKU станут ✋ ручными.`)) return;
         let rows = draftRows, prebook = draftPrebook;
         const manual = new Set(manualNms);
-        let addedUnits = 0, addedBoxes = 0, touched = 0, skipNoPpb = 0, skipNoTarget = 0, skipGuard = 0, skipCap = 0, skipMono = 0;
+        let addedUnits = 0, addedBoxes = 0, touched = 0, skipNoPpb = 0, skipNoTarget = 0, skipCap = 0, skipMono = 0;
         for (const a of articles) {
             const res = allocSkuLeftover(a, rows, prebook);
             if (res.skip === 'noPpb') skipNoPpb++;
             else if (res.skip === 'noTarget') skipNoTarget++;
-            else if (res.skip === 'guard') skipGuard++;
             else if (res.skip === 'cap') skipCap++;
             else if (res.skip === 'monoPrebook') skipMono++;
             if (res.boxes <= 0) continue;
@@ -803,14 +1111,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
             touched++; addedBoxes += res.boxes; addedUnits += res.boxes * res.ppb;
         }
         if (touched === 0) {
-            showToast(`Нечего распределять: свободный ФФ уже в плане${skipNoPpb ? ` · без кратности: ${skipNoPpb} SKU` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget} SKU` : ''}${skipGuard ? ` · гвард пересорта: ${skipGuard} SKU` : ''}`, 'error');
+            showToast(`Нечего распределять: свободный ФФ уже в плане${skipNoPpb ? ` · без кратности: ${skipNoPpb} SKU` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget} SKU` : ''}`, 'error');
             return;
         }
         setDraftRowsState(rows);
         setDraftPrebook(prebook);
         setManualNms(manual);
         scheduleDraftSave(rows, prebook, [...manual]);
-        showToast(`Распределено ${formatNumber(addedUnits, 0)} шт (${formatNumber(addedBoxes, 0)} кор) по ${formatNumber(touched, 0)} SKU — помечены ✋${skipNoPpb ? ` · без кратности: ${skipNoPpb}` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget}` : ''}${skipGuard ? ` · гвард: ${skipGuard}` : ''}${skipCap ? ` · кап ФФ: ${skipCap}` : ''}${skipMono ? ` · моно-предбронь: ${skipMono}` : ''}`, 'success');
+        showToast(`Распределено ${formatNumber(addedUnits, 0)} шт (${formatNumber(addedBoxes, 0)} кор) по ${formatNumber(touched, 0)} SKU — помечены ✋${skipNoPpb ? ` · без кратности: ${skipNoPpb}` : ''}${skipNoTarget ? ` · некуда: ${skipNoTarget}` : ''}${skipCap ? ` · кап ФФ: ${skipCap}` : ''}${skipMono ? ` · моно-предбронь: ${skipMono}` : ''}`, 'success');
     }, [articles, availByBc, draftAgg, draftRows, draftPrebook, manualNms, allocSkuLeftover, scheduleDraftSave, showToast]);
 
     // Раздача остатка ОДНОЙ строки (кнопка в «Остаётся ФФ»).
@@ -819,7 +1127,6 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         if (res.boxes <= 0) {
             const msg = res.skip === 'handed' ? 'SKU заморожен юнитами на странице склада — правь там'
                 : res.skip === 'noPpb' ? 'Не задана кратность короба'
-                : res.skip === 'guard' ? `Гвард пересорта: ${guardByNm.get(a.nm_id) || 'посев лежит без продаж'} — только вручную степпером`
                 : res.skip === 'noTarget' ? 'Некуда: нет ни потребности, ни присутствия на открытых складах'
                 : res.skip === 'cap' ? 'Не хватает свободного остатка на ФФ'
                 : res.skip === 'monoPrebook' ? 'У SKU моно-предбронь (предзаявка) — раздача сделала бы её коробной; реши на вкладке 🅿️ Предбронь'
@@ -833,7 +1140,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
         setManualNms(manual);
         scheduleDraftSave(res.rows, res.prebook, [...manual]);
         showToast(`${a.vendor_code || a.barcode}: распределено ${formatNumber(res.boxes * res.ppb, 0)} шт (${formatNumber(res.boxes, 0)} кор) — SKU помечен ✋`, 'success');
-    }, [allocSkuLeftover, draftRows, draftPrebook, manualNms, guardByNm, scheduleDraftSave, showToast]);
+    }, [allocSkuLeftover, draftRows, draftPrebook, manualNms, scheduleDraftSave, showToast]);
 
     const sortValue = useCallback((a: StockNeedArticle, key: SortKey): number | string => {
         const nm = a.nm_id;
@@ -920,8 +1227,8 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
     const matrixView = useMemo(() => {
         if (!isFiltered) return viewAgg;
         const base = ffSliceActive ? slicedDraft : draftAll;
-        return buildDistAgg(base.filter((r) => visibleBarcodes.has(r.barcode)), nmByBc, nmPpb, nmBoxSize, palletOverrides);
-    }, [isFiltered, viewAgg, ffSliceActive, slicedDraft, draftAll, visibleBarcodes, nmByBc, nmPpb, nmBoxSize, palletOverrides]);
+        return buildDistAgg(base.filter((r) => visibleBarcodes.has(r.barcode)), nmByBc, nmPpb, nmBoxSize, palletOverrides, classOf);
+    }, [isFiltered, viewAgg, ffSliceActive, slicedDraft, draftAll, visibleBarcodes, nmByBc, nmPpb, nmBoxSize, palletOverrides, classOf]);
     const matrixViewOnHold = useMemo(
         () => visibleRows.reduce((s, a) => s + Math.max(0, availOf(a) - (matrixView.allocByBc.get(a.barcode) ?? 0)), 0),
         [visibleRows, availOf, matrixView],
@@ -944,6 +1251,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                 saveTimerRef.current = null;
             }
             await flushDraftSave();
+            // Флаш не прошёл (сеть) — синк от базы без несохранённой правки был бы
+            // перекрыт её отложенным ретраем. Откладываем синк до успешного сейва.
+            if (pendingSaveRef.current) {
+                if (trigger === 'manual') showToast('Есть несохранённая правка степпера (сеть мигнула) — синк отложен, повтори позже', 'error');
+                return;
+            }
             const cur = await api.getAssemblyDraft(draftId);
             const dist = cur.distribution;
             const curManual = new Set<number>(dist?.manual_nms ?? []);
@@ -1077,6 +1390,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                         <button className={`btn btn-sm ${editMode ? 'btn-primary' : 'btn-secondary'}`} onClick={editMode ? finishManual : enterManual}>
                             {editMode ? '✓ Готово с правкой' : '✏️ Править черновик'}
                         </button>
+                        {accPrefetching && (
+                            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}
+                                title="Батч-проверка приёмки WB по товарам матрицы — метки ⛔/⌛ появятся в ячейках">
+                                ⏳ проверяю приёмку по товарам…
+                            </span>
+                        )}
                         <button className="btn btn-sm btn-secondary" onClick={distributeAllLeftovers} disabled={writing || computing}
                             title="Раздать весь свободный остаток ФФ сверх плана целыми коробами: по складам с потребностью, иначе — куда товар уже лежит/едет; закрытые по приёмке и гвард-новинки пропускаются. Тронутые SKU становятся ✋ ручными.">
                             📦 Распределить все остатки
@@ -1089,9 +1408,9 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                     </div>
                     <div style={{ color: 'var(--color-muted)', fontSize: 13 }}>
                         Таблица показывает <b style={{ color: 'var(--color-text)' }}>черновик</b>: строки и 🅿️ предбронь каждого SKU единой суммой (ячейки с предбронью подсвечены, доля — в подсказке «Σ отпр.»).
-                        Правки степперами сохраняются в черновик сразу; ✕ убирает SKU целиком.
+                        Правки степперами сохраняются в черновик сразу (план нормализуется: целые паллеты → строки-заявки, хвост меньше паллеты → 🅿️ предбронь; ✋ при этом сохраняется); ✕ убирает SKU целиком.
                         План <b style={{ color: 'var(--color-text)' }}>сам синхронизируется</b> с живым расчётом при заходе (need-канал + новинки cold-start с гвардом пересорта ⚠): целые паллеты → строки, хвосты → предбронь. SKU, правленный руками, помечается ✋ и авто-синком не трогается (↺ на строке возвращает в авто); «⟳ Обновить сейчас» — форс-синк без перезахода.
-                        Колонки складов: 🏬 остаток на WB · 🚚 в сборке/в пути · потребность. Метрики SKU: <b style={{ color: 'var(--color-text)' }}>Хватит, дн</b> (на сколько дней остатка WB при текущей скорости; 🔴 меньше плеча доставки) · <b style={{ color: 'var(--color-text)' }}>Потр. {NEED_SUPPLY_DAYS}д</b> (growth-aware: скорость = max из среднего за 14д/7д/3д, ⚡ — растущий SKU) · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (цвет — статус КТР).
+                        Колонки складов: 🏬 остаток на WB · 🔧 в сборке · 🚚 в пути · потребность. Метрики SKU: <b style={{ color: 'var(--color-text)' }}>Хватит, дн</b> (на сколько дней остатка WB при текущей скорости; 🔴 меньше плеча доставки) · <b style={{ color: 'var(--color-text)' }}>Потр. {NEED_SUPPLY_DAYS}д</b> (growth-aware: скорость = max из среднего за 14д/7д/3д, ⚡ — растущий SKU) · <b style={{ color: 'var(--color-text)' }}>₽ 14д</b> · <b style={{ color: 'var(--color-text)' }}>Лок %</b> (цвет — статус КТР).
                         Колонка <b style={{ color: 'var(--color-text)' }}>«Расчёт»</b> — что предлагает живой расчёт (для сравнения с планом).
                     </div>
                     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
@@ -1211,7 +1530,7 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                                                     <span style={{ fontWeight: 600 }}>{label}</span>
                                                     {e?.isNew && <span className="badge" style={{ background: 'rgba(168,85,247,0.16)', color: '#a855f7', fontSize: 10, padding: '1px 6px' }}>🆕 новинка</span>}
                                                     {guardByNm.has(nm) && (
-                                                        <span className="badge" title={`Гвард пересорта: ${guardByNm.get(nm)}. Авто-досев выключен; ручные −/+ работают.`}
+                                                        <span className="badge" title={`Гвард пересорта: ${guardByNm.get(nm)}. Авто-досев выключен; ручной степпер и «Распределить остатки» работают.`}
                                                             style={{ background: 'rgba(255,159,10,0.14)', color: 'var(--color-warning)', fontSize: 10, padding: '1px 6px' }}>
                                                             ⚠ посев лежит без продаж
                                                         </span>
@@ -1228,7 +1547,15 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                                                 </div>
                                                 <div style={{ fontSize: 11, color: 'var(--color-muted)' }}>{a.subject ? `${a.subject} · ` : ''}ШК {a.barcode}</div>
                                             </td>
-                                            <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(avail, 0)}</td>
+                                            <td style={{ padding: '6px 8px', textAlign: 'right' }}
+                                                title={reservedForBarcode(reserved, a.barcode) > 0
+                                                    ? `Свободно ${formatNumber(avail, 0)} (уже за вычетом ${formatNumber(reservedForBarcode(reserved, a.barcode), 0)} шт, занятых другими черновиками)`
+                                                    : undefined}>
+                                                {formatNumber(avail, 0)}
+                                                {reservedForBarcode(reserved, a.barcode) > 0 && (
+                                                    <div style={{ fontSize: 10, color: 'var(--color-warning)' }}>🔒 −{formatNumber(reservedForBarcode(reserved, a.barcode), 0)} др. черновик</div>
+                                                )}
+                                            </td>
                                             <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.inAssembly > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.inAssembly > 0 ? formatNumber(e.inAssembly, 0) : '·'}</td>
                                             <td style={{ padding: '6px 8px', textAlign: 'right', color: e && e.stocksWb > 0 ? 'var(--color-text)' : 'var(--color-dim)' }}>{e && e.stocksWb > 0 ? formatNumber(e.stocksWb, 0) : '·'}</td>
                                             {(() => {
@@ -1279,14 +1606,14 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged }:
                                             {wbCols.map((c) => {
                                                 const cell = cells?.get(c.name);
                                                 const ctx = e?.byWh[c.name];
-                                                const ctxBusy = (ctx?.asm ?? 0) + (ctx?.transit ?? 0);
                                                 const pbPart = prebookCellByBc.get(a.barcode)?.get(c.name) ?? 0;
                                                 return (
                                                     <NeedMatrixCell
                                                         key={c.name}
                                                         ship={cell ?? null}
                                                         stock={ctx?.stock ?? 0}
-                                                        onWay={ctxBusy}
+                                                        asm={ctx?.asm ?? 0}
+                                                        transit={ctx?.transit ?? 0}
                                                         tint={pbPart > 0 ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : districtTint(c.district)}
                                                         mark={markFor(nm, c.name, cell?.pkg ?? null)}
                                                         edit={rowEditable && ppb ? {
