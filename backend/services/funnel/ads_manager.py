@@ -1569,7 +1569,8 @@ async def run_ads_schedule_tick(db: AsyncSession, project_id: int, api_key: str)
         journal = [e for e in log if int(e.get("campaign_id") or 0) == cid]
         decision = compute_schedule_action(setting, camp.status if camp else None, now_msk, journal)
         action = decision["action"]
-        if action == "skip":
+        # camp is None → status None → decision всегда skip; проверка для mypy (union-attr ниже)
+        if action == "skip" or camp is None:
             continue
 
         res = await set_campaign_state(api_key, cid, action)
