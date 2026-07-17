@@ -1734,12 +1734,15 @@ async def get_unified_stock_summary(
         entry = _ensure(nom_id)
         entry["vehicle_transit_qty"] = qty
 
-    # Compute totals (own + wb + wb-в-пути + in_transit; supply chain is separate columns)
+    # Compute totals. «В пути до получателей» (wb_in_way_to_client) НЕ входит в
+    # «Итого»: этот товар уже уехал к покупателям (по сути продан) — считать его
+    # доступным остатком для дозаказа неверно. Он остаётся отдельной колонкой.
+    # «Возвраты на склад WB» (wb_in_way_from_client) — входят: вернутся и снова
+    # станут доступны. Supply chain — отдельные колонки.
     for entry in unified.values():
         entry["total"] = (
             entry["total_own"]
             + entry["total_wb"]
-            + entry["wb_in_way_to_client"]
             + entry["wb_in_way_from_client"]
             + entry["in_transit"]
         )
