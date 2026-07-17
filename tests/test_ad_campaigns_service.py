@@ -881,3 +881,129 @@ class TestSyncAdCampaignsEfficiency:
             assert order.index("commit") < order.index(http_step), (
                 f"{http_step} вызван с открытой транзакцией: {order}"
             )
+
+
+# ─── Владение бюджетами: планировщик не дублирует sync_ad_budgets_only ────────
+
+
+class TestScheduledSyncSkipsBudgets:
+    """Бюджеты активных кампаний каждые 10 мин тянет sync_ad_budgets_only. Плановый
+    sync_ad_campaigns тянул ТЕ ЖЕ кампании по тому же rate-лимитированному
+    /adv/v1/budget — две джобы дрались за эндпоинт (прод 2026-07-17: прогон бюджетов
+    228с → 426с при наложении). Плановый путь бюджеты больше не трогает.
+    Ручной путь (кнопка «Синхронизировать» с priority_ids) — трогает, он редкий.
+    """
+
+    @staticmethod
+    def _mock_db(known_ids, existing_rows=None):
+        known_res = MagicMock()
+        known_res.scalars.return_value.all.return_value = known_ids
+        existing_res = MagicMock()
+        existing_res.scalars.return_value.all.return_value = existing_rows or []
+        mock_db = AsyncMock()
+        # 1-й execute — лёгкий запрос известных id, 2-й — полная выборка для дифа,
+        # 3-й и далее — сам upsert
+        mock_db.execute = AsyncMock(
+            side_effect=[known_res, existing_res, MagicMock(), MagicMock()]
+        )
+        mock_db.add_all = MagicMock()
+        mock_db.commit = AsyncMock()
+        return mock_db
+
+    @staticmethod
+    def _patches(campaigns, fetch_budgets_mock):
+        return (
+            patch("backend.services.funnel.ad_campaigns_service.get_wb_key",
+                  new_callable=AsyncMock, return_value="k"),
+            patch("backend.services.funnel.ad_campaigns_service.fetch_ad_campaigns_detailed",
+                  new_callable=AsyncMock, return_value=campaigns),
+            patch("backend.services.funnel.ad_campaigns_service._sort_campaigns_by_spend",
+                  AsyncMock(side_effect=lambda db, pid, ids, prio=None: ids)),
+            patch("backend.services.funnel.ad_campaigns_service.fetch_campaign_budgets_batch",
+                  fetch_budgets_mock),
+            patch("backend.services.funnel.ad_campaigns_service.pg_insert",
+                  return_value=MagicMock(on_conflict_do_update=MagicMock(return_value=MagicMock()))),
+        )
+
+    @pytest.mark.asyncio
+    async def test_scheduled_skips_budgets_for_known_campaigns(self):
+        from backend.services.funnel.ad_campaigns_service import sync_ad_campaigns
+
+        campaigns = [
+            {"advertId": 1, "name": "активная", "status": 9, "nm_ids": []},
+            {"advertId": 2, "name": "пауза", "status": 11, "nm_ids": []},
+        ]
+        fetch_budgets = AsyncMock(return_value={})
+        mock_db = self._mock_db(known_ids=[1, 2])
+
+        with patch("backend.services.funnel.ad_campaigns_service.get_wb_key",
+                   new_callable=AsyncMock, return_value="k"), \
+             patch("backend.services.funnel.ad_campaigns_service.fetch_ad_campaigns_detailed",
+                   new_callable=AsyncMock, return_value=campaigns), \
+             patch("backend.services.funnel.ad_campaigns_service.fetch_campaign_budgets_batch",
+                   fetch_budgets), \
+             patch("backend.services.funnel.ad_campaigns_service.pg_insert",
+                   return_value=MagicMock(on_conflict_do_update=MagicMock(return_value=MagicMock()))):
+            await sync_ad_campaigns(mock_db, PROJECT_ID, fetch_budgets=False)
+
+        fetch_budgets.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scheduled_still_fetches_budgets_for_new_campaigns(self):
+        """У новой кампании нет «последнего известного» бюджета: без разового запроса
+        паузная новинка навсегда осталась бы с 0 (sync_ad_budgets_only берёт только активные)."""
+        from backend.services.funnel.ad_campaigns_service import sync_ad_campaigns
+
+        campaigns = [
+            {"advertId": 1, "name": "известная", "status": 9, "nm_ids": []},
+            {"advertId": 7, "name": "новая пауза", "status": 11, "nm_ids": []},
+            {"advertId": 8, "name": "новая завершённая", "status": 7, "nm_ids": []},
+        ]
+        fetch_budgets = AsyncMock(return_value={7: Decimal("500")})
+        mock_db = self._mock_db(known_ids=[1])
+
+        with patch("backend.services.funnel.ad_campaigns_service.get_wb_key",
+                   new_callable=AsyncMock, return_value="k"), \
+             patch("backend.services.funnel.ad_campaigns_service.fetch_ad_campaigns_detailed",
+                   new_callable=AsyncMock, return_value=campaigns), \
+             patch("backend.services.funnel.ad_campaigns_service.fetch_campaign_budgets_batch",
+                   fetch_budgets), \
+             patch("backend.services.funnel.ad_campaigns_service.pg_insert",
+                   return_value=MagicMock(on_conflict_do_update=MagicMock(return_value=MagicMock()))):
+            await sync_ad_campaigns(mock_db, PROJECT_ID, fetch_budgets=False)
+
+        requested = fetch_budgets.await_args[0][1]
+        assert requested == [7], "спрашиваем только новую незавершённую, не известные и не завершённые"
+
+    @pytest.mark.asyncio
+    async def test_scheduler_job_calls_sync_without_budgets(self):
+        """Плановая джоба обязана звать синк с fetch_budgets=False."""
+        import backend.services.funnel.ad_campaigns_service as svc
+        from backend.scheduler.jobs.funnel import sync_ad_campaigns_all_projects
+
+        seen = {}
+
+        async def _fake_sync(db, pid, *a, **kw):
+            seen.update(kw)
+            return {"synced": 0}
+
+        def _session():
+            """Сессия для sync_log-обвязки джобы (сам синк замокан)."""
+            s = AsyncMock()
+            res = MagicMock()
+            res.scalar.return_value = 1
+            s.execute = AsyncMock(return_value=res)
+            s.add = MagicMock()
+            s.commit = AsyncMock()
+            s.refresh = AsyncMock()  # sync_log.id останется None → finally не полезет в БД
+            s.__aenter__ = AsyncMock(return_value=s)
+            s.__aexit__ = AsyncMock(return_value=False)
+            return s
+
+        with patch.object(svc, "sync_ad_campaigns", _fake_sync), \
+             patch("backend.scheduler.jobs.funnel.get_sync_project_ids",
+                   new_callable=AsyncMock, return_value=[PROJECT_ID]), \
+             patch("backend.scheduler.jobs.funnel.AsyncSessionLocal", _session):
+            await sync_ad_campaigns_all_projects()
+
+        assert seen.get("fetch_budgets") is False
