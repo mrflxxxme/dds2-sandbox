@@ -44,9 +44,9 @@ def upgrade() -> None:
             "project_id", "nm_id", "barcode", "warehouse_name", name="uq_wb_remains_nm_barcode_wh"
         ),
     )
-    op.create_index("ix_wb_warehouse_remains_project_id", "wb_warehouse_remains", ["project_id"])
+    # Отдельный индекс по project_id НЕ создаём: unique-констрейнт выше (project_id
+    # первым столбцом) уже покрывает все project-scoped фильтры.
 
 
 def downgrade() -> None:
-    op.drop_index("ix_wb_warehouse_remains_project_id", table_name="wb_warehouse_remains")
     op.drop_table("wb_warehouse_remains")

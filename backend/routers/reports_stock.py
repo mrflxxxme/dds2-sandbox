@@ -139,7 +139,10 @@ async def sync_warehouse_remains_endpoint(
 ):
     """Sync cabinet-accurate WB stock from analytics report «Остатки на складах».
 
-    Task-based WB flow (create → poll → download) — отвечает до ~1 мин.
+    Task-based WB flow (create → poll → download). Отчёт обычно готов за
+    секунды; ждём максимум 90с — уложиться в nginx proxy timeout (120с),
+    иначе gateway отдаст 504 раньше, чем мы вернём осмысленный ответ.
+    Ежечасный фоновый джоб (без gateway-лимита) добьёт то, что не успело.
     Питает колонку «WB склады» в «Сводных остатках».
     """
     from backend.services.funnel.wb_api_client import fetch_warehouse_remains, get_wb_key
@@ -149,7 +152,7 @@ async def sync_warehouse_remains_endpoint(
     if not api_key:
         raise HTTPException(status_code=400, detail="WB API key not configured")
 
-    items = await fetch_warehouse_remains(api_key)
+    items = await fetch_warehouse_remains(api_key, max_wait_seconds=90)
     if not items:
         raise HTTPException(status_code=502, detail="WB не вернул отчёт «Остатки на складах» — попробуйте позже")
     count = await do_sync(db, project.id, items)

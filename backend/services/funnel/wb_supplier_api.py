@@ -287,7 +287,9 @@ async def fetch_warehouse_remains(api_key: str, max_wait_seconds: int = 300) -> 
 
     async with httpx.AsyncClient(timeout=120) as client:
         created = await _remains_get(client, _REMAINS_BASE, api_key, params=params)
-        task_id = (created or {}).get("data", {}).get("taskId") if isinstance(created, dict) else None
+        # `.get("data") or {}` — не `.get("data", {})`: WB может вернуть data=null (ключ
+        # есть, значение null) → .get с дефолтом отдаст None, а None.get() = AttributeError.
+        task_id = ((created or {}).get("data") or {}).get("taskId") if isinstance(created, dict) else None
         if not task_id:
             logger.error(f"WB warehouse_remains: no taskId in create response: {str(created)[:200]}")
             return []
@@ -298,7 +300,7 @@ async def fetch_warehouse_remains(api_key: str, max_wait_seconds: int = 300) -> 
         while time.monotonic() < deadline:
             await asyncio.sleep(10)
             st = await _remains_get(client, f"{_REMAINS_BASE}/tasks/{task_id}/status", api_key)
-            status = (st or {}).get("data", {}).get("status", "") if isinstance(st, dict) else ""
+            status = ((st or {}).get("data") or {}).get("status", "") if isinstance(st, dict) else ""
             if status == "done":
                 break
             if status in ("error", "canceled"):

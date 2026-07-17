@@ -369,8 +369,9 @@ class WbWarehouseRemains(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
     __table_args__ = (
+        # project_id-first unique покрывает и фильтры по project_id (delete/exists/join),
+        # и full-replace синк — отдельный индекс по project_id избыточен и грузит write.
         UniqueConstraint("project_id", "nm_id", "barcode", "warehouse_name", name="uq_wb_remains_nm_barcode_wh"),
-        Index("ix_wb_warehouse_remains_project_id", "project_id"),
     )
 
 
