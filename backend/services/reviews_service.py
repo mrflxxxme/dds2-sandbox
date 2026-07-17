@@ -29,8 +29,6 @@ from sqlalchemy.sql.selectable import Subquery
 from backend.cache import cached
 from backend.models import Nomenclature, ProductTag, ProductTagMap, WBFeedback
 from backend.schemas.reviews import (
-    ReviewBreakdownResponse,
-    ReviewBreakdownRow,
     ReviewItem,
     ReviewsListResponse,
 )
@@ -464,6 +462,7 @@ def _nom_lookup_dated(project_id: int) -> Subquery:
     )
 
 
+@cached(prefix="reviews:newcomers", ttl=300)
 async def get_new_low_rated(
     db: AsyncSession,
     project_id: int,
@@ -734,6 +733,7 @@ async def _breakdown_options(db: AsyncSession, project_id: int) -> tuple[list[st
     return await _distinct(subj), await _distinct(brnd)
 
 
+@cached(prefix="reviews:breakdown", ttl=300)
 async def get_reviews_breakdown(
     db: AsyncSession,
     project_id: int,
@@ -743,7 +743,7 @@ async def get_reviews_breakdown(
     subject: str | None = None,
     brand: str | None = None,
     nm_id: int | None = None,
-) -> ReviewBreakdownResponse:
+) -> dict:
     """
     Детальная таблица отзывов: группировка по времени/предмету/бренду/артикулу,
     распределение оценок 1–5, средний рейтинг, строка итога. Всё project-scoped.
@@ -805,12 +805,12 @@ async def get_reviews_breakdown(
     subjects, brands = await _breakdown_options(db, project_id)
     has_key = bool(totals["total"]) or await has_any_feedback(db, project_id) or await _has_wb_key(db, project_id)
 
-    return ReviewBreakdownResponse(
-        group_by=group_by,
-        rows=[ReviewBreakdownRow(**r) for r in rows],
-        totals=ReviewBreakdownRow(**totals),
-        subjects=subjects,
-        brands=brands,
-        truncated=truncated,
-        has_key=has_key,
-    )
+    return {
+        "group_by": group_by,
+        "rows": rows,
+        "totals": totals,
+        "subjects": subjects,
+        "brands": brands,
+        "truncated": truncated,
+        "has_key": has_key,
+    }

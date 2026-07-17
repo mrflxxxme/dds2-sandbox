@@ -173,11 +173,12 @@ async def reviews_breakdown(
     """Детальная таблица отзывов с группировкой (день/неделя/месяц/предмет/бренд/артикул)."""
     dt_from = datetime.combine(date_from, time.min) if date_from else None
     dt_to = datetime.combine(date_to, time.min) if date_to else None
-    return await reviews_service.get_reviews_breakdown(
+    data = await reviews_service.get_reviews_breakdown(
         db, project.id, group_by=group_by,
         date_from=dt_from, date_to=dt_to,
         subject=subject, brand=brand, nm_id=nm_id,
     )
+    return ReviewBreakdownResponse(**data)
 
 
 @router.get("/complaint-reviews", response_model=ReviewsListResponse)
@@ -234,5 +235,7 @@ async def sync_reviews(
         # неверный ключ / ошибка WB API → 502 с человекочитаемым текстом
         raise HTTPException(status_code=502, detail=str(e))
 
-    await invalidate_cache(f"reviews:summary:project_id={project.id}")
+    # синк обновил зеркало → сбрасываем весь кэш раздела отзывов
+    for prefix in ("reviews:summary", "reviews:newcomers", "reviews:breakdown"):
+        await invalidate_cache(f"{prefix}:project_id={project.id}")
     return await reviews_service.get_reviews_summary(db, project.id, tag=tag, period=period)
