@@ -1,7 +1,7 @@
 /** Funnel (Воронка продаж) API methods */
 import { ApiClient } from './client';
 import type {
-    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry, BudgetLedgerEntry, AdsCampaignStateResult, AdsAutopaySaveResult, AdsBudgetGap, AdsBudgetGapHistory, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
+    AdSubject, AdNmCard, CreateCampaignResult, FunnelDayRow, FunnelSkuRow, FunnelGroupRow, FunnelSummary, FunnelFilters, FunnelColorsResponse, FunnelSyncStatus, MessageResponse, MissingCostItem, WbTariff, WbTariffUploadResult, AnomaliesResponse, CapitalResponse, AdTabProduct, AdsManagerCampaign, AdsScheduleSetting, AdsScheduleLogEntry, AdsWbAutopayStatus, BudgetLedgerEntry, AdsCampaignStateResult, AdsScheduleSaveResult, AdsBudgetGap, AdsBudgetGapHistory, AdsHistoryPoint, UnifiedSyncProgress, FirstSyncProgress, CampaignClustersResponse, CampaignMetricsResponse, CampaignZoneMetricsResponse, CampaignHourlySpend, CampaignIntradayMetrics, PositionsResponse, PositionsProgress, CollectPositionsResult, CollectOneResult, CampaignZones,
     CampaignZonesUpdate, ClusterMinusResult, ClusterBidResult, ClusterBidBulkResult, AdCategory, CategoryClustersResponse, ProductClustersResponse, ProductMinusResult, ProductDailyResponse } from '@/types/api';
 
 export function addFunnelMethods(api: ApiClient) {
@@ -206,11 +206,18 @@ export function addFunnelMethods(api: ApiClient) {
             return api.request<{ ok: boolean; status: string | null; budget_after: number | null; error: string | null }>(
                 'POST', `/api/v1/funnel/campaigns/${campaignId}/deposit`, { amount, source });
         },
-        getCampaignsAutopay() {
-            return api.request<Record<string, AdsAutopaySetting>>('GET', '/api/v1/funnel/campaigns/autopay');
+        getCampaignsSchedule() {
+            return api.request<Record<string, AdsScheduleSetting>>('GET', '/api/v1/funnel/campaigns/schedule');
         },
-        setCampaignAutopay(campaignId: number, setting: AdsAutopaySetting) {
-            return api.request<AdsAutopaySaveResult>('POST', '/api/v1/funnel/campaigns/autopay', { campaign_id: campaignId, ...setting });
+        /** Детект автопополнения ВБ по фактическим доливам бюджета (событиям) за 7 дней. */
+        getWbAutopayStatus(campaignId?: number) {
+            const q = new URLSearchParams();
+            if (campaignId != null) q.set('campaign_id', String(campaignId));
+            const qs = q.toString();
+            return api.request<Record<string, AdsWbAutopayStatus>>('GET', `/api/v1/funnel/campaigns/wb-autopay${qs ? `?${qs}` : ''}`);
+        },
+        setCampaignSchedule(campaignId: number, setting: AdsScheduleSetting) {
+            return api.request<AdsScheduleSaveResult>('POST', '/api/v1/funnel/campaigns/schedule', { campaign_id: campaignId, ...setting });
         },
         /** Запустить (active=true) или поставить кампанию на паузу (false) в WB. */
         setCampaignState(campaignId: number, active: boolean) {
@@ -252,11 +259,11 @@ export function addFunnelMethods(api: ApiClient) {
         createCampaign(body: { name: string; nms: number[]; bid_type: string; payment_type: string; placement_types?: string[] | null }) {
             return api.request<CreateCampaignResult>('POST', '/api/v1/funnel/campaigns/create', body);
         },
-        getAutopayLog(campaignId?: number) {
+        getScheduleLog(campaignId?: number) {
             const q = new URLSearchParams();
             if (campaignId != null) q.set('campaign_id', String(campaignId));
             const qs = q.toString();
-            return api.request<AdsAutopayLogEntry[]>('GET', `/api/v1/funnel/campaigns/autopay/log${qs ? `?${qs}` : ''}`);
+            return api.request<AdsScheduleLogEntry[]>('GET', `/api/v1/funnel/campaigns/schedule/log${qs ? `?${qs}` : ''}`);
         },
         getBudgetLedger(campaignId?: number, kind?: 'topup' | 'charge') {
             const q = new URLSearchParams();

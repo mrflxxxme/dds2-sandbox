@@ -741,39 +741,50 @@ async def get_ad_campaigns_list(
     )
 
 
-class AutopaySettingRequest(BaseModel):
+class ScheduleSettingRequest(BaseModel):
     campaign_id: int
     enabled: bool = False
-    mode: str = "to_target"  # to_target — до X в час по порогу оборота; low_balance — «как на ВБ», по остатку
-    amount: float = 0  # to_target: дневной бюджет X
-    hour: int = 9  # to_target: час пополнения, МСК
-    threshold_pct: int = 50  # to_target: пополнять, только если открут за сутки ≥ порога
-    low_balance_threshold: float = 1000  # low_balance: долить, когда остаток < этого, ₽
-    topup_amount: float = 1000  # low_balance: сумма разового долива, ₽
-    daily_cap: int = 1  # low_balance: не чаще N раз в день (0 = без ограничения)
+    pause_hour: int = 0  # час МСК, когда ставить на паузу (после долива ВБ в 00:00)
+    resume_hour: int = 9  # час МСК, когда запускать обратно
 
 
-@router.get("/campaigns/autopay")
-async def get_campaigns_autopay(
+@router.get("/campaigns/schedule")
+async def get_campaigns_schedule(
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Настройки автопополнения по кампаниям (исполняет scheduler-джоба ads_autopay)."""
-    from backend.services.funnel.ads_manager import get_autopay_settings
+    """Настройки паузы по расписанию по кампаниям (исполняет scheduler-джоба ads_schedule)."""
+    from backend.services.funnel.ads_manager import get_schedule_settings
 
-    return await get_autopay_settings(db, project.id)
+    return await get_schedule_settings(db, project.id)
 
 
-@router.get("/campaigns/autopay/log")
-async def get_campaigns_autopay_log(
+@router.get("/campaigns/wb-autopay")
+async def get_campaigns_wb_autopay(
     campaign_id: int | None = None,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Журнал автопополнений (новые первыми); campaign_id — фильтр по кампании."""
-    from backend.services.funnel.ads_manager import get_autopay_log
+    """Где ВБ доливал бюджет за последние дни (детект автопополнения ВБ по событиям бюджета).
 
-    log = await get_autopay_log(db, project.id)
+    API ВБ статус своего автопея не отдаёт — определяем по фактическим доливам.
+    Кампании без записи в ответе = доливов со стороны ВБ не замечено.
+    """
+    from backend.services.funnel.ads_manager import get_wb_autopay_status
+
+    return await get_wb_autopay_status(db, project.id, campaign_id)
+
+
+@router.get("/campaigns/schedule/log")
+async def get_campaigns_schedule_log(
+    campaign_id: int | None = None,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+):
+    """Журнал пауз/запусков по расписанию (новые первыми); campaign_id — фильтр по кампании."""
+    from backend.services.funnel.ads_manager import get_schedule_log
+
+    log = await get_schedule_log(db, project.id)
     if campaign_id is not None:
         log = [e for e in log if int(e.get("campaign_id") or 0) == campaign_id]
     return log
@@ -794,27 +805,22 @@ async def get_campaigns_budget_ledger(
     return await get_budget_ledger(db, project.id, campaign_id, kind)
 
 
-@router.post("/campaigns/autopay", dependencies=[Depends(rate_limit_write)])
-async def set_campaigns_autopay(
-    body: AutopaySettingRequest,
+@router.post("/campaigns/schedule", dependencies=[Depends(rate_limit_write)])
+async def set_campaigns_schedule(
+    body: ScheduleSettingRequest,
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
 ):
-    """Сохранить настройку автопополнения; при включении — активировать кампанию.
-
-    Возвращает {"settings": {...}, "activation": {ok,status,error} | None}.
+    """Сохранить настройку паузы по расписанию. Кампанию не трогает —
+    паузу/запуск делает только scheduler-тик. Возвращает {"settings": {...}}.
     """
-    from backend.services.funnel.ads_manager import save_autopay_and_maybe_activate
+    from backend.services.funnel.ads_manager import set_schedule_setting
 
-    return await save_autopay_and_maybe_activate(
+    settings = await set_schedule_setting(
         db, project.id, body.campaign_id,
-        {
-            "enabled": body.enabled, "mode": body.mode, "amount": body.amount,
-            "hour": body.hour, "threshold_pct": body.threshold_pct,
-            "low_balance_threshold": body.low_balance_threshold, "topup_amount": body.topup_amount,
-            "daily_cap": body.daily_cap,
-        },
+        {"enabled": body.enabled, "pause_hour": body.pause_hour, "resume_hour": body.resume_hour},
     )
+    return {"settings": settings}
 
 
 class CampaignStateRequest(BaseModel):

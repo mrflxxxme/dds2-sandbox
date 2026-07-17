@@ -1,5 +1,5 @@
 import React from 'react';
-import type { AdsManagerCampaign, AdsAutopaySetting, AdsAutopayLogEntry } from '@/types/api';
+import type { AdsManagerCampaign, AdsScheduleSetting } from '@/types/api';
 
 // ─── Форматтеры (округление до 0,1) ───
 export const fmt = (n: number | undefined) => (Number(n) || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 });
@@ -103,22 +103,16 @@ export function wbImageUrl(nmId: number, size: 'small' | 'big' | 'c246x328' | 'c
     return `https://basket-${host}.wbbasket.ru/vol${vol}/part${part}/${nmId}/images/${size}/1.webp`;
 }
 
-export const DEFAULT_AUTOPAY: AdsAutopaySetting = {
-    enabled: true, mode: 'to_target', amount: 1000, hour: 9, threshold_pct: 50,
-    low_balance_threshold: 1000, topup_amount: 1000, daily_cap: 1,
-};
+// Дефолтное окно паузы: ВБ доливает бюджет в 00:00 МСК — глушим сразу после
+// долива и запускаем к утреннему трафику.
+export const DEFAULT_SCHEDULE: AdsScheduleSetting = { enabled: true, pause_hour: 0, resume_hour: 9 };
 
-/** Короткий ярлык активного автопополнения для кнопки/ячейки (зависит от режима). */
-export function autopayLabel(s: AdsAutopaySetting): string {
-    if (s.mode === 'low_balance') return `< ${fmt(s.low_balance_threshold)} → +${fmt(s.topup_amount)} ₽`;
-    return `${String(s.hour).padStart(2, '0')}:00 · ${fmt(s.amount)} ₽`;
+const hh = (h: number) => `${String(h).padStart(2, '0')}:00`;
+
+/** Короткий ярлык активного расписания для кнопки/ячейки: «⏸ 00:00–09:00». */
+export function scheduleLabel(s: AdsScheduleSetting): string {
+    return `${hh(s.pause_hour)}–${hh(s.resume_hour)}`;
 }
-
-export const AUTOPAY_STATUS_BADGE: Record<AdsAutopayLogEntry['status'], { label: string; cls: string }> = {
-    ok: { label: 'Успешно', cls: 'badge-success' },
-    error: { label: 'Ошибка', cls: 'badge-danger' },
-    unknown: { label: 'Неизвестно', cls: 'badge-warning' },
-};
 
 // Известные сигнатуры ошибок WB → понятный менеджеру текст. Матчим по подстроке (lowercase),
 // первое совпадение выигрывает. Ключи — фрагменты, которые WB стабильно возвращает в теле ошибки.
