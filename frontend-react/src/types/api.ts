@@ -6387,12 +6387,19 @@ export interface NewcomerReview {
   avg_rating: number | null;
   count: number;
   count_unanswered: number;
+  neg_unanswered: number;
   r1: number;
   r2: number;
   r3: number;
   r4: number;
   r5: number;
   tags: string[];
+}
+
+/** Частая тема жалоб из негативных отзывов. */
+export interface ComplaintTerm {
+  term: string;
+  count: number;
 }
 
 /** Разрез проблемных новинок по категории / бренду / ярлыку. */
@@ -6413,6 +6420,8 @@ export interface NewcomersResponse {
   by_category: NewcomerGroup[];
   by_brand: NewcomerGroup[];
   by_tag: NewcomerGroup[];
+  total_newcomers: number;
+  complaint_terms: ComplaintTerm[];
   days: number;
   max_rating: number;
   has_key: boolean;

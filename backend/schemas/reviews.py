@@ -96,6 +96,7 @@ class NewcomerReview(BaseModel):
     avg_rating: float | None = None
     count: int = 0  # всего отзывов
     count_unanswered: int = 0
+    neg_unanswered: int = 0  # негатив (1–2★) без ответа — «горит, нужен ответ»
     r1: int = 0
     r2: int = 0
     r3: int = 0
@@ -118,6 +119,13 @@ class NewcomerGroup(BaseModel):
     r5: int = 0
 
 
+class ComplaintTerm(BaseModel):
+    """Частая тема жалоб: слово из негативных отзывов + частота."""
+
+    term: str
+    count: int
+
+
 class NewcomersResponse(BaseModel):
     """Раздел «Проблемные новинки»: новинки с рейтингом ниже порога."""
 
@@ -126,6 +134,10 @@ class NewcomersResponse(BaseModel):
     by_category: list[NewcomerGroup] = []
     by_brand: list[NewcomerGroup] = []
     by_tag: list[NewcomerGroup] = []
+    # Всего новинок в окне (любой рейтинг) — для доли проблемных в KPI
+    total_newcomers: int = 0
+    # Частые темы жалоб по негативным отзывам проблемных новинок
+    complaint_terms: list[ComplaintTerm] = []
     days: int = 30  # окно «новинки» (дней на продаже)
     max_rating: float = 4.6  # порог «плохого» рейтинга
     # False → у проекта не настроен активный WB-ключ (фронт покажет подсказку)

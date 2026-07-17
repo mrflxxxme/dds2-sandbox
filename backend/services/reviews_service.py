@@ -16,6 +16,8 @@ has_key: у проекта есть активный WB-ключ ИЛИ уже �
 from __future__ import annotations
 
 import logging
+import re
+from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
 
@@ -397,6 +399,49 @@ async def get_reviews_summary(
 # ─── Проблемные новинки (недавно на продаже + низкий рейтинг) ────────────────
 
 _NEWCOMERS_LIMIT = 300
+_COMPLAINT_TERMS_TOP = 25  # сколько тем жалоб отдавать
+_NEG_TEXT_LIMIT = 5000  # кап на негативные тексты для частотника
+
+# Русские стоп-слова (частые незначимые) — чтобы в темах жалоб остались смысловые слова.
+_RU_STOP: frozenset[str] = frozenset(
+    """
+    это этот эта эти того этом этой очень просто вообще совсем именно даже более менее самый
+    когда потом после перед сразу пока ещё уже всё все весь вся свои свой своя моя мой меня мне
+    была было были есть быть будет чтобы если чтоб хотя однако поэтому который которая которое
+    здесь там тут туда сюда затем итоге общем короче ничего никак нельзя можно надо нужно нужен
+    товар товара товаре заказ заказа заказала заказал купила купил брала взяла пришло пришла пришел
+    штука штук цена деньги рубль рублей магазин продавец доставка отзыв звезда балл оценка
+    хорошо плохо нормально спасибо руб шт см как что так вот его ему нее них они она оно
+    """.split()
+)
+_WORD_RE = re.compile(r"[а-яёa-z0-9]+", re.IGNORECASE)
+
+
+def _complaint_tokens(text: str) -> list[str]:
+    """Смысловые слова из текста жалобы (длина ≥4, не стоп-слово)."""
+    return [w for w in _WORD_RE.findall(text.lower()) if len(w) >= 4 and w not in _RU_STOP]
+
+
+async def _complaint_terms(db: AsyncSession, project_id: int, nm_ids: list[int]) -> list[dict]:
+    """Топ частых слов из негативных (1–2★) отзывов заданных товаров."""
+    if not nm_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(WBFeedback.text, WBFeedback.cons)
+            .where(
+                WBFeedback.project_id == project_id,
+                WBFeedback.nm_id.in_(nm_ids),
+                WBFeedback.rating.in_((1, 2)),
+                WBFeedback.has_text,
+            )
+            .limit(_NEG_TEXT_LIMIT)
+        )
+    ).all()
+    counter: Counter[str] = Counter()
+    for text, cons in rows:
+        counter.update(_complaint_tokens(f"{text or ''} {cons or ''}"))
+    return [{"term": t, "count": c} for t, c in counter.most_common(_COMPLAINT_TERMS_TOP) if c >= 2]
 
 
 def _nom_lookup_dated(project_id: int) -> Subquery:
@@ -441,6 +486,7 @@ async def get_new_low_rated(
                 avg,
                 cnt,
                 func.count(WBFeedback.id).filter(~WBFeedback.is_answered),
+                func.count(WBFeedback.id).filter(WBFeedback.rating.in_((1, 2)) & (~WBFeedback.is_answered)),
                 func.min(WBFeedback.created_date),
                 _r(1), _r(2), _r(3), _r(4), _r(5),
                 subject,
@@ -457,8 +503,9 @@ async def get_new_low_rated(
 
     today = utcnow().replace(tzinfo=None).date()
     items: list[dict] = []
+    total_newcomers = 0  # все новинки в окне (любой рейтинг) — для доли проблемных
     for r in rows:
-        nm_id, ar, c, unanswered, first_rev, x1, x2, x3, x4, x5, subj, brnd, pname, fsd = r
+        nm_id, ar, c, unanswered, neg_unans, first_rev, x1, x2, x3, x4, x5, subj, brnd, pname, fsd = r
         # эффективная дата старта: реальная продажа, иначе прокси — первый отзыв
         if fsd is not None:
             eff: date | None = fsd
@@ -475,6 +522,7 @@ async def get_new_low_rated(
             continue
         if int(c or 0) < min_reviews:
             continue
+        total_newcomers += 1  # новинка в окне (до фильтра по рейтингу)
         if ar is None or float(ar) >= max_rating:
             continue
         items.append({
@@ -488,6 +536,7 @@ async def get_new_low_rated(
             "avg_rating": _round(ar),
             "count": int(c or 0),
             "count_unanswered": int(unanswered or 0),
+            "neg_unanswered": int(neg_unans or 0),
             "r1": int(x1 or 0), "r2": int(x2 or 0), "r3": int(x3 or 0),
             "r4": int(x4 or 0), "r5": int(x5 or 0),
         })
@@ -496,7 +545,8 @@ async def get_new_low_rated(
     items.sort(key=lambda it: (it["avg_rating"] if it["avg_rating"] is not None else 5.0, -it["count"]))
     items = items[:_NEWCOMERS_LIMIT]
 
-    nm_to_tags = await _newcomer_tag_map(db, project_id, [it["nm_id"] for it in items])
+    nm_ids = [it["nm_id"] for it in items]
+    nm_to_tags = await _newcomer_tag_map(db, project_id, nm_ids)
     for it in items:
         it["tags"] = nm_to_tags.get(it["nm_id"], [])
     has_key = bool(items) or await has_any_feedback(db, project_id) or await _has_wb_key(db, project_id)
@@ -505,6 +555,8 @@ async def get_new_low_rated(
         "by_category": _group_newcomers(items, lambda it: [it["subject"]]),
         "by_brand": _group_newcomers(items, lambda it: [it["brand"]]),
         "by_tag": _group_newcomers(items, lambda it: it["tags"] or [_NO_TAG]),
+        "total_newcomers": total_newcomers,
+        "complaint_terms": await _complaint_terms(db, project_id, nm_ids),
         "days": days,
         "max_rating": max_rating,
         "has_key": has_key,

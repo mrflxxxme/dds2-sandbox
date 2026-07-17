@@ -293,6 +293,27 @@ async def test_new_low_rated_date_source_review_fallback(db_session, project):
     assert item["days_on_sale"] == 5
 
 
+async def test_new_low_rated_kpi_and_complaints(db_session, project):
+    """total_newcomers (все новинки), neg_unanswered (негатив без ответа), темы жалоб."""
+    now = utcnow().replace(tzinfo=None)
+    # проблемная новинка (nm 701): 2 негатива без ответа + повторяющиеся слова жалоб
+    await _add_feedback(db_session, project.id, "p1", 1, 701, text="ужасное тонкий материал", created=now - timedelta(days=3))
+    await _add_feedback(db_session, project.id, "p2", 2, 701, cons="тонкий материал брак", created=now - timedelta(days=2))
+    # хорошая новинка (nm 702): попадает в total_newcomers, но не в проблемные
+    await _add_feedback(db_session, project.id, "g1", 5, 702, created=now - timedelta(days=4))
+    await db_session.commit()
+
+    res = await reviews_service.get_new_low_rated(db_session, project.id, days=30, max_rating=4.6)
+    assert res["total_newcomers"] == 2  # 701 (плохая) + 702 (хорошая)
+    ids = {it["nm_id"]: it for it in res["items"]}
+    assert 701 in ids and 702 not in ids  # только проблемная в списке
+    assert ids[701]["neg_unanswered"] == 2  # оба 1–2★ без ответа
+
+    terms = {t["term"]: t["count"] for t in res["complaint_terms"]}
+    assert terms.get("тонкий") == 2 and terms.get("материал") == 2  # частые слова жалоб
+    assert "ужасное" not in terms  # одиночные (count<2) отсекаются
+
+
 async def test_new_low_rated_breakdowns(db_session, project):
     """Разрезы новинок по категории/бренду/ярлыку: агрегат по проблемным новинкам."""
     now = utcnow().replace(tzinfo=None)

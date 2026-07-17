@@ -4,8 +4,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
+import KpiCard from '@/components/KpiCard';
 import type { Column } from '@/components/DataTable';
-import type { NewcomerGroup, NewcomerReview, NewcomersResponse, Review } from '@/types/api';
+import type { ComplaintTerm, NewcomerGroup, NewcomerReview, NewcomersResponse, Review } from '@/types/api';
 
 const DAYS_OPTIONS = [
     { key: 14, label: '2 недели' },
@@ -46,6 +47,38 @@ function avgColor(v: number | null): string {
 function toggle<T>(arr: T[], v: T): T[] {
     return arr.includes(v) ? arr.filter(x => x !== v) : [...arr, v];
 }
+
+/** Ссылка на карточку товара WB. */
+function wbUrl(nmId: number): string {
+    return `https://www.wildberries.ru/catalog/${nmId}/detail.aspx`;
+}
+
+/** Балл критичности: ниже рейтинг × больше отзывов × выше доля негатива. */
+function severity(it: NewcomerReview): number {
+    const rated = it.r1 + it.r2 + it.r3 + it.r4 + it.r5;
+    const negShare = rated ? (it.r1 + it.r2) / rated : 0;
+    const deficit = Math.max(0, MAX_RATING - (it.avg_rating ?? 5));
+    return deficit * Math.log2(1 + it.count) * (1 + negShare);
+}
+
+/** Тир критичности по баллу: подпись + цвет. */
+function sevTier(s: number): { label: string; color: string } {
+    if (s >= 5) return { label: 'критично', color: 'var(--color-danger)' };
+    if (s >= 2) return { label: 'внимание', color: 'var(--color-warning)' };
+    return { label: 'следить', color: 'var(--color-text-dim)' };
+}
+
+/** Сколько 5★-отзывов нужно, чтобы дотянуть средний рейтинг до target. */
+function needFiveStars(it: NewcomerReview, target = MAX_RATING): number {
+    const rated = it.r1 + it.r2 + it.r3 + it.r4 + it.r5;
+    if (!rated) return 0;
+    const sum = it.r1 * 1 + it.r2 * 2 + it.r3 * 3 + it.r4 * 4 + it.r5 * 5;
+    const k = (target * rated - sum) / (5 - target);
+    return k > 0 ? Math.ceil(k) : 0;
+}
+
+/** Строка таблицы с производными полями критичности/цели. */
+type NewcomerRow = NewcomerReview & { _sev: number; _need: number };
 
 /** Средняя оценка группы товаров по суммарному распределению r1..r5 (rating>0). */
 function subBreakdown(products: NewcomerReview[], dim: SubDim): SubRow[] {
@@ -286,22 +319,63 @@ export default function ReviewsNewcomersTab() {
         selectedGroups.some(g => matchesGroup(it, g)) ||
         selectedSubs.some(s => matchesGroup(it, s.group) && matchesSub(it, s.sub))
     );
+    // Производные поля + сортировка по критичности (худшие сверху)
+    const rows: NewcomerRow[] = useMemo(
+        () => shown
+            .map(it => ({ ...it, _sev: severity(it), _need: needFiveStars(it) }))
+            .sort((a, b) => b._sev - a._sev),
+        [shown],
+    );
+
+    // KPI по всему набору (не по фильтру)
+    const total = data?.total_newcomers ?? 0;
+    const problem = items.length;
+    const pctProblem = total ? (problem / total) * 100 : 0;
+    const critical = items.filter(it => (it.avg_rating ?? 5) < 3.5).length;
+    const negUnanswered = items.reduce((a, it) => a + it.neg_unanswered, 0);
+    const terms: ComplaintTerm[] = data?.complaint_terms ?? [];
+    const maxTerm = terms.length ? terms[0].count : 1;
 
     const columns: Column[] = useMemo(() => [
         {
             key: 'name', label: 'Товар',
-            render: (v: string, row: NewcomerReview) => (
+            render: (v: string, row: NewcomerRow) => (
                 <div style={{ minWidth: 0 }}>
                     <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 260 }} title={v}>{v}</div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>nmID {row.nm_id}</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
+                        nmID {row.nm_id}
+                        <a
+                            href={wbUrl(row.nm_id)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Открыть карточку на Wildberries"
+                            style={{ marginLeft: 6, color: 'var(--color-accent)', textDecoration: 'none' }}
+                        >
+                            ↗ WB
+                        </a>
+                    </div>
                 </div>
             ),
+        },
+        {
+            key: '_sev', label: 'Критичность',
+            render: (v: number, row: NewcomerRow) => {
+                const t = sevTier(row._sev);
+                return (
+                    <span style={{ whiteSpace: 'nowrap' }}>
+                        <span style={{ display: 'inline-block', padding: '1px 8px', borderRadius: 24, fontSize: 11, fontWeight: 600, color: '#fff', background: t.color }}>
+                            {t.label}
+                        </span>
+                        <span style={{ marginLeft: 6, color: 'var(--color-text-dim)', fontSize: 12 }}>{formatNumber(row._sev, 1)}</span>
+                    </span>
+                );
+            },
         },
         { key: 'brand', label: 'Бренд' },
         { key: 'subject', label: 'Предмет' },
         {
             key: 'first_date', label: 'Старт продаж',
-            render: (v: string, row: NewcomerReview) => (
+            render: (v: string, row: NewcomerRow) => (
                 <span style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
                     {formatDate(v)}
                     <span style={{ color: 'var(--color-text-dim)' }}> · {formatNumber(row.days_on_sale, 0)} дн</span>
@@ -325,14 +399,32 @@ export default function ReviewsNewcomersTab() {
         { key: 'count', label: 'Отзывов', format: 'number' as const },
         {
             key: 'count_unanswered', label: 'Без ответа',
-            render: (v: number) => (
-                <span style={v > 0 ? { color: 'var(--color-warning)', fontWeight: 600 } : undefined}>{formatNumber(v, 0)}</span>
+            render: (v: number, row: NewcomerRow) => (
+                <span style={{ whiteSpace: 'nowrap' }}>
+                    <span style={v > 0 ? { color: 'var(--color-warning)', fontWeight: 600 } : undefined}>{formatNumber(v, 0)}</span>
+                    {row.neg_unanswered > 0 && (
+                        <span
+                            title="Негативные отзывы (1–2★) без ответа — стоит ответить в первую очередь"
+                            style={{ marginLeft: 6, fontSize: 11, color: 'var(--color-danger)', fontWeight: 700, cursor: 'help' }}
+                        >
+                            🔴 {formatNumber(row.neg_unanswered, 0)} негатив
+                        </span>
+                    )}
+                </span>
             ),
         },
         {
             key: 'r1', label: '★1–2',
-            render: (_v: number, row: NewcomerReview) => (
+            render: (_v: number, row: NewcomerRow) => (
                 <span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>{formatNumber(row.r1 + row.r2, 0)}</span>
+            ),
+        },
+        {
+            key: '_need', label: 'До 4.6★',
+            render: (v: number) => (
+                v > 0
+                    ? <span title={`Нужно ещё ~${v} отзывов по 5★, чтобы поднять средний рейтинг до ${formatNumber(MAX_RATING, 1)}`} style={{ color: 'var(--color-accent)', fontWeight: 600, cursor: 'help', whiteSpace: 'nowrap' }}>+{formatNumber(v, 0)} × 5★</span>
+                    : <span style={{ color: 'var(--color-text-dim)' }}>—</span>
             ),
         },
     ], []);
@@ -399,9 +491,45 @@ export default function ReviewsNewcomersTab() {
 
             {!loading && !error && data && data.has_key && items.length > 0 && (
                 <>
-                    <div style={{ marginBottom: 12, fontSize: 14 }}>
-                        Найдено <b>{formatNumber(items.length, 0)}</b> проблемных новинок
+                    {/* KPI: масштаб проблемы */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 16 }}>
+                        <KpiCard label="Новинок всего" value={formatNumber(total, 0)} />
+                        <KpiCard label="Проблемных" value={formatNumber(problem, 0)} />
+                        <KpiCard label="Доля проблемных" value={`${formatNumber(pctProblem, 0)}%`} />
+                        <KpiCard label="Критичных (<3.5★)" value={formatNumber(critical, 0)} />
+                        <KpiCard label="Негатив без ответа" value={formatNumber(negUnanswered, 0)} />
                     </div>
+
+                    {/* Частые темы жалоб — из негативных отзывов проблемных новинок */}
+                    {terms.length > 0 && (
+                        <div className="glass-card" style={{ padding: 16, marginBottom: 20 }}>
+                            <h3 style={{ margin: '0 0 4px', fontSize: 16 }}>Частые темы жалоб</h3>
+                            <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 10 }}>
+                                Слова из негативных отзывов (1–2★) этих новинок — на что чаще всего жалуются
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                {terms.map(t => {
+                                    const w = t.count / maxTerm; // 0..1
+                                    return (
+                                        <span
+                                            key={t.term}
+                                            title={`${t.count} упоминаний в негативных отзывах`}
+                                            style={{
+                                                display: 'inline-flex', alignItems: 'baseline', gap: 4,
+                                                padding: '4px 10px', borderRadius: 24,
+                                                background: `rgba(255, 59, 48, ${0.08 + w * 0.22})`,
+                                                color: 'var(--color-text)',
+                                                fontSize: 12 + Math.round(w * 6), fontWeight: 500,
+                                            }}
+                                        >
+                                            {t.term}
+                                            <span style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{formatNumber(t.count, 0)}</span>
+                                        </span>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
 
                     {/* Распределение проблемных новинок по разрезам (над таблицей — сразу видно) */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '0 0 12px', flexWrap: 'wrap' }}>
@@ -451,16 +579,16 @@ export default function ReviewsNewcomersTab() {
                         )}
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 6 }}>
-                        Нажмите ▸ слева от товара, чтобы прочитать его отзывы.
+                        Отсортировано по критичности. Нажмите ▸ слева от товара, чтобы прочитать его отзывы.
                     </div>
                     <TanStackDataTable
                         columns={columns}
-                        data={shown}
+                        data={rows}
                         exportName="problem_newcomers"
                         enableSorting
-                        enablePagination={shown.length > 50}
-                        getRowId={(row: NewcomerReview) => String(row.nm_id)}
-                        renderSubRow={(row: NewcomerReview) => <ProductReviews nmId={row.nm_id} />}
+                        enablePagination={rows.length > 50}
+                        getRowId={(row: NewcomerRow) => String(row.nm_id)}
+                        renderSubRow={(row: NewcomerRow) => <ProductReviews nmId={row.nm_id} />}
                     />
                 </>
             )}
