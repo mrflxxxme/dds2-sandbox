@@ -314,6 +314,23 @@ async def test_new_low_rated_kpi_and_complaints(db_session, project):
     assert "ужасное" not in terms  # одиночные (count<2) отсекаются
 
 
+async def test_complaint_reviews_by_term(db_session, project):
+    """Клик по теме жалоб → негативные отзывы проблемных новинок, содержащие слово."""
+    now = utcnow().replace(tzinfo=None)
+    await _add_feedback(db_session, project.id, "c1", 2, 801, text="цвет не совпал с фото", created=now - timedelta(days=3))
+    await _add_feedback(db_session, project.id, "c2", 1, 801, cons="ужасный цвет", created=now - timedelta(days=2))
+    await _add_feedback(db_session, project.id, "c3", 2, 801, text="качество плохое", created=now - timedelta(days=2))
+    await db_session.commit()
+
+    res = await reviews_service.get_complaint_reviews(db_session, project.id, "цвет", days=30, max_rating=4.6)
+    assert res.total == 2  # только c1 (text) и c2 (cons) содержат «цвет»
+    assert all("цвет" in f"{r.text or ''} {r.cons or ''}".lower() for r in res.items)
+
+    # пустой term → пусто, без ошибки
+    empty = await reviews_service.get_complaint_reviews(db_session, project.id, "   ", days=30, max_rating=4.6)
+    assert empty.total == 0
+
+
 async def test_new_low_rated_breakdowns(db_session, project):
     """Разрезы новинок по категории/бренду/ярлыку: агрегат по проблемным новинкам."""
     now = utcnow().replace(tzinfo=None)

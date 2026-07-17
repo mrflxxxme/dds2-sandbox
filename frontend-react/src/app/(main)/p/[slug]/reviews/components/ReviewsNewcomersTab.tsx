@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { formatNumber, formatDate } from '@/lib/utils';
 import TanStackDataTable from '@/components/TanStackDataTable';
@@ -157,6 +157,73 @@ function ProductReviews({ nmId }: { nmId: number }) {
     );
 }
 
+/** Подсветка вхождений term в тексте (регистронезависимо), без dangerouslySetInnerHTML. */
+function Highlight({ text, term }: { text: string; term: string }) {
+    if (!term || !text) return <>{text}</>;
+    const lower = text.toLowerCase();
+    const t = term.toLowerCase();
+    const parts: ReactNode[] = [];
+    let i = 0;
+    let idx = lower.indexOf(t);
+    let key = 0;
+    while (idx !== -1) {
+        if (idx > i) parts.push(text.slice(i, idx));
+        parts.push(
+            <mark key={key++} style={{ background: 'rgba(255,159,10,0.4)', padding: '0 2px', borderRadius: 3 }}>
+                {text.slice(idx, idx + t.length)}
+            </mark>,
+        );
+        i = idx + t.length;
+        idx = lower.indexOf(t, i);
+    }
+    if (i < text.length) parts.push(text.slice(i));
+    return <>{parts}</>;
+}
+
+/** Панель: негативные отзывы проблемных новинок, содержащие выбранное слово-жалобу. */
+function TermReviews({ term, days }: { term: string; days: number }) {
+    const [revs, setRevs] = useState<Review[] | null>(null);
+    const [busy, setBusy] = useState(true);
+    const [err, setErr] = useState('');
+
+    useEffect(() => {
+        let cancelled = false;
+        setBusy(true); setErr('');
+        api.getComplaintReviews(term, days, MAX_RATING)
+            .then(r => { if (!cancelled) setRevs(r.items); })
+            .catch(e => { if (!cancelled) setErr(e instanceof Error ? e.message : 'Не удалось загрузить отзывы'); })
+            .finally(() => { if (!cancelled) setBusy(false); });
+        return () => { cancelled = true; };
+    }, [term, days]);
+
+    if (busy) return <div style={{ padding: 12, color: 'var(--color-text-dim)', fontSize: 13 }}>Загрузка отзывов…</div>;
+    if (err) return <div style={{ padding: 12, color: 'var(--color-danger)', fontSize: 13 }}>{err}</div>;
+    if (!revs || revs.length === 0) return <div style={{ padding: 12, color: 'var(--color-text-dim)', fontSize: 13 }}>Отзывов со словом «{term}» не найдено</div>;
+
+    return (
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--color-border)', paddingTop: 12, display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 480, overflowY: 'auto' }}>
+            <div style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Отзывы со словом «<b style={{ color: 'var(--color-text)' }}>{term}</b>»: {formatNumber(revs.length, 0)}</div>
+            {revs.map(r => (
+                <div key={r.id} style={{ borderLeft: '3px solid var(--color-danger)', paddingLeft: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 13 }}>
+                        {r.rating > 0 && <Stars rating={r.rating} />}
+                        <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 360 }} title={r.product_name || ''}>
+                            {r.product_name || (r.nm_id ? `nmID ${r.nm_id}` : '')}
+                        </span>
+                        {r.nm_id != null && (
+                            <a href={wbUrl(r.nm_id)} target="_blank" rel="noopener noreferrer" title="Открыть карточку на Wildberries" style={{ color: 'var(--color-accent)', textDecoration: 'none', fontSize: 12 }}>↗ WB</a>
+                        )}
+                        {!r.is_answered && <span className="badge badge-warning">Без ответа</span>}
+                        <span style={{ marginLeft: 'auto', color: 'var(--color-text-dim)' }}>{r.created_date ? formatDate(r.created_date) : ''}</span>
+                    </div>
+                    {r.text && <p style={{ margin: '4px 0 0', fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}><Highlight text={r.text} term={term} /></p>}
+                    {r.cons && <div style={{ marginTop: 4, fontSize: 13 }}><span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>− </span><Highlight text={r.cons} term={term} /></div>}
+                </div>
+            ))}
+        </div>
+    );
+}
+
 /**
  * Карточка разреза. Клик по телу — добавить/убрать группу из фильтра (объединение).
  * Кнопка «по предмету/бренду» — развернуть встречный разрез; клик по строке — фильтр по (группа ∩ разрез).
@@ -270,6 +337,7 @@ export default function ReviewsNewcomersTab() {
     const [selectedGroups, setSelectedGroups] = useState<string[]>([]); // выбранные группы (объединение)
     const [selectedSubs, setSelectedSubs] = useState<{ group: string; sub: string }[]>([]); // разрезы (группа ∩ встречная)
     const [expanded, setExpanded] = useState<string[]>([]); // развёрнутые карточки
+    const [selectedTerm, setSelectedTerm] = useState<string | null>(null); // выбранная тема жалоб
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -438,7 +506,7 @@ export default function ReviewsNewcomersTab() {
                         <button
                             key={o.key}
                             className={`btn btn-sm ${days === o.key ? 'btn-primary' : 'btn-secondary'}`}
-                            onClick={() => { setDays(o.key); resetFilters(); }}
+                            onClick={() => { setDays(o.key); resetFilters(); setSelectedTerm(null); }}
                             disabled={loading}
                         >
                             {o.label}
@@ -505,21 +573,27 @@ export default function ReviewsNewcomersTab() {
                         <div className="glass-card" style={{ padding: 16, marginBottom: 20 }}>
                             <h3 style={{ margin: '0 0 4px', fontSize: 16 }}>Частые темы жалоб</h3>
                             <div style={{ fontSize: 12, color: 'var(--color-text-dim)', marginBottom: 10 }}>
-                                Слова из негативных отзывов (1–2★) этих новинок — на что чаще всего жалуются
+                                Слова из негативных отзывов (1–2★) этих новинок — на что чаще всего жалуются. Нажмите слово, чтобы увидеть отзывы с ним.
                             </div>
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                                 {terms.map(t => {
                                     const w = t.count / maxTerm; // 0..1
+                                    const sel = selectedTerm === t.term;
                                     return (
                                         <span
                                             key={t.term}
-                                            title={`${t.count} упоминаний в негативных отзывах`}
+                                            onClick={() => setSelectedTerm(prev => prev === t.term ? null : t.term)}
+                                            role="button"
+                                            tabIndex={0}
+                                            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedTerm(prev => prev === t.term ? null : t.term); } }}
+                                            title={`${t.count} упоминаний — нажмите, чтобы прочитать эти отзывы`}
                                             style={{
                                                 display: 'inline-flex', alignItems: 'baseline', gap: 4,
-                                                padding: '4px 10px', borderRadius: 24,
+                                                padding: '4px 10px', borderRadius: 24, cursor: 'pointer',
                                                 background: `rgba(255, 59, 48, ${0.08 + w * 0.22})`,
                                                 color: 'var(--color-text)',
                                                 fontSize: 12 + Math.round(w * 6), fontWeight: 500,
+                                                outline: sel ? '2px solid var(--color-accent)' : 'none', outlineOffset: sel ? '1px' : undefined,
                                             }}
                                         >
                                             {t.term}
@@ -528,6 +602,7 @@ export default function ReviewsNewcomersTab() {
                                     );
                                 })}
                             </div>
+                            {selectedTerm && <TermReviews term={selectedTerm} days={days} />}
                         </div>
                     )}
 

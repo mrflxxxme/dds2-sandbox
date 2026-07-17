@@ -21,7 +21,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Subquery
@@ -561,6 +561,66 @@ async def get_new_low_rated(
         "max_rating": max_rating,
         "has_key": has_key,
     }
+
+
+async def get_complaint_reviews(
+    db: AsyncSession,
+    project_id: int,
+    term: str,
+    days: int = 30,
+    max_rating: float = 4.6,
+    take: int = 200,
+) -> ReviewsListResponse:
+    """
+    Негативные (1–2★) отзывы проблемных новинок, в тексте/минусах которых есть `term`.
+
+    Товары — те же, что в разделе «Проблемные новинки» (окно `days`, порог `max_rating`).
+    """
+    term = (term or "").strip()
+    newc = await get_new_low_rated(db, project_id, days=days, max_rating=max_rating)
+    nm_ids = [it["nm_id"] for it in newc["items"]]
+    if not term or not nm_ids:
+        return ReviewsListResponse(items=[], total=0, has_key=bool(newc["has_key"]))
+
+    # экранируем спецсимволы ILIKE в пользовательском вводе (% и _)
+    esc = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pat = f"%{esc}%"
+    rows = (
+        await db.execute(
+            select(WBFeedback)
+            .where(
+                WBFeedback.project_id == project_id,
+                WBFeedback.nm_id.in_(nm_ids),
+                WBFeedback.rating.in_((1, 2)),
+                WBFeedback.has_text,
+                or_(
+                    WBFeedback.text.ilike(pat, escape="\\"),
+                    WBFeedback.cons.ilike(pat, escape="\\"),
+                ),
+            )
+            .order_by(WBFeedback.created_date.desc().nullslast())
+            .limit(max(1, min(take, _LIST_MAX)))
+        )
+    ).scalars().all()
+
+    items = [
+        ReviewItem(
+            id=r.wb_id,
+            text=r.text or "",
+            rating=r.rating,
+            created_date=r.created_date.isoformat() if r.created_date else None,
+            user_name=r.user_name,
+            pros=r.pros,
+            cons=r.cons,
+            nm_id=r.nm_id,
+            product_name=r.product_name,
+            article=r.article,
+            brand=r.brand,
+            is_answered=r.is_answered,
+        )
+        for r in rows
+    ]
+    return ReviewsListResponse(items=items, total=len(items), has_key=bool(newc["has_key"]))
 
 
 async def _newcomer_tag_map(db: AsyncSession, project_id: int, nm_ids: list[int]) -> dict[int, list[str]]:

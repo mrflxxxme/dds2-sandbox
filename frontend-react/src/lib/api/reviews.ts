@@ -20,6 +20,14 @@ export function addReviewMethods(api: ApiClient) {
             const qs = q.toString();
             return api.request<ReviewsListResponse>('GET', `/api/v1/reviews${qs ? `?${qs}` : ''}`);
         },
+        // Негативные отзывы проблемных новинок, содержащие слово `term` (клик по теме жалоб)
+        getComplaintReviews(term: string, days?: number, maxRating?: number) {
+            const q = new URLSearchParams();
+            q.set('term', term);
+            if (days != null) q.set('days', String(days));
+            if (maxRating != null) q.set('max_rating', String(maxRating));
+            return api.request<ReviewsListResponse>('GET', `/api/v1/reviews/complaint-reviews?${q.toString()}`);
+        },
         getReviewsNewcomers(days?: number, maxRating?: number) {
             const q = new URLSearchParams();
             if (days != null) q.set('days', String(days));

@@ -69,6 +69,20 @@ async def reviews_newcomers(
     return NewcomersResponse(**data)
 
 
+@router.get("/complaint-reviews", response_model=ReviewsListResponse)
+async def complaint_reviews(
+    term: str = Query(..., min_length=1, max_length=100, description="Слово из темы жалоб"),
+    days: int = Query(30, ge=1, le=365),
+    max_rating: float = Query(4.6, gt=0, le=5),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> ReviewsListResponse:
+    """Негативные отзывы проблемных новинок, содержащие слово `term` (клик по теме жалоб)."""
+    return await reviews_service.get_complaint_reviews(
+        db, project.id, term, days=days, max_rating=max_rating
+    )
+
+
 @router.post("/sync", response_model=ReviewsSummaryResponse)
 async def sync_reviews(
     tag: str | None = Query(None, description="Фильтр по ярлыку для возвращаемой сводки"),
