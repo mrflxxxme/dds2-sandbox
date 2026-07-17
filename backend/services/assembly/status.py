@@ -163,14 +163,23 @@ async def mark_ready(db: AsyncSession, project_id: int, request_id: int) -> Asse
     if not req.wb_fbo_supply_id:
         raise ValueError("Нельзя перевести заявку в статус ГОТОВО без привязанной поставки WB")
 
+    # Переход валидируем ДО авто-веса: apply_goods_weight КОММИТИТ перетёртые
+    # pallets_count/pallet_weight_kg, и без раннего чека отказанный переход
+    # (например CANCELLED → READY со stale-страницы/bulk) всё равно тихо
+    # мутировал терминальную заявку.
+    _check_transition(AssemblyStatus(req.status), AssemblyStatus.READY)
+
     # Авто-вес: если ручной вес паллеты не задан — подставляем расчётный вес
     # отгрузки (нетто + тара коробов) и авто-число паллет, чтобы «Готово» не
     # требовало ручного ввода. Нет веса ни у одной позиции → ValueError ниже.
+    # preserve_set_pallets: уже заданное pallets_count (>0) — авторитет фронта
+    # (commit черновика считает паллеты ПО КЛАССАМ совместимости категорий) или
+    # оператора; бэкендовая геометрия классов не знает — не перетираем.
     if not req.pallet_weight_kg or req.pallet_weight_kg <= 0:
         from .pallets import apply_goods_weight
 
         try:
-            req = await apply_goods_weight(db, project_id, request_id)
+            req = await apply_goods_weight(db, project_id, request_id, preserve_set_pallets=True)
         except ValueError:
             pass
 
@@ -580,8 +589,25 @@ async def cancel_request(db: AsyncSession, project_id: int, request_id: int) -> 
     if not req:
         raise ValueError("Assembly request not found")
 
-    current = AssemblyStatus(req.status)
+    # Row-lock + ре-чтение под локом (симметрично ship_request / return_to_warehouse):
+    # cancel — единственный переход, ОТКАТЫВАЮЩИЙ сток. Без лока переход валидировался
+    # по stale-снимку identity map и гонялся с авто-DELIVERED синка WB / вторым кликом
+    # «Отменить» → двойной возврат стока (+qty), soft-delete попытки и CANCELLED
+    # поверх DELIVERED (запрещён таблицей переходов).
+    locked_status = (
+        await db.execute(
+            select(AssemblyRequest.status)
+            .where(AssemblyRequest.id == req.id, AssemblyRequest.project_id == project_id)
+            .with_for_update()
+        )
+    ).scalar_one()
+    current = AssemblyStatus(locked_status)
     _check_transition(current, AssemblyStatus.CANCELLED)
+    # Зеркало попытки могло смениться параллельным переходом до нашего лока —
+    # перечитываем поля, изменяемые переходами (полный refresh не нужен: состав
+    # items переходами не меняется, а сброс selectinload-релейшенов дал бы
+    # lazy-load в async-контексте).
+    await db.refresh(req, ["status", "outbound_shipment_id", "shipped_at", "wb_fbo_supply_id"])
 
     if current == AssemblyStatus.SHIPPED:
         # Rollback stock

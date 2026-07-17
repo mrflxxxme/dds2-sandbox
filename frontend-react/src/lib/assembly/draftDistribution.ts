@@ -271,11 +271,11 @@ export function buildAutoSyncPlan(
 
 /**
  * Правка ячейки ЧЕРНОВИКА (матрица = редактор черновика): изменить план SKU на
- * складе `wh` на `deltaBoxes` целых коробов. BOX-строки (без as_is) и ВСЯ
- * предбронь этого SKU сливаются в одну строку rows (ручная правка = точный план
+ * складе `wh` на `deltaBoxes` целых коробов. BOX-строки (без as_is) и предбронь
+ * БАРКОДА СТАТЬИ сливаются в одну строку rows (ручная правка = точный план
  * юзера, «хвост в предбронь» — только для авто-пересчёта); строки других типов
- * упаковки (MONOPALLET/SUPERSAFE) и as_is («Оставить так») не трогаются и
- * сохраняют свои src. ИНКРЕМЕНТ капится свободным ФФ-остатком SKU (минус занятое
+ * упаковки (MONOPALLET/SUPERSAFE), других баркодов того же nm и as_is
+ * («Оставить так») не трогаются и сохраняют свои src. ИНКРЕМЕНТ капится свободным ФФ-остатком SKU (минус занятое
  * нетронутыми строками; превышение → null, вызывающий игнорирует клик);
  * ДЕКРЕМЕНТ разрешён всегда — перезаложенный план (сток ушёл после записи)
  * можно уменьшить. src пересобирается по ФФ с резервом под нетронутые строки;
@@ -302,8 +302,13 @@ export function applyDraftPrebookEdit(
 ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } | null {
     if (!ppb || ppb <= 0 || !deltaBoxes) return null;
     const pkgOfRow = (r: AssemblyDraftRow) => (r.package_type ?? 'BOX');
-    const merged = skuPrebook.filter((r) => pkgOfRow(r) === pkg);
-    const keptPrebook = skuPrebook.filter((r) => pkgOfRow(r) !== pkg);
+    // Идентичность строки — (nm × barcode × упаковка × as_is), см. keyOfDraftRow и
+    // backend `_merge_rows`: сливается только предбронь БАРКОДА СТАТЬИ. Строки чужих
+    // баркодов того же nm (размерные варианты карточки) остаются нетронутыми — иначе
+    // их план молча переатрибуцировался бы на чужой физический товар.
+    const sameBc = (r: AssemblyDraftRow) => (r.barcode || '') === (article.barcode || '');
+    const merged = skuPrebook.filter((r) => pkgOfRow(r) === pkg && sameBc(r));
+    const keptPrebook = skuPrebook.filter((r) => pkgOfRow(r) !== pkg || !sameBc(r));
 
     const tgt: Record<string, number> = {};
     for (const r of merged) {
@@ -356,12 +361,17 @@ export function applyDraftCellEdit(
 ): { rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[] } | null {
     if (!ppb || ppb <= 0 || !deltaBoxes) return null;
     const pkgOfRow = (r: AssemblyDraftRow) => (r.package_type ?? 'BOX');
-    const isMergeable = (r: AssemblyDraftRow) => pkgOfRow(r) === cellPkg && !r.as_is;
-    const kept = skuRows.filter((r) => !isMergeable(r)); // другие упаковки/as_is остаются как есть
-    // Предбронь: в точный план сливается только СВОЯ упаковка; чужая остаётся
-    // предбронью (раньше моно-предбронь молча поглощалась в КОРОБ → риск приёмки).
-    const mergedPrebook = skuPrebook.filter((r) => pkgOfRow(r) === cellPkg);
-    const keptPrebook = skuPrebook.filter((r) => pkgOfRow(r) !== cellPkg);
+    // Идентичность строки — (nm × barcode × упаковка × as_is), см. keyOfDraftRow и
+    // backend `_merge_rows`: сливаются только строки БАРКОДА СТАТЬИ. Строки чужих
+    // баркодов того же nm (размерные варианты карточки) не трогаются и бронируют
+    // сток в капе — иначе их план молча переатрибуцировался бы на чужой товар.
+    const sameBc = (r: AssemblyDraftRow) => (r.barcode || '') === (article.barcode || '');
+    const isMergeable = (r: AssemblyDraftRow) => pkgOfRow(r) === cellPkg && !r.as_is && sameBc(r);
+    const kept = skuRows.filter((r) => !isMergeable(r)); // чужие баркоды/упаковки/as_is остаются как есть
+    // Предбронь: в точный план сливается только СВОЯ упаковка СВОЕГО баркода; чужая
+    // остаётся предбронью (раньше моно-предбронь молча поглощалась в КОРОБ → риск приёмки).
+    const mergedPrebook = skuPrebook.filter((r) => pkgOfRow(r) === cellPkg && sameBc(r));
+    const keptPrebook = skuPrebook.filter((r) => pkgOfRow(r) !== cellPkg || !sameBc(r));
     const merged = [...skuRows.filter(isMergeable), ...mergedPrebook];
 
     const tgt: Record<string, number> = {};

@@ -2715,3 +2715,134 @@ class TestListBuildBatched:
         # SKU-override — один батч на ВСЕ склады) и вес коробки (настройка проекта).
         assert batched < per_row
         assert batched <= 12
+
+
+@pytest.mark.asyncio
+class TestMarkReadyTransitionGuard:
+    """mark_ready: проверка допустимости перехода — ДО побочных мутаций авто-веса."""
+
+    async def _make_weighted_request(self, db_session, *, pallets_count: int) -> AssemblyRequest:
+        """Заявка с весом позиций, привязанной WB-поставкой и НЕзаполненным весом
+        паллеты (триггер авто-веса в mark_ready)."""
+        await db_session.execute(
+            text("UPDATE nomenclature SET weight_kg = 0.5 WHERE project_id = :pid AND barcode = :bc"),
+            {"pid": PROJECT_ID, "bc": TEST_BARCODE_1},
+        )
+        await db_session.commit()
+        wh_id = await _get_fulfillment_wh_id(db_session)
+        fbo_id = await _get_fbo_supply_id(db_session)
+        return await create_assembly_request(
+            db_session,
+            PROJECT_ID,
+            AssemblyRequestCreate(
+                warehouse_id=wh_id,
+                wb_fbo_supply_id=fbo_id,
+                pallets_count=pallets_count,
+                pallet_weight_kg=Decimal("0"),
+                items=[AssemblyItemCreate(barcode=TEST_BARCODE_1, quantity=5)],
+            ),
+        )
+
+    async def test_rejected_transition_does_not_mutate_weight_and_pallets(self, db_session):
+        """mark_ready на CANCELLED: отказ перехода БЕЗ побочной мутации — раньше
+        apply_goods_weight коммитил перетёртые pallets_count/pallet_weight_kg до
+        _check_transition, и отказанная операция тихо портила терминальную заявку."""
+        req = await self._make_weighted_request(db_session, pallets_count=5)
+        await cancel_request(db_session, PROJECT_ID, req.id)  # supply остаётся привязана
+
+        with pytest.raises(ValueError, match="Cannot transition"):
+            await mark_ready(db_session, PROJECT_ID, req.id)
+
+        row = (
+            await db_session.execute(
+                text(
+                    "SELECT pallets_count, pallet_weight_kg FROM assembly_requests "
+                    "WHERE id = :rid AND project_id = :pid"
+                ),
+                {"rid": req.id, "pid": PROJECT_ID},
+            )
+        ).one()
+        assert row.pallets_count == 5  # ручная раскладка не перетёрта
+        assert Decimal(row.pallet_weight_kg) == Decimal("0")  # авто-вес НЕ закоммичен
+
+    async def test_mark_ready_autoweight_preserves_frontend_pallets(self, db_session, monkeypatch):
+        """Авто-вес в mark_ready НЕ перетирает заданное pallets_count: заявки из
+        commit черновика несут паллеты, посчитанные фронтом по классам совместимости
+        категорий — бэкендовый footprint классов не знает и «сплющил» бы их."""
+        from backend.services.assembly import pallets as pallets_mod
+
+        async def fake_suggest(db, project_id, request, box_qty_by_wh_bc):
+            return 1  # бэкенд «сплющил» бы 2 несовместимых класса в 1 паллету
+
+        monkeypatch.setattr(pallets_mod, "_suggest_pallets_count", fake_suggest)
+        req = await self._make_weighted_request(db_session, pallets_count=2)
+
+        req = await mark_ready(db_session, PROJECT_ID, req.id)
+        assert req.status == AssemblyStatus.READY
+        assert req.pallets_count == 2  # значение фронта сохранено
+        assert req.pallet_weight_kg == Decimal("1.25")  # (5×0.5)/2 — авто-вес применился
+
+
+@pytest.mark.asyncio
+class TestCancelStatusRecheck:
+    """cancel_request: статус перечитывается под row-lock (симметрично ship/return)."""
+
+    async def test_cancel_rechecks_status_from_db_not_stale_snapshot(self, db_session):
+        """Гонка cancel ‖ авто-DELIVERED синка WB — детерминированная эмуляция:
+        в БД уже DELIVERED, а identity map сессии держит stale SHIPPED
+        (expire_on_commit=False). cancel обязан отбраковаться по СВЕЖЕМУ статусу
+        (DELIVERED→CANCELLED запрещён), НЕ вернуть сток (+qty) и НЕ soft-delete'ить
+        OutboundShipment попытки."""
+        req = await _create_and_ship(db_session)
+        shipment_id = req.outbound_shipment_id
+        nom_id = (
+            await db_session.execute(
+                text("SELECT id FROM nomenclature WHERE project_id = :pid AND barcode = :bc"),
+                {"pid": PROJECT_ID, "bc": TEST_BARCODE_1},
+            )
+        ).scalar()
+        qty_before = (
+            await db_session.execute(
+                text(
+                    "SELECT quantity FROM warehouse_stock WHERE project_id = :pid "
+                    "AND warehouse_id = :wid AND nomenclature_id = :nid"
+                ),
+                {"pid": PROJECT_ID, "wid": req.warehouse_id, "nid": nom_id},
+            )
+        ).scalar()
+
+        # «Параллельный» синк закоммитил DELIVERED; объект в сессии остаётся stale.
+        await db_session.execute(
+            text("UPDATE assembly_requests SET status = 'DELIVERED' WHERE id = :rid AND project_id = :pid"),
+            {"rid": req.id, "pid": PROJECT_ID},
+        )
+        await db_session.commit()
+        assert req.status == AssemblyStatus.SHIPPED  # stale-снимок в identity map
+
+        with pytest.raises(ValueError, match="Cannot transition"):
+            await cancel_request(db_session, PROJECT_ID, req.id)
+
+        status_db = (
+            await db_session.execute(
+                text("SELECT status FROM assembly_requests WHERE id = :rid AND project_id = :pid"),
+                {"rid": req.id, "pid": PROJECT_ID},
+            )
+        ).scalar()
+        assert status_db == "DELIVERED"  # CANCELLED не перетёр терминальный статус
+        shipment_deleted = (
+            await db_session.execute(
+                text("SELECT is_deleted FROM outbound_shipments WHERE id = :sid AND project_id = :pid"),
+                {"sid": shipment_id, "pid": PROJECT_ID},
+            )
+        ).scalar()
+        assert shipment_deleted is False  # цепочка попыток жива
+        qty_after = (
+            await db_session.execute(
+                text(
+                    "SELECT quantity FROM warehouse_stock WHERE project_id = :pid "
+                    "AND warehouse_id = :wid AND nomenclature_id = :nid"
+                ),
+                {"pid": PROJECT_ID, "wid": req.warehouse_id, "nid": nom_id},
+            )
+        ).scalar()
+        assert qty_after == qty_before  # фантомного возврата стока нет

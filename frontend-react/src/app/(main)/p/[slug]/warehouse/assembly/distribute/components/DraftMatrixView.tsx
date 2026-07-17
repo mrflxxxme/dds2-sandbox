@@ -415,7 +415,11 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
      *    (иначе стейл-ответ откатил бы более свежие клики);
      *  - серверный гейт мог вычесть «уже едущее» — про это говорит тост. */
     const editGenRef = useRef(0);
-    const saveInFlightRef = useRef(false);
+    // Летящий PUT как промис: `await flushDraftSave()` обязан ДОЖИМАТЬ и его, и
+    // pending-хвост (контракт ✕-удаления/авто-синка), а не возвращаться мгновенно.
+    const saveInFlightRef = useRef<Promise<void> | null>(null);
+    // Счётчик ретраев базового GET (сеть мигнула) — сбрасывается успешным GET.
+    const saveRetryRef = useRef(0);
     const pendingSaveRef = useRef<{ rows: AssemblyDraftRow[]; prebook: AssemblyDraftRow[]; manualNms: number[] } | null>(null);
     const sumUnits = (rows: AssemblyDraftRow[]) => rows.reduce((s, r) => s + Object.values(r.tgt || {}).reduce((a, v) => a + (v || 0), 0), 0);
 
@@ -446,18 +450,43 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
         };
     }, [articles, nmPpb, nmPpbByWh, nmBoxSize, palletOverrides, classOf]);
     const flushDraftSave = useCallback(async (): Promise<void> => {
-        if (saveInFlightRef.current) return; // доедет из finally текущего PUT
+        // «Дожать сейв» (контракт ✕-удаления и авто-синка) = дождаться И летящего
+        // PUT, И pending-хвоста за ним. Ранний return при летящем PUT ломал
+        // контракт: удаление/синк уезжали ВПЕРЁД отложенного флаша, и тот
+        // воскрешал SKU снапшотом, сделанным до удаления (и затирал ✋-флаг).
+        while (saveInFlightRef.current) await saveInFlightRef.current;
         const pending = pendingSaveRef.current;
         if (!pending) return;
         pendingSaveRef.current = null;
-        saveInFlightRef.current = true;
         const gen = editGenRef.current;
+        const run = (async (): Promise<void> => {
         try {
-            let base = draftDistRef.current;
+            // База PUT — строго СВЕЖИЙ GET черновика. Сбой GET ≠ «шлём от последней
+            // известной базы»: full-replace от stale-базы затирал бы чужие изменения
+            // (handed_units со страницы склада, правки другой вкладки). Правка
+            // возвращается в pending и уедет ретраем/следующим флашем.
+            let base: AssemblyDraft['distribution'] | null = null;
             try {
                 const fresh = await api.getAssemblyDraft(draftId);
-                base = fresh.distribution ?? base;
-            } catch { /* сеть мигнула — шлём от последней известной базы */ }
+                base = fresh.distribution ?? null;
+            } catch {
+                if (!pendingSaveRef.current) pendingSaveRef.current = pending; // новее нет — вернуть свою
+                if (saveRetryRef.current < 3) {
+                    saveRetryRef.current += 1;
+                    if (!saveTimerRef.current) {
+                        saveTimerRef.current = setTimeout(() => {
+                            saveTimerRef.current = null;
+                            void flushDraftSave();
+                        }, 3000);
+                    }
+                    showToast('Сеть мигнула — правка пока не записана, повторю автоматически', 'error');
+                } else {
+                    pendingSaveRef.current = null;
+                    showToast('Черновик не сохраняется (сеть/сервер) — правки степперов НЕ записаны, обнови страницу', 'error');
+                }
+                return;
+            }
+            saveRetryRef.current = 0;
             if (!base) {
                 showToast('Черновик недоступен — правка НЕ сохранена', 'error');
                 return;
@@ -505,9 +534,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
         } catch (err) {
             showToast(err instanceof Error ? err.message : 'Не удалось сохранить черновик', 'error');
         } finally {
-            saveInFlightRef.current = false;
-            if (pendingSaveRef.current) void flushDraftSave();
+            saveInFlightRef.current = null;
+            if (pendingSaveRef.current && !saveTimerRef.current) void flushDraftSave();
         }
+        })();
+        saveInFlightRef.current = run;
+        await run;
     }, [draftId, onDraftChanged, showToast, geomReady, buildNormCtx]);
     const scheduleDraftSave = useCallback((rows: AssemblyDraftRow[], prebook: AssemblyDraftRow[], manual: number[]) => {
         editGenRef.current += 1;
@@ -570,6 +602,16 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                 saveTimerRef.current = null;
             }
             await flushDraftSave();
+            // Флаш мог не пройти (сеть мигнула) и вернуть правку в pending —
+            // вычищаем из неё удаляемый SKU, иначе отложенный ретрай воскресил бы его.
+            if (pendingSaveRef.current) {
+                const p = pendingSaveRef.current;
+                pendingSaveRef.current = {
+                    rows: p.rows.filter((r) => r.nm_id !== nm),
+                    prebook: p.prebook.filter((r) => r.nm_id !== nm),
+                    manualNms: [...new Set([...p.manualNms, nm])],
+                };
+            }
             const removed = await api.removeAssemblyDraftRows(draftId, [nm]);
             // ✕ — ручное решение «не отправлять»: помечаем SKU ручным, иначе
             // авто-синк с расчётом вернул бы его на следующем заходе.
@@ -853,20 +895,28 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             const boxOk = !!flags.can_box && days(flags.box_meta) > 0;
             const monoOk = !!flags.can_monopallet && days(flags.mono_meta) > 0;
             const monoNoLimit = !!flags.can_monopallet && days(flags.mono_meta) <= 0;
+            // Сейф-ячейка (existingPkg='SUPERSAFE') гейтится своей приёмкой так же,
+            // как короб/моно — раньше проваливалась в else и росла без проверки.
+            const superOk = !!flags.can_supersafe && days(flags.super_meta) > 0;
             const wantPkg: PackageType | null = existingPkg ?? (boxOk ? 'BOX' : monoOk ? 'MONOPALLET' : null);
             if (!wantPkg
                 || (wantPkg === 'BOX' && !boxOk)
-                || (wantPkg === 'MONOPALLET' && !monoOk)) {
+                || (wantPkg === 'MONOPALLET' && !monoOk)
+                || (wantPkg === 'SUPERSAFE' && !superOk)) {
                 // Моно открыто, но лимита нет → не блокируем: кладём в предбронь.
                 if (monoNoLimit && !boxOk && (existingPkg == null || existingPkg === 'MONOPALLET')) {
                     toPrebook = true;
                     cellPkg = 'MONOPALLET';
                 } else {
-                    const reason = (!flags.can_box && !flags.can_monopallet && !flags.can_supersafe)
-                        ? `⛔ WB не принимает на «${wh}» — приём закрыт`
-                        : !flags.can_box && !flags.can_monopallet
-                            ? `⛔ «${wh}» не принимает ни короб, ни моно этого товара`
-                            : `⌛ «${wh}»: короб открыт, но лимита приёмки нет — в заявки не поедет`;
+                    const reason = wantPkg === 'SUPERSAFE'
+                        ? (flags.can_supersafe
+                            ? `⌛ «${wh}»: суперсейф открыт, но лимита приёмки нет — в заявки не поедет`
+                            : `⛔ «${wh}» не принимает суперсейф этого товара`)
+                        : (!flags.can_box && !flags.can_monopallet && !flags.can_supersafe)
+                            ? `⛔ WB не принимает на «${wh}» — приём закрыт`
+                            : !flags.can_box && !flags.can_monopallet
+                                ? `⛔ «${wh}» не принимает ни короб, ни моно этого товара`
+                                : `⌛ «${wh}»: короб открыт, но лимита приёмки нет — в заявки не поедет`;
                     showToast(reason, 'error');
                     return;
                 }
@@ -1184,6 +1234,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
                 saveTimerRef.current = null;
             }
             await flushDraftSave();
+            // Флаш не прошёл (сеть) — синк от базы без несохранённой правки был бы
+            // перекрыт её отложенным ретраем. Откладываем синк до успешного сейва.
+            if (pendingSaveRef.current) {
+                if (trigger === 'manual') showToast('Есть несохранённая правка степпера (сеть мигнула) — синк отложен, повтори позже', 'error');
+                return;
+            }
             const cur = await api.getAssemblyDraft(draftId);
             const dist = cur.distribution;
             const curManual = new Set<number>(dist?.manual_nms ?? []);

@@ -435,10 +435,12 @@ async def remove_rows_by_nm(
     draft_id: int,
     nm_ids: list[int],
 ) -> AssemblyDraft:
-    """Убрать из черновика все строки, ПРЕДБРОНЬ и handed-юниты указанных SKU
-    (удаление неликвида из прогноза / чистка SKU из ручной раскладки). handed-юниты
-    с несколькими SKU очищаются от этих nm_id; пустые юниты выбрасываются.
-    Остальные поля черновика не трогаются. 404 если не найден."""
+    """Убрать из черновика все строки, ПРЕДБРОНЬ и draft-снимки указанных SKU
+    (удаление неликвида из прогноза / чистка SKU из ручной раскладки). Ручные
+    снимки (status='draft') очищаются от этих nm_id, пустые выбрасываются;
+    физически переданные (status='handed') НЕ трогаются — это факт выдачи товара
+    оператору ФФ (сначала «Вернуть в черновик»). Остальные поля не трогаются.
+    404 если не найден."""
     draft = await get_draft(db, project_id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
@@ -456,6 +458,12 @@ async def remove_rows_by_nm(
     distribution.prebook_origin = [k for k in distribution.prebook_origin if not k.startswith(prefixes)]
     kept_units = []
     for unit in distribution.handed_units:
+        # handed-юнит — физический факт передачи товара оператору ФФ (та же природа,
+        # что гвард delete_draft): чистка неликвида его НЕ трогает — иначе черновик
+        # молча «забывал» бы переданное, а /drafts/reserved отпускал бы его резерв.
+        if (unit.status or "handed") == "handed":
+            kept_units.append(unit)
+            continue
         unit.items = [it for it in unit.items if it.nm_id not in nm_set]
         if unit.items:
             kept_units.append(unit)
@@ -490,10 +498,26 @@ async def delete_draft(
     project_id: int,
     draft_id: int,
 ) -> None:
-    """Soft-delete a draft. Raises 404 if missing/already deleted."""
+    """Soft-delete a draft. Raises 404 if missing/already deleted.
+
+    Гвард (паритет с delete_unit/set_unit_items/move_unit): handed-юнит — физический
+    факт передачи товара оператору ФФ, и черновик — единственная запись об этом
+    (плюс его резерв в /drafts/reserved). Удаление с живым handed-юнитом молча
+    забывало бы переданный товар → другие черновики запланировали бы его повторно.
+    """
     draft = await get_draft(db, project_id, draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
+    # Сырой JSONB (не Pydantic): в проде встречается explicit null вместо []/{}.
+    dist = draft.distribution if isinstance(draft.distribution, dict) else {}
+    for unit in (dist or {}).get("handed_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        if (unit.get("status") or "handed") == "handed" and (unit.get("items") or []):
+            raise HTTPException(
+                status_code=400,
+                detail="В черновике есть заявки, переданные на ФФ — сначала верните их в черновик",
+            )
     draft.soft_delete()
     await db.commit()
 
@@ -572,6 +596,14 @@ async def merge_drafts(
     src_ids_set: set[int] = set(src_ids)
     tgt_names: list[str] = list(merged.target_warehouse_names)
     tgt_names_set: set[str] = set(tgt_names)
+    # ✋-флаги и бейджи «из предброни» не-survivor'ов обязаны пережить слияние:
+    # manual_nms защищает ручной план SKU от авто-синка (иначе ленивая консолидация
+    # POST /drafts/current молча отдаёт ручные решения пересчёту по потребности),
+    # prebook_origin — провенанс паллет для бейджа. Union с сохранением порядка.
+    manual_nms: list[int] = list(merged.manual_nms)
+    manual_nms_set: set[int] = set(manual_nms)
+    origin_keys: list[str] = list(merged.prebook_origin)
+    origin_keys_set: set[str] = set(origin_keys)
 
     for other in others:
         other_dist = AssemblyDraftDistribution.model_validate(other.distribution or {})
@@ -587,6 +619,16 @@ async def merge_drafts(
             if name not in tgt_names_set:
                 tgt_names.append(name)
                 tgt_names_set.add(name)
+
+        # Union manual_nms / prebook_origin: ручные решения и провенанс не теряются.
+        for nm in other_dist.manual_nms:
+            if nm not in manual_nms_set:
+                manual_nms.append(nm)
+                manual_nms_set.add(nm)
+        for origin_key in other_dist.prebook_origin:
+            if origin_key not in origin_keys_set:
+                origin_keys.append(origin_key)
+                origin_keys_set.add(origin_key)
 
         # Merge rows: sum (nm_id, pkg) element-wise, append new keys.
         merged_rows = _merge_rows(merged_rows, [r.model_dump() for r in other_dist.rows])
@@ -617,6 +659,8 @@ async def merge_drafts(
     merged.handed_units = list(handed_by_key.values())
     merged.source_warehouse_ids = src_ids
     merged.target_warehouse_names = tgt_names
+    merged.manual_nms = manual_nms
+    merged.prebook_origin = origin_keys
     # Summing cold-start shares is meaningless; user re-runs auto-balance if needed
     merged.cold_start_shares = None
 
@@ -856,9 +900,20 @@ async def _fold_barcodes_into_request(
     old_pallets = max(0, int(req.pallets_count or 0))
     add_p = max(0, int(add_pallets or 0))
     total_pallets = old_pallets + add_p
+    old_w = _dec(req.pallet_weight_kg)
+    add_w = _dec(add_pallet_weight)
+    # Взвешенное среднее — ТОЛЬКО из известных (>0) весов. Черновики со страницы
+    # распределения несут pallet_weight_kg=0: усреднение с нулём разбавляло бы уже
+    # проставленный вес заявки (2×150кг + 1×0 → «100 кг/паллета»), занижая вес в
+    # экспорте/аналитике; разбавленный >0 вес вдобавок минует авто-пересчёт
+    # mark_ready (он срабатывает лишь при весе 0). Нулевой добавляемый вес не
+    # трогает старый; нулевой старый — заменяется новым.
     if total_pallets > 0:
-        total_w = _dec(old_pallets) * _dec(req.pallet_weight_kg) + _dec(add_p) * _dec(add_pallet_weight)
-        req.pallet_weight_kg = (total_w / Decimal(total_pallets)).quantize(Decimal("0.01"))
+        if old_w > 0 and add_w > 0:
+            total_w = _dec(old_pallets) * old_w + _dec(add_p) * add_w
+            req.pallet_weight_kg = (total_w / Decimal(total_pallets)).quantize(Decimal("0.01"))
+        elif old_w <= 0 < add_w:
+            req.pallet_weight_kg = add_w.quantize(Decimal("0.01"))
     req.pallets_count = max(1, total_pallets)
     await db.flush()
 
@@ -1225,6 +1280,10 @@ async def commit_draft(
         raise HTTPException(status_code=400, detail=f"Failed to commit draft: {e}") from None
 
     await invalidate_cache("reports:assembly_flow")
+    # «Потребность по складам» вычитает активные заявки (in_assembly): без
+    # инвалидации до 5 минут показывает свободным сток, уже уехавший в заявки
+    # (паритет с create/status-путями assembly/crud и assembly/status).
+    await invalidate_cache("reports:warehouse_need")
     await _notify_ff_portal_new_requests(db, project_id, created_notify)
 
     # Событие истории «создание заявки» — для вкладки «🕘 История» и отката.
@@ -1653,7 +1712,11 @@ def _carve_unit_from_rows(
         new_tgt[target_wb_name] = new_tgt.get(target_wb_name, 0) - qty
         if new_tgt[target_wb_name] <= 0:
             new_tgt.pop(target_wb_name, None)
-        if new_src and new_tgt:
+        # `or`, не `and`: у СБАЛАНСИРОВАННОЙ строки стороны пустеют одновременно,
+        # а у несбалансированной («!», Σsrc≠Σtgt — PUT такие принимает, баланс
+        # валидируется только на commit) опустевшая одна сторона молча уносила бы
+        # ненулевой остаток другой (потеря плана без следа в истории).
+        if new_src or new_tgt:
             remaining.append(row.model_copy(update={"src": new_src, "tgt": new_tgt}))
     return carved, remaining
 
@@ -1750,11 +1813,15 @@ async def revert_unit(
 
     unit = units.pop(idx)
     sid = str(source_ff_id)
-    rows_by_key: dict[tuple[int, str], AssemblyDraftRow] = {
-        (r.nm_id, r.package_type or "BOX"): r for r in distribution.rows
+    # Ключ ВКЛЮЧАЕТ barcode (см. _dedupe_rows/_merge_rows): один nm_id несёт несколько
+    # баркодов (размерные варианты) — влив по (nm_id, pkg) приписал бы qty чужому
+    # баркоду, и commit отгрузил бы чужой физический товар. Строки «Оставить так»
+    # (as_is) — отдельная сущность, возврат юнита в них не суммируется.
+    rows_by_key: dict[tuple[int, str, str], AssemblyDraftRow] = {
+        (r.nm_id, r.package_type or "BOX", r.barcode or ""): r for r in distribution.rows if not r.as_is
     }
     for it in unit.items:
-        row = rows_by_key.get((it.nm_id, norm_pkg))
+        row = rows_by_key.get((it.nm_id, norm_pkg, it.barcode))
         if row is None:
             row = AssemblyDraftRow(
                 nm_id=it.nm_id,
@@ -1765,7 +1832,7 @@ async def revert_unit(
                 package_type=norm_pkg,
             )
             distribution.rows.append(row)
-            rows_by_key[(it.nm_id, norm_pkg)] = row
+            rows_by_key[(it.nm_id, norm_pkg, it.barcode)] = row
         row.src[sid] = row.src.get(sid, 0) + it.qty
         row.tgt[target_wb_name] = row.tgt.get(target_wb_name, 0) + it.qty
 
@@ -1831,7 +1898,9 @@ async def commit_unit(
         created_ids.append(req.id)
         del units[idx]
         distribution.handed_units = units
-        if distribution.rows or distribution.handed_units:
+        # Предбронь держит черновик живым (инвариант commit_draft): она резервирует
+        # сток в /drafts/reserved — soft-delete молча терял бы её вместе с резервом.
+        if distribution.rows or distribution.handed_units or distribution.prebook:
             draft.distribution = distribution.model_dump(mode="json")
         else:
             draft.soft_delete()
@@ -1845,9 +1914,45 @@ async def commit_unit(
         raise HTTPException(status_code=400, detail=f"Failed to commit unit: {e}") from None
 
     await invalidate_cache("reports:assembly_flow")
+    # Паритет с commit_draft: заявка юнита попадает в in_assembly «Потребности».
+    await invalidate_cache("reports:warehouse_need")
     await _notify_ff_portal_new_requests(
         db, project_id, [(source_ff_id, req.number, sum(q for q in barcodes.values() if q > 0))]
     )
+
+    # Событие истории COMMIT_REQUEST (паритет с commit_draft): без него заявка из
+    # юнита невидима во вкладке «🕘 История» и неоткатываема. committed_rows — позиции
+    # юнита per-barcode (src=ФФ юнита, tgt=его WB-склад), чтобы откат вернул их в rows.
+    # Best-effort: заявка уже durable (коммит выше) — сбой лога не валит ответ.
+    from backend.models.assembly import DraftEventType
+    from backend.services.assembly.draft_history import log_draft_event
+
+    committed_rows = [
+        {
+            "nm_id": it.nm_id,
+            "barcode": it.barcode,
+            "vendor_code": it.vendor_code or "",
+            "src": {str(source_ff_id): it.qty},
+            "tgt": {target_wb_name: it.qty},
+            "package_type": norm_pkg,
+            "as_is": False,
+        }
+        for it in unit.items
+        if it.qty > 0
+    ]
+    try:
+        await log_draft_event(
+            db,
+            project_id,
+            draft_id,
+            DraftEventType.COMMIT_REQUEST,
+            summary=f"Создана заявка {req.number} из юнита ({sum(barcodes.values())} шт)",
+            committed_rows=committed_rows,
+            created_request_ids=created_ids,
+            draft_updated_at=draft.updated_at,
+        )
+    except Exception:
+        logger.warning("Failed to log COMMIT_REQUEST draft event for draft_id=%s (commit_unit)", draft_id, exc_info=True)
 
     return AssemblyDraftCommitResponse(created_request_ids=created_ids, draft_id=draft_id)
 
@@ -1987,11 +2092,13 @@ async def move_unit(
     else:
         distribution.handed_units = units
         sid = str(source_ff_id)
-        rows_by_key: dict[tuple[int, str], AssemblyDraftRow] = {
-            (r.nm_id, r.package_type or "BOX"): r for r in distribution.rows
+        # Ключ с barcode — как в revert_unit: без него размерные варианты одного
+        # nm_id сливались бы в одну строку (qty чужому баркоду). as_is — отдельно.
+        rows_by_key: dict[tuple[int, str, str], AssemblyDraftRow] = {
+            (r.nm_id, r.package_type or "BOX", r.barcode or ""): r for r in distribution.rows if not r.as_is
         }
         for it in moved:
-            row = rows_by_key.get((it.nm_id, norm_pkg))
+            row = rows_by_key.get((it.nm_id, norm_pkg, it.barcode))
             if row is None:
                 row = AssemblyDraftRow(
                     nm_id=it.nm_id,
@@ -2002,7 +2109,7 @@ async def move_unit(
                     package_type=norm_pkg,
                 )
                 distribution.rows.append(row)
-                rows_by_key[(it.nm_id, norm_pkg)] = row
+                rows_by_key[(it.nm_id, norm_pkg, it.barcode)] = row
             row.src[sid] = row.src.get(sid, 0) + it.qty
             row.tgt[new_wb] = row.tgt.get(new_wb, 0) + it.qty
 
@@ -2049,7 +2156,8 @@ async def delete_unit(
         raise HTTPException(status_code=404, detail="Заявка не найдена")
 
     draft.distribution = distribution.model_dump(mode="json")
-    if not (distribution.rows or distribution.handed_units):
+    # Предбронь держит черновик живым (инвариант commit_draft) — см. commit_unit.
+    if not (distribution.rows or distribution.handed_units or distribution.prebook):
         draft.soft_delete()
     await db.commit()
     await db.refresh(draft)

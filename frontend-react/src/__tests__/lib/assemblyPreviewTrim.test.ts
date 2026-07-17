@@ -135,3 +135,41 @@ describe('trimLinesToWholePallets', () => {
         expect(r.droppedUnits).toBe(80);
     });
 });
+
+describe('trimLinesToWholePallets — мульти-баркодный nm (barcode в ключе агрегации)', () => {
+    // Одна WB-карточка (nm) может нести несколько баркодов (размерные варианты);
+    // схлоп по nm приписывал бы весь объём баркоду ПОСЛЕДНЕЙ линии (мисаттрибуция
+    // физического товара) — идентичность та же, что в linesToRows / backend `_dedupe_rows`.
+    const bcLine = (ff: number, wb: string, nm: number, bc: string, qty: number, pkg: PreviewLine['pkg'] = 'BOX'): PreviewLine =>
+        ({ ...line(ff, wb, nm, qty, pkg), barcode: bc });
+
+    it('два баркода одного nm в одной отгрузке НЕ схлопываются: свои qty и barcode', () => {
+        // Смешанная BOX-паллета: 80+80 = 1 целая (upp 160) — обе линии едут раздельно.
+        const r = trimLinesToWholePallets([
+            bcLine(1, 'Казань', 100, 'BC1', 80),
+            bcLine(1, 'Казань', 100, 'BC2', 80),
+        ], uppOf);
+        expect(r.kept.map(l => [l.barcode, l.qty]).sort()).toEqual([['BC1', 80], ['BC2', 80]]);
+        expect(r.droppedUnits).toBe(0);
+    });
+
+    it('под-паллетный срез: dropped-линии сохраняют СВОЙ barcode и qty', () => {
+        // 80 + 40 = 0.75 паллеты → обе снимаются, каждая со своим баркодом.
+        const r = trimLinesToWholePallets([
+            bcLine(1, 'Казань', 100, 'BC1', 80),
+            bcLine(1, 'Казань', 100, 'BC2', 40),
+        ], uppOf);
+        expect(r.kept).toHaveLength(0);
+        expect(r.droppedLines.map(l => [l.barcode, l.qty]).sort()).toEqual([['BC1', 80], ['BC2', 40]]);
+    });
+
+    it('SUPERSAFE: каждый barcode — своя паллета (объёмы не суммируются в одну)', () => {
+        // BC1 = ровно паллета (160) едет; BC2 = 80 < паллеты — снимается со СВОИМ баркодом.
+        const r = trimLinesToWholePallets([
+            bcLine(1, 'Казань', 100, 'BC1', 160, 'SUPERSAFE'),
+            bcLine(1, 'Казань', 100, 'BC2', 80, 'SUPERSAFE'),
+        ], uppOf);
+        expect(r.kept.map(l => [l.barcode, l.qty])).toEqual([['BC1', 160]]);
+        expect(r.droppedLines.map(l => [l.barcode, l.qty])).toEqual([['BC2', 80]]);
+    });
+});

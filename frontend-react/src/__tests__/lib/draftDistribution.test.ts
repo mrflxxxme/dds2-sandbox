@@ -353,6 +353,46 @@ describe('applyDraftCellEdit — фиксы аудита 2026-07-11', () => {
     });
 });
 
+describe('applyDraftCellEdit / applyDraftPrebookEdit — мульти-баркодный nm (barcode в ключе слияния)', () => {
+    // Одна WB-карточка (nm) может нести несколько баркодов (размерные варианты).
+    // Идентичность строки — (nm × barcode × упаковка × as_is), см. keyOfDraftRow и
+    // backend `_merge_rows`: строка ЧУЖОГО баркода не сливается в правку — иначе её
+    // план молча переатрибуцировался бы на баркод статьи (чужой физический товар).
+    const otherBc = () => ({ nm_id: 1, barcode: 'B2', vendor_code: 'art-1', src: { '4': 50 }, tgt: { 'Казань': 50 } });
+
+    it('строка другого баркода не поглощается правкой и сохраняет свой barcode', () => {
+        const out = applyDraftCellEdit([otherBc()], [], article('B1', 1, { 4: 300 }), 'Коледино', 1, 10);
+        expect(out).not.toBeNull();
+        const b2 = out!.rows.find((r) => r.barcode === 'B2');
+        expect(b2?.tgt).toEqual({ 'Казань': 50 }); // нетронута
+        const b1 = out!.rows.find((r) => r.barcode === 'B1');
+        expect(b1?.tgt).toEqual({ 'Коледино': 10 }); // правка легла в свой баркод
+    });
+
+    it('кап учитывает бронь строк чужого баркода (rf_stocks агрегирован per nm)', () => {
+        // Свободно 60 − 50 (строка B2) = 10 → 2 короба (20) не лезут, 1 (10) — впритык.
+        expect(applyDraftCellEdit([otherBc()], [], article('B1', 1, { 4: 60 }), 'Коледино', 2, 10)).toBeNull();
+        expect(applyDraftCellEdit([otherBc()], [], article('B1', 1, { 4: 60 }), 'Коледино', 1, 10)).not.toBeNull();
+    });
+
+    it('декремент в ноль не трогает строку чужого баркода', () => {
+        const own = { nm_id: 1, barcode: 'B1', vendor_code: 'art-1', src: { '4': 10 }, tgt: { 'Коледино': 10 } };
+        const out = applyDraftCellEdit([own, otherBc()], [], article('B1', 1, { 4: 300 }), 'Коледино', -1, 10);
+        expect(out).not.toBeNull();
+        expect(out!.rows).toEqual([otherBc()]);
+    });
+
+    it('applyDraftPrebookEdit: предбронь чужого баркода той же упаковки не поглощается', () => {
+        const otherMono = { nm_id: 1, barcode: 'B2', vendor_code: 'art-1', src: { '4': 8 }, tgt: { 'Казань': 8 }, package_type: 'MONOPALLET' as const };
+        const out = applyDraftPrebookEdit([], [otherMono], article('B1', 1, { 4: 300 }), 'Тула', 1, 4, 'MONOPALLET');
+        expect(out).not.toBeNull();
+        const b2 = out!.prebook.find((r) => r.barcode === 'B2');
+        expect(b2?.tgt).toEqual({ 'Казань': 8 }); // чужой баркод остался предбронью как был
+        const b1 = out!.prebook.find((r) => r.barcode === 'B1');
+        expect(b1?.tgt).toEqual({ 'Тула': 4 });
+    });
+});
+
 describe('buildWriteDistribution — владение по nm целиком', () => {
     it('старая MONO-строка SKU заменяется BOX-результатом расчёта (нет задвоения)', () => {
         const oldMono = { nm_id: 1, barcode: 'A', vendor_code: 'art-1', src: { '4': 36 }, tgt: { 'Казань': 36 }, package_type: 'MONOPALLET' as const };

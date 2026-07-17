@@ -154,6 +154,10 @@ export default function AssemblyDraftPage() {
     const [draftsReserved, setDraftsReserved] = useState<DraftReserveMap>({});
     const [allDrafts, setAllDrafts] = useState<AssemblyDraft[]>([]);
     const [catModalOpen, setCatModalOpen] = useState(false);
+    // Резерв ВСЕХ черновиков (без exclude текущего) — линза модалки «По категориям»:
+    // она выбирает категории для НОВОГО черновика, срез/резерв текущего к ней не
+    // относится. null до загрузки → фолбэк на draftsReserved.
+    const [modalReserved, setModalReserved] = useState<DraftReserveMap | null>(null);
 
     // Приёмка WB для предброни (⌛ на карточках) — грузится при наличии предброни.
     const [prebookAcceptance, setPrebookAcceptance] = useState<Map<number, AcceptanceCheckPerItem>>(new Map());
@@ -171,6 +175,9 @@ export default function AssemblyDraftPage() {
 
     const lastSavedJsonRef = useRef<string>('');
     const initialLoadRef = useRef(false);
+    // Взведённый таймер автосейва — чтобы конкурирующие операции (carve категорий)
+    // могли его погасить, а не ловить PUT полного до-carve снимка поверх очистки.
+    const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // id текущего черновика (синглтон). null до первой загрузки.
     const draftId = draft?.id ?? null;
@@ -260,8 +267,22 @@ export default function AssemblyDraftPage() {
                             // Предбронь сверяем ПОСЛЕ заявок: остаток transit после rows.
                             const recPrebook = subtractInTransitFromRows(dist.prebook || [], recRows.remainingTransit);
                             if (recRows.changed || recPrebook.changed) {
-                                setRows(recRows.rows);
-                                setPrebook(recPrebook.rows);
+                                // Вычет персистится СРАЗУ, не автосейвом через 5с: self-heal стартует
+                                // раньше и берёт базу свежим GET — не-вычтенная серверная версия
+                                // вернулась бы его PUT'ом, а смена rows сбросила бы таймер автосейва
+                                // (вычет не сохранялся никогда; коммит отгружал дубль уже едущего).
+                                // Дельта-гейт бэка усечение пропускает (режется только прирост).
+                                try {
+                                    const persisted = await api.updateAssemblyDraft(draftResp.id, {
+                                        distribution: { ...dist, rows: recRows.rows, prebook: recPrebook.rows },
+                                    });
+                                    if (cancelled) return;
+                                    applyDraft(persisted);
+                                } catch {
+                                    // PUT не прошёл — старое поведение: локальный стейт + автосейв.
+                                    setRows(recRows.rows);
+                                    setPrebook(recPrebook.rows);
+                                }
                                 const units = recRows.subtractedUnits + recPrebook.subtractedUnits;
                                 const skus = new Set([...recRows.touchedNm, ...recPrebook.touchedNm]).size;
                                 showToast(`⚠ Вычтено уже едущее в заявках: ${formatNumber(units, 0)} шт · ${formatNumber(skus, 0)} SKU`, 'success');
@@ -417,6 +438,36 @@ export default function AssemblyDraftPage() {
         return arts;
     }, [stockNeed, draftsReserved, scopeFfId]);
     const reservedUnits = useMemo(() => reservedTotal(draftsReserved), [draftsReserved]);
+
+    // Резерв других черновиков per nm (для «Срочно к отправке»: ffFree честный).
+    // draftsReserved ключуется баркодом — мапим на nm через статьи потребности.
+    const urgentReservedByNm = useMemo(() => {
+        const bcToNm = new Map<string, number>();
+        for (const a of stockNeed?.articles ?? []) if (a.barcode) bcToNm.set(a.barcode, a.nm_id);
+        const m = new Map<number, number>();
+        for (const [bc, byFf] of Object.entries(draftsReserved)) {
+            const nm = bcToNm.get(bc);
+            if (nm == null) continue;
+            const total = Object.values(byFf).reduce((s, v) => s + (v || 0), 0);
+            if (total > 0) m.set(nm, (m.get(nm) || 0) + total);
+        }
+        return m;
+    }, [stockNeed, draftsReserved]);
+
+    // Статьи для модалки «По категориям»: БЕЗ restrictArticlesToFf текущего черновика
+    // (его scope_ff_id занулял «свободно» чужих ФФ — категории «исчезали» из списка)
+    // и с резервом ВСЕХ черновиков, включая текущий (новый черновик — отдельный).
+    const modalArticles = useMemo(
+        () => subtractReserveFromArticles(stockNeed?.articles ?? [], modalReserved ?? draftsReserved),
+        [stockNeed, modalReserved, draftsReserved],
+    );
+    const openCatModal = useCallback(() => {
+        setCatModalOpen(true);
+        setModalReserved(null);
+        void api.getDraftsReserved(undefined)
+            .then(r => setModalReserved(r.reserved || {}))
+            .catch(() => { /* фолбэк — draftsReserved (без резерва текущего) */ });
+    }, []);
 
     // ─── Build current distribution snapshot ─────────────────────────────
     const buildDistribution = useCallback((): AssemblyDraftDistribution => ({
@@ -655,6 +706,14 @@ export default function AssemblyDraftPage() {
     // редирект на «Ручную раскладку» (авто-синк заполнит срез из потребности).
     const handleCreateScopedDraft = useCallback(async (categories: string[], ffId: number | null) => {
         try {
+            // Гасим взведённый дебаунс автосейва: его PUT нёс бы ПОЛНЫЙ до-carve снимок
+            // и лёг бы поверх cleanup-PUT (перенесённые строки воскресали в источнике —
+            // план в двух черновиках, оба коммитят один сток). Несохранённые правки не
+            // теряются: carve считается от текущего стейта, cleanup-PUT их персистит.
+            if (autosaveTimerRef.current) {
+                clearTimeout(autosaveTimerRef.current);
+                autosaveTimerRef.current = null;
+            }
             const scopedIn = inScopeOf(categories, categoryOf);
             let carveOut: { restRows: AssemblyDraftRow[]; restPrebook: AssemblyDraftRow[] } | null = null;
             let movedRows: AssemblyDraftRow[] = [];
@@ -689,14 +748,23 @@ export default function AssemblyDraftPage() {
                     estimated_ready_date: null,
                     category_scope: categories,
                     scope_ff_id: ffId,
+                    // ✋-флаги перенесённых SKU обязаны переехать вместе со строками:
+                    // без них первый авто-синк «Ручной раскладки» пересчитал бы ручной
+                    // план перенесённого SKU по потребности (класс бага «кастрюли 80→0»).
+                    manual_nms: carveOut ? manualNmsRef.current.filter(nm => scopedIn(nm)) : [],
                 },
             });
             if (carveOut && draftId) {
                 try {
-                    await api.updateAssemblyDraft(draftId, {
+                    const cleaned = await api.updateAssemblyDraft(draftId, {
                         distribution: { ...buildDistribution(), rows: carveOut.restRows, prebook: carveOut.restPrebook },
                         event: { event_type: 'MATRIX_EDIT', summary: `Категории «${categories.join(', ')}» выделены в отдельный черновик` },
                     });
+                    // Локальный стейт = очищенный источник: иначе любой поздний сейв
+                    // (автосейв от следующей правки) вернул бы полные до-carve строки.
+                    setRows(dedupeRows(cleaned.distribution.rows || []));
+                    setPrebook(cleaned.distribution.prebook || []);
+                    lastSavedJsonRef.current = JSON.stringify(cleaned.distribution);
                 } catch {
                     showToast('⚠ Новый черновик создан, но строки не удалились из текущего — они сейчас в ОБОИХ черновиках, удалите дубль вручную', 'error');
                 }
@@ -1237,24 +1305,37 @@ export default function AssemblyDraftPage() {
         return out;
     }, [prebookGroups, prebookAcceptance]);
 
-    // Удалить позицию (SKU×направление) из предброни — коробы остаются на ФФ, не едут.
-    const handleDeletePrebookItem = useCallback(async (nm_id: number, wb: string, pkg: PackageType) => {
-        if (!draftId) return;
+    // Удалить позицию (SKU×направление×ФФ) из предброни — коробы остаются на ФФ, не едут.
+    // Снимается ТОЛЬКО порция этого ФФ (allocatePairs, как в handleDeleteDirection):
+    // ✕ живёт в карточке ФФ-группы, а строка может сорсить wb с нескольких ФФ — снятие
+    // всего tgt[wb] уносило бы порции чужих ФФ и перевирало привязку src к ФФ.
+    const deletingItemRef = useRef(false);
+    const handleDeletePrebookItem = useCallback(async (nm_id: number, wb: string, pkg: PackageType, ffId: number) => {
+        // In-flight-гвард: два быстрых ✕ считали бы next от одного stale prebook —
+        // второй PUT воскрешал бы первую удалённую позицию.
+        if (!draftId || deletingItemRef.current) return;
+        const chosenKey = String(ffId);
         const next = prebook
             .map(r => {
-                if (r.nm_id !== nm_id || (r.package_type || 'BOX') !== pkg || !(r.tgt[wb] > 0)) return r;
-                const tgt = { ...r.tgt }; const removed = tgt[wb]; delete tgt[wb];
-                const src = { ...r.src }; let rem = removed;
-                for (const ff of Object.keys(src)) { const take = Math.min(src[ff], rem); src[ff] -= take; rem -= take; if (src[ff] <= 0) delete src[ff]; if (rem <= 0) break; }
+                if (r.nm_id !== nm_id || (r.package_type || 'BOX') !== pkg || !(r.tgt[wb] > 0) || !(r.src[chosenKey] > 0)) return r;
+                const removed = allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0;
+                if (removed <= 0) return r;
+                const tgt = { ...r.tgt }; tgt[wb] = Math.max(0, (tgt[wb] || 0) - removed); if (tgt[wb] <= 0) delete tgt[wb];
+                const src = { ...r.src }; src[chosenKey] = Math.max(0, (src[chosenKey] || 0) - removed); if (src[chosenKey] <= 0) delete src[chosenKey];
                 return { ...r, tgt, src };
             })
             .filter(r => Object.keys(r.tgt).length > 0);
+        deletingItemRef.current = true;
         try {
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: next } });
+            const updated = await api.updateAssemblyDraft(draftId, {
+                distribution: { ...buildDistribution(), prebook: next },
+                event: { event_type: 'MATRIX_EDIT', summary: `Позиция nm ${nm_id} убрана из предброни «${wb}»` },
+            });
             healScopeRef.current = { ts: updated.updated_at, only: new Set() }; // вычитающая → self-heal no-op
             applyDraft(updated);
             showToast('Удалено из предброни', 'success');
         } catch (e) { showToast(e instanceof Error ? e.message : 'Ошибка', 'error'); }
+        finally { deletingItemRef.current = false; }
     }, [draftId, prebook, buildDistribution, applyDraft, showToast]);
 
     // Дозабить МИНИМАЛЬНО, с ОДНОГО ФФ: добираем целыми коробами до целых паллет
@@ -1341,10 +1422,14 @@ export default function AssemblyDraftPage() {
                     else if (open && pbNm.has(nm)) dirNoLimit = true;
                 }
             }
-            if (!dirOpen) {
-                showToast(dirNoLimit
-                    ? `«${wb}»: приём открыт, но ЛИМИТА нет (⌛) — дозабор в черновик заблокирован (там только готовое к сдаче). ${pkg === 'MONOPALLET' ? 'Моно сдаётся предзаявкой.' : 'Дождитесь лимита.'}`
-                    : `WB не принимает на «${wb}» — направление закрыто, дозабор невозможен`, 'error');
+            // ⌛-режим (приём открыт, лимита нет): дозабор РАЗРЕШЁН, но результат остаётся
+            // В ПРЕДБРОНИ — «черновик = готовое к сдаче» не нарушается, а целые паллеты
+            // затем уходят «📋 Создать предзаявку» (ФФ собирает сейчас, слот WB — потом).
+            // okNm не фильтруем: флаги приёмки — уровня (склад × упаковка), у ⌛-направления
+            // они одинаково ⌛ для всех SKU пула.
+            const prebookMode = !dirOpen && dirNoLimit;
+            if (!dirOpen && !prebookMode) {
+                showToast(`WB не принимает на «${wb}» — направление закрыто, дозабор невозможен`, 'error');
                 return;
             }
             // Планируем добор целыми коробами по геометрии КАЖДОГО кандидата (короб = 1/bpp
@@ -1352,7 +1437,7 @@ export default function AssemblyDraftPage() {
             const poolByNm = new Map(pool.map(c => [c.nm_id, c]));
             const plan = planTopUpBoxes(
                 shortfallFp,
-                pool.filter(c => okNm.has(c.nm_id)).map(c => ({
+                pool.filter(c => prebookMode || okNm.has(c.nm_id)).map(c => ({
                     nmId: c.nm_id, ppb: c.ppb, freeBoxes: c.freeBoxes,
                     bpp: effectiveBoxesPerPallet(nmBoxSize.get(c.nm_id) ?? null, maxPalletHeightCm(wb), palletOverrides),
                 })),
@@ -1374,12 +1459,9 @@ export default function AssemblyDraftPage() {
             const palletizedRows = norm.rows;
             const keptUnits = palletizedRows.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
             if (keptUnits <= 0) { showToast('Не удалось дособрать целую паллету — не хватает свободного ФФ', 'error'); return; }
-            // Провенанс: дозабранные паллеты собраны с участием предброни направления.
-            for (const r of palletizedRows) prebookOriginRef.current.add(`${r.nm_id}::${wb}`);
-            const mergedRows = mergeDraftRows([...rows, ...palletizedRows]);
             // Новая предбронь: снимаем ТОЛЬКО порцию (chosenFf→wb) из затронутых строк
             // (остаток других складов/ФФ строки остаётся) + добавляем срез дозабора.
-            const nextPrebook = prebook
+            const strippedPrebook = prebook
                 .map(r => {
                     if ((r.package_type || 'BOX') !== pkg || !(r.tgt[wb] > 0) || !(r.src[chosenKey] > 0)) return r;
                     const removed = allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0;
@@ -1389,7 +1471,21 @@ export default function AssemblyDraftPage() {
                     return { ...r, tgt, src };
                 })
                 .filter(r => Object.keys(r.tgt).length > 0);
-            nextPrebook.push(...norm.dropped.filter(r => pbNm.has(r.nm_id)));
+            if (prebookMode) {
+                // ⌛: паллетизированный результат остаётся В ПРЕДБРОНИ (rows не трогаем) —
+                // авто-консолидация его не промотирует (направление не в readyPkgWbs),
+                // целые паллеты уходят кнопкой «📋 Создать предзаявку».
+                const nextPrebook = mergeDraftRows([...strippedPrebook, ...palletizedRows, ...norm.dropped.filter(r => pbNm.has(r.nm_id))]);
+                const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook }, event: { event_type: 'PREBOOK_TOPUP', summary: `Дозабор ⌛-направления «${wb}» (в предбронь)` } });
+                healScopeRef.current = { ts: updated.updated_at, only: new Set() };
+                applyDraft(updated);
+                showToast(`Дособрано в предбронь «${wb}»: +${formatNumber(keptUnits, 0)} шт целыми паллетами (приём ⌛ — теперь «📋 Создать предзаявку»)`, 'success');
+                return;
+            }
+            // Провенанс: дозабранные паллеты собраны с участием предброни направления.
+            for (const r of palletizedRows) prebookOriginRef.current.add(`${r.nm_id}::${wb}`);
+            const mergedRows = mergeDraftRows([...rows, ...palletizedRows]);
+            const nextPrebook = [...strippedPrebook, ...norm.dropped.filter(r => pbNm.has(r.nm_id))];
             const targetNames = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.tgt))));
             const sourceIds = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
             const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: mergedRows, prebook: nextPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames }, event: { event_type: 'PREBOOK_TOPUP', summary: 'Дозабор из предброни' } });
@@ -1454,7 +1550,7 @@ export default function AssemblyDraftPage() {
             }
             if (okNm.size === 0) {
                 showToast(openNoLimit
-                    ? `«${wb}»: приём открыт, но ЛИМИТА нет (⌛) — в черновик не переносим (там только готовое к сдаче). ${pkg === 'MONOPALLET' ? 'Моно сдаётся предзаявкой: под-вкладка «Предзаявка» или кнопка «📋 Предзаявка» у паллеты.' : 'Дождитесь лимита приёмки — направление останется в предброни.'}`
+                    ? `«${wb}»: приём открыт, но ЛИМИТА нет (⌛) — в черновик не переносим (там только готовое к сдаче). Сборку можно запустить СЕЙЧАС кнопкой «📋 Создать предзаявку» (целые паллеты уйдут заявкой 🅿️, слот WB — при появлении лимита); хвост можно «Дозабить» — он останется в предброни.`
                     : `WB не принимает на «${wb}» — направление закрыто, отгрузка невозможна`, 'error');
                 return;
             }
@@ -1501,7 +1597,7 @@ export default function AssemblyDraftPage() {
             const mergedRows = mergeDraftRows([...rows, ...shipRows]);
             const targetNames = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.tgt))));
             const sourceIds = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: mergedRows, prebook: nextPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames } });
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: mergedRows, prebook: nextPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames }, event: { event_type: 'MATRIX_EDIT', summary: `«Оставить так»: неполная паллета «${wb}» → в черновик (as_is)` } });
             healScopeRef.current = { ts: updated.updated_at, only: new Set([directionKey(pkg, wb)]) };
             applyDraft(updated);
             showToast(
@@ -1543,7 +1639,7 @@ export default function AssemblyDraftPage() {
                     return { ...r, tgt, src };
                 })
                 .filter(r => Object.keys(r.tgt).length > 0);
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: next } });
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: next }, event: { event_type: 'MATRIX_EDIT', summary: `Направление «${wb}» удалено из предброни` } });
             healScopeRef.current = { ts: updated.updated_at, only: new Set() }; // вычитающая → self-heal no-op
             applyDraft(updated);
             showToast(`Направление «${wb}» удалено из предброни — коробы свободны на ФФ`, 'success');
@@ -1551,20 +1647,23 @@ export default function AssemblyDraftPage() {
         finally { setDeletingDir(null); }
     }, [draftId, deletingDir, prebook, prebookGroups, buildDistribution, applyDraft, showToast]);
 
-    // Создать ПРЕДЗАЯВКУ на моно: готовые целые моно-паллеты на WB-склад без лимита
+    // Создать ПРЕДЗАЯВКУ: готовые целые паллеты (моно ИЛИ короб) на WB-склад без лимита
     // приёмки (⌛) сдаются предзаявкой (бронью). Создаём заявки на сборку сразу с флагом
     // is_prebooking (бэк, обычный сток) и убираем их из предброни. Скоуп по (ffId→wb).
-    // В БРОНЬ УХОДЯТ ТОЛЬКО ЦЕЛЫЕ ПАЛЛЕТЫ (авторитетный трим-сплит, моно ≤3 арт) —
-    // неполный хвост остаётся в предброни (дозабрать/убрать в под-вкладке «Предзаявка»).
+    // Короб — тот же поток: ⌛-направление иначе тупик («Оставить так»/«Дозабить»
+    // гейтует «черновик = готовое к сдаче»), а ФФ должен начать сборку сейчас, не
+    // дожидаясь лимита. В БРОНЬ УХОДЯТ ТОЛЬКО ЦЕЛЫЕ ПАЛЛЕТЫ (авторитетный трим-сплит,
+    // моно ≤3 арт, короб per-класс) — неполный хвост остаётся в предброни.
     const [creatingPrebooking, setCreatingPrebooking] = useState<string | null>(null);
     const handleCreatePrebooking = useCallback(async (pkg: PackageType, wb: string, ffId: number) => {
-        if (!draftId || creatingPrebooking || pkg !== 'MONOPALLET') return;
+        if (!draftId || creatingPrebooking || (pkg !== 'MONOPALLET' && pkg !== 'BOX')) return;
         const chosenKey = String(ffId);
-        const affected = prebook.filter(r => (r.package_type || 'BOX') === 'MONOPALLET' && (r.tgt[wb] || 0) > 0 && (r.src[chosenKey] || 0) > 0);
+        const pkgWord = pkg === 'MONOPALLET' ? 'моно' : 'короба';
+        const affected = prebook.filter(r => (r.package_type || 'BOX') === pkg && (r.tgt[wb] || 0) > 0 && (r.src[chosenKey] || 0) > 0);
         if (affected.length === 0) return;
         // Порции ИМЕННО этого направления (ffId→wb) — строка может сорсить wb с неск. ФФ.
         const dirPortions: AssemblyDraftRow[] = affected
-            .map((r): AssemblyDraftRow | null => { const q = allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0; return q > 0 ? { nm_id: r.nm_id, barcode: r.barcode, vendor_code: r.vendor_code, src: { [chosenKey]: q }, tgt: { [wb]: q }, package_type: 'MONOPALLET' as PackageType } : null; })
+            .map((r): AssemblyDraftRow | null => { const q = allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0; return q > 0 ? { nm_id: r.nm_id, barcode: r.barcode, vendor_code: r.vendor_code, src: { [chosenKey]: q }, tgt: { [wb]: q }, package_type: pkg } : null; })
             .filter((x): x is AssemblyDraftRow => x != null);
         if (dirPortions.length === 0) return;
         // Целые паллеты (в бронь) vs хвост (остаётся) — тем же сплитом, что консолидация/коммит.
@@ -1573,14 +1672,14 @@ export default function AssemblyDraftPage() {
         if (wholeUnits <= 0) { showToast('Нет целой паллеты для предзаявки — сначала дозаберите хвост до целой или уберите неполную', 'error'); return; }
         const tailUnits = split.prebook.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
         if (!window.confirm(
-            `Создать предзаявку на моно «${wb}»? В бронь уйдут ТОЛЬКО целые паллеты (${formatNumber(wholeUnits, 0)} шт).`
+            `Создать предзаявку на ${pkgWord} «${wb}»? В бронь уйдут ТОЛЬКО целые паллеты (${formatNumber(wholeUnits, 0)} шт) — ФФ начнёт сборку сразу, слот WB бронируется при появлении лимита.`
             + (tailUnits ? ` Неполный хвост (${formatNumber(tailUnits, 0)} шт) останется в предброни.` : ''),
         )) return;
         const key = `${pkg}::${wb}::${ffId}`;
         setCreatingPrebooking(key);
         try {
             const bookRows = split.toDraft
-                .map(r => ({ warehouse_id: ffId, barcode: r.barcode, wb_warehouse_name: wb, qty: r.tgt[wb] || 0, package_type: 'MONOPALLET' as PackageType }))
+                .map(r => ({ warehouse_id: ffId, barcode: r.barcode, wb_warehouse_name: wb, qty: r.tgt[wb] || 0, package_type: pkg }))
                 .filter(r => r.qty > 0);
             if (bookRows.length === 0) return;
             const res = await api.createPrebooking({ rows: bookRows });
@@ -1596,12 +1695,19 @@ export default function AssemblyDraftPage() {
                 })
                 .filter(r => Object.keys(r.tgt).length > 0);
             const nextPrebook = mergeDraftRows([...stripped, ...split.prebook]);
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook } });
-            healScopeRef.current = { ts: updated.updated_at, only: new Set() }; // бронь убирает из предброни, rows не трогает
-            applyDraft(updated);
+            // Полу-успех НЕ атомарен: бронь уже создана. Падение PUT очистки предброни
+            // без явного сигнала провоцировало повторный клик → ДУБЛЬ предзаявки.
+            try {
+                const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook }, event: { event_type: 'MATRIX_EDIT', summary: `Предзаявка (${pkgWord}) «${wb}»: целые паллеты убраны из предброни` } });
+                healScopeRef.current = { ts: updated.updated_at, only: new Set() }; // бронь убирает из предброни, rows не трогает
+                applyDraft(updated);
+            } catch {
+                showToast(`⚠ Предзаявка на «${wb}» СОЗДАНА, но предбронь не очистилась — НЕ жмите кнопку повторно (будет дубль брони). Удалите направление из предброни вручную`, 'error');
+                return;
+            }
             const numbers = (res.requests || []).map(r => r.number).filter(Boolean);
             showToast(
-                `Предзаявка на моно «${wb}» создана: ${formatNumber(res.created, 0)} заявок ${numbers.length ? numbers.join(', ') : ''} (${formatNumber(wholeUnits, 0)} шт целыми паллетами)`
+                `Предзаявка на ${pkgWord} «${wb}» создана: ${formatNumber(res.created, 0)} заявок ${numbers.length ? numbers.join(', ') : ''} (${formatNumber(wholeUnits, 0)} шт целыми паллетами)`
                 + (tailUnits ? ` · хвост ${formatNumber(tailUnits, 0)} шт остался в предброни` : '')
                 + ' — ищите их в списке «Заявки на сборку» с бейджем 🅿️',
                 'success',
@@ -1705,7 +1811,7 @@ export default function AssemblyDraftPage() {
             // Возвращаем в предбронь ТОЛЬКО целые паллеты (split.toDraft) — ⌛-моно под
             // предзаявку. Хвост (split.prebook) НЕ возвращаем → освобождается на ФФ.
             const nextPrebook = mergeDraftRows([...stripped, ...split.toDraft]);
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook } });
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook }, event: { event_type: 'MATRIX_EDIT', summary: `Неполная моно-паллета «${wb}» убрана из предброни` } });
             healScopeRef.current = { ts: updated.updated_at, only: new Set() }; // вычитающая → self-heal no-op
             applyDraft(updated);
             const wholeKept = split.toDraft.reduce((s, r) => s + Object.values(r.tgt).reduce((a, v) => a + (v || 0), 0), 0);
@@ -1757,16 +1863,28 @@ export default function AssemblyDraftPage() {
         // суммарные units per nm (backend группирует по ФФ×WB×упаковке → одна заявка).
         const unitsByNm = new Map<number, number>();
         for (const x of sel) for (const it of x.pallet.items) unitsByNm.set(it.nm_id, (unitsByNm.get(it.nm_id) || 0) + it.units);
-        // Баркод берём из строк ЭТОГО направления (wb+ffId) — у мульти-баркодного SKU
-        // на другом направлении может лежать другой barcode.
-        const bcByNm = new Map<number, string>();
+        // Порции per (nm × БАРКОД) — зеркало stripPalletsFromPrebook (тот же порядок
+        // обхода prebook и то же жадное min(portion, want)): у мульти-баркодного SKU
+        // units уходят в бронь под ТЕМИ ЖЕ баркодами, что снимутся из предброни.
+        // «Первый найденный баркод на все штуки nm» бронировал бы чужой размерный
+        // вариант (ФФ собирает по баркоду — физически не тот товар).
+        const remainingBook = new Map(unitsByNm);
+        const bookByNmBc = new Map<string, { barcode: string; qty: number }>();
         for (const r of prebook) {
-            if ((r.package_type || 'BOX') !== 'MONOPALLET' || !r.barcode || bcByNm.has(r.nm_id)) continue;
+            if ((r.package_type || 'BOX') !== 'MONOPALLET' || !r.barcode) continue;
             if (!(r.tgt[wb] > 0) || !(r.src[String(ffId)] > 0)) continue;
-            bcByNm.set(r.nm_id, r.barcode);
+            const want = remainingBook.get(r.nm_id) || 0;
+            if (want <= 0) continue;
+            const portion = allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0;
+            const take = Math.min(portion, want);
+            if (take <= 0) continue;
+            remainingBook.set(r.nm_id, want - take);
+            const k = `${r.nm_id}::${r.barcode}`;
+            const e = bookByNmBc.get(k);
+            if (e) e.qty += take; else bookByNmBc.set(k, { barcode: r.barcode, qty: take });
         }
-        const bookRows = [...unitsByNm.entries()]
-            .map(([nm, qty]) => ({ warehouse_id: ffId, barcode: bcByNm.get(nm) || '', wb_warehouse_name: wb, qty, package_type: 'MONOPALLET' as PackageType }))
+        const bookRows = [...bookByNmBc.values()]
+            .map(x => ({ warehouse_id: ffId, barcode: x.barcode, wb_warehouse_name: wb, qty: x.qty, package_type: 'MONOPALLET' as PackageType }))
             .filter(r => r.qty > 0 && r.barcode);
         if (bookRows.length === 0) { showToast('Не нашёл баркоды артикулов паллет в предброни', 'error'); return; }
         const partials = sel.filter(x => x.pallet.fillPct < 0.999).length;
@@ -1782,9 +1900,16 @@ export default function AssemblyDraftPage() {
         try {
             const res = await api.createPrebooking({ rows: bookRows });
             const nextPrebook = stripPalletsFromPrebook(sel.map(x => x.pallet), wb, ffId);
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook } });
-            healScopeRef.current = { ts: updated.updated_at, only: new Set() }; // бронь убирает из предброни, rows не трогает
-            applyDraft(updated);
+            // Полу-успех НЕ атомарен: бронь уже создана — падение PUT очистки без
+            // явного сигнала провоцировало повторный клик → дубль предзаявки.
+            try {
+                const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook }, event: { event_type: 'MATRIX_EDIT', summary: `Предзаявка из паллет «${wb}»: убраны из предброни` } });
+                healScopeRef.current = { ts: updated.updated_at, only: new Set() }; // бронь убирает из предброни, rows не трогает
+                applyDraft(updated);
+            } catch {
+                showToast(`⚠ Предзаявка на «${wb}» СОЗДАНА, но паллеты не убрались из предброни — НЕ жмите кнопку повторно (будет дубль брони). Уберите их вручную («На ФФ»)`, 'error');
+                return;
+            }
             const numbers = (res.requests || []).map(r => r.number).filter(Boolean);
             showToast(
                 `Предзаявка из ${sel.length === 1 ? `паллеты ${palletsLabel(sel)}` : `${formatNumber(sel.length, 0)} паллет (${palletsLabel(sel)})`} на «${wb}» создана: заявка ${numbers.join(', ')} (${formatNumber(units, 0)} шт${partials ? `, ${formatNumber(partials, 0)} частичн.` : ''})`
@@ -1808,7 +1933,7 @@ export default function AssemblyDraftPage() {
         setPalletOp(key);
         try {
             const nextPrebook = stripPalletsFromPrebook(sel.map(x => x.pallet), wb, ffId);
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook } });
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), prebook: nextPrebook }, event: { event_type: 'MATRIX_EDIT', summary: `Паллеты «${wb}» оставлены на ФФ (убраны из предброни)` } });
             healScopeRef.current = { ts: updated.updated_at, only: new Set() }; // «На ФФ» — вычитающая → self-heal no-op, соседей не трогаем
             applyDraft(updated);
             showToast(`${sel.length === 1 ? `Паллета ${palletsLabel(sel)}` : `Паллеты ${palletsLabel(sel)}`} (${formatNumber(units, 0)} шт) оставлены на ФФ — убраны из предброни`, 'success');
@@ -1825,25 +1950,26 @@ export default function AssemblyDraftPage() {
         // Сколько штук per nm просят выбранные паллеты.
         const wantByNm = new Map<number, number>();
         for (const x of sel) for (const it of x.pallet.items) wantByNm.set(it.nm_id, (wantByNm.get(it.nm_id) || 0) + it.units);
-        // Баркод/вендор + РЕАЛЬНО доступная порция направления (ffId→wb) per nm — грузим в
-        // черновик min(want, avail), ровно столько снимет stripPalletsFromPrebook (консервация).
-        const meta = new Map<number, { barcode: string; vendor_code: string; avail: number }>();
+        // Порции per (nm × БАРКОД) — зеркало stripPalletsFromPrebook (тот же обход и то же
+        // жадное min(portion, want)): в черновик едет ровно то и под теми баркодами, что
+        // снимется из предброни. Схлоп «первый баркод per nm» переатрибуцировал бы штуки
+        // чужого размерного варианта (коммит бакетит по баркоду → не тот товар на ФФ).
+        const remainingDraft = new Map(wantByNm);
+        const shipByNmBc = new Map<string, AssemblyDraftRow>();
         for (const r of prebook) {
             if ((r.package_type || 'BOX') !== 'MONOPALLET' || !r.barcode || !(r.tgt[wb] > 0) || !(r.src[chosenKey] > 0)) continue;
+            const want = remainingDraft.get(r.nm_id) || 0;
+            if (want <= 0) continue;
             const portion = allocatePairs(r.src, r.tgt).get(`${ffId}::${wb}`) || 0;
-            const e = meta.get(r.nm_id);
-            if (e) e.avail += portion;
-            else meta.set(r.nm_id, { barcode: r.barcode, vendor_code: r.vendor_code, avail: portion });
+            const take = Math.min(portion, want);
+            if (take <= 0) continue;
+            remainingDraft.set(r.nm_id, want - take);
+            const k = `${r.nm_id}::${r.barcode}`;
+            const e = shipByNmBc.get(k);
+            if (e) { e.src[chosenKey] = (e.src[chosenKey] || 0) + take; e.tgt[wb] = (e.tgt[wb] || 0) + take; }
+            else shipByNmBc.set(k, { nm_id: r.nm_id, barcode: r.barcode, vendor_code: r.vendor_code, src: { [chosenKey]: take }, tgt: { [wb]: take }, package_type: 'MONOPALLET' as PackageType, as_is: true });
         }
-        const shipRows: AssemblyDraftRow[] = [...wantByNm.entries()]
-            .map(([nm, want]): AssemblyDraftRow | null => {
-                const m = meta.get(nm);
-                const qty = Math.min(want, m?.avail ?? 0);
-                return m && qty > 0
-                    ? { nm_id: nm, barcode: m.barcode, vendor_code: m.vendor_code, src: { [chosenKey]: qty }, tgt: { [wb]: qty }, package_type: 'MONOPALLET' as PackageType, as_is: true }
-                    : null;
-            })
-            .filter((r): r is AssemblyDraftRow => r != null);
+        const shipRows: AssemblyDraftRow[] = [...shipByNmBc.values()];
         if (shipRows.length === 0) { showToast('Не нашёл баркоды артикулов паллет в предброни', 'error'); return; }
         const units = shipRows.reduce((s, r) => s + (r.tgt[wb] || 0), 0);
         const partials = sel.filter(x => x.pallet.fillPct < 0.999).length;
@@ -1857,7 +1983,7 @@ export default function AssemblyDraftPage() {
             const mergedRows = mergeDraftRows([...rows, ...shipRows]);
             const targetNames = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.tgt))));
             const sourceIds = Array.from(new Set(mergedRows.flatMap(r => Object.keys(r.src).map(Number).filter(n => Number.isFinite(n) && n > 0))));
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: mergedRows, prebook: nextPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames } });
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: { ...buildDistribution(), rows: mergedRows, prebook: nextPrebook, source_warehouse_ids: sourceIds, target_warehouse_names: targetNames }, event: { event_type: 'MATRIX_EDIT', summary: `Паллеты предброни «${wb}» перенесены в черновик как есть` } });
             healScopeRef.current = { ts: updated.updated_at, only: new Set([directionKey('MONOPALLET', wb)]) };
             applyDraft(updated);
             showToast(`${sel.length === 1 ? `Паллета ${palletsLabel(sel)}` : `Паллеты ${palletsLabel(sel)}`} перенесены в черновик (${formatNumber(units, 0)} шт как есть) — бейдж «из предброни» в раскладке`, 'success');
@@ -1881,7 +2007,7 @@ export default function AssemblyDraftPage() {
                 target_warehouse_names: [],
                 cold_start_shares: null,
             };
-            const updated = await api.updateAssemblyDraft(draftId, { distribution: dist });
+            const updated = await api.updateAssemblyDraft(draftId, { distribution: dist, event: { event_type: 'MATRIX_EDIT', summary: 'Черновик очищен (строки + предбронь)' } });
             applyDraft(updated);
             showToast('Черновик очищен', 'success');
         } catch (e: unknown) {
@@ -1910,10 +2036,15 @@ export default function AssemblyDraftPage() {
     useEffect(() => {
         if (!initialLoadRef.current || !draftId) return;
         const timer = setTimeout(() => {
+            autosaveTimerRef.current = null;
             const json = JSON.stringify(buildDistribution());
             if (json !== lastSavedJsonRef.current) saveDraft(true).catch(() => {});
         }, AUTOSAVE_DEBOUNCE_MS);
-        return () => clearTimeout(timer);
+        autosaveTimerRef.current = timer;
+        return () => {
+            clearTimeout(timer);
+            if (autosaveTimerRef.current === timer) autosaveTimerRef.current = null;
+        };
     }, [rows, sourceWarehouseIds, targetWarehouseNames, palletsCount, palletWeightKg, estimatedReadyDate, name, comment, draftId, buildDistribution, saveDraft]);
 
     // Переименование черновика (как на предпросмотре): сохраняем только name.
@@ -1934,6 +2065,13 @@ export default function AssemblyDraftPage() {
             showToast(e instanceof Error ? e.message : 'Не удалось переименовать', 'error');
         }
     }, [draftId, draft, name, showToast]);
+
+    // ?tab=need у скоупленного черновика — аномалия URL (чип кликнут с вкладки
+    // «Потребность» основного / закладка): вкладка скрыта, контент не рендерится —
+    // уводим на «Ручную раскладку», иначе экран без активного таба и без контента.
+    useEffect(() => {
+        if (!loading && isScoped && activeTab === 'need') setTab('matrix');
+    }, [loading, isScoped, activeTab, setTab]);
 
     // nm_id строк черновика — скрыть из таблицы потребности во встроенной вкладке.
     const draftNmIds = useMemo(() => {
@@ -2013,7 +2151,7 @@ export default function AssemblyDraftPage() {
                             </button>
                         );
                     })}
-                    <button className="btn btn-secondary btn-sm" onClick={() => setCatModalOpen(true)}
+                    <button className="btn btn-secondary btn-sm" onClick={openCatModal}
                         title="Создать отдельный черновик-распределение только для выбранных категорий">
                         ➕ По категориям
                     </button>
@@ -2021,7 +2159,7 @@ export default function AssemblyDraftPage() {
             )}
             {draftChips.length <= 1 && !isScoped && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
-                    <button className="btn btn-secondary btn-sm" onClick={() => setCatModalOpen(true)}
+                    <button className="btn btn-secondary btn-sm" onClick={openCatModal}
                         title="Создать отдельный черновик-распределение только для выбранных категорий (например, только «Панели стеновые» с одного ФФ)">
                         ➕ Распределение по категориям
                     </button>
@@ -2064,7 +2202,7 @@ export default function AssemblyDraftPage() {
 
             {catModalOpen && (
                 <CategoryDraftModal
-                    articles={effArticles}
+                    articles={modalArticles}
                     categoryOf={categoryOf}
                     warehouses={warehouses}
                     existingScopes={allDrafts.flatMap(d => d.distribution.category_scope || [])}
@@ -2203,7 +2341,8 @@ export default function AssemblyDraftPage() {
                             </div>
                         </div>
                     )}
-                    <UrgentShipPanel slug={slug} rows={rows} stockNeed={stockNeed}
+                    <UrgentShipPanel slug={slug} rows={rows} prebook={prebook} stockNeed={stockNeed}
+                        reservedByNm={urgentReservedByNm}
                         inScope={isScoped ? inScope : undefined}
                         scopeLabel={isScoped ? (categoryScope || []).join(', ') : undefined}
                     />
@@ -2229,8 +2368,12 @@ export default function AssemblyDraftPage() {
                 </>
             )}
 
-            {/* Вкладка «Потребность по складам» — встроенный WarehouseNeedView */}
-            {activeTab === 'need' && (
+            {/* Вкладка «Потребность по складам» — встроенный WarehouseNeedView.
+                !isScoped обязателен (не только фильтр кнопки таба): ?tab=need переживает
+                клик по чипу категорийного черновика (switchDraft хранит query), и смонти-
+                рованная «Потребность» лила бы SKU ЧУЖИХ категорий в скоупленный черновик
+                (add_rows_to_draft скоуп не валидирует, авто-синк чужие nm не вычищает). */}
+            {activeTab === 'need' && !isScoped && (
                 <WarehouseNeedView
                     embeddedDraftId={draft.id}
                     hiddenNmIds={draftNmIds}

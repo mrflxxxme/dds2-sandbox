@@ -14,7 +14,13 @@ const LOC_WINDOW_DAYS = 30;
 interface Props {
     slug: string;
     rows: AssemblyDraftRow[];
+    /** Предбронь черновика: SKU в ней УЖЕ спланирован (ждёт паллету) — без неё
+     *  он ложно попадал в «Срочные ВНЕ черновика» с советом «добавьте». */
+    prebook?: AssemblyDraftRow[];
     stockNeed: StockNeedResponse | null;
+    /** nm → штук, занятых ДРУГИМИ черновиками (из /drafts/reserved): вычитается
+     *  из «свободно на ФФ» — иначе чипы предлагали доложить уже занятый сток. */
+    reservedByNm?: ReadonlyMap<number, number>;
     /** Категорийный скоуп черновика: срочные SKU считаются ТОЛЬКО по своим
      *  категориям (и «в черновике», и «вне черновика» — чужие не шумят). */
     inScope?: (nm: number) => boolean;
@@ -54,7 +60,7 @@ function LocPct({ pct, target }: { pct: number | null; target: number }) {
  *  сколько реализации теряем за каждый день промедления. Заменил панель
  *  «Добавить из потребности»: срочные SKU вне черновика показаны компактной
  *  строкой-предупреждением (добавляются через «Заполнить» или вкладку «Потребность»). */
-export default function UrgentShipPanel({ slug, rows, stockNeed, inScope, scopeLabel }: Props) {
+export default function UrgentShipPanel({ slug, rows, prebook, stockNeed, reservedByNm, inScope, scopeLabel }: Props) {
     const [articles, setArticles] = useState<StockAnalyticsArticle[] | null>(null);
     const [locMap, setLocMap] = useState<Map<number, number>>(new Map());
     const [state, setState] = useState<'loading' | 'error' | 'ready'>('loading');
@@ -82,12 +88,13 @@ export default function UrgentShipPanel({ slug, rows, stockNeed, inScope, scopeL
 
     const draftQtyByNm = useMemo(() => {
         const m = new Map<number, number>();
-        for (const r of rows) {
+        // rows + prebook: предбронь — тоже план черновика (коробы ждут паллету).
+        for (const r of [...rows, ...(prebook ?? [])]) {
             const qty = Object.values(r.tgt).reduce((s, v) => s + (v || 0), 0);
             if (qty > 0) m.set(r.nm_id, (m.get(r.nm_id) || 0) + qty);
         }
         return m;
-    }, [rows]);
+    }, [rows, prebook]);
 
     // Плечо поставки = средняя сборка на ФФ + средняя доставка до склада WB.
     const leadDays = useMemo(() => {
@@ -102,9 +109,17 @@ export default function UrgentShipPanel({ slug, rows, stockNeed, inScope, scopeL
             // Категорийный скоуп: срочность считается только по SKU своих категорий —
             // и «в черновике», и «вне черновика» (иначе в «Панелях» шумели бы ковры).
             const scoped = inScope ? (articles ?? []).filter(a => inScope(a.nm_id)) : (articles ?? []);
-            return buildUrgentShip({ articles: scoped, draftQtyByNm, locPctByNm: locMap, leadDays, trendDays: TREND_DAYS });
+            // «Свободно на ФФ» минус занятое другими черновиками: stocks_rf → ffFree
+            // внутри buildUrgentShip; без вычета чипы предлагали чужой резерв.
+            const adjusted = reservedByNm && reservedByNm.size > 0
+                ? scoped.map(a => {
+                    const res = reservedByNm.get(a.nm_id) || 0;
+                    return res > 0 ? { ...a, stocks_rf: Math.max(0, (a.stocks_rf ?? 0) - res) } : a;
+                })
+                : scoped;
+            return buildUrgentShip({ articles: adjusted, draftQtyByNm, locPctByNm: locMap, leadDays, trendDays: TREND_DAYS });
         },
-        [articles, draftQtyByNm, locMap, leadDays, inScope],
+        [articles, draftQtyByNm, locMap, leadDays, inScope, reservedByNm],
     );
 
     const locTarget = stockNeed?.summary?.localization_target ?? 75;

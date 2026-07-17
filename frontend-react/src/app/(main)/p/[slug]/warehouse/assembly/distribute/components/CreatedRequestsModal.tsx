@@ -92,7 +92,13 @@ export default function CreatedRequestsModal({ slug, rows, listQuery, onClose }:
     const [ffState, setFfState] = useState<Map<number, CellState>>(new Map());
     const [massBusy, setMassBusy] = useState<'wb' | 'ff' | null>(null);
     // Параметры создаваемых заявок ФФ (общие для всех) — как в FfBulkCreateModal.
-    const plus3 = () => { const d = new Date(); d.setDate(d.getDate() + 3); return d.toISOString().slice(0, 10); };
+    // Дата — в ЛОКАЛЬНОМ поясе: toISOString (UTC) ночью (00:00–03:00 МСК) отдавал
+    // вчерашний день → дефолт забора сдвигался на сутки назад.
+    const plus3 = () => {
+        const d = new Date();
+        d.setDate(d.getDate() + 3);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
     const [collectionDate, setCollectionDate] = useState(plus3());
     const [deliveryType, setDeliveryType] = useState<'straight' | 'cross_dock'>('straight');
     // Занос в WB идёт реплеем кабинета — без активной сессии упадёт каждый преордер.

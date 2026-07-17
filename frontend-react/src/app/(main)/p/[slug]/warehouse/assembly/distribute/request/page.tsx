@@ -200,8 +200,10 @@ export default function AssemblyRequestUnitPage() {
         return m;
     }, [draft, ffId]);
     const origQtyByNm = useMemo(() => {
+        // Σ per nm: юнит может нести НЕСКОЛЬКО баркодов одного nm (размерные
+        // варианты) — set() последним значением занижал бы исходный вклад.
         const m = new Map<number, number>();
-        for (const it of unit?.items ?? []) m.set(it.nmId, it.qty);
+        for (const it of unit?.items ?? []) m.set(it.nmId, (m.get(it.nmId) || 0) + it.qty);
         return m;
     }, [unit]);
     // Максимум для позиции = свободный остаток ФФ + текущий вклад этой заявки.
@@ -262,11 +264,14 @@ export default function AssemblyRequestUnitPage() {
         setAddQuery('');
         setEditMode(true);
     }, [unit]);
-    const setItemQty = useCallback((nmId: number, qty: number) => {
-        setEditItems(prev => prev.map(e => e.nmId === nmId ? { ...e, qty: normQty(nmId, qty) } : e));
+    // Адресация позиции — по БАРКОДУ: он уникален в юните (бэк сливает по barcode),
+    // а nmId дублируется у размерных вариантов — правка/удаление по nmId затирала
+    // qty второго баркода того же nm (и 🗑 сносил оба).
+    const setItemQty = useCallback((barcode: string, nmId: number, qty: number) => {
+        setEditItems(prev => prev.map(e => e.barcode === barcode ? { ...e, qty: normQty(nmId, qty) } : e));
     }, [normQty]);
-    const removeItem = useCallback((nmId: number) => {
-        setEditItems(prev => prev.filter(e => e.nmId !== nmId));
+    const removeItem = useCallback((barcode: string) => {
+        setEditItems(prev => prev.filter(e => e.barcode !== barcode));
     }, []);
     const addItem = useCallback((c: { nmId: number; vendor: string; barcode: string; free: number }) => {
         const k = kOf(c.nmId);
@@ -596,18 +601,18 @@ export default function AssemblyRequestUnitPage() {
                                 const max = maxForNm(e.nmId);
                                 const over = e.qty > max;
                                 return (
-                                    <tr key={e.nmId} style={{ borderBottom: '1px solid var(--color-border)' }}>
+                                    <tr key={`${e.nmId}::${e.barcode}`} style={{ borderBottom: '1px solid var(--color-border)' }}>
                                         <td style={{ padding: '6px 12px', fontWeight: 500 }}>{e.vendor || `nm:${e.nmId}`}</td>
                                         <td style={{ padding: '6px 12px', color: 'var(--color-text-muted)' }}>{e.barcode}</td>
                                         <td style={{ padding: '6px 12px' }}>
                                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-                                                <button className="btn btn-secondary btn-sm" style={{ width: 30, padding: '2px 0' }} onClick={() => setItemQty(e.nmId, e.qty - step)} disabled={e.qty <= 0}>−</button>
+                                                <button className="btn btn-secondary btn-sm" style={{ width: 30, padding: '2px 0' }} onClick={() => setItemQty(e.barcode, e.nmId, e.qty - step)} disabled={e.qty <= 0}>−</button>
                                                 <input
                                                     type="number" min={0} value={e.qty}
-                                                    onChange={ev => setItemQty(e.nmId, Number(ev.target.value))}
+                                                    onChange={ev => setItemQty(e.barcode, e.nmId, Number(ev.target.value))}
                                                     style={{ width: 72, textAlign: 'center', padding: '4px 6px', borderRadius: 6, border: `1px solid ${over ? 'var(--color-danger)' : 'var(--color-border)'}` }}
                                                 />
-                                                <button className="btn btn-secondary btn-sm" style={{ width: 30, padding: '2px 0' }} onClick={() => setItemQty(e.nmId, e.qty + step)} disabled={e.qty >= max}>+</button>
+                                                <button className="btn btn-secondary btn-sm" style={{ width: 30, padding: '2px 0' }} onClick={() => setItemQty(e.barcode, e.nmId, e.qty + step)} disabled={e.qty >= max}>+</button>
                                                 <span style={{ fontSize: 11, color: 'var(--color-text-muted)', minWidth: 54 }}>
                                                     {k > 0 ? `${formatNumber(e.qty / k, 0)} кор ×${k}` : 'россыпь'}
                                                 </span>
@@ -615,7 +620,7 @@ export default function AssemblyRequestUnitPage() {
                                         </td>
                                         <td style={{ padding: '6px 12px', textAlign: 'right', color: over ? 'var(--color-danger)' : 'var(--color-text-muted)' }}>{formatNumber(max, 0)}</td>
                                         <td style={{ padding: '6px 12px', textAlign: 'center' }}>
-                                            <button className="btn btn-secondary btn-sm" title="Удалить позицию" onClick={() => removeItem(e.nmId)}>🗑</button>
+                                            <button className="btn btn-secondary btn-sm" title="Удалить позицию" onClick={() => removeItem(e.barcode)}>🗑</button>
                                         </td>
                                     </tr>
                                 );
