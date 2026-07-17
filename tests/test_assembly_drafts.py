@@ -3575,3 +3575,56 @@ async def test_commit_unit_logs_commit_event_and_revert_restores(db_session):
         r.barcode == TEST_BARCODE_1 and r.src == {str(wh_a): 7} and r.tgt == {"Электросталь": 7}
         for r in rdist.rows
     ), "позиции юнита не вернулись в rows при откате"
+
+
+# ─── CAS-гвард update_draft (base_updated_at) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_update_draft_version_conflict_409(db_session):
+    """PUT со stale base_updated_at → 409 DRAFT_VERSION_CONFLICT, черновик не тронут.
+
+    Прод-кейс 2026-07-17: фоновая консолидация второй вкладки full-replace'ом
+    воскресила очищенный черновик через 9с (11 177 шт вернулись без события)."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    payload = _build_payload([wh_a], ["Электросталь"], [
+        AssemblyDraftRow(nm_id=1, barcode=TEST_BARCODE_1, src={str(wh_a): 5}, tgt={"Электросталь": 5}),
+    ])
+    draft = await assembly_draft_service.create_draft(db_session, PROJECT_ID, payload)
+    stale_version = draft.updated_at
+
+    # Конкурирующая запись двигает версию (очистка из «другой вкладки»).
+    await assembly_draft_service.update_draft(
+        db_session, PROJECT_ID, draft.id,
+        AssemblyDraftUpdate(distribution=AssemblyDraftDistribution()),
+    )
+
+    # Stale-писатель с прежней версией — 409, содержимое не перезаписано.
+    with pytest.raises(HTTPException) as exc:
+        await assembly_draft_service.update_draft(
+            db_session, PROJECT_ID, draft.id,
+            AssemblyDraftUpdate(distribution=payload.distribution, base_updated_at=stale_version),
+        )
+    assert exc.value.status_code == 409
+    assert "DRAFT_VERSION_CONFLICT" in str(exc.value.detail)
+    fresh = await assembly_draft_service.get_draft(db_session, PROJECT_ID, draft.id)
+    assert (fresh.distribution or {}).get("rows") in ([], None)  # очистка не затёрта
+
+
+@pytest.mark.asyncio
+async def test_update_draft_version_match_and_legacy_ok(db_session):
+    """Совпавшая версия проходит; PUT без base_updated_at — легаси, без CAS."""
+    wh_a, _ = await _get_warehouse_ids(db_session)
+    draft = await assembly_draft_service.create_draft(
+        db_session, PROJECT_ID, _build_payload([wh_a], ["Электросталь"], []),
+    )
+    updated = await assembly_draft_service.update_draft(
+        db_session, PROJECT_ID, draft.id,
+        AssemblyDraftUpdate(comment="v1", base_updated_at=draft.updated_at),
+    )
+    assert updated.comment == "v1"
+    # Легаси-путь (без версии) по-прежнему пишет.
+    updated2 = await assembly_draft_service.update_draft(
+        db_session, PROJECT_ID, draft.id, AssemblyDraftUpdate(comment="v2"),
+    )
+    assert updated2.comment == "v2"
