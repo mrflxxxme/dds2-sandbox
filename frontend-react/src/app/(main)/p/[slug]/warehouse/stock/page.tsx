@@ -220,8 +220,9 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
     const isGrouped = groupBy !== 'sku' && groupBy !== 'abc';
 
     const getVariantTotal = useCallback((row: UnifiedStockRow): number => {
-        // Всё у WB = на складах + в пути до получателей + возвраты (как «Итого» кабинета)
-        const wbAll = (row.total_wb || 0) + (row.wb_in_way_to_client || 0) + (row.wb_in_way_from_client || 0);
+        // «В пути до получателей» НЕ входит в Итого (товар уже уехал к покупателям).
+        // Учитываем склады WB + возвраты (вернутся и снова станут доступны).
+        const wbAll = (row.total_wb || 0) + (row.wb_in_way_from_client || 0);
         if (variant === 1) return wbAll;
         if (variant === 2) return (row.total_own || 0) + wbAll + (row.in_transit || 0);
         return (row.total_own || 0) + wbAll + (row.in_transit || 0)
@@ -483,7 +484,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             vehicleTransitTotal += row.vehicle_transit_qty || 0;
             variantTotal += getVariantTotal(row);
             if (mode !== 'qty') {
-                const wbAll = (row.total_wb || 0) + (row.wb_in_way_to_client || 0) + (row.wb_in_way_from_client || 0);
+                // «В пути до получателей» исключён из Итого (см. getVariantTotal)
+                const wbAll = (row.total_wb || 0) + (row.wb_in_way_from_client || 0);
                 ownMoney += (row.total_own || 0) * multiplier;
                 wbMoney += (row.total_wb || 0) * multiplier;
                 wbToClientMoney += (row.wb_in_way_to_client || 0) * multiplier;
