@@ -251,3 +251,147 @@ async def test_me_rejects_too_long_period(client, db_session, registered_user):
         params={"since": "2000-01-01", "until": date(2026, 7, 17).isoformat()},
     )
     assert resp.status_code == 400
+
+
+# ─── Селектор разработчика (любой вайбкодер видит всех) ─────────────────────
+
+
+async def test_authors_forbidden_for_non_vibecoder(client, db_session, registered_user):
+    """Список сотрудников — внутренние данные: клиенту его не отдаём."""
+    _user, headers = registered_user
+    resp = await client.get("/api/v1/vibe/authors", headers=headers)
+    assert resp.status_code == 403
+
+
+async def test_authors_lists_vibecoders(client, db_session, registered_user):
+    user, headers = registered_user
+    await _make_vibecoder(db_session, user)
+
+    resp = await client.get("/api/v1/vibe/authors", headers=headers)
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert any(r["user_id"] == user.id and r["name"] == "Денис" for r in rows)
+
+
+async def test_authors_dedups_multiple_emails_of_one_person(
+    client, db_session, registered_user
+):
+    """Две git-почты одного человека — ОДНА строка в селекторе, не две.
+
+    Реальный кейс: у Дениса denlyublyukatyu@gmail.com и denisdmitriev@macbook-air-7.local.
+    """
+    user, headers = registered_user
+    await _make_vibecoder(db_session, user)
+    db_session.add(
+        VibeAuthor(user_id=user.id, git_email=f"second_{uuid.uuid4().hex[:6]}@example.com")
+    )
+    await db_session.commit()
+
+    rows = (await client.get("/api/v1/vibe/authors", headers=headers)).json()
+    assert len([r for r in rows if r["user_id"] == user.id]) == 1
+
+
+async def test_me_shows_other_author_stats(client, db_session, registered_user):
+    """Вайбкодер может открыть статистику другого вайбкодера."""
+    user, headers = registered_user
+    await _make_vibecoder(db_session, user)
+
+    other = User(
+        username=f"other_{uuid.uuid4().hex[:8]}",
+        password_hash="x",
+        email=f"other_{uuid.uuid4().hex[:8]}@test.com",
+    )
+    db_session.add(other)
+    await db_session.commit()
+    other_email = f"other_{uuid.uuid4().hex[:8]}@example.com"
+    db_session.add(
+        VibeAuthor(user_id=other.id, git_email=other_email, display_name="Влад")
+    )
+    await db_session.commit()
+
+    today = utcnow().date()
+    await vibe_service.ingest(
+        db_session,
+        [
+            VibeIngestCommit(
+                sha=_sha(),
+                author_email=other_email,
+                authored_on=today,
+                ctype="feat",
+                scope="ads",
+                title="чужая поставка",
+                added=10,
+                deleted=0,
+                files=1,
+                is_product=True,
+                files_list=[VibeIngestFile(path="backend/x.py", added=10, is_new=True)],
+            )
+        ],
+    )
+
+    resp = await client.get(
+        f"/api/v1/vibe/me?author_id={other.id}", headers=headers
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["display_name"] == "Влад"
+    assert body["shipments_total"] == 1
+
+    # Своя статистика при этом пуста — данные не перемешались.
+    mine = (await client.get("/api/v1/vibe/me", headers=headers)).json()
+    assert mine["shipments_total"] == 0
+
+    await db_session.execute(delete(VibeFile))
+    await db_session.execute(delete(VibeCommit).where(VibeCommit.author_email == other_email))
+    await db_session.execute(delete(VibeAuthor).where(VibeAuthor.user_id == other.id))
+    await db_session.execute(delete(User).where(User.id == other.id))
+    await db_session.commit()
+
+
+async def test_me_with_unknown_author_is_404_not_403(client, db_session, registered_user):
+    """Чужой/несуществующий id — 404. Слить его с 403 нельзя: тогда клиент не отличит
+    «нет такого автора» от «я потерял доступ»."""
+    user, headers = registered_user
+    await _make_vibecoder(db_session, user)
+
+    resp = await client.get("/api/v1/vibe/me?author_id=999999", headers=headers)
+    assert resp.status_code == 404
+
+
+async def test_non_vibecoder_cannot_read_others_via_author_id(
+    client, db_session, registered_user
+):
+    """Гейт проверяется по ЗАПРАШИВАЮЩЕМУ: не-вайбкодер не обойдёт его чужим id."""
+    _user, headers = registered_user
+    resp = await client.get("/api/v1/vibe/me?author_id=1", headers=headers)
+    assert resp.status_code == 403
+
+
+async def test_authors_prefer_display_name_over_username(
+    client, db_session, registered_user
+):
+    """Имя ищется по ВСЕМ строкам автора, а не по первой попавшейся.
+
+    Реальный баг: у человека несколько git-почт, display_name задан только у одной.
+    Строка без имени, попавшаяся первой, закрепляла username — в селекторе висели
+    «admin» и «ivnfs» вместо «Влад Вяткин» и «Иван».
+    """
+    user, headers = registered_user
+    # Первая строка — БЕЗ имени, вторая — с именем.
+    db_session.add(
+        VibeAuthor(user_id=user.id, git_email=f"a_{uuid.uuid4().hex[:6]}@example.com")
+    )
+    await db_session.commit()
+    db_session.add(
+        VibeAuthor(
+            user_id=user.id,
+            git_email=f"b_{uuid.uuid4().hex[:6]}@example.com",
+            display_name="Влад Вяткин",
+        )
+    )
+    await db_session.commit()
+
+    rows = (await client.get("/api/v1/vibe/authors", headers=headers)).json()
+    mine = [r for r in rows if r["user_id"] == user.id]
+    assert len(mine) == 1
+    assert mine[0]["name"] == "Влад Вяткин", "имя проиграло username"

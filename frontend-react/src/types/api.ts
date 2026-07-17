@@ -6637,6 +6637,12 @@ export interface VibeScale {
 }
 
 /** Ответ вкладки «Вайбкодинг» для текущего пользователя. */
+/** Вайбкодер для селектора: один человек = один user_id, сколько бы git-почт ни было. */
+export interface VibeAuthorRef {
+    user_id: number;
+    name: string;
+}
+
 export interface VibeStats {
   display_name: string;
   since: string;

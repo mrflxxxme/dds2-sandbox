@@ -11,7 +11,8 @@
 HTTP-эндпоинт означал бы ещё один write-путь в прод и токен к нему.
 
 Эндпоинты:
-  GET /vibe/me            — статистика текущего пользователя за период
+  GET /vibe/authors       — вайбкодеры для селектора
+  GET /vibe/me            — статистика за период: своя либо ?author_id=N
   GET /vibe/is-vibecoder  — дешёвый флаг для сайдбара
 """
 
@@ -25,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.auth import get_current_user
 from backend.database import get_db
 from backend.models import User
-from backend.schemas.vibe import VibeStats
+from backend.schemas.vibe import VibeAuthorRef, VibeStats
 from backend.services import vibe_service
 from backend.utils.time import utcnow
 
@@ -37,16 +38,33 @@ DEFAULT_PERIOD_DAYS = 30
 MAX_PERIOD_DAYS = 366
 
 
+@router.get("/authors", response_model=list[VibeAuthorRef])
+async def list_vibe_authors(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[VibeAuthorRef]:
+    """Вайбкодеры для селектора. Любой вайбкодер видит всех (решение юзера 17.07).
+
+    403 не-вайбкодеру: список сотрудников — внутренние данные, клиентам не отдаём.
+    """
+    if not await vibe_service.is_vibecoder(db, user.id):
+        raise HTTPException(403, "Раздел доступен только вайбкодерам")
+    return await vibe_service.list_authors(db)
+
+
 @router.get("/me", response_model=VibeStats)
 async def get_my_vibe_stats(
     since: date | None = Query(None, description="Начало периода (по умолчанию — 30 дней назад)"),
     until: date | None = Query(None, description="Конец периода (по умолчанию — сегодня)"),
+    author_id: int | None = Query(None, description="Чью статистику показать (по умолчанию — свою)"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> VibeStats:
-    """Статистика вайбкодинга текущего пользователя за период.
+    """Статистика вайбкодинга за период: своя либо выбранного автора.
 
-    403 — пользователь не вайбкодер (нет строки в `vibe_authors`).
+    403 — запрашивающий не вайбкодер (нет строки в `vibe_authors`).
+    404 — запрошенный автор не вайбкодер: это НЕ 403, иначе ответ «нет такого» и
+    «тебе нельзя» сливаются, и клиент не отличит чужой id от своей потери доступа.
     """
     until = until or utcnow().date()
     # 30 дней ВКЛЮЧИТЕЛЬНО: since=until-29 даёт ровно 30 точек в by_day.
@@ -57,9 +75,14 @@ async def get_my_vibe_stats(
     if (until - since).days + 1 > MAX_PERIOD_DAYS:
         raise HTTPException(400, f"Период больше {MAX_PERIOD_DAYS} дней")
 
-    stats = await vibe_service.get_stats(db, user.id, since, until)
-    if stats is None:
+    # Доступ проверяем ПО ЗАПРАШИВАЮЩЕМУ, а не по цели: иначе не-вайбкодер, угадав
+    # чужой author_id, получил бы данные в обход гейта.
+    if not await vibe_service.is_vibecoder(db, user.id):
         raise HTTPException(403, "Раздел доступен только вайбкодерам")
+
+    stats = await vibe_service.get_stats(db, author_id or user.id, since, until)
+    if stats is None:
+        raise HTTPException(404, "Автор не найден")
     return stats
 
 

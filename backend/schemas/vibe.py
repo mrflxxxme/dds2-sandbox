@@ -6,6 +6,14 @@ from datetime import date
 from pydantic import BaseModel
 
 
+class VibeAuthorRef(BaseModel):
+    """Вайбкодер для селектора. Один человек = один user_id, сколько бы git-почт у него
+    ни было (у Дениса их две, и самый крупный коммит недели — под второй)."""
+
+    user_id: int
+    name: str
+
+
 class VibeShipment(BaseModel):
     """Одна поставка на прод."""
 

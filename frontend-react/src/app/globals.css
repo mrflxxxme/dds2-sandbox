@@ -3130,6 +3130,32 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
    ПАЛИТРА ЗАМКНУТА НА .vibe-root: переменные объявлены здесь, а не в :root, поэтому
    тёмным становится только «Вайбкодинг» — на остальной сервис не течёт. Внутри
    раздела цвета берутся ТОЛЬКО из var(--vibe-*), hex в компонентах нет. */
+.vibe-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+/* Селектор автора. Тёмный, как весь раздел: системный светлый control на тёмной
+   карточке читался бы белым пятном. */
+.vibe-select {
+    background: var(--vibe-surface);
+    color: var(--vibe-ink);
+    border: 1px solid var(--vibe-border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.vibe-select:focus {
+    outline: none;
+    border-color: var(--vibe-seq-4);
+}
+
 .vibe-root {
     color-scheme: dark;
 
@@ -3403,6 +3429,13 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 
 .vibe-cols-dense .vibe-col {
     min-width: 0;
+}
+
+/* Базовая линия жила на `.vibe-cd`, а он в плотном режиме скрыт — без неё столбцы
+   висят в воздухе, чего в эталоне нет. Возвращаем линию контейнеру: подписи по-прежнему
+   не мешаются, а «от чего растут столбцы» видно. */
+.vibe-cols-dense {
+    border-bottom: 1px solid var(--vibe-baseline);
 }
 
 .vibe-col {

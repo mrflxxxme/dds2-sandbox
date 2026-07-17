@@ -16,8 +16,10 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.models.auth import User
 from backend.models.vibe import VibeAuthor, VibeCommit, VibeFile
 from backend.schemas.vibe import (
+    VibeAuthorRef,
     VibeAreaVolume,
     VibeDayVolume,
     VibeIngestCommit,
@@ -326,6 +328,39 @@ async def get_stats(
         shipments=shipments,
         last_ingest=last_ingest.date() if last_ingest else None,
     )
+
+
+async def list_authors(db: AsyncSession) -> list[VibeAuthorRef]:
+    """Все вайбкодеры — для селектора. Один человек может иметь несколько git-почт,
+    поэтому группируем по user_id, а не по строкам таблицы.
+
+    Имя берём первое непустое из `display_name`; если его не проставили при привязке —
+    падаем на username, иначе в селекторе будет пусто.
+    """
+    rows = (
+        await db.execute(
+            select(VibeAuthor.user_id, VibeAuthor.display_name, User.username)
+            .join(User, User.id == VibeAuthor.user_id)
+            .order_by(VibeAuthor.user_id)
+        )
+    ).all()
+
+    # display_name проставлен НЕ у каждой строки: почт у человека несколько, имя обычно
+    # задают при первой привязке. Поэтому сначала ищем имя по ВСЕМ его строкам и только
+    # потом падаем на username — иначе строка без имени, попавшаяся первой, навсегда
+    # закрепляла бы логин (в селекторе было «admin» и «ivnfs» вместо живых имён).
+    display: dict[int, str] = {}
+    fallback: dict[int, str] = {}
+    for user_id, display_name, username in rows:
+        if display_name and display_name.strip() and user_id not in display:
+            display[user_id] = display_name.strip()
+        fallback.setdefault(user_id, (username or "").strip())
+
+    names = {uid: display.get(uid) or fallback.get(uid) or f"#{uid}" for uid in fallback}
+    return [
+        VibeAuthorRef(user_id=uid, name=name)
+        for uid, name in sorted(names.items(), key=lambda kv: kv[1].lower())
+    ]
 
 
 async def is_vibecoder(db: AsyncSession, user_id: int) -> bool:

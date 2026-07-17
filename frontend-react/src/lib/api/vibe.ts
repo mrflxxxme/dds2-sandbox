@@ -1,6 +1,6 @@
 /** Vibecoding API — опись работы вайбкодера: ритм, объём, лента поставок. */
 import { ApiClient } from './client';
-import type { VibeStats } from '@/types/api';
+import type { VibeAuthorRef, VibeStats } from '@/types/api';
 
 /** 403 = «не вайбкодер». Не ошибка загрузки, а отсутствие доступа к вкладке. */
 export function isForbidden(e: unknown): boolean {
@@ -9,13 +9,22 @@ export function isForbidden(e: unknown): boolean {
 
 export function addVibeMethods(api: ApiClient) {
     return {
-        /** Статистика текущего пользователя за период. 403 — не вайбкодер. */
-        getVibeStats(params?: { since?: string; until?: string }) {
+        /**
+         * Статистика за период: своя либо выбранного автора (`authorId`).
+         * 403 — запрашивающий не вайбкодер. 404 — такого автора нет.
+         */
+        getVibeStats(params?: { since?: string; until?: string; authorId?: number }) {
             const q = new URLSearchParams();
             if (params?.since) q.set('since', params.since);
             if (params?.until) q.set('until', params.until);
+            if (params?.authorId) q.set('author_id', String(params.authorId));
             const qs = q.toString();
             return api.request<VibeStats>('GET', `/api/v1/vibe/me${qs ? `?${qs}` : ''}`);
+        },
+
+        /** Вайбкодеры для селектора. Любой вайбкодер видит всех. */
+        getVibeAuthors() {
+            return api.request<VibeAuthorRef[]>('GET', '/api/v1/vibe/authors');
         },
 
         /**

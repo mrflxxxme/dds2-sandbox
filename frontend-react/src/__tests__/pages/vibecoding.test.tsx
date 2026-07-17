@@ -3,11 +3,12 @@ import { render, screen } from '@testing-library/react';
 import VibecodingPage from '@/app/(main)/p/[slug]/vibecoding/page';
 import type { VibeStats } from '@/types/api';
 
-vi.mock('@/lib/api', () => ({ api: { getVibeStats: vi.fn() } }));
+vi.mock('@/lib/api', () => ({ api: { getVibeStats: vi.fn(), getVibeAuthors: vi.fn() } }));
 
 import { api } from '@/lib/api';
 
 const getVibeStats = vi.mocked(api.getVibeStats);
+const getVibeAuthors = vi.mocked(api.getVibeAuthors);
 
 function makeStats(over: Partial<VibeStats> = {}): VibeStats {
     return {
@@ -45,7 +46,12 @@ function forbidden(): Error & { status: number } {
 }
 
 describe('Страница «Вайбкодинг»', () => {
-    beforeEach(() => { getVibeStats.mockReset(); });
+    beforeEach(() => {
+        getVibeStats.mockReset();
+        // Список авторов страница тянет всегда; по умолчанию — пусто, селектора нет.
+        getVibeAuthors.mockReset();
+        getVibeAuthors.mockResolvedValue([]);
+    });
 
     it('loading — пока запрос не ответил', () => {
         getVibeStats.mockReturnValue(new Promise(() => { }));
@@ -149,5 +155,47 @@ describe('Страница «Вайбкодинг»', () => {
         expect(await screen.findByText('Вкладка не для вас')).toBeInTheDocument();
         expect(screen.queryByText('Не удалось загрузить статистику')).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Повторить' })).not.toBeInTheDocument();
+    });
+});
+
+describe('Вайбкодинг — селектор разработчика', () => {
+    beforeEach(() => {
+        getVibeStats.mockReset();
+        getVibeAuthors.mockReset();
+        getVibeStats.mockResolvedValue(makeStats());
+    });
+
+    it('не показывает селектор, когда вайбкодер один: выбирать не из кого', async () => {
+        getVibeAuthors.mockResolvedValue([{ user_id: 1, name: 'Денис' }]);
+        render(<VibecodingPage />);
+        await screen.findByText(/Ритм/i);
+        expect(screen.queryByLabelText('Чью статистику показать')).toBeNull();
+    });
+
+    it('показывает селектор, когда вайбкодеров несколько', async () => {
+        getVibeAuthors.mockResolvedValue([
+            { user_id: 1, name: 'Денис' },
+            { user_id: 2, name: 'Влад Вяткин' },
+        ]);
+        render(<VibecodingPage />);
+        expect(await screen.findByLabelText('Чью статистику показать')).toBeInTheDocument();
+        expect(screen.getByRole('option', { name: 'Моя статистика' })).toBeInTheDocument();
+    });
+
+    it('первый заход НЕ шлёт author_id — бэк сам берёт текущего пользователя', async () => {
+        getVibeAuthors.mockResolvedValue([
+            { user_id: 1, name: 'Денис' },
+            { user_id: 2, name: 'Влад Вяткин' },
+        ]);
+        render(<VibecodingPage />);
+        await screen.findByText(/Ритм/i);
+        expect(getVibeStats).toHaveBeenCalledWith(undefined);
+    });
+
+    it('сбой списка авторов не ломает страницу — своя статистика показывается', async () => {
+        getVibeAuthors.mockRejectedValue(new Error('нет сети'));
+        render(<VibecodingPage />);
+        await screen.findByText(/Ритм/i);
+        expect(screen.queryByLabelText('Чью статистику показать')).toBeNull();
     });
 });

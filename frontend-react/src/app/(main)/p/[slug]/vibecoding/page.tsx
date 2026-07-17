@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { isForbidden } from '@/lib/api/vibe';
 import { formatDate, formatNumber, pluralRu, exportToExcel, type ExcelExportColumn } from '@/lib/utils';
-import type { VibeStats, VibeShipment, VibeDayVolume } from '@/types/api';
+import type { VibeAuthorRef, VibeStats, VibeShipment, VibeDayVolume } from '@/types/api';
 
 /* ─── Даты ──────────────────────────────────────────────────────────────────── */
 
@@ -337,13 +337,17 @@ export default function VibecodingPage() {
     // 403 — не ошибка, а «вкладка не для вас»: у сервиса есть внешние пользователи
     // и клиенты-селлеры, для них это нормальный ответ, а не сбой.
     const [forbidden, setForbidden] = useState(false);
+    // Кого показываем. null = себя: бэк по умолчанию берёт текущего пользователя,
+    // поэтому первый заход не ждёт списка авторов и рисуется сразу.
+    const [authorId, setAuthorId] = useState<number | null>(null);
+    const [authors, setAuthors] = useState<VibeAuthorRef[]>([]);
 
     const load = useCallback(async () => {
         setLoading(true);
         setError('');
         setForbidden(false);
         try {
-            const res = await api.getVibeStats();
+            const res = await api.getVibeStats(authorId ? { authorId } : undefined);
             setStats(res);
         } catch (e) {
             if (isForbidden(e)) setForbidden(true);
@@ -351,9 +355,19 @@ export default function VibecodingPage() {
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [authorId]);
 
     useEffect(() => { load(); }, [load]);
+
+    // Список для селектора. Сбой глушим: не смог загрузить — просто нет выбора,
+    // своя статистика при этом показывается как обычно.
+    useEffect(() => {
+        let cancelled = false;
+        api.getVibeAuthors()
+            .then(rows => { if (!cancelled) setAuthors(rows); })
+            .catch(() => { /* нет списка — нет селектора */ });
+        return () => { cancelled = true; };
+    }, []);
 
     const perDay = useMemo(
         () => new Map((stats?.by_day ?? []).map(d => [d.day, d])),
@@ -364,12 +378,31 @@ export default function VibecodingPage() {
 
     return (
         <div className="vibe-root animate-in">
-            <h1 className="vibe-h1">Вайбкодинг</h1>
-            <p className="vibe-sub">
-                {stats
-                    ? `${stats.display_name} · ${formatDate(stats.since)} — ${formatDate(stats.until)} · поставка = коммит, доехавший до прода`
-                    : 'Опись работы: что уехало на прод'}
-            </p>
+            <div className="vibe-head">
+                <div>
+                    <h1 className="vibe-h1">Вайбкодинг</h1>
+                    <p className="vibe-sub">
+                        {stats
+                            ? `${stats.display_name} · ${formatDate(stats.since)} — ${formatDate(stats.until)} · поставка = коммит, доехавший до прода`
+                            : 'Опись работы: что уехало на прод'}
+                    </p>
+                </div>
+                {/* Селектор показываем, только когда есть из кого выбирать: один
+                    вайбкодер в базе → выпадающий список с одним пунктом бессмыслен. */}
+                {authors.length > 1 && !forbidden && (
+                    <select
+                        className="vibe-select"
+                        value={authorId ?? ''}
+                        onChange={e => setAuthorId(e.target.value ? Number(e.target.value) : null)}
+                        aria-label="Чью статистику показать"
+                    >
+                        <option value="">Моя статистика</option>
+                        {authors.map(a => (
+                            <option key={a.user_id} value={a.user_id}>{a.name}</option>
+                        ))}
+                    </select>
+                )}
+            </div>
 
             {loading && <div className="vibe-card vibe-loading">Загрузка...</div>}
 
