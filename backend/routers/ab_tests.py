@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
 from backend.database import get_db
+from backend.integrations.wb_content_api import WbContentError
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.services.funnel import ab_photo_tests as svc
@@ -64,6 +65,8 @@ async def create_ab_test(
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except WbContentError as e:
+        raise HTTPException(502, str(e))
     return {"id": test.id, "status": test.status}
 
 
@@ -167,6 +170,8 @@ async def resume_ab_test(
         test = await svc.resume_test(db, project.id, test_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except WbContentError as e:
+        raise HTTPException(502, str(e))
     return {"id": test.id, "status": test.status}
 
 
@@ -211,4 +216,6 @@ async def apply_ab_winner(
         test = await svc.apply_winner(db, project.id, test_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except WbContentError as e:
+        raise HTTPException(502, str(e))
     return {"ok": True, "winner_applied_at": test.winner_applied_at.isoformat() if test.winner_applied_at else None}
