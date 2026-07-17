@@ -35,6 +35,78 @@ def compute_need(stock_qty: int, avg_daily: float, need_days: int) -> int:
     return max(0, int(deficit + 0.5))
 
 
+def _bridge_rows_from_remains(project_id: int, remains_rows: list[dict]) -> list[dict]:
+    """Собрать строки wb_warehouse_stocks из агрегированных строк remains-отчёта.
+
+    Зачем мост: старый источник зеркала (statistics supplier/stocks) с 2026-07-15
+    отдаёт 0 строк — синк warehouse_stocks «OK», но зеркало мертво, а его читают
+    потребность, прогнозы, кратность, прайсинг и др. Отчёт кабинета — те же числа,
+    что видит юзер в ЛК, поэтому пересобираем зеркало из него.
+
+    Маппинг: реальные склады → (nm × склад), qty суммируется по баркодам
+    карточки; итоговая псевдо-строка «Всего находится на складах» — дубль суммы,
+    выбрасывается; «В пути …» НЕ становятся строками (читатели группируют по
+    складам) — их qty едет полями in_way_* на строке-НОСИТЕЛЕ карточки (max qty):
+    Σ по nm остаётся честной для fallback-читателей. quantity_full носителя =
+    qty + в-пути (семантика quantityFull старого API). Чистая функция."""
+    from backend.services.warehouse_stock_engine import (
+        WB_REMAINS_IN_WAY_FROM_CLIENT,
+        WB_REMAINS_IN_WAY_TO_CLIENT,
+        WB_REMAINS_TOTAL_ROW,
+    )
+
+    per_wh: dict[tuple[int, str], dict[str, Any]] = {}
+    in_way_to: dict[int, int] = {}
+    in_way_from: dict[int, int] = {}
+    for r in remains_rows:
+        nm = int(r["nm_id"])
+        wh = str(r["warehouse_name"])
+        qty = int(r.get("quantity") or 0)
+        if wh == WB_REMAINS_TOTAL_ROW:
+            continue
+        if wh == WB_REMAINS_IN_WAY_TO_CLIENT:
+            in_way_to[nm] = in_way_to.get(nm, 0) + qty
+            continue
+        if wh == WB_REMAINS_IN_WAY_FROM_CLIENT:
+            in_way_from[nm] = in_way_from.get(nm, 0) + qty
+            continue
+        cur = per_wh.get((nm, wh))
+        if cur is None:
+            per_wh[(nm, wh)] = {
+                "project_id": project_id,
+                "nm_id": nm,
+                "vendor_code": r.get("vendor_code") or "",
+                "subject": r.get("subject") or "",
+                "brand": r.get("brand") or "",
+                "warehouse_name": wh,
+                "quantity": qty,
+                "quantity_full": qty,
+                "in_way_to_client": 0,
+                "in_way_from_client": 0,
+            }
+        else:
+            cur["quantity"] += qty
+            cur["quantity_full"] += qty
+
+    # Носитель в-пути = строка карточки с max qty (tie-break по имени склада —
+    # детерминизм между синками).
+    carriers: dict[int, dict[str, Any]] = {}
+    for (nm, _wh), row in sorted(per_wh.items(), key=lambda kv: (-kv[1]["quantity"], kv[0][1])):
+        if nm not in carriers:
+            carriers[nm] = row
+    for nm in set(in_way_to) | set(in_way_from):
+        carrier = carriers.get(nm)
+        if carrier is None:
+            # Карточка целиком «в пути» (на складах 0): строку-носитель НЕ создаём —
+            # псевдо-имя склада засорило бы колонки у читателей (матрица потребности
+            # группирует по warehouse_name). Точные в-пути берутся из remains напрямую.
+            continue
+        carrier["in_way_to_client"] = in_way_to.get(nm, 0)
+        carrier["in_way_from_client"] = in_way_from.get(nm, 0)
+        carrier["quantity_full"] = carrier["quantity"] + carrier["in_way_to_client"] + carrier["in_way_from_client"]
+    return list(per_wh.values())
+
+
 async def sync_warehouse_remains(
     db: AsyncSession,
     project_id: int,
@@ -47,6 +119,9 @@ async def sync_warehouse_remains(
     на складах») — stored as-is, one DB row per (nm_id, barcode, warehouse).
     Returns count of inserted rows. Empty report → keep previous data (WB
     glitches happen; better stale-but-real than wiped).
+
+    Заодно МОСТОМ пересобирает wb_warehouse_stocks (см. _bridge_rows_from_remains):
+    старое зеркало statistics API мертво, а его читает вся аналитика потребности.
     """
     if not items:
         return 0
@@ -92,8 +167,27 @@ async def sync_warehouse_remains(
     for i in range(0, len(rows), 500):
         await db.execute(pg_insert(WbWarehouseRemains).values(rows[i : i + 500]))
 
+    # МОСТ: пересобрать wb_warehouse_stocks из этого же отчёта (одной транзакцией).
+    # Старый источник зеркала (statistics supplier/stocks) мёртв — «OK, 0 строк»
+    # с 2026-07-15, а зеркало читают потребность/прогнозы/кратность/прайсинг.
+    bridged = _bridge_rows_from_remains(project_id, rows)
+    if bridged:
+        await db.execute(delete(WbWarehouseStock).where(WbWarehouseStock.project_id == project_id))
+        for i in range(0, len(bridged), 500):
+            await db.execute(pg_insert(WbWarehouseStock).values(bridged[i : i + 500]))
+
     await db.commit()
-    logger.info(f"Synced {len(rows)} warehouse remains rows for project {project_id}")
+
+    # Читатели зеркала кэшируются — без инвалидации потребность/остатки до 5 мин
+    # (и до часа) показывали бы прежние числа после свежего синка.
+    await invalidate_cache(f"reports:warehouse_need:project_id={project_id}")
+    await invalidate_cache(f"reports:stock_warehouses:project_id={project_id}")
+    await invalidate_cache(f"reports:stock_warehouses_articles:project_id={project_id}")
+
+    logger.info(
+        f"Synced {len(rows)} warehouse remains rows for project {project_id} "
+        f"(+bridge {len(bridged)} rows → wb_warehouse_stocks)"
+    )
     return len(rows)
 
 
