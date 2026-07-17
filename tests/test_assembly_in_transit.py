@@ -184,10 +184,14 @@ async def test_update_draft_gate_subtracts_in_transit(db_session, project, ff_wa
     dist = Dist.model_validate(updated.distribution)
     assert len(dist.rows) == 1
     row = dist.rows[0]
-    # Самара 32−30=2, Сарапул 12−24→0 (ключ выпал), ЕКБ не тронут.
-    assert row.tgt == {"Самара (Новосемейкино)": 2, "Екатеринбург - Перспективная 14": 52}
-    # src ужат до Σtgt (carve): 96 → 54.
-    assert sum(row.src.values()) == 54
+    # Сарапул 12−24→0 (ключ выпал); ЕКБ не тронут — остаётся строкой.
+    # Самара 32−30=2: хвост урезанного гейтом направления не может оставаться
+    # строкой (целость паллеты потеряна) → уезжает в предбронь.
+    assert row.tgt == {"Екатеринбург - Перспективная 14": 52}
+    assert sum(row.src.values()) == 52
+    assert len(dist.prebook) == 1
+    assert dist.prebook[0].tgt == {"Самара (Новосемейкино)": 2}
+    assert sum(dist.prebook[0].src.values()) == 2
 
 
 @pytest.mark.asyncio
@@ -318,10 +322,13 @@ async def test_gate_subtracts_only_increase(db_session, project, ff_warehouse):
     from backend.schemas.assembly_draft import AssemblyDraftDistribution as Dist
 
     dist = Dist.model_validate(updated.distribution)
-    assert len(dist.rows) == 1
-    assert dist.rows[0].tgt == {"Казань": 50}
+    # Направление урезано гейтом (110 → 50) → остаток больше не гарантированно
+    # целая паллета → уезжает в предбронь (Σ плана сохраняется: 50).
+    assert dist.rows == []
+    assert len(dist.prebook) == 1
+    assert dist.prebook[0].tgt == {"Казань": 50}
     # src ужат до Σtgt (carve): 110 → 50.
-    assert sum(dist.rows[0].src.values()) == 50
+    assert sum(dist.prebook[0].src.values()) == 50
 
 
 @pytest.mark.asyncio
@@ -460,7 +467,74 @@ async def test_gate_manual_exemption_is_per_nm(db_session, project, ff_warehouse
 
     dist = Dist.model_validate(updated.distribution)
     by_nm = {r.nm_id: r for r in dist.rows}
-    # ручной — цел
+    # ручной — цел (и от вычета, и от демоции в предбронь)
     assert by_nm[nm_manual].tgt == {"Электросталь": 52}
-    # обычный — урезан на транзит 26
-    assert by_nm[nm_auto].tgt == {"Электросталь": 26}
+    # обычный — урезан на транзит 26; хвост урезанного направления → предбронь
+    assert nm_auto not in by_nm
+    pre_by_nm = {r.nm_id: r for r in dist.prebook}
+    assert pre_by_nm[nm_auto].tgt == {"Электросталь": 26}
+    assert sum(pre_by_nm[nm_auto].src.values()) == 26
+
+
+@pytest.mark.asyncio
+async def test_gate_demotes_partial_direction_remains_to_prebook(db_session, project, ff_warehouse):
+    """Прод-кейс draft 62 (2026-07-17, ЕКБ×BOX): фронт прислал направление ЦЕЛОЙ
+    смешанной паллетой (SKU A 52 шт + SKU B 18 шт), транзит покрывал только A →
+    гейт вычитал строки A, а остаток направления (B, < паллеты) оставался в rows —
+    канон «rows = целые паллеты» ломался (превью честно показывало «⚠ ~50%»).
+    Теперь остаток урезанного гейтом направления уезжает в ПРЕДБРОНЬ; чужие
+    направления той же строки (Казань) и as_is-строки остаются в rows."""
+    from backend.schemas.assembly_draft import (
+        AssemblyDraftCreate,
+        AssemblyDraftDistribution,
+        AssemblyDraftRow,
+        AssemblyDraftUpdate,
+    )
+    from backend.services import assembly_draft_service
+
+    nm_a = 897_000_000 + int(_uid()[:4], 16)
+    nm_b = nm_a + 1
+    nm_c = nm_a + 2
+    nom_a = await _nom(db_session, project.id, nm_a)
+    nom_b = await _nom(db_session, project.id, nm_b)
+    nom_c = await _nom(db_session, project.id, nm_c)
+    # Транзит покрывает ВЕСЬ план SKU A на ЕКБ.
+    await _make_request(
+        db_session, project.id, ff_warehouse.id, nom_a,
+        status=AssemblyStatus.IN_PROGRESS, wb_name="Екатеринбург - Перспективная 14", qty=52,
+    )
+
+    draft = await assembly_draft_service.create_draft(
+        db_session, project.id, AssemblyDraftCreate(name="Демоция", distribution=AssemblyDraftDistribution())
+    )
+    incoming = AssemblyDraftDistribution(
+        source_warehouse_ids=[ff_warehouse.id],
+        target_warehouse_names=["Екатеринбург - Перспективная 14", "Казань"],
+        rows=[
+            # A: целиком покрыт транзитом → строка выпадает.
+            AssemblyDraftRow(nm_id=nm_a, barcode=nom_a.barcode, vendor_code="a", src={str(ff_warehouse.id): 52}, tgt={"Екатеринбург - Перспективная 14": 52}),
+            # B: транзита нет, но направление ЕКБ урезано гейтом (через A) →
+            # его ЕКБ-порция больше не гарантированно целая паллета → предбронь.
+            AssemblyDraftRow(nm_id=nm_b, barcode=nom_b.barcode, vendor_code="b", src={str(ff_warehouse.id): 38}, tgt={"Екатеринбург - Перспективная 14": 18, "Казань": 20}),
+            # C: as_is («Оставить так») — юзер осознанно везёт частичную паллету.
+            AssemblyDraftRow(nm_id=nm_c, barcode=nom_c.barcode, vendor_code="c", src={str(ff_warehouse.id): 6}, tgt={"Екатеринбург - Перспективная 14": 6}, as_is=True),
+        ],
+    )
+    updated = await assembly_draft_service.update_draft(
+        db_session, project.id, draft.id, AssemblyDraftUpdate(distribution=incoming)
+    )
+
+    from backend.schemas.assembly_draft import AssemblyDraftDistribution as Dist
+
+    dist = Dist.model_validate(updated.distribution)
+    rows_by_nm = {r.nm_id: r for r in dist.rows}
+    # A вычтен целиком (весь план уже едет).
+    assert nm_a not in rows_by_nm
+    # B: ЕКБ-порция демотирована, Казань осталась строкой (Σsrc == Σtgt).
+    assert rows_by_nm[nm_b].tgt == {"Казань": 20}
+    assert sum(rows_by_nm[nm_b].src.values()) == 20
+    # C: as_is освобождён от паллет-инварианта — остаётся в rows.
+    assert rows_by_nm[nm_c].tgt == {"Екатеринбург - Перспективная 14": 6}
+    pre_by_nm = {r.nm_id: r for r in dist.prebook}
+    assert pre_by_nm[nm_b].tgt == {"Екатеринбург - Перспективная 14": 18}
+    assert sum(pre_by_nm[nm_b].src.values()) == 18
