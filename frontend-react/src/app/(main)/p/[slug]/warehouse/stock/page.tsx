@@ -333,6 +333,26 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
         return rows;
     }, [data, search, isGrouped, stockDaysFilter, stockDaysFor]);
 
+    // Предвычисленные ЧИСЛОВЫЕ ключи сортировки для метрик-колонок. Сортировка по
+    // готовому полю (а не по замыканию, считающему на каждое сравнение) — надёжна
+    // и повторяет проверенный порядок. Товары без продаж уезжают в конец при обеих
+    // сортировках (тренд/реализ/маржа → -1, запас → большое число).
+    const rowsForTable = useMemo(() => {
+        return filtered.map((r) => {
+            const t = getTrendData(r);
+            const vt = getVariantTotal(r);
+            const daily = t?.avg_daily_qty || 0;
+            const rev = t?.revenue || 0;
+            return {
+                ...r,
+                _sortTrend: daily,
+                _sortRevenue: rev,
+                _sortMargin: rev > 0 ? ((t?.profit || 0) / rev) * 100 : -1,
+                _sortStockDays: daily > 0 ? vt / daily : Number.MAX_SAFE_INTEGER,
+            };
+        });
+    }, [filtered, getTrendData, getVariantTotal]);
+
     // «Новинки» KPI — aggregates SKUs flagged as novelties by the backend
     // (no sales recorded in the last 60 days). Counts ALL current and incoming
     // quantity (shelf own + WB + in-transit + factory + vehicles) since none
@@ -626,7 +646,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             headerTitle: 'Средние заказы в день за выбранный период (7/14/30 дн) по данным WB',
             align: 'right',
             sortable: true,
-            getValue: (row: UnifiedStockRow) => getTrendData(row).avg_daily_qty,
+            sortingFn: 'basic',
+            getValue: (row) => (row as UnifiedStockRow & { _sortTrend?: number })._sortTrend ?? 0,
             render: (_: unknown, row: UnifiedStockRow) => {
                 const v = getTrendData(row).avg_daily_qty;
                 if (v <= 0) return DASH;
@@ -639,7 +660,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             headerTitle: 'Реализация за выбранный период — сходится с отчётом БДР',
             align: 'right',
             sortable: true,
-            getValue: (row: UnifiedStockRow) => getTrendData(row).revenue,
+            sortingFn: 'basic',
+            getValue: (row) => (row as UnifiedStockRow & { _sortRevenue?: number })._sortRevenue ?? 0,
             render: (_: unknown, row: UnifiedStockRow) => {
                 const v = getTrendData(row).revenue;
                 if (v <= 0) return DASH;
@@ -655,10 +677,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             headerTitle: 'Прибыль ÷ реализация за выбранный период',
             align: 'right',
             sortable: true,
-            getValue: (row: UnifiedStockRow) => {
-                const t = getTrendData(row);
-                return t.revenue > 0 ? (t.profit / t.revenue) * 100 : 0;
-            },
+            sortingFn: 'basic',
+            getValue: (row) => (row as UnifiedStockRow & { _sortMargin?: number })._sortMargin ?? -1,
             render: (_: unknown, row: UnifiedStockRow) => {
                 const t = getTrendData(row);
                 if (t.revenue <= 0) return DASH;
@@ -689,10 +709,8 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             headerTitle: 'На сколько дней хватит остатка при текущем темпе заказов (Итого ÷ тренд шт/д)',
             align: 'right',
             sortable: true,
-            getValue: (row: UnifiedStockRow) => {
-                const daily = getTrendData(row).avg_daily_qty;
-                return daily > 0 ? getVariantTotal(row) / daily : 9999;
-            },
+            sortingFn: 'basic',
+            getValue: (row) => (row as UnifiedStockRow & { _sortStockDays?: number })._sortStockDays ?? Number.MAX_SAFE_INTEGER,
             render: (_: unknown, row: UnifiedStockRow) => {
                 const daily = getTrendData(row).avg_daily_qty;
                 if (daily <= 0) return DASH;
@@ -1576,7 +1594,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
             ) : (
                 <TanStackDataTable
                     columns={cols}
-                    data={filtered}
+                    data={rowsForTable}
                     exportName="unified_stock"
                     enableSorting
                     enablePagination={false}

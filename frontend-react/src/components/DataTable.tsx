@@ -19,6 +19,8 @@ export interface Column {
     headerTitle?: string;
     /** Разрешить перенос длинного заголовка на 2 строки (узкая колонка вместо широкой) */
     headerWrap?: boolean;
+    /** Явная функция сортировки TanStack (иначе 'auto' может выбрать строковую для чисел) */
+    sortingFn?: 'basic' | 'alphanumeric' | 'text';
     align?: 'left' | 'right' | 'center';
     format?: 'number' | 'date' | 'badge' | 'money' | 'money-color';
     render?: (value: any, row: any, index: number) => React.ReactNode;
