@@ -91,6 +91,7 @@ function adaptColumns(cols: Column[]): ColumnDef<any, any>[] {
             header: col.label,
             size: col.width ? parseInt(col.width) : undefined,
             enableSorting: col.sortable !== false,
+            ...(col.sortingFn ? { sortingFn: col.sortingFn } : {}),
             cell: (info: any) => {
                 const value = info.getValue();
                 const row = info.row.original;

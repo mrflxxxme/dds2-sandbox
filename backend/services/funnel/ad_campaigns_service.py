@@ -104,11 +104,24 @@ async def _sort_campaigns_by_spend(
 
 
 async def sync_ad_campaigns(
-    db: AsyncSession, project_id: int, priority_ids: list[int] | None = None
+    db: AsyncSession,
+    project_id: int,
+    priority_ids: list[int] | None = None,
+    fetch_budgets: bool = True,
 ) -> dict:
     """Fetch campaign details + budgets from WB and upsert into wb_ad_campaigns.
 
     ``priority_ids`` — кампании под текущим фильтром страницы; их бюджеты тянутся первыми.
+
+    ``fetch_budgets=False`` — режим планировщика: бюджеты НЕ трогаем, их владелец —
+    sync_ad_budgets_only (активные кампании, каждые 10 мин). Раньше обе джобы тянули одни и
+    те же активные кампании по rate-лимитированному /adv/v1/budget и дрались за него: на
+    проде 2026-07-17 прогон бюджетов при наложении вырос 228с → 426с и срезался лимитом.
+    Исключение — кампании, которых мы ещё не видели: у них нет «последнего известного»
+    бюджета, и без разового запроса паузная новинка навсегда осталась бы с 0 (в
+    sync_ad_budgets_only она не попадёт — там только статус 9).
+    Ручной путь (кнопка «Синхронизировать» на странице рекламы) зовёт с дефолтным True:
+    он редкий, запускается человеком и показывает прогресс «N/M бюджетов».
     """
     _sync_progress[project_id] = {"status": "fetching_campaigns"}
 
@@ -146,10 +159,27 @@ async def sync_ad_campaigns(
         if c.get("advertId") and c.get("status") != CAMPAIGN_STATUS_COMPLETED
     ]
 
-    # Prioritize campaigns by spend (last 7 days) — high spenders first for budget fetch.
-    # Кампании под фильтром страницы (priority_ids) уходят в начало очереди.
-    campaign_ids = await _sort_campaigns_by_spend(db, project_id, campaign_ids, priority_ids)
-    await db.commit()  # сортировка читала БД → снова закрываем транзакцию перед WB
+    if fetch_budgets:
+        # Prioritize campaigns by spend (last 7 days) — high spenders first for budget fetch.
+        # Кампании под фильтром страницы (priority_ids) уходят в начало очереди.
+        campaign_ids = await _sort_campaigns_by_spend(db, project_id, campaign_ids, priority_ids)
+    else:
+        # Режим планировщика: спрашиваем WB только про новинки (см. докстроку). Лёгкий
+        # запрос ТОЛЬКО id — полную выборку для дифа берём ниже, уже ПОСЛЕ похода в WB,
+        # иначе за минуты HTTP sync_ad_budgets_only обновит бюджеты, а мы затрём их
+        # устаревшим снимком.
+        known_ids = set(
+            (
+                await db.execute(
+                    select(WbAdCampaign.campaign_id).where(WbAdCampaign.project_id == project_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        campaign_ids = [cid for cid in campaign_ids if cid not in known_ids]
+
+    await db.commit()  # чтения выше закрыли транзакцию → снова свободны перед WB
 
     _sync_progress[project_id] = {
         "status": "fetching_budgets",
@@ -158,14 +188,18 @@ async def sync_ad_campaigns(
         "budgets_done": 0,
     }
 
-    budgets = await fetch_campaign_budgets_batch(
-        api_key,
-        campaign_ids,
-        progress_cb=lambda done, total: _sync_progress.__setitem__(
-            project_id,
-            {**_sync_progress.get(project_id, {}), "budgets_done": done},
-        ),
-        time_budget=BUDGET_FETCH_TIME_BUDGET,
+    budgets = (
+        await fetch_campaign_budgets_batch(
+            api_key,
+            campaign_ids,
+            progress_cb=lambda done, total: _sync_progress.__setitem__(
+                project_id,
+                {**_sync_progress.get(project_id, {}), "budgets_done": done},
+            ),
+            time_budget=BUDGET_FETCH_TIME_BUDGET,
+        )
+        if campaign_ids
+        else {}
     )
 
     _sync_progress[project_id] = {

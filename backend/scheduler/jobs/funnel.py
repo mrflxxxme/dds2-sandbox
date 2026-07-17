@@ -306,8 +306,12 @@ async def sync_ad_campaigns_all_projects():
                 log_id = sync_log.id
 
             async with AsyncSessionLocal() as db:
+                # fetch_budgets=False: бюджеты активных кампаний каждые 10 мин обновляет
+                # sync_budgets_all_projects. Тянуть их ещё и здесь = две джобы дерутся за
+                # rate-лимитированный /adv/v1/budget (прод 2026-07-17: прогон бюджетов при
+                # наложении 228с → 426с и срез по лимиту). Новинки синк всё же спросит сам.
                 result = await asyncio.wait_for(
-                    sync_ad_campaigns(db, pid),
+                    sync_ad_campaigns(db, pid, fetch_budgets=False),
                     timeout=AD_CAMPAIGNS_SYNC_TIMEOUT,
                 )
                 synced = result.get("synced", 0)
