@@ -3130,6 +3130,25 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
    ПАЛИТРА ЗАМКНУТА НА .vibe-root: переменные объявлены здесь, а не в :root, поэтому
    тёмным становится только «Вайбкодинг» — на остальной сервис не течёт. Внутри
    раздела цвета берутся ТОЛЬКО из var(--vibe-*), hex в компонентах нет. */
+.vibe-pager {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 16px;
+}
+
+.vibe-pager-info {
+    color: var(--vibe-ink-2);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+
+.vibe-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
 .vibe-head {
     display: flex;
     align-items: flex-start;

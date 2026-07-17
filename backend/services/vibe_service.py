@@ -330,7 +330,7 @@ async def get_stats(
     )
 
 
-async def list_authors(db: AsyncSession) -> list[VibeAuthorRef]:
+async def list_authors(db: AsyncSession, me_id: int | None = None) -> list[VibeAuthorRef]:
     """Все вайбкодеры — для селектора. Один человек может иметь несколько git-почт,
     поэтому группируем по user_id, а не по строкам таблицы.
 
@@ -358,7 +358,7 @@ async def list_authors(db: AsyncSession) -> list[VibeAuthorRef]:
 
     names = {uid: display.get(uid) or fallback.get(uid) or f"#{uid}" for uid in fallback}
     return [
-        VibeAuthorRef(user_id=uid, name=name)
+        VibeAuthorRef(user_id=uid, name=name, is_me=(uid == me_id))
         for uid, name in sorted(names.items(), key=lambda kv: kv[1].lower())
     ]
 

@@ -296,7 +296,22 @@ const FEED_EXPORT: ExcelExportColumn[] = [
     { key: 'is_product', label: 'Продуктовая', getValue: (r: VibeShipment) => (r.is_product ? 'да' : 'нет') },
 ];
 
+/** Строк на странице ленты. У активного автора поставок под сотни — одной простынёй
+ *  её листать невозможно. Выгрузка в Excel при этом отдаёт ВСЕ, а не текущую страницу. */
+const FEED_PAGE_SIZE = 20;
+
 function FeedCard({ shipments }: { shipments: VibeShipment[] }) {
+    const [page, setPage] = useState(0);
+    const pages = Math.max(1, Math.ceil(shipments.length / FEED_PAGE_SIZE));
+
+    // Сменился автор или период — список другой, а страница осталась третьей.
+    // Без сброса попадаем в пустоту вместо данных.
+    useEffect(() => { setPage(0); }, [shipments]);
+
+    const safePage = Math.min(page, pages - 1);
+    const from = safePage * FEED_PAGE_SIZE;
+    const rows = shipments.slice(from, from + FEED_PAGE_SIZE);
+
     return (
         <div className="vibe-card">
             <div className="vibe-card-head">
@@ -313,7 +328,7 @@ function FeedCard({ shipments }: { shipments: VibeShipment[] }) {
                     </tr>
                 </thead>
                 <tbody>
-                    {shipments.map(s => (
+                    {rows.map(s => (
                         <tr key={s.sha}>
                             <td className="d">{ddmm(s.day)}</td>
                             <td><span className="vibe-tag">{TYPE_RU[s.ctype] ?? s.ctype ?? '—'}</span></td>
@@ -324,6 +339,23 @@ function FeedCard({ shipments }: { shipments: VibeShipment[] }) {
                     ))}
                 </tbody>
             </table>
+
+            {pages > 1 && (
+                <div className="vibe-pager">
+                    <button type="button" className="vibe-btn" disabled={safePage === 0}
+                        onClick={() => setPage(p => Math.max(0, p - 1))}>
+                        Назад
+                    </button>
+                    <span className="vibe-pager-info">
+                        {formatNumber(from + 1, 0)}–{formatNumber(from + rows.length, 0)} из{' '}
+                        {formatNumber(shipments.length, 0)}
+                    </span>
+                    <button type="button" className="vibe-btn" disabled={safePage >= pages - 1}
+                        onClick={() => setPage(p => Math.min(pages - 1, p + 1))}>
+                        Вперёд
+                    </button>
+                </div>
+            )}
         </div>
     );
 }
@@ -341,6 +373,9 @@ export default function VibecodingPage() {
     // поэтому первый заход не ждёт списка авторов и рисуется сразу.
     const [authorId, setAuthorId] = useState<number | null>(null);
     const [authors, setAuthors] = useState<VibeAuthorRef[]>([]);
+    // Свой id — чтобы селектор показывал собственное ИМЯ, а не отдельный пункт
+    // «Моя статистика»: он дублировал бы строку с этим же именем.
+    const meId = useMemo(() => authors.find(a => a.is_me)?.user_id ?? null, [authors]);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -392,11 +427,10 @@ export default function VibecodingPage() {
                 {authors.length > 1 && !forbidden && (
                     <select
                         className="vibe-select"
-                        value={authorId ?? ''}
-                        onChange={e => setAuthorId(e.target.value ? Number(e.target.value) : null)}
+                        value={authorId ?? meId ?? ''}
+                        onChange={e => setAuthorId(Number(e.target.value))}
                         aria-label="Чью статистику показать"
                     >
-                        <option value="">Моя статистика</option>
                         {authors.map(a => (
                             <option key={a.user_id} value={a.user_id}>{a.name}</option>
                         ))}

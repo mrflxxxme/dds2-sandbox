@@ -12,6 +12,10 @@ class VibeAuthorRef(BaseModel):
 
     user_id: int
     name: str
+    # Кто из списка — сам запрашивающий. Без флага фронт не отличит себя от тёзки и
+    # вынужден был бы держать отдельный пункт «Моя статистика» — а он дублирует
+    # строку с собственным именем.
+    is_me: bool = False
 
 
 class VibeShipment(BaseModel):

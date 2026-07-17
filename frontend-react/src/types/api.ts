@@ -6641,6 +6641,10 @@ export interface VibeScale {
 export interface VibeAuthorRef {
     user_id: number;
     name: string;
+    /** Это сам запрашивающий. Отдельного пункта «Моя статистика» нет — он дублировал
+     *  бы строку с собственным именем (юзер вошёл как admin = Влад Вяткин и увидел
+     *  себя дважды). */
+    is_me: boolean;
 }
 
 export interface VibeStats {

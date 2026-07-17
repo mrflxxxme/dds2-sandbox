@@ -166,7 +166,7 @@ describe('Вайбкодинг — селектор разработчика', (
     });
 
     it('не показывает селектор, когда вайбкодер один: выбирать не из кого', async () => {
-        getVibeAuthors.mockResolvedValue([{ user_id: 1, name: 'Денис' }]);
+        getVibeAuthors.mockResolvedValue([{ user_id: 1, name: 'Денис', is_me: true }]);
         render(<VibecodingPage />);
         await screen.findByText(/Ритм/i);
         expect(screen.queryByLabelText('Чью статистику показать')).toBeNull();
@@ -174,18 +174,22 @@ describe('Вайбкодинг — селектор разработчика', (
 
     it('показывает селектор, когда вайбкодеров несколько', async () => {
         getVibeAuthors.mockResolvedValue([
-            { user_id: 1, name: 'Денис' },
-            { user_id: 2, name: 'Влад Вяткин' },
+            { user_id: 1, name: 'Денис', is_me: true },
+            { user_id: 2, name: 'Влад Вяткин', is_me: false },
         ]);
         render(<VibecodingPage />);
         expect(await screen.findByLabelText('Чью статистику показать')).toBeInTheDocument();
-        expect(screen.getByRole('option', { name: 'Моя статистика' })).toBeInTheDocument();
+        // Отдельного пункта «Моя статистика» НЕТ: он дублировал бы строку с собственным
+        // именем (юзер вошёл как admin = Влад Вяткин и видел себя дважды).
+        expect(screen.queryByRole('option', { name: 'Моя статистика' })).toBeNull();
+        expect(screen.getByRole('option', { name: 'Денис' })).toBeInTheDocument();
+        expect(screen.getByRole('option', { name: 'Влад Вяткин' })).toBeInTheDocument();
     });
 
     it('первый заход НЕ шлёт author_id — бэк сам берёт текущего пользователя', async () => {
         getVibeAuthors.mockResolvedValue([
-            { user_id: 1, name: 'Денис' },
-            { user_id: 2, name: 'Влад Вяткин' },
+            { user_id: 1, name: 'Денис', is_me: true },
+            { user_id: 2, name: 'Влад Вяткин', is_me: false },
         ]);
         render(<VibecodingPage />);
         await screen.findByText(/Ритм/i);
@@ -197,5 +201,40 @@ describe('Вайбкодинг — селектор разработчика', (
         render(<VibecodingPage />);
         await screen.findByText(/Ритм/i);
         expect(screen.queryByLabelText('Чью статистику показать')).toBeNull();
+    });
+});
+
+describe('Вайбкодинг — пагинация ленты', () => {
+    beforeEach(() => {
+        getVibeStats.mockReset();
+        getVibeAuthors.mockReset();
+        getVibeAuthors.mockResolvedValue([]);
+    });
+
+    function manyShipments(n: number) {
+        return Array.from({ length: n }, (_, i) => ({
+            sha: `${i}`.padStart(40, '0'), short: `${i}`.padStart(8, '0'),
+            day: '2026-07-03', ctype: 'fix', scope: 'ads', section: 'Управление рекламой',
+            title: `поставка ${i}`, added: 1, deleted: 0, files: 1, is_product: true,
+        }));
+    }
+
+    it('короткая лента (≤20) — без пагинатора', async () => {
+        getVibeStats.mockResolvedValue(makeStats({ shipments: manyShipments(20) }));
+        render(<VibecodingPage />);
+        await screen.findByText(/Лента поставок/i);
+        expect(screen.queryByRole('button', { name: 'Вперёд' })).toBeNull();
+    });
+
+    it('длинная лента — по 20 на страницу, «Назад» на первой недоступна', async () => {
+        getVibeStats.mockResolvedValue(makeStats({ shipments: manyShipments(45) }));
+        render(<VibecodingPage />);
+        await screen.findByText(/Лента поставок/i);
+        // 20 строк на странице, а не все 45.
+        expect(screen.getByText('поставка 0')).toBeInTheDocument();
+        expect(screen.getByText('поставка 19')).toBeInTheDocument();
+        expect(screen.queryByText('поставка 20')).toBeNull();
+        expect(screen.getByText(/1–20 из 45/)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Назад' })).toBeDisabled();
     });
 });

@@ -49,7 +49,7 @@ async def list_vibe_authors(
     """
     if not await vibe_service.is_vibecoder(db, user.id):
         raise HTTPException(403, "Раздел доступен только вайбкодерам")
-    return await vibe_service.list_authors(db)
+    return await vibe_service.list_authors(db, me_id=user.id)
 
 
 @router.get("/me", response_model=VibeStats)
