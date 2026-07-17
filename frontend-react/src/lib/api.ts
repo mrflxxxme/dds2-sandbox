@@ -34,6 +34,7 @@ import { addLocalizationMethods } from './api/localization';
 import { addPaymentRequestMethods } from './api/payment-requests';
 import { addPricingMethods } from './api/pricing';
 import { addMeasurementMethods } from './api/measurements';
+import { addReviewMethods } from './api/reviews';
 import { addAbTestMethods } from './api/abTests';
 import { addVibeMethods } from './api/vibe';
 
@@ -65,6 +66,7 @@ export const api = Object.assign(client, {
     ...addPaymentRequestMethods(client),
     ...addPricingMethods(client),
     ...addMeasurementMethods(client),
+    ...addReviewMethods(client),
     ...addAbTestMethods(client),
     ...addVibeMethods(client),
 });

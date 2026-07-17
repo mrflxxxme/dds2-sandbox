@@ -50,6 +50,7 @@ from backend.routers import (
     projects,
     refs,
     reports,
+    reviews,
     supply_chain,
     telegram,
     telegram_miniapp,
@@ -633,6 +634,12 @@ app.include_router(
     wb_returns.router,
     prefix="/api/v1",
     tags=["WB Returns"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    reviews.router,
+    prefix="/api/v1",
+    tags=["Reviews"],
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(

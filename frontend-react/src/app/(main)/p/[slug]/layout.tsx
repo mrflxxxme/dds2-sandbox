@@ -153,6 +153,7 @@ const navGroups: { title: string; section: string; items: NavItem[] }[] = [
         section: 'sales',
         items: [
             { href: '/funnel', label: 'Воронка продаж', icon: '📊', pageKey: 'funnel' },
+            { href: '/reviews', label: 'Отзывы', icon: '⭐', pageKey: 'reviews' },
             { href: '/ads-manager', label: 'Управление рекламой', icon: '📢', pageKey: 'ads-manager' },
             { href: '/ab-tests', label: 'АБ-тесты фото', icon: '🧪', pageKey: 'ab-tests' },
             { href: '/pricing', label: 'Ценообразование', icon: '💲', pageKey: 'funnel' },

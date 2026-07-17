@@ -8,15 +8,15 @@ import { useParams, useRouter } from 'next/navigation';
 import { IcMegaphone, IcRefresh, IcDownload, IcSliders, IcColumns, IcPause, IcPlay, IcClock, IcGear, IcHistory, IcExternal, IcSearch, IcX, IcCopy } from './components/icons';
 import SearchSelect from './components/SearchSelect';
 import AdSections from './components/AdSections';
-import AutopayModal from './components/AutopayModal';
-import AutopayLogModal from './components/AutopayLogModal';
+import ScheduleModal from './components/ScheduleModal';
+import BudgetLedgerModal from './components/BudgetLedgerModal';
 import WbThumb from './components/WbThumb';
 import AdsPeriodPicker from './components/AdsPeriodPicker';
 import InfoTip from './components/InfoTip';
 import Tooltip from './components/Tooltip';
 import { useToast } from './components/Toasts';
-import { fmt, num, fmtPct, iso, STATUS_BADGE, thStyle, thLeft, tdStyle, tdLeft, wbCampaignUrl, campaignTypeBadge, autopayLabel, humanizeAdsError } from './components/adsShared';
-import type { AdsManagerCampaign, AdsAutopaySetting } from '@/types/api';
+import { fmt, num, fmtPct, iso, STATUS_BADGE, thStyle, thLeft, tdStyle, tdLeft, wbCampaignUrl, campaignTypeBadge, scheduleLabel, humanizeAdsError } from './components/adsShared';
+import type { AdsManagerCampaign, AdsScheduleSetting } from '@/types/api';
 
 type SortDir = 'asc' | 'desc';
 
@@ -61,7 +61,7 @@ const CAMP_COLS: { key: string; label: string; sort?: keyof AdsManagerCampaign; 
     { key: 'budget_gap', label: 'Недобор бюджета ₽', sort: 'budget_gap', title: 'Сколько долить, чтобы кампания крутилась до конца дня, по скорости расхода до момента остановки. Только активные кампании, у которых сегодня кончился бюджет; минимум пополнения WB — 1000 ₽', w: 92 },
     { key: 'drr_plan', label: 'ДРР план ₽', sort: 'rev_yesterday', title: 'Рекомендованное пополнение на сегодня = сумма заказов ВЧЕРА × целевой ДРР (задаётся в шапке). Пример: 100 000 × 8% = 8 000', w: 122 },
     { key: 'nm_count', label: 'Товаров', sort: 'nm_count', blockStart: true, w: 56 },
-    { key: 'autopay', label: 'Автопополнение', align: 'center', w: 100 },
+    { key: 'schedule', label: 'Расписание', title: 'Пауза по расписанию: ДДС глушит кампанию в окне «плохих» часов (после долива ВБ в 00:00 МСК) и запускает обратно', align: 'center', w: 100 },
     { key: 'wb', label: 'WB', align: 'center', w: 44 },
 ];
 const CAMP_TOGGLE_KEYS = CAMP_COLS.filter(c => !c.fixed).map(c => c.key);
@@ -135,10 +135,10 @@ export default function AdsManagerPage() {
     const [campSort, setCampSort] = useState<{ field: keyof AdsManagerCampaign; dir: SortDir } | null>(null);
     const [syncing, setSyncing] = useState(false);
     const [syncProgress, setSyncProgress] = useState('');  // «N/M» бюджетов во время синка
-    const [autopay, setAutopay] = useState<Record<string, AdsAutopaySetting>>({});
-    const [autopayModal, setAutopayModal] = useState<AdsManagerCampaign | null>(null);
+    const [schedule, setSchedule] = useState<Record<string, AdsScheduleSetting>>({});
+    const [scheduleModal, setScheduleModal] = useState<AdsManagerCampaign | null>(null);
     const [createMenuOpen, setCreateMenuOpen] = useState(false);
-    const [autopayLogModal, setAutopayLogModal] = useState<AdsManagerCampaign | null>(null);
+    const [budgetLogModal, setBudgetLogModal] = useState<AdsManagerCampaign | null>(null);
     const [stateBusy, setStateBusy] = useState<number | null>(null);  // кампания в процессе смены статуса
     const [bidBusy, setBidBusy] = useState<number | null>(null);  // кампания в процессе записи ставки в WB
     const [bidDraft, setBidDraft] = useState<{ key: string; text: string } | null>(null);  // текст редактируемой ячейки ставки
@@ -191,23 +191,19 @@ export default function AdsManagerPage() {
     const loadCampaigns = useCallback(async (df?: string, dt?: string) => {
         setLoading(true); setError('');
         try {
-            const [list, ap] = await Promise.all([api.getAdCampaignsList(df, dt), api.getCampaignsAutopay().catch(() => ({}))]);
+            const [list, sched] = await Promise.all([api.getAdCampaignsList(df, dt), api.getCampaignsSchedule().catch(() => ({}))]);
             setCampaigns(list);
-            setAutopay(ap);
+            setSchedule(sched);
         }
         catch (e) { setError(e instanceof Error ? e.message : 'Ошибка загрузки'); }
         finally { setLoading(false); }
     }, []);
 
-    const saveAutopay = useCallback(async (campaignId: number, s: AdsAutopaySetting) => {
-        const res = await api.setCampaignAutopay(campaignId, s);
-        setAutopay(res.settings);
-        if (res.activation && !res.activation.ok) {
-            setError(`Автопополнение сохранено, но кампанию не удалось активировать: ${res.activation.error || 'ошибка WB'}`);
-        }
-        // Включение автопополнения активирует кампанию — подтянем свежий статус в таблицу
-        if (s.enabled) loadCampaigns(dateFrom, dateTo);
-    }, [loadCampaigns, dateFrom, dateTo]);
+    const saveSchedule = useCallback(async (campaignId: number, s: AdsScheduleSetting) => {
+        // Сейв только пишет настройку: паузу/запуск делает scheduler-тик (раз в 15 минут)
+        const res = await api.setCampaignSchedule(campaignId, s);
+        setSchedule(res.settings);
+    }, []);
 
     const toggleCampaignState = useCallback(async (c: AdsManagerCampaign) => {
         const active = c.status !== 9;  // не активна → запускаем, активна → пауза
@@ -524,7 +520,7 @@ export default function AdsManagerPage() {
     const onRowClick = (e: React.MouseEvent, c: AdsManagerCampaign) => {
         if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
         // Клик по интерактивному контролу ИЛИ по его ячейке (правка ставки/ДРР%, пуск-пауза,
-        // автопополнение, ссылка WB) не должен проваливаться в карточку. Проверяем реальную
+        // расписание, ссылка WB) не должен проваливаться в карточку. Проверяем реальную
         // цель клика — не полагаемся только на stopPropagation дочерних контролов (мимо мелкого
         // инпута легко попасть в пустое поле ячейки, где всплытие уже не погашено).
         if ((e.target as HTMLElement).closest?.('button, a, input, select, textarea, [role="button"], [data-nonav]')) return;
@@ -540,7 +536,7 @@ export default function AdsManagerPage() {
     const visibleCampColumns = CAMP_COLS.filter(col => col.fixed || visibleCols.has(col.key));
     // Колонки с интерактивными контролами: клик в любом месте такой ячейки остаётся в ней,
     // а не открывает кампанию (см. onRowClick — проверка [data-nonav]).
-    const NONAV_COLS = new Set(['status', 'bid', 'drr_plan', 'autopay', 'wb']);
+    const NONAV_COLS = new Set(['status', 'bid', 'drr_plan', 'schedule', 'wb']);
     const renderCampCell = (key: string, c: AdsManagerCampaign): React.ReactNode => {
         switch (key) {
             case 'name': return (
@@ -676,23 +672,22 @@ export default function AdsManagerPage() {
                 );
             }
             case 'nm_count': return c.nm_count;
-            case 'autopay': {
-                const ap = autopay[String(c.campaign_id)];
-                // Зелёный — включено; красный — настроено, но выключено; серый — ни разу не настраивалось
-                const color = ap ? (ap.enabled ? '#10b981' : '#ef4444') : '#9ca3af';
-                const title = ap ? (ap.enabled ? 'Автопополнение включено' : 'Автопополнение настроено, но выключено') : 'Автопополнение ни разу не настраивалось';
+            case 'schedule': {
+                const sc = schedule[String(c.campaign_id)];
+                // Зелёный — включено; серый — не настраивалось (выключенные записи бэк не хранит)
+                const title = sc?.enabled ? `Пауза по расписанию: ${scheduleLabel(sc)} МСК` : 'Пауза по расписанию не настроена';
                 return (
                     <span style={{ whiteSpace: 'nowrap' }}>
                         <Tooltip text={title}>
-                            <button onClick={e => { e.stopPropagation(); setAutopayModal(c); }} aria-label={title}
-                                style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, color, fontWeight: ap?.enabled ? 600 : 400, whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                                {ap?.enabled
-                                    ? <><IcClock size={13} />{autopayLabel(ap)}</>
-                                    : <><IcGear size={13} />{ap ? 'выключено' : 'настроить'}</>}
+                            <button onClick={e => { e.stopPropagation(); setScheduleModal(c); }} aria-label={title}
+                                style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, color: sc?.enabled ? '#10b981' : '#9ca3af', fontWeight: sc?.enabled ? 600 : 400, whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                {sc?.enabled
+                                    ? <><IcPause size={13} />{scheduleLabel(sc)}</>
+                                    : <><IcGear size={13} />настроить</>}
                             </button>
                         </Tooltip>
                         <Tooltip text="История бюджета">
-                            <button onClick={e => { e.stopPropagation(); setAutopayLogModal(c); }} aria-label="История бюджета"
+                            <button onClick={e => { e.stopPropagation(); setBudgetLogModal(c); }} aria-label="История бюджета"
                                 style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#6b7280', padding: '0 4px', display: 'inline-flex', alignItems: 'center' }}><IcHistory size={14} /></button>
                         </Tooltip>
                     </span>
@@ -960,18 +955,18 @@ export default function AdsManagerPage() {
                     </div>
                 )}
 
-                {autopayModal && (
-                    <AutopayModal
-                        campaign={autopayModal}
-                        initial={autopay[String(autopayModal.campaign_id)]}
-                        onClose={() => setAutopayModal(null)}
-                        onSave={s => saveAutopay(autopayModal.campaign_id, s)}
+                {scheduleModal && (
+                    <ScheduleModal
+                        campaign={scheduleModal}
+                        initial={schedule[String(scheduleModal.campaign_id)]}
+                        onClose={() => setScheduleModal(null)}
+                        onSave={s => saveSchedule(scheduleModal.campaign_id, s)}
                     />
                 )}
-                {autopayLogModal && (
-                    <AutopayLogModal
-                        campaign={autopayLogModal}
-                        onClose={() => setAutopayLogModal(null)}
+                {budgetLogModal && (
+                    <BudgetLedgerModal
+                        campaign={budgetLogModal}
+                        onClose={() => setBudgetLogModal(null)}
                     />
                 )}
             </div>

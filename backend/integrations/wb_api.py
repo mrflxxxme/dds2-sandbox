@@ -42,9 +42,33 @@ WB_MARKETPLACE_API_BASE = "https://marketplace-api.wildberries.ru"
 WB_SUPPLIERS_API_BASE = "https://supplies-api.wildberries.ru"
 WB_SELLER_ANALYTICS_API_BASE = "https://seller-analytics-api.wildberries.ru"
 WB_PRICES_API_BASE = "https://discounts-prices-api.wildberries.ru"
+WB_FEEDBACKS_API_BASE = "https://feedbacks-api.wildberries.ru"
 
 # Request timeout in seconds
 TIMEOUT = 30
+
+
+async def check_feedbacks_scope(api_key: str) -> str:
+    """Есть ли у токена категория «Вопросы и отзывы». Возвращает "ok" | "no_scope" | "unknown".
+
+    Лёгкий пробник — GET /api/v1/feedbacks?take=1: валидирует именно feedbacks-scope.
+    "unknown" (429/5xx/сеть) НЕ считать невалидным ключом — зеркало check_content_scope.
+    """
+    params = {"isAnswered": "true", "take": "1", "skip": "0"}
+    url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers={"Authorization": api_key}, params=params)
+    except httpx.HTTPError as e:
+        logger.warning("feedbacks_scope_check.network_error", error=str(e))
+        return "unknown"
+    if resp.status_code in (200, 204):
+        return "ok"
+    if resp.status_code in (401, 403):
+        logger.info("feedbacks_scope_check.rejected", status=resp.status_code)
+        return "no_scope"
+    logger.warning("feedbacks_scope_check.transient", status=resp.status_code)
+    return "unknown"
 
 # Per-project circuit breakers — one project's failures don't block others
 _wb_circuits = CircuitBreakerRegistry(
@@ -741,6 +765,136 @@ class WBApiClient:
                 if isinstance(data, list):
                     return data
                 return []
+
+    # ─── Feedbacks / Reviews (Feedbacks API) ────────────────────────────────
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_feedbacks(
+        self,
+        is_answered: bool = False,
+        take: int = 100,
+        skip: int = 0,
+    ) -> dict:
+        """
+        Отзывы покупателей (feedbacks) по товарам продавца.
+        WB Feedbacks API: GET /api/v1/feedbacks?isAnswered=&take=&skip=
+        take ∈ [1..5000], skip ≥ 0. Нужен scope «Вопросы и отзывы».
+
+        Возвращает внутренний data-dict:
+          {countUnanswered, countArchive, feedbacks: [
+             {id, text, pros, cons, productValuation, createdDate, userName,
+              answer, productDetails: {nmId, productName, supplierArticle, brandName}}
+          ]}
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                params = {
+                    "isAnswered": str(is_answered).lower(),
+                    "take": take,
+                    "skip": skip,
+                }
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks"
+                logger.info("wb_api.request", method="GET", path="/api/v1/feedbacks", params=params)
+                response = await client.get(url, headers=self.headers, params=params)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code == 204:
+                    return {"countUnanswered": 0, "countArchive": 0, "feedbacks": []}
+                if response.status_code != 200:
+                    raise ValueError(f"WB Feedbacks API error: HTTP {response.status_code} — {response.text[:200]}")
+
+                data = response.json()
+                inner = data.get("data") if isinstance(data, dict) else None
+                return inner or {"countUnanswered": 0, "countArchive": 0, "feedbacks": []}
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def get_feedbacks_archive(
+        self,
+        take: int = 5000,
+        skip: int = 0,
+    ) -> dict:
+        """
+        Архивные отзывы покупателей (feedbacks archive).
+        WB Feedbacks API: GET /api/v1/feedbacks/archive?take=&skip=
+        take ∈ [1..5000], skip ≥ 0. Тот же формат data-dict, что get_feedbacks
+        (архив = обработанные отзывы, без isAnswered-фильтра). Нужен для первичного
+        бэкофилла истории — активный список отдаёт только «свежие» отзывы.
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                params = {"take": take, "skip": skip}
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks/archive"
+                logger.info("wb_api.request", method="GET", path="/api/v1/feedbacks/archive", params=params)
+                response = await client.get(url, headers=self.headers, params=params)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code == 204:
+                    return {"feedbacks": []}
+                if response.status_code != 200:
+                    raise ValueError(f"WB Feedbacks archive error: HTTP {response.status_code} — {response.text[:200]}")
+
+                data = response.json()
+                inner = data.get("data") if isinstance(data, dict) else None
+                return inner or {"feedbacks": []}
+
+    @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
+    async def submit_feedback_complaint(
+        self,
+        feedback_id: str,
+        reason_code: str,
+        text: str | None = None,
+    ) -> bool:
+        """
+        Подать жалобу на отзыв. WB Feedbacks API: POST /api/v1/feedbacks/actions.
+
+        ⚠️ WB ВРЕМЕННО ОТКЛЮЧИЛ этот метод: жалобы подаются только через ЛК продавца,
+        а тем, у кого подача была автоматизирована, предписано перейти в ручной режим.
+        Код дремлет за флагом `settings.WB_FEEDBACK_COMPLAINTS_API` (по умолчанию False)
+        и включается, когда WB объявит возврат метода.
+
+        ⚠️ Лимит методов отзывов — 1 rps (до 3 rps → блок на 60 сек): массовую подачу
+        гнать ТОЛЬКО через фоновую очередь с троттлингом, не в HTTP-запросе.
+
+        WB не валидирует id отзыва: на неверном значении ошибки не будет — сверяй сам.
+        """
+        async with self._circuit:
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                url = f"{WB_FEEDBACKS_API_BASE}/api/v1/feedbacks/actions"
+                payload: dict = {"id": feedback_id, "supplierComplaint": {"reason": reason_code}}
+                if text:
+                    payload["supplierComplaint"]["comment"] = text
+                logger.info("wb_api.request", method="POST", path="/api/v1/feedbacks/actions")
+                response = await client.post(url, headers=self.headers, json=payload)
+
+                if response.status_code == 401:
+                    raise ValueError("WB API: неверный API-ключ (401) — нужен scope «Вопросы и отзывы»")
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "60"))
+                    raise RateLimitError("WB Feedbacks API rate limited (429)", retry_after=retry_after)
+                if response.status_code >= 500:
+                    raise ValueError(f"WB Feedbacks API server error: HTTP {response.status_code}")
+                if response.status_code in (404, 405):
+                    # метод отключён/убран на стороне WB
+                    raise ValueError(
+                        "WB: метод подачи жалоб недоступен (WB временно отключил его) — "
+                        "подайте жалобу через личный кабинет"
+                    )
+                if response.status_code not in (200, 204):
+                    raise ValueError(
+                        f"WB feedbacks/actions error: HTTP {response.status_code} — {response.text[:200]}"
+                    )
+                return True
 
 
 def parse_wb_cards_to_nomenclature(cards: list[dict]) -> list[dict]:

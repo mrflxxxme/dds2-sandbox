@@ -32,9 +32,10 @@ from backend.integrations.gazelka_client import (
     GazelkaCreateResult,
     SchedulePlan,
 )
+from backend.cache import invalidate_cache
 from backend.integrations.resilience import CircuitOpenError
 from backend.models import GazelkaOrder, GazelkaOrderStatus, IntegrationKey, Warehouse
-from backend.models.assembly import AssemblyRequest
+from backend.models.assembly import AssemblyRequest, AssemblyStatus
 from backend.models.wb_fbo import WbFboSupply
 from backend.schemas.gazelka import (
     GazelkaConfigResponse,
@@ -936,6 +937,57 @@ async def list_planned(db: AsyncSession, project_id: int) -> GazelkaOrderList:
     return GazelkaOrderList(items=rows, count=len(rows))
 
 
+def _vehicle_assigned_ids(rows: list[GazelkaOrderRow]) -> set[int]:
+    """Сборки, чьей заявке Газелька уже назначила машину (в маршруте есть ТС/водитель)."""
+    return {
+        row.linked_assembly_id
+        for row in rows
+        if row.linked_assembly_id is not None and (row.vehicle or row.driver_name)
+    }
+
+
+async def _promote_vehicle_assigned(db: AsyncSession, project_id: int, assembly_ids: set[int]) -> set[int]:
+    """READY → VEHICLE_ASSIGNED для сборок, чьим заявкам Газелька назначила машину.
+
+    Логистику связанных заявок ведёт агрегатор (ручной assign_vehicle заблокирован),
+    поэтому статус «Машина назначена» зеркалим отсюда — с вкладки «Активные», где
+    портал отдаёт маршрут с ТС/водителем. Реквизиты машины НЕ копируем (решение
+    пользователя 17.07.2026) — только статус + история + момент назначения.
+    Прочие статусы не трогаем: не READY — либо ещё не готова, либо уже уехала
+    (авто-шип по приёмке WB умеет и READY, и VEHICLE_ASSIGNED). Вернувшийся id
+    → set промоушнутых (для патча бейджей в уже построенных строках).
+    """
+    if not assembly_ids:
+        return set()
+    result = await db.execute(
+        select(AssemblyRequest).where(
+            AssemblyRequest.project_id == project_id,
+            AssemblyRequest.id.in_(assembly_ids),
+            AssemblyRequest.is_deleted.is_(False),
+            AssemblyRequest.status == AssemblyStatus.READY.value,
+        )
+    )
+    to_promote = result.scalars().all()
+    if not to_promote:
+        return set()
+    from backend.services.assembly.status import _log_status_change
+
+    for ar in to_promote:
+        ar.status = AssemblyStatus.VEHICLE_ASSIGNED
+        ar.vehicle_assigned_at = utcnow()
+        await _log_status_change(
+            db, project_id, ar.id, AssemblyStatus.READY, AssemblyStatus.VEHICLE_ASSIGNED,
+            changed_by="gazelka", comment="Газелька: машина назначена",
+        )
+    promoted = {ar.id for ar in to_promote}
+    await db.commit()
+    await invalidate_cache("reports:assembly_flow")
+    await invalidate_cache("reports:assembly_link_anomalies")
+    await invalidate_cache("reports:warehouse_need")
+    logger.info("gazelka.vehicle_assigned_sync", project_id=project_id, assembly_ids=sorted(promoted))
+    return promoted
+
+
 async def list_active(db: AsyncSession, project_id: int) -> GazelkaOrderList:
     key = await _get_key(db, project_id)
     try:
@@ -959,6 +1011,12 @@ async def list_active(db: AsyncSession, project_id: int) -> GazelkaOrderList:
         row = _row_from_plan(p, mkts, linked, editable=False, joins=joins)
         _attach_suggestion(row, p, supply_idx)
         rows.append(row)
+    # Синк статуса из портала: у связанной заявки появилась машина → сборка
+    # «Машина назначена» (бейдж в уже построенных строках патчим тут же).
+    promoted = await _promote_vehicle_assigned(db, project_id, _vehicle_assigned_ids(rows))
+    for row in rows:
+        if row.linked_assembly_id in promoted:
+            row.linked_assembly_status = _assembly_status_label(AssemblyStatus.VEHICLE_ASSIGNED.value)
     return GazelkaOrderList(items=rows, count=len(rows))
 
 
