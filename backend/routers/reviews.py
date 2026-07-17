@@ -19,6 +19,8 @@ from backend.integrations.resilience import CircuitOpenError, RateLimitError
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.reviews import (
+    ComplaintBulkCreate,
+    ComplaintBulkResult,
     ComplaintCandidatesResponse,
     ComplaintCreate,
     ComplaintItem,
@@ -118,6 +120,22 @@ async def create_complaint(
     try:
         return await complaints_service.create_complaint(
             db, project.id, body.wb_feedback_id, body.reason, body.text
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/complaints/bulk", response_model=ComplaintBulkResult)
+async def create_complaints_bulk(
+    body: ComplaintBulkCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+) -> ComplaintBulkResult:
+    """Зафиксировать жалобы на ВСЕ накопившиеся отзывы 1–3★ одним действием."""
+    try:
+        return await complaints_service.bulk_create_complaints(
+            db, project.id, body.reason, body.text, max_rating=body.max_rating
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from None

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models import WBFeedback, WBFeedbackComplaint
 from backend.models.wb_feedback_complaints import COMPLAINT_REASONS, COMPLAINT_STATUSES
 from backend.schemas.reviews import (
+    ComplaintBulkResult,
     ComplaintCandidate,
     ComplaintCandidatesResponse,
     ComplaintItem,
@@ -25,6 +26,7 @@ from backend.services.reviews_service import _has_wb_key, has_any_feedback
 from backend.utils.time import utcnow
 
 _CANDIDATE_MAX = 500
+_BULK_MAX = 500  # кап массовой подачи за один прогон
 _TERMINAL = {"removed", "rejected"}
 
 
@@ -77,8 +79,21 @@ async def list_candidates(
         )
         for f, status in rows
     ]
+    # всего накопившихся кандидатов без жалобы — для кнопки массовой подачи
+    already = select(WBFeedbackComplaint.wb_feedback_id).where(
+        WBFeedbackComplaint.project_id == project_id
+    )
+    total_open = await db.scalar(
+        select(func.count(WBFeedback.id)).where(
+            WBFeedback.project_id == project_id,
+            WBFeedback.rating >= 1,
+            WBFeedback.rating <= max_rating,
+            WBFeedback.wb_id.notin_(already),
+        )
+    )
+
     has_key = bool(items) or await has_any_feedback(db, project_id) or await _has_wb_key(db, project_id)
-    return ComplaintCandidatesResponse(items=items, has_key=has_key)
+    return ComplaintCandidatesResponse(items=items, total_open=int(total_open or 0), has_key=has_key)
 
 
 async def _stats(db: AsyncSession, project_id: int) -> ComplaintStats:
@@ -186,6 +201,56 @@ async def create_complaint(
     await db.commit()
     await db.refresh(c)
     return _to_item(c, fb.text, fb.product_name)
+
+
+async def bulk_create_complaints(
+    db: AsyncSession, project_id: int, reason: str, text: str, max_rating: int = 3
+) -> ComplaintBulkResult:
+    """
+    Зафиксировать жалобы на ВСЕ накопившиеся отзывы 1..max_rating без жалобы.
+
+    Текст один на все (шаблон не привязан к конкретному отзыву). За прогон — не
+    больше `_BULK_MAX` (остаток берётся повторным нажатием, `truncated=True`).
+    """
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("Нужен текст жалобы")
+    if reason not in COMPLAINT_REASONS:
+        reason = "not_related"
+    max_rating = max(1, min(max_rating, 3))
+
+    already = select(WBFeedbackComplaint.wb_feedback_id).where(
+        WBFeedbackComplaint.project_id == project_id
+    )
+    rows = (
+        await db.execute(
+            select(WBFeedback)
+            .where(
+                WBFeedback.project_id == project_id,
+                WBFeedback.rating >= 1,
+                WBFeedback.rating <= max_rating,
+                WBFeedback.wb_id.notin_(already),
+            )
+            .order_by(WBFeedback.rating.asc(), WBFeedback.created_date.desc().nullslast())
+            .limit(_BULK_MAX + 1)
+        )
+    ).scalars().all()
+
+    truncated = len(rows) > _BULK_MAX
+    for f in rows[:_BULK_MAX]:
+        db.add(
+            WBFeedbackComplaint(
+                project_id=project_id,
+                wb_feedback_id=f.wb_id,
+                nm_id=f.nm_id,
+                rating=f.rating,
+                reason=reason,
+                text=text,
+                status="pending",
+            )
+        )
+    await db.commit()
+    return ComplaintBulkResult(created=min(len(rows), _BULK_MAX), truncated=truncated)
 
 
 async def update_status(

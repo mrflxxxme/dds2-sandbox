@@ -129,18 +129,90 @@ function ComplaintModal({ candidate, seller, onClose, onSubmitted }: {
     );
 }
 
+/** Модалка массовой подачи: один текст на все накопившиеся отзывы. */
+function BulkModal({ count, seller, onClose, onDone }: {
+    count: number;
+    seller: string;
+    onClose: () => void;
+    onDone: (created: number, truncated: boolean) => void;
+}) {
+    const [reason, setReason] = useState<ComplaintReason>('not_related');
+    const [text, setText] = useState(buildTemplate(seller, 'not_related'));
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState('');
+
+    const changeReason = (r: ComplaintReason) => { setReason(r); setText(buildTemplate(seller, r)); };
+
+    const submit = async () => {
+        setBusy(true); setErr('');
+        try {
+            const res = await api.createComplaintsBulk({ reason, text, max_rating: 3 });
+            onDone(res.created, res.truncated);
+        } catch (e) {
+            setErr(e instanceof Error ? e.message : 'Не удалось подать жалобы');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', zIndex: 1000, padding: 24, overflowY: 'auto' }} onClick={onClose}>
+            <div className="glass-card" style={{ maxWidth: 640, width: '100%', padding: 24, marginTop: 40 }} onClick={e => e.stopPropagation()}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                    <h2 style={{ margin: 0, fontSize: 22 }}>🗑 Жалобы на все отзывы</h2>
+                    <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
+                </div>
+
+                <div className="glass-card" style={{ padding: 12, margin: '12px 0', borderLeft: '3px solid var(--color-warning)' }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Будет зафиксировано жалоб: {formatNumber(count, 0)}</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
+                        Все накопившиеся отзывы 1–3★ без жалобы. Один текст на все.
+                        Отзывы <b>не удаляются автоматически</b> — решение принимает WB. Жалобы нужно подать
+                        в кабинете WB, здесь они фиксируются для учёта (статус «В ожидании»).
+                    </div>
+                </div>
+
+                <div style={{ fontWeight: 600, marginBottom: 8 }}>Причина</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+                    {REASONS.map(r => (
+                        <label key={r.key} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: 15 }}>
+                            <input type="radio" name="bulk-reason" checked={reason === r.key} onChange={() => changeReason(r.key)} />
+                            {r.label}
+                        </label>
+                    ))}
+                </div>
+
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>Текст жалобы (общий)</div>
+                <textarea className="form-input" value={text} onChange={e => setText(e.target.value)} rows={10} maxLength={1000} style={{ width: '100%', resize: 'vertical', fontSize: 13, lineHeight: 1.5 }} />
+                <div style={{ fontSize: 12, color: 'var(--color-text-dim)', margin: '4px 0 16px' }}>{formatNumber(text.length, 0)} / 1000</div>
+
+                {err && <div style={{ color: 'var(--color-danger)', marginBottom: 8, fontSize: 13 }}>{err}</div>}
+                <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="btn btn-danger" onClick={submit} disabled={busy || !text.trim() || count === 0} style={{ fontSize: 15, fontWeight: 600, padding: '10px 20px' }}>
+                        {busy ? 'Подаём…' : `🗑 Зафиксировать ${formatNumber(count, 0)} жалоб`}
+                    </button>
+                    <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 type SubTab = 'candidates' | 'filed';
 
 export default function ReviewsComplaintsTab() {
     const [subTab, setSubTab] = useState<SubTab>('candidates');
     const [seller, setSeller] = useState(DEFAULT_SELLER);
     const [candidates, setCandidates] = useState<ComplaintCandidate[]>([]);
+    const [totalOpen, setTotalOpen] = useState(0);
     const [filed, setFiled] = useState<ComplaintItem[]>([]);
     const [stats, setStats] = useState<ComplaintStats | null>(null);
     const [hasKey, setHasKey] = useState(true);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [modalFor, setModalFor] = useState<ComplaintCandidate | null>(null);
+    const [bulkOpen, setBulkOpen] = useState(false);
+    const [bulkMsg, setBulkMsg] = useState('');
 
     useEffect(() => {
         const saved = typeof window !== 'undefined' ? window.localStorage.getItem(SELLER_KEY) : null;
@@ -155,6 +227,7 @@ export default function ReviewsComplaintsTab() {
                 api.getComplaints(),
             ]);
             setCandidates(cand.items);
+            setTotalOpen(cand.total_open);
             setFiled(comp.items);
             setStats(comp.stats);
             setHasKey(cand.has_key);
@@ -196,6 +269,31 @@ export default function ReviewsComplaintsTab() {
                 <span style={{ fontSize: 13, color: 'var(--color-text-dim)' }}>Продавец в шаблоне жалобы:</span>
                 <input className="form-input" style={{ minWidth: 240 }} value={seller} onChange={e => saveSeller(e.target.value)} placeholder="ООО «…»" />
             </div>
+
+            {/* Массовая подача — крупная кнопка */}
+            {hasKey && totalOpen > 0 && (
+                <div className="glass-card" style={{ padding: 20, marginBottom: 16, display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', borderLeft: '4px solid var(--color-danger)' }}>
+                    <button
+                        className="btn btn-danger"
+                        onClick={() => setBulkOpen(true)}
+                        style={{ fontSize: 17, fontWeight: 700, padding: '16px 32px', borderRadius: 12, display: 'inline-flex', alignItems: 'center', gap: 12 }}
+                    >
+                        <span style={{ fontSize: 24, lineHeight: 1 }}>🗑</span>
+                        Пожаловаться на все ({formatNumber(totalOpen, 0)})
+                    </button>
+                    <div style={{ fontSize: 13, color: 'var(--color-text-dim)', minWidth: 220, flex: 1 }}>
+                        Одним действием зафиксировать жалобы на все накопившиеся отзывы <b>1–3★</b> с общим текстом.
+                        Отзывы удаляет WB по итогу рассмотрения — здесь ведётся учёт.
+                    </div>
+                </div>
+            )}
+
+            {bulkMsg && (
+                <div className="glass-card" style={{ padding: 12, marginBottom: 16, color: 'var(--color-success)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {bulkMsg}
+                    <button className="btn btn-secondary btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setBulkMsg('')}>✕</button>
+                </div>
+            )}
 
             {/* Подвкладки */}
             <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
@@ -278,6 +376,22 @@ export default function ReviewsComplaintsTab() {
                     seller={seller}
                     onClose={() => setModalFor(null)}
                     onSubmitted={() => { setModalFor(null); load(); }}
+                />
+            )}
+
+            {bulkOpen && (
+                <BulkModal
+                    count={totalOpen}
+                    seller={seller}
+                    onClose={() => setBulkOpen(false)}
+                    onDone={(created, truncated) => {
+                        setBulkOpen(false);
+                        setBulkMsg(
+                            `✓ Зафиксировано жалоб: ${formatNumber(created, 0)}`
+                            + (truncated ? ' — это максимум за раз, нажмите ещё раз для остальных.' : ''),
+                        );
+                        load();
+                    }}
                 />
             )}
         </div>

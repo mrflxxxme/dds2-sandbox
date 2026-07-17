@@ -102,6 +102,7 @@ class ComplaintCandidatesResponse(BaseModel):
     """Кандидаты на жалобу (низкооценённые отзывы)."""
 
     items: list[ComplaintCandidate] = []
+    total_open: int = 0  # всего накопившихся кандидатов без жалобы (не только загруженных)
     has_key: bool = True
 
 
@@ -111,6 +112,21 @@ class ComplaintCreate(BaseModel):
     wb_feedback_id: str
     reason: str = "not_related"
     text: str
+
+
+class ComplaintBulkCreate(BaseModel):
+    """Массовая подача жалоб на все накопившиеся низкооценённые отзывы."""
+
+    reason: str = "not_related"
+    text: str  # один текст на все жалобы (шаблон не привязан к конкретному отзыву)
+    max_rating: int = 3
+
+
+class ComplaintBulkResult(BaseModel):
+    """Итог массовой подачи."""
+
+    created: int = 0  # сколько жалоб зафиксировано
+    truncated: bool = False  # упёрлись в лимит за прогон (остались ещё)
 
 
 class ComplaintStatusUpdate(BaseModel):

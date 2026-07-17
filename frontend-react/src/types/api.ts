@@ -6395,6 +6395,8 @@ export interface ComplaintCandidate {
 
 export interface ComplaintCandidatesResponse {
   items: ComplaintCandidate[];
+  /** Всего накопившихся кандидатов без жалобы (не только загруженных) */
+  total_open: number;
   has_key: boolean;
 }
 
@@ -6411,6 +6413,12 @@ export interface ComplaintItem {
   resolved_at: string | null;
   product_name: string | null;
   review_text: string | null;
+}
+
+/** Итог массовой подачи жалоб. */
+export interface ComplaintBulkResult {
+  created: number;
+  truncated: boolean;
 }
 
 export interface ComplaintStats {

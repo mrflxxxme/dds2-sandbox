@@ -346,6 +346,35 @@ async def test_complaints_flow(db_session, project):
         await complaints_service.create_complaint(db_session, project.id, "nope", "other", "x")
 
 
+async def test_complaints_bulk(db_session, project):
+    """Массовая подача: все накопившиеся 1–3★ без жалобы, повторный прогон — 0."""
+    from backend.services import complaints_service
+
+    await _add_feedback(db_session, project.id, "b1", 1, 111, text="раз", created=datetime(2026, 7, 1))
+    await _add_feedback(db_session, project.id, "b2", 3, 111, text="два", created=datetime(2026, 7, 2))
+    await _add_feedback(db_session, project.id, "b3", 5, 111, text="хороший", created=datetime(2026, 7, 3))
+    await db_session.commit()
+
+    cand = await complaints_service.list_candidates(db_session, project.id)
+    assert cand.total_open == 2  # только b1 и b2 (1–3★), b3 (5★) не кандидат
+
+    res = await complaints_service.bulk_create_complaints(db_session, project.id, "not_related", "общий текст")
+    assert res.created == 2 and res.truncated is False
+
+    stats = (await complaints_service.get_complaints(db_session, project.id)).stats
+    assert stats.filed == 2 and stats.pending == 2
+
+    # повторный прогон — жаловаться не на что (идемпотентно)
+    again = await complaints_service.bulk_create_complaints(db_session, project.id, "not_related", "общий текст")
+    assert again.created == 0
+    assert (await complaints_service.list_candidates(db_session, project.id)).total_open == 0
+
+    # пустой текст → ошибка
+    import pytest
+    with pytest.raises(ValueError):
+        await complaints_service.bulk_create_complaints(db_session, project.id, "not_related", "  ")
+
+
 async def test_reviews_breakdown_month(db_session, project):
     """Детальная таблица по месяцам: группы, распределение, итог, опции фильтров."""
     await _seed(db_session, project.id)

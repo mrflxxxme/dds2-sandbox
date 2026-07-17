@@ -1,6 +1,6 @@
 /** Отзывы покупателей WB (feedbacks) API methods */
 import { ApiClient } from './client';
-import type { ComplaintCandidatesResponse, ComplaintItem, ComplaintReason, ComplaintStatus, ComplaintsResponse, NewcomersResponse, ReviewBreakdownGroup, ReviewBreakdownResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse } from '@/types/api';
+import type { ComplaintBulkResult, ComplaintCandidatesResponse, ComplaintItem, ComplaintReason, ComplaintStatus, ComplaintsResponse, NewcomersResponse, ReviewBreakdownGroup, ReviewBreakdownResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse } from '@/types/api';
 
 export interface GetReviewsParams {
     isAnswered?: boolean;
@@ -42,6 +42,10 @@ export function addReviewMethods(api: ApiClient) {
         },
         createComplaint(body: { wb_feedback_id: string; reason: ComplaintReason; text: string }) {
             return api.request<ComplaintItem>('POST', '/api/v1/reviews/complaints', body);
+        },
+        // Массовая подача жалоб на все накопившиеся отзывы 1–3★
+        createComplaintsBulk(body: { reason: ComplaintReason; text: string; max_rating?: number }) {
+            return api.request<ComplaintBulkResult>('POST', '/api/v1/reviews/complaints/bulk', body);
         },
         updateComplaint(id: number, body: { status: ComplaintStatus; note?: string | null }) {
             return api.request<ComplaintItem>('PATCH', `/api/v1/reviews/complaints/${id}`, body);
