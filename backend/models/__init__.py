@@ -190,6 +190,12 @@ from backend.models.transactions import (
     Transaction,
 )
 
+# Vibecoding (внутренняя телеметрия репозитория)
+from backend.models.vibe import (
+    VibeAuthor,
+    VibeCommit,
+)
+
 # Warehouse
 from backend.models.warehouse import (
     DefectMarkOperation,
@@ -314,6 +320,9 @@ __all__ = [
     "Project",
     "ProjectMember",
     "ProjectInvite",
+    # Vibecoding
+    "VibeAuthor",
+    "VibeCommit",
     # References
     "Account",
     "CbrBic",

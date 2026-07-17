@@ -1,0 +1,61 @@
+# Вайбкодинг: git → БД прода после деплоя.
+#
+# Зачем отдельный воркфлоу, а не шаг в cd-production: статистика не должна ронять
+# выкатку прода. Упал ингест — деплой всё равно зелёный, данные догонит следующий
+# прогон или ночной cron.
+#
+# Почему CI, а не бэкенд: в образе нет .git (.dockerignore:7), история приложению
+# недоступна. CI считает (у него полный клон), сервер только принимает JSON.
+#
+# Секреты — те же, что у деплоя: DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY / DEPLOY_PATH.
+name: Vibecoding stats
+
+on:
+  workflow_run:
+    workflows: ["Deploy to Production"]
+    types: [completed]
+  workflow_dispatch:
+  schedule:
+    # Страховка: если workflow_run пропустили или ингест падал — подберём ночью.
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    name: Ingest vibecoding stats
+    runs-on: ubuntu-latest
+    # После workflow_run — только если деплой прошёл. По cron/вручную — всегда.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0  # нужна полная история: считаем по датам АВТОРА
+
+      - name: Generate stats
+        run: |
+          set -euo pipefail
+          # Окно 90 дней: перекрывает любые паузы в деплоях, а UPSERT по sha делает
+          # повторную заливку тех же коммитов бесплатной.
+          python3 scripts/vibe_stats.py --ref HEAD --last 90 > /tmp/vibe.json
+          echo "JSON: $(wc -c < /tmp/vibe.json) байт"
+
+      - name: Push to production DB
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          APP_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${HOST}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          # JSON уходит в stdin контейнера — ingest_vibe идемпотентен (UPSERT по sha).
+          ssh -i ~/.ssh/deploy_key "${USER}@${HOST}" \
+            "cd ${APP_PATH} && docker compose -f docker-compose.app.yml exec -T -w /app backend python3 -m scripts.ingest_vibe" \
+            < /tmp/vibe.json

@@ -36,6 +36,7 @@ import { addPricingMethods } from './api/pricing';
 import { addMeasurementMethods } from './api/measurements';
 import { addReviewMethods } from './api/reviews';
 import { addAbTestMethods } from './api/abTests';
+import { addVibeMethods } from './api/vibe';
 
 const client = new ApiClient();
 
@@ -67,4 +68,5 @@ export const api = Object.assign(client, {
     ...addMeasurementMethods(client),
     ...addReviewMethods(client),
     ...addAbTestMethods(client),
+    ...addVibeMethods(client),
 });
