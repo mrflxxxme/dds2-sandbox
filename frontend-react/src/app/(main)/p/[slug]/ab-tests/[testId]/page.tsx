@@ -393,7 +393,13 @@ export default function AbTestDetailPage() {
                                         <td style={{ padding: '8px 16px', textAlign: 'right' }}>{formatNumber(r.orders, 0)}</td>
                                         <td style={{ padding: '8px 16px', fontSize: 12, color: 'var(--color-warning)' }}>
                                             {r.flags.campaign_paused ? 'кампания стояла ' : ''}
-                                            {r.flags.apply_errors ? `смена фото с ${String(r.flags.apply_errors)} попытки` : ''}
+                                            {r.flags.apply_errors ? (
+                                                <span title={r.flags.last_apply_error ? String(r.flags.last_apply_error) : undefined}>
+                                                    {r.ended_at
+                                                        ? `смена фото с ${String(r.flags.apply_errors)} попытки`
+                                                        : `смена фото не проходит (попыток: ${String(r.flags.apply_errors)})`}
+                                                </span>
+                                            ) : ''}
                                         </td>
                                     </tr>
                                 );
