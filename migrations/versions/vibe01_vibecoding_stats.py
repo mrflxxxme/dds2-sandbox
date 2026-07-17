@@ -1,7 +1,7 @@
 """vibe_authors + vibe_commits — статистика вайбкодинга по данным git
 
 Revision ID: vibe01_vibecoding_stats
-Revises: wbr01_wb_warehouse_remains
+Revises: rev02_feedback_complaints
 Create Date: 2026-07-17
 
 Внутренняя телеметрия репозитория: что каждый вайбкодер выкатил на прод. Данные кладёт
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "vibe01_vibecoding_stats"
-down_revision = "wbr01_wb_warehouse_remains"
+down_revision = "rev02_feedback_complaints"
 branch_labels = None
 depends_on = None
 
