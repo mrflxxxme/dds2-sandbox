@@ -10,6 +10,7 @@
 | Себестоимость | FIFO, номенклатура, пошлины | [DOMAIN_COST.md](DOMAIN_COST.md) |
 | Склад | остатки, приёмка / отгрузка, FBO, box-multiplicity, WB-возвраты | [DOMAIN_WAREHOUSE.md](DOMAIN_WAREHOUSE.md) |
 | WB API | HTTP-клиент, resilience, воронка, финансы, синки | [DOMAIN_WB.md](DOMAIN_WB.md) |
+| Вайбкодинг | статистика по git; БЕЗ `project_id`, доступ по `vibe_authors`, данные льёт CI | [DOMAIN_VIBE.md](DOMAIN_VIBE.md) |
 | Сборка | заявки на сборку FBO, статусы, AssemblyDraft | [DOMAIN_ASSEMBLY.md](DOMAIN_ASSEMBLY.md) |
 | Поставки | FactoryOrder → Vehicle → Таможня → Склад | [DOMAIN_SUPPLY_CHAIN.md](DOMAIN_SUPPLY_CHAIN.md) |
 | Контрагенты | upsert по ИНН, мультивалюта, займы, обороты | [DOMAIN_COUNTERPARTY.md](DOMAIN_COUNTERPARTY.md) |
