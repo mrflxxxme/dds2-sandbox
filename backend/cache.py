@@ -176,6 +176,8 @@ async def invalidate_project_reports(project_id: int):
         "counterparty_detail",
         "reports:counterparty_turnovers",
         "loan_list",
+        # WB отзывы (сводная аналитика из зеркала БД)
+        "reviews:summary",
     ):
         await invalidate_cache(f"{prefix}:project_id={project_id}")
 

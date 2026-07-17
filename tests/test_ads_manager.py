@@ -465,129 +465,166 @@ async def test_hourly_spend_reconstructs_from_budget_deltas():
     assert len(res["hours"]) == 24 and res["date"] == "2026-07-03"
 
 
-def test_sanitize_autopay_clamps():
-    """Настройки автопополнения нормализуются: час 0-23, порог 0-100, сумма ≥ 0."""
-    from backend.services.funnel.ads_manager import _sanitize_autopay
+def test_sanitize_schedule_clamps():
+    """Настройки расписания нормализуются: часы МСК в 0-23, дефолт 00→09."""
+    from backend.services.funnel.ads_manager import _sanitize_schedule
 
-    s = _sanitize_autopay({"enabled": True, "amount": -5, "hour": 25, "threshold_pct": 150})
-    assert s == {"enabled": True, "mode": "to_target", "amount": 0.0, "hour": 23, "threshold_pct": 100,
-                 "low_balance_threshold": 1000.0, "topup_amount": 1000.0, "daily_cap": 1}
-    d = _sanitize_autopay({})
-    assert d == {"enabled": False, "mode": "to_target", "amount": 0.0, "hour": 9, "threshold_pct": 50,
-                 "low_balance_threshold": 1000.0, "topup_amount": 1000.0, "daily_cap": 1}
-    # Неизвестный режим откатывается к to_target; low_balance-поля нормализуются
-    lb = _sanitize_autopay({"enabled": True, "mode": "wat", "low_balance_threshold": -1, "topup_amount": 1200, "daily_cap": -3})
-    assert lb["mode"] == "to_target" and lb["low_balance_threshold"] == 0.0 and lb["topup_amount"] == 1200.0
-    assert lb["daily_cap"] == 0  # отрицательный клампится к 0 (без ограничения)
+    s = _sanitize_schedule({"enabled": True, "pause_hour": -1, "resume_hour": 25})
+    assert s == {"enabled": True, "pause_hour": 0, "resume_hour": 23}
+    d = _sanitize_schedule({})
+    assert d == {"enabled": False, "pause_hour": 0, "resume_hour": 9}
 
 
-# ─── compute_autopay_decision ────────────────────────────────────────────────
+def test_wb_side_topups_detects_increases_only():
+    """Долив ВБ = рост бюджета ≥ 50₽; падения и дрожание <50₽ — не доливы; последний долив выигрывает."""
+    from backend.services.funnel.ads_manager import _wb_side_topups
+
+    events = [
+        _event(101, None, datetime(2026, 7, 16, 21, 2)),          # мусор без числа — пропуск
+        _event(101, "3000.0", datetime(2026, 7, 15, 21, 2)),      # 0→3000: долив
+        _event(101, "10.0", datetime(2026, 7, 16, 12, 0)),        # 3000→10: списание, не долив
+        _event(101, "40.0", datetime(2026, 7, 16, 13, 0)),        # +30: дрожание < 50
+        _event(101, "5000.0", datetime(2026, 7, 16, 21, 2)),      # 40→5000: долив (последний)
+        _event(202, "999.0", datetime(2026, 7, 16, 21, 3)),       # чужая кампания без роста
+    ]
+    # old_value проставляем цепочкой руками (у _event его нет)
+    olds = [None, "0.0", "3000.0", "10.0", "40.0", "999.0"]
+    for ev, old in zip(events, olds):
+        ev.old_value = old
+
+    res = _wb_side_topups(events, manual_marks=[])
+    assert set(res) == {101}
+    assert res[101]["count"] == 2
+    assert res[101]["last"] == datetime(2026, 7, 16, 21, 2) and res[101]["last_amount"] == 4960.0
 
 
-def _decision(**overrides):
-    from backend.services.funnel.ads_manager import compute_autopay_decision
+def test_wb_side_topups_excludes_our_manual_deposits():
+    """Рост бюджета в ±15 мин от нашего ручного пополнения через ДДС — не долив ВБ."""
+    from backend.services.funnel.ads_manager import _wb_side_topups
+
+    ev = _event(101, "2000.0", datetime(2026, 7, 16, 12, 0))
+    ev.old_value = "500.0"
+    # наш депозит через ДДС в 12:05 — событие роста через 5 минут = это он
+    res = _wb_side_topups([ev], manual_marks=[(101, datetime(2026, 7, 16, 12, 5))])
+    assert res == {}
+    # депозит по ДРУГОЙ кампании не гасит долив этой
+    res = _wb_side_topups([ev], manual_marks=[(202, datetime(2026, 7, 16, 12, 5))])
+    assert set(res) == {101}
+
+
+def test_schedule_active_requires_nonzero_window():
+    """Выключенная или с пустым окном (pause==resume) настройка не работает."""
+    from backend.services.funnel.ads_manager import _schedule_active, _sanitize_schedule
+
+    assert _schedule_active(_sanitize_schedule({"enabled": True, "pause_hour": 0, "resume_hour": 9}))
+    assert not _schedule_active(_sanitize_schedule({"enabled": False, "pause_hour": 0, "resume_hour": 9}))
+    assert not _schedule_active(_sanitize_schedule({"enabled": True, "pause_hour": 5, "resume_hour": 5}))
+
+
+# ─── compute_schedule_action ─────────────────────────────────────────────────
+
+ACTIVE, PAUSED = 9, 11
+
+
+def _action(**overrides):
+    from backend.services.funnel.ads_manager import compute_schedule_action
 
     kwargs = {
-        "setting": {"enabled": True, "amount": 3000.0, "hour": 9, "threshold_pct": 50},
-        "budget": 500.0,
-        "spend_day": 2000.0,
-        "now_hour_msk": 9,
-        "already_topped_today": False,
-        "pending_unknown": False,
+        "setting": {"enabled": True, "pause_hour": 0, "resume_hour": 9},
+        "status": ACTIVE,
+        "now_msk": datetime(2026, 7, 17, 0, 30),  # внутри окна 00–09
+        "journal": [],
     }
     kwargs.update(overrides)
-    return compute_autopay_decision(**kwargs)
+    return compute_schedule_action(**kwargs)
 
 
-def test_autopay_deposit_tops_up_to_x():
-    """Бюджет 500, X=3000 → пополнить 2500 (кратно 50)."""
-    d = _decision()
-    assert d == {"action": "deposit", "sum": 2500, "reason": "ok"}
+def _je(kind, status="ok", window_id="2026-07-17", campaign_id=101):
+    """Запись журнала расписания (новые первыми — порядок задаёт вызывающий)."""
+    return {"campaign_id": campaign_id, "kind": kind, "status": status, "window_id": window_id}
 
 
-def test_autopay_min_1000_and_round50():
-    """Недобор 300 → минимум 1000; недобор 1230 → округление вверх до 1250."""
-    d = _decision(budget=2700.0)
-    assert d["action"] == "deposit" and d["sum"] == 1000
-    d = _decision(budget=1770.0)
-    assert d["action"] == "deposit" and d["sum"] == 1250
+def test_schedule_pauses_active_in_window():
+    """Активная кампания внутри окна, журнал пуст → пауза (окно = МСК-дата старта)."""
+    d = _action()
+    assert d == {"action": "pause", "window_id": "2026-07-17", "reason": "ok"}
 
 
-def test_autopay_skips():
-    """Скипы: выключено, не тот час, уже пополняли, неизвестный исход, бюджет полон."""
-    assert _decision(setting={"enabled": False, "amount": 3000, "hour": 9, "threshold_pct": 0})["reason"] == "disabled"
-    assert _decision(now_hour_msk=10)["reason"] == "not_time"
-    assert _decision(already_topped_today=True)["reason"] == "already_today"
-    assert _decision(pending_unknown=True)["reason"] == "pending_unknown"
-    assert _decision(budget=3000.0)["reason"] == "budget_full"
-    assert _decision(budget=5000.0)["reason"] == "budget_full"
+def test_schedule_skips_not_active_in_window():
+    """Внутри окна не активна (пауза руками/ещё не запускалась/нет в БД) → не трогаем."""
+    assert _action(status=PAUSED)["reason"] == "not_active"
+    assert _action(status=4)["reason"] == "not_active"
+    assert _action(status=None)["reason"] == "not_active"
 
 
-def test_autopay_threshold():
-    """Порог 50% от X=3000 → 1500: открут 1499 — скип, 1500 — пополняем. Порог 0 — всегда."""
-    assert _decision(spend_day=1499.0)["reason"] == "below_threshold"
-    assert _decision(spend_day=1500.0)["action"] == "deposit"
-    d = _decision(spend_day=0.0, setting={"enabled": True, "amount": 3000, "hour": 9, "threshold_pct": 0})
-    assert d["action"] == "deposit"
+def test_schedule_no_repause_after_manual_start():
+    """Уже глушили в это окно (есть успешная пауза), кампания снова активна —
+    значит юзер поднял её руками ночью. Повторно не глушим."""
+    d = _action(status=ACTIVE, journal=[_je("pause")])
+    assert d["reason"] == "already_paused"
 
 
-def test_autopay_zero_amount_disabled():
-    d = _decision(setting={"enabled": True, "amount": 0, "hour": 9, "threshold_pct": 0})
-    assert d["reason"] == "disabled"
+def test_schedule_retries_failed_pause_up_to_cap():
+    """Ошибка WB ретраится следующим тиком, но не более SCHEDULE_MAX_ATTEMPTS на окно."""
+    from backend.services.funnel.ads_manager import SCHEDULE_MAX_ATTEMPTS
+
+    d = _action(journal=[_je("pause", status="error")])
+    assert d["action"] == "pause"  # одна неудача — пробуем ещё
+    exhausted = [_je("pause", status="error")] * SCHEDULE_MAX_ATTEMPTS
+    assert _action(journal=exhausted)["reason"] == "attempts_exhausted"
 
 
-# ─── Режим low_balance («как на ВБ»): долив по остатку, любой час, повторяемо ──
+def test_schedule_starts_our_pause_after_window():
+    """Окно кончилось, кампания на паузе, последняя успешная операция — наша пауза → запуск."""
+    d = _action(status=PAUSED, now_msk=datetime(2026, 7, 17, 9, 1), journal=[_je("pause")])
+    assert d == {"action": "start", "window_id": "2026-07-17", "reason": "ok"}
 
 
-def _lb(**setting):
-    base = {"enabled": True, "mode": "low_balance", "low_balance_threshold": 1000, "topup_amount": 1000}
-    base.update(setting)
-    return base
+def test_schedule_never_starts_foreign_pause():
+    """Паузу, которую ставили НЕ мы, не трогаем: пустой журнал или последняя операция — запуск."""
+    after = datetime(2026, 7, 17, 9, 1)
+    assert _action(status=PAUSED, now_msk=after)["reason"] == "not_ours"
+    assert _action(status=PAUSED, now_msk=after, journal=[_je("start"), _je("pause")])["reason"] == "not_ours"
 
 
-def test_autopay_low_balance_tops_up_when_below():
-    """Остаток < порога → долить topup; час/«уже пополняли сегодня» игнорируются в этом режиме."""
-    d = _decision(setting=_lb(), budget=800.0, now_hour_msk=15, already_topped_today=True)
-    assert d == {"action": "deposit", "sum": 1000, "reason": "ok"}
+def test_schedule_skips_active_after_window():
+    """Вне окна активная кампания — делать нечего."""
+    assert _action(now_msk=datetime(2026, 7, 17, 12, 0))["reason"] == "not_paused"
 
 
-def test_autopay_low_balance_skips_when_above():
-    d = _decision(setting=_lb(), budget=1200.0)
-    assert d["reason"] == "above_threshold"
+def test_schedule_missed_window_self_heals():
+    """Тик проспал окно (бэкенд лежал) → застрявшая на паузе кампания поднимается позже."""
+    d = _action(
+        status=PAUSED,
+        now_msk=datetime(2026, 7, 18, 14, 0),  # следующий день, давно вне окна
+        journal=[_je("pause", window_id="2026-07-17")],
+    )
+    assert d["action"] == "start" and d["window_id"] == "2026-07-17"
 
 
-def test_autopay_low_balance_pending_unknown_skips():
-    """Неизвестный исход прошлой попытки — не рискуем двойным списанием."""
-    d = _decision(setting=_lb(), budget=100.0, pending_unknown=True)
-    assert d["reason"] == "pending_unknown"
+def test_schedule_cross_midnight_window():
+    """Окно через полночь (22→08): вечер и утро — одно окно с датой старта."""
+    setting = {"enabled": True, "pause_hour": 22, "resume_hour": 8}
+    # вечер 23:30 — окно стартовало сегодня
+    d = _action(setting=setting, now_msk=datetime(2026, 7, 17, 23, 30))
+    assert d == {"action": "pause", "window_id": "2026-07-17", "reason": "ok"}
+    # утро 03:00 следующего дня — то же окно (стартовало вчера)
+    d = _action(setting=setting, now_msk=datetime(2026, 7, 18, 3, 0))
+    assert d["action"] == "pause" and d["window_id"] == "2026-07-17"
+    # 03:00, но в это окно уже глушили → скип
+    d = _action(setting=setting, now_msk=datetime(2026, 7, 18, 3, 0), journal=[_je("pause")])
+    assert d["reason"] == "already_paused"
+    # 08:00 — окно кончилось, поднимаем свою паузу
+    d = _action(setting=setting, status=PAUSED, now_msk=datetime(2026, 7, 18, 8, 1), journal=[_je("pause")])
+    assert d == {"action": "start", "window_id": "2026-07-17", "reason": "ok"}
 
 
-def test_autopay_low_balance_min_topup_and_round50():
-    d = _decision(setting=_lb(topup_amount=300), budget=100.0)
-    assert d["sum"] == 1000  # минимум 1000
-    d = _decision(setting=_lb(topup_amount=1230), budget=100.0)
-    assert d["sum"] == 1250  # округление вверх до 50
+def test_schedule_disabled_or_empty_window_skips():
+    assert _action(setting={"enabled": False, "pause_hour": 0, "resume_hour": 9})["reason"] == "disabled"
+    assert _action(setting={"enabled": True, "pause_hour": 9, "resume_hour": 9})["reason"] == "disabled"
 
 
-def test_autopay_low_balance_zero_topup_disabled():
-    d = _decision(setting=_lb(topup_amount=0), budget=100.0)
-    assert d["reason"] == "disabled"
-
-
-def test_autopay_low_balance_daily_cap():
-    """«Не чаще N раз в день»: при достижении cap — скип; 0 = без ограничения."""
-    # cap=1: одно пополнение уже было сегодня → скип
-    d = _decision(setting=_lb(daily_cap=1), budget=100.0, topped_today_count=1)
-    assert d["reason"] == "cap_reached"
-    # cap=2: одно было — ещё можно
-    d = _decision(setting=_lb(daily_cap=2), budget=100.0, topped_today_count=1)
-    assert d["action"] == "deposit"
-    # cap=0 (без ограничения): сколько бы ни было — доливаем
-    d = _decision(setting=_lb(daily_cap=0), budget=100.0, topped_today_count=5)
-    assert d["action"] == "deposit"
-
-
-# ─── Журнал автопополнений ───────────────────────────────────────────────────
+# ─── Журнал пополнений (ручные) ──────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -730,75 +767,124 @@ async def test_set_campaign_active_wb_error_keeps_status(monkeypatch):
     db.commit.assert_not_awaited()
 
 
+def _settings_store(monkeypatch) -> dict[str, str]:
+    """project_settings в памяти: настройки и журнал расписания живут в JSON."""
+    store: dict[str, str] = {}
+
+    async def fake_get(db, project_id, key):
+        return store.get(key)
+
+    async def fake_set(db, project_id, key, value):
+        store[key] = value
+
+    monkeypatch.setattr("backend.services.settings_service.get_setting", fake_get)
+    monkeypatch.setattr("backend.services.settings_service.set_setting", fake_set)
+    return store
+
+
 @pytest.mark.asyncio
-async def test_save_autopay_activates_paused_campaign(monkeypatch):
-    """Включили автопополнение на кампании НА ПАУЗЕ (11) → активируется."""
+async def test_schedule_settings_merge_and_drop_disabled(monkeypatch):
+    """set мержит по кампании; выключенные записи вычищаются из JSON."""
     from backend.services.funnel import ads_manager as am
 
-    activated: dict = {}
+    _settings_store(monkeypatch)
+    db = AsyncMock()
+    await am.set_schedule_setting(db, PROJECT_ID, 101, {"enabled": True, "pause_hour": 0, "resume_hour": 9})
+    settings = await am.set_schedule_setting(db, PROJECT_ID, 202, {"enabled": True, "pause_hour": 22, "resume_hour": 8})
+    assert set(settings) == {"101", "202"}
 
-    async def fake_save(db, pid, cid, entry):
-        return {str(cid): entry}
+    settings = await am.set_schedule_setting(db, PROJECT_ID, 101, {"enabled": False})
+    assert set(settings) == {"202"}  # выключенная запись не хранится
+    assert (await am.get_schedule_settings(db, PROJECT_ID)) == settings
 
-    async def fake_active(db, pid, cid, active):
-        activated["cid"] = cid
-        activated["active"] = active
-        return {"ok": True, "status": 9, "error": None}
 
-    monkeypatch.setattr(am, "set_autopay_setting", fake_save)
-    monkeypatch.setattr(am, "set_campaign_active", fake_active)
+def _campaigns_db(*camps) -> AsyncMock:
+    """db, чей execute отдаёт список кампаний (scalars().all())."""
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = list(camps)
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=result)
+    return db
+
+
+@pytest.mark.asyncio
+async def test_run_schedule_tick_pause_then_resume(monkeypatch):
+    """Полный цикл тика: 00:30 — пауза + журнал, повторный тик — скип, 09:01 — запуск.
+
+    Сейв настройки кампанию не трогает — только тик (урок автопея: сейв менял
+    статус кампании и это стреляло). Статус в нашей БД обновляется синхронно.
+    """
+    import json as _json
+
+    from backend.services.funnel import ads_manager as am
+
+    store = _settings_store(monkeypatch)
+    calls: list[tuple[int, str]] = []
+
+    async def fake_state(api_key, campaign_id, action):
+        calls.append((campaign_id, action))
+        return {"ok": True, "error": None}
+
+    monkeypatch.setattr("backend.services.funnel.wb_advertising_api.set_campaign_state", fake_state)
 
     db = AsyncMock()
-    db.execute = AsyncMock(return_value=_scalar_one_result(11))  # текущий статус — пауза
-    res = await am.save_autopay_and_maybe_activate(db, PROJECT_ID, 42, {"enabled": True, "amount": 1000})
-    assert activated == {"cid": 42, "active": True}
-    assert res["activation"]["ok"] is True
+    await am.set_schedule_setting(db, PROJECT_ID, 101, {"enabled": True, "pause_hour": 0, "resume_hour": 9})
+    assert calls == []  # сейв не дёргает WB
+
+    camp = MagicMock(campaign_id=101, status=am.CAMPAIGN_STATUS_ACTIVE)
+
+    # 00:30 МСК — внутри окна → пауза
+    monkeypatch.setattr(am, "msk_now", lambda: datetime(2026, 7, 17, 0, 30))
+    res = await am.run_ads_schedule_tick(_campaigns_db(camp), PROJECT_ID, "key")
+    assert res == {"paused": 1, "started": 0, "checked": 1}
+    assert calls == [(101, "pause")]
+    assert camp.status == am.CAMPAIGN_STATUS_PAUSED  # наш статус обновлён сразу
+    log = _json.loads(store[am.SCHEDULE_LOG_KEY])
+    assert log[0]["kind"] == "pause" and log[0]["status"] == "ok" and log[0]["window_id"] == "2026-07-17"
+
+    # 00:46 — то же окно, уже глушили → ничего не делаем
+    res = await am.run_ads_schedule_tick(_campaigns_db(camp), PROJECT_ID, "key")
+    assert res == {"paused": 0, "started": 0, "checked": 1}
+    assert len(calls) == 1
+
+    # 09:01 — окно кончилось → запускаем свою паузу
+    monkeypatch.setattr(am, "msk_now", lambda: datetime(2026, 7, 17, 9, 1))
+    res = await am.run_ads_schedule_tick(_campaigns_db(camp), PROJECT_ID, "key")
+    assert res == {"paused": 0, "started": 1, "checked": 1}
+    assert calls[-1] == (101, "start")
+    assert camp.status == am.CAMPAIGN_STATUS_ACTIVE
+    log = _json.loads(store[am.SCHEDULE_LOG_KEY])
+    assert log[0]["kind"] == "start" and log[0]["status"] == "ok"
+
+    # 09:16 — кампания активна, журнал закрыт → тишина
+    res = await am.run_ads_schedule_tick(_campaigns_db(camp), PROJECT_ID, "key")
+    assert res == {"paused": 0, "started": 0, "checked": 1}
+    assert len(calls) == 2
 
 
 @pytest.mark.asyncio
-async def test_save_autopay_skips_activate_when_already_active(monkeypatch):
-    """Кампания уже активна (9) → повторный start НЕ дёргаем (нет ложного баннера)."""
+async def test_run_schedule_tick_wb_error_logged_not_counted(monkeypatch):
+    """Ошибка WB: статус в БД не меняем, в журнал пишем error (ретрай следующим тиком)."""
+    import json as _json
+
     from backend.services.funnel import ads_manager as am
 
-    called = {"n": 0}
+    store = _settings_store(monkeypatch)
 
-    async def fake_save(db, pid, cid, entry):
-        return {str(cid): entry}
+    async def fake_state(api_key, campaign_id, action):
+        return {"ok": False, "error": "HTTP 429: limited"}
 
-    async def fake_active(db, pid, cid, active):
-        called["n"] += 1
-        return {"ok": True, "status": 9, "error": None}
+    monkeypatch.setattr("backend.services.funnel.wb_advertising_api.set_campaign_state", fake_state)
 
-    monkeypatch.setattr(am, "set_autopay_setting", fake_save)
-    monkeypatch.setattr(am, "set_campaign_active", fake_active)
+    await am.set_schedule_setting(AsyncMock(), PROJECT_ID, 101, {"enabled": True, "pause_hour": 0, "resume_hour": 9})
+    camp = MagicMock(campaign_id=101, status=am.CAMPAIGN_STATUS_ACTIVE)
+    monkeypatch.setattr(am, "msk_now", lambda: datetime(2026, 7, 17, 0, 30))
 
-    db = AsyncMock()
-    db.execute = AsyncMock(return_value=_scalar_one_result(9))  # уже активна
-    res = await am.save_autopay_and_maybe_activate(db, PROJECT_ID, 42, {"enabled": True, "amount": 1000})
-    assert called["n"] == 0
-    assert res["activation"] is None
-
-
-@pytest.mark.asyncio
-async def test_save_autopay_no_activate_when_disabled(monkeypatch):
-    """Выключенное автопополнение НЕ трогает статус кампании."""
-    from backend.services.funnel import ads_manager as am
-
-    called = {"n": 0}
-
-    async def fake_save(db, pid, cid, entry):
-        return {}
-
-    async def fake_active(db, pid, cid, active):
-        called["n"] += 1
-        return {}
-
-    monkeypatch.setattr(am, "set_autopay_setting", fake_save)
-    monkeypatch.setattr(am, "set_campaign_active", fake_active)
-
-    res = await am.save_autopay_and_maybe_activate(AsyncMock(), PROJECT_ID, 42, {"enabled": False, "amount": 0})
-    assert called["n"] == 0
-    assert res["activation"] is None
+    res = await am.run_ads_schedule_tick(_campaigns_db(camp), PROJECT_ID, "key")
+    assert res == {"paused": 0, "started": 0, "checked": 1}
+    assert camp.status == am.CAMPAIGN_STATUS_ACTIVE
+    log = _json.loads(store[am.SCHEDULE_LOG_KEY])
+    assert log[0]["status"] == "error" and "429" in log[0]["reason"]
 
 
 @pytest.mark.asyncio
@@ -885,51 +971,6 @@ async def test_campaign_metrics_customer_price_zero_without_spp_map():
 
     res = await get_campaign_metrics(db, PROJECT_ID, 999, date_from="2026-07-10", date_to="2026-07-10")
     assert res["rows"][0]["customer_price"] == 1000.0  # СПП нет → цена как есть
-
-
-# ─── _autopay_journal_day_stats: naive-UTC ts vs день МСК ────────────────────
-
-
-def test_autopay_journal_night_window_counts_as_today_msk():
-    """Запись 00:30 МСК = 21:30 UTC вчера (naive) обязана считаться «сегодня» по МСК.
-
-    Регресс: naive-UTC ts сравнивался по ts.date() (UTC-дата) с датой МСК —
-    в 00:00–02:59 МСК идемпотентность и защита unknown молча отключались.
-    """
-    from datetime import date
-
-    from backend.services.funnel.ads_manager import _autopay_journal_day_stats
-
-    today_msk = date(2026, 7, 15)
-    log = [
-        # 00:30 МСК 15.07 = 21:30 UTC 14.07 — journal пишет utcnow() (naive UTC)
-        {"ts": "2026-07-14T21:30:00", "campaign_id": 111, "status": "ok"},
-        {"ts": "2026-07-14T21:40:00", "campaign_id": 222, "status": "unknown"},
-        # 23:50 UTC 14.07 = 02:50 МСК 15.07 — тоже «сегодня»
-        {"ts": "2026-07-14T23:50:00", "campaign_id": 111, "status": "ok"},
-        # 20:59 UTC 14.07 = 23:59 МСК 14.07 — «вчера», не считается
-        {"ts": "2026-07-14T20:59:00", "campaign_id": 111, "status": "ok"},
-    ]
-    topped, unknown = _autopay_journal_day_stats(log, today_msk)
-    assert topped == {111: 2}
-    assert unknown == {222}
-
-
-def test_autopay_journal_aware_ts_and_garbage():
-    """Aware-метки конвертируются честно; мусорные ts пропускаются молча."""
-    from datetime import date
-
-    from backend.services.funnel.ads_manager import _autopay_journal_day_stats
-
-    today_msk = date(2026, 7, 15)
-    log = [
-        {"ts": "2026-07-15T09:00:00+03:00", "campaign_id": 5, "status": "ok"},
-        {"ts": "not-a-date", "campaign_id": 6, "status": "ok"},
-        {"ts": "", "campaign_id": 7, "status": "unknown"},
-    ]
-    topped, unknown = _autopay_journal_day_stats(log, today_msk)
-    assert topped == {5: 1}
-    assert unknown == set()
 
 
 # ─── create_campaign: точечный догруз вместо полного синка ───────────────────

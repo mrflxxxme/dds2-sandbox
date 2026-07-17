@@ -50,10 +50,12 @@ from backend.routers import (
     projects,
     refs,
     reports,
+    reviews,
     supply_chain,
     telegram,
     telegram_miniapp,
     telegram_webhook,
+    vibe,
     warehouse,
     warehouse_speed,
     wb_returns,
@@ -635,6 +637,12 @@ app.include_router(
     dependencies=[Depends(get_current_user)],
 )
 app.include_router(
+    reviews.router,
+    prefix="/api/v1",
+    tags=["Reviews"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
     supply_chain.router,
     prefix="/api/v1",
     tags=["Supply Chain"],
@@ -662,6 +670,12 @@ app.include_router(
     localization.router,
     prefix="/api/v1",
     tags=["Localization"],
+    dependencies=[Depends(get_current_user)],
+)
+app.include_router(
+    vibe.router,
+    prefix="/api/v1",
+    tags=["Vibecoding"],
     dependencies=[Depends(get_current_user)],
 )
 

@@ -3466,30 +3466,28 @@ export interface AdsManagerCampaign {
   updated_at: string | null;
 }
 
-/** Режим автопополнения: to_target — долить до X в заданный час при пороге по обороту (наш);
- *  low_balance — «как на ВБ»: когда остаток < порога, долить фиксированную сумму (любой час, повторяемо). */
-export type AdsAutopayMode = 'to_target' | 'low_balance';
-
-export interface AdsAutopaySetting {
+/** Пауза по расписанию: деньгами рулит автопополнение ВБ (доливает в 00:00 МСК),
+ *  ДДС глушит кампанию в окне «плохих» часов и запускает обратно по его окончании. */
+export interface AdsScheduleSetting {
   enabled: boolean;
-  mode: AdsAutopayMode;
-  amount: number;  // to_target: дневной бюджет X
-  hour: number;  // to_target: час пополнения, МСК
-  threshold_pct: number;  // to_target: пополнять, только если открут за сутки ≥ порога
-  low_balance_threshold: number;  // low_balance: долить, когда остаток < этого, ₽
-  topup_amount: number;  // low_balance: сумма разового долива, ₽
-  daily_cap: number;  // low_balance: не чаще N раз в день (0 = без ограничения)
+  pause_hour: number;  // час МСК, когда ставить на паузу
+  resume_hour: number;  // час МСК, когда запускать обратно
 }
 
-export interface AdsAutopayLogEntry {
+/** Долив бюджета со стороны ВБ (детект автопополнения ВБ по событиям бюджета:
+ *  API ВБ статус автопея не отдаёт). Кампании без записи — доливов не замечено. */
+export interface AdsWbAutopayStatus {
+  last_ts: string | null;  // ISO UTC последнего долива
+  last_amount: number;  // ₽ последнего долива
+  count: number;  // доливов за окно (7 дней)
+}
+
+export interface AdsScheduleLogEntry {
   campaign_id: number;
   ts: string;  // ISO UTC
-  amount: number;  // фактически пополнено ₽ (0, если не удалось)
-  requested: number;  // запрошенная сумма ₽
-  source: string;  // счёт | баланс
-  status: 'ok' | 'error' | 'unknown';
-  budget_before: number | null;
-  budget_after: number | null;
+  kind: 'pause' | 'start';
+  status: 'ok' | 'error';
+  window_id: string;  // МСК-дата старта окна паузы
   reason: string | null;  // текст ошибки WB, если была
 }
 
@@ -3510,10 +3508,10 @@ export interface AdsCampaignStateResult {
   error: string | null;
 }
 
-/** Ответ сохранения автопополнения: настройки + результат авто-активации (если включили). */
-export interface AdsAutopaySaveResult {
-  settings: Record<string, AdsAutopaySetting>;
-  activation: AdsCampaignStateResult | null;
+/** Ответ сохранения паузы по расписанию: актуальная мапа настроек проекта.
+ *  Кампанию сейв не трогает — паузу/запуск делает только scheduler-тик. */
+export interface AdsScheduleSaveResult {
+  settings: Record<string, AdsScheduleSetting>;
 }
 
 export interface AdsHistoryPoint {
@@ -6407,6 +6405,225 @@ export interface PenaltyArticleSummaryResponse {
   net: string;
 }
 
+// ─── Отзывы (WB feedbacks) ───────────────────────────────────────────────────
+export interface Review {
+  id: string;
+  text: string;
+  rating: number;
+  created_date: string | null;
+  user_name: string | null;
+  pros: string | null;
+  cons: string | null;
+  nm_id: number | null;
+  product_name: string | null;
+  article: string | null;
+  brand: string | null;
+  is_answered: boolean;
+}
+
+export interface ReviewsListResponse {
+  items: Review[];
+  /** Всего отзывов в текущем срезе (по фильтру is_answered) — для пагинации */
+  total: number;
+  count_unanswered: number;
+  count_archive: number;
+  average_rating: number | null;
+  has_key: boolean;
+}
+
+/** Диапазон выборки сводки отзывов. */
+export type ReviewsPeriod = '2w' | '1m' | '3m' | '6m' | '1y' | 'all';
+
+/** Причина жалобы на отзыв. */
+export type ComplaintReason = 'not_related' | 'competitors' | 'other';
+/** Статус жалобы. */
+export type ComplaintStatus = 'pending' | 'removed' | 'rejected';
+
+/** Отзыв-кандидат на жалобу (низкая оценка) + статус. */
+export interface ComplaintCandidate {
+  wb_feedback_id: string;
+  nm_id: number | null;
+  rating: number;
+  text: string;
+  cons: string | null;
+  created_date: string | null;
+  user_name: string | null;
+  product_name: string | null;
+  brand: string | null;
+  complaint_status: ComplaintStatus | null;
+}
+
+export interface ComplaintCandidatesResponse {
+  items: ComplaintCandidate[];
+  /** Всего накопившихся кандидатов без жалобы (не только загруженных) */
+  total_open: number;
+  has_key: boolean;
+}
+
+export interface ComplaintItem {
+  id: number;
+  wb_feedback_id: string;
+  nm_id: number | null;
+  rating: number;
+  reason: ComplaintReason;
+  status: ComplaintStatus;
+  text: string;
+  note: string | null;
+  created_at: string | null;
+  resolved_at: string | null;
+  product_name: string | null;
+  review_text: string | null;
+}
+
+/** Итог массовой подачи жалоб. */
+export interface ComplaintBulkResult {
+  created: number;
+  truncated: boolean;
+}
+
+export interface ComplaintStats {
+  filed: number;
+  removed: number;
+  rejected: number;
+  pending: number;
+  removal_rate: number | null;
+}
+
+export interface ComplaintsResponse {
+  items: ComplaintItem[];
+  stats: ComplaintStats;
+  has_key: boolean;
+}
+
+/** Группировка детальной таблицы отзывов. */
+export type ReviewBreakdownGroup = 'day' | 'week' | 'month' | 'subject' | 'brand' | 'nm_id';
+
+/** Строка детальной таблицы: группа + распределение оценок 1–5. */
+export interface ReviewBreakdownRow {
+  key: string;
+  label: string;
+  total: number;
+  avg_rating: number | null;
+  r1: number;
+  r2: number;
+  r3: number;
+  r4: number;
+  r5: number;
+}
+
+export interface ReviewBreakdownResponse {
+  group_by: ReviewBreakdownGroup;
+  rows: ReviewBreakdownRow[];
+  totals: ReviewBreakdownRow;
+  subjects: string[];
+  brands: string[];
+  truncated: boolean;
+  has_key: boolean;
+}
+
+/** Проблемная новинка: недавно на продаже + рейтинг ниже порога. */
+export interface NewcomerReview {
+  nm_id: number;
+  name: string;
+  brand: string;
+  subject: string;
+  first_date: string;
+  /** Источник даты старта: 'sale' — дата первой продажи; 'review' — дата первого отзыва (прокси) */
+  date_source: 'sale' | 'review';
+  days_on_sale: number;
+  avg_rating: number | null;
+  count: number;
+  count_unanswered: number;
+  neg_unanswered: number;
+  r1: number;
+  r2: number;
+  r3: number;
+  r4: number;
+  r5: number;
+  tags: string[];
+}
+
+/** Частая тема жалоб из негативных отзывов. */
+export interface ComplaintTerm {
+  term: string;
+  count: number;
+}
+
+/** Разрез проблемных новинок по категории / бренду / ярлыку. */
+export interface NewcomerGroup {
+  name: string;
+  products: number;
+  avg_rating: number | null;
+  count: number;
+  r1: number;
+  r2: number;
+  r3: number;
+  r4: number;
+  r5: number;
+}
+
+export interface NewcomersResponse {
+  items: NewcomerReview[];
+  by_category: NewcomerGroup[];
+  by_brand: NewcomerGroup[];
+  by_tag: NewcomerGroup[];
+  total_newcomers: number;
+  complaint_terms: ComplaintTerm[];
+  days: number;
+  max_rating: number;
+  has_key: boolean;
+}
+
+/** Сводная аналитика отзывов (backend Decimal-поля могут прийти строкой → Number()). */
+export interface ReviewsSummary {
+  average_rating: number | null;
+  total: number;
+  count_no_text: number;
+  count_with_text: number;
+  count_unanswered: number;
+  count_positive: number;
+  count_negative: number;
+}
+
+export interface MonthlyRatingPoint {
+  month: string;
+  avg_rating: number | null;
+  count: number;
+}
+
+export interface MonthlyVolumePoint {
+  month: string;
+  r1: number;
+  r2: number;
+  r3: number;
+  r4: number;
+  r5: number;
+}
+
+export interface GroupRating {
+  name: string;
+  avg_rating: number | null;
+  count: number;
+  r1: number;
+  r2: number;
+  r3: number;
+  r4: number;
+  r5: number;
+}
+
+export interface ReviewsSummaryResponse {
+  summary: ReviewsSummary;
+  monthly_rating: MonthlyRatingPoint[];
+  monthly_volume: MonthlyVolumePoint[];
+  by_category: GroupRating[];
+  by_brand: GroupRating[];
+  /** Гранулярность рядов: 'day' (короткие периоды) либо 'month' */
+  granularity: 'day' | 'month';
+  /** Применённый период (эхо запроса) */
+  period: ReviewsPeriod;
+  has_key: boolean;
+}
+
 // ─── Сырые данные (GET /raw-data/sources) ───────────────────────────────────
 
 /** Прогресс принудительной дозагрузки источника (живёт в памяти бэкенда). */
@@ -6571,4 +6788,93 @@ export interface AbTestCreatePayload {
   round_minutes?: number;
   target_views?: number;
   max_days?: number;
+}
+
+// ─── Vibecoding ──────────────────────────────────────────────────────────────
+// Зеркало backend/schemas/vibe.py. Все числовые поля — int (не Decimal),
+// поэтому приходят числами и Number()-обёртка перед formatNumber не нужна.
+
+/** Одна поставка на прод (= один коммит, достижимый из ветки прода). */
+export interface VibeShipment {
+  sha: string;
+  short: string;
+  day: string;
+  ctype: string;
+  scope: string;
+  /** Человеческое имя раздела («Управление рекламой»). */
+  section: string;
+  title: string;
+  added: number;
+  deleted: number;
+  files: number;
+  is_product: boolean;
+}
+
+/** Дней с поставкой в скользящем окне. НЕ стрик: пауза не обнуляет. */
+export interface VibeRhythm {
+  hit: number;
+  denom: number;
+  window: number;
+  start: string;
+  end: string;
+}
+
+/** Объём по области кода (фронтенд/бэкенд/тесты/миграции). */
+export interface VibeAreaVolume {
+  area: string;
+  files: number;
+  added: number;
+  deleted: number;
+}
+
+/** Строки за день. Дни без поставок тоже приходят — нулями. */
+export interface VibeDayVolume {
+  day: string;
+  shipments: number;
+  added: number;
+  deleted: number;
+}
+
+/** Поставок в разделе. */
+export interface VibeSectionCount {
+  section: string;
+  count: number;
+}
+
+/** Опись объёма: сколько сделано. */
+export interface VibeScale {
+  files: number;
+  new_files: number;
+  components: number;
+  migrations: number;
+  sections: number;
+  added: number;
+  deleted: number;
+  by_area: VibeAreaVolume[];
+}
+
+/** Ответ вкладки «Вайбкодинг» для текущего пользователя. */
+/** Вайбкодер для селектора: один человек = один user_id, сколько бы git-почт ни было. */
+export interface VibeAuthorRef {
+    user_id: number;
+    name: string;
+    /** Это сам запрашивающий. Отдельного пункта «Моя статистика» нет — он дублировал
+     *  бы строку с собственным именем (юзер вошёл как admin = Влад Вяткин и увидел
+     *  себя дважды). */
+    is_me: boolean;
+}
+
+export interface VibeStats {
+  display_name: string;
+  since: string;
+  until: string;
+  shipments_total: number;
+  shipments_product: number;
+  rhythm: VibeRhythm;
+  scale: VibeScale;
+  by_day: VibeDayVolume[];
+  by_section: VibeSectionCount[];
+  shipments: VibeShipment[];
+  /** Когда CI последний раз обновлял данные. */
+  last_ingest: string | null;
 }

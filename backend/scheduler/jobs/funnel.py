@@ -697,22 +697,22 @@ async def sync_funnel_hourly():
             logger.error(f"Hourly funnel sync failed for project {pid}: {e}")
 
 
-# ─── Ads autopay (реальные деньги) ───────────────────────────────────────────
+# ─── Ads schedule (пауза по расписанию) ──────────────────────────────────────
 
-_autopay_lock = asyncio.Lock()
+_ads_schedule_lock = asyncio.Lock()
 
 
-async def ads_autopay_tick():
-    """Автопополнение бюджетов кампаний по настройкам ads_autopay.
+async def ads_schedule_tick():
+    """Пауза/запуск кампаний по расписанию из настроек ads_schedule.
 
-    Каждые 15 мин; реально пополняет только кампании, у которых текущий час МСК
-    совпал с настроенным и сегодня ещё не пополняли (идемпотентность — по
-    журналу ads_autopay_log). РЕАЛЬНОЕ СПИСАНИЕ ДЕНЕГ через WB API.
+    Каждые 15 мин; первый тик после полуночи (00:01 МСК) глушит кампании сразу
+    после штатного долива бюджета ВБ в 00:00, тик после часа запуска — поднимает
+    обратно (идемпотентность — по журналу ads_schedule_log).
     """
-    if _autopay_lock.locked():
+    if _ads_schedule_lock.locked():
         return
-    async with _autopay_lock:
-        from backend.services.funnel.ads_manager import run_autopay_tick
+    async with _ads_schedule_lock:
+        from backend.services.funnel.ads_manager import run_ads_schedule_tick
         from backend.services.funnel.wb_api_client import get_wb_key
 
         try:
@@ -726,15 +726,15 @@ async def ads_autopay_tick():
                     )
                     if not api_key:
                         continue
-                    res = await run_autopay_tick(db, pid, api_key)
-                    if res.get("checked"):
+                    res = await run_ads_schedule_tick(db, pid, api_key)
+                    if res.get("paused") or res.get("started"):
                         logger.info(
-                            f"💰 Ads autopay: project {pid} — checked {res['checked']}, deposits {res['deposits']}"
+                            f"⏸ Ads schedule: project {pid} — paused {res['paused']}, started {res['started']} of {res['checked']}"
                         )
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"Ads autopay error: {e}\n{traceback.format_exc()}")
+            logger.error(f"Ads schedule error: {e}\n{traceback.format_exc()}")
 
 
 _ad_nm_lock = asyncio.Lock()

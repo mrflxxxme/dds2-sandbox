@@ -216,12 +216,12 @@ export class ApiClient {
             // чтобы вызывающий мог распарсить через JSON.parse(e.message).
             const payload = err.error?.payload;
             if (payload && typeof payload === 'object') {
-                throw new Error(JSON.stringify(payload));
+                throw this.httpError(JSON.stringify(payload), res.status);
             }
             const detail = err.detail ?? err.error?.message;
-            if (typeof detail === 'string') throw new Error(detail);
-            if (Array.isArray(detail)) throw new Error(detail.map((d: any) => d.msg || JSON.stringify(d)).join('; '));
-            throw new Error(typeof detail === 'object' ? JSON.stringify(detail) : `Error ${res.status}`);
+            if (typeof detail === 'string') throw this.httpError(detail, res.status);
+            if (Array.isArray(detail)) throw this.httpError(detail.map((d: any) => d.msg || JSON.stringify(d)).join('; '), res.status);
+            throw this.httpError(typeof detail === 'object' ? JSON.stringify(detail) : `Error ${res.status}`, res.status);
         }
 
         // 204 No Content / пустое тело (DELETE-эндпоинты): res.json() на пустоте
@@ -344,6 +344,18 @@ export class ApiClient {
             e.status = res.status;
             throw e;
         }
+    }
+
+    /**
+     * Ошибка HTTP с сохранённым кодом ответа. Текст не меняется — существующие
+     * вызывающие, читающие `.message`, не ломаются; `.status` — добавка для тех,
+     * кому важен КОД, а не текст (напр. 403 = «вкладка не для вас», не «ошибка»).
+     * Зеркалит `uploadFormData()`, которое так делало и раньше.
+     */
+    private httpError(message: string, status: number): Error & { status: number } {
+        const e = new Error(message) as Error & { status: number };
+        e.status = status;
+        return e;
     }
 
     private sleep(ms: number): Promise<void> {

@@ -29,8 +29,6 @@ MSK = pytz.timezone("Europe/Moscow")
 
 CAMPAIGN_STATUS_LABELS = {4: "Готова", 7: "Завершена", 9: "Активна", 11: "Пауза", -1: "Удаляется"}
 
-AUTOPAY_SETTINGS_KEY = "ads_autopay"
-
 # WB не принимает пополнение рекламной кампании меньше этой суммы.
 MIN_TOPUP_RUB = 1000.0
 
@@ -921,95 +919,189 @@ async def get_campaign_zone_metrics(
     }
 
 
-# ─── Настройки автопополнения (project_settings, без миграций) ──────────────
+# ─── Пауза по расписанию (project_settings, без миграций) ───────────────────
+#
+# Деньгами рулит родное автопополнение ВБ (доливает в 00:00 МСК). ДДС управляет
+# только показами: ставит кампанию на паузу в окне «плохих» часов (по умолчанию
+# 00:00–09:00 МСК) и запускает обратно по его окончании — дневной бюджет не
+# сгорает ночью на низкой конверсии. Возобновляем СТРОГО то, что глушили сами.
+
+SCHEDULE_SETTINGS_KEY = "ads_schedule"
+# Попыток pause/start на одно окно: ретраим ошибки WB следующими тиками, но не
+# долбим API часами при постоянном отказе (например, read-only токен).
+SCHEDULE_MAX_ATTEMPTS = 5
 
 
-def _sanitize_autopay(entry: dict) -> dict:
-    """Нормализация записи настроек автопополнения одной кампании.
-
-    Два режима:
-      to_target  — долить до дневного бюджета X в заданный час МСК при пороге по обороту (наш режим);
-      low_balance — «как на ВБ»: когда остаток < low_balance_threshold, долить topup_amount (в любой час, повторяемо).
-    Старые записи без mode считаются to_target (обратная совместимость).
-    """
-    hour = int(entry.get("hour", 9))
-    mode = entry.get("mode", "to_target")
-    if mode not in ("to_target", "low_balance"):
-        mode = "to_target"
+def _sanitize_schedule(entry: dict) -> dict:
+    """Нормализация настройки расписания одной кампании: часы МСК в 0–23."""
     return {
         "enabled": bool(entry.get("enabled", False)),
-        "mode": mode,
-        "amount": max(0.0, float(entry.get("amount", 0) or 0)),
-        "hour": min(23, max(0, hour)),
-        "threshold_pct": min(100, max(0, int(entry.get("threshold_pct", 50) or 50))),
-        "low_balance_threshold": max(0.0, float(entry.get("low_balance_threshold", 1000) or 0)),
-        "topup_amount": max(0.0, float(entry.get("topup_amount", 1000) or 0)),
-        # low_balance: «не чаще N раз в день». 0 = без ограничения (как чекбокс WB снят).
-        "daily_cap": max(0, int(entry.get("daily_cap", 1) or 0)),
+        "pause_hour": min(23, max(0, int(entry.get("pause_hour", 0) or 0))),
+        "resume_hour": min(23, max(0, int(entry.get("resume_hour", 9) or 0))),
     }
 
 
-def _autopay_active(s: dict) -> bool:
-    """Настройка реально работает: включена и у соответствующего режиму поля суммы > 0."""
-    if not s.get("enabled"):
-        return False
-    if s.get("mode") == "low_balance":
-        return float(s.get("topup_amount") or 0) > 0
-    return float(s.get("amount") or 0) > 0
+def _schedule_active(s: dict) -> bool:
+    """Настройка реально работает: включена и окно ненулевое."""
+    return bool(s.get("enabled")) and s.get("pause_hour") != s.get("resume_hour")
 
 
-async def get_autopay_settings(db: AsyncSession, project_id: int) -> dict:
-    """{campaign_id(str): {enabled, amount, hour, threshold_pct}} из project_settings."""
+async def get_schedule_settings(db: AsyncSession, project_id: int) -> dict:
+    """{campaign_id(str): {enabled, pause_hour, resume_hour}} из project_settings."""
     from backend.services.settings_service import get_setting
 
-    raw = await get_setting(db, project_id, AUTOPAY_SETTINGS_KEY)
+    raw = await get_setting(db, project_id, SCHEDULE_SETTINGS_KEY)
     try:
         data = json.loads(raw) if raw else {}
     except (TypeError, ValueError):
         data = {}
-    return {str(k): _sanitize_autopay(v) for k, v in data.items() if isinstance(v, dict)}
+    return {str(k): _sanitize_schedule(v) for k, v in data.items() if isinstance(v, dict)}
 
 
-async def set_autopay_setting(db: AsyncSession, project_id: int, campaign_id: int, entry: dict) -> dict:
-    """Обновить настройку одной кампании (merge в JSON-настройке проекта)."""
+async def set_schedule_setting(db: AsyncSession, project_id: int, campaign_id: int, entry: dict) -> dict:
+    """Обновить настройку одной кампании (merge в JSON-настройке проекта).
+
+    Кампанию НЕ трогаем при сохранении: паузу/запуск делает только тик по
+    расписанию (урок автопея — сейв не должен менять статус кампании).
+    """
     from backend.services.settings_service import set_setting
 
-    settings = await get_autopay_settings(db, project_id)
-    settings[str(campaign_id)] = _sanitize_autopay(entry)
-    # Выключенные с нулевыми суммами не храним — не раздуваем JSON (topup_amount держит конфиг low_balance)
-    settings = {k: v for k, v in settings.items() if v["enabled"] or v["amount"] > 0 or v["topup_amount"] > 0}
-    await set_setting(db, project_id, AUTOPAY_SETTINGS_KEY, json.dumps(settings, ensure_ascii=False))
+    settings = await get_schedule_settings(db, project_id)
+    settings[str(campaign_id)] = _sanitize_schedule(entry)
+    # Выключенные не храним — не раздуваем JSON (окно часов дефолтное восстановимо)
+    settings = {k: v for k, v in settings.items() if v["enabled"]}
+    await set_setting(db, project_id, SCHEDULE_SETTINGS_KEY, json.dumps(settings, ensure_ascii=False))
     return settings
 
 
-async def save_autopay_and_maybe_activate(
-    db: AsyncSession, project_id: int, campaign_id: int, entry: dict
-) -> dict:
-    """Сохранить настройку автопополнения; если включили — активировать кампанию.
+def _in_pause_window(hour: int, pause_hour: int, resume_hour: int) -> bool:
+    """Час МСК внутри окна паузы; окно может переходить через полночь (22→08)."""
+    if pause_hour < resume_hour:
+        return pause_hour <= hour < resume_hour
+    return hour >= pause_hour or hour < resume_hour
 
-    На паузе WB кампанию не откручивает → автопополнение для неё бессмысленно,
-    поэтому включение автопополнения запускает кампанию (best-effort: ошибка WB
-    не мешает сохранению настройки, а возвращается вызывающему для показа).
 
-    Возвращает {"settings": {...}, "activation": {ok,status,error} | None}.
+def _window_id(now_msk: datetime, pause_hour: int, resume_hour: int) -> str:
+    """Идентификатор текущего окна = МСК-дата его старта (для идемпотентности журнала)."""
+    if pause_hour < resume_hour or now_msk.hour >= pause_hour:
+        return now_msk.date().isoformat()
+    # окно через полночь, мы в его утренней части — стартовало вчера
+    return (now_msk.date() - timedelta(days=1)).isoformat()
+
+
+def compute_schedule_action(setting: dict, status: int | None, now_msk: datetime, journal: list[dict]) -> dict:
+    """Чистое решение «что сделать с кампанией сейчас»: pause / start / skip.
+
+    setting — {enabled, pause_hour, resume_hour}; status — наш WbAdCampaign.status;
+    journal — записи журнала ЭТОЙ кампании, новые первыми.
+
+    Внутри окна: пауза, если кампания активна и в это окно мы её ещё не глушили
+    (успешная пауза в журнале). Ручной запуск ночью уважаем — повторно не глушим.
+    Вне окна: запуск, если кампания на паузе и ПОСЛЕДНЯЯ успешная операция
+    журнала — наша пауза (чужие/ручные паузы не трогаем). Пропущенное окно
+    самолечится: незапущенная кампания поднимется первым же тиком вне окна.
+
+    Возвращает {"action": "pause"|"start"|"skip", "window_id": str, "reason": str}.
     """
-    settings = await set_autopay_setting(db, project_id, campaign_id, entry)
-    activation = None
-    saved = settings.get(str(campaign_id))
-    if saved and _autopay_active(saved):
-        # Активируем ТОЛЬКО кампанию на паузе. На уже активной (9) WB start
-        # отбился бы ошибкой → ложный баннер + лишний write при правке суммы.
-        status = (
-            await db.execute(
-                select(WbAdCampaign.status).where(
-                    WbAdCampaign.project_id == project_id,
-                    WbAdCampaign.campaign_id == campaign_id,
-                )
-            )
-        ).scalar_one_or_none()
-        if status == CAMPAIGN_STATUS_PAUSED:
-            activation = await set_campaign_active(db, project_id, campaign_id, True)
-    return {"settings": settings, "activation": activation}
+    if not _schedule_active(setting):
+        return {"action": "skip", "window_id": "", "reason": "disabled"}
+    pause_hour, resume_hour = int(setting["pause_hour"]), int(setting["resume_hour"])
+
+    if _in_pause_window(now_msk.hour, pause_hour, resume_hour):
+        wid = _window_id(now_msk, pause_hour, resume_hour)
+        attempts = [e for e in journal if e.get("kind") == "pause" and e.get("window_id") == wid]
+        if any(e.get("status") == "ok" for e in attempts):
+            return {"action": "skip", "window_id": wid, "reason": "already_paused"}
+        if len(attempts) >= SCHEDULE_MAX_ATTEMPTS:
+            return {"action": "skip", "window_id": wid, "reason": "attempts_exhausted"}
+        if status != CAMPAIGN_STATUS_ACTIVE:
+            return {"action": "skip", "window_id": wid, "reason": "not_active"}
+        return {"action": "pause", "window_id": wid, "reason": "ok"}
+
+    if status != CAMPAIGN_STATUS_PAUSED:
+        return {"action": "skip", "window_id": "", "reason": "not_paused"}
+    last_ok = next((e for e in journal if e.get("status") == "ok" and e.get("kind") in ("pause", "start")), None)
+    if not last_ok or last_ok.get("kind") != "pause":
+        return {"action": "skip", "window_id": "", "reason": "not_ours"}
+    wid = str(last_ok.get("window_id") or "")
+    starts = [e for e in journal if e.get("kind") == "start" and e.get("window_id") == wid]
+    if len(starts) >= SCHEDULE_MAX_ATTEMPTS:
+        return {"action": "skip", "window_id": wid, "reason": "attempts_exhausted"}
+    return {"action": "start", "window_id": wid, "reason": "ok"}
+
+
+# ─── Автопополнение ВБ: детект по фактическим доливам ────────────────────────
+# API ВБ статус своего автопополнения не отдаёт. Определяем по истории бюджета:
+# рост значения в budget_change-событиях за окно = долив со стороны ВБ
+# (автопей кабинета или ручной долив там же). Наши ручные пополнения через ДДС
+# исключаются по журналу (совпадение кампании и времени).
+
+WB_TOPUP_LOOKBACK_DAYS = 7
+WB_TOPUP_EVENTS_CAP = 50000  # событий роста за окно на проект (страховка от раздувания)
+WB_TOPUP_MANUAL_MATCH_SEC = 900  # долив в ±15 мин от нашего ручного депозита = это он и есть
+
+
+def _wb_side_topups(events: Sequence[Any], manual_marks: list[tuple[int, datetime]]) -> dict[int, dict]:
+    """{campaign_id: {last, last_amount, count}} — доливы бюджета со стороны ВБ.
+
+    events — budget_change-события (created_at — naive UTC); долив = рост значения
+    на ≥ BUDGET_TOPUP_MIN_DELTA (меньше — дрожание между синками, как в ledger).
+    manual_marks — (campaign_id, ts UTC) успешных ручных пополнений через ДДС.
+    """
+    out: dict[int, dict] = {}
+    for ev in events:
+        old_v, new_v = _parse_num(ev.old_value), _parse_num(ev.new_value)
+        if old_v is None or new_v is None:
+            continue
+        delta = new_v - old_v
+        if delta < BUDGET_TOPUP_MIN_DELTA:
+            continue
+        if any(
+            cid == ev.campaign_id and abs((ev.created_at - ts).total_seconds()) <= WB_TOPUP_MANUAL_MATCH_SEC
+            for cid, ts in manual_marks
+        ):
+            continue
+        rec = out.setdefault(ev.campaign_id, {"last": None, "last_amount": 0.0, "count": 0})
+        rec["count"] += 1
+        if rec["last"] is None or ev.created_at > rec["last"]:
+            rec["last"] = ev.created_at
+            rec["last_amount"] = round(delta, 2)
+    return out
+
+
+async def get_wb_autopay_status(db: AsyncSession, project_id: int, campaign_id: int | None = None) -> dict:
+    """{campaign_id(str): {last_ts, last_amount, count}} — где ВБ доливал бюджет за окно.
+
+    Кампании без записи = доливов со стороны ВБ не замечено (автопей ВБ выключен,
+    либо кампания не тратила и долив не требовался, либо истории ещё нет).
+    """
+    since = utcnow() - timedelta(days=WB_TOPUP_LOOKBACK_DAYS)
+    q = (
+        select(WbAdCampaignEvent)
+        .where(
+            WbAdCampaignEvent.project_id == project_id,
+            WbAdCampaignEvent.event_type == "budget_change",
+            WbAdCampaignEvent.created_at >= since,
+        )
+    )
+    if campaign_id is not None:
+        q = q.where(WbAdCampaignEvent.campaign_id == campaign_id)
+    events = (await db.execute(q.order_by(WbAdCampaignEvent.created_at).limit(WB_TOPUP_EVENTS_CAP))).scalars().all()
+
+    marks: list[tuple[int, datetime]] = []
+    for e in await get_autopay_log(db, project_id):
+        if e.get("status") != "ok" or not e.get("campaign_id"):
+            continue
+        try:
+            ts = datetime.fromisoformat(str(e.get("ts", "")))
+        except (TypeError, ValueError):
+            continue
+        marks.append((int(e["campaign_id"]), ts.replace(tzinfo=None)))
+
+    return {
+        str(cid): {"last_ts": _iso_utc(rec["last"]), "last_amount": rec["last_amount"], "count": rec["count"]}
+        for cid, rec in _wb_side_topups(events, marks).items()
+    }
 
 
 # ─── Пауза / запуск кампании (реальный вызов WB) ─────────────────────────────
@@ -1388,7 +1480,7 @@ async def deposit_campaign_budget_manual(
     return {"ok": bool(res.get("ok")), "status": res.get("status"), "budget_after": budget_after, "error": res.get("error")}
 
 
-# ─── Автопополнение: журнал и исполнение (реальные деньги) ───────────────────
+# ─── Журнал пополнений (ручные, реальные деньги) ─────────────────────────────
 
 AUTOPAY_LOG_KEY = "ads_autopay_log"
 AUTOPAY_LOG_CAP = 500  # храним последние N записей, чтобы не раздувать JSON
@@ -1413,6 +1505,91 @@ async def append_autopay_log(db: AsyncSession, project_id: int, entry: dict) -> 
     log = await get_autopay_log(db, project_id)
     log.insert(0, entry)
     await set_setting(db, project_id, AUTOPAY_LOG_KEY, json.dumps(log[:AUTOPAY_LOG_CAP], ensure_ascii=False))
+
+
+# ─── Пауза по расписанию: журнал и исполнение ────────────────────────────────
+
+SCHEDULE_LOG_KEY = "ads_schedule_log"
+SCHEDULE_LOG_CAP = 500  # храним последние N записей, чтобы не раздувать JSON
+
+
+async def get_schedule_log(db: AsyncSession, project_id: int) -> list[dict]:
+    """Журнал пауз/запусков по расписанию (новые записи первыми)."""
+    from backend.services.settings_service import get_setting
+
+    raw = await get_setting(db, project_id, SCHEDULE_LOG_KEY)
+    try:
+        data = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        data = []
+    return [e for e in data if isinstance(e, dict)]
+
+
+async def append_schedule_log(db: AsyncSession, project_id: int, entry: dict) -> None:
+    """Дописать запись в журнал (в начало) с обрезкой до SCHEDULE_LOG_CAP."""
+    from backend.services.settings_service import set_setting
+
+    log = await get_schedule_log(db, project_id)
+    log.insert(0, entry)
+    await set_setting(db, project_id, SCHEDULE_LOG_KEY, json.dumps(log[:SCHEDULE_LOG_CAP], ensure_ascii=False))
+
+
+async def run_ads_schedule_tick(db: AsyncSession, project_id: int, api_key: str) -> dict:
+    """Один проход паузы по расписанию: решения + WB start/pause + журнал.
+
+    Вызывается scheduler'ом каждые ~15 минут. Первый тик после полуночи (00:01)
+    глушит кампании ПОСЛЕ штатного долива ВБ в 00:00 — долитый бюджет доживает
+    до утреннего запуска. Статус берём из нашей таблицы: pause/start сами же
+    синхронно её обновляют, а фоновый синк докатывает внешние изменения.
+    """
+    from backend.services.funnel.wb_advertising_api import set_campaign_state
+
+    settings = await get_schedule_settings(db, project_id)
+    enabled = {int(cid): s for cid, s in settings.items() if _schedule_active(s)}
+    if not enabled:
+        return {"paused": 0, "started": 0, "checked": 0}
+
+    now_msk = msk_now()
+    camps = {
+        c.campaign_id: c
+        for c in (
+            await db.execute(
+                select(WbAdCampaign).where(
+                    WbAdCampaign.project_id == project_id,
+                    WbAdCampaign.campaign_id.in_(list(enabled)),
+                ).limit(len(enabled))
+            )
+        ).scalars().all()
+    }
+    log = await get_schedule_log(db, project_id)
+
+    paused = started = 0
+    for cid, setting in enabled.items():
+        camp = camps.get(cid)
+        journal = [e for e in log if int(e.get("campaign_id") or 0) == cid]
+        decision = compute_schedule_action(setting, camp.status if camp else None, now_msk, journal)
+        action = decision["action"]
+        # camp is None → status None → decision всегда skip; проверка для mypy (union-attr ниже)
+        if action == "skip" or camp is None:
+            continue
+
+        res = await set_campaign_state(api_key, cid, action)
+        if res["ok"]:
+            camp.status = CAMPAIGN_STATUS_PAUSED if action == "pause" else CAMPAIGN_STATUS_ACTIVE
+            await db.commit()
+            if action == "pause":
+                paused += 1
+            else:
+                started += 1
+        await append_schedule_log(db, project_id, {
+            "campaign_id": cid,
+            "ts": utcnow().isoformat(),
+            "kind": action,
+            "status": "ok" if res["ok"] else "error",
+            "window_id": decision["window_id"],
+            "reason": res.get("error"),
+        })
+    return {"paused": paused, "started": started, "checked": len(enabled)}
 
 
 # ─── История бюджета: единая лента движения денег из данных, парсимых из WB ───
@@ -1507,194 +1684,6 @@ async def get_budget_ledger(
 
     entries.sort(key=lambda x: x["ts"] or "", reverse=True)
     return entries[:LEDGER_CAP]
-
-
-def _round_up_50(value: float) -> int:
-    """Округление суммы пополнения вверх до шага 50₽ (шаг кабинета WB)."""
-    import math
-
-    return int(math.ceil(value / 50.0) * 50)
-
-
-def compute_autopay_decision(
-    setting: dict,
-    budget: float,
-    spend_day: float,
-    now_hour_msk: int,
-    already_topped_today: bool,
-    pending_unknown: bool,
-    topped_today_count: int = 0,
-) -> dict:
-    """Чистое решение «пополнять ли кампанию сейчас и на сколько».
-
-    setting — {enabled, mode, amount(X), hour, threshold_pct, low_balance_threshold, topup_amount, daily_cap};
-    budget — текущий бюджет кампании ₽; spend_day — открут за последние сутки ₽;
-    already_topped_today — в журнале уже есть успешное пополнение за сегодня (МСК, для to_target);
-    topped_today_count — сколько успешных пополнений уже было сегодня (для low_balance daily_cap);
-    pending_unknown — последняя попытка сегодня закончилась timeout/5xx (исход
-    неизвестен) → не пополняем, пока бюджет не пересинкается.
-
-    Возвращает {"action": "deposit"|"skip", "sum": int, "reason": str}.
-    """
-    if not setting.get("enabled"):
-        return {"action": "skip", "sum": 0, "reason": "disabled"}
-
-    # Режим «как на ВБ»: остаток упал ниже порога → долить фиксированную сумму (любой час, повторяемо).
-    if setting.get("mode") == "low_balance":
-        topup = float(setting.get("topup_amount") or 0)
-        if topup <= 0:
-            return {"action": "skip", "sum": 0, "reason": "disabled"}
-        if pending_unknown:  # исход прошлой попытки неизвестен — не рискуем двойным списанием
-            return {"action": "skip", "sum": 0, "reason": "pending_unknown"}
-        cap = int(setting.get("daily_cap", 1) or 0)  # «не чаще N раз в день»; 0 = без ограничения
-        if cap > 0 and topped_today_count >= cap:
-            return {"action": "skip", "sum": 0, "reason": "cap_reached"}
-        thr = float(setting.get("low_balance_threshold") or 0)
-        if float(budget or 0) >= thr:
-            return {"action": "skip", "sum": 0, "reason": "above_threshold"}
-        return {"action": "deposit", "sum": _round_up_50(max(MIN_TOPUP_RUB, topup)), "reason": "ok"}
-
-    # Режим to_target (наш): долить до X в заданный час при пороге по обороту.
-    x = float(setting.get("amount") or 0)
-    if x <= 0:
-        return {"action": "skip", "sum": 0, "reason": "disabled"}
-    if now_hour_msk != int(setting.get("hour", 9)):
-        return {"action": "skip", "sum": 0, "reason": "not_time"}
-    if already_topped_today:
-        return {"action": "skip", "sum": 0, "reason": "already_today"}
-    if pending_unknown:
-        return {"action": "skip", "sum": 0, "reason": "pending_unknown"}
-    threshold_pct = int(setting.get("threshold_pct", 50) or 0)
-    if threshold_pct > 0 and spend_day < x * threshold_pct / 100.0:
-        return {"action": "skip", "sum": 0, "reason": "below_threshold"}
-    gap = x - float(budget or 0)
-    if gap <= 0:
-        return {"action": "skip", "sum": 0, "reason": "budget_full"}
-    return {"action": "deposit", "sum": _round_up_50(max(MIN_TOPUP_RUB, gap)), "reason": "ok"}
-
-
-def _autopay_journal_day_stats(log: list[dict], day_msk: date) -> tuple[dict[int, int], set[int]]:
-    """Счётчики журнала за календарный день МСК: {campaign_id: успешных пополнений} и unknown-кампании.
-
-    ts в журнале — naive UTC (`utcnow().isoformat()`), поэтому naive-метки трактуем
-    как UTC и переводим в МСК. Сравнение по «сырой» UTC-дате в 00:00–02:59 МСК
-    относило сегодняшние записи ко вчера — идемпотентность to_target, daily_cap
-    low_balance и защита от unknown-статусов молча отключались (риск повторных
-    реальных списаний).
-    """
-    topped: dict[int, int] = {}
-    unknown: set[int] = set()
-    for e in log:
-        try:
-            ts = datetime.fromisoformat(e.get("ts", ""))
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-        except (TypeError, ValueError):
-            continue
-        if ts.astimezone(MSK).date() != day_msk:
-            continue
-        cid = int(e.get("campaign_id") or 0)
-        if e.get("status") == "ok":
-            topped[cid] = topped.get(cid, 0) + 1
-        elif e.get("status") == "unknown":
-            unknown.add(cid)
-    return topped, unknown
-
-
-async def run_autopay_tick(db: AsyncSession, project_id: int, api_key: str) -> dict:
-    """Один проход автопополнения проекта: решения + реальные списания + журнал.
-
-    Вызывается scheduler'ом каждые ~15 минут.
-      to_target — срабатывает в настроенный час МСК, идемпотентность по журналу
-        (одно успешное пополнение в день на кампанию);
-      low_balance — проверяется каждый проход, доливает как только остаток < порога
-        (несколько раз в день); повтор в тот же тик исключён свежим чтением бюджета из WB.
-    """
-    from backend.services.funnel.wb_advertising_api import (
-        DEPOSIT_SOURCE_ACCOUNT,
-        DEPOSIT_SOURCE_BALANCE,
-        DEPOSIT_SOURCE_LABELS,
-        deposit_campaign_budget,
-        fetch_adv_balance,
-        fetch_campaign_budgets_batch,
-    )
-
-    settings = await get_autopay_settings(db, project_id)
-    enabled = {int(cid): s for cid, s in settings.items() if _autopay_active(s)}
-    if not enabled:
-        return {"deposits": 0, "checked": 0}
-
-    now_msk = msk_now()
-    today_msk = now_msk.date()
-    # to_target срабатывает только в свой час МСК; low_balance проверяется каждый проход (по остатку)
-    due_ids = [
-        cid for cid, s in enabled.items()
-        if s.get("mode") == "low_balance" or now_msk.hour == int(s.get("hour", 9))
-    ]
-    if not due_ids:
-        return {"deposits": 0, "checked": 0}
-
-    log = await get_autopay_log(db, project_id)
-    topped_count_today, unknown_today = _autopay_journal_day_stats(log, today_msk)
-
-    # Открут за последние сутки (вчера МСК — полные сутки)
-    CD = WbAdCampaignDaily
-    yesterday = today_msk - timedelta(days=1)
-    spend_rows = (
-        await db.execute(
-            select(CD.campaign_id, func.coalesce(func.sum(CD.spend), Decimal("0")).label("spend"))
-            .where(CD.project_id == project_id, CD.date == yesterday, CD.campaign_id.in_(due_ids))
-            .group_by(CD.campaign_id)
-        )
-    ).all()
-    spend_day_map = {r.campaign_id: float(r.spend) for r in spend_rows}
-
-    # Свежие бюджеты — прямо из WB (не из нашей таблицы: синк мог отстать на час)
-    budgets = await fetch_campaign_budgets_batch(api_key, due_ids)
-
-    deposits = 0
-    for cid in due_ids:
-        setting = enabled[cid]
-        budget = float(budgets.get(cid, -1))
-        if budget < 0:
-            logger.warning(f"Autopay: project {project_id} campaign {cid} — бюджет из WB не получен, скип")
-            continue
-        topped_n = topped_count_today.get(cid, 0)
-        decision = compute_autopay_decision(
-            setting, budget, spend_day_map.get(cid, 0.0), now_msk.hour,
-            topped_n > 0, cid in unknown_today, topped_today_count=topped_n,
-        )
-        if decision["action"] != "deposit":
-            continue
-
-        # Источник: как в кабинете — сначала счёт, при отказе баланс. Бонусы не трогаем.
-        balance_info = await fetch_adv_balance(api_key) or {}
-        result = await deposit_campaign_budget(api_key, cid, decision["sum"], DEPOSIT_SOURCE_ACCOUNT)
-        source = DEPOSIT_SOURCE_ACCOUNT
-        if result["status"] == "error":
-            result = await deposit_campaign_budget(api_key, cid, decision["sum"], DEPOSIT_SOURCE_BALANCE)
-            source = DEPOSIT_SOURCE_BALANCE
-
-        await append_autopay_log(
-            db,
-            project_id,
-            {
-                "campaign_id": cid,
-                "ts": utcnow().isoformat(),
-                "amount": decision["sum"] if result["ok"] else 0,
-                "requested": decision["sum"],
-                "source": DEPOSIT_SOURCE_LABELS.get(source, str(source)),
-                "status": result["status"],
-                "budget_before": budget,
-                "budget_after": result.get("total"),
-                "reason": result.get("error"),
-                "balance_snapshot": {k: balance_info.get(k) for k in ("balance", "net", "bonus")},
-            },
-        )
-        if result["ok"]:
-            deposits += 1
-
-    return {"deposits": deposits, "checked": len(due_ids)}
 
 
 # ─── Нехватка бюджета ────────────────────────────────────────────────────────

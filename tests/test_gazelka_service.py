@@ -647,3 +647,53 @@ async def test_send_order_confirms_even_when_post_raises(monkeypatch):
     assert result.ref == "101"
     order = db.add.call_args.args[0]
     assert order.status == GazelkaOrderStatus.SENT
+
+
+# ─── Синк «машина назначена» из Газельки (READY → VEHICLE_ASSIGNED) ──────────
+
+
+def _order_row(**kw) -> "gazelka_service.GazelkaOrderRow":
+    from backend.schemas.gazelka import GazelkaOrderRow
+
+    base = {"gazelka_id": "1", "status": "3", "status_label": "Принята в работу"}
+    base.update(kw)
+    return GazelkaOrderRow(**base)
+
+
+def test_vehicle_assigned_ids_requires_link_and_vehicle_or_driver():
+    rows = [
+        _order_row(linked_assembly_id=1, vehicle="Мерседес Х392РМ37"),  # машина есть
+        _order_row(linked_assembly_id=2, driver_name="Дейнекин А.Г."),  # только водитель — тоже сигнал
+        _order_row(linked_assembly_id=3),  # связана, но маршрут без машины
+        _order_row(vehicle="Газель А111АА37"),  # машина есть, но заявка не связана
+    ]
+    assert gazelka_service._vehicle_assigned_ids(rows) == {1, 2}
+
+
+async def test_promote_vehicle_assigned_moves_ready_only(monkeypatch):
+    from backend.models.assembly import AssemblyStatus
+
+    ready = SimpleNamespace(id=646, status=AssemblyStatus.READY.value, vehicle_assigned_at=None)
+    db = MagicMock()
+    # select(...).scalars().all() → БД отдаёт только READY-строки (фильтр в SQL)
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [ready])))
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    monkeypatch.setattr(gazelka_service, "invalidate_cache", AsyncMock())
+
+    promoted = await gazelka_service._promote_vehicle_assigned(db, 4, {646, 999})
+
+    assert promoted == {646}
+    assert ready.status == AssemblyStatus.VEHICLE_ASSIGNED
+    assert ready.vehicle_assigned_at is not None
+    history = db.add.call_args.args[0]  # запись в историю статусов
+    assert history.new_status == AssemblyStatus.VEHICLE_ASSIGNED
+    assert history.changed_by == "gazelka"
+    db.commit.assert_awaited_once()
+
+
+async def test_promote_vehicle_assigned_noop_without_candidates(monkeypatch):
+    db = MagicMock()
+    db.execute = AsyncMock()
+    assert await gazelka_service._promote_vehicle_assigned(db, 4, set()) == set()
+    db.execute.assert_not_awaited()  # пустой вход — ни одного запроса в БД

@@ -14,6 +14,8 @@
 | `WbFinanceRow` (`wb_finance_rows`) | Кэш финансового отчёта WB | |
 | `WbFinanceSyncLog` (`wb_finance_sync_log`) | Лог синхронизации финансов | |
 | `WbOrderCancelDaily` (`wb_order_cancel_daily`) | Ежедневная статистика отмен | |
+| `WBFeedback` (`wb_feedbacks`) | Зеркало отзывов покупателей WB | uniq `(project_id, wb_id)`; `has_text` derived; sync_type=`feedbacks` |
+| `WBFeedbackComplaint` (`wb_feedback_complaints`) | Учёт жалоб на отзывы (для удаления) | uniq `(project_id, wb_feedback_id)`; status pending/removed/rejected; НЕ авто-отправка в WB |
 | `WbTariff` (`wb_tariffs`) | Коэффициенты WB | SoftDeleteMixin |
 
 ## Бизнес-правила
@@ -65,8 +67,26 @@ WB возвращает строки удержаний за отзывы с п�
 - Бэкфил истории: `python -m scripts.backfill_review_deductions`.
 - При новом типе удержаний с nm_id в тексте — расширить `_REVIEW_TARGET_RE` или добавить аналогичный helper.
 
+### Отзывы покупателей (feedbacks) — сводная аналитика
+Отзывы **зеркалятся в БД** (`wb_feedbacks`), сводка строится из зеркала, не из живого API (историю «за всё существование» живой API не отдаёт — старое уходит в архив, `take` ограничен).
+- **Ключ**: `resolve_wb_key` каскад `wb_feedbacks`→`wb_analytics`→`wb`. Отдельный тип ключа `wb_feedbacks` (scope «Вопросы и отзывы») добавляется в Настройка→Интеграции — валидируется `wb_api.check_feedbacks_scope` (401/403→no_scope→400; 429/5xx/сеть→unknown→сохраняем, как wb_content/wb_advert). Резолвер берёт его первым, поэтому битый feedbacks-ключ ЗАТЕНИТ рабочий `wb` → удалять невалидный.
+- Sync: `services/wb_reviews_sync.py` — активные отзывы (isAnswered false+true) + `full_backfill` тянет архив (`WBApiClient.get_feedbacks_archive`) при первом прогоне (пустое зеркало). Upsert `on_conflict (project_id, wb_id)`, дедуп ключей до executemany.
+- Job: `scheduler/jobs/wb_reviews_sync.py`, ночью 03:15 MSK, `sync_type="feedbacks"`. On-demand — `POST /reviews/sync` (кнопка «Обновить»).
+- Агрегаты: `services/reviews_service.get_reviews_summary(project_id, tag=None, period="1y")` (`@cached("reviews:summary", 300)`) — KPI, рейтинг/объём временны́м рядом, разрезы по категории (`Nomenclature.subject`)/бренду (`Nomenclature.brand` по nm_id, фолбэк — снапшот отзыва)/ярлыку (`ProductTagMap`→`ProductTag.name`, только `is_deleted=False`). Непривязанные nm_id → «Без категории/бренда/ярлыка».
+- **Период (`period`)**: `2w/1m/3m/6m/1y/all` (дефолт `1y`) → окно `created_date >= now-Δ` во ВСЕХ блоках. Гранулярность рядов адаптивная: `day` для коротких (2w/1m), `month` для остальных; отдаётся в ответе (`granularity`). Неизвестный ключ → `1y`. `GET /reviews/summary` и `POST /reviews/sync` принимают `period` (эхо в ответе).
+- **has_key = «показывать data-UI»**: True, если у проекта есть отзывы за ВСЁ время (`_has_any_feedback`) ИЛИ активный ключ — НЕ period-фильтрованный `total` (иначе пустое окно у проекта с историей ложно показало бы экран «нет ключа»). Пустое окно при has_key=True → фронт рисует «за период пусто».
+- **Список** (`GET /reviews`): пагинация `take`/`skip`, ответ несёт `total` среза (по `is_answered`) → фронт «показано N из M» + «Показать ещё».
+- **Проблемные новинки** (`GET /reviews/newcomers?days=30&max_rating=4.6`, `get_new_low_rated`): товары «на продаже» < `days` дней со средним рейтингом < `max_rating`. «Старт продаж» = `Nomenclature.first_sale_date`, при NULL — фолбэк на дату ПЕРВОГО отзыва (прокси). Вкладка «🆕 Проблемные новинки». Не кэшируется. Плюс **разрезы** `by_category/by_brand/by_tag` (`_group_newcomers`): агрегат проблемных новинок по предмету/бренду/ярлыку — `products` (число новинок), `avg_rating` (ТОЧНО из суммы r1..r5, не усреднением округлённых), `count`, распределение. Товар с несколькими ярлыками — в каждый; без ярлыка → «Без ярлыка».
+- Grabli: джойн `feedback.nm_id → Nomenclature.article_wb` дедуплен через `GROUP BY article_wb` в подзапросе — иначе размеры (много barcode на nm_id) раздули бы счётчики.
+
+### Жалобы на отзывы (для удаления)
+`services/complaints_service.py` + `models/wb_feedback_complaints.py` (миграция `rev02_feedback_complaints`). Готовит текст по шаблону (причина «отзыв не относится к товару») для отзывов 1–3★, фиксирует факт подачи и исход.
+- **Почему подача ручная:** метод `POST /api/v1/feedbacks/actions` в WB API существует, но WB **временно отключил** его — жалобы подаются только через ЛК продавца (тем, у кого было автоматизировано, предписан ручной режим). Клиент `WBApiClient.submit_feedback_complaint` написан и **дремлет за флагом** `settings.WB_FEEDBACK_COMPLAINTS_API` (default False) — включить, когда WB вернёт метод. ⚠️ Лимит методов отзывов **1 rps** (до 3 rps → блок 60 сек): массовую подачу гнать только фоновой очередью с троттлингом, не в HTTP-запросе (6.7k жалоб ≈ 2 часа).
+- **Автодетект исхода** (`resolve_after_sync`): вызывается из `sync_project_feedbacks` ТОЛЬКО при `full_backfill=True` (актив+архив = полная выдача WB). Жалоба `pending`, а отзыва в выдаче нет → `removed`; отзыв на месте и жалобе >14 дней (`_REJECT_AFTER_DAYS`) → `rejected`. **Грабля:** на инкрементальном синке (без архива) отзыв мог просто уехать в архив — детект там дал бы ложное «удалён», поэтому гейт по `full_backfill` обязателен. Эндпоинты: `GET /reviews/complaints/candidates` (низкооценённые отзывы + статус), `GET /reviews/complaints` (поданные + KPI подано/удалено/не удалено/в ожидании), `POST /reviews/complaints` (зафиксировать, idempotent по отзыву), `PATCH /reviews/complaints/{id}` (исход). Фронт — вкладка «🚩 Жалобы».
+
 ### Cache invalidation
 После WB sync инвалидировать **точечно**: `reports:opiu`, `reports:wb_bdr`, `reports:dashboard`. Никогда не сбрасывать все ключи разом — worker starvation.
+Отзывы: после `POST /reviews/sync` — `invalidate_cache("reviews:summary:project_id={id}")`.
 
 ## Зависимости
 - `DOMAIN_TRANSACTIONS` — WB-выплаты матчатся с транзакциями.
