@@ -162,6 +162,11 @@ export function addReportMethods(api: ApiClient) {
         syncWarehouseStocks() {
             return api.request<{ synced: number }>('POST', '/api/v1/reports/stock_warehouses/sync');
         },
+        /** Синк остатков WB как в кабинете (отчёт «Остатки на складах», warehouse_remains).
+         *  Питает колонку «WB склады» в «Сводных остатках». Отчёт готовится до ~90с. */
+        syncWarehouseRemains() {
+            return api.request<{ synced: number }>('POST', '/api/v1/reports/stock_warehouses/sync-remains');
+        },
         getWarehouseStocks() {
             return api.request<WbStocksResponse>('GET', '/api/v1/reports/stock_warehouses');
         },
