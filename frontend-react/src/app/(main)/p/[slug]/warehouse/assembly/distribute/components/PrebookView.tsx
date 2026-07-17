@@ -127,7 +127,8 @@ interface Props {
     onTopUp: (pkg: PackageType, wb: string, ffId: number, cls?: string) => void;
     /** Отгрузить неполную паллету направления в черновик как есть (без дозабора). */
     onShipAsIs: (pkg: PackageType, wb: string, ffId: number) => void;
-    onDelete: (nm_id: number, wb: string, pkg: PackageType) => void;
+    /** ✕ позиции: снимает порцию ИМЕННО этого ФФ (карточка — ФФ-группа). */
+    onDelete: (nm_id: number, wb: string, pkg: PackageType, ffId: number) => void;
     /** Удалить ВСЁ направление (упаковка × склад × ФФ) из предброни — коробы на ФФ. */
     onDeleteDirection: (pkg: PackageType, wb: string, ffId: number) => void;
     /** Создать предзаявку (бронь) на моно: готовые целые ⌛-паллеты → заявки с пометкой. */
@@ -460,10 +461,13 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                 </span>
                             )}
                             <span style={{ marginLeft: 'auto', fontSize: 13, fontWeight: (low || whole >= 1) ? 700 : 400, color: low ? 'var(--color-warning)' : whole >= 1 ? 'var(--color-success)' : 'var(--color-text-muted)' }}>{fillLabel}</span>
-                            {isMono && whole >= 1 && preorderByLimit && (
+                            {/* Предзаявка доступна и КОРОБУ: ⌛-направление иначе тупик —
+                                «Оставить так»/«Дозабить» гейтует «черновик = готовое к сдаче»,
+                                а сборку на ФФ надо запускать сейчас, лимит ждать потом. */}
+                            {(isMono || g.pkg === 'BOX') && whole >= 1 && preorderByLimit && (
                                 <button className="btn btn-primary btn-sm" style={{ padding: '2px 8px' }} disabled={busy || !preorderOk}
                                     title={preorderOk
-                                        ? `Создать предзаявку (бронь) — заявки на сборку с пометкой «предзаявка на моно». В бронь уйдут только ЦЕЛЫЕ паллеты (${whole}); неполный хвост останется в предброни`
+                                        ? `Создать предзаявку (бронь) — заявка на сборку с пометкой 🅿️: ФФ собирает сейчас, слот WB бронируется при появлении лимита. В бронь уйдут только ЦЕЛЫЕ паллеты (${whole}); неполный хвост останется в предброни`
                                         : 'Склад не в списке разрешённых для предзаявки без лимита — добавьте его в «Настройки складов»'}
                                     onClick={() => onCreatePrebooking(g.pkg, g.wb, g.ffId)}>
                                     {busyPrebook ? '…' : preorderOk ? `📋 Создать предзаявку · ${formatNumber(whole, 0)} цел.` : '📋 Предзаявка не разрешена'}
@@ -799,7 +803,7 @@ export default function PrebookView({ groups, toppingUpKey, shipAsIsKey, deletin
                                             <td style={{ padding: '5px 6px', textAlign: 'right' }}>
                                                 <button className="btn btn-danger btn-sm" style={{ padding: '2px 8px' }}
                                                     title="Убрать из предброни — коробы останутся на ФФ"
-                                                    onClick={() => onDelete(it.nm_id, g.wb, g.pkg)}>✕</button>
+                                                    onClick={() => onDelete(it.nm_id, g.wb, g.pkg, g.ffId)}>✕</button>
                                             </td>
                                         </tr>
                                         );

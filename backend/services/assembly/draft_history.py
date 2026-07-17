@@ -35,8 +35,18 @@ from backend.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
-# События со снапшот-возвратом (откат зависит от версии черновика).
-_SNAPSHOT_EVENTS = (DraftEventType.PREBOOK_TOPUP, DraftEventType.MATRIX_WRITE)
+# События со снапшот-возвратом (откат зависит от версии черновика). Строковые типы
+# (MATRIX_EDIT/AUTO_SYNC — маркеры PUT из DraftEventLog; REMOVE_ROWS — ✕ SKU) пишутся
+# тем же путём с before_distribution+draft_updated_at_after; вне этого списка они были
+# «неизвестным типом события» — неоткатываемы И, оставаясь новейшим незакрытым
+# событием, навсегда блокировали LIFO-откат всей истории под ними.
+_SNAPSHOT_EVENTS: tuple[DraftEventType | str, ...] = (
+    DraftEventType.PREBOOK_TOPUP,
+    DraftEventType.MATRIX_WRITE,
+    "MATRIX_EDIT",
+    "AUTO_SYNC",
+    "REMOVE_ROWS",
+)
 _HISTORY_LIMIT = 200
 
 
@@ -171,6 +181,35 @@ async def _revert_guard(
         ).scalars().all()
         if not reqs:
             return False, "заявки уже удалены"
+        # ЧАСТИЧНО удалённый набор (заявку объединили merge'ем с чужой сборкой →
+        # loser soft-deleted, количества живут в survivor): откат вернул бы в черновик
+        # ПОЛНЫЙ committed_rows, включая долю слитой заявки — товар существовал бы
+        # дважды (в survivor и в rows). Разбивки committed_rows по заявкам нет,
+        # частичный возврат невозможен → блокируем целиком.
+        if len(reqs) < len(set(ids)):
+            return False, "часть заявок уже удалена (объединена с другой сборкой?) — откат недоступен"
+        # FOLD-защита: повторный commit того же черновика ДОЛИВАЕТ в уже созданную
+        # заявку (см. _fold_barcodes_into_request) — та же заявка фигурирует в
+        # НЕСКОЛЬКИХ COMMIT-событиях. Откат любого из них удалил бы заявку целиком,
+        # вместе с количествами других (неоткаченных) коммитов → блокируем, пока
+        # у заявки есть другое живое COMMIT-событие.
+        ids_set = set(ids)
+        sibling_rows = (
+            await db.execute(
+                select(AssemblyDraftEvent.created_request_ids)
+                .where(
+                    AssemblyDraftEvent.project_id == project_id,
+                    AssemblyDraftEvent.draft_id == ev.draft_id,
+                    AssemblyDraftEvent.id != ev.id,
+                    AssemblyDraftEvent.event_type == str(DraftEventType.COMMIT_REQUEST),
+                    AssemblyDraftEvent.reverted_at.is_(None),
+                )
+                .limit(_HISTORY_LIMIT)
+            )
+        ).scalars().all()
+        for sibling_ids in sibling_rows:
+            if ids_set & set(sibling_ids or []):
+                return False, "заявка дополнялась другим коммитом (долив) — откат недоступен"
         # Локальные импорты — избегаем тяжёлых модульных зависимостей и циклов.
         from backend.services.assembly.status import _NON_DELETABLE_STATUSES
         from backend.services.fulfillment_service import get_ff_link_for_assembly
@@ -284,15 +323,24 @@ async def revert_draft_event(
                 await cancel_request(db, project_id, rid)
             await delete_request(db, project_id, rid)
             deleted_ids.append(rid)
-        # Возврат строк в черновик. ВАЖНО про два случая коммита:
-        #  • ПОЛНЫЙ коммит — черновик soft-delete'нут, но `distribution.rows` НЕ очищались
-        #    (остались исходные строки) → достаточно restore(), merge НЕ нужен (иначе x2).
-        #  • ЧАСТИЧНЫЙ коммит — вынесенные строки вырезаны в leftover (частичный carve —
-        #    остаток той же строки остался) → возвращаем committed_rows поверх leftover (merge/сумма).
+        # Возврат строк в черновик. ВАЖНО про три случая:
+        #  • ПОЛНЫЙ коммит — черновик soft-delete'нут ЭТИМ коммитом, `distribution.rows`
+        #    НЕ очищались (остались исходные строки) → достаточно restore(), merge НЕ
+        #    нужен (иначе x2). Признак: draft.updated_at == токену события — после
+        #    коммита черновик никто не трогал (все операции фильтруют is_deleted).
+        #  • Черновик пережил коммит (rows вырезаны в leftover), но удалён ПОЗЖЕ другой
+        #    операцией (delete_draft при живой предброни) → restore() поднимает
+        #    состояние ПОСЛЕ коммита, committed_rows нужно вернуть merge'ем — голый
+        #    restore() молча терял вынесенные строки.
+        #  • ЧАСТИЧНЫЙ коммит, черновик жив → merge committed_rows поверх leftover.
         was_deleted = draft.is_deleted
+        deleted_by_this_commit = was_deleted and (
+            ev.draft_updated_at_after is None  # legacy-события без токена — старое поведение
+            or draft.updated_at == ev.draft_updated_at_after
+        )
         if was_deleted:
             draft.restore()
-        else:
+        if not deleted_by_this_commit:
             restore_rows = ev.committed_rows or []
             if restore_rows:
                 dist = dict(draft.distribution or {})
@@ -301,6 +349,36 @@ async def revert_draft_event(
 
     ev.reverted_at = utcnow()
     ev.reverted_by = changed_by or None
+
+    # ЦЕПНОЙ undo: сам откат меняет draft.updated_at (onupdate), что ломало бы
+    # version-гейт СЛЕДУЮЩЕГО (более старого) снапшот-события — вопреки подсказке
+    # «сначала откатите более новое действие». Если новейшее ОСТАВШЕЕСЯ незакрытое
+    # событие — снапшотное, возвращаем draft.updated_at к его токену: состояние
+    # черновика после отката соответствует именно этой точке истории (снапшот-откат —
+    # полная замена distribution, испортить количества он не может; несохранённые в
+    # событиях промежуточные автосейвы цепной undo осознанно отбрасывает).
+    # Явное присваивание updated_at подавляет onupdate. select ниже автофлашит ev
+    # (reverted_at уже проставлен) — само событие из выборки выпадает.
+    prev_open = (
+        await db.execute(
+            select(AssemblyDraftEvent)
+            .where(
+                AssemblyDraftEvent.project_id == project_id,
+                AssemblyDraftEvent.draft_id == draft_id,
+                AssemblyDraftEvent.reverted_at.is_(None),
+            )
+            .order_by(AssemblyDraftEvent.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if (
+        prev_open is not None
+        and prev_open.event_type in _SNAPSHOT_EVENTS
+        and prev_open.draft_updated_at_after is not None
+        and not draft.is_deleted
+    ):
+        draft.updated_at = prev_open.draft_updated_at_after
+
     await db.commit()
     await db.refresh(draft)
 

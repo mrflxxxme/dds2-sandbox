@@ -1384,12 +1384,22 @@ export default function PreDistVehiclePage() {
                         onShipAsIs={promoteDir}
                         onDelete={(nm, wb, pkg) => setHiddenSkus(s => new Set(s).add(`${nm}::${wb}::${pkg}`))}
                         onDeleteDirection={hideDir}
-                        onCreatePrebooking={promoteDir}
+                        onCreatePrebooking={(pkg, wb, ffId) => {
+                            if (window.confirm(`На экране машины «Создать предзаявку» НЕ создаёт бронь — направление «${wb}» целиком уйдёт в план заявок машины (предзаявку можно сделать после приёмки из основного черновика). Продолжить?`)) promoteDir(pkg, wb, ffId);
+                        }}
                         onTopUpPrebook={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
-                        onTrimTail={(wb, ffId) => hideDir('MONOPALLET', wb, ffId)}
-                        onBookPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
-                        onReleasePallets={(wb, ffId) => hideDir('MONOPALLET', wb, ffId)}
-                        onDraftPallets={(wb, ffId) => promoteDir('MONOPALLET', wb, ffId)}
+                        onTrimTail={(wb, ffId) => {
+                            if (window.confirm(`На экране машины «Убрать неполную» скрывает ВСЁ направление «${wb}» из плана (не только хвост). Продолжить?`)) hideDir('MONOPALLET', wb, ffId);
+                        }}
+                        onBookPallets={(wb, ffId, sel) => {
+                            if (window.confirm(`На экране машины предзаявка формируется ВСЕМ направлением «${wb}»${sel?.length ? ` — не только выбранными паллетами (${sel.length})` : ''}. Продолжить?`)) promoteDir('MONOPALLET', wb, ffId);
+                        }}
+                        onReleasePallets={(wb, ffId, sel) => {
+                            if (window.confirm(`На экране машины «На ФФ» скрывает ВСЁ направление «${wb}» из плана${sel?.length ? ` — не только выбранные паллеты (${sel.length})` : ''}. Продолжить?`)) hideDir('MONOPALLET', wb, ffId);
+                        }}
+                        onDraftPallets={(wb, ffId, sel) => {
+                            if (window.confirm(`На экране машины «В черновик как есть» переносит ВСЁ направление «${wb}»${sel?.length ? ` — не только выбранные паллеты (${sel.length})` : ''}. Продолжить?`)) promoteDir('MONOPALLET', wb, ffId);
+                        }}
                     />
                 )
             ) : subTab === 'preview' ? (
