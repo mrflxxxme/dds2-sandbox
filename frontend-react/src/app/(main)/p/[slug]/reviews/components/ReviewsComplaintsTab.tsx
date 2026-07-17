@@ -159,7 +159,7 @@ function BulkModal({ count, seller, onClose, onDone }: {
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', zIndex: 1000, padding: 24, overflowY: 'auto' }} onClick={onClose}>
             <div className="glass-card" style={{ maxWidth: 640, width: '100%', padding: 24, marginTop: 40 }} onClick={e => e.stopPropagation()}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                    <h2 style={{ margin: 0, fontSize: 22 }}>🗑 Жалобы на все отзывы</h2>
+                    <h2 style={{ margin: 0, fontSize: 22 }}>🗑 Подготовить жалобы на все</h2>
                     <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
                 </div>
 
@@ -189,7 +189,7 @@ function BulkModal({ count, seller, onClose, onDone }: {
                 {err && <div style={{ color: 'var(--color-danger)', marginBottom: 8, fontSize: 13 }}>{err}</div>}
                 <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-danger" onClick={submit} disabled={busy || !text.trim() || count === 0} style={{ fontSize: 15, fontWeight: 600, padding: '10px 20px' }}>
-                        {busy ? 'Подаём…' : `🗑 Зафиксировать ${formatNumber(count, 0)} жалоб`}
+                        {busy ? 'Сохраняем…' : `🗑 Взять в учёт ${formatNumber(count, 0)} жалоб`}
                     </button>
                     <button className="btn btn-secondary" onClick={onClose}>Отмена</button>
                 </div>
@@ -279,11 +279,12 @@ export default function ReviewsComplaintsTab() {
                         style={{ fontSize: 17, fontWeight: 700, padding: '16px 32px', borderRadius: 12, display: 'inline-flex', alignItems: 'center', gap: 12 }}
                     >
                         <span style={{ fontSize: 24, lineHeight: 1 }}>🗑</span>
-                        Пожаловаться на все ({formatNumber(totalOpen, 0)})
+                        Подготовить жалобы на все ({formatNumber(totalOpen, 0)})
                     </button>
                     <div style={{ fontSize: 13, color: 'var(--color-text-dim)', minWidth: 220, flex: 1 }}>
-                        Одним действием зафиксировать жалобы на все накопившиеся отзывы <b>1–3★</b> с общим текстом.
-                        Отзывы удаляет WB по итогу рассмотрения — здесь ведётся учёт.
+                        Одним действием готовит общий текст и берёт в учёт все накопившиеся отзывы <b>1–3★</b>.
+                        <b style={{ color: 'var(--color-warning)' }}> В WB ничего не отправляется</b> — подать жалобы
+                        нужно вручную в кабинете WB, здесь фиксируется факт подачи и исход.
                     </div>
                 </div>
             )}
