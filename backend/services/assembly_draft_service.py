@@ -378,6 +378,16 @@ async def update_draft(
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
 
+    # CAS-гвард фоновых писателей: full-replace от stale-снимка молча затирал
+    # свежие изменения (прод 2026-07-17: фоновая консолидация второй вкладки
+    # воскресила очищенный черновик через 9с — 11 177 шт вернулись без события).
+    # Клиент на 409 перечитывает черновик вместо записи.
+    if payload.base_updated_at is not None and draft.updated_at != payload.base_updated_at:
+        raise HTTPException(
+            status_code=409,
+            detail="DRAFT_VERSION_CONFLICT: черновик изменился в другой вкладке/окне — данные перечитаны",
+        )
+
     before_distribution = copy.deepcopy(draft.distribution) if payload.event is not None else None
 
     if payload.name is not None:
@@ -1338,16 +1348,22 @@ def _find_handed_index(units: list[HandedUnit], ff: int, wb: str, pkg: str) -> i
 def _subtract_in_transit_rows(
     rows: list[AssemblyDraftRow],
     remaining: dict[int, dict[str, int]],
-) -> tuple[list[AssemblyDraftRow], int]:
-    """Вычесть «уже едет» per (nm, WB-склад) из строк; вернуть (строки, Σ вычтено).
+) -> tuple[list[AssemblyDraftRow], int, set[tuple[str, str]]]:
+    """Вычесть «уже едет» per (nm, WB-склад) из строк; вернуть
+    (строки, Σ вычтено, урезанные направления {(package_type, WB-склад)}).
 
     Greedy по порядку строк; remaining мутируется (расходуется) — вызывающий
     передаёт один и тот же dict для rows → prebook (нет двойного вычета).
     src ужимается с крупнейших источников до Σtgt (carve, Σsrc == Σtgt);
     строки с Σtgt=0 выпадают. Зеркало фронтового reconcileInTransit.ts.
+
+    Урезанные направления нужны вызывающему: паллетная целость направления в
+    rows после вычета потеряна — его остаток обязан уехать в предбронь
+    (`_demote_directions_to_prebook`), иначе в rows остаётся частичная паллета.
     """
     kept: list[AssemblyDraftRow] = []
     subtracted = 0
+    touched_dirs: set[tuple[str, str]] = set()
     for r in rows:
         per = remaining.get(r.nm_id)
         if not per:
@@ -1362,6 +1378,7 @@ def _subtract_in_transit_rows(
             r.tgt[wh] = int(q) - take
             per[wh] = int(avail) - take
             row_sub += take
+            touched_dirs.add((r.package_type or "BOX", wh))
         if row_sub == 0:
             kept.append(r)
             continue
@@ -1379,7 +1396,81 @@ def _subtract_in_transit_rows(
         r.tgt = {k: v for k, v in r.tgt.items() if v > 0}
         r.src = {k: v for k, v in (r.src or {}).items() if v > 0}
         kept.append(r)
-    return kept, subtracted
+    return kept, subtracted, touched_dirs
+
+
+def _demote_directions_to_prebook(
+    distribution: AssemblyDraftDistribution,
+    touched_dirs: set[tuple[str, str]],
+) -> int:
+    """Увезти остатки урезанных гейтом направлений из rows в prebook; вернуть Σ штук.
+
+    Канон: «в rows только ЦЕЛЫЕ паллеты, хвост < паллеты → предбронь». Фронт
+    нормализует направление (ФФ→WB×упаковка) целыми паллетами ДО PUT, а гейт
+    `_subtract_in_transit` вычитает транзит per (nm, склад) ПОСЛЕ — из смешанной
+    паллеты выпадают чужие SKU, и остаток направления в rows перестаёт быть целым
+    (прод-кейс draft 62, 2026-07-17: ЕКБ ехал «1 пал · ⚠ ~50%»). Геометрии коробов
+    на бэке нет — консервативно демотируем ВЕСЬ остаток урезанного направления в
+    предбронь: фронт-консолидация поднимет собравшиеся целые паллеты обратно.
+
+    Исключения (правка их плана — осознанное решение юзера, не stale-дубль):
+      • `as_is`-строки («Оставить так») — частичная паллета разрешена канонoм;
+      • ✋ ручные SKU (`manual_nms`) — гейт их не режет, демоция их не трогает.
+
+    Порция направления вырезается парами `_allocate_pairs` (Σsrc == Σtgt в обеих
+    частях), в предбронь сливается `_merge_rows` (ключ nm×упаковка×barcode×as_is).
+    """
+    if not touched_dirs:
+        return 0
+    manual = set(distribution.manual_nms or [])
+    kept_rows: list[AssemblyDraftRow] = []
+    carved: list[dict] = []
+    demoted_units = 0
+    for r in distribution.rows or []:
+        pkg = r.package_type or "BOX"
+        hit = {wh for wh, q in (r.tgt or {}).items() if (pkg, wh) in touched_dirs and (q or 0) > 0}
+        if not hit or r.as_is or r.nm_id in manual:
+            kept_rows.append(r)
+            continue
+        move_src: dict[str, int] = {}
+        move_tgt: dict[str, int] = {}
+        keep_src: dict[str, int] = {}
+        keep_tgt: dict[str, int] = {}
+        for (sid, wb), q in _allocate_pairs(r.src or {}, r.tgt or {}).items():
+            if q <= 0:
+                continue
+            src_part, tgt_part = (move_src, move_tgt) if wb in hit else (keep_src, keep_tgt)
+            src_part[str(sid)] = src_part.get(str(sid), 0) + q
+            tgt_part[wb] = tgt_part.get(wb, 0) + q
+        if move_tgt:
+            demoted_units += sum(move_tgt.values())
+            carved.append(
+                {
+                    "nm_id": r.nm_id,
+                    "barcode": r.barcode,
+                    "vendor_code": r.vendor_code,
+                    "src": move_src,
+                    "tgt": move_tgt,
+                    "package_type": pkg,
+                }
+            )
+        if keep_tgt:
+            kept_rows.append(
+                AssemblyDraftRow(
+                    nm_id=r.nm_id,
+                    barcode=r.barcode,
+                    vendor_code=r.vendor_code,
+                    src=keep_src,
+                    tgt=keep_tgt,
+                    package_type=pkg,
+                )
+            )
+    if not carved:
+        return 0
+    distribution.rows = kept_rows
+    merged = _merge_rows([p.model_dump() for p in (distribution.prebook or [])], carved)
+    distribution.prebook = [AssemblyDraftRow.model_validate(d) for d in merged]
+    return demoted_units
 
 
 def _plan_tgt_sums(distribution: AssemblyDraftDistribution) -> dict[int, dict[str, int]]:
@@ -1449,8 +1540,17 @@ async def _subtract_in_transit(
             remaining[nm] = eff
     if not remaining:
         return 0
-    distribution.rows, sub_rows = _subtract_in_transit_rows(distribution.rows or [], remaining)
-    distribution.prebook, sub_pb = _subtract_in_transit_rows(distribution.prebook or [], remaining)
+    distribution.rows, sub_rows, touched_dirs = _subtract_in_transit_rows(distribution.rows or [], remaining)
+    distribution.prebook, sub_pb, _ = _subtract_in_transit_rows(distribution.prebook or [], remaining)
+    # Урезанные в ROWS направления больше не гарантированно целые паллеты —
+    # их остаток уезжает в предбронь (канон «rows = целые паллеты»). Вычеты в
+    # prebook на целость rows не влияют (предбронь — уже хвосты).
+    demoted = _demote_directions_to_prebook(distribution, touched_dirs)
+    if demoted:
+        logger.info(
+            "in-transit гейт: %d шт остатков урезанных направлений демотированы в предбронь",
+            demoted,
+        )
     return sub_rows + sub_pb
 
 

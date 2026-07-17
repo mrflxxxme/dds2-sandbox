@@ -253,7 +253,8 @@ class TestSyncAdBudgetsOnly:
             result = await sync_ad_budgets_only(mock_db, PROJECT_ID)
 
         assert result["updated"] == 2
-        mock_db.commit.assert_called_once()
+        # два коммита: первый освобождает транзакцию перед HTTP к WB, второй пишет результат
+        assert mock_db.commit.await_count == 2
 
     @pytest.mark.asyncio
     async def test_budget_change_creates_event(self):
@@ -719,3 +720,164 @@ class TestAdTabGroupedDrrInfinite:
         rows = await m.get_ad_tab_grouped(db, PROJECT_ID, "2024-01-01", "2024-01-31", group_by="brand")
         assert rows, "нет групп"
         assert rows[0]["drr"] is None
+
+
+# ─── Бюджет времени: мягкая деградация вместо жёсткого убийства ───────────────
+
+
+class TestBudgetFetchTimeBudget:
+    """fetch_campaign_budgets_batch: лимит времени параметризуем и строго меньше
+    внешнего wait_for джобы — иначе внешний таймаут убивает корутину раньше, чем
+    сработает мягкая остановка, и НИ ОДИН бюджет не сохраняется (прод: 0% с 2026-07-11)."""
+
+    @pytest.mark.asyncio
+    async def test_time_budget_is_parameterised_and_returns_partial(self):
+        from backend.services.funnel.wb_advertising_api import fetch_campaign_budgets_batch
+
+        calls = []
+
+        class _Resp:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"total": 100}
+
+        class _Client:
+            def __init__(self, *a, **kw):  # httpx.AsyncClient(timeout=15)
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, headers=None):
+                calls.append(url)
+                return _Resp()
+
+        # монотонное время: каждый tick +1с → бюджет 3с исчерпается на 4-й кампании
+        ticks = iter([0] + [i for i in range(0, 100)])
+
+        with (
+            patch("backend.services.funnel.wb_advertising_api.httpx.AsyncClient", _Client),
+            patch("backend.services.funnel.wb_advertising_api.asyncio.sleep", new_callable=AsyncMock),
+            patch("backend.services.funnel.wb_advertising_api.time.monotonic", lambda: next(ticks)),
+        ):
+            res = await fetch_campaign_budgets_batch(
+                "k", [1, 2, 3, 4, 5, 6, 7, 8], time_budget=3
+            )
+
+        # часть бюджетов получена и ВОЗВРАЩЕНА (не потеряна), цикл остановлен по лимиту
+        assert 0 < len(res) < 8
+        assert len(calls) == len(res)
+
+    @pytest.mark.asyncio
+    async def test_inner_time_budget_below_job_timeout(self):
+        """Связка констант для ОБЕИХ джоб: внутренний лимит < внешнего wait_for.
+
+        Ровно это равенство (600 = 600) и обратное (600 > 300) держали синки на 0%.
+        """
+        from backend.scheduler.jobs.funnel import (
+            AD_BUDGETS_SYNC_TIMEOUT,
+            AD_CAMPAIGNS_SYNC_TIMEOUT,
+        )
+        from backend.services.funnel.ad_campaigns_service import (
+            BUDGET_FETCH_TIME_BUDGET,
+            BUDGET_ONLY_TIME_BUDGET,
+        )
+
+        for inner, outer, name in (
+            (BUDGET_FETCH_TIME_BUDGET, AD_CAMPAIGNS_SYNC_TIMEOUT, "sync_ad_campaigns"),
+            (BUDGET_ONLY_TIME_BUDGET, AD_BUDGETS_SYNC_TIMEOUT, "sync_ad_budgets_only"),
+        ):
+            assert inner < outer, (
+                f"{name}: внутренний бюджет времени ({inner}с) обязан быть строго меньше "
+                f"таймаута джобы ({outer}с), иначе мягкая деградация недостижима"
+            )
+
+
+# ─── Пропуск завершённых кампаний + транзакция ────────────────────────────────
+
+
+class TestSyncAdCampaignsEfficiency:
+    @staticmethod
+    def _mocks(campaigns_from_api):
+        existing_q_result = MagicMock()
+        existing_q_result.scalars.return_value.all.return_value = []
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=existing_q_result)
+        mock_db.add_all = MagicMock()
+        mock_db.commit = AsyncMock()
+        return mock_db
+
+    @pytest.mark.asyncio
+    async def test_completed_campaigns_excluded_from_budget_fetch(self):
+        """Статус 7 необратим → остаток заморожен, дёргать WB по нему незачем."""
+        from backend.services.funnel.ad_campaigns_service import sync_ad_campaigns
+
+        campaigns_from_api = [
+            {"advertId": 1, "name": "активная", "status": 9, "nm_ids": []},
+            {"advertId": 2, "name": "завершённая", "status": 7, "nm_ids": []},
+            {"advertId": 3, "name": "пауза", "status": 11, "nm_ids": []},
+        ]
+        mock_db = self._mocks(campaigns_from_api)
+        sorted_ids = AsyncMock(side_effect=lambda db, pid, ids, prio: ids)
+
+        with (
+            patch("backend.services.funnel.ad_campaigns_service.get_wb_key",
+                  new_callable=AsyncMock, return_value="k"),
+            patch("backend.services.funnel.ad_campaigns_service.fetch_ad_campaigns_detailed",
+                  new_callable=AsyncMock, return_value=campaigns_from_api),
+            patch("backend.services.funnel.ad_campaigns_service._sort_campaigns_by_spend", sorted_ids),
+            patch("backend.services.funnel.ad_campaigns_service.fetch_campaign_budgets_batch",
+                  new_callable=AsyncMock, return_value={}) as fetch_budgets,
+            patch("backend.services.funnel.ad_campaigns_service.pg_insert",
+                  return_value=MagicMock(on_conflict_do_update=MagicMock(return_value=MagicMock()))),
+        ):
+            await sync_ad_campaigns(mock_db, PROJECT_ID)
+
+        requested = fetch_budgets.call_args[0][1]
+        assert 2 not in requested, "завершённая кампания не должна дёргать WB"
+        assert set(requested) == {1, 3}
+
+    @pytest.mark.asyncio
+    async def test_db_transaction_released_before_wb_calls(self):
+        """Канон repo: не держать транзакцию через внешний HTTP (pgbouncer-зомби).
+
+        sync_ad_campaigns читает БД (get_wb_key, сортировка по расходу), затем уходит
+        в WB на минуты → обязан закоммитить ДО походов наружу.
+        """
+        from backend.services.funnel.ad_campaigns_service import sync_ad_campaigns
+
+        order = []
+        mock_db = self._mocks([])
+        mock_db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+
+        async def _details(*a, **kw):
+            order.append("http:details")
+            return [{"advertId": 1, "name": "a", "status": 9, "nm_ids": []}]
+
+        async def _budgets(*a, **kw):
+            order.append("http:budgets")
+            return {}
+
+        with (
+            patch("backend.services.funnel.ad_campaigns_service.get_wb_key",
+                  new_callable=AsyncMock, return_value="k"),
+            patch("backend.services.funnel.ad_campaigns_service.fetch_ad_campaigns_detailed", _details),
+            patch("backend.services.funnel.ad_campaigns_service._sort_campaigns_by_spend",
+                  AsyncMock(side_effect=lambda db, pid, ids, prio: ids)),
+            patch("backend.services.funnel.ad_campaigns_service.fetch_campaign_budgets_batch", _budgets),
+            patch("backend.services.funnel.ad_campaigns_service.pg_insert",
+                  return_value=MagicMock(on_conflict_do_update=MagicMock(return_value=MagicMock()))),
+        ):
+            await sync_ad_campaigns(mock_db, PROJECT_ID)
+
+        assert "commit" in order, "нет коммита вовсе"
+        # перед КАЖДЫМ походом в WB транзакция должна быть закрыта
+        for http_step in ("http:details", "http:budgets"):
+            assert order.index("commit") < order.index(http_step), (
+                f"{http_step} вызван с открытой транзакцией: {order}"
+            )

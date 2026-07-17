@@ -286,3 +286,86 @@ class TestUnifiedStockFromRemains:
         rows = await get_unified_stock_summary(db_session, project.id, group_by="sku")
         row = next(r for r in rows if r["article_wb"] == 9)
         assert row["total_wb"] == 3  # из своего fallback-источника, не 50 чужих
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Мост remains → wb_warehouse_stocks (зеркало statistics API мертво с 2026-07-15)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBridgeToWarehouseStocks:
+    """sync_warehouse_remains пересобирает и wb_warehouse_stocks: старый источник
+    (statistics supplier/stocks) отдаёт 0 строк, а зеркало читают потребность,
+    прогнозы, кратность, прайсинг и др. — без моста они живут на данных 14.07."""
+
+    async def test_bridge_rebuilds_mirror_from_remains(self, _clean_remains, db_session, project):
+        items = [
+            _report_row(
+                396063762,
+                "2043740032052",
+                [
+                    ("В пути до получателей", 307),
+                    ("В пути возвраты на склад WB", 49),
+                    (WB_REMAINS_TOTAL_ROW, 1249),
+                    ("Коледино", 700),
+                    ("Казань", 549),
+                ],
+            ),
+            # Второй баркод той же карточки — количества суммируются per (nm, склад).
+            _report_row(396063762, "2043740032053", [("Коледино", 100)]),
+            _report_row(111222333, "2000000000001", [("Казань", 5)]),
+        ]
+        await sync_warehouse_remains(db_session, project.id, items)
+
+        rows = (
+            (await db_session.execute(select(WbWarehouseStock).where(WbWarehouseStock.project_id == project.id)))
+            .scalars()
+            .all()
+        )
+        by_key = {(r.nm_id, r.warehouse_name): r for r in rows}
+        # Псевдо-склады не становятся строками зеркала (читатели группируют по складам).
+        assert all("В пути" not in wh and wh != WB_REMAINS_TOTAL_ROW for (_, wh) in by_key)
+        assert by_key[(396063762, "Коледино")].quantity == 800  # 700 + 100 (два баркода)
+        assert by_key[(396063762, "Казань")].quantity == 549
+        assert by_key[(111222333, "Казань")].quantity == 5
+        # В-пути карточки — полями in_way_* на строке-носителе (max qty):
+        # Σ по nm корректна для fallback-читателей, склады не засоряются.
+        koled = by_key[(396063762, "Коледино")]
+        assert (koled.in_way_to_client, koled.in_way_from_client) == (307, 49)
+        assert by_key[(396063762, "Казань")].in_way_to_client == 0
+        assert koled.quantity_full == 800 + 307 + 49
+        assert by_key[(396063762, "Казань")].quantity_full == 549
+
+    async def test_bridge_full_replace_and_project_isolation(self, _clean_remains, db_session, project, other_project):
+        # Протухшая строка зеркала текущего проекта + строка чужого проекта.
+        db_session.add(WbWarehouseStock(project_id=project.id, nm_id=999, warehouse_name="Мёртвый склад", quantity=42))
+        db_session.add(WbWarehouseStock(project_id=other_project.id, nm_id=555, warehouse_name="Чужой", quantity=7))
+        await db_session.commit()
+
+        await sync_warehouse_remains(db_session, project.id, [_report_row(1, "b1", [("Казань", 3)])])
+
+        mine = (
+            (await db_session.execute(select(WbWarehouseStock).where(WbWarehouseStock.project_id == project.id)))
+            .scalars()
+            .all()
+        )
+        assert {(r.nm_id, r.warehouse_name, r.quantity) for r in mine} == {(1, "Казань", 3)}
+        alien = (
+            (await db_session.execute(select(WbWarehouseStock).where(WbWarehouseStock.project_id == other_project.id)))
+            .scalars()
+            .all()
+        )
+        assert [(r.nm_id, r.quantity) for r in alien] == [(555, 7)]  # чужой проект не тронут
+
+    async def test_empty_report_keeps_old_mirror(self, _clean_remains, db_session, project):
+        db_session.add(WbWarehouseStock(project_id=project.id, nm_id=1, warehouse_name="Казань", quantity=10))
+        await db_session.commit()
+
+        assert await sync_warehouse_remains(db_session, project.id, []) == 0
+
+        kept = (
+            (await db_session.execute(select(WbWarehouseStock).where(WbWarehouseStock.project_id == project.id)))
+            .scalars()
+            .one()
+        )
+        assert kept.quantity == 10  # пустой отчёт (глюк WB) не стирает зеркало

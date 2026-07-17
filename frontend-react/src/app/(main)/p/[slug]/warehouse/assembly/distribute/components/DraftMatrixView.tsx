@@ -466,9 +466,11 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             // (handed_units со страницы склада, правки другой вкладки). Правка
             // возвращается в pending и уедет ретраем/следующим флашем.
             let base: AssemblyDraft['distribution'] | null = null;
+            let baseVersion = '';
             try {
                 const fresh = await api.getAssemblyDraft(draftId);
                 base = fresh.distribution ?? null;
+                baseVersion = fresh.updated_at;
             } catch {
                 if (!pendingSaveRef.current) pendingSaveRef.current = pending; // новее нет — вернуть свою
                 if (saveRetryRef.current < 3) {
@@ -512,9 +514,12 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             const sent = sumUnits(sendRows) + sumUnits(sendPrebook);
             // Событие истории: правка степпером — значимое изменение (снапшот для
             // отката). Дебаунс+сериализация PUT-ов не дают спама на серию кликов.
+            // CAS от версии свежего GET: между GET и PUT черновик могла записать
+            // другая вкладка — 409 вернёт правку в pending на ретрай (свежая база).
             const d = await api.updateAssemblyDraft(draftId, {
                 distribution: { ...base, ...next, manual_nms: pending.manualNms },
                 event: { event_type: 'MATRIX_EDIT', summary: `Степпер: план ${formatNumber(sent, 0)} шт` },
+                base_updated_at: baseVersion || undefined,
             });
             draftDistRef.current = d.distribution ?? null;
             const got = sumUnits(d.distribution?.rows ?? []) + sumUnits(d.distribution?.prebook ?? []);
@@ -532,7 +537,19 @@ export default function DraftMatrixView({ draftId, ffNameById, onDraftChanged, r
             }
             // Были новые правки → базу обновили, стейт не трогаем; pending уже ждёт.
         } catch (err) {
-            showToast(err instanceof Error ? err.message : 'Не удалось сохранить черновик', 'error');
+            if (err instanceof Error && err.message.includes('DRAFT_VERSION_CONFLICT')) {
+                // Между нашим GET и PUT черновик записала другая вкладка: правка
+                // возвращается в pending и уедет ретраем от НОВОЙ базы (свежий GET).
+                if (!pendingSaveRef.current) pendingSaveRef.current = pending;
+                if (!saveTimerRef.current) {
+                    saveTimerRef.current = setTimeout(() => {
+                        saveTimerRef.current = null;
+                        void flushDraftSave();
+                    }, 1500);
+                }
+            } else {
+                showToast(err instanceof Error ? err.message : 'Не удалось сохранить черновик', 'error');
+            }
         } finally {
             saveInFlightRef.current = null;
             if (pendingSaveRef.current && !saveTimerRef.current) void flushDraftSave();

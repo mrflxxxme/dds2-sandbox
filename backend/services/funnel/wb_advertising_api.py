@@ -658,12 +658,18 @@ async def fetch_campaign_budgets_batch(
     api_key: str,
     campaign_ids: list[int],
     progress_cb: object = None,
+    time_budget: float = 600,
 ) -> dict:
     """Fetch remaining budget for each campaign.
 
     GET /adv/v1/budget?id={campaign_id}
-    Returns {campaign_id: budget_value}.
-    Time budget: 120 seconds.
+    Returns {campaign_id: budget_value} — при исчерпании лимита времени ЧАСТИЧНЫЙ
+    словарь (кампании отсортированы по расходу, так что успевают важные).
+
+    ``time_budget`` — сколько секунд отведено на цикл. Вызывающий ОБЯЗАН задать его
+    строго меньше своего внешнего таймаута: WB отвечает ~0.7с на кампанию (0.5с пауза
+    против rate-limit + сам запрос), и при равных лимитах внешний wait_for убивает
+    корутину раньше мягкой остановки → частичный результат теряется целиком.
     progress_cb: optional callback(done, total) for progress tracking.
     """
     from decimal import Decimal
@@ -673,7 +679,7 @@ async def fetch_campaign_budgets_batch(
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
-    TIME_BUDGET = 600  # 10 min — enough for 750+ campaigns
+    TIME_BUDGET = time_budget
     t_start = time.monotonic()
 
     async with httpx.AsyncClient(timeout=15) as client:
