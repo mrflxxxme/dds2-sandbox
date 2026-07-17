@@ -2,93 +2,154 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { isForbidden } from '@/lib/api/vibe';
-import { formatDate, formatNumber, pluralRu } from '@/lib/utils';
-import PageHeader from '@/components/PageHeader';
-import KpiCard from '@/components/KpiCard';
-import TanStackDataTable from '@/components/TanStackDataTable';
-import type { Column } from '@/components/DataTable';
-import type { VibeStats, VibeShipment } from '@/types/api';
+import { formatDate, formatNumber, pluralRu, exportToExcel, type ExcelExportColumn } from '@/lib/utils';
+import type { VibeStats, VibeShipment, VibeDayVolume } from '@/types/api';
 
-/** Дни периода включительно. Кап — страховка от кривых границ с бэка. */
+/* ─── Даты ──────────────────────────────────────────────────────────────────── */
+
+/** Кап на длину периода — страховка от кривых границ (роутер режет период на 366). */
 const MAX_DAYS = 400;
+
+const toDate = (s: string) => new Date(`${s}T00:00:00Z`);
+const isoOf = (d: Date) => d.toISOString().slice(0, 10);
+
+function addDays(d: Date, n: number): Date {
+    const x = new Date(d);
+    x.setUTCDate(x.getUTCDate() + n);
+    return x;
+}
+
+/** Понедельник недели, в которую попал день: календарь строится с пн. */
+const mondayOf = (d: Date) => addDays(d, -((d.getUTCDay() + 6) % 7));
+
+/** Компактная метка «дд.мм» — из formatDate (ru-RU даёт «дд.мм.гггг»), не toLocaleDateString. */
+const ddmm = (s: string) => formatDate(s).slice(0, 5);
 
 function eachDay(start: string, end: string): string[] {
     const out: string[] = [];
-    const cur = new Date(`${start}T00:00:00Z`);
-    const last = new Date(`${end}T00:00:00Z`);
+    const last = toDate(end);
+    let cur = toDate(start);
     if (Number.isNaN(cur.getTime()) || Number.isNaN(last.getTime())) return out;
     while (cur <= last && out.length < MAX_DAYS) {
-        out.push(cur.toISOString().slice(0, 10));
-        cur.setUTCDate(cur.getUTCDate() + 1);
+        out.push(isoOf(cur));
+        cur = addDays(cur, 1);
     }
     return out;
 }
 
-/** Цвет типа поставки. Тип — из conventional commits (feat/fix/perf/...). */
-const CTYPE_BADGE: Record<string, string> = {
-    feat: 'badge-success',
-    fix: 'badge-warning',
-    perf: 'badge-info',
-    refactor: 'badge-secondary',
-    infra: 'badge-secondary',
-    test: 'badge-secondary',
+/* ─── Словари ───────────────────────────────────────────────────────────────── */
+
+/** Русские имена типов поставки — как в эталоне. */
+const TYPE_RU: Record<string, string> = {
+    feat: 'фича',
+    fix: 'починка',
+    perf: 'ускорение',
+    refactor: 'рефакторинг',
+    test: 'тесты',
+    chore: 'рутина',
+    docs: 'документация',
 };
 
-function CtypeBadge({ ctype }: { ctype: string }) {
-    return <span className={`badge ${CTYPE_BADGE[ctype] ?? 'badge-secondary'}`}>{ctype}</span>;
+const DOWS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
+
+const shipmentsWord = (n: number) => pluralRu(n, ['поставка', 'поставки', 'поставок']);
+
+/** Подсказка дня. Без поставок — так и говорим, а не «0 поставок». */
+function dayTitle(day: string, n: number, lines?: { added: number; deleted: number }): string {
+    if (!n) return `${ddmm(day)}: без поставок`;
+    const vol = lines ? `+${formatNumber(lines.added, 0)} / −${formatNumber(lines.deleted, 0)} строк, ` : '';
+    return `${ddmm(day)}: ${vol}${formatNumber(n, 0)} ${shipmentsWord(n)}`;
 }
 
 /* ─── Ритм ──────────────────────────────────────────────────────────────────── */
 
-function RhythmCard({ stats }: { stats: VibeStats }) {
+function RhythmCard({ stats, perDay }: { stats: VibeStats; perDay: Map<string, VibeDayVolume> }) {
     const { rhythm } = stats;
-    // День закрашен, если в нём была хоть одна поставка. Пауза — пустая клетка:
-    // окно к ней равнодушно, в отличие от стрика, который бы обнулился.
-    //
     // ИНВАРИАНТ: окно ритма (14 дней до `until`) обязано лежать ВНУТРИ периода отчёта —
-    // иначе by_day не покроет часть клеток и пропуск нарисуется там, где поставка была.
+    // иначе by_day не покроет часть пилюль и пропуск нарисуется там, где поставка была.
     // Держится сам: период по умолчанию 30 дней, и страница не шлёт since/until.
     // Появится выбор периода короче 14 дней — строку окна брать с бэка, а не из by_day.
-    const shipped = useMemo(() => {
-        const set = new Set<string>();
-        for (const d of stats.by_day) if (d.shipments > 0) set.add(d.day);
-        return set;
-    }, [stats.by_day]);
-
     const days = useMemo(() => eachDay(rhythm.start, rhythm.end), [rhythm.start, rhythm.end]);
 
     return (
-        <div className="glass-card">
+        <div className="vibe-card">
+            <h2 className="vibe-card-h">Ритм</h2>
+            <div className="vibe-hero">
+                <span className="vibe-fig">
+                    {formatNumber(rhythm.hit, 0)}
+                    <span className="vibe-of">/{formatNumber(rhythm.denom, 0)}</span>
+                </span>
+                <span className="vibe-cap">
+                    {pluralRu(rhythm.denom, ['дня', 'дней', 'дней'])} с поставкой на прод
+                    {' · '}{ddmm(rhythm.start)}—{ddmm(rhythm.end)}
+                    {' · '}окно {formatNumber(rhythm.window, 0)}{' '}
+                    {pluralRu(rhythm.window, ['день', 'дня', 'дней'])}
+                </span>
+            </div>
+            {/* Полоска дней окна: пауза видна пропуском, а не обнулённым счётчиком */}
             <div className="vibe-rhythm">
-                <div>
-                    <div className="vibe-card-title">Ритм</div>
-                    <div className="vibe-rhythm-figure">
-                        <span className="vibe-rhythm-hit">{formatNumber(rhythm.hit, 0)}</span>
-                        <span className="vibe-rhythm-denom">/ {formatNumber(rhythm.denom, 0)}</span>
-                    </div>
-                    <div className="vibe-rhythm-caption">
-                        {pluralRu(rhythm.hit, ['день', 'дня', 'дней'])} с поставкой на прод
-                        {' · '}{formatDate(rhythm.start)} — {formatDate(rhythm.end)}
-                        {' · '}окно {formatNumber(rhythm.window, 0)}{' '}
-                        {pluralRu(rhythm.window, ['день', 'дня', 'дней'])}
-                    </div>
-                </div>
+                {days.map(day => {
+                    const n = perDay.get(day)?.shipments ?? 0;
+                    return <span key={day} className={`vibe-pip${n ? ' on' : ''}`} title={dayTitle(day, n)} />;
+                })}
+            </div>
+        </div>
+    );
+}
 
-                <div className="vibe-rhythm-days">
-                    <div className="vibe-days">
-                        {days.map(day => {
-                            const hit = shipped.has(day);
+/* ─── Календарь поставок ────────────────────────────────────────────────────── */
+
+/** Ступень рампы по числу поставок — как в эталоне: 0 → пусто, дальше по парам. */
+const tierOf = (n: number) => (n === 0 ? 0 : Math.min(4, Math.floor((n + 1) / 2)));
+
+function CalendarCard({ stats, perDay }: { stats: VibeStats; perDay: Map<string, VibeDayVolume> }) {
+    const weeks = useMemo(() => {
+        const first = toDate(stats.since);
+        const last = toDate(stats.until);
+        if (Number.isNaN(first.getTime()) || Number.isNaN(last.getTime())) return [];
+        const out: { key: string; days: (string | null)[] }[] = [];
+        let week = mondayOf(first);
+        while (week <= last && out.length < 60) {
+            const cells = Array.from({ length: 7 }, (_, i) => {
+                const day = addDays(week, i);
+                // День вне периода — не «ноль поставок», а отсутствие дня: пустая клетка
+                return day < first || day > last ? null : isoOf(day);
+            });
+            out.push({ key: isoOf(week), days: cells });
+            week = addDays(week, 7);
+        }
+        return out;
+    }, [stats.since, stats.until]);
+
+    return (
+        <div className="vibe-card">
+            <h2 className="vibe-card-h">Календарь поставок</h2>
+            <div className="vibe-dows">
+                <span />
+                {DOWS.map(d => <span key={d} className="vibe-dow">{d}</span>)}
+            </div>
+            <div className="vibe-weeks">
+                {weeks.map(w => (
+                    <div key={w.key} className="vibe-week">
+                        <span className="vibe-wlab">{ddmm(w.key)}</span>
+                        {w.days.map((day, i) => {
+                            if (day === null) return <span key={i} className="vibe-cell void" />;
+                            const n = perDay.get(day)?.shipments ?? 0;
+                            const tier = tierOf(n);
                             return (
-                                <div
-                                    key={day}
-                                    className={`vibe-day ${hit ? 'hit' : ''}`}
-                                    title={`${formatDate(day)} — ${hit ? 'поставка была' : 'без поставки'}`}
-                                />
+                                <span key={day} className={`vibe-cell${tier ? ` n${tier}` : ''}`}
+                                    title={dayTitle(day, n)}>
+                                    {n || ''}
+                                </span>
                             );
                         })}
                     </div>
-                    <div className="vibe-legend">Закрашенный день — была поставка. Пропуск — пауза, ритм не сбрасывается.</div>
-                </div>
+                ))}
+            </div>
+            <div className="vibe-legend">
+                <span>меньше</span>
+                <i className="s0" /><i className="s2" /><i className="s3" /><i className="s4" /><i className="s5" />
+                <span>больше</span>
             </div>
         </div>
     );
@@ -96,25 +157,30 @@ function RhythmCard({ stats }: { stats: VibeStats }) {
 
 /* ─── Объём по дням ─────────────────────────────────────────────────────────── */
 
+/** Сколько столбцов ещё терпят подпись над каждым. Больше — подписи прячем:
+ *  они не влезают (nowrap + min-width:auto не дают колонке сжаться, график вылезал
+ *  за карточку), да и число над каждым столбцом — анти-паттерн. Значения — в тултипе. */
+const DENSE_COLS = 12;
+
 function ByDayCard({ stats }: { stats: VibeStats }) {
-    const max = Math.max(...stats.by_day.map(d => d.added), 0);
+    const peak = Math.max(...stats.by_day.map(d => d.added), 1);
+    const dense = stats.by_day.length > DENSE_COLS;
 
     return (
-        <div className="glass-card">
-            <div className="vibe-card-title">Объём по дням</div>
-            <div className="vibe-card-sub">Высота столбца — строк добавлено</div>
-            <div className="vibe-days-chart">
-                {stats.by_day.map(d => {
-                    // День с нулём — ПУСТОЕ место. min-height нужен мелким значениям,
-                    // но для нуля он рисовал бы работу, которой не было.
-                    const pct = max > 0 && d.added > 0 ? Math.max((d.added / max) * 100, 2) : 0;
-                    const tip = `${formatDate(d.day)}\n+${formatNumber(d.added, 0)} / −${formatNumber(d.deleted, 0)} строк\n${formatNumber(d.shipments, 0)} ${pluralRu(d.shipments, ['поставка', 'поставки', 'поставок'])}`;
-                    return (
-                        <div key={d.day} className="vibe-day-col" title={tip}>
-                            {pct > 0 && <div className="vibe-day-bar" style={{ height: `${pct}%` }} />}
-                        </div>
-                    );
-                })}
+        <div className="vibe-card">
+            <h2 className="vibe-card-h">Объём по дням</h2>
+            <div className={dense ? 'vibe-cols vibe-cols-dense' : 'vibe-cols'}>
+                {stats.by_day.map(d => (
+                    <div key={d.day} className="vibe-col" title={dayTitle(d.day, d.shipments, d)}>
+                        <span className="vibe-cv">{d.added ? `+${formatNumber(d.added, 0)}` : ''}</span>
+                        {/* min-height у .vibe-cbar не даёт потеряться мелким значениям, но для НУЛЯ
+                            рисовал бы столбик там, где работы не было: день без поставок — пустое место */}
+                        {d.added > 0 && (
+                            <span className="vibe-cbar" style={{ height: `${(100 * d.added) / peak}%` }} />
+                        )}
+                        <span className="vibe-cd">{ddmm(d.day)}</span>
+                    </div>
+                ))}
             </div>
         </div>
     );
@@ -124,78 +190,89 @@ function ByDayCard({ stats }: { stats: VibeStats }) {
 
 function ScaleCard({ stats }: { stats: VibeStats }) {
     const { scale } = stats;
-    const nums: { label: string; value: number }[] = [
-        { label: 'файлов', value: scale.files },
-        { label: 'новых файлов', value: scale.new_files },
-        { label: 'компонентов', value: scale.components },
-        { label: 'миграций', value: scale.migrations },
-        { label: 'разделов', value: scale.sections },
+    const totals: { label: string; value: number }[] = [
+        { label: 'файлов затронуто', value: scale.files },
+        { label: 'создано с нуля', value: scale.new_files },
+        { label: 'React-компонентов', value: scale.components },
+        { label: 'миграций БД', value: scale.migrations },
+        {
+            label: pluralRu(scale.sections, ['раздел продукта', 'раздела продукта', 'разделов продукта']),
+            value: scale.sections,
+        },
     ];
 
-    // Бар по строкам (добавлено + удалено) — это объём правки, а не «прирост».
-    const lines = (a: { added: number; deleted: number }) => a.added + a.deleted;
-    const max = Math.max(...scale.by_area.map(lines), 0);
+    // Бары по СТРОКАМ (объём), файлы — в подпись: 9 миграций и 54 компонента несопоставимы
+    // по счётчику файлов, а по объёму видно, где на самом деле работа.
+    const ranked = useMemo(
+        () => [...scale.by_area].sort((a, b) => (b.added + b.deleted) - (a.added + a.deleted)),
+        [scale.by_area],
+    );
+    const top = Math.max(...ranked.map(a => a.added + a.deleted), 1);
 
     return (
-        <div className="glass-card">
-            <div className="vibe-card-title">Масштаб</div>
-            <div className="vibe-card-sub">Сколько сделано — опись объёма</div>
-
-            <div className="vibe-scale-nums">
-                {nums.map(n => (
-                    <div key={n.label} className="vibe-scale-num">
-                        <div className="vibe-scale-num-value">{formatNumber(n.value, 0)}</div>
-                        <div className="vibe-scale-num-label">{n.label}</div>
+        <div className="vibe-card">
+            <h2 className="vibe-card-h">Масштаб</h2>
+            <div className="vibe-totals">
+                {totals.map(t => (
+                    <div key={t.label}>
+                        <div className="vibe-tv">{formatNumber(t.value, 0)}</div>
+                        <div className="vibe-tl">{t.label}</div>
                     </div>
                 ))}
             </div>
-
-            {scale.by_area.length > 0 && (
-                <div className="vibe-bars">
-                    {scale.by_area.map(a => {
-                        const total = lines(a);
-                        const pct = max > 0 ? (total / max) * 100 : 0;
-                        return (
-                            <div key={a.area} className="vibe-bar-row">
-                                <div>
-                                    <div className="vibe-bar-name">{a.area}</div>
-                                    <div className="vibe-bar-name-sub">
-                                        {formatNumber(a.files, 0)} {pluralRu(a.files, ['файл', 'файла', 'файлов'])}
-                                    </div>
-                                </div>
-                                <div className="vibe-bar-track"
-                                    title={`${a.area}: +${formatNumber(a.added, 0)} / −${formatNumber(a.deleted, 0)} строк`}>
-                                    <div className="vibe-bar-fill" style={{ width: `${pct}%` }} />
-                                </div>
-                                <div className="vibe-bar-value">{formatNumber(total, 0)}</div>
-                            </div>
-                        );
-                    })}
-                </div>
-            )}
+            <div className="vibe-bars">
+                {ranked.map(a => (
+                    <div key={a.area} className="vibe-bar">
+                        <span className="vibe-bar-nm">
+                            {a.area}<br />
+                            <span className="vibe-bar-sub2">
+                                {formatNumber(a.files, 0)} {pluralRu(a.files, ['файл', 'файла', 'файлов'])}
+                            </span>
+                        </span>
+                        <span className="vibe-bar-track">
+                            <span className="vibe-bar-fill"
+                                style={{ width: `${(100 * (a.added + a.deleted)) / top}%` }} />
+                            <span className="vibe-bar-val">
+                                +{formatNumber(a.added, 0)} / −{formatNumber(a.deleted, 0)}
+                            </span>
+                        </span>
+                    </div>
+                ))}
+            </div>
         </div>
     );
 }
 
 /* ─── Поставки по разделам ──────────────────────────────────────────────────── */
 
+/** Сколько разделов показывать поимённо. Хвост сворачиваем в «Прочее»: у активного
+ *  вайбкодера их под сорок (gazelka, api, cache, box-multiplicity…), и полный список
+ *  сырых слагов — стена текста вместо графика. Больше 7–8 категорий читаются как шум. */
+const TOP_SECTIONS = 8;
+
 function BySectionCard({ stats }: { stats: VibeStats }) {
-    const max = Math.max(...stats.by_section.map(s => s.count), 0);
+    const rows = useMemo(() => {
+        const sorted = [...stats.by_section].sort((a, b) => b.count - a.count);
+        if (sorted.length <= TOP_SECTIONS + 1) return sorted;
+        const head = sorted.slice(0, TOP_SECTIONS);
+        const tail = sorted.slice(TOP_SECTIONS);
+        const rest = tail.reduce((sum, s) => sum + s.count, 0);
+        return [...head, { section: `Прочее (${tail.length})`, count: rest }];
+    }, [stats.by_section]);
+
+    const top = Math.max(...rows.map(s => s.count), 1);
 
     return (
-        <div className="glass-card">
-            <div className="vibe-card-title">Поставки по разделам</div>
-            {/* Бэкенд считает тут только продуктовые: раздел есть у того, что видит юзер */}
-            <div className="vibe-card-sub">Куда уходила работа — продуктовые поставки</div>
+        <div className="vibe-card">
+            <h2 className="vibe-card-h">Поставки по разделам</h2>
             <div className="vibe-bars">
-                {stats.by_section.map(s => (
-                    <div key={s.section} className="vibe-bar-row">
-                        <div className="vibe-bar-name" title={s.section}>{s.section}</div>
-                        <div className="vibe-bar-track"
-                            title={`${s.section}: ${formatNumber(s.count, 0)} ${pluralRu(s.count, ['поставка', 'поставки', 'поставок'])}`}>
-                            <div className="vibe-bar-fill added" style={{ width: `${max > 0 ? (s.count / max) * 100 : 0}%` }} />
-                        </div>
-                        <div className="vibe-bar-value">{formatNumber(s.count, 0)}</div>
+                {rows.map(s => (
+                    <div key={s.section} className="vibe-bar">
+                        <span className="vibe-bar-nm">{s.section}</span>
+                        <span className="vibe-bar-track">
+                            <span className="vibe-bar-fill" style={{ width: `${(100 * s.count) / top}%` }} />
+                            <span className="vibe-bar-val">{formatNumber(s.count, 0)}</span>
+                        </span>
                     </div>
                 ))}
             </div>
@@ -205,29 +282,49 @@ function BySectionCard({ stats }: { stats: VibeStats }) {
 
 /* ─── Лента поставок ────────────────────────────────────────────────────────── */
 
-const FEED_COLUMNS: Column[] = [
-    { key: 'day', label: 'Дата', format: 'date', width: '110px' },
-    { key: 'ctype', label: 'Тип', width: '90px', render: (v: unknown) => <CtypeBadge ctype={String(v)} /> },
+// Выгрузка несёт больше ленты: в Excel идут полный sha и объём — по ним ищут коммит и
+// считают, а на экране они бы забили таблицу.
+const FEED_EXPORT: ExcelExportColumn[] = [
+    { key: 'day', label: 'Дата' },
+    { key: 'ctype', label: 'Тип', getValue: (r: VibeShipment) => TYPE_RU[r.ctype] ?? r.ctype },
     { key: 'title', label: 'Что уехало' },
-    { key: 'section', label: 'Раздел', width: '200px' },
-    {
-        key: 'short', label: 'SHA', width: '100px',
-        // Полный sha — в подсказке и в выгрузке: короткий годится глазу, но не для поиска коммита
-        render: (v: unknown, row: VibeShipment) => <span className="vibe-feed-sha" title={row.sha}>{String(v)}</span>,
-        exportValue: (row: VibeShipment) => row.sha,
-    },
+    { key: 'section', label: 'Раздел' },
+    { key: 'sha', label: 'Коммит' },
+    { key: 'added', label: 'Строк добавлено' },
+    { key: 'deleted', label: 'Строк удалено' },
+    { key: 'files', label: 'Файлов' },
+    { key: 'is_product', label: 'Продуктовая', getValue: (r: VibeShipment) => (r.is_product ? 'да' : 'нет') },
 ];
 
 function FeedCard({ shipments }: { shipments: VibeShipment[] }) {
     return (
-        <TanStackDataTable
-            title="Лента поставок"
-            columns={FEED_COLUMNS}
-            data={shipments}
-            exportName="vibecoding_shipments"
-            emptyIcon="📭"
-            emptyText="Поставок нет"
-        />
+        <div className="vibe-card">
+            <div className="vibe-card-head">
+                <h2 className="vibe-card-h">Лента поставок</h2>
+                <button type="button" className="vibe-btn"
+                    onClick={() => exportToExcel(shipments, 'vibecoding_shipments', FEED_EXPORT)}>
+                    Выгрузить в Excel
+                </button>
+            </div>
+            <table className="vibe-table">
+                <thead>
+                    <tr>
+                        <th>Дата</th><th>Тип</th><th>Что уехало</th><th>Раздел</th><th>Коммит</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {shipments.map(s => (
+                        <tr key={s.sha}>
+                            <td className="d">{ddmm(s.day)}</td>
+                            <td><span className="vibe-tag">{TYPE_RU[s.ctype] ?? s.ctype ?? '—'}</span></td>
+                            <td className="t">{s.title}</td>
+                            <td>{s.section}</td>
+                            <td className="h" title={s.sha}>{s.short}</td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
     );
 }
 
@@ -258,22 +355,26 @@ export default function VibecodingPage() {
 
     useEffect(() => { load(); }, [load]);
 
-    const subtitle = stats
-        ? `${stats.display_name} · ${formatDate(stats.since)} — ${formatDate(stats.until)}`
-        : 'Опись работы: что уехало на прод';
+    const perDay = useMemo(
+        () => new Map((stats?.by_day ?? []).map(d => [d.day, d])),
+        [stats?.by_day],
+    );
+
+    const hasData = !!stats && stats.shipments_total > 0;
 
     return (
-        <div className="animate-in">
-            <PageHeader title="Вайбкодинг" icon="🤖" subtitle={subtitle} />
+        <div className="vibe-root animate-in">
+            <h1 className="vibe-h1">Вайбкодинг</h1>
+            <p className="vibe-sub">
+                {stats
+                    ? `${stats.display_name} · ${formatDate(stats.since)} — ${formatDate(stats.until)} · поставка = коммит, доехавший до прода`
+                    : 'Опись работы: что уехало на прод'}
+            </p>
 
-            {loading && (
-                <div className="glass-card" style={{ padding: 40, color: 'var(--color-text-muted)' }}>
-                    Загрузка...
-                </div>
-            )}
+            {loading && <div className="vibe-card vibe-loading">Загрузка...</div>}
 
             {!loading && forbidden && (
-                <div className="glass-card vibe-empty">
+                <div className="vibe-card vibe-empty">
                     <div className="vibe-empty-icon">🤖</div>
                     <div className="vibe-empty-title">Вкладка не для вас</div>
                     <p className="vibe-empty-text">
@@ -284,18 +385,16 @@ export default function VibecodingPage() {
             )}
 
             {!loading && !forbidden && error && (
-                <div className="glass-card vibe-empty">
+                <div className="vibe-card vibe-empty">
                     <div className="vibe-empty-icon">⚠️</div>
                     <div className="vibe-empty-title">Не удалось загрузить статистику</div>
                     <p className="vibe-empty-text">{error}</p>
-                    <button className="btn btn-secondary btn-sm" style={{ marginTop: 16 }} onClick={load}>
-                        Повторить
-                    </button>
+                    <button type="button" className="vibe-btn" onClick={load}>Повторить</button>
                 </div>
             )}
 
-            {!loading && !forbidden && !error && stats && stats.shipments_total === 0 && (
-                <div className="glass-card vibe-empty">
+            {!loading && !forbidden && !error && stats && !hasData && (
+                <div className="vibe-card vibe-empty">
                     <div className="vibe-empty-icon">📭</div>
                     <div className="vibe-empty-title">За этот период поставок на прод нет</div>
                     <p className="vibe-empty-text">
@@ -305,32 +404,36 @@ export default function VibecodingPage() {
                 </div>
             )}
 
-            {!loading && !forbidden && !error && stats && stats.shipments_total > 0 && (
-                <div className="vibe-stack">
-                    <RhythmCard stats={stats} />
+            {!loading && !forbidden && !error && stats && hasData && (
+                <>
+                    <RhythmCard stats={stats} perDay={perDay} />
 
-                    {/* value — СТРОКОЙ: KpiCard форматирует number с 2 знаками («3,00 поставки») */}
                     <div className="vibe-kpis">
-                        <KpiCard
-                            label="Поставок на прод"
-                            value={formatNumber(stats.shipments_total, 0)}
-                            sub={`из них продуктовых: ${formatNumber(stats.shipments_product, 0)}`}
-                            icon="🚀"
-                        />
-                        <KpiCard
-                            label="Строк добавлено"
-                            value={formatNumber(stats.scale.added, 0)}
-                            sub={`−${formatNumber(stats.scale.deleted, 0)} удалено`}
-                            icon="📝"
-                            color="#22c55e"
-                        />
+                        <div className="vibe-kpi">
+                            <div className="vibe-kpi-v">{formatNumber(stats.shipments_total, 0)}</div>
+                            <div className="vibe-kpi-l">поставок на прод</div>
+                            <div className="vibe-kpi-n">
+                                из них продуктовых: {formatNumber(stats.shipments_product, 0)}
+                            </div>
+                        </div>
+                        <div className="vibe-kpi">
+                            <div className="vibe-kpi-v">+{formatNumber(stats.scale.added, 0)}</div>
+                            <div className="vibe-kpi-l">строк добавлено</div>
+                            <div className="vibe-kpi-n">−{formatNumber(stats.scale.deleted, 0)} удалено</div>
+                        </div>
                     </div>
 
+                    <CalendarCard stats={stats} perDay={perDay} />
                     <ByDayCard stats={stats} />
                     <ScaleCard stats={stats} />
                     {stats.by_section.length > 0 && <BySectionCard stats={stats} />}
                     {stats.shipments.length > 0 && <FeedCard shipments={stats.shipments} />}
-                </div>
+
+                    <p className="vibe-foot">
+                        Собрано из git: поставка = коммит, доехавший до прода.
+                        {stats.last_ingest && ` CI последний раз обновлял данные ${formatDate(stats.last_ingest)}.`}
+                    </p>
+                </>
             )}
         </div>
     );

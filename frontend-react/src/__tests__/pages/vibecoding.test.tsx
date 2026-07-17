@@ -60,30 +60,66 @@ describe('Страница «Вайбкодинг»', () => {
 
         const { container } = render(<VibecodingPage />);
 
-        // Ритм: hit/denom + окно
-        expect(await screen.findByText('/ 3')).toBeInTheDocument();
-        expect(container.querySelector('.vibe-rhythm-hit')).toHaveTextContent('2');
-        expect(screen.getByText(/дня с поставкой на прод/)).toBeInTheDocument();
+        // Ритм: герой hit/denom + окно
+        await screen.findByText(/с поставкой на прод/);
+        expect(container.querySelector('.vibe-fig')).toHaveTextContent('2/3');
         expect(screen.getByText(/окно 3 дня/)).toBeInTheDocument();
         // KPI — штуки без «,00», подпись о продуктовых
         expect(screen.getByText('из них продуктовых: 2')).toBeInTheDocument();
         expect(screen.getByText('−120 удалено')).toBeInTheDocument();
-        // Масштаб + лента
+        // Масштаб + лента (тип поставки — по-русски, как в эталоне)
         expect(screen.getByText('8 файлов')).toBeInTheDocument();
         expect(screen.getByText('колонка «Реком. ставка»')).toBeInTheDocument();
+        expect(screen.getByText('фича')).toBeInTheDocument();
         expect(screen.getByText('f96487ba')).toBeInTheDocument();
+    });
+
+    it('полоска ритма: день с поставкой закрашен, пауза — пропуск', async () => {
+        getVibeStats.mockResolvedValue(makeStats());
+
+        const { container } = render(<VibecodingPage />);
+        await screen.findByText(/с поставкой на прод/);
+
+        // Окно 01.07—03.07: три пилюли, средний день без поставки не закрашен
+        expect(container.querySelectorAll('.vibe-pip')).toHaveLength(3);
+        expect(container.querySelectorAll('.vibe-pip.on')).toHaveLength(2);
+    });
+
+    it('календарь: ячейка красится по ступени рампы, пустой день — нулевая ступень', async () => {
+        getVibeStats.mockResolvedValue(makeStats());
+
+        const { container } = render(<VibecodingPage />);
+        await screen.findByText(/с поставкой на прод/);
+
+        const cells = [...container.querySelectorAll('.vibe-cell:not(.void)')];
+        expect(cells).toHaveLength(3);
+        // 2 поставки → ступень n1, 0 → без класса ступени, 1 → n1
+        expect(cells[0]).toHaveClass('n1');
+        expect(cells[0]).toHaveTextContent('2');
+        expect(cells[1].className).toBe('vibe-cell');
+        expect(cells[1]).toHaveTextContent('');
+        // Дни вне периода — пустые клетки, а не «ноль поставок»
+        expect(container.querySelectorAll('.vibe-cell.void').length).toBeGreaterThan(0);
     });
 
     it('день с нулём — пустое место, а не полоска', async () => {
         getVibeStats.mockResolvedValue(makeStats());
 
         const { container } = render(<VibecodingPage />);
-        await screen.findByText('/ 3');
+        await screen.findByText(/с поставкой на прод/);
 
         // 3 дня в by_day держат место, но полоска — только у двух непустых:
         // min-height нужен мелким значениям, для нуля он рисовал бы работу, которой не было
-        expect(container.querySelectorAll('.vibe-day-col')).toHaveLength(3);
-        expect(container.querySelectorAll('.vibe-day-bar')).toHaveLength(2);
+        expect(container.querySelectorAll('.vibe-col')).toHaveLength(3);
+        expect(container.querySelectorAll('.vibe-cbar')).toHaveLength(2);
+    });
+
+    it('лента поставок выгружается в Excel — канон требует экспорт у таблиц', async () => {
+        getVibeStats.mockResolvedValue(makeStats());
+
+        render(<VibecodingPage />);
+
+        expect(await screen.findByRole('button', { name: 'Выгрузить в Excel' })).toBeInTheDocument();
     });
 
     it('empty — данные есть, поставок в периоде нет', async () => {

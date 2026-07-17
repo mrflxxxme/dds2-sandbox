@@ -3124,218 +3124,449 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .dds-tip-label { transition: opacity .15s; }
 .dds-tip--label:hover .dds-tip-label { opacity: .65; }
 
-/* ─── Вайбкодинг ────────────────────────────────────────────────────────────── */
 
-.vibe-stack {
+/* ─── Вайбкодинг ────────────────────────────────────────────────────────────── */
+/* Тёмный дашборд 1:1 с локальным эталоном (~/Desktop/dds2/worklog/worklog.py, CSS).
+   ПАЛИТРА ЗАМКНУТА НА .vibe-root: переменные объявлены здесь, а не в :root, поэтому
+   тёмным становится только «Вайбкодинг» — на остальной сервис не течёт. Внутри
+   раздела цвета берутся ТОЛЬКО из var(--vibe-*), hex в компонентах нет. */
+.vibe-root {
+    color-scheme: dark;
+
+    --vibe-page: #0d0d0d;
+    --vibe-surface: #1a1a19;
+    --vibe-ink: #ffffff;
+    --vibe-ink-2: #c3c2b7;
+    --vibe-muted: #898781;
+    --vibe-grid: #2c2c2a;
+    --vibe-baseline: #383835;
+    --vibe-border: rgba(255, 255, 255, 0.10);
+    /* Секвенциальная рампа. На тёмной поверхности она зеркальная: больше = светлее. */
+    --vibe-seq-0: #232322;
+    --vibe-seq-1: #184f95;
+    --vibe-seq-2: #256abf;
+    --vibe-seq-3: #3987e5;
+    --vibe-seq-4: #6da7ec;
+    --vibe-seq-5: #9ec5f4;
+    /* Раз рампа зеркальная — подпись на верхних (светлых) ступенях тёмная, а не белая. */
+    --vibe-cell-ink-hi: #0b0b0b;
+
+    background: var(--vibe-page);
+    color: var(--vibe-ink);
+    border-radius: 20px;
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 32px 20px 64px;
+}
+
+.vibe-h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.01em;
+    color: var(--vibe-ink);
+}
+
+.vibe-sub {
+    color: var(--vibe-ink-2);
+    font-size: 13px;
+    margin: 6px 0 0;
+}
+
+.vibe-card {
+    background: var(--vibe-surface);
+    border: 1px solid var(--vibe-border);
+    border-radius: 20px;
+    padding: 20px;
+    margin-top: 16px;
+}
+
+.vibe-card-h {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--vibe-ink-2);
+    margin: 0 0 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.vibe-card-head {
     display: flex;
-    flex-direction: column;
-    gap: 20px;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.vibe-card-head .vibe-card-h {
+    margin: 0;
+}
+
+/* Кнопка в тёмной карточке: .btn проекта светлый и здесь бы не лёг */
+.vibe-btn {
+    background: transparent;
+    border: 1px solid var(--vibe-border);
+    color: var(--vibe-ink-2);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.vibe-btn:hover {
+    background: var(--vibe-seq-0);
+    color: var(--vibe-ink);
 }
 
 /* Ритм — герой */
-.vibe-rhythm {
-    display: flex;
-    align-items: center;
-    gap: 32px;
-    flex-wrap: wrap;
-}
-
-.vibe-rhythm-figure {
+.vibe-hero {
     display: flex;
     align-items: baseline;
-    gap: 4px;
-    color: var(--color-accent);
-    font-weight: 700;
-    line-height: 1;
-}
-
-.vibe-rhythm-hit {
-    font-size: 56px;
-}
-
-.vibe-rhythm-denom {
-    font-size: 28px;
-    color: var(--color-text-muted);
-    font-weight: 500;
-}
-
-.vibe-rhythm-caption {
-    font-size: 13px;
-    color: var(--color-text-muted);
-    margin-top: 8px;
-}
-
-.vibe-rhythm-days {
-    flex: 1;
-    min-width: 220px;
-}
-
-/* Полоска дней окна: закрашен = день с поставкой, пустой = пауза.
-   Пауза видна пропуском, а не сбросом — окно к ней равнодушно. */
-.vibe-days {
-    display: flex;
-    gap: 4px;
+    gap: 14px;
     flex-wrap: wrap;
 }
 
-.vibe-day {
-    width: 14px;
-    height: 20px;
+.vibe-fig {
+    font-size: 64px;
+    font-weight: 650;
+    line-height: 1;
+    letter-spacing: -0.03em;
+}
+
+.vibe-of {
+    font-size: 28px;
+    font-weight: 500;
+    color: var(--vibe-muted);
+    letter-spacing: -0.01em;
+}
+
+.vibe-cap {
+    color: var(--vibe-ink-2);
+    font-size: 14px;
+}
+
+/* Полоска дней окна: пауза видна пропуском, а не обнулённым счётчиком */
+.vibe-rhythm {
+    display: flex;
+    gap: 4px;
+    margin-top: 18px;
+    flex-wrap: wrap;
+}
+
+.vibe-pip {
+    width: 22px;
+    height: 8px;
     border-radius: 4px;
-    border: 1px solid var(--color-border);
-    background: transparent;
+    background: var(--vibe-seq-0);
 }
 
-.vibe-day.hit {
-    background: var(--color-accent);
-    border-color: var(--color-accent);
-}
-
-.vibe-legend {
-    font-size: 12px;
-    color: var(--color-text-dim);
-    margin-top: 8px;
+.vibe-pip.on {
+    background: var(--vibe-seq-4);
 }
 
 /* KPI-строка */
 .vibe-kpis {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 16px;
-}
-
-/* Заголовок карточки */
-.vibe-card-title {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--color-text);
-    margin-bottom: 4px;
-}
-
-.vibe-card-sub {
-    font-size: 12px;
-    color: var(--color-text-muted);
-    margin-bottom: 16px;
-}
-
-/* Объём по дням — колонки */
-.vibe-days-chart {
-    display: flex;
-    align-items: flex-end;
-    gap: 3px;
-    height: 140px;
-    overflow-x: auto;
-    padding-bottom: 4px;
-}
-
-.vibe-day-col {
-    flex: 1;
-    min-width: 6px;
-    height: 100%;
-    display: flex;
-    align-items: flex-end;
-}
-
-.vibe-day-bar {
-    width: 100%;
-    border-radius: 4px 4px 0 0;
-    background: var(--color-accent);
-    transition: opacity 0.2s ease;
-}
-
-.vibe-day-bar:hover {
-    opacity: 0.75;
-}
-
-/* Масштаб — числа */
-.vibe-scale-nums {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 12px;
-    margin-bottom: 20px;
+    margin-top: 16px;
 }
 
-.vibe-scale-num {
-    text-align: center;
-    padding: 12px 8px;
-    border-radius: 12px;
-    background: var(--color-bg-hover);
+.vibe-kpi {
+    background: var(--vibe-surface);
+    border: 1px solid var(--vibe-border);
+    border-radius: 20px;
+    padding: 16px;
 }
 
-.vibe-scale-num-value {
-    font-size: 22px;
-    font-weight: 700;
-    color: var(--color-text);
+.vibe-kpi-v {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
 }
 
-.vibe-scale-num-label {
+.vibe-kpi-l {
+    color: var(--vibe-ink-2);
     font-size: 12px;
-    font-weight: 500;
-    color: var(--color-text-muted);
+    margin-top: 4px;
+}
+
+.vibe-kpi-n {
+    color: var(--vibe-muted);
+    font-size: 11px;
     margin-top: 2px;
 }
 
-/* Горизонтальные бары (области, разделы) */
+/* Календарь поставок — недельная сетка */
+.vibe-weeks {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.vibe-dows,
+.vibe-week {
+    display: grid;
+    grid-template-columns: 96px repeat(7, 1fr);
+    gap: 2px;
+}
+
+.vibe-week {
+    align-items: center;
+}
+
+.vibe-dows {
+    margin-bottom: 6px;
+}
+
+.vibe-dow {
+    color: var(--vibe-muted);
+    font-size: 11px;
+    text-align: center;
+}
+
+.vibe-wlab {
+    color: var(--vibe-muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+
+.vibe-cell {
+    aspect-ratio: 1 / 1;
+    width: 100%;
+    max-width: 42px;
+    justify-self: center;
+    border-radius: 4px;
+    background: var(--vibe-seq-0);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: var(--vibe-ink-2);
+    font-variant-numeric: tabular-nums;
+}
+
+/* День вне периода — не «ноль поставок», а отсутствие дня: места не занимает цветом */
+.vibe-cell.void {
+    background: transparent;
+}
+
+.vibe-cell.n1 { background: var(--vibe-seq-2); }
+.vibe-cell.n2 { background: var(--vibe-seq-3); }
+.vibe-cell.n3 { background: var(--vibe-seq-4); color: var(--vibe-cell-ink-hi); }
+.vibe-cell.n4 { background: var(--vibe-seq-5); color: var(--vibe-cell-ink-hi); }
+
+.vibe-legend {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 14px;
+    color: var(--vibe-muted);
+    font-size: 11px;
+}
+
+.vibe-legend i {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    display: inline-block;
+}
+
+.vibe-legend i.s0 { background: var(--vibe-seq-0); }
+.vibe-legend i.s2 { background: var(--vibe-seq-2); }
+.vibe-legend i.s3 { background: var(--vibe-seq-3); }
+.vibe-legend i.s4 { background: var(--vibe-seq-4); }
+.vibe-legend i.s5 { background: var(--vibe-seq-5); }
+
+/* Объём по дням — столбцы */
+.vibe-cols {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    height: 190px;
+    /* Страховка: если дней станет столько, что не влезут и без подписей — график
+       скроллится ВНУТРИ карточки, а не вылезает на страницу. */
+    overflow-x: auto;
+}
+
+/* Много дней (период по умолчанию — 30) → подписи на каждом столбце физически не
+   помещаются: `.vibe-cv` стоит nowrap, а у флекс-элемента min-width:auto, поэтому
+   колонка не сжимается уже своей подписи и график вылезал за карточку.
+   Плюс число над каждым столбцом — анти-паттерн сам по себе; значения остаются в
+   тултипе. Подписи дат снизу тоже прячем — они сливались в кашу. */
+.vibe-cols-dense .vibe-cv,
+.vibe-cols-dense .vibe-cd {
+    display: none;
+}
+
+.vibe-cols-dense .vibe-col {
+    min-width: 0;
+}
+
+.vibe-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    height: 100%;
+    gap: 6px;
+}
+
+/* Скруглён только верх — столбец «растёт» от базовой линии, низ к ней прижат */
+.vibe-cbar {
+    width: 100%;
+    max-width: 56px;
+    background: var(--vibe-seq-4);
+    border-radius: 4px 4px 0 0;
+    min-height: 2px;
+}
+
+.vibe-cv {
+    font-size: 11px;
+    color: var(--vibe-ink-2);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.vibe-cd {
+    font-size: 11px;
+    color: var(--vibe-muted);
+    font-variant-numeric: tabular-nums;
+    padding-top: 6px;
+    border-top: 1px solid var(--vibe-baseline);
+    width: 100%;
+    text-align: center;
+}
+
+/* Бары — области и разделы */
 .vibe-bars {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
 }
 
-.vibe-bar-row {
+.vibe-bar {
     display: grid;
-    grid-template-columns: 160px 1fr auto;
-    align-items: center;
+    grid-template-columns: 168px 1fr;
     gap: 12px;
+    align-items: center;
 }
 
-.vibe-bar-name {
+.vibe-bar-nm {
     font-size: 13px;
-    font-weight: 500;
-    color: var(--color-text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    color: var(--vibe-ink-2);
+    text-align: right;
+    line-height: 1.35;
 }
 
-.vibe-bar-name-sub {
+.vibe-bar-sub2 {
+    color: var(--vibe-muted);
     font-size: 11px;
-    color: var(--color-text-dim);
-    font-weight: 400;
 }
 
 .vibe-bar-track {
-    height: 10px;
-    border-radius: 8px;
-    background: var(--color-bg-hover);
-    overflow: hidden;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .vibe-bar-fill {
-    height: 100%;
-    border-radius: 8px;
-    background: var(--color-accent);
+    height: 14px;
+    background: var(--vibe-seq-4);
+    border-radius: 0 4px 4px 0;
+    min-width: 2px;
 }
 
-.vibe-bar-fill.added {
-    background: var(--color-success);
-}
-
-.vibe-bar-value {
+.vibe-bar-val {
     font-size: 12px;
-    font-weight: 500;
-    color: var(--color-text-muted);
+    color: var(--vibe-ink-2);
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
 
-/* Лента поставок — таблица от TanStackDataTable, свой тут только sha */
-.vibe-feed-sha {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12px;
-    color: var(--color-text-dim);
+/* Масштаб — числа */
+.vibe-totals {
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+    padding-bottom: 18px;
+    margin-bottom: 18px;
+    border-bottom: 1px solid var(--vibe-grid);
 }
 
-/* Пустой экран */
+.vibe-tv {
+    font-size: 32px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+.vibe-tl {
+    color: var(--vibe-ink-2);
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+/* Лента поставок */
+.vibe-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.vibe-table th {
+    text-align: left;
+    font-size: 11px;
+    color: var(--vibe-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0 8px 8px 0;
+    border-bottom: 1px solid var(--vibe-grid);
+}
+
+.vibe-table td {
+    padding: 9px 8px 9px 0;
+    border-bottom: 1px solid var(--vibe-grid);
+    color: var(--vibe-ink-2);
+    vertical-align: top;
+}
+
+.vibe-table td.d {
+    color: var(--vibe-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.vibe-table td.t {
+    color: var(--vibe-ink);
+}
+
+.vibe-table td.h {
+    color: var(--vibe-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+}
+
+.vibe-tag {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 24px;
+    border: 1px solid var(--vibe-border);
+    color: var(--vibe-ink-2);
+    white-space: nowrap;
+}
+
+/* Состояния: loading / error / empty / 403 */
+.vibe-loading {
+    padding: 40px;
+    color: var(--vibe-muted);
+    font-size: 14px;
+}
+
 .vibe-empty {
     text-align: center;
     padding: 48px 24px;
@@ -3349,13 +3580,21 @@ th:hover .ts-sort-indicator { opacity: 0.8; }
 .vibe-empty-title {
     font-size: 18px;
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--vibe-ink);
     margin-bottom: 8px;
 }
 
 .vibe-empty-text {
     font-size: 14px;
-    color: var(--color-text-muted);
+    color: var(--vibe-ink-2);
     max-width: 460px;
     margin: 0 auto;
+    line-height: 1.5;
+}
+
+.vibe-foot {
+    color: var(--vibe-muted);
+    font-size: 11px;
+    margin-top: 24px;
+    line-height: 1.6;
 }
