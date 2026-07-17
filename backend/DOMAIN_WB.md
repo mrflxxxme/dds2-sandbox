@@ -14,6 +14,7 @@
 | `WbFinanceSyncLog` (`wb_finance_sync_log`) | Лог синхронизации финансов | |
 | `WbOrderCancelDaily` (`wb_order_cancel_daily`) | Ежедневная статистика отмен | |
 | `WBFeedback` (`wb_feedbacks`) | Зеркало отзывов покупателей WB | uniq `(project_id, wb_id)`; `has_text` derived; sync_type=`feedbacks` |
+| `WBFeedbackComplaint` (`wb_feedback_complaints`) | Учёт жалоб на отзывы (для удаления) | uniq `(project_id, wb_feedback_id)`; status pending/removed/rejected; НЕ авто-отправка в WB |
 | `WbTariff` (`wb_tariffs`) | Коэффициенты WB | SoftDeleteMixin |
 
 ## Бизнес-правила
@@ -72,6 +73,9 @@ WB возвращает строки удержаний за отзывы с п�
 - **Список** (`GET /reviews`): пагинация `take`/`skip`, ответ несёт `total` среза (по `is_answered`) → фронт «показано N из M» + «Показать ещё».
 - **Проблемные новинки** (`GET /reviews/newcomers?days=30&max_rating=4.6`, `get_new_low_rated`): товары «на продаже» < `days` дней со средним рейтингом < `max_rating`. «Старт продаж» = `Nomenclature.first_sale_date`, при NULL — фолбэк на дату ПЕРВОГО отзыва (прокси). Вкладка «🆕 Проблемные новинки». Не кэшируется. Плюс **разрезы** `by_category/by_brand/by_tag` (`_group_newcomers`): агрегат проблемных новинок по предмету/бренду/ярлыку — `products` (число новинок), `avg_rating` (ТОЧНО из суммы r1..r5, не усреднением округлённых), `count`, распределение. Товар с несколькими ярлыками — в каждый; без ярлыка → «Без ярлыка».
 - Grabli: джойн `feedback.nm_id → Nomenclature.article_wb` дедуплен через `GROUP BY article_wb` в подзапросе — иначе размеры (много barcode на nm_id) раздули бы счётчики.
+
+### Жалобы на отзывы (для удаления)
+`services/complaints_service.py` + `models/wb_feedback_complaints.py` (миграция `rev02_feedback_complaints`). Инструмент НЕ отправляет жалобу в WB (у продавца нет API) — готовит текст по шаблону (причина «отзыв не относится к товару») для отзывов 1–3★, фиксирует факт подачи и исход. Эндпоинты: `GET /reviews/complaints/candidates` (низкооценённые отзывы + статус), `GET /reviews/complaints` (поданные + KPI подано/удалено/не удалено/в ожидании), `POST /reviews/complaints` (зафиксировать, idempotent по отзыву), `PATCH /reviews/complaints/{id}` (исход). Фронт — вкладка «🚩 Жалобы».
 
 ### Cache invalidation
 После WB sync инвалидировать **точечно**: `reports:opiu`, `reports:wb_bdr`, `reports:dashboard`. Никогда не сбрасывать все ключи разом — worker starvation.

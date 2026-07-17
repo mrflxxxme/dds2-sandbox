@@ -314,6 +314,38 @@ async def test_new_low_rated_kpi_and_complaints(db_session, project):
     assert "ужасное" not in terms  # одиночные (count<2) отсекаются
 
 
+async def test_complaints_flow(db_session, project):
+    """Кандидаты (1–3★) → подача жалобы → исход → KPI."""
+    import pytest
+
+    from backend.services import complaints_service
+
+    await _add_feedback(db_session, project.id, "neg1", 1, 111, text="не про товар", created=datetime(2026, 7, 1))
+    await _add_feedback(db_session, project.id, "pos1", 5, 111, created=datetime(2026, 7, 1))
+    await db_session.commit()
+
+    cand = await complaints_service.list_candidates(db_session, project.id, max_rating=3)
+    ids = {c.wb_feedback_id for c in cand.items}
+    assert "neg1" in ids and "pos1" not in ids  # только низкие оценки
+
+    item = await complaints_service.create_complaint(db_session, project.id, "neg1", "not_related", "текст жалобы")
+    assert item.status == "pending" and item.rating == 1
+
+    # после подачи neg1 не в открытых кандидатах
+    open_ids = {c.wb_feedback_id for c in (await complaints_service.list_candidates(db_session, project.id, only_open=True)).items}
+    assert "neg1" not in open_ids
+
+    comp = await complaints_service.get_complaints(db_session, project.id)
+    assert comp.stats.filed == 1 and comp.stats.pending == 1
+
+    await complaints_service.update_status(db_session, project.id, item.id, "removed", None)
+    comp2 = await complaints_service.get_complaints(db_session, project.id)
+    assert comp2.stats.removed == 1 and comp2.stats.removal_rate == 100.0
+
+    with pytest.raises(ValueError):
+        await complaints_service.create_complaint(db_session, project.id, "nope", "other", "x")
+
+
 async def test_reviews_breakdown_month(db_session, project):
     """Детальная таблица по месяцам: группы, распределение, итог, опции фильтров."""
     await _seed(db_session, project.id)

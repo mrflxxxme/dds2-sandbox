@@ -1,6 +1,6 @@
 /** Отзывы покупателей WB (feedbacks) API methods */
 import { ApiClient } from './client';
-import type { NewcomersResponse, ReviewBreakdownGroup, ReviewBreakdownResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse } from '@/types/api';
+import type { ComplaintCandidatesResponse, ComplaintItem, ComplaintReason, ComplaintStatus, ComplaintsResponse, NewcomersResponse, ReviewBreakdownGroup, ReviewBreakdownResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse } from '@/types/api';
 
 export interface GetReviewsParams {
     isAnswered?: boolean;
@@ -28,6 +28,23 @@ export function addReviewMethods(api: ApiClient) {
             if (params.nmId != null) q.set('nm_id', String(params.nmId));
             const qs = q.toString();
             return api.request<ReviewsListResponse>('GET', `/api/v1/reviews${qs ? `?${qs}` : ''}`);
+        },
+        // Жалобы на отзывы (для удаления)
+        getComplaintCandidates(maxRating = 3, take = 100, onlyOpen = true) {
+            const q = new URLSearchParams({ max_rating: String(maxRating), take: String(take), only_open: String(onlyOpen) });
+            return api.request<ComplaintCandidatesResponse>('GET', `/api/v1/reviews/complaints/candidates?${q.toString()}`);
+        },
+        getComplaints(status?: ComplaintStatus) {
+            const q = new URLSearchParams();
+            if (status) q.set('status', status);
+            const qs = q.toString();
+            return api.request<ComplaintsResponse>('GET', `/api/v1/reviews/complaints${qs ? `?${qs}` : ''}`);
+        },
+        createComplaint(body: { wb_feedback_id: string; reason: ComplaintReason; text: string }) {
+            return api.request<ComplaintItem>('POST', '/api/v1/reviews/complaints', body);
+        },
+        updateComplaint(id: number, body: { status: ComplaintStatus; note?: string | null }) {
+            return api.request<ComplaintItem>('PATCH', `/api/v1/reviews/complaints/${id}`, body);
         },
         // Детальная таблица отзывов с группировкой (Динамика)
         getReviewsBreakdown(params: GetBreakdownParams) {

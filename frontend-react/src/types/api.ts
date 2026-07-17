@@ -6374,6 +6374,59 @@ export interface ReviewsListResponse {
 /** Диапазон выборки сводки отзывов. */
 export type ReviewsPeriod = '2w' | '1m' | '3m' | '6m' | '1y' | 'all';
 
+/** Причина жалобы на отзыв. */
+export type ComplaintReason = 'not_related' | 'competitors' | 'other';
+/** Статус жалобы. */
+export type ComplaintStatus = 'pending' | 'removed' | 'rejected';
+
+/** Отзыв-кандидат на жалобу (низкая оценка) + статус. */
+export interface ComplaintCandidate {
+  wb_feedback_id: string;
+  nm_id: number | null;
+  rating: number;
+  text: string;
+  cons: string | null;
+  created_date: string | null;
+  user_name: string | null;
+  product_name: string | null;
+  brand: string | null;
+  complaint_status: ComplaintStatus | null;
+}
+
+export interface ComplaintCandidatesResponse {
+  items: ComplaintCandidate[];
+  has_key: boolean;
+}
+
+export interface ComplaintItem {
+  id: number;
+  wb_feedback_id: string;
+  nm_id: number | null;
+  rating: number;
+  reason: ComplaintReason;
+  status: ComplaintStatus;
+  text: string;
+  note: string | null;
+  created_at: string | null;
+  resolved_at: string | null;
+  product_name: string | null;
+  review_text: string | null;
+}
+
+export interface ComplaintStats {
+  filed: number;
+  removed: number;
+  rejected: number;
+  pending: number;
+  removal_rate: number | null;
+}
+
+export interface ComplaintsResponse {
+  items: ComplaintItem[];
+  stats: ComplaintStats;
+  has_key: boolean;
+}
+
 /** Группировка детальной таблицы отзывов. */
 export type ReviewBreakdownGroup = 'day' | 'week' | 'month' | 'subject' | 'brand' | 'nm_id';
 

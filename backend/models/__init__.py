@@ -282,6 +282,9 @@ from backend.models.wb_returns import (
 from backend.models.wb_reviews import (
     WBFeedback,
 )
+from backend.models.wb_feedback_complaints import (
+    WBFeedbackComplaint,
+)
 
 # Alias for backward compatibility
 WbApiKey = IntegrationKey
@@ -405,6 +408,7 @@ __all__ = [
     "WbGoodsReturn",
     # WB Customer Feedbacks
     "WBFeedback",
+    "WBFeedbackComplaint",
     # Telegram bot
     "TelegramBotUser",
     "TelegramChatBinding",

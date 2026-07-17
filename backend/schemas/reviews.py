@@ -83,6 +83,78 @@ class GroupRating(BaseModel):
     r5: int = 0
 
 
+class ComplaintCandidate(BaseModel):
+    """Отзыв-кандидат на жалобу (низкая оценка) + текущий статус жалобы."""
+
+    wb_feedback_id: str
+    nm_id: int | None = None
+    rating: int
+    text: str = ""
+    cons: str | None = None
+    created_date: str | None = None
+    user_name: str | None = None
+    product_name: str | None = None
+    brand: str | None = None
+    complaint_status: str | None = None  # None | pending | removed | rejected
+
+
+class ComplaintCandidatesResponse(BaseModel):
+    """Кандидаты на жалобу (низкооценённые отзывы)."""
+
+    items: list[ComplaintCandidate] = []
+    has_key: bool = True
+
+
+class ComplaintCreate(BaseModel):
+    """Запрос на подачу жалобы на отзыв."""
+
+    wb_feedback_id: str
+    reason: str = "not_related"
+    text: str
+
+
+class ComplaintStatusUpdate(BaseModel):
+    """Смена статуса жалобы (исход)."""
+
+    status: str  # removed | rejected | pending
+    note: str | None = None
+
+
+class ComplaintItem(BaseModel):
+    """Поданная жалоба + снапшот отзыва."""
+
+    id: int
+    wb_feedback_id: str
+    nm_id: int | None = None
+    rating: int = 0
+    reason: str = "not_related"
+    status: str = "pending"
+    text: str = ""
+    note: str | None = None
+    created_at: str | None = None
+    resolved_at: str | None = None
+    product_name: str | None = None
+    review_text: str | None = None  # текст отзыва (для контекста)
+
+
+class ComplaintStats(BaseModel):
+    """Оцифровка эффективности жалоб."""
+
+    filed: int = 0  # всего подано
+    removed: int = 0  # удалено
+    rejected: int = 0  # не удалено (отклонено)
+    pending: int = 0  # в ожидании
+    removal_rate: float | None = None  # % удалённых от закрытых
+
+
+class ComplaintsResponse(BaseModel):
+    """Список поданных жалоб + KPI."""
+
+    items: list[ComplaintItem] = []
+    stats: ComplaintStats = ComplaintStats()
+    has_key: bool = True
+
+
 class ReviewBreakdownRow(BaseModel):
     """Строка детальной таблицы: группа (период/предмет/бренд/артикул) + распределение оценок."""
 

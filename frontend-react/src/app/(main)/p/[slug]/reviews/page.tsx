@@ -7,8 +7,9 @@ import ReviewsSummaryTab from './components/ReviewsSummaryTab';
 import ReviewsBreakdownTab from './components/ReviewsBreakdownTab';
 import ReviewsListTab from './components/ReviewsListTab';
 import ReviewsNewcomersTab from './components/ReviewsNewcomersTab';
+import ReviewsComplaintsTab from './components/ReviewsComplaintsTab';
 
-type Tab = 'summary' | 'dynamics' | 'list' | 'newcomers';
+type Tab = 'summary' | 'dynamics' | 'list' | 'newcomers' | 'complaints';
 
 export default function ReviewsPage() {
     const [tab, setTab] = useState<Tab>('summary');
@@ -27,6 +28,7 @@ export default function ReviewsPage() {
                     { key: 'dynamics', label: '📈 Динамика' },
                     { key: 'list', label: '💬 Отзывы' },
                     { key: 'newcomers', label: '🆕 Проблемные новинки' },
+                    { key: 'complaints', label: '🚩 Жалобы' },
                 ]}
                 active={tab}
                 onChange={(k) => setTab(k as Tab)}
@@ -36,6 +38,7 @@ export default function ReviewsPage() {
             {tab === 'dynamics' && <ReviewsBreakdownTab />}
             {tab === 'list' && <ReviewsListTab />}
             {tab === 'newcomers' && <ReviewsNewcomersTab />}
+            {tab === 'complaints' && <ReviewsComplaintsTab />}
         </div>
     );
 }

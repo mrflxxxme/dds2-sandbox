@@ -19,12 +19,17 @@ from backend.integrations.resilience import CircuitOpenError, RateLimitError
 from backend.models import Project
 from backend.project_context import get_current_project
 from backend.schemas.reviews import (
+    ComplaintCandidatesResponse,
+    ComplaintCreate,
+    ComplaintItem,
+    ComplaintsResponse,
+    ComplaintStatusUpdate,
     NewcomersResponse,
     ReviewBreakdownResponse,
     ReviewsListResponse,
     ReviewsSummaryResponse,
 )
-from backend.services import reviews_service
+from backend.services import complaints_service, reviews_service
 from backend.services.wb_reviews_sync import sync_project_feedbacks
 from backend.utils.rate_limit import rate_limit_write
 
@@ -73,6 +78,67 @@ async def reviews_newcomers(
     """Проблемные новинки: товары на продаже < `days` дней со средним рейтингом < `max_rating`."""
     data = await reviews_service.get_new_low_rated(db, project.id, days=days, max_rating=max_rating)
     return NewcomersResponse(**data)
+
+
+# ─── Жалобы на отзывы (для удаления) ─────────────────────────────────────────
+
+
+@router.get("/complaints/candidates", response_model=ComplaintCandidatesResponse)
+async def complaint_candidates(
+    max_rating: int = Query(3, ge=1, le=3, description="Верхняя оценка кандидатов (1..3)"),
+    take: int = Query(100, ge=1, le=500),
+    only_open: bool = Query(True, description="Только без поданной жалобы"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> ComplaintCandidatesResponse:
+    """Низкооценённые отзывы (1–3★) — кандидаты на жалобу, с текущим статусом."""
+    return await complaints_service.list_candidates(
+        db, project.id, max_rating=max_rating, take=take, only_open=only_open
+    )
+
+
+@router.get("/complaints", response_model=ComplaintsResponse)
+async def list_complaints(
+    status: str | None = Query(None, description="Фильтр по статусу"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> ComplaintsResponse:
+    """Поданные жалобы на отзывы + KPI (подано/удалено/не удалено/в ожидании)."""
+    return await complaints_service.get_complaints(db, project.id, status=status)
+
+
+@router.post("/complaints", response_model=ComplaintItem)
+async def create_complaint(
+    body: ComplaintCreate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+) -> ComplaintItem:
+    """Зафиксировать подачу жалобы на отзыв."""
+    try:
+        return await complaints_service.create_complaint(
+            db, project.id, body.wb_feedback_id, body.reason, body.text
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.patch("/complaints/{complaint_id}", response_model=ComplaintItem)
+async def update_complaint(
+    complaint_id: int,
+    body: ComplaintStatusUpdate,
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(rate_limit_write),
+) -> ComplaintItem:
+    """Проставить исход жалобы (удалено/не удалено/в ожидании)."""
+    try:
+        res = await complaints_service.update_status(db, project.id, complaint_id, body.status, body.note)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    if res is None:
+        raise HTTPException(404, "Жалоба не найдена")
+    return res
 
 
 @router.get("/breakdown", response_model=ReviewBreakdownResponse)
