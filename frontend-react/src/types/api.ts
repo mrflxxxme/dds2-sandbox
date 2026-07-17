@@ -3466,30 +3466,28 @@ export interface AdsManagerCampaign {
   updated_at: string | null;
 }
 
-/** Режим автопополнения: to_target — долить до X в заданный час при пороге по обороту (наш);
- *  low_balance — «как на ВБ»: когда остаток < порога, долить фиксированную сумму (любой час, повторяемо). */
-export type AdsAutopayMode = 'to_target' | 'low_balance';
-
-export interface AdsAutopaySetting {
+/** Пауза по расписанию: деньгами рулит автопополнение ВБ (доливает в 00:00 МСК),
+ *  ДДС глушит кампанию в окне «плохих» часов и запускает обратно по его окончании. */
+export interface AdsScheduleSetting {
   enabled: boolean;
-  mode: AdsAutopayMode;
-  amount: number;  // to_target: дневной бюджет X
-  hour: number;  // to_target: час пополнения, МСК
-  threshold_pct: number;  // to_target: пополнять, только если открут за сутки ≥ порога
-  low_balance_threshold: number;  // low_balance: долить, когда остаток < этого, ₽
-  topup_amount: number;  // low_balance: сумма разового долива, ₽
-  daily_cap: number;  // low_balance: не чаще N раз в день (0 = без ограничения)
+  pause_hour: number;  // час МСК, когда ставить на паузу
+  resume_hour: number;  // час МСК, когда запускать обратно
 }
 
-export interface AdsAutopayLogEntry {
+/** Долив бюджета со стороны ВБ (детект автопополнения ВБ по событиям бюджета:
+ *  API ВБ статус автопея не отдаёт). Кампании без записи — доливов не замечено. */
+export interface AdsWbAutopayStatus {
+  last_ts: string | null;  // ISO UTC последнего долива
+  last_amount: number;  // ₽ последнего долива
+  count: number;  // доливов за окно (7 дней)
+}
+
+export interface AdsScheduleLogEntry {
   campaign_id: number;
   ts: string;  // ISO UTC
-  amount: number;  // фактически пополнено ₽ (0, если не удалось)
-  requested: number;  // запрошенная сумма ₽
-  source: string;  // счёт | баланс
-  status: 'ok' | 'error' | 'unknown';
-  budget_before: number | null;
-  budget_after: number | null;
+  kind: 'pause' | 'start';
+  status: 'ok' | 'error';
+  window_id: string;  // МСК-дата старта окна паузы
   reason: string | null;  // текст ошибки WB, если была
 }
 
@@ -3510,10 +3508,10 @@ export interface AdsCampaignStateResult {
   error: string | null;
 }
 
-/** Ответ сохранения автопополнения: настройки + результат авто-активации (если включили). */
-export interface AdsAutopaySaveResult {
-  settings: Record<string, AdsAutopaySetting>;
-  activation: AdsCampaignStateResult | null;
+/** Ответ сохранения паузы по расписанию: актуальная мапа настроек проекта.
+ *  Кампанию сейв не трогает — паузу/запуск делает только scheduler-тик. */
+export interface AdsScheduleSaveResult {
+  settings: Record<string, AdsScheduleSetting>;
 }
 
 export interface AdsHistoryPoint {

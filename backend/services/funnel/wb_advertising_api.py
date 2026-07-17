@@ -61,7 +61,7 @@ async def check_advert_scope(api_key: str) -> str:
         "unknown"  — 429/5xx/network error: could not verify right now (rate-limit
                      or transient). Caller MUST NOT treat this as an invalid key —
                      this endpoint is aggressively rate-limited and shares the
-                     per-account limit with ads_autopay / ad_campaigns sync.
+                     per-account limit with ads_schedule / ad_campaigns sync.
     """
     headers = {
         "Accept": "application/json",

@@ -31,7 +31,7 @@ from backend.scheduler.jobs.fulfillment_sync import sync_all_fulfillment_warehou
 from backend.scheduler.jobs.funnel import (
     ad_anomaly_check,
     ad_nm_backfill_tick,
-    ads_autopay_tick,
+    ads_schedule_tick,
     fast_backfill_tick,
     snapshot_ad_intraday_all_projects,
     sync_ad_campaigns_all_projects,
@@ -148,12 +148,13 @@ def start_scheduler():
         misfire_grace_time=120,
     )
 
-    # Ads autopay: every 15 min — реальное пополнение бюджетов по настройкам
+    # Ads schedule: every 15 min — пауза/запуск кампаний по расписанию.
+    # Тик в :01 — сразу после штатного долива бюджетов ВБ в 00:00 МСК.
     _scheduler.add_job(
-        ads_autopay_tick,
+        ads_schedule_tick,
         trigger=CronTrigger(minute="1,16,31,46", timezone=MSK),
-        id="ads_autopay",
-        name="WB Ads Autopay (every 15min)",
+        id="ads_schedule",
+        name="WB Ads Schedule pause/start (every 15min)",
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=300,
