@@ -157,7 +157,8 @@ function ProductReviews({ nmId }: { nmId: number }) {
     );
 }
 
-/** Подсветка вхождений term в тексте (регистронезависимо), без dangerouslySetInnerHTML. */
+/** Подсветка вхождений term в тексте (регистронезависимо). Через React-узлы <mark>,
+ *  сырой HTML не вставляем — XSS-вектора нет. */
 function Highlight({ text, term }: { text: string; term: string }) {
     if (!term || !text) return <>{text}</>;
     const lower = text.toLowerCase();
