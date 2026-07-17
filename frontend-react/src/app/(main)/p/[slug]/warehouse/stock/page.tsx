@@ -199,6 +199,7 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
     const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
     const [expandedSubGroups, setExpandedSubGroups] = useState<Set<string>>(new Set());
     const [syncing, setSyncing] = useState(false);
+    const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
     const [mode, setMode] = useState<'qty' | 'cost' | 'revenue' | 'profit'>('qty');
     const [variant, setVariant] = useState<1 | 2 | 3>(2);
     const [trendPeriod, setTrendPeriod] = useState<7 | 14 | 30>(14);
@@ -265,10 +266,20 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
 
     const handleSync = async () => {
         setSyncing(true);
+        setSyncMsg(null);
         try {
-            await api.syncWarehouseStocks();
+            // Главное для колонки «WB склады» — отчёт кабинета «Остатки на складах».
+            // Отчёт готовится на стороне WB до ~90с, поэтому ждём его первым.
+            const res = await api.syncWarehouseRemains();
+            // Старый источник (доступно к продаже) — для прочих разделов; не критичен,
+            // ошибку тут глотаем, чтобы не перебить успех основного синка.
+            try { await api.syncWarehouseStocks(); } catch { /* ignore */ }
             onRefresh();
-        } catch { /* ignore */ }
+            setSyncMsg({ ok: true, text: `Остатки WB обновлены (${formatNumber(res.synced, 0)} строк)` });
+        } catch (e) {
+            const detail = e instanceof Error ? e.message : 'неизвестная ошибка';
+            setSyncMsg({ ok: false, text: `Не удалось обновить остатки WB: ${detail}` });
+        }
         setSyncing(false);
     };
 
@@ -1537,9 +1548,19 @@ function UnifiedTab({ data, onRefresh, groupBy, onGroupChange, brand, onBrandCha
                         >{btn.label}</button>
                     ))}
                 </div>
-                <button className="btn btn-secondary btn-sm" onClick={handleSync} disabled={syncing}>
-                    {syncing ? '\u23F3 Обновление...' : '\uD83D\uDD04 Обновить WB остатки'}
+                <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={handleSync}
+                    disabled={syncing}
+                    title="Скачать свежий отчёт WB «Остатки на складах» (готовится до ~90с) и обновить колонку «WB склады»"
+                >
+                    {syncing ? '\u23F3 Обновление (до 90с)...' : '\uD83D\uDD04 Обновить WB остатки'}
                 </button>
+                {syncMsg && (
+                    <span style={{ fontSize: 13, fontWeight: 500, color: syncMsg.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                        {syncMsg.ok ? '✓ ' : '⚠ '}{syncMsg.text}
+                    </span>
+                )}
                 {isLoading && <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{'\u23F3'} Загрузка...</span>}
             </div>
 
