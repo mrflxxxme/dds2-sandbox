@@ -21,14 +21,19 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import String, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Subquery
 
 from backend.cache import cached
 from backend.models import Nomenclature, ProductTag, ProductTagMap, WBFeedback
-from backend.schemas.reviews import ReviewItem, ReviewsListResponse
+from backend.schemas.reviews import (
+    ReviewBreakdownResponse,
+    ReviewBreakdownRow,
+    ReviewItem,
+    ReviewsListResponse,
+)
 from backend.utils.time import utcnow
 
 logger = logging.getLogger("dds.reviews")
@@ -671,3 +676,141 @@ def _group_newcomers(
     # больше всего проблемных новинок — первыми
     groups.sort(key=lambda g: (-g["products"], g["avg_rating"] if g["avg_rating"] is not None else 5.0))
     return groups
+
+
+# ─── Детальная таблица отзывов (Динамика) ───────────────────────────────────
+
+_BREAKDOWN_GROUPS = {"day", "week", "month", "subject", "brand", "nm_id"}
+_TIME_GROUPS = {"day", "week", "month"}
+_BREAKDOWN_LIMIT = 500
+
+
+def _breakdown_key(group_by: str, nom: Subquery) -> ColumnElement[str]:
+    """SQL-выражение ключа группировки детальной таблицы."""
+    if group_by == "day":
+        return func.to_char(WBFeedback.created_date, "YYYY-MM-DD")
+    if group_by == "week":
+        return func.to_char(func.date_trunc("week", WBFeedback.created_date), "YYYY-MM-DD")
+    if group_by == "month":
+        return func.to_char(WBFeedback.created_date, "YYYY-MM")
+    if group_by == "subject":
+        return func.coalesce(nom.c.subject, _NO_CATEGORY)
+    if group_by == "brand":
+        return func.coalesce(nom.c.brand, WBFeedback.brand, _NO_BRAND)
+    return cast(WBFeedback.nm_id, String)  # nm_id
+
+
+def _row_dict(key: str, label: str, total: int, avg: float | None, rr: Sequence) -> dict:
+    return {
+        "key": key,
+        "label": label,
+        "total": int(total or 0),
+        "avg_rating": _round(avg),
+        "r1": int(rr[0] or 0), "r2": int(rr[1] or 0), "r3": int(rr[2] or 0),
+        "r4": int(rr[3] or 0), "r5": int(rr[4] or 0),
+    }
+
+
+async def _breakdown_options(db: AsyncSession, project_id: int) -> tuple[list[str], list[str]]:
+    """Опции фильтров: предметы и бренды проекта (топ по числу отзывов)."""
+    nom = _nom_lookup(project_id)
+    subj = func.coalesce(nom.c.subject, _NO_CATEGORY)
+    brnd = func.coalesce(nom.c.brand, WBFeedback.brand, _NO_BRAND)
+
+    async def _distinct(expr: ColumnElement[str]) -> list[str]:
+        rows = (
+            await db.execute(
+                select(expr)
+                .select_from(WBFeedback)
+                .outerjoin(nom, nom.c.nm_id == WBFeedback.nm_id)
+                .where(WBFeedback.project_id == project_id)
+                .group_by(expr)
+                .order_by(func.count(WBFeedback.id).desc())
+                .limit(300)
+            )
+        ).all()
+        return [r[0] for r in rows]
+
+    return await _distinct(subj), await _distinct(brnd)
+
+
+async def get_reviews_breakdown(
+    db: AsyncSession,
+    project_id: int,
+    group_by: str = "month",
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    subject: str | None = None,
+    brand: str | None = None,
+    nm_id: int | None = None,
+) -> ReviewBreakdownResponse:
+    """
+    Детальная таблица отзывов: группировка по времени/предмету/бренду/артикулу,
+    распределение оценок 1–5, средний рейтинг, строка итога. Всё project-scoped.
+    """
+    group_by = group_by if group_by in _BREAKDOWN_GROUPS else "month"
+    nom = _nom_lookup(project_id)
+
+    conds: list = [WBFeedback.project_id == project_id]
+    if group_by in _TIME_GROUPS:
+        conds.append(WBFeedback.created_date.isnot(None))
+    if date_from is not None:
+        conds.append(WBFeedback.created_date >= date_from)
+    if date_to is not None:
+        conds.append(WBFeedback.created_date < date_to + timedelta(days=1))  # включая день конца
+    if subject:
+        conds.append(func.coalesce(nom.c.subject, _NO_CATEGORY) == subject)
+    if brand:
+        conds.append(func.coalesce(nom.c.brand, WBFeedback.brand, _NO_BRAND) == brand)
+    if nm_id is not None:
+        conds.append(WBFeedback.nm_id == nm_id)
+
+    key = _breakdown_key(group_by, nom)
+    avg, cnt = _avg_and_count()
+    sel: list = [key.label("key"), avg, cnt, _r(1), _r(2), _r(3), _r(4), _r(5)]
+    if group_by == "nm_id":
+        sel.append(func.max(WBFeedback.product_name))
+
+    stmt = (
+        select(*sel)
+        .select_from(WBFeedback)
+        .outerjoin(nom, nom.c.nm_id == WBFeedback.nm_id)
+        .where(*conds)
+        .group_by(key)
+    )
+    stmt = stmt.order_by(key.desc()) if group_by in _TIME_GROUPS else stmt.order_by(cnt.desc())
+    stmt = stmt.limit(_BREAKDOWN_LIMIT + 1)
+    raw = (await db.execute(stmt)).all()
+
+    truncated = len(raw) > _BREAKDOWN_LIMIT
+    raw = raw[:_BREAKDOWN_LIMIT]
+
+    rows: list[dict] = []
+    for r in raw:
+        k = str(r[0])
+        label = (r[8] or f"nmID {k}") if group_by == "nm_id" else k
+        rows.append(_row_dict(k, label, r[2], r[1], (r[3], r[4], r[5], r[6], r[7])))
+
+    # Итог — отдельным запросом по всем отфильтрованным строкам (не по усечённым)
+    tot = (
+        await db.execute(
+            select(cnt, avg, _r(1), _r(2), _r(3), _r(4), _r(5))
+            .select_from(WBFeedback)
+            .outerjoin(nom, nom.c.nm_id == WBFeedback.nm_id)
+            .where(*conds)
+        )
+    ).one()
+    totals = _row_dict("__total__", "Итого", tot[0], tot[1], (tot[2], tot[3], tot[4], tot[5], tot[6]))
+
+    subjects, brands = await _breakdown_options(db, project_id)
+    has_key = bool(totals["total"]) or await has_any_feedback(db, project_id) or await _has_wb_key(db, project_id)
+
+    return ReviewBreakdownResponse(
+        group_by=group_by,
+        rows=[ReviewBreakdownRow(**r) for r in rows],
+        totals=ReviewBreakdownRow(**totals),
+        subjects=subjects,
+        brands=brands,
+        truncated=truncated,
+        has_key=has_key,
+    )

@@ -6374,6 +6374,32 @@ export interface ReviewsListResponse {
 /** Диапазон выборки сводки отзывов. */
 export type ReviewsPeriod = '2w' | '1m' | '3m' | '6m' | '1y' | 'all';
 
+/** Группировка детальной таблицы отзывов. */
+export type ReviewBreakdownGroup = 'day' | 'week' | 'month' | 'subject' | 'brand' | 'nm_id';
+
+/** Строка детальной таблицы: группа + распределение оценок 1–5. */
+export interface ReviewBreakdownRow {
+  key: string;
+  label: string;
+  total: number;
+  avg_rating: number | null;
+  r1: number;
+  r2: number;
+  r3: number;
+  r4: number;
+  r5: number;
+}
+
+export interface ReviewBreakdownResponse {
+  group_by: ReviewBreakdownGroup;
+  rows: ReviewBreakdownRow[];
+  totals: ReviewBreakdownRow;
+  subjects: string[];
+  brands: string[];
+  truncated: boolean;
+  has_key: boolean;
+}
+
 /** Проблемная новинка: недавно на продаже + рейтинг ниже порога. */
 export interface NewcomerReview {
   nm_id: number;

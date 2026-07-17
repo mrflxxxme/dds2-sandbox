@@ -1,11 +1,20 @@
 /** Отзывы покупателей WB (feedbacks) API methods */
 import { ApiClient } from './client';
-import type { NewcomersResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse } from '@/types/api';
+import type { NewcomersResponse, ReviewBreakdownGroup, ReviewBreakdownResponse, ReviewsListResponse, ReviewsPeriod, ReviewsSummaryResponse } from '@/types/api';
 
 export interface GetReviewsParams {
     isAnswered?: boolean;
     take?: number;
     skip?: number;
+    nmId?: number;
+}
+
+export interface GetBreakdownParams {
+    groupBy: ReviewBreakdownGroup;
+    dateFrom?: string;
+    dateTo?: string;
+    subject?: string;
+    brand?: string;
     nmId?: number;
 }
 
@@ -19,6 +28,17 @@ export function addReviewMethods(api: ApiClient) {
             if (params.nmId != null) q.set('nm_id', String(params.nmId));
             const qs = q.toString();
             return api.request<ReviewsListResponse>('GET', `/api/v1/reviews${qs ? `?${qs}` : ''}`);
+        },
+        // Детальная таблица отзывов с группировкой (Динамика)
+        getReviewsBreakdown(params: GetBreakdownParams) {
+            const q = new URLSearchParams();
+            q.set('group_by', params.groupBy);
+            if (params.dateFrom) q.set('date_from', params.dateFrom);
+            if (params.dateTo) q.set('date_to', params.dateTo);
+            if (params.subject) q.set('subject', params.subject);
+            if (params.brand) q.set('brand', params.brand);
+            if (params.nmId != null) q.set('nm_id', String(params.nmId));
+            return api.request<ReviewBreakdownResponse>('GET', `/api/v1/reviews/breakdown?${q.toString()}`);
         },
         // Негативные отзывы проблемных новинок, содержащие слово `term` (клик по теме жалоб)
         getComplaintReviews(term: string, days?: number, maxRating?: number) {

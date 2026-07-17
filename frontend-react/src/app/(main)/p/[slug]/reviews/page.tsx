@@ -4,10 +4,11 @@ import { useState } from 'react';
 import PageHeader from '@/components/PageHeader';
 import TabLayout from '@/components/TabLayout';
 import ReviewsSummaryTab from './components/ReviewsSummaryTab';
+import ReviewsBreakdownTab from './components/ReviewsBreakdownTab';
 import ReviewsListTab from './components/ReviewsListTab';
 import ReviewsNewcomersTab from './components/ReviewsNewcomersTab';
 
-type Tab = 'summary' | 'list' | 'newcomers';
+type Tab = 'summary' | 'dynamics' | 'list' | 'newcomers';
 
 export default function ReviewsPage() {
     const [tab, setTab] = useState<Tab>('summary');
@@ -23,6 +24,7 @@ export default function ReviewsPage() {
             <TabLayout
                 tabs={[
                     { key: 'summary', label: '📊 Сводка' },
+                    { key: 'dynamics', label: '📈 Динамика' },
                     { key: 'list', label: '💬 Отзывы' },
                     { key: 'newcomers', label: '🆕 Проблемные новинки' },
                 ]}
@@ -31,6 +33,7 @@ export default function ReviewsPage() {
             />
 
             {tab === 'summary' && <ReviewsSummaryTab />}
+            {tab === 'dynamics' && <ReviewsBreakdownTab />}
             {tab === 'list' && <ReviewsListTab />}
             {tab === 'newcomers' && <ReviewsNewcomersTab />}
         </div>

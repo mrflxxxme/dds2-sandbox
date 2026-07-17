@@ -8,6 +8,7 @@ Thin HTTP layer поверх `backend.services.reviews_service`. Список и
 """
 
 import logging
+from datetime import date, datetime, time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +18,12 @@ from backend.database import get_db
 from backend.integrations.resilience import CircuitOpenError, RateLimitError
 from backend.models import Project
 from backend.project_context import get_current_project
-from backend.schemas.reviews import NewcomersResponse, ReviewsListResponse, ReviewsSummaryResponse
+from backend.schemas.reviews import (
+    NewcomersResponse,
+    ReviewBreakdownResponse,
+    ReviewsListResponse,
+    ReviewsSummaryResponse,
+)
 from backend.services import reviews_service
 from backend.services.wb_reviews_sync import sync_project_feedbacks
 from backend.utils.rate_limit import rate_limit_write
@@ -67,6 +73,27 @@ async def reviews_newcomers(
     """Проблемные новинки: товары на продаже < `days` дней со средним рейтингом < `max_rating`."""
     data = await reviews_service.get_new_low_rated(db, project.id, days=days, max_rating=max_rating)
     return NewcomersResponse(**data)
+
+
+@router.get("/breakdown", response_model=ReviewBreakdownResponse)
+async def reviews_breakdown(
+    group_by: str = Query("month", pattern="^(day|week|month|subject|brand|nm_id)$"),
+    date_from: date | None = Query(None, description="Начало периода (вкл.)"),
+    date_to: date | None = Query(None, description="Конец периода (вкл.)"),
+    subject: str | None = Query(None, description="Фильтр по предмету"),
+    brand: str | None = Query(None, description="Фильтр по бренду"),
+    nm_id: int | None = Query(None, description="Фильтр по артикулу (nm_id)"),
+    project: Project = Depends(get_current_project),
+    db: AsyncSession = Depends(get_db),
+) -> ReviewBreakdownResponse:
+    """Детальная таблица отзывов с группировкой (день/неделя/месяц/предмет/бренд/артикул)."""
+    dt_from = datetime.combine(date_from, time.min) if date_from else None
+    dt_to = datetime.combine(date_to, time.min) if date_to else None
+    return await reviews_service.get_reviews_breakdown(
+        db, project.id, group_by=group_by,
+        date_from=dt_from, date_to=dt_to,
+        subject=subject, brand=brand, nm_id=nm_id,
+    )
 
 
 @router.get("/complaint-reviews", response_model=ReviewsListResponse)

@@ -83,6 +83,32 @@ class GroupRating(BaseModel):
     r5: int = 0
 
 
+class ReviewBreakdownRow(BaseModel):
+    """Строка детальной таблицы: группа (период/предмет/бренд/артикул) + распределение оценок."""
+
+    key: str
+    label: str
+    total: int = 0
+    avg_rating: float | None = None
+    r1: int = 0
+    r2: int = 0
+    r3: int = 0
+    r4: int = 0
+    r5: int = 0
+
+
+class ReviewBreakdownResponse(BaseModel):
+    """Детальная таблица отзывов с группировкой + итог + опции фильтров."""
+
+    group_by: str = "month"
+    rows: list[ReviewBreakdownRow] = []
+    totals: ReviewBreakdownRow = ReviewBreakdownRow(key="__total__", label="Итого")
+    subjects: list[str] = []  # опции фильтра «Предмет»
+    brands: list[str] = []  # опции фильтра «Бренд»
+    truncated: bool = False  # список групп усечён лимитом
+    has_key: bool = True
+
+
 class NewcomerReview(BaseModel):
     """Проблемная новинка: товар недавно на продаже, но рейтинг ниже порога."""
 
