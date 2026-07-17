@@ -57,12 +57,40 @@ def collect_new_paths(ref: str, lo: str) -> dict[str, set[str]]:
     return res
 
 
+def patch_ids(ref: str, lo: str) -> dict[str, str]:
+    """sha → отпечаток диффа. Одна работа может лежать в истории НЕСКОЛЬКО раз.
+
+    Бот-автомёрж сквошит ветку в main, сквош возвращается в dev через «Merge branch
+    'main' into dev» — и рядом с оригиналом `574eadf6` (citrus37) появляется
+    `a571d022` «…(#682)» под GitHub-аккаунтом. Тот же эффект дают черри-пик и ребейз.
+    Считать это двумя поставками — врать.
+
+    Заголовок ключом не годится: у одного человека бывают два РАЗНЫХ коммита с одним
+    заголовком. patch-id — отпечаток самого диффа, он не гадает по тексту.
+
+    Сквош МНОГИХ коммитов в один даёт свой уникальный дифф и ни с чем не совпадёт —
+    и правильно: для 98 из 100 таких сквошей это единственная запись работы в истории.
+    """
+    out = subprocess.run(
+        f"git log {ref} --no-merges -p --format='%H' --since={lo} | git patch-id --stable",
+        shell=True, capture_output=True, text=True, check=False,
+    ).stdout
+    res: dict[str, str] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            pid, sha = parts
+            res[sha] = pid
+    return res
+
+
 def collect(ref: str, since: date, until: date) -> list[dict]:
     # git фильтрует --since/--until по дате КОММИТЕРА, а нам нужна дата АВТОРА: ребейз
     # на ушедший dev перебивает коммитерскую днём пуша, и работа, сделанная во вторник,
     # уехала бы в четверг. Берём широко и режем по author date здесь.
     lo = (since - timedelta(days=90)).isoformat()
     new_by_sha = collect_new_paths(ref, lo)
+    pids = patch_ids(ref, lo)
 
     fmt = "%x1e%H%x1f%ae%x1f%ad%x1f%s"
     out = git("log", ref, "--no-merges", "--date=short", f"--format={fmt}",
@@ -110,6 +138,7 @@ def collect(ref: str, since: date, until: date) -> list[dict]:
 
         commits.append({
             "sha": sha,
+            "patch_id": pids.get(sha),
             "author_email": email.lower(),
             "authored_on": authored.isoformat(),
             "ctype": ctype[:20],
@@ -121,7 +150,41 @@ def collect(ref: str, since: date, until: date) -> list[dict]:
             "is_product": ctype in PRODUCT_TYPES and scope not in INFRA_SCOPES,
             "files_list": files,
         })
-    return commits
+    return dedupe(commits)
+
+
+# GitHub-аккаунты автоматики: под ними лежат сквоши чужой работы, а не своя.
+BOT_EMAIL = re.compile(r"users\.noreply\.github\.com$")
+# Сквош через PR дописывает в заголовок «(#682)» — метка копии, а не оригинала.
+SQUASH_SUFFIX = re.compile(r"\s\(#\d+\)$")
+
+
+def _origin_rank(c: dict) -> tuple:
+    """Чем меньше — тем «оригинальнее». Из копий одной работы берём лучшую по этому ключу.
+
+    Дата автора у оригинала и сквоша ЧАСТО СОВПАДАЕТ (сквош её сохраняет), поэтому
+    одной даты мало — нужны ещё два признака: суффикс `(#N)` и бот-аккаунт.
+    """
+    return (
+        c["authored_on"],                              # раньше = оригинальнее
+        1 if SQUASH_SUFFIX.search(c["title"]) else 0,  # без «(#N)» = оригинал
+        1 if BOT_EMAIL.search(c["author_email"]) else 0,  # живой автор важнее бота
+    )
+
+
+def dedupe(commits: list[dict]) -> list[dict]:
+    """Одна работа = одна поставка, сколько бы копий её ни лежало в истории."""
+    best: dict[str, dict] = {}
+    out: list[dict] = []
+    for c in commits:
+        pid = c.pop("patch_id", None)
+        if not pid:  # пустой дифф (мёрж-остаток) — не с чем сверять
+            out.append(c)
+            continue
+        prev = best.get(pid)
+        if prev is None or _origin_rank(c) < _origin_rank(prev):
+            best[pid] = c
+    return out + list(best.values())
 
 
 def main() -> None:
